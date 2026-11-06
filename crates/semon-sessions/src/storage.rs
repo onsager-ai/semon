@@ -11,8 +11,8 @@
 //! ledger before serving it.
 #[cfg(feature = "postgres")]
 pub(crate) mod postgres;
-pub(crate) mod sqlite;
 pub(crate) mod runtime;
+pub(crate) mod sqlite;
 
 #[cfg(test)]
 mod conformance;

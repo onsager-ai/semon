@@ -137,6 +137,15 @@ pub(crate) fn open_index(
     Ok(cache)
 }
 
+pub(crate) fn selected_connection(
+    options: &crate::Options,
+    source_key: &str,
+) -> Result<Connection, StorageError> {
+    Namespace::new(source_key)?;
+    // The consumer qualifies namespace, stamp and metadata in its snapshot.
+    read_only(&EventCache::path(&options.cache))
+}
+
 fn read_only(path: &Path) -> Result<Connection, StorageError> {
     let connection = Connection::open_with_flags(
         path,

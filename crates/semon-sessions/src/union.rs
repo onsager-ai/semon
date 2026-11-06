@@ -1434,9 +1434,18 @@ impl ViewerCore {
                 return reply;
             }
             return match path {
-                "/api/sessions" => view.evidence.storage.page(key, &request.expect("Catalog request"), None),
+                "/api/sessions" => {
+                    view.evidence
+                        .storage
+                        .page(key, &request.expect("Catalog request"), None)
+                }
                 "/api/session-transcript" => view.evidence.storage.transcript(key, query, None),
-                _ => crate::catalog::error(503, "capability_unavailable", "This session operation is not yet available on PostgreSQL.", false),
+                _ => crate::catalog::error(
+                    503,
+                    "capability_unavailable",
+                    "This session operation is not yet available on PostgreSQL.",
+                    false,
+                ),
             };
         }
         let mut refresh_error = None;
@@ -1591,10 +1600,12 @@ impl ViewerCore {
                         admission.paths,
                     )
                 };
-                refresh_error = Some(match wait_for_catalog_read(view, deadline, allow_catalog_wait) {
-                    Ok(error) => error,
-                    Err(reply) => return reply,
-                });
+                refresh_error = Some(
+                    match wait_for_catalog_read(view, deadline, allow_catalog_wait) {
+                        Ok(error) => error,
+                        Err(reply) => return reply,
+                    },
+                );
                 epoch.set(Some(view.evidence.catalog_search_epoch()));
                 view.evidence.storage.page(
                     key,

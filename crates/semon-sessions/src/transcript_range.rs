@@ -7,14 +7,13 @@ use crate::{
     slot_projection::{SavedSlot, VERSION},
     viewer::{ViewerReply, decoded, query_value},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
 const MAX_LIMIT: usize = 100;
@@ -173,11 +172,8 @@ pub(crate) fn session_turn_anchor_with_gate(
         if let Err(reply) = before_read() {
             return Ok(reply);
         }
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        db.busy_timeout(Duration::from_millis(100))?;
+        let mut db = crate::storage::runtime::RuntimeStore::for_source(options, source_key)
+            .selected_connection(source_key)?;
         let tx = db.transaction()?;
         let identity = match catalog::catalog_selection_in_snapshot(
             options,
@@ -303,11 +299,8 @@ pub(crate) fn session_annotations_with_gate(
         if let Err(reply) = before_read() {
             return Ok(reply);
         }
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        db.busy_timeout(Duration::from_millis(100))?;
+        let mut db = crate::storage::runtime::RuntimeStore::for_source(options, source_key)
+            .selected_connection(source_key)?;
         let tx = db.transaction()?;
         let (identity, session) = match catalog::catalog_selection_in_snapshot(
             options,
@@ -651,11 +644,8 @@ pub(crate) fn read(
     if let Err(reply) = before_read() {
         return Ok(reply);
     }
-    let mut connection = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    connection.busy_timeout(Duration::from_millis(100))?;
+    let mut connection = crate::storage::runtime::RuntimeStore::for_source(options, source_key)
+        .selected_connection(source_key)?;
     let mut transaction = connection.transaction()?;
     crate::events::store::require_current(&transaction)?;
     #[cfg(feature = "test-hooks")]

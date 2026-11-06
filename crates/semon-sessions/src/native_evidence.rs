@@ -472,7 +472,10 @@ impl NativeEvidence {
         Self::with_storage(options, storage)
     }
 
-    pub(crate) fn with_storage(options: Options, storage: crate::storage::runtime::RuntimeStore) -> Arc<Self> {
+    pub(crate) fn with_storage(
+        options: Options,
+        storage: crate::storage::runtime::RuntimeStore,
+    ) -> Arc<Self> {
         Arc::new(Self {
             options,
             storage,
@@ -647,14 +650,16 @@ impl NativeEvidence {
     /// The source key this producer was configured under, in tests.
     #[cfg(test)]
     pub(crate) fn source_key(&self) -> String {
-        self.storage.namespace()
+        self.storage
+            .namespace()
             .map_or_else(String::new, |namespace| namespace.as_str().to_owned())
     }
 
     /// The key a test reads this producer's database under.
     #[cfg(test)]
     pub(crate) fn read_key(&self) -> String {
-        self.storage.namespace()
+        self.storage
+            .namespace()
             .map_or("local", |namespace| namespace.binding())
             .to_owned()
     }
@@ -1838,7 +1843,10 @@ impl NativeEvidence {
         if self.storage.is_postgres() {
             self.validate_configuration()?;
             if self.closed.load(Ordering::Acquire) {
-                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "native query source is closed"));
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "native query source is closed",
+                ));
             }
             return self.storage.query(now).map(Arc::new);
         }
