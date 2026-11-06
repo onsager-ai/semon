@@ -1096,6 +1096,19 @@ impl ViewerCore {
         if path == "/api/session-sources" {
             return self.source_inventory(&views).page(query);
         }
+        if views
+            .iter()
+            .any(|(_, view)| view.evidence.storage.is_postgres())
+            && path.starts_with("/api/")
+            && !matches!(path, "/api/sessions" | "/api/session-transcript")
+        {
+            return crate::catalog::error(
+                503,
+                "capability_unavailable",
+                "This session operation is not yet available on PostgreSQL.",
+                false,
+            );
+        }
         if matches!(path, "/api/viewer/home" | "/api/viewer/analytics") {
             let selected_source = match crate::overview_source_key(query) {
                 Ok(source) => source,
@@ -1186,6 +1199,15 @@ impl ViewerCore {
         };
         self.follow();
         let views = self.views();
+        if views
+            .iter()
+            .any(|(_, view)| view.evidence.storage.is_postgres())
+        {
+            return text(
+                503,
+                "Selected session routing is not yet available on PostgreSQL",
+            );
+        }
         let inventory = self.source_inventory(&views);
         let shell = || {
             let selected = inventory

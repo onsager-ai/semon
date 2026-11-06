@@ -102,6 +102,14 @@ pub(super) fn lifecycle(dsn: &str) {
                     .is_some_and(|text| text.contains("direct"))
             })
     );
+    for route in [
+        "/api/tree",
+        "/api/viewer/home",
+        "/api/viewer/analytics",
+        "/api/session-annotations",
+    ] {
+        assert_eq!(core.respond("GET", route, "", None).status, 503, "{route}");
+    }
     let mut query = crate::Query::from_sources(sources.clone());
     let answer = query.call("list_sessions", &json!({"limit":100})).unwrap();
     assert!(!answer["sessions"].as_array().unwrap().is_empty());
