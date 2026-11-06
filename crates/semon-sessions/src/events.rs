@@ -88,7 +88,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// outcomes; event-state envelopes preserve bounded selected output evidence.
 /// v29: durable source-owned Codex turn activity, separate from writer liveness.
 /// v30: Claude usage retains the selected native observation offset.
-pub(crate) const CACHE_VERSION: u32 = 30;
+/// v31: source-bound typed activity observations, without tool input/output.
+pub(crate) const CACHE_VERSION: u32 = 31;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3407,8 +3408,20 @@ fn parse(
                 } else {
                     activity(index, record_time(&record));
                 }
+                session_activity::classify::capture(index, harness, &record, line_offset, &line);
             }
-            _ => gap(index, line_offset),
+            _ => {
+                gap(index, line_offset);
+                if let Some(event) = index
+                    .events
+                    .len()
+                    .checked_sub(1)
+                    .and_then(|at| index.event_mut(at))
+                {
+                    event.activity_observation =
+                        Some(session_activity::classify::unknown_boundary(&line));
+                }
+            }
         }
     }
     Ok((offset, parsed.finalize().into(), bounded))
@@ -3618,6 +3631,9 @@ pub(crate) struct Event {
     /// copy-resume duplicated.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) u: Option<String>,
+    /// Sanitized classifier evidence; native bodies stay source-backed.
+    #[serde(skip)]
+    pub(crate) activity_observation: Option<session_activity::classify::Observation>,
 }
 
 fn is_zero(value: &u32) -> bool {

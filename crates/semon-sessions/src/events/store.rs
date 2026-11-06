@@ -247,7 +247,7 @@ fn emit_catalog_publish_attempt(
 /// [`CACHE_VERSION`], kept in `meta`.
 // Contract fence: older owned indexes rebuild together. Version 35 adds
 // source-bound activity steps and Claude usage observation offsets.
-pub(crate) const SCHEMA_VERSION: i64 = 35;
+pub(crate) const SCHEMA_VERSION: i64 = 36;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -597,6 +597,8 @@ struct EventState {
     result_source: bool,
     #[serde(default, skip_serializing_if = "super::is_false")]
     native_direct_call: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activity_observation: Option<super::session_activity::classify::Observation>,
 }
 
 const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
@@ -4544,7 +4546,8 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT tree_root FROM native_tree_repairs LIMIT 0",
         "SELECT source_generation FROM session_slot_projections LIMIT 0",
         "SELECT source_generation,generation,rules_version,pricing_fingerprint,total FROM session_activity_projections LIMIT 0",
-        "SELECT generation,ordinal,metadata FROM session_activity_steps LIMIT 0",
+        "SELECT generation,ordinal,metadata,waste_kind,waste_category,empty_search FROM session_activity_steps LIMIT 0",
+        "SELECT generation,identity,metadata FROM session_activity_facts LIMIT 0",
         "SELECT generation,ordinal,metadata FROM session_activity_compactions LIMIT 0",
         "SELECT metadata FROM session_history_catalog LIMIT 0",
         "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
@@ -5835,14 +5838,15 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
         .get::<_, Option<String>>(12)?
         .map(|text| event_state(12, &text))
         .transpose()?;
-    let (y, poll_target, result_source, native_direct_call) = match state {
+    let (y, poll_target, result_source, native_direct_call, activity_observation) = match state {
         Some(state) => (
             state.yielded,
             state.poll_target,
             state.result_source,
             state.native_direct_call,
+            state.activity_observation,
         ),
-        None => (None, None, false, false),
+        None => (None, None, false, false, None),
     };
     let r = if row.get::<_, bool>(14)? {
         Some(Reply {
@@ -5885,6 +5889,7 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
         item: row.get::<_, Option<i64>>(21)?.map(uint),
         peer,
         u: row.get(26)?,
+        activity_observation,
     };
     Ok((row.get(0)?, seq_of(row.get(1)?), event))
 }
@@ -6433,14 +6438,21 @@ fn put_event(
         item,
         peer,
         u,
+        activity_observation,
     } = event;
-    let y = if y.is_some() || poll_target.is_some() || *result_source || *native_direct_call {
+    let y = if y.is_some()
+        || poll_target.is_some()
+        || *result_source
+        || *native_direct_call
+        || activity_observation.is_some()
+    {
         Some(json(&EventState {
             version: 1,
             yielded: y.as_ref().map(|yielded| Box::new((**yielded).clone())),
             poll_target: poll_target.as_ref().cloned(),
             result_source: *result_source,
             native_direct_call: *native_direct_call,
+            activity_observation: activity_observation.clone(),
         })?)
     } else {
         None
@@ -9719,6 +9731,7 @@ mod tests {
                         start: Some("777".to_owned()),
                     }),
                     u: Some("uuid-1".to_owned()),
+                    activity_observation: None,
                 },
                 // A peer with nothing known is still a peer.
                 Event {

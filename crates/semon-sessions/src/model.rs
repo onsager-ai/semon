@@ -2436,6 +2436,7 @@ impl<'a> Builder<'a> {
         }
         let mut usage = Vec::new();
         let mut signals = Vec::new();
+        let mut observations = Vec::new();
         for position in &session.files {
             let file = &self.files[*position];
             let path = file
@@ -2456,6 +2457,19 @@ impl<'a> Builder<'a> {
             } else if file.summary.has_native_usage() {
                 usage.extend(self.cache.activity_codex_steps(&summary::source(file))?);
             }
+            observations.extend(file.summary.events.iter().filter_map(|event| {
+                event.activity_observation.clone().map(|observation| {
+                    events::session_activity::classify::LocatedObservation {
+                        position: SourcePosition {
+                            source: path.into(),
+                            offset: event.o,
+                        },
+                        timestamp: event.r.as_ref().and_then(|reply| reply.t).or(event.t),
+                        result_offset: event.r.as_ref().map(|reply| reply.o),
+                        observation,
+                    }
+                })
+            }));
             signals.extend(
                 file.summary
                     .signals
@@ -2473,6 +2487,7 @@ impl<'a> Builder<'a> {
                 .cloned()
                 .unwrap_or_default(),
             signals,
+            observations,
             crate::pricing::snapshot(),
         )))
     }

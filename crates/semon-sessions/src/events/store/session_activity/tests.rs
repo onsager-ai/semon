@@ -142,6 +142,7 @@ fn activity_repricing_resumes_and_never_serves_mixed_prices() {
         usage,
         &Default::default(),
         Vec::new(),
+        Vec::new(),
         old.clone(),
     );
     let path = crate::events::EventCache::path(&options.cache);
@@ -206,6 +207,98 @@ fn activity_repricing_resumes_and_never_serves_mixed_prices() {
         .len(),
         4
     );
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn activity_observations_survive_restart_and_facts_share_publication_generation() {
+    use crate::events::session_activity::classify::{self, Change, ChangeFact, WasteKind};
+    let root = scratch("activity-evidence");
+    let (options, mut rows, _) = catalog_native_fixture(&root, 2, true);
+    let path = crate::events::EventCache::path(&options.cache);
+    let (mut store, _) = opened(&path);
+    let record = serde_json::json!({"type":"assistant","message":{"id":"synthetic-message","role":"assistant","content":[{"type":"tool_use","id":"synthetic-call","name":"Agent","input":{"prompt":"private-marker"}}]}});
+    let mut index = FileIndex::default();
+    crate::events::claude(&mut index, &record, 0);
+    classify::capture(
+        &mut index,
+        "claude",
+        &record,
+        0,
+        &serde_json::to_vec(&record).unwrap(),
+    );
+    let ledger = super::super::tests::ledger(1);
+    store
+        .write_one("synthetic.jsonl", None, None, &ledger, &index)
+        .unwrap();
+    drop(store);
+    let (mut store, _) = opened(&path);
+    let (_, restored) = store.read_one("synthetic.jsonl").unwrap().unwrap();
+    assert_eq!(
+        restored.events[0].activity_observation,
+        index.events[0].activity_observation
+    );
+    let metadata: String = store
+        .connection
+        .query_row(
+            "SELECT y FROM events JOIN files USING(file_id) WHERE path='synthetic.jsonl'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(!metadata.contains("private-marker"));
+    let row = rows.iter_mut().find(|row| row.harness == "claude").unwrap();
+    let projection = row.session_activity.as_mut().unwrap();
+    projection.activity.steps[0].waste = Some(WasteKind::OrchestrationWait);
+    projection.activity.steps[0].waste_category = Some(WasteKind::OrchestrationWait.category());
+    projection.activity.facts.push(ChangeFact {
+        identity: "synthetic-fact".into(),
+        timestamp: Some(100),
+        step_id: Some(projection.activity.steps[0].id.clone()),
+        position: SourcePosition {
+            source: row.sources[0].path.to_string_lossy().into_owned(),
+            offset: 0,
+        },
+        record_digest: "synthetic-digest".into(),
+        change: Change::Commit {
+            branch: "topic".into(),
+            sha: "abc1234".into(),
+        },
+    });
+    let projection = projection.clone();
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, &projection).unwrap();
+    tx.commit().unwrap();
+    let read = read(&store.connection, row);
+    assert_eq!(read.steps[0].waste, Some(WasteKind::OrchestrationWait));
+    let (generation, metadata): (String, String) = store
+        .connection
+        .query_row(
+            "SELECT generation,metadata FROM session_activity_facts WHERE session_key=?1",
+            [&row.key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(generation, read.generation);
+    assert_eq!(
+        serde_json::from_str::<ChangeFact>(&metadata).unwrap(),
+        projection.activity.facts[0]
+    );
+    let tx = store.connection.transaction().unwrap();
+    let mut changed = projection.clone();
+    changed.activity.facts.clear();
+    publish(&tx, row, &changed).unwrap();
+    tx.rollback().unwrap();
+    let count: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM session_activity_facts WHERE session_key=?1",
+            [&row.key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "rollback preserves facts with the old header");
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }

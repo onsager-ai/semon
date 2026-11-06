@@ -18,11 +18,16 @@ CREATE INDEX IF NOT EXISTS session_activity_pricing ON session_activity_projecti
 CREATE TABLE IF NOT EXISTS session_activity_steps (
  session_key TEXT NOT NULL, generation TEXT NOT NULL, ordinal INTEGER NOT NULL,
  pricing_fingerprint TEXT NOT NULL, metadata TEXT NOT NULL,
+ waste_kind TEXT, waste_category TEXT, empty_search INTEGER NOT NULL,
  PRIMARY KEY(session_key,generation,ordinal)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS session_activity_compactions (
  session_key TEXT NOT NULL, generation TEXT NOT NULL, ordinal INTEGER NOT NULL,
  metadata TEXT NOT NULL, PRIMARY KEY(session_key,generation,ordinal)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS session_activity_facts (
+ session_key TEXT NOT NULL, generation TEXT NOT NULL, identity TEXT NOT NULL,
+ metadata TEXT NOT NULL, PRIMARY KEY(session_key,generation,identity)
 ) STRICT, WITHOUT ROWID;
 ";
 
@@ -39,6 +44,7 @@ impl Projection {
         usage: Vec<UsageStep>,
         shared: &crate::claude_usage::Shared,
         signals: Vec<(String, Signal)>,
+        observations: Vec<activity::classify::LocatedObservation>,
         table: Arc<crate::pricing::EffectiveTable>,
     ) -> Self {
         let mut inputs = BTreeMap::new();
@@ -54,10 +60,9 @@ impl Projection {
                 }
             }
         }
-        Self {
-            activity: activity::derive(key, usage, shared, signals, table),
-            inputs,
-        }
+        let mut activity = activity::derive(key, usage, shared, signals, table);
+        activity::apply_observations(&mut activity, observations);
+        Self { activity, inputs }
     }
 }
 
@@ -133,7 +138,12 @@ pub(super) fn publish(
         "DELETE FROM session_activity_compactions WHERE session_key=?1",
         [&row.key],
     )?;
-    let mut put = tx.prepare("INSERT INTO session_activity_steps VALUES(?1,?2,?3,?4,?5)")?;
+    tx.execute(
+        "DELETE FROM session_activity_facts WHERE session_key=?1",
+        [&row.key],
+    )?;
+    let mut put =
+        tx.prepare("INSERT INTO session_activity_steps VALUES(?1,?2,?3,?4,?5,?6,?7,?8)")?;
     for (ordinal, step) in activity.steps.iter().enumerate() {
         let saved = SavedStep {
             step: step.clone(),
@@ -148,12 +158,21 @@ pub(super) fn publish(
             generation,
             ordinal as i64,
             activity.pricing_fingerprint,
-            json(&saved)?
+            json(&saved)?,
+            step.waste.map(|kind| tag(&kind)).transpose()?,
+            step.waste_category
+                .map(|category| tag(&category))
+                .transpose()?,
+            step.empty_search,
         ])?;
     }
     let mut put = tx.prepare("INSERT INTO session_activity_compactions VALUES(?1,?2,?3,?4)")?;
     for (ordinal, compact) in activity.compactions.iter().enumerate() {
         put.execute(params![row.key, generation, ordinal as i64, json(compact)?])?;
+    }
+    let mut put = tx.prepare("INSERT INTO session_activity_facts VALUES(?1,?2,?3,?4)")?;
+    for fact in &activity.facts {
+        put.execute(params![row.key, generation, fact.identity, json(fact)?])?;
     }
     tx.execute("INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,rules_version=excluded.rules_version,pricing_fingerprint=excluded.pricing_fingerprint,total=excluded.total,compactions=excluded.compactions,thrash=excluded.thrash",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint,activity.steps.len() as i64,activity.compactions.len() as i64,activity.aggregate.thrash])?;
     Ok(())
@@ -170,6 +189,10 @@ pub(super) fn remove_mismatched(
         params![row.key, sources],
     )?;
     if removed > 0 {
+        tx.execute(
+            "DELETE FROM session_activity_facts WHERE session_key=?1",
+            [&row.key],
+        )?;
         tx.execute(
             "DELETE FROM session_activity_steps WHERE session_key=?1",
             [&row.key],
@@ -289,6 +312,10 @@ pub(super) fn reprice_step(
         )?;
         tx.execute(
             "UPDATE session_activity_compactions SET generation=?2 WHERE session_key=?1",
+            params![key, next],
+        )?;
+        tx.execute(
+            "UPDATE session_activity_facts SET generation=?2 WHERE session_key=?1",
             params![key, next],
         )?;
         tx.execute("UPDATE session_activity_projections SET pricing_fingerprint=?2,generation=?3 WHERE session_key=?1",params![key,table.fingerprint,next])?;
