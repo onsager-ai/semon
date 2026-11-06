@@ -241,11 +241,12 @@ PostgreSQL session backend yet.
   context is explicitly incomplete, and selected details/field/annotation routes
   are not implemented on this host port. Native proof verification remains the
   host reader's obligation; no hidden SQLite proof connection is opened.
-- Schema 4 adds forced-RLS Raw intent revisions and completed host generation
+- Schema 5 adds forced-RLS Raw intent revisions and completed host generation
   markers. Commit intent before Raw mutation, retain the host's exclusive custody
   fence, then complete after fsync and independent byte qualification. Restart
   retains pending state, stale completion refuses, and uncommitted intents roll
-  back. Pending writes refuse Current reads and producer publication; intents
+  back. Each token also carries a PostgreSQL-generated random intent ID, so a
+  token returned from an aborted transaction cannot complete a later reused revision. Pending writes refuse Current reads and producer publication; intents
   advance the namespace epoch so a racing repeatable-read publisher refuses.
   These primitives do not yet replace `SessionSourceWrite` in runtime callers.
 - Part 4 qualification covers the shared producer, actual Catalog response,

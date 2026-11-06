@@ -103,6 +103,7 @@ CREATE TABLE semon_projection.raw_sources (
     path text NOT NULL CHECK (octet_length(path) BETWEEN 1 AND 4096),
     revision bigint NOT NULL CHECK (revision > 0),
     pending boolean NOT NULL,
+    intent_id text NOT NULL DEFAULT gen_random_uuid()::text,
     generation text CHECK (octet_length(generation) <= 1048576),
     CHECK (pending OR generation IS NOT NULL),
     PRIMARY KEY (namespace,root,path)
