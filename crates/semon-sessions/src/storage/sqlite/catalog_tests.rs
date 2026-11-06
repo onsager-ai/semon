@@ -3620,25 +3620,66 @@ fn projection_cache_tag_refuses_wrong_projector_and_altered_prefix() {
         Err(crate::storage::StorageError::ScopeChanged)
     ));
     tx.rollback().unwrap();
+    let tx = db.transaction().unwrap();
+    tx.execute("UPDATE storage_projection_tags SET raw_identity=?1 WHERE namespace=semon_namespace() AND session_key=?2", rusqlite::params!["0".repeat(64),row.key]).unwrap();
+    assert!(matches!(
+        crate::storage::sqlite::projection_tags::check(
+            &tx, &binding, &row, crate::storage::catalog::CatalogObservationOwner::Catalog,
+        ),
+        Err(crate::storage::StorageError::ScopeChanged)
+    ));
+    tx.rollback().unwrap();
+    let tx = db.transaction().unwrap();
+    tx.execute("UPDATE session_slot_projections SET generation='stale-generation' WHERE namespace=semon_namespace() AND session_key=?1", [&row.key]).unwrap();
+    assert!(matches!(
+        crate::storage::sqlite::projection_tags::check(
+            &tx, &binding, &row, crate::storage::catalog::CatalogObservationOwner::Catalog,
+        ),
+        Err(crate::storage::StorageError::ScopeChanged)
+    ));
+    tx.rollback().unwrap();
 }
 
 #[test]
 fn projection_cache_rebuild_rollback_restart_keeps_prior_publication() {
+    const CRASH_DB: &str = "SEMON_TEST_PROJECTION_REBUILD_CRASH_DB";
+    if let Some(path) = std::env::var_os(CRASH_DB) {
+        let db = Connection::open(&path).unwrap();
+        let namespace: String = db.query_row("SELECT namespace FROM storage_namespaces", [], |row| row.get(0)).unwrap();
+        let stream: String = db.query_row("SELECT value FROM main.meta WHERE namespace='' AND key='catalog_changes_epoch'", [], |row| row.get(0)).unwrap();
+        drop(db);
+        let config = crate::storage::StoreConfig {
+            backend: crate::storage::StoreBackend::Sqlite { database: path.into() },
+            namespace: crate::storage::LogicalSourceNamespace::new(namespace).unwrap(),
+            expected_stream_epoch: Some(stream),
+        };
+        let db = crate::storage::sqlite::semantic::Stage::open(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&config).unwrap(),
+        ).unwrap().into_test_connection();
+        db.execute_batch(
+            "BEGIN IMMEDIATE;
+             UPDATE storage_projection_tags SET projector='incomplete-rebuild';
+             DELETE FROM main.session_slots;",
+        )
+        .unwrap();
+        // Exit without running Connection/Transaction destructors. The parent
+        // reopens the store after this interrupted projection rebuild.
+        std::process::exit(73);
+    }
     let fixture = Fixture::new();
     fixture.publish(1);
     let before = fixture.body("sid=session-00000");
     assert_eq!(before.0, 200);
-    {
-        let mut db = fixture.db();
-        let tx = db.transaction().unwrap();
-        tx.execute("UPDATE storage_projection_tags SET projector='incomplete-rebuild' WHERE namespace=semon_namespace()", []).unwrap();
-        tx.execute(
-            "DELETE FROM main.session_slots WHERE namespace=semon_namespace()",
-            [],
-        )
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "catalog::tests::projection_cache_rebuild_rollback_restart_keeps_prior_publication",
+            "--nocapture",
+        ])
+        .env(CRASH_DB, EventCache::path(&fixture.options.cache))
+        .status()
         .unwrap();
-        // Closing the uncommitted producer models a crash before rebuild commit.
-    }
+    assert_eq!(status.code(), Some(73));
     assert_eq!(fixture.body("sid=session-00000"), before);
     fixture.publish_existing();
     assert_eq!(fixture.body("sid=session-00000").0, 200);

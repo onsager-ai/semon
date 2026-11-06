@@ -3889,8 +3889,7 @@ impl SqliteStore {
                     }],
                 )
                 .map_err(failure)?;
-            let mut capture_budget =
-                crate::storage::sqlite::projection_tags::CAPTURE_MAX_BYTES;
+            let mut capture_budget = crate::storage::sqlite::projection_tags::CAPTURE_MAX_BYTES;
             for row in rows {
                 let projection_generation: Option<String> = transaction.query_row(
                     "SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",
@@ -8758,7 +8757,10 @@ mod tests {
             "SELECT prefix_digest FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
             params![namespace, key], |row| row.get(0),
         ).unwrap();
-        assert_eq!(current_prefix, crate::retention::source_generation(&current.sources).unwrap());
+        assert_eq!(
+            current_prefix,
+            crate::retention::source_generation(&current.sources).unwrap()
+        );
         assert_ne!(current_prefix, old_digest);
 
         let history_metadata: String = publisher
