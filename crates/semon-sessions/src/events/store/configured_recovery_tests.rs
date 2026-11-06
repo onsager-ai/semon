@@ -457,3 +457,223 @@ mod current_recovery {
         assert_eq!(f.state(), before);
     }
 }
+
+// Cold-cohort ingest intents: one intent transaction per cohort, committed
+// before the cohort's apply transaction, with replay through ledger CAS.
+mod cohort_intent_recovery {
+    use super::*;
+
+    type Cohort = Vec<(String, Ledger, std::sync::Arc<FileIndex>)>;
+
+    fn producer(f: &Fixture) -> Box<dyn crate::events::IndexStore> {
+        crate::storage::sqlite::configured_index::open_semantic(
+            crate::storage::sqlite::semantic::SemanticStaging::admit(&f.config).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn operation(n: usize) -> String {
+        format!("{n:064x}")
+    }
+
+    fn cohort(
+        f: &Fixture,
+        names: &[&str],
+        first: usize,
+        writer: &mut dyn crate::events::IndexStore,
+    ) -> Cohort {
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let raw = f.root.join(name);
+                fs::write(&raw, b"").unwrap();
+                let path = raw.to_string_lossy().into_owned();
+                let ledger = Ledger {
+                    stat: Stat::of(&raw).unwrap(),
+                    offset: 0,
+                    prefix: Sha256::digest(b"").into(),
+                    tail: Sha256::digest(b"").into(),
+                };
+                writer
+                    .defer_file(&path, None, &operation(first + i), "codex")
+                    .unwrap();
+                (path, ledger, std::sync::Arc::new(FileIndex::default()))
+            })
+            .collect()
+    }
+
+    fn intents(f: &Fixture) -> Vec<(String, String)> {
+        let db = f.db();
+        let mut statement = db
+            .prepare("SELECT operation_id,state FROM storage_event_operations WHERE namespace=?1 ORDER BY operation_id")
+            .unwrap();
+        statement
+            .query_map([f.config.namespace.as_str()], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    fn states(f: &Fixture) -> Vec<String> {
+        intents(f).into_iter().map(|(_, state)| state).collect()
+    }
+
+    #[test]
+    fn cohort_crash_after_intent_commit_replays_after_restart() {
+        let f = Fixture::new();
+        let mut first = producer(&f);
+        let files = cohort(&f, &["c0", "c1", "c2"], 1, &mut *first);
+        assert!(intents(&f).is_empty(), "queued intents wait for their cohort");
+        let before = f.state();
+        FAIL_EFFECT.with(|p| p.set(Some("cohort_intents_committed")));
+        assert!(matches!(
+            first.commit_initial_files(&files),
+            Err(StoreError::Configured(StorageError::Unavailable))
+        ));
+        assert_eq!(FAIL_EFFECT.with(|p| p.get()), None, "fault not reached");
+        assert_eq!(states(&f), vec!["intent"; 3], "one durable intent per source");
+        assert_eq!(before, f.state(), "no apply effect precedes the intent commit");
+        drop(first);
+
+        let mut restarted = producer(&f);
+        for (i, (path, _, _)) in files.iter().enumerate() {
+            assert_eq!(
+                restarted.reconcile_event(&operation(1 + i), path, "codex").unwrap(),
+                None,
+                "an unapplied intent has no receipt"
+            );
+            restarted
+                .defer_file(path, None, &operation(1 + i), "codex")
+                .unwrap();
+        }
+        assert_eq!(
+            restarted.commit_initial_files(&files).unwrap(),
+            Outcome::Written
+        );
+        assert_eq!(states(&f), vec!["complete"; 3], "replay reuses each intent");
+        for (i, (path, _, _)) in files.iter().enumerate() {
+            assert!(restarted.ledger(path).unwrap().is_some());
+            assert!(
+                restarted
+                    .reconcile_event(&operation(1 + i), path, "codex")
+                    .unwrap()
+                    .is_some(),
+                "a completed intent reconciles to its receipt"
+            );
+        }
+        let committed = f.state();
+        assert_eq!(
+            restarted.commit_initial_files(&files).unwrap(),
+            Outcome::Written
+        );
+        assert_eq!(committed, f.state(), "a lost reply replays idempotently");
+    }
+
+    #[test]
+    fn cohort_mid_apply_fault_rolls_back_every_source_and_keeps_intents() {
+        let f = Fixture::new();
+        let mut writer = producer(&f);
+        let files = cohort(&f, &["m0", "m1", "m2"], 11, &mut *writer);
+        let before = f.state();
+        // Fail the second source's row write, after the first one applied.
+        FAIL_EFFECT_SKIP.with(|skip| skip.set(1));
+        FAIL_EFFECT.with(|p| p.set(Some("file_upsert")));
+        assert!(matches!(
+            writer.commit_initial_files(&files),
+            Err(StoreError::Configured(StorageError::Unavailable))
+        ));
+        assert_eq!(FAIL_EFFECT.with(|p| p.get()), None, "fault not reached");
+        assert_eq!(FAIL_EFFECT_SKIP.with(|skip| skip.get()), 0);
+        assert_eq!(before, f.state(), "the cohort apply is all or nothing");
+        assert_eq!(states(&f), vec!["intent"; 3], "intents survive a failed apply");
+        assert_eq!(
+            writer.commit_initial_files(&files).unwrap(),
+            Outcome::Written
+        );
+        assert_eq!(states(&f), vec!["complete"; 3]);
+    }
+
+    #[test]
+    fn cohort_ledger_conflict_for_one_source_records_no_intent() {
+        let f = Fixture::new();
+        let mut writer = producer(&f);
+        let files = cohort(&f, &["k0", "k1", "k2"], 21, &mut *writer);
+        // A peer producer commits one of the cohort's sources first.
+        let mut peer = Writer::owned(NativeOwnership::restore(&f.config).unwrap()).unwrap();
+        let (path, ledger, _) = &files[1];
+        peer.begin(path, None, &operation(99), "codex").unwrap();
+        assert_eq!(
+            peer.commit(&[(path, None, None, ledger, &ledger.stat, &FileIndex::default())])
+                .unwrap(),
+            Outcome::Written
+        );
+        let before = f.state();
+        let recorded = intents(&f);
+        assert_eq!(recorded, vec![(operation(99), "complete".to_owned())]);
+        assert!(matches!(
+            writer.commit_initial_files(&files),
+            Err(StoreError::Configured(StorageError::Conflict))
+        ));
+        assert_eq!(before, f.state(), "a refused cohort applies nothing");
+        assert_eq!(recorded, intents(&f), "a refused cohort records no intent");
+        assert!(writer.ledger(&files[0].0).unwrap().is_none());
+
+        let rest = vec![files[0].clone(), files[2].clone()];
+        for (i, (path, _, _)) in rest.iter().enumerate() {
+            writer
+                .defer_file(path, None, &operation(31 + i), "codex")
+                .unwrap();
+        }
+        assert_eq!(writer.commit_initial_files(&rest).unwrap(), Outcome::Written);
+        assert_eq!(states(&f), vec!["complete"; 3]);
+    }
+
+    #[test]
+    fn cohort_scan_records_intents_in_one_transaction_before_apply() {
+        let f = Fixture::current("cohort-scan");
+        let options = crate::Options {
+            source: crate::storage::HostSource::new(f.config.namespace.clone(), "a".repeat(64)).unwrap(),
+            cache: f.root.join("index.json"),
+            codex_home: f.root.join("codex"),
+            claude_home: f.root.join("claude"),
+            proc_root: f.root.join("proc"),
+            ..Default::default()
+        };
+        fs::create_dir_all(&options.proc_root).unwrap();
+        fs::write(options.proc_root.join("locks"), "").unwrap();
+        let mut cache = EventCache::open_scoped(&options.cache, &options.source).unwrap();
+        let inputs = (0..3)
+            .map(|n| {
+                let relative = format!("sessions/2026/11/06/rollout-cohort-{n:03}.jsonl");
+                let raw = options.codex_home.join(&relative);
+                fs::create_dir_all(raw.parent().unwrap()).unwrap();
+                fs::write(&raw, format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"cohort-{n:03}\",\"cwd\":\"/sanitized\"}}}}\n")).unwrap();
+                crate::Input { root: crate::InputRoot::Codex, path: relative }
+            })
+            .collect::<Vec<_>>();
+        let files = || -> i64 {
+            f.db()
+                .query_row(
+                    "SELECT count(*) FROM files WHERE namespace=?1",
+                    [f.config.namespace.as_str()],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        cache.scan_byte_budget = Some(4 * 1024 * 1024);
+        FAIL_EFFECT.with(|p| p.set(Some("cohort_intents")));
+        assert!(crate::model::prepare_sources(&options, &mut cache, &inputs, 1_790_000_000_000).is_err());
+        assert_eq!(
+            FAIL_EFFECT.with(|p| p.get()),
+            None,
+            "a cold cohort scan records its intents through the cohort transaction"
+        );
+        assert!(intents(&f).is_empty(), "the refused cohort transaction records no intent");
+        assert_eq!(files(), 0, "no apply precedes the cohort's intents");
+        crate::model::prepare_sources(&options, &mut cache, &inputs, 1_790_000_000_000).unwrap();
+        cache.scan_byte_budget = None;
+        assert_eq!(states(&f), vec!["complete"; 3]);
+        assert_eq!(files(), 3);
+    }
+}

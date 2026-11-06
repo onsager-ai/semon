@@ -411,6 +411,8 @@ type CompletionRow = (String, String, Option<i64>, Option<i64>, String);
 #[cfg(test)]
 thread_local! {
     static FAIL_EFFECT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    // Matching FAIL_EFFECT hits to pass before the fault fires.
+    static FAIL_EFFECT_SKIP: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static REPORTED_FAIL_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
@@ -432,12 +434,19 @@ fn reported_effect() -> rusqlite::Result<()> {
 #[cfg(test)]
 pub(crate) fn effect(name: &'static str) -> rusqlite::Result<()> {
     FAIL_EFFECT.with(|failure| {
-        if failure.get() == Some(name) {
-            failure.set(None);
-            Err(rusqlite::Error::InvalidQuery)
-        } else {
-            Ok(())
+        if failure.get() != Some(name) {
+            return Ok(());
         }
+        let skipped = FAIL_EFFECT_SKIP.with(|skip| {
+            let remaining = skip.get();
+            skip.set(remaining.saturating_sub(1));
+            remaining > 0
+        });
+        if skipped {
+            return Ok(());
+        }
+        failure.set(None);
+        Err(rusqlite::Error::InvalidQuery)
     })
 }
 
@@ -1202,6 +1211,17 @@ struct Intent {
     revision: Option<i64>,
 }
 
+/// A cold-cohort intent queued in memory until its cohort commits. It binds
+/// the Source claim revision observed before parsing; the batch transaction
+/// rechecks that claim and the expected ledger before recording the intent.
+struct Deferred {
+    path: String,
+    expected: Option<Ledger>,
+    id: String,
+    request_digest: String,
+    revision: Option<i64>,
+}
+
 fn read_reported_stamp(db: &Connection) -> Result<Option<ReportedFileStamp>, StorageError> {
     let text: Option<String> = db
         .query_row(
@@ -1229,6 +1249,7 @@ pub(crate) struct Writer {
     owner: Option<NativeOwnership>,
     connection: Connection,
     intents: BTreeMap<String, Intent>,
+    deferred: Vec<Deferred>,
     catalog_rejection: Option<&'static str>,
 }
 
@@ -1596,6 +1617,7 @@ impl Writer {
             owner: None,
             connection: connection(config)?,
             intents: BTreeMap::new(),
+            deferred: Vec::new(),
             catalog_rejection: None,
         })
     }
@@ -1610,6 +1632,7 @@ impl Writer {
             connection: connection(&owner.config)?,
             owner: Some(owner),
             intents: BTreeMap::new(),
+            deferred: Vec::new(),
             catalog_rejection: None,
         })
     }
@@ -1874,6 +1897,8 @@ impl Writer {
         {
             return Err(StorageError::InvalidArguments);
         }
+        // An immediate intent supersedes this source's queued cohort intent.
+        self.deferred.retain(|deferred| deferred.path != path);
         NativeOwnership::validate_physical(&self.connection)?;
         let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
             .map_err(|error| failed(error))?;
@@ -1933,6 +1958,118 @@ impl Writer {
         Ok(())
     }
 
+    /// Queue a new source's cold-cohort intent without a writer reservation.
+    /// `commit` records the queued intents of its files in one transaction,
+    /// committed before that cohort's apply transaction.
+    pub(crate) fn defer(
+        &mut self,
+        path: &str,
+        expected: Option<&Ledger>,
+        operation_id: &str,
+        harness: &str,
+    ) -> Result<(), StorageError> {
+        let request_digest = self.request_digest(path, harness)?;
+        if operation_id.len() != 64 || !operation_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(StorageError::InvalidArguments);
+        }
+        self.deferred.retain(|deferred| deferred.path != path);
+        self.intents.remove(path);
+        if self.deferred.len() >= 64 {
+            return self.begin(path, expected, operation_id, harness);
+        }
+        // Observed before parsing. The cohort transaction records the intent
+        // only while the Source claim still has this revision.
+        let revision = crate::storage::sqlite::source_journal::claims(
+            &self.connection,
+            self.config.namespace.as_str(),
+            &[path.to_owned()],
+        )
+        .map_err(failed)?[0]
+            .1;
+        self.deferred.push(Deferred {
+            path: path.to_owned(),
+            expected: expected.cloned(),
+            id: operation_id.to_owned(),
+            request_digest,
+            revision,
+        });
+        Ok(())
+    }
+
+    /// Record the queued intents of one cohort in a single transaction that
+    /// commits before any of its apply effects. A ledger or Source claim
+    /// conflict for any queued source refuses the cohort without an intent.
+    fn begin_deferred(&mut self, paths: &[&str]) -> Result<(), StorageError> {
+        let (cohort, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.deferred)
+            .into_iter()
+            .partition(|deferred| paths.contains(&deferred.path.as_str()));
+        self.deferred = rest;
+        if cohort.is_empty() {
+            return Ok(());
+        }
+        NativeOwnership::validate_physical(&self.connection)?;
+        let tx = Transaction::new_unchecked(&self.connection, TransactionBehavior::Immediate)
+            .map_err(failed)?;
+        #[cfg(test)]
+        let _sql_lock = crate::source_change::SqlLockScope::enter();
+        self.validate(&tx)?;
+        let namespace = self.config.namespace.as_str();
+        let claim_paths = cohort
+            .iter()
+            .map(|deferred| deferred.path.clone())
+            .collect::<Vec<_>>();
+        let revisions =
+            crate::storage::sqlite::source_journal::claims(&tx, namespace, &claim_paths)
+                .map_err(failed)?;
+        let mut recorded = Vec::with_capacity(cohort.len());
+        for (deferred, (_, revision)) in cohort.into_iter().zip(revisions) {
+            if revision != deferred.revision
+                || ledger_row(&tx, &deferred.path)
+                    .map_err(failed)?
+                    .as_ref()
+                    .map(|(_, l)| l)
+                    != deferred.expected.as_ref()
+            {
+                #[cfg(test)]
+                eprintln!("begin_cohort_conflict");
+                return Err(StorageError::Conflict);
+            }
+            let base = deferred
+                .expected
+                .as_ref()
+                .map(header_ledger)
+                .unwrap_or_default();
+            let prior: Option<(String, String, Option<i64>, String)> = tx.query_row("SELECT source_path,base,observed_revision,request_digest FROM storage_event_operations WHERE namespace=?1 AND operation_id=?2", params![namespace,deferred.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional().map_err(failed)?;
+            if let Some((old_path, old_base, old_revision, old_request)) = prior {
+                if old_path != deferred.path
+                    || old_base != base
+                    || old_revision != revision
+                    || old_request != deferred.request_digest
+                {
+                    return Err(StorageError::Conflict);
+                }
+            } else {
+                tx.execute("INSERT INTO storage_event_operations(namespace,operation_id,source_path,request_digest,base,observed_revision,state) VALUES(?1,?2,?3,?4,?5,?6,'intent')", params![namespace,deferred.id,deferred.path,deferred.request_digest,base,revision]).map_err(failed)?;
+            }
+            recorded.push((
+                deferred.path,
+                Intent {
+                    id: deferred.id,
+                    base,
+                    revision,
+                },
+            ));
+        }
+        #[cfg(test)]
+        effect("cohort_intents").map_err(failed)?;
+        tx.commit().map_err(|_| StorageError::CommitUncertain)?;
+        self.intents.extend(recorded);
+        // Fault point: the cohort's intents are durable and no apply ran.
+        #[cfg(test)]
+        effect("cohort_intents_committed").map_err(failed)?;
+        Ok(())
+    }
+
     pub(crate) fn commit(&mut self, files: &[CommitFile<'_>]) -> Result<Outcome, StorageError> {
         if files.is_empty()
             || files.len() > 64
@@ -1945,6 +2082,9 @@ impl Writer {
         {
             return Err(StorageError::InvalidArguments);
         }
+        // Queued cohort intents commit in their own transaction before apply.
+        let paths = files.iter().map(|f| f.0).collect::<Vec<_>>();
+        self.begin_deferred(&paths)?;
         // Establish explicit admission before any Raw access, then release the
         // read snapshot. The writer transaction validates again below.
         drop(self.snapshot()?);

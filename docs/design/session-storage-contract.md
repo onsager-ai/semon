@@ -181,6 +181,14 @@ repair before beginning native ingestion. The projection worker owns no ingest
 OpID or receipt. It must not leave an unexecuted ingest intent behind to block
 the semantic publication recovery fence.
 
+A scoped cold cohort of new sources (at most 64) queues each host ingest intent
+with the Source claim revision observed before parsing. The SQLite producer
+records the cohort's queued intents in one transaction, committed before the
+cohort's apply transaction; a changed ledger or claim for any queued source
+refuses the whole cohort before any intent is recorded. Existing sources and
+explicit ingest record their intent before opening Raw. Ledger CAS
+and exact OpID reconciliation keep replay after a lost reply idempotent.
+
 Current acceptance preserves the existing two-second cold first-page gate,
 five-second publication wait and sixty-second background completion gate.
 Historical relaxed thresholds do not authorize weakening these checks. Wall

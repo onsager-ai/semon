@@ -209,6 +209,17 @@ impl IndexStore for ConfiguredIndex {
             .begin(path, expected, operation_id, harness)
             .map_err(StoreError::Configured)
     }
+    fn defer_file(
+        &mut self,
+        path: &str,
+        expected: Option<&Ledger>,
+        operation_id: &str,
+        harness: &str,
+    ) -> Result<(), StoreError> {
+        self.native
+            .defer(path, expected, operation_id, harness)
+            .map_err(StoreError::Configured)
+    }
     fn reconcile_event(
         &self,
         operation_id: &str,

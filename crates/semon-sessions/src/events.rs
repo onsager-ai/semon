@@ -1130,6 +1130,19 @@ pub(crate) trait IndexStore: Send {
         Ok(())
     }
 
+    /// Cold-cohort intent for a new source. A store may queue it and commit
+    /// every queued intent of a cohort in one transaction before that
+    /// cohort's apply transaction; the default records it immediately.
+    fn defer_file(
+        &mut self,
+        path: &str,
+        expected: Option<&Ledger>,
+        operation_id: &str,
+        harness: &str,
+    ) -> Result<(), StoreError> {
+        self.prepare_file(path, expected, operation_id, harness)
+    }
+
     /// At most 64 compatible metadata-only descriptions, in request order. The
     /// model checks dependencies after a successful source scan, before lookup.
     fn session_descriptions(
@@ -3986,22 +3999,26 @@ fn scan_file_with_mode(
                     format!("{}:{attempt}", operation.id).as_bytes(),
                 )
             });
+            // A new source in a scoped cold cohort queues its host intent; the
+            // store commits the cohort's intents together before any apply.
+            let cohort = operation.is_some()
+                && expected.is_none()
+                && cache.scan_byte_budget.is_some()
+                && cache.scoped;
+            let operation_id = operation
+                .as_deref()
+                .or(cache.event_operation.as_deref())
+                .ok_or_else(|| io::Error::other(crate::storage::StorageError::InvalidArguments))?;
             let prepare_started = cache.scan_measurements.start();
-            let prepared = cache
+            let store = cache
                 .store
                 .as_mut()
-                .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?
-                .prepare_file(
-                    &key,
-                    expected,
-                    operation
-                        .as_deref()
-                        .or(cache.event_operation.as_deref())
-                        .ok_or_else(|| {
-                            io::Error::other(crate::storage::StorageError::InvalidArguments)
-                        })?,
-                    harness,
-                );
+                .ok_or_else(|| io::Error::other(crate::storage::StorageError::Unavailable))?;
+            let prepared = if cohort {
+                store.defer_file(&key, expected, operation_id, harness)
+            } else {
+                store.prepare_file(&key, expected, operation_id, harness)
+            };
             cache
                 .scan_measurements
                 .record("prepare_file", prepare_started, 1);
