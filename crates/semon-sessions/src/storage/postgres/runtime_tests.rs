@@ -88,6 +88,20 @@ pub(super) fn lifecycle(dsn: &str) {
     );
     let transcript: Value = serde_json::from_slice(&transcript.body).unwrap();
     assert!(!transcript["entries"].as_array().unwrap().is_empty());
+    assert_ne!(transcript["content_observation"]["state"], "incomplete");
+    assert!(transcript["observation"]["source_bytes"].as_u64().unwrap() > 0);
+    assert_eq!(transcript["observation"]["incomplete_entries"], 0);
+    assert!(
+        transcript["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry["out"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("direct"))
+            })
+    );
     let mut query = crate::Query::from_sources(sources.clone());
     let answer = query.call("list_sessions", &json!({"limit":100})).unwrap();
     assert!(!answer["sessions"].as_array().unwrap().is_empty());
