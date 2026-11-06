@@ -74,7 +74,12 @@ impl PgProjectionStore {
                 "unsupported PostgreSQL projection stamp".into(),
             ));
         }
-        tx.execute("INSERT INTO semon_projection.namespaces(namespace) VALUES($1) ON CONFLICT DO NOTHING", &[&namespace.binding()]).await.map_err(backend)?;
+        tx.execute(
+            "INSERT INTO semon_projection.namespaces(namespace) VALUES($1) ON CONFLICT DO NOTHING",
+            &[&namespace.binding()],
+        )
+        .await
+        .map_err(backend)?;
         Ok(PgProjectionTransaction {
             tx,
             namespace: namespace.clone(),

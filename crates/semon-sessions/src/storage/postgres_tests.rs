@@ -193,8 +193,17 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
         .await
         .is_err()
     );
-    admin.execute("UPDATE semon_projection.metadata SET stamp='unsupported'", &[]).await.unwrap();
-    assert!(matches!(store_a.begin(&a).await, Err(StorageError::Unsupported(_))));
+    admin
+        .execute(
+            "UPDATE semon_projection.metadata SET stamp='unsupported'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        store_a.begin(&a).await,
+        Err(StorageError::Unsupported(_))
+    ));
     let root = std::env::var("SEMON_PG_EMPTY_ROOT").expect("CI empty working directory");
     assert!(
         std::fs::read_dir(root).unwrap().next().is_none(),
