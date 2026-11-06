@@ -3,6 +3,29 @@ use crate::{
     storage::{Namespace, postgres::PgProjectionStore},
 };
 
+struct NativeReader {
+    path: std::path::PathBuf,
+    source: crate::model::summary::CatalogSource,
+    proof: [u8; 32],
+}
+impl crate::SessionSourceReader for NativeReader {
+    fn read_range(&self, reference: &crate::SessionSourceRef, expected: Option<&str>, offset: u64, max: usize) -> std::io::Result<crate::SessionSourceRange> {
+        use sha2::{Digest, Sha256};
+        let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "selected fixture changed");
+        let generation = format!("{:x}", Sha256::digest(self.source.prefix_sha256));
+        let bytes = std::fs::read(&self.path)?;
+        if reference.offset != self.source.offset || reference.prefix_sha256 != self.source.prefix_sha256
+            || expected.is_some_and(|expected| expected != generation)
+            || bytes.len() as u64 < reference.offset
+            || <[u8; 32]>::from(Sha256::digest(&bytes[..reference.offset as usize])) != self.proof
+            || offset >= reference.offset || max > crate::SESSION_SOURCE_CHUNK_MAX
+        { return Err(invalid()); }
+        let end = (offset as usize + max).min(reference.offset as usize);
+        Ok(crate::SessionSourceRange { generation, length: reference.offset, offset,
+            bytes: std::sync::Arc::from(&bytes[offset as usize..end]), cached: true })
+    }
+}
+
 pub(super) async fn lifecycle(dsn: &str) {
     let root = crate::storage::conformance::root();
     let options = crate::storage::conformance::source(&root.0, "pg-producer");
@@ -22,6 +45,11 @@ pub(super) async fn lifecycle(dsn: &str) {
         .await
         .unwrap()
         .unwrap();
+    let served = store.catalog_reply(&namespace, &options, "limit=10").await.unwrap();
+    assert_eq!(served.status, 200);
+    let served: serde_json::Value = serde_json::from_slice(&served.body).unwrap();
+    assert_eq!(served["items"].as_array().unwrap().len(), 1);
+    assert_eq!(served["items"][0]["harness"], "claude");
     let tx = store.begin(&namespace).await.unwrap();
     let page = tx
         .catalog_page(&namespace, CatalogReadScope::Current, None, 10)
@@ -45,7 +73,16 @@ pub(super) async fn lifecycle(dsn: &str) {
     assert_eq!(slots.len(), 1);
     assert!(matches!(slots[0].recipe, crate::slot_projection::Recipe::U));
     assert_eq!(slots[0].file.as_ref().unwrap().path, path);
+    let source = row.sources[0].clone();
+    let proof = tx.proof_block(&namespace, path.to_str().unwrap(), tx.ledger(&namespace, path.to_str().unwrap()).await.unwrap().unwrap(), 0).await.unwrap().unwrap();
     tx.commit(&namespace).await.unwrap();
+    let reader = NativeReader { path: path.clone(), source, proof };
+    let selected = store.transcript_reply(&namespace, &options, &key, CatalogReadScope::Current, None, 0, 10, &reader).await.unwrap();
+    assert_eq!(selected.status, 200);
+    let selected: serde_json::Value = serde_json::from_slice(&selected.body).unwrap();
+    assert_eq!(selected["entries"][0]["text"], "synthetic producer prompt");
+    assert_eq!(selected["entries"][0]["freshness"]["state"], "cached");
+    assert!(selected["entries"][0]["entry_id"].as_str().is_some());
     // Restart and append use the same native producer and persisted parser base.
     drop(store);
     std::io::Write::write_all(&mut std::fs::OpenOptions::new().append(true).open(&path).unwrap(), format!("{}\n", serde_json::json!({"type":"assistant","sessionId":"pg-produced","uuid":"answer","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"synthetic answer"}]}})).as_bytes()).unwrap();

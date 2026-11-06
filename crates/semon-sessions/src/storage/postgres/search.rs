@@ -34,6 +34,54 @@ impl PgProjectionTransaction<'_> {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn filtered_catalog_page(
+        &self,
+        namespace: &Namespace,
+        scope: CatalogReadScope,
+        harness: Option<&str>,
+        repo: Option<&str>,
+        model: Option<&str>,
+        query: Option<&str>,
+        after: Option<(i64, &str)>,
+        limit: usize,
+    ) -> Result<SearchPage, StorageError> {
+        ensure(&self.namespace, namespace)?;
+        if !(1..=100).contains(&limit) {
+            return Err(backend("invalid catalog limit"));
+        }
+        let query = query.map(|query| catalog_search::normalize_query(query)
+            .filter(|query| !query.is_empty()).ok_or_else(|| backend("invalid metadata query"))).transpose()?;
+        let anchor: Option<String> = query.as_ref().map(|query| query.chars().take(3).collect());
+        let (last, key) = after.unwrap_or((i64::MAX, ""));
+        let selected = self.tx.query(
+            "SELECT c.session_key,c.last_ms FROM semon_projection.catalog c WHERE c.namespace=$1 AND ($2 OR c.lifecycle='current') AND (c.last_ms<$3 OR (c.last_ms=$3 AND c.session_key>$4)) AND ($5::text IS NULL OR c.harness=$5) AND ($6::text IS NULL OR c.repo=$6) AND ($7::text IS NULL OR c.model=$7) AND ($8::text IS NULL OR EXISTS(SELECT 1 FROM semon_projection.search_postings p WHERE p.namespace=c.namespace AND p.session_key=c.session_key AND p.read_scope=$9 AND p.gram=$8)) ORDER BY c.last_ms DESC,c.session_key LIMIT $10",
+            &[&namespace.binding(), &(scope == CatalogReadScope::RetainedHistory), &last, &key, &harness, &repo, &model, &anchor, &catalog_search::scope_key(scope), &number(catalog_search::MAX_CANDIDATES as u64 + 1)?],
+        ).await.map_err(backend)?;
+        let mut rows = Vec::new();
+        let mut checked = None;
+        let mut bytes = 0;
+        let mut candidates = 0;
+        for item in selected.iter().take(catalog_search::MAX_CANDIDATES) {
+            let key: String = item.get(0);
+            let row = self.catalog_row(namespace, &key, scope).await?
+                .ok_or_else(|| backend("catalog candidate unavailable"))?;
+            bytes += serde_json::to_vec(&row).map_err(backend)?.len();
+            if bytes > catalog_search::MAX_SCAN_BYTES {
+                return Ok(SearchPage { rows, next: checked, partial: true, candidates });
+            }
+            let matches = query.as_ref().is_none_or(|query| catalog_search::fields(&row).iter().any(|field| field.contains(query)));
+            if matches && rows.len() == limit {
+                return Ok(SearchPage { rows, next: checked, partial: false, candidates });
+            }
+            candidates += 1;
+            checked = Some((item.get(1), key));
+            if matches { rows.push(row); }
+        }
+        let partial = selected.len() > catalog_search::MAX_CANDIDATES;
+        Ok(SearchPage { rows, next: if partial { checked } else { None }, partial, candidates })
+    }
+
     pub(crate) async fn search_catalog(
         &self,
         namespace: &Namespace,

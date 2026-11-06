@@ -25,6 +25,16 @@ impl RuntimeObservations {
     pub(crate) fn new(options: &Options) -> Self {
         Self::new_measured(options, &mut crate::native_timing::Measurements::default())
     }
+    #[cfg(feature = "postgres")]
+    pub(crate) fn projection(options: &Options) -> Self {
+        let mut observations = Self::fresh_with_store(
+            options,
+            &mut crate::native_timing::Measurements::default(),
+            false,
+        );
+        observations.fallback = query_runtime_generation(options).ok();
+        observations
+    }
     pub(crate) fn new_measured(
         options: &Options,
         measurements: &mut crate::native_timing::Measurements,

@@ -437,7 +437,7 @@ pub(crate) fn error_generation(projection: &str, session: &Value) -> String {
     )
 }
 
-fn entry_generation(stored: &str) -> String {
+pub(crate) fn entry_generation(stored: &str) -> String {
     use sha2::{Digest, Sha256};
     format!(
         "{:x}",
@@ -480,7 +480,7 @@ pub(crate) fn observation(
 }
 
 struct Selection {
-    proof_db: Arc<crate::events::store::chunk_proofs::Snapshot>,
+    proof_db: Option<Arc<crate::events::store::chunk_proofs::Snapshot>>,
     identity: CatalogSessionIdentity,
     session: Value,
     generation: String,
@@ -816,7 +816,7 @@ pub(crate) fn read(
     transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     drop(transaction);
     let selection = Selection {
-        proof_db: crate::events::store::chunk_proofs::Snapshot::new(connection),
+        proof_db: Some(crate::events::store::chunk_proofs::Snapshot::new(connection)),
         identity,
         session,
         generation,
@@ -849,6 +849,32 @@ pub(crate) fn read(
         return Ok(render_field(options, selection, provider, chunk, mode));
     }
     Ok(render(options, selection, provider, mode, requested_part))
+}
+
+/// Render a PostgreSQL recipe window with a request-owned authorized source
+/// reader. Metadata and proof witnesses remain in the caller's SQL snapshot.
+#[cfg(feature = "postgres")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_postgres(
+    options: &Options,
+    identity: CatalogSessionIdentity,
+    session: Value,
+    stored_generation: &str,
+    total: usize,
+    first: usize,
+    slots: Vec<SavedSlot>,
+    sources: Vec<CatalogSource>,
+    reader: &dyn SessionSourceReader,
+) -> ViewerReply {
+    let end = first.saturating_add(slots.len()).min(total);
+    let selection = Selection {
+        proof_db: None, identity, session,
+        generation: entry_generation(stored_generation), total, first, end, start: first,
+        slots, sources: sources.into_iter().map(|source| (source.path.clone(), source)).collect(),
+        history_incomplete: false,
+        context: json!({"state":"incomplete","turns":[],"handoffs":[],"sessions":{},"previews":{}}),
+    };
+    render(options, selection, Some(reader), SessionSourceReadMode::ProviderOnly, SelectedPart::Transcript)
 }
 
 // Closed, body-free diagnostics let a host distinguish metadata/cursor races
@@ -1420,7 +1446,7 @@ fn render(
         })
         .collect();
     let local = Local {
-        proof_db: Some(selection.proof_db.clone()),
+        proof_db: selection.proof_db.clone(),
         options,
         mode,
         observed: std::sync::Mutex::default(),
@@ -2024,7 +2050,7 @@ fn render_field(
         })
         .collect();
     let local = Local {
-        proof_db: Some(selection.proof_db.clone()),
+        proof_db: selection.proof_db.clone(),
         options,
         mode,
         observed: std::sync::Mutex::default(),

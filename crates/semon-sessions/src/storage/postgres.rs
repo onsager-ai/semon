@@ -7,6 +7,7 @@ use tokio_postgres::{Client, IsolationLevel, Transaction};
 
 mod index;
 mod producer;
+mod selected;
 // The typed Catalog API is qualified independently before runtime adoption.
 #[allow(dead_code, reason = "Catalog runtime integration is pending")]
 mod catalog;
@@ -45,6 +46,26 @@ pub struct PgProjectionStore {
 }
 
 impl PgProjectionStore {
+    /// Serve the shared focused Catalog contract from this namespace's
+    /// PostgreSQL snapshot. Native source access remains the host's authority.
+    pub async fn catalog_reply(
+        &mut self,
+        namespace: &Namespace,
+        options: &crate::Options,
+        query: &str,
+    ) -> Result<crate::ViewerReply, StorageError> {
+        ensure(&self.namespace, namespace)?;
+        let request = match crate::catalog::Request::parse(query) {
+            Ok(request) => request,
+            Err(reply) => return Ok(reply),
+        };
+        let tx = self.begin(namespace).await?;
+        let reply = crate::catalog::postgres_page(&tx, namespace, options, &request)
+            .await.map_err(backend)?;
+        tx.commit(namespace).await?;
+        Ok(reply)
+    }
+
     pub async fn new(client: Client, namespace: Namespace) -> Result<Self, StorageError> {
         let role = client.query_one(
             "SELECT r.rolsuper,r.rolbypassrls,EXISTS(SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='semon_projection' AND c.relowner=r.oid) FROM pg_roles r WHERE r.rolname=current_user",
