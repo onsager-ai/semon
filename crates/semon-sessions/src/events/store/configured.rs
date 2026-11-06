@@ -14172,7 +14172,7 @@ mod tests {
                         |row| row.get(0),
                     )
                     .unwrap();
-                crate::storage::sqlite::proof_generations::fail_presentation_capture_once();
+                crate::storage::sqlite::projection_tags::fail_runtime_capture_once();
                 let (outcome, publication) = cache
                     .publish_semantic_catalog(&batch, model.prepared())
                     .unwrap();
@@ -14602,7 +14602,7 @@ mod tests {
                 let mut cache = open(&f.config);
                 admit_independent_inputs(&mut cache, options, &inputs);
                 let (batch, model) = ready(&mut cache, &f, options, &inputs);
-                crate::storage::sqlite::proof_generations::fail_presentation_capture_once();
+                crate::storage::sqlite::projection_tags::fail_runtime_capture_once();
                 crate::storage::sqlite::semantic::drop_capture_overflow_receipt_once();
                 assert_eq!(
                     cache
@@ -14634,7 +14634,7 @@ mod tests {
                 admit_independent_inputs(&mut cache, options, &inputs);
                 let (batch, model) = ready(&mut cache, &f, options, &inputs);
                 let before = shared_state(&f);
-                crate::storage::sqlite::proof_generations::fail_presentation_capture_once();
+                crate::storage::sqlite::projection_tags::fail_runtime_capture_once();
                 assert!(
                     cache
                         .publish_semantic_catalog(&batch, model.prepared())

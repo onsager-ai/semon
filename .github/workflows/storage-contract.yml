@@ -87,7 +87,12 @@ jobs:
           result=0
           case_number=0
           for test in \
-            events::store::tests::direct_catalog_history_grants_preserve_only_existing_producer_metadata \
+            events::store::tests::direct_catalog_history_tags_preserve_existing_producer_metadata \
+            catalog::tests::projection_cache_tag_refuses_wrong_projector_and_altered_prefix \
+            catalog::tests::projection_cache_rebuild_rollback_restart_keeps_prior_publication \
+            catalog::tests::partial_publication_withdrawal_hands_native_history_to_custody \
+            catalog::tests::semantic_stage_history_custody_budget_overflow_rolls_back_and_defers \
+            storage::sqlite::history::verified_history_tests::composed_history_keeps_source_tag_and_refreshes_metadata_capture \
             catalog::tests::codex_child_pages_use_complete_parent_calls_across_sibling_pages \
             catalog::tests::codex_child_page_keeps_a_done_parent_context_only \
             catalog::tests::codex_relation_closure_excludes_unrelated_pending_claude_source \

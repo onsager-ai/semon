@@ -3889,18 +3889,25 @@ impl SqliteStore {
                     }],
                 )
                 .map_err(failure)?;
+            let mut capture_budget =
+                crate::storage::sqlite::projection_tags::CAPTURE_MAX_BYTES;
             for row in rows {
                 let projection_generation: Option<String> = transaction.query_row(
                     "SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",
                     params![owner.config().namespace.as_str(), row.key], |saved| saved.get(0),
                 ).optional().map_err(failure)?;
-                crate::storage::sqlite::projection_tags::publish(
+                let capture_bytes = crate::storage::sqlite::projection_tags::publish(
                     &transaction,
                     owner.config().namespace.as_str(),
                     row,
                     crate::storage::catalog::CatalogObservationOwner::Catalog,
                     projection_generation.as_deref().unwrap_or_default(),
                     publication.observations,
+                )
+                .map_err(StoreError::Configured)?;
+                crate::storage::sqlite::projection_tags::charge_capture(
+                    &mut capture_budget,
+                    capture_bytes,
                 )
                 .map_err(StoreError::Configured)?;
             }
@@ -8674,103 +8681,9 @@ mod tests {
     }
 
     #[test]
-    fn direct_catalog_history_grants_preserve_only_existing_producer_metadata() {
-        let root = scratch("direct-catalog-history-grant");
-        let (options, rows, projections) = catalog_native_fixture(&root, 1, false);
-        let config = options.source.config(&options.cache).unwrap();
-        let mut store = current_test_store_with_epoch(
-            &crate::events::EventCache::path(&options.cache),
-            &config.namespace,
-            config.expected_stream_epoch.as_deref().unwrap(),
-        );
-        assert_eq!(
-            catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
-                .unwrap()
-                .0,
-            Outcome::Written
-        );
-        let namespace = store.owner.config().namespace.as_str().to_owned();
-        let admission = store.owner.admission();
-        let stream = store
-            .owner
-            .config()
-            .expected_stream_epoch
-            .as_deref()
-            .unwrap()
-            .to_owned();
-        let mut retained = rows[0].clone();
-        retained.lifecycle = crate::model::summary::CatalogLifecycle::Retained;
-        store
-            .connection
-            .execute(
-                "INSERT INTO main.session_history_catalog(namespace,session_key,metadata) VALUES(?1,?2,?3)",
-                params![namespace, retained.key, serde_json::to_string(&retained).unwrap()],
-            )
-            .unwrap();
-        crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
-            &store.connection,
-            &namespace,
-            &retained.key,
-            admission,
-            &stream,
-        )
-        .unwrap();
-        let binding = crate::storage::QueryRuntimeBinding {
-            namespace: store.owner.config().namespace.clone(),
-            admission,
-            stream_epoch: stream.clone(),
-        };
-        assert!(
-            crate::storage::sqlite::proof_generations::observation_binding(
-                &store.connection,
-                &binding,
-                &retained
-            )
-            .is_ok(),
-            "the latest History row inherits an exact prior producer grant"
-        );
-
-        let mut copied = retained.clone();
-        copied.name.push_str(" copied without producer evidence");
-        store
-            .connection
-            .execute(
-                "UPDATE main.session_history_catalog SET metadata=?3 WHERE namespace=?1 AND session_key=?2",
-                params![namespace, copied.key, serde_json::to_string(&copied).unwrap()],
-            )
-            .unwrap();
-        crate::storage::sqlite::proof_generations::reconcile_native_observation_owners(
-            &store.connection,
-            &namespace,
-            &copied.key,
-            admission,
-            &stream,
-        )
-        .unwrap();
-        let copied_grants: i64 = store
-            .connection
-            .query_row(
-                "SELECT count(*) FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
-                params![namespace, copied.key],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(copied_grants, 0);
-        assert!(
-            crate::storage::sqlite::proof_generations::observation_binding(
-                &store.connection,
-                &binding,
-                &copied
-            )
-            .is_err(),
-            "copied History metadata cannot mint local authority"
-        );
-        drop(store);
-        fs::remove_dir_all(root).unwrap();
-
-        // A real native publication can install an exact Current proof while
-        // the prior direct Catalog grant still owns the row moved to History.
-        // The LocalOnly grant itself has no captured observations in this path.
+    fn direct_catalog_history_tags_preserve_existing_producer_metadata() {
+        // Replacing a native owner hands the old metadata and source tag to
+        // History before the replacement Current projection is published.
         let coexist_root = scratch("direct-catalog-history-current-proof");
         let (options, rows, projections) = catalog_native_fixture(&coexist_root, 2, false);
         let key = "native-cx-01";
@@ -8783,7 +8696,6 @@ mod tests {
             &config.namespace,
             &stream,
         );
-        let admission = store.owner.admission();
         assert_eq!(
             catalog_write(&mut store, &rows, &projections, false, CatalogWriter::Auto)
                 .unwrap()
@@ -8793,7 +8705,7 @@ mod tests {
         let (old_digest, old_capture): (String, Option<String>) = store
             .connection
             .query_row(
-                "SELECT metadata_digest,direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
+                "SELECT prefix_digest,capture FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
                 params![namespace, key],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -8842,16 +8754,12 @@ mod tests {
             current.lifecycle,
             crate::model::summary::CatalogLifecycle::Current
         );
-        assert!(
-            publisher
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND g.metadata=?3 AND g.admission=?4 AND g.stream=?5)",
-                    params![namespace, key, current_metadata, i64::try_from(admission).unwrap(), stream],
-                    |row| row.get::<_, bool>(0),
-                )
-                .unwrap(),
-            "the replacement has an exact Current immutable proof"
-        );
+        let current_prefix: String = publisher.query_row(
+            "SELECT prefix_digest FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind='catalog'",
+            params![namespace, key], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(current_prefix, crate::retention::source_generation(&current.sources).unwrap());
+        assert_ne!(current_prefix, old_digest);
 
         let history_metadata: String = publisher
             .query_row(
@@ -8870,29 +8778,14 @@ mod tests {
             serde_json::to_string(&old).unwrap(),
             "History retains the exact old producer metadata"
         );
-        let history_refs: i64 = publisher
+        let (history_digest, history_capture): (String, Option<String>) = publisher
             .query_row(
-                "SELECT count(*) FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='history'",
+                "SELECT prefix_digest,capture FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
                 params![namespace, key],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(history_refs, 0, "the History row has no immutable owner");
-        let (history_digest, history_admission, history_stream, history_capture): (
-            String,
-            i64,
-            String,
-            Option<String>,
-        ) = publisher
-            .query_row(
-                "SELECT metadata_digest,admission,stream,direct_capture FROM storage_catalog_native_observation_grants WHERE namespace=?1 AND session_key=?2 AND owner_kind='history'",
-                params![namespace, key],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
         assert_eq!(history_digest, old_digest);
-        assert_eq!(history_admission, i64::try_from(admission).unwrap());
-        assert_eq!(history_stream, stream);
         assert!(history_capture.is_none());
         drop(publisher);
         drop(evidence);

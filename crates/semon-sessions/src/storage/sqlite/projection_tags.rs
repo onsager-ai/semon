@@ -5,6 +5,28 @@ use crate::storage::{QueryRuntimeBinding, StorageError, catalog::CatalogObservat
 use rusqlite::{Connection, OptionalExtension, params};
 
 const PROJECTOR: &str = "native-projection-v1";
+pub(crate) const CAPTURE_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+#[cfg(test)]
+std::thread_local! {
+    static FAIL_RUNTIME_CAPTURE_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn fail_runtime_capture_once() {
+    FAIL_RUNTIME_CAPTURE_ONCE.with(|value| value.set(true));
+}
+
+pub(crate) fn charge_capture(remaining: &mut usize, bytes: usize) -> Result<(), StorageError> {
+    #[cfg(test)]
+    if FAIL_RUNTIME_CAPTURE_ONCE.with(|value| value.replace(false)) {
+        return Err(StorageError::HistoryRetentionBounds);
+    }
+    *remaining = remaining
+        .checked_sub(bytes)
+        .ok_or(StorageError::HistoryRetentionBounds)?;
+    Ok(())
+}
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS storage_projection_tags(namespace TEXT NOT NULL,session_key TEXT NOT NULL,owner_kind TEXT NOT NULL CHECK(owner_kind IN('catalog','history')),raw_identity TEXT NOT NULL,prefix_digest TEXT NOT NULL,projector TEXT NOT NULL,generation TEXT NOT NULL,capture TEXT CHECK(capture IS NULL OR octet_length(capture)<=8388608),PRIMARY KEY(namespace,session_key,owner_kind)) STRICT, WITHOUT ROWID;
 ";
@@ -35,7 +57,7 @@ pub(crate) fn publish(
     owner: CatalogObservationOwner,
     generation: &str,
     observations: Option<&crate::storage::selected::PresentationObservations>,
-) -> Result<(), StorageError> {
+) -> Result<usize, StorageError> {
     let raw_identity = identity(row)?;
     let prefix = crate::retention::source_generation(&row.sources)
         .map_err(|_| StorageError::ScopeChanged)?;
@@ -43,15 +65,13 @@ pub(crate) fn publish(
         .and_then(|observations| observations.runtime_capture_for(row))
         .map(|capture| serde_json::to_string(&capture).map_err(|_| StorageError::Unavailable))
         .transpose()?;
-    if capture
-        .as_ref()
-        .is_some_and(|capture| capture.len() > 8 * 1024 * 1024)
-    {
+    let capture_bytes = capture.as_ref().map_or(0, String::len);
+    if capture_bytes > CAPTURE_MAX_BYTES {
         return Err(StorageError::HistoryRetentionBounds);
     }
     db.prepare_cached("INSERT INTO storage_projection_tags(namespace,session_key,owner_kind,raw_identity,prefix_digest,projector,generation,capture) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(namespace,session_key,owner_kind) DO UPDATE SET raw_identity=excluded.raw_identity,prefix_digest=excluded.prefix_digest,projector=excluded.projector,generation=excluded.generation,capture=excluded.capture")
         .map_err(failed)?.execute(params![namespace,row.key,kind(owner),raw_identity,prefix,PROJECTOR,generation,capture]).map_err(failed)?;
-    Ok(())
+    Ok(capture_bytes)
 }
 
 pub(crate) fn check(

@@ -735,7 +735,8 @@ mod verified_history_tests {
              CREATE TABLE storage_catalog_native_observation_grants(namespace TEXT,session_key TEXT,owner_kind TEXT,metadata_digest TEXT,admission INTEGER,stream TEXT,direct_capture TEXT,PRIMARY KEY(namespace,session_key,owner_kind));",
         )
         .unwrap();
-        db.execute_batch(super::super::projection_tags::SCHEMA).unwrap();
+        db.execute_batch(super::super::projection_tags::SCHEMA)
+            .unwrap();
         db
     }
 

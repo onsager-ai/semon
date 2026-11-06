@@ -14,16 +14,6 @@ use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, 
 
 const DIRECT_CAPTURE_MAX_BYTES: usize = 8 * 1024 * 1024;
 
-#[cfg(test)]
-std::thread_local! {
-    static FAIL_PRESENTATION_CAPTURE_ONCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-#[cfg(test)]
-pub(crate) fn fail_presentation_capture_once() {
-    FAIL_PRESENTATION_CAPTURE_ONCE.with(|value| value.set(true));
-}
-
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS storage_proof_generations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,publication TEXT NOT NULL,proof TEXT NOT NULL,admission INTEGER NOT NULL,stream TEXT NOT NULL,metadata TEXT NOT NULL,query_recipe TEXT CHECK(query_recipe IS NULL OR octet_length(metadata)+octet_length(query_recipe)<=1048576),slots TEXT NOT NULL,prefix TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS storage_proof_presentations(namespace TEXT NOT NULL,id TEXT NOT NULL,session_key TEXT NOT NULL,metadata TEXT NOT NULL,PRIMARY KEY(namespace,id,session_key)) STRICT, WITHOUT ROWID;
@@ -2331,6 +2321,7 @@ pub(crate) fn native_catalog_observation_grant(
         generation.as_deref().unwrap_or_default(),
         observations,
     )
+    .map(|_| ())
 }
 
 /// Store a fresh composed-row runtime capture in the existing physical
@@ -3032,10 +3023,6 @@ pub(crate) fn capture_presentations(
     observed_at: i64,
 ) -> Result<Vec<(String, String)>, StorageError> {
     validate_receipt_inputs(&inputs)?;
-    #[cfg(test)]
-    if FAIL_PRESENTATION_CAPTURE_ONCE.with(|value| value.replace(false)) {
-        return Err(StorageError::HistoryRetentionBounds);
-    }
     use crate::storage::selected::{CapturedContext, PresentationWitness};
     let PresentationInputs {
         catalog_generation,

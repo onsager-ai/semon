@@ -3699,12 +3699,13 @@ impl Stage {
         } else if !repeat {
             tx.execute("DELETE FROM main.meta WHERE namespace=?1 AND key='slot_projection_catalog_generation'",[ns]).map_err(error)?;
         }
+        let mut capture_budget = super::projection_tags::CAPTURE_MAX_BYTES;
         for row in &prepared.rows {
             let projection_generation: Option<String> = tx.query_row(
                 "SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2",
                 params![ns, row.key], |saved| saved.get(0),
             ).optional().map_err(error)?;
-            super::projection_tags::publish(
+            let capture_bytes = super::projection_tags::publish(
                 &tx,
                 ns,
                 row,
@@ -3712,7 +3713,12 @@ impl Stage {
                 projection_generation.as_deref().unwrap_or_default(),
                 prepared.presentation_observations(),
             )
-            .map_err(StoreError::Configured)?;
+            .map_err(|error| match error {
+                StorageError::HistoryRetentionBounds => refuse(PUBLICATION_GROUP_BUDGET),
+                error => StoreError::Configured(error),
+            })?;
+            super::projection_tags::charge_capture(&mut capture_budget, capture_bytes)
+                .map_err(|_| refuse(PUBLICATION_GROUP_BUDGET))?;
         }
         if !repeat {
             tx.execute(
