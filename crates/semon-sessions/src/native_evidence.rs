@@ -1862,6 +1862,7 @@ impl NativeEvidence {
         #[cfg(feature = "postgres")]
         if self.storage.is_postgres() {
             self.validate_configuration()?;
+            let _work = lock(&self.work);
             if self.closed.load(Ordering::Acquire) {
                 return Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
