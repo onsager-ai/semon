@@ -903,6 +903,11 @@ pub(crate) trait IndexStore: Send {
         expected_generation: Option<&str>,
         claims: &[(String, Option<i64>)],
     ) -> Result<Outcome, StoreError>;
+    fn publish_immutable_history(
+        &mut self,
+        publication: &crate::slot_projection::Publication<'_>,
+        expected_generation: Option<&str>,
+    ) -> Result<Outcome, StoreError>;
     fn catalog_claims(&self, paths: &[String]) -> Result<Vec<(String, Option<i64>)>, StoreError>;
 
     /// `path`'s ledger as committed now.
@@ -1170,6 +1175,23 @@ impl EventCache {
                 },
                 prepared.base_generation.as_deref(),
                 &prepared.claims,
+            )
+            .map_err(|error| io::Error::other(error.to_string()))
+    }
+
+    pub(crate) fn publish_immutable_history(
+        &mut self,
+        prepared: &crate::model::PreparedSources,
+    ) -> io::Result<Outcome> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("immutable history store unavailable"))?
+            .publish_immutable_history(
+                &crate::slot_projection::Publication {
+                    rows: &prepared.rows,
+                    transcripts: Some(&prepared.transcripts),
+                },
+                prepared.base_generation.as_deref(),
             )
             .map_err(|error| io::Error::other(error.to_string()))
     }
