@@ -135,6 +135,36 @@ impl PgProjectionTransaction<'_> {
         Ok(())
     }
 
+    /// The host supplies the least durable acknowledgement of every consumer.
+    /// Remove at most one bounded page and retain the stream head separately.
+    pub(crate) async fn compact_changes(
+        &self,
+        namespace: &Namespace,
+        scope: CatalogReadScope,
+        epoch: &str,
+        acknowledged: u64,
+        limit: usize,
+    ) -> Result<crate::CatalogChangeCompaction, StorageError> {
+        ensure(&self.namespace, namespace)?;
+        if !(1..=256).contains(&limit) { return Err(backend("invalid compaction limit")) }
+        self.tx.query_one("SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE", &[&namespace.binding()]).await.map_err(backend)?;
+        let current: String = self.tx.query_one("SELECT custody_epoch FROM semon_projection.namespaces WHERE namespace=$1", &[&namespace.binding()]).await.map_err(backend)?.get(0);
+        if current != epoch { return Err(backend("change stream epoch mismatch")) }
+        let scope_key = crate::catalog_search::scope_key(scope);
+        let header = self.tx.query_opt("SELECT head,floor FROM semon_projection.change_heads WHERE namespace=$1 AND read_scope=$2", &[&namespace.binding(), &scope_key]).await.map_err(backend)?;
+        let (head, floor) = header.map_or((0, 0), |row| (row.get::<_, i64>(0), row.get::<_, i64>(1)));
+        let acknowledged = number(acknowledged)?;
+        if acknowledged > head { return Err(backend("acknowledgement exceeds stream head")) }
+        let rows = self.tx.query("SELECT revision FROM semon_projection.changes WHERE namespace=$1 AND read_scope=$2 AND revision<=$3 ORDER BY revision LIMIT $4", &[&namespace.binding(), &scope_key, &acknowledged, &number(limit as u64 + 1)?]).await.map_err(backend)?;
+        let removed = rows.len().min(limit);
+        let through = rows.iter().take(limit).next_back().map_or(floor, |row| row.get::<_, i64>(0));
+        if removed > 0 {
+            self.tx.execute("DELETE FROM semon_projection.changes WHERE namespace=$1 AND read_scope=$2 AND revision<=$3", &[&namespace.binding(), &scope_key, &through]).await.map_err(backend)?;
+            self.tx.execute("UPDATE semon_projection.change_heads SET floor=$3 WHERE namespace=$1 AND read_scope=$2", &[&namespace.binding(), &scope_key, &through]).await.map_err(backend)?;
+        }
+        Ok(crate::CatalogChangeCompaction { removed, compacted_through: through as u64, head: head as u64, more: rows.len() > limit })
+    }
+
     pub(crate) async fn catalog_changes(
         &self,
         namespace: &Namespace,
