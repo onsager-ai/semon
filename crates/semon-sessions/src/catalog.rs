@@ -161,7 +161,7 @@ pub fn session_source_proof(
         transaction.commit()?;
         // Reuse the catalog's current-root/native-selection validation. A
         // publication race fails closed rather than mixing catalog generations.
-        let identity = session_catalog_identity(options, namespace.as_str(), &key)?
+        let identity = session_catalog_identity(options, namespace.binding(), &key)?
             .ok_or_else(|| io::Error::other("source catalog changed"))?;
         let observed = identity
             .source_refs

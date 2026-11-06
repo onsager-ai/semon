@@ -138,6 +138,9 @@ impl PgProjectionTransaction<'_> {
         append: bool,
     ) -> Result<Option<ProjectionTag>, StorageError> {
         ensure(&self.namespace, namespace)?;
+        if next.projector != crate::model::summary::CATALOG_VERSION {
+            return Err(StorageError::Unsupported("unsupported projector version".into()));
+        }
         self.tx
             .query_one(
                 "SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE",
@@ -175,7 +178,9 @@ impl PgProjectionTransaction<'_> {
         tag: ProjectionTag,
     ) -> Result<(), StorageError> {
         ensure(&self.namespace, namespace)?;
-        if self.ledger(namespace, path).await? != Some(tag) {
+        if tag.projector != crate::model::summary::CATALOG_VERSION
+            || self.ledger(namespace, path).await? != Some(tag)
+        {
             return Err(StorageError::Backend("projection_stale".into()));
         }
         self.tx.execute("INSERT INTO semon_projection.units(namespace,unit_key,path,dev,ino,consumed,prefix,tail,epoch,projector) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT(namespace,unit_key,path) DO UPDATE SET dev=excluded.dev,ino=excluded.ino,consumed=excluded.consumed,prefix=excluded.prefix,tail=excluded.tail,epoch=excluded.epoch,projector=excluded.projector", &[&namespace.binding(),&key,&path,&(tag.dev as i64),&(tag.ino as i64),&number(tag.offset)?,&&tag.prefix_sha256[..],&&tag.tail_sha256[..],&tag.epoch,&(tag.projector as i32)]).await.map_err(backend)?;
@@ -194,6 +199,9 @@ impl PgProjectionTransaction<'_> {
             return Ok(None);
         };
         let published = decode(&row)?;
+        if published.projector != crate::model::summary::CATALOG_VERSION {
+            return Ok(Some(TagCheck::Mismatch("projector_version")));
+        }
         Ok(Some(match self.ledger(namespace, path).await? {
             Some(committed) => published.check(&committed),
             None => TagCheck::Mismatch("missing_ledger"),
