@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [main, codex/477-rebuild-20261106, codex/477-rebuild-diagnostic-20261106-20]
+    branches: [main, codex/477-rebuild-20261106, 'codex/477-rebuild-diagnostic-20261106-*']
 permissions:
   contents: read
 env:
@@ -56,7 +56,8 @@ jobs:
           name: pg-review
           path: ${{ runner.temp }}/pg-review/
       - name: Compile PostgreSQL conformance
-        run: cargo test --locked -p semon-sessions --lib --features postgres storage::conformance:: --no-run
+        run: |
+          cargo test --locked -p semon-sessions --lib --features postgres storage::conformance:: --no-run
       - name: Check formatting
         id: formatting
         run: cargo fmt --all --check
