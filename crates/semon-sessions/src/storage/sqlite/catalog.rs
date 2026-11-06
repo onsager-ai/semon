@@ -605,9 +605,17 @@ impl CatalogSnapshot for AdmittedSnapshot<'_, '_> {
             .map_err(io::Error::other)?
             .into_iter()
             .map(|row| {
-                super::projection_tags::check(self.0, &self.2, &row, CatalogObservationOwner::Catalog)
-                    .map_err(io::Error::other)?;
-                Ok(SelectedCatalogRow { row, owner: Some(CatalogObservationOwner::Catalog) })
+                super::projection_tags::check(
+                    self.0,
+                    &self.2,
+                    &row,
+                    CatalogObservationOwner::Catalog,
+                )
+                .map_err(io::Error::other)?;
+                Ok(SelectedCatalogRow {
+                    row,
+                    owner: Some(CatalogObservationOwner::Catalog),
+                })
             })
             .collect()
     }

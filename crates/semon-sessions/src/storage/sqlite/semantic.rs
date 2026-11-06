@@ -3501,11 +3501,15 @@ impl Stage {
             tx.commit().map_err(error)?;
             return Ok((Outcome::Deferred, None));
         }
-        super::history::publish_composition(&history, &crate::slot_projection::Publication {
-            rows: &prepared.rows,
-            transcripts: Some(&prepared.transcripts),
-            observations: prepared.presentation_observations(),
-        }).map_err(error)?;
+        super::history::publish_composition(
+            &history,
+            &crate::slot_projection::Publication {
+                rows: &prepared.rows,
+                transcripts: Some(&prepared.transcripts),
+                observations: prepared.presentation_observations(),
+            },
+        )
+        .map_err(error)?;
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_history").map_err(error)?;
         publication_phase("slot_effects");
@@ -3674,20 +3678,38 @@ impl Stage {
                 params![ns, row.key], |saved| saved.get(0),
             ).optional().map_err(error)?;
             super::projection_tags::publish(
-                &tx, ns, row, crate::storage::catalog::CatalogObservationOwner::Catalog,
-                projection_generation.as_deref().unwrap_or_default(), prepared.presentation_observations(),
-            ).map_err(StoreError::Configured)?;
+                &tx,
+                ns,
+                row,
+                crate::storage::catalog::CatalogObservationOwner::Catalog,
+                projection_generation.as_deref().unwrap_or_default(),
+                prepared.presentation_observations(),
+            )
+            .map_err(StoreError::Configured)?;
         }
         if !repeat {
             tx.execute(
                 "INSERT INTO storage_semantic_publications VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![ns,generation,batch.epoch,i64::try_from(self.source.admission).map_err(|_| refuse("semantic_admission_range"))?,batch.base_generation,batch.source_revision,proof_digest,claims_text,metadata_text],
-            ).map_err(error)?;
+                params![
+                    ns,
+                    generation,
+                    batch.epoch,
+                    i64::try_from(self.source.admission)
+                        .map_err(|_| refuse("semantic_admission_range"))?,
+                    batch.base_generation,
+                    batch.source_revision,
+                    proof_digest,
+                    claims_text,
+                    metadata_text
+                ],
+            )
+            .map_err(error)?;
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_proof").map_err(error)?;
         #[cfg(test)]
-        crate::events::store::configured::effect("semantic_publish_generation_refs").map_err(error)?;
+        crate::events::store::configured::effect("semantic_publish_generation_refs")
+            .map_err(error)?;
         publication_phase("claim_ack");
         for row in &prepared.rows {
             tx.execute("UPDATE main.catalog_semantic_endpoints SET published=1 WHERE namespace=?1 AND session_key=?2", params![ns,row.key]).map_err(error)?;

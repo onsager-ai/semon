@@ -3600,12 +3600,25 @@ fn projection_cache_tag_refuses_wrong_projector_and_altered_prefix() {
     let reader = crate::storage::local_navigation_binding(&fixture.options, "local").unwrap();
     let tx = db.transaction().unwrap();
     let binding = reader.runtime_binding_at(&tx).unwrap();
-    let check = || crate::storage::sqlite::projection_tags::check(&tx, &binding, &row, crate::storage::catalog::CatalogObservationOwner::Catalog);
+    let check = || {
+        crate::storage::sqlite::projection_tags::check(
+            &tx,
+            &binding,
+            &row,
+            crate::storage::catalog::CatalogObservationOwner::Catalog,
+        )
+    };
     assert!(check().is_ok());
     tx.execute("UPDATE storage_projection_tags SET projector='unknown-projector' WHERE namespace=semon_namespace() AND session_key=?1", [&row.key]).unwrap();
-    assert!(matches!(check(), Err(crate::storage::StorageError::ScopeChanged)));
+    assert!(matches!(
+        check(),
+        Err(crate::storage::StorageError::ScopeChanged)
+    ));
     tx.execute("UPDATE storage_projection_tags SET projector='native-projection-v1',prefix_digest=?1 WHERE namespace=semon_namespace() AND session_key=?2", rusqlite::params!["0".repeat(64),row.key]).unwrap();
-    assert!(matches!(check(), Err(crate::storage::StorageError::ScopeChanged)));
+    assert!(matches!(
+        check(),
+        Err(crate::storage::StorageError::ScopeChanged)
+    ));
     tx.rollback().unwrap();
 }
 
@@ -3619,7 +3632,11 @@ fn projection_cache_rebuild_rollback_restart_keeps_prior_publication() {
         let mut db = fixture.db();
         let tx = db.transaction().unwrap();
         tx.execute("UPDATE storage_projection_tags SET projector='incomplete-rebuild' WHERE namespace=semon_namespace()", []).unwrap();
-        tx.execute("DELETE FROM main.session_slots WHERE namespace=semon_namespace()", []).unwrap();
+        tx.execute(
+            "DELETE FROM main.session_slots WHERE namespace=semon_namespace()",
+            [],
+        )
+        .unwrap();
         // Closing the uncommitted producer models a crash before rebuild commit.
     }
     assert_eq!(fixture.body("sid=session-00000"), before);
@@ -11270,10 +11287,23 @@ fn partial_publication_withdrawal_hands_native_history_to_custody() {
     let fixture = Fixture::new();
     let path = fixture.source("partial-custody");
     fixture.source("unrelated-not-yet-published");
-    let input = crate::Input { root: crate::InputRoot::Claude, path: "projects/project/partial-custody.jsonl".into() };
-    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
-    let prepared = crate::model::prepare_sources(&fixture.options,&mut cache,&[input],crate::model::now_ms()).unwrap();
-    assert_eq!(cache.publish_partial_catalog(&prepared).unwrap(),crate::events::Outcome::Written);
+    let input = crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/project/partial-custody.jsonl".into(),
+    };
+    let mut cache =
+        EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    let prepared = crate::model::prepare_sources(
+        &fixture.options,
+        &mut cache,
+        &[input],
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    assert_eq!(
+        cache.publish_partial_catalog(&prepared).unwrap(),
+        crate::events::Outcome::Written
+    );
     let db = fixture.db();
     let original: String = db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='partial-custody'", [], |row| row.get(0)).unwrap();
     let original: CatalogRow = serde_json::from_str(&original).unwrap();
@@ -11286,9 +11316,9 @@ fn partial_publication_withdrawal_hands_native_history_to_custody() {
     let db = fixture.db();
     let retained: String = db.query_row("SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='partial-custody'", [], |row| row.get(0)).unwrap();
     let retained: CatalogRow = serde_json::from_str(&retained).unwrap();
-    assert_eq!(retained.sources,original.sources);
+    assert_eq!(retained.sources, original.sources);
     let retained_slots = db.prepare("SELECT metadata FROM main.session_history_slots WHERE namespace=semon_namespace() AND session_key='partial-custody' ORDER BY slot").unwrap().query_map([], |row| row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-    assert_eq!(retained_slots,slots);
+    assert_eq!(retained_slots, slots);
     assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='partial-custody' AND lifecycle='current')", [], |row| row.get::<_,bool>(0)).unwrap());
     assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM storage_projection_tags WHERE namespace=semon_namespace() AND session_key='partial-custody' AND owner_kind='history')", [], |row| row.get::<_,bool>(0)).unwrap());
 }
@@ -12096,7 +12126,10 @@ fn semantic_publication_snapshot(db: &Connection, key: &str) -> (String, String,
 fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
     let fixture = Fixture::new();
     let first = fixture.source("first");
-    let first_copy = fixture.options.claude_home.join("projects/project/first-copy.jsonl");
+    let first_copy = fixture
+        .options
+        .claude_home
+        .join("projects/project/first-copy.jsonl");
     let mut raw = fs::read_to_string(&first).unwrap();
     raw.push_str(&format!("{}\n", json!({"type":"continued-in","sessionId":"first","continuedInSessionId":"first-copy","timestamp":"2026-10-01T00:00:00Z"})));
     fs::write(&first, raw).unwrap();
@@ -12107,9 +12140,16 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
             .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
     };
     let original = slots("session_slots");
-    let missing = original.iter().filter(|text| {
-        serde_json::from_str::<crate::slot_projection::SavedSlot>(text).unwrap().source_paths().contains(&&first_copy)
-    }).cloned().collect::<Vec<_>>();
+    let missing = original
+        .iter()
+        .filter(|text| {
+            serde_json::from_str::<crate::slot_projection::SavedSlot>(text)
+                .unwrap()
+                .source_paths()
+                .contains(&&first_copy)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
     assert!(!missing.is_empty());
     fs::remove_file(&first_copy).unwrap();
     fixture.publish_existing();
@@ -12120,7 +12160,13 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
     let current = slots("session_slots");
     assert!(current.iter().all(|slot| history.contains(slot)));
     assert!(missing.iter().all(|slot| history.contains(slot)));
-    assert!(current.iter().any(|text| serde_json::from_str::<crate::slot_projection::SavedSlot>(text).unwrap().native_event_id.as_deref() == Some("repeated-history")));
+    assert!(current.iter().any(|text| {
+        serde_json::from_str::<crate::slot_projection::SavedSlot>(text)
+            .unwrap()
+            .native_event_id
+            .as_deref()
+            == Some("repeated-history")
+    }));
     let db = fixture.db();
     let current: String = db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='first'", [], |row| row.get(0)).unwrap();
     let retained: String = db.query_row("SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='first'", [], |row| row.get(0)).unwrap();
@@ -12128,7 +12174,10 @@ fn semantic_stage_retains_multisource_history_refs_across_recomposition() {
     let retained: crate::model::summary::CatalogRow = serde_json::from_str(&retained).unwrap();
     assert_eq!(current.sources.len(), 1);
     assert_eq!(retained.sources.len(), 2);
-    assert_eq!(retained.lifecycle, crate::model::summary::CatalogLifecycle::Retained);
+    assert_eq!(
+        retained.lifecycle,
+        crate::model::summary::CatalogLifecycle::Retained
+    );
 }
 
 #[test]

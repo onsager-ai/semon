@@ -332,19 +332,34 @@ pub(super) fn header_ready(c: &Connection, path: &str, ledger: &Ledger) -> rusql
 
 /// Check a projection tag against the existing exact-ledger proof header.
 /// Body readers still verify covering pages and native bytes through `Focused`.
-pub(crate) fn projection_header_ready(c: &Connection, path: &str, ledger: &Ledger) -> rusqlite::Result<bool> {
+pub(crate) fn projection_header_ready(
+    c: &Connection,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<bool> {
     let live = prefix(path);
     let retained = published::prefix(path, &crate::source_carrier::ledger_digest(ledger));
     for prefix in [live, retained] {
-        let encoded: Option<Option<String>> = c.query_row(
-            native_metadata_value(c)?, [format!("{prefix}header")], |row| row.get(0),
-        ).optional()?;
-        let Some(encoded) = encoded.flatten() else { continue; };
-        let header: Header = serde_json::from_str(&encoded).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        if header.version == 1 && header.parser_version == CACHE_VERSION
+        let encoded: Option<Option<String>> = c
+            .query_row(
+                native_metadata_value(c)?,
+                [format!("{prefix}header")],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(encoded) = encoded.flatten() else {
+            continue;
+        };
+        let header: Header =
+            serde_json::from_str(&encoded).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if header.version == 1
+            && header.parser_version == CACHE_VERSION
             && header.ledger == header_ledger(ledger)
-            && usize::try_from(ledger.offset.div_ceil(crate::source_chunks::SIZE as u64)) == Ok(header.count)
-        { return Ok(true); }
+            && usize::try_from(ledger.offset.div_ceil(crate::source_chunks::SIZE as u64))
+                == Ok(header.count)
+        {
+            return Ok(true);
+        }
     }
     Ok(false)
 }

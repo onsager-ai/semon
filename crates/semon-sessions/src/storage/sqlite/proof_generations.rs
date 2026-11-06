@@ -43,7 +43,8 @@ CREATE TRIGGER IF NOT EXISTS storage_proof_source_immutable BEFORE UPDATE ON sto
 
 pub(super) fn initialize(db: &Connection) -> Result<(), StorageError> {
     db.execute_batch(SCHEMA).map_err(failed)?;
-    db.execute_batch(super::projection_tags::SCHEMA).map_err(failed)?;
+    db.execute_batch(super::projection_tags::SCHEMA)
+        .map_err(failed)?;
     validate(db)
 }
 
@@ -434,93 +435,6 @@ fn publish_current_ref(
     // Exact History references are installed by the verified composer.
     // Reconstructing them from path/ledger matches would retain unrelated
     // generations and let imported proof sources acquire local authority.
-    Ok(())
-}
-
-/// Retain outgoing owners' exact Current receipts after History composition,
-/// then release their Current references before grant reconciliation.
-pub(crate) fn retain_outgoing_history_refs(
-    tx: &Transaction<'_>,
-    namespace: &str,
-    admission: u64,
-    stream: &str,
-    outgoing_owners: &[CatalogRow],
-    overview_budget: &mut crate::overview::SummaryPublicationBudget,
-) -> Result<(), PublicationError> {
-    // History refs are either the exact local composition set or retention
-    // references copied from an exact local Current grant. They never grant
-    // History origin.
-    for row in outgoing_owners {
-        // A retired Catalog row still owns a physical observation after its
-        // Current receipt moves to History. Authenticate that exact preimage
-        // before releasing the ref, then carry its runtime into a direct grant.
-        let retained_metadata: Option<String> = tx.prepare_cached("SELECT metadata FROM main.session_catalog WHERE namespace=?1 AND session_key=?2 AND lifecycle='retained' AND octet_length(metadata)<=1048576").map_err(failed)?.query_row(
-                params![namespace, row.key],
-                |record| record.get(0),
-            )
-            .optional()
-            .map_err(failed)?;
-        let retained_capture = if let Some(metadata) = retained_metadata {
-            let mut retained: CatalogRow =
-                serde_json::from_str(&metadata).map_err(|_| StorageError::Unavailable)?;
-            retained.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-            let mut original = row.clone();
-            original.lifecycle = crate::model::summary::CatalogLifecycle::Current;
-            let original_metadata =
-                serde_json::to_string(&original).map_err(|_| StorageError::Unavailable)?;
-            let sql_admission = i64::try_from(admission).map_err(|_| StorageError::ScopeChanged)?;
-            let outgoing_receipt: bool = tx.prepare_cached("SELECT EXISTS(SELECT 1 FROM storage_proof_refs f JOIN storage_proof_generations g ON g.namespace=f.namespace AND g.id=f.id AND g.session_key=f.session_key WHERE f.namespace=?1 AND f.session_key=?2 AND f.kind='current' AND g.admission=?3 AND g.stream=?4 AND g.metadata=?5)").map_err(failed)?.query_row(
-                    params![namespace, row.key, sql_admission, stream, original_metadata],
-                    |record| record.get(0),
-                )
-                .map_err(failed)?;
-            if outgoing_receipt
-                && retained.query.is_some()
-                && serde_json::to_value(&retained).map_err(|_| StorageError::Unavailable)?
-                    == serde_json::to_value(&original).map_err(|_| StorageError::Unavailable)?
-            {
-                let binding = crate::storage::QueryRuntimeBinding {
-                    namespace: crate::storage::LogicalSourceNamespace::new(namespace)?,
-                    admission,
-                    stream_epoch: stream.to_owned(),
-                };
-                let (_, observations) = observation_binding_with_observations(
-                    tx,
-                    &binding,
-                    &retained,
-                    CatalogObservationOwner::Catalog,
-                )?;
-                Some((metadata, observations))
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-        retain_current_refs_for_unowned_history(
-            tx,
-            namespace,
-            &row.key,
-            admission,
-            stream,
-            overview_budget,
-        )?;
-        tx.prepare_cached("DELETE FROM storage_proof_refs WHERE namespace=?1 AND session_key=?2 AND kind='current'").map_err(failed)?.execute(
-            params![namespace, row.key],
-        )
-        .map_err(failed)?;
-        if let Some((metadata, observations)) = retained_capture {
-            native_catalog_observation_grant(
-                tx,
-                namespace,
-                &row.key,
-                admission,
-                stream,
-                &metadata,
-                Some(&observations),
-            )?;
-        }
-    }
     Ok(())
 }
 
@@ -2109,7 +2023,13 @@ pub(crate) fn observation_binding_with_observations(
     current: &crate::storage::QueryRuntimeBinding,
     selected: &CatalogRow,
     owner: CatalogObservationOwner,
-) -> Result<(crate::storage::QueryRuntimeBinding, crate::storage::selected::PresentationObservations), StorageError> {
+) -> Result<
+    (
+        crate::storage::QueryRuntimeBinding,
+        crate::storage::selected::PresentationObservations,
+    ),
+    StorageError,
+> {
     let observations = super::projection_tags::check(db, current, selected, owner)?
         .ok_or(StorageError::ScopeChanged)?;
     Ok((current.clone(), observations))
@@ -2124,31 +2044,52 @@ pub(crate) fn retained_runtime_source_cwds(
     owner: CatalogObservationOwner,
     observations: &crate::storage::selected::PresentationObservations,
 ) -> Result<Option<std::collections::BTreeSet<String>>, StorageError> {
-    let table = match owner { CatalogObservationOwner::Catalog => "session_slots", CatalogObservationOwner::History => "session_history_slots" };
+    let table = match owner {
+        CatalogObservationOwner::Catalog => "session_slots",
+        CatalogObservationOwner::History => "session_history_slots",
+    };
     let mut cwds = std::collections::BTreeSet::new();
     for source in &selected.sources {
-        if let Some(current) = super::catalog::runtime_source_cwds_by_path_if_current(db, std::slice::from_ref(source)).map_err(|_| StorageError::Unavailable)? {
+        if let Some(current) =
+            super::catalog::runtime_source_cwds_by_path_if_current(db, std::slice::from_ref(source))
+                .map_err(|_| StorageError::Unavailable)?
+        {
             cwds.extend(current.into_values().flatten());
             continue;
         }
         let mut statement = db.prepare_cached(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata END FROM main.{table} WHERE namespace=semon_namespace() AND session_key=?1 ORDER BY slot LIMIT 65")).map_err(failed)?;
-        let slots = statement.query_map([&selected.key], |row| row.get::<_,String>(0)).map_err(failed)?.collect::<rusqlite::Result<Vec<_>>>().map_err(failed)?;
-        if slots.len() > 64 { return Err(StorageError::HistoryRetentionBounds); }
+        let slots = statement
+            .query_map([&selected.key], |row| row.get::<_, String>(0))
+            .map_err(failed)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(failed)?;
+        if slots.len() > 64 {
+            return Err(StorageError::HistoryRetentionBounds);
+        }
         let mut saved = None;
         for text in slots {
-            let slot: crate::slot_projection::SavedSlot = serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
-            for (path,cwd) in slot.source_cwds() {
+            let slot: crate::slot_projection::SavedSlot =
+                serde_json::from_str(&text).map_err(|_| StorageError::ScopeChanged)?;
+            for (path, cwd) in slot.source_cwds() {
                 if path == &source.path {
                     let cwd = cwd.map(str::to_owned);
-                    if saved.as_ref().is_some_and(|prior| prior != &cwd) { return Err(StorageError::ScopeChanged); }
+                    if saved.as_ref().is_some_and(|prior| prior != &cwd) {
+                        return Err(StorageError::ScopeChanged);
+                    }
                     saved = Some(cwd);
                 }
             }
         }
-        let Some(saved) = saved else { return Ok(None); };
+        let Some(saved) = saved else {
+            return Ok(None);
+        };
         cwds.extend(saved);
     }
-    if observations.runtime_cwd_fingerprint_for(&selected.sources) != Some(crate::native_evidence::runtime::cwd_fingerprint(&cwds).as_str()) { return Err(StorageError::ScopeChanged); }
+    if observations.runtime_cwd_fingerprint_for(&selected.sources)
+        != Some(crate::native_evidence::runtime::cwd_fingerprint(&cwds).as_str())
+    {
+        return Err(StorageError::ScopeChanged);
+    }
     Ok(Some(cwds))
 }
 
@@ -2195,10 +2136,22 @@ fn observation_authority_for_owner_with_cache(
     physical_owner: Option<CatalogObservationOwner>,
     _local_only: bool,
     _cache: Option<&std::cell::RefCell<proof_codec::PresentationCache>>,
-) -> Result<(crate::storage::QueryRuntimeBinding, crate::storage::query::QueryRecipeResidence), ObservationPreparationError> {
-    let owner = if let Some(owner) = physical_owner { owner } else {
+) -> Result<
+    (
+        crate::storage::QueryRuntimeBinding,
+        crate::storage::query::QueryRecipeResidence,
+    ),
+    ObservationPreparationError,
+> {
+    let owner = if let Some(owner) = physical_owner {
+        owner
+    } else {
         let history: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_history_catalog WHERE namespace=?1 AND session_key=?2 AND metadata=?3)", params![current.namespace.as_str(), selected.key, serde_json::to_string(selected).map_err(|_| StorageError::Unavailable)?], |row| row.get(0)).map_err(ObservationPreparationError::Sql)?;
-        if history { CatalogObservationOwner::History } else { CatalogObservationOwner::Catalog }
+        if history {
+            CatalogObservationOwner::History
+        } else {
+            CatalogObservationOwner::Catalog
+        }
     };
     super::projection_tags::check(db, current, selected, owner)?;
     let mut row = selected.clone();
@@ -2206,8 +2159,12 @@ fn observation_authority_for_owner_with_cache(
     let metadata = serde_json::to_string(&row).map_err(|_| StorageError::Unavailable)?;
     let metadata_digest = proof_codec::digest(metadata.as_bytes());
     let residence = match owner {
-        CatalogObservationOwner::Catalog => crate::storage::query::QueryRecipeResidence::NativeCatalog { metadata_digest },
-        CatalogObservationOwner::History => crate::storage::query::QueryRecipeResidence::NativeHistory { metadata_digest },
+        CatalogObservationOwner::Catalog => {
+            crate::storage::query::QueryRecipeResidence::NativeCatalog { metadata_digest }
+        }
+        CatalogObservationOwner::History => {
+            crate::storage::query::QueryRecipeResidence::NativeHistory { metadata_digest }
+        }
     };
     Ok((current.clone(), residence))
 }
@@ -2304,9 +2261,7 @@ pub(super) fn load_query_recipe_with_bytes(
         QueryRecipeResidence::NativeCatalog { metadata_digest }
         | QueryRecipeResidence::NativeHistory { metadata_digest } => {
             let owner = match &observation.residence {
-                QueryRecipeResidence::NativeCatalog { .. } => {
-                    CatalogObservationOwner::Catalog
-                }
+                QueryRecipeResidence::NativeCatalog { .. } => CatalogObservationOwner::Catalog,
                 _ => CatalogObservationOwner::History,
             };
             let cells: Option<(Option<String>, Option<String>, bool)> = db.query_row(
@@ -2471,13 +2426,27 @@ pub(crate) fn native_observation_grant(
 /// immutable receipt grants in `meta` through `native_observation_grant`.
 #[cfg(test)]
 pub(crate) fn native_catalog_observation_grant(
-    db: &Connection, namespace: &str, session_key: &str, _admission: u64, _stream: &str,
-    metadata: &str, observations: Option<&crate::storage::selected::PresentationObservations>,
+    db: &Connection,
+    namespace: &str,
+    session_key: &str,
+    _admission: u64,
+    _stream: &str,
+    metadata: &str,
+    observations: Option<&crate::storage::selected::PresentationObservations>,
 ) -> Result<(), StorageError> {
     let row: CatalogRow = serde_json::from_str(metadata).map_err(|_| StorageError::Unavailable)?;
-    if row.key != session_key { return Err(StorageError::ScopeChanged); }
+    if row.key != session_key {
+        return Err(StorageError::ScopeChanged);
+    }
     let generation: Option<String> = db.query_row("SELECT generation FROM main.session_slot_projections WHERE namespace=?1 AND session_key=?2", params![namespace,session_key], |saved| saved.get(0)).optional().map_err(failed)?;
-    super::projection_tags::publish(db,namespace,&row,CatalogObservationOwner::Catalog,generation.as_deref().unwrap_or_default(),observations)
+    super::projection_tags::publish(
+        db,
+        namespace,
+        &row,
+        CatalogObservationOwner::Catalog,
+        generation.as_deref().unwrap_or_default(),
+        observations,
+    )
 }
 
 /// Store a fresh composed-row runtime capture in the existing physical
@@ -2631,10 +2600,24 @@ impl PreparedObservationUpdate {
         if changed != 1 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let repaired: CatalogRow = serde_json::from_str(&self.metadata).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let capture = self.direct_capture.as_deref().map(serde_json::from_str::<crate::storage::selected::PresentationObservations>).transpose().map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let repaired: CatalogRow =
+            serde_json::from_str(&self.metadata).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let capture = self
+            .direct_capture
+            .as_deref()
+            .map(serde_json::from_str::<crate::storage::selected::PresentationObservations>)
+            .transpose()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
         let generation: String = db.query_row("SELECT generation FROM storage_projection_tags WHERE namespace=?1 AND session_key=?2 AND owner_kind=?3", params![self.namespace,self.key,self.owner.kind()], |row| row.get(0))?;
-        super::projection_tags::publish(db, &self.namespace, &repaired, self.owner, &generation, capture.as_ref()).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        super::projection_tags::publish(
+            db,
+            &self.namespace,
+            &repaired,
+            self.owner,
+            &generation,
+            capture.as_ref(),
+        )
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         Ok(())
     }
 }
@@ -2751,13 +2734,23 @@ fn prepare_observation_update(
     }
 
     let metadata = serde_json::to_string(repaired).map_err(|_| StorageError::Unavailable)?;
-    if metadata.len() > 1_048_576 { return Err(StorageError::HistoryRetentionBounds.into()); }
+    if metadata.len() > 1_048_576 {
+        return Err(StorageError::HistoryRetentionBounds.into());
+    }
     let observations = super::projection_tags::check(db, current, selected, owner)?;
-    let direct_capture = observations.and_then(|observations| observations.runtime_capture_for(repaired))
-        .map(|capture| serde_json::to_string(&capture).map_err(|_| StorageError::Unavailable)).transpose()?;
-    if local_only && direct_capture.is_none() { return Err(StorageError::ScopeChanged.into()); }
+    let direct_capture = observations
+        .and_then(|observations| observations.runtime_capture_for(repaired))
+        .map(|capture| serde_json::to_string(&capture).map_err(|_| StorageError::Unavailable))
+        .transpose()?;
+    if local_only && direct_capture.is_none() {
+        return Err(StorageError::ScopeChanged.into());
+    }
     Ok(PreparedObservationUpdate {
-        namespace: namespace.to_owned(), key: selected.key.clone(), owner, stored, metadata,
+        namespace: namespace.to_owned(),
+        key: selected.key.clone(),
+        owner,
+        stored,
+        metadata,
         direct_capture,
         history_activity: crate::storage::query::history_activity(repaired),
     })

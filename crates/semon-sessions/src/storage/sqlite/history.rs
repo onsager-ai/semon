@@ -380,14 +380,22 @@ pub(crate) fn publish_composition(
     store: &OriginalHistory<'_>,
     publication: &crate::slot_projection::Publication<'_>,
 ) -> rusqlite::Result<()> {
-    let bytes = publication.rows.iter().try_fold(0usize, |total,row| {
-        serde_json::to_string(row).map(|text| total.saturating_add(text.len()))
-    }).map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?;
+    let bytes = publication
+        .rows
+        .iter()
+        .try_fold(0usize, |total, row| {
+            serde_json::to_string(row).map(|text| total.saturating_add(text.len()))
+        })
+        .map_err(<OriginalHistory<'_> as CompositeHistoryStore>::data)?;
     let mut budget = crate::overview::SummaryPublicationBudget::after_catalog_metadata(bytes);
-    let (plan,captures) = crate::storage::catalog::prepare_history_composition(
-        store,publication.rows,publication.transcripts,publication.observations,&mut budget,
+    let (plan, captures) = crate::storage::catalog::prepare_history_composition(
+        store,
+        publication.rows,
+        publication.transcripts,
+        publication.observations,
+        &mut budget,
     )?;
-    crate::storage::catalog::apply_prepared_history_composition(store,&plan,&captures)
+    crate::storage::catalog::apply_prepared_history_composition(store, &plan, &captures)
 }
 
 impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistory<'_> {
@@ -555,32 +563,55 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
             }
             if !snapshot.unavailable && snapshot.recipe_header.is_some() {
                 let binding = crate::storage::QueryRuntimeBinding {
-                    namespace: crate::storage::LogicalSourceNamespace::new(self.namespace).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
+                    namespace: crate::storage::LogicalSourceNamespace::new(self.namespace)
+                        .map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                        })?,
                     admission: self.admission,
                     stream_epoch: self.stream.ok_or(rusqlite::Error::InvalidQuery)?.to_owned(),
                 };
-                let owner = if history_exists { crate::storage::catalog::CatalogObservationOwner::History } else { crate::storage::catalog::CatalogObservationOwner::Catalog };
-                if super::projection_tags::check(self.db,&binding,previous_row,owner).is_err() {
+                let owner = if history_exists {
+                    crate::storage::catalog::CatalogObservationOwner::History
+                } else {
+                    crate::storage::catalog::CatalogObservationOwner::Catalog
+                };
+                if super::projection_tags::check(self.db, &binding, previous_row, owner).is_err() {
                     snapshot.unavailable = true;
                 } else {
                     let mut cwds = std::collections::BTreeMap::new();
                     for text in &snapshot.recipe_slots {
-                        let slot: crate::slot_projection::SavedSlot = serde_json::from_str(text).map_err(<Self as CompositeHistoryStore>::data)?;
-                        for (path,cwd) in slot.source_cwds() {
+                        let slot: crate::slot_projection::SavedSlot = serde_json::from_str(text)
+                            .map_err(<Self as CompositeHistoryStore>::data)?;
+                        for (path, cwd) in slot.source_cwds() {
                             let cwd = cwd.map(str::to_owned);
-                            if !previous_row.sources.iter().any(|source| &source.path == path) || cwds.get(path).is_some_and(|prior| prior != &cwd) {
+                            if !previous_row
+                                .sources
+                                .iter()
+                                .any(|source| &source.path == path)
+                                || cwds.get(path).is_some_and(|prior| prior != &cwd)
+                            {
                                 snapshot.unavailable = true;
                                 break;
                             }
-                            cwds.insert(path.clone(),cwd);
+                            cwds.insert(path.clone(), cwd);
                         }
                     }
                     if !snapshot.unavailable {
-                        let prefix = crate::retention::source_generation(&previous_row.sources).map_err(<Self as CompositeHistoryStore>::data)?;
-                        let fingerprint = crate::native_evidence::runtime::cwd_fingerprint(&cwds.values().filter_map(Clone::clone).collect());
-                        snapshot.receipts.push(crate::storage::catalog::VerifiedHistoryReceipt::verified(
-                            prefix.clone(),prefix,previous_row.sources.clone(),snapshot.recipe_slots.clone(),fingerprint,cwds,
-                        ));
+                        let prefix = crate::retention::source_generation(&previous_row.sources)
+                            .map_err(<Self as CompositeHistoryStore>::data)?;
+                        let fingerprint = crate::native_evidence::runtime::cwd_fingerprint(
+                            &cwds.values().filter_map(Clone::clone).collect(),
+                        );
+                        snapshot.receipts.push(
+                            crate::storage::catalog::VerifiedHistoryReceipt::verified(
+                                prefix.clone(),
+                                prefix,
+                                previous_row.sources.clone(),
+                                snapshot.recipe_slots.clone(),
+                                fingerprint,
+                                cwds,
+                            ),
+                        );
                     }
                 }
             }
@@ -639,9 +670,17 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
         if projection_changed > 0 || metadata_changed > 0 {
             self.db.execute("INSERT INTO main.meta(namespace,key,value) VALUES(?1,?2,'1') ON CONFLICT(namespace,key) DO UPDATE SET value='1'",params![self.namespace,format!("overview_needed:{key}")])?;
         }
-        let capture: crate::storage::selected::PresentationObservations = serde_json::from_str(capture).map_err(<Self as CompositeHistoryStore>::data)?;
-        super::projection_tags::publish(self.db,self.namespace,&row,crate::storage::catalog::CatalogObservationOwner::History,generation,Some(&capture))
-            .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        let capture: crate::storage::selected::PresentationObservations =
+            serde_json::from_str(capture).map_err(<Self as CompositeHistoryStore>::data)?;
+        super::projection_tags::publish(
+            self.db,
+            self.namespace,
+            &row,
+            crate::storage::catalog::CatalogObservationOwner::History,
+            generation,
+            Some(&capture),
+        )
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
         Ok(())
     }
 }
