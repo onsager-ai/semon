@@ -53,6 +53,11 @@ pub(crate) fn check(
     if projector != PROJECTOR || raw_identity != identity(row)? || prefix != crate::retention::source_generation(&row.sources).map_err(|_| StorageError::ScopeChanged)? {
         return Err(StorageError::ScopeChanged);
     }
+    for source in &row.sources {
+        if !crate::events::store::chunk_proofs::projection_header_ready(
+            db, &source.path.to_string_lossy(), &crate::source_carrier::ledger(source),
+        ).map_err(failed)? { return Err(StorageError::ScopeChanged); }
+    }
     let (table,projection) = match owner {
         CatalogObservationOwner::Catalog => ("session_catalog","session_slot_projections"),
         CatalogObservationOwner::History => ("session_history_catalog","session_history_projections"),

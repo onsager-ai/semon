@@ -11266,6 +11266,34 @@ fn cold_scoped_native_publication_is_visible_before_unrelated_source_reads() {
 }
 
 #[test]
+fn partial_publication_withdrawal_hands_native_history_to_custody() {
+    let fixture = Fixture::new();
+    let path = fixture.source("partial-custody");
+    fixture.source("unrelated-not-yet-published");
+    let input = crate::Input { root: crate::InputRoot::Claude, path: "projects/project/partial-custody.jsonl".into() };
+    let mut cache = EventCache::open_scoped(&fixture.options.cache, &fixture.options.source).unwrap();
+    let prepared = crate::model::prepare_sources(&fixture.options,&mut cache,&[input],crate::model::now_ms()).unwrap();
+    assert_eq!(cache.publish_partial_catalog(&prepared).unwrap(),crate::events::Outcome::Written);
+    let db = fixture.db();
+    let original: String = db.query_row("SELECT metadata FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='partial-custody'", [], |row| row.get(0)).unwrap();
+    let original: CatalogRow = serde_json::from_str(&original).unwrap();
+    let slots = db.prepare("SELECT metadata FROM main.session_slots WHERE namespace=semon_namespace() AND session_key='partial-custody' ORDER BY slot").unwrap().query_map([], |row| row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert!(!slots.is_empty());
+    drop(db);
+    fs::remove_file(path).unwrap();
+    drop(cache);
+    fixture.publish_existing();
+    let db = fixture.db();
+    let retained: String = db.query_row("SELECT metadata FROM main.session_history_catalog WHERE namespace=semon_namespace() AND session_key='partial-custody'", [], |row| row.get(0)).unwrap();
+    let retained: CatalogRow = serde_json::from_str(&retained).unwrap();
+    assert_eq!(retained.sources,original.sources);
+    let retained_slots = db.prepare("SELECT metadata FROM main.session_history_slots WHERE namespace=semon_namespace() AND session_key='partial-custody' ORDER BY slot").unwrap().query_map([], |row| row.get::<_,String>(0)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+    assert_eq!(retained_slots,slots);
+    assert!(!db.query_row("SELECT EXISTS(SELECT 1 FROM main.session_catalog WHERE namespace=semon_namespace() AND session_key='partial-custody' AND lifecycle='current')", [], |row| row.get::<_,bool>(0)).unwrap());
+    assert!(db.query_row("SELECT EXISTS(SELECT 1 FROM storage_projection_tags WHERE namespace=semon_namespace() AND session_key='partial-custody' AND owner_kind='history')", [], |row| row.get::<_,bool>(0)).unwrap());
+}
+
+#[test]
 fn selected_native_index_preserves_membership_and_native_semantics() {
     let fixture = Fixture::new();
     fixture.publish(3);
