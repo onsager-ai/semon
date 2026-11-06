@@ -69,7 +69,10 @@ async fn pg_sanitized_native_indexes(dsn: &str) {
         assert_same_index(&path, harness, &ledger, &index, &mut sqlite);
         tx.commit(&namespace).await.unwrap();
         // Restart and append a complete native line, retaining parser state.
-        let line = bytes.split_inclusive(|byte| *byte == b'\n').last().unwrap();
+        let line = bytes
+            .split_inclusive(|byte| *byte == b'\n')
+            .next_back()
+            .unwrap();
         std::io::Write::write_all(
             &mut std::fs::OpenOptions::new()
                 .append(true)
