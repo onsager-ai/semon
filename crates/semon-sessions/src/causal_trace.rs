@@ -666,9 +666,6 @@ pub(crate) fn range_context(
 struct TraceParticipantCost {
     usd: Option<f64>,
     unpriced_models: Vec<String>,
-    priced_tokens: u64,
-    unpriced_tokens: u64,
-    pricing_fingerprint: String,
 }
 
 /// Qualified whole-session observation, never a receiving-turn interval.
@@ -759,9 +756,6 @@ fn trace_participant_summary(
         cost: TraceParticipantCost {
             usd: row.cost.usd,
             unpriced_models: row.cost.unpriced_models.clone(),
-            priced_tokens: row.cost.priced_tokens,
-            unpriced_tokens: row.cost.unpriced_tokens,
-            pricing_fingerprint: row.cost.pricing_fingerprint.clone(),
         },
         observed_extent: TraceParticipantExtent {
             scope: "whole_session",
@@ -1448,13 +1442,7 @@ mod generation_tests {
                 .keys()
                 .map(String::as_str)
                 .collect::<BTreeSet<_>>(),
-            BTreeSet::from([
-                "usd",
-                "unpriced_models",
-                "priced_tokens",
-                "unpriced_tokens",
-                "pricing_fingerprint"
-            ])
+            BTreeSet::from(["usd", "unpriced_models"])
         );
     }
 
