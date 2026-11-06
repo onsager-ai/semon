@@ -592,8 +592,12 @@ pub(crate) mod conformance {
         let mut b = open_b();
         let b_initial = b.claims(&paths).unwrap();
         assert_eq!(
-            a.discover(&discover_operation(namespace_a, &paths, false), &paths, false)
-                .unwrap(),
+            a.discover(
+                &discover_operation(namespace_a, &paths, false),
+                &paths,
+                false
+            )
+            .unwrap(),
             SourceMutationReceipt::Applied
         );
         let a_claims = a.claims(&paths).unwrap();
@@ -607,8 +611,12 @@ pub(crate) mod conformance {
         );
         assert_eq!(b.claims(&paths).unwrap(), b_initial);
         assert_eq!(
-            b.discover(&discover_operation(namespace_b, &shared, false), &shared, false)
-                .unwrap(),
+            b.discover(
+                &discover_operation(namespace_b, &shared, false),
+                &shared,
+                false
+            )
+            .unwrap(),
             SourceMutationReceipt::Applied
         );
         let b_claims = b.claims(&paths).unwrap();

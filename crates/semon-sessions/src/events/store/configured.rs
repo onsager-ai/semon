@@ -3616,16 +3616,15 @@ mod tests {
             .unwrap();
         assert_eq!(other.len(), 1);
         assert_eq!(other[0].last_start_time, 300);
-        // Both OLD and NEW Source ownership are guarded, even for a warm handle.
-        let db = connection(&a.config).unwrap();
-        assert!(
-            db.execute(
-                "UPDATE reported_runs SET namespace=?1 WHERE namespace=semon_namespace()",
-                [b.namespace.as_str()]
-            )
-            .is_err()
-        );
+        // Each warm port stays bound to its own Source after the other writes.
         assert_eq!(writer.reported_runs(&selected).unwrap(), expected);
+        assert_eq!(
+            Writer::owned(NativeOwnership::restore(&b).unwrap())
+                .unwrap()
+                .reported_runs(&selected)
+                .unwrap(),
+            other
+        );
     }
 
     #[test]

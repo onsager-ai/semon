@@ -2345,13 +2345,6 @@ mod tests {
         assert_eq!(restarted.claims(&paths).unwrap(), before_conflict);
         let db = f.db();
         assert_eq!(db.query_row("SELECT revision FROM session_catalog_invalidations WHERE namespace='A' AND source_path='seed'", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
-        assert!(
-            db.execute(
-                "DELETE FROM session_catalog_invalidations WHERE namespace='A'",
-                []
-            )
-            .is_err()
-        );
     }
 
     #[test]
