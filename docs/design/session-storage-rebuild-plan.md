@@ -106,6 +106,41 @@ Scope:
 - Route the producer through `IndexWriter`/`CatalogPublisher`, binding every
   production database's namespace, and add a ledger epoch to the tag.
 
+Implemented in slice 2:
+
+- The native producer opens main's single scoped writer through the port's
+  `open_index`, which binds the database to the host's source namespace (the
+  local source's empty key binds as `local`) and refuses a database bound to
+  another namespace before any index or Catalog write. `SessionSources`,
+  received machine views and `SessionCatalogObserver` (now constructed with its
+  source key) carry the namespace; key-less producer constructors are
+  test-only. Publication stays on that one writer connection.
+- Ledger epoch: a ledger written without append changes takes a fresh
+  database-wide epoch, and publication records each source's epoch. Past the
+  published boundary at the same Raw identity, a changed epoch is a
+  `ledger_epoch` mismatch, not an append. `SCHEMA_VERSION` 36.
+- Intents: local cold ingest never writes Raw; it only reads native logs, so
+  it has no Raw crash window to journal. A crash before the cohort's index
+  commit leaves nothing durable and the next scan rebuilds from Raw. Main's
+  existing mechanisms already cover the real windows and are kept: the cold
+  index cohort (at most 64 sources) commits in one transaction with a
+  per-source generation fence (a mid-apply fault rolls the whole cohort back,
+  one changed source refuses it, and replay of a committed cohort is a
+  conflict, not a duplicate:
+  `initial_index_batch_rolls_back_evidence_and_revisions_and_rechecks_each_generation`);
+  host Raw writes journal a durable intent before touching bytes and complete
+  after fsync (`SessionSourceWrite`), and an interrupted write grants no append
+  trust and is replayed conservatively
+  (`receiver_append_chain_reads_only_boundary_and_recovers_interrupted_or_corrupt_proofs`).
+  No in-repo host batches Raw writes, so per-cohort host intents are not added.
+
+Carried to slice 3/4: custody writers that open their own connection
+(`SessionSourceWrite`, `SessionFactsWrite`, `retain_source_event_index`, the
+CLI `collect`/`FactsSource` index) do not yet take a namespace; the
+partial-publication withdrawal custody test; per-connection `qualify_contract`
+and the direct SQLite readers (page-ready, union generation, native
+resolution, in-snapshot transcript reads) behind the reader capability.
+
 Acceptance checks: the four ported recovery tests (kill/fault around Raw
 writes and SQL commits replay without loss or duplicate logical sessions),
 partial-publication withdrawal custody, child-process exit during an
