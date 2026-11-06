@@ -54,7 +54,8 @@ jobs:
           name: pg-review
           path: ${{ runner.temp }}/pg-review/
       - name: SQLite storage conformance
-        run: cargo test --locked -p semon-sessions --lib storage::conformance:: -- --nocapture
+        run: |
+          cargo test --locked -p semon-sessions --lib storage::conformance:: -- --nocapture
       - name: PostgreSQL projection and restricted-role RLS conformance
         env:
           SEMON_PG_EMPTY_ROOT: ${{ runner.temp }}/pg-empty
