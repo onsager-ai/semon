@@ -358,19 +358,19 @@ jobs:
       - name: diag(narrow) branch cold-page timing
         if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
         continue-on-error: true
-        env:
-          SEMON_BUILD_TIMING: "1"
         run: |
-          cargo test -p semon-sessions --locked --features postgres-test-tls viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture
+          for attempt in 1 2 3 4 5; do
+            cargo test -p semon-sessions --locked --features postgres-test-tls viewer::tests::concurrent_native_reads_keep_whole_generation_fenced_pages_while_logs_grow -- --exact 2>&1 | grep -E "^test |not within|test result" || true
+          done
       - name: diag(main) same-runner cold-page timing
         if: ${{ !cancelled() && matrix.suite == 'regression-other' && steps.resolve.outcome == 'success' }}
         continue-on-error: true
-        env:
-          SEMON_BUILD_TIMING: "1"
         run: |
-          git fetch --depth=1 origin main
+          git fetch --depth=1 origin c202c712652bb20c1ec5198e70a8d12d916a3486
           git worktree add --detach "$RUNNER_TEMP/diag-main" FETCH_HEAD
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo test --manifest-path "$RUNNER_TEMP/diag-main/Cargo.toml" -p semon-sessions --locked viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture
+          for attempt in 1 2 3 4 5; do
+            CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo test --manifest-path "$RUNNER_TEMP/diag-main/Cargo.toml" -p semon-sessions --locked --features postgres-test-tls viewer::tests::concurrent_native_reads_keep_whole_generation_fenced_pages_while_logs_grow -- --exact 2>&1 | grep -E "^test |not within|test result" || true
+          done
       - name: Existing session regressions outside the focused PostgreSQL module
         if: ${{ !cancelled() && startsWith(matrix.suite, 'regression-') && steps.resolve.outcome == 'success' }}
         # Disjoint name filters retain the complete feature-enabled suite and
