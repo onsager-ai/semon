@@ -672,6 +672,7 @@ impl NativeEvidence {
         lock(&self.catalog_search).open();
         let discovery = work.cold_catalog.get_or_insert_with(|| ColdCatalog {
             revision: self.audit_request.load(Ordering::Acquire),
+            started_at: crate::native_timing::enabled().then(Instant::now),
             ..Default::default()
         });
         if state.as_deref() != Some("draining") {
@@ -1687,6 +1688,19 @@ impl NativeEvidence {
         match self.prepare_catalog(work, now)? {
             CatalogPreparation::Pending => return Ok(false),
             CatalogPreparation::PublishedPending => {
+                if let Some(started) = work
+                    .cold_catalog
+                    .as_ref()
+                    .and_then(|discovery| discovery.started_at)
+                {
+                    let producer = crate::native_timing::id(&crate::events::EventCache::path(
+                        &self.options.cache,
+                    ));
+                    eprintln!(
+                        "semon sessions native: producer={producer} cold_lifecycle=first_partial_ready elapsed_us={}",
+                        started.elapsed().as_micros()
+                    );
+                }
                 before_build()?;
                 return Ok(false);
             }
@@ -1871,6 +1885,9 @@ struct CatalogAudit {
 #[derive(Default)]
 struct ColdCatalog {
     revision: u64,
+    /// Diagnostic-only start of this bounded cold observation. It exists only
+    /// while timing is enabled and never participates in readiness decisions.
+    started_at: Option<Instant>,
     cursor: crate::inputs::Discovery,
     pids: BTreeSet<u32>,
     snapshot: Option<Snapshot>,

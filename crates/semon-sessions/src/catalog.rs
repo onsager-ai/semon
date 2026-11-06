@@ -11,10 +11,36 @@ use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::Duration;
-use std::{io, time::UNIX_EPOCH};
+use std::{
+    io,
+    time::{Instant, UNIX_EPOCH},
+};
 
 const MAX_LIMIT: usize = 100;
 const MAX_CURSOR: usize = 8192;
+
+/// Opt-in request-stage diagnostics. These clocks do not retain state or affect
+/// custody, qualification, snapshot lifetime, or the returned page.
+struct PageTiming {
+    previous: Instant,
+}
+
+impl PageTiming {
+    fn start() -> Option<Self> {
+        crate::native_timing::enabled().then(|| Self {
+            previous: Instant::now(),
+        })
+    }
+
+    fn stage(&mut self, name: &'static str, units: usize) {
+        let elapsed = self.previous.elapsed();
+        self.previous = Instant::now();
+        eprintln!(
+            "semon sessions native: catalog_page_stage={name} elapsed_us={} units={units}",
+            elapsed.as_micros()
+        );
+    }
+}
 
 /// Provider-neutral identity for a retained native source generation. The path
 /// is relative to `root`, never an absolute host path or a credential.
@@ -859,6 +885,7 @@ pub(crate) fn read_page_snapshot_with_search(
     admit_search: bool,
     admission: &mut Option<CatalogSearchAdmission>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    let mut timing = PageTiming::start();
     transaction.require_current()?;
     if request.cursor.as_ref().is_some_and(|cursor| {
         cursor.scope != request.scope
@@ -912,6 +939,9 @@ pub(crate) fn read_page_snapshot_with_search(
         },
         |saved| saved.selection_known,
     );
+    if let Some(timing) = &mut timing {
+        timing.stage("readiness", usize::from(recorded.is_some()));
+    }
     let meta = |key: &str| transaction.publication_value(key);
     let version = meta("catalog_version")?;
     let Some(generation) = meta("catalog_generation")? else {
@@ -985,6 +1015,9 @@ pub(crate) fn read_page_snapshot_with_search(
     } else {
         (transaction.rows(request)?, None, None)
     };
+    if let Some(timing) = &mut timing {
+        timing.stage("cohort", selected.len());
+    }
     let mut partial_history = std::collections::BTreeSet::new();
     for row in &selected {
         if transaction.has_history(&row.key)? {
@@ -1134,6 +1167,9 @@ pub(crate) fn read_page_snapshot_with_search(
     } else {
         None
     };
+    if let Some(timing) = &mut timing {
+        timing.stage("trace", usize::from(details.is_some()));
+    }
     // The legacy model tolerates absent facts/old source selection. Focused
     // observations must retain that absence rather than invent current facts.
     let machine_label = match pinned {
@@ -1314,6 +1350,9 @@ pub(crate) fn read_page_snapshot_with_search(
                 json!(crate::transcript_range::error_generation(generation, &item,));
         }
         items.push(item);
+    }
+    if let Some(timing) = &mut timing {
+        timing.stage("assembly", items.len());
     }
     if runtime.as_ref().is_some_and(|before| {
         crate::native_evidence::query_runtime_generation(options)
