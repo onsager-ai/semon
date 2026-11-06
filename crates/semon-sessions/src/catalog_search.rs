@@ -935,6 +935,8 @@ mod sqlite_tests {
                 pricing_fingerprint: String::new(),
                 usd: None,
                 unpriced_models: Vec::new(),
+                priced_tokens: 0,
+                unpriced_tokens: 0,
                 split_unknown_messages: 0,
                 by_model: Default::default(),
                 by_day: Default::default(),
