@@ -1392,10 +1392,22 @@ impl NativeEvidence {
         if self.storage.is_postgres() {
             let mut before_build = before_build;
             before_build()?;
+            if !work.postgres_pending.is_empty() {
+                self.storage.publish_sources(&work.postgres_pending)?;
+                work.postgres_pending.clear();
+                return Ok(false);
+            }
             let discovery = work.postgres_discovery.get_or_insert_with(Default::default);
             let page = discovery.next(&self.options, 64, 512)?;
-            if !page.inputs.is_empty() {
-                self.storage.publish_sources(&page.inputs)?;
+            // Keep a refused cohort for retry: advancing discovery must never
+            // turn an unpublished source into an apparently completed scan.
+            work.postgres_pending.extend(page.inputs);
+            if !work.postgres_pending.is_empty() {
+                self.storage.publish_sources(&work.postgres_pending)?;
+                work.postgres_pending.clear();
+            }
+            if page.complete {
+                work.postgres_discovery = None;
             }
             return Ok(page.complete);
         }
@@ -1819,6 +1831,10 @@ impl NativeEvidence {
     /// Native queries refresh this owner's source cache and coherent cohort.
     /// This owner has no compatibility transport or background refresh workers.
     pub(crate) fn catalog_continuation(&self, work: &Work) -> bool {
+        #[cfg(feature = "postgres")]
+        if self.storage.is_postgres() {
+            return work.postgres_discovery.is_some() || !work.postgres_pending.is_empty();
+        }
         work.tree_repair_pending
             || work.cold_catalog.is_some()
             || work.audit.is_some()
@@ -1827,6 +1843,10 @@ impl NativeEvidence {
     }
 
     pub(crate) fn catalog_pending(&self, work: &Work) -> bool {
+        #[cfg(feature = "postgres")]
+        if self.storage.is_postgres() {
+            return self.catalog_continuation(work);
+        }
         work.tree_repair_pending
             || work
                 .events
@@ -1918,6 +1938,8 @@ fn write_lock<T>(value: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 pub(crate) struct Work {
     #[cfg(feature = "postgres")]
     postgres_discovery: Option<crate::inputs::Discovery>,
+    #[cfg(feature = "postgres")]
+    postgres_pending: Vec<crate::Input>,
     pub(crate) events: Option<EventCache>,
     pub(crate) texts: Texts,
     pub(crate) catalog_snapshot: Option<Snapshot>,

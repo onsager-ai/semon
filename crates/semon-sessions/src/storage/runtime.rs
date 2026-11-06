@@ -125,10 +125,16 @@ impl RuntimeStore {
 
     /// SQLite's selected snapshot remains owned by the renderer, including its
     /// lazy byte proofs. PostgreSQL selected windows use the typed port above.
-    pub(crate) fn selected_connection(&self, key: &str) -> Result<rusqlite::Connection, StorageError> {
-        self.validate().map_err(|error| StorageError::Backend(error.to_string()))?;
+    pub(crate) fn selected_connection(
+        &self,
+        key: &str,
+    ) -> Result<rusqlite::Connection, StorageError> {
+        self.validate()
+            .map_err(|error| StorageError::Backend(error.to_string()))?;
         if self.is_postgres() {
-            return Err(StorageError::Backend("PostgreSQL has no SQLite selected snapshot".into()));
+            return Err(StorageError::Backend(
+                "PostgreSQL has no SQLite selected snapshot".into(),
+            ));
         }
         super::sqlite::selected_connection(&self.options, key)
     }
