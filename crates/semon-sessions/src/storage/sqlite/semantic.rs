@@ -3014,9 +3014,16 @@ impl Stage {
                 Some(&prepared.transcripts),
                 prepared.presentation_observations(),
                 &mut overview_budget,
-            ).map_err(error)?
+            )
+            .map_err(error)?
         };
-        match self.publish_transaction(batch, prepared, &history_plan, &history_captures, &mut overview_budget) {
+        match self.publish_transaction(
+            batch,
+            prepared,
+            &history_plan,
+            &history_captures,
+            &mut overview_budget,
+        ) {
             Err(StoreError::Data(reason)) if reason == PUBLICATION_GROUP_BUDGET => {
                 #[cfg(test)]
                 if DROP_CAPTURE_OVERFLOW_RECEIPT_ONCE.with(|value| value.replace(false)) {
@@ -3502,8 +3509,13 @@ impl Stage {
         let history = super::history::OriginalHistory::admitted(&tx, &self.source)
             .map_err(StoreError::Configured)?;
         let history_plan_matches = crate::storage::catalog::history_composition_matches(
-            &history, &prepared.rows, Some(&prepared.transcripts), history_plan, overview_budget,
-        ).map_err(error)?;
+            &history,
+            &prepared.rows,
+            Some(&prepared.transcripts),
+            history_plan,
+            overview_budget,
+        )
+        .map_err(error)?;
         publication_phase("original_history");
         if !crate::storage::catalog::preserve_rows(
             &history,
@@ -3519,8 +3531,11 @@ impl Stage {
         }
         if history_plan_matches {
             crate::storage::catalog::apply_prepared_history_composition(
-                &history, history_plan, history_captures,
-            ).map_err(error)?;
+                &history,
+                history_plan,
+                history_captures,
+            )
+            .map_err(error)?;
         }
         #[cfg(test)]
         crate::events::store::configured::effect("semantic_publish_history").map_err(error)?;

@@ -3185,7 +3185,9 @@ impl SqliteStore {
                 .iter()
                 .zip(&query_recipes)
                 .try_fold(0usize, |total, (text, recipe)| {
-                    total.checked_add(text.len())?.checked_add(recipe.as_ref().map_or(0, String::len))
+                    total
+                        .checked_add(text.len())?
+                        .checked_add(recipe.as_ref().map_or(0, String::len))
                 })
                 .ok_or_else(|| StoreError::Data("catalog metadata size overflow".into()))?;
             let mut history_budget =
@@ -3193,11 +3195,18 @@ impl SqliteStore {
             let admitted = crate::storage::sqlite::semantic::AdmittedSource::native(owner.clone());
             let (history_plan, history_captures) = {
                 let history = crate::storage::sqlite::history::OriginalHistory::admitted(
-                    &self.connection, &admitted,
-                ).map_err(StoreError::Configured)?;
+                    &self.connection,
+                    &admitted,
+                )
+                .map_err(StoreError::Configured)?;
                 crate::storage::catalog::prepare_history_composition(
-                    &history, rows, publication.transcripts, publication.observations, &mut history_budget,
-                ).map_err(failure)?
+                    &history,
+                    rows,
+                    publication.transcripts,
+                    publication.observations,
+                    &mut history_budget,
+                )
+                .map_err(failure)?
             };
             let transaction = self
                 .connection
@@ -3385,8 +3394,13 @@ impl SqliteStore {
                 crate::storage::sqlite::history::OriginalHistory::admitted(&transaction, &admitted)
                     .map_err(StoreError::Configured)?;
             let history_plan_matches = crate::storage::catalog::history_composition_matches(
-                &history, rows, publication.transcripts, &history_plan, &mut history_budget,
-            ).map_err(failure)?;
+                &history,
+                rows,
+                publication.transcripts,
+                &history_plan,
+                &mut history_budget,
+            )
+            .map_err(failure)?;
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=history_composition");
             let preserved =
@@ -3400,8 +3414,11 @@ impl SqliteStore {
             eprintln!("catalog_publication_probe stage=preserve_rows_complete");
             if history_plan_matches {
                 crate::storage::catalog::apply_prepared_history_composition(
-                    &history, &history_plan, &history_captures,
-                ).map_err(failure)?;
+                    &history,
+                    &history_plan,
+                    &history_captures,
+                )
+                .map_err(failure)?;
             }
             #[cfg(test)]
             eprintln!("catalog_publication_probe stage=history_composition_complete");

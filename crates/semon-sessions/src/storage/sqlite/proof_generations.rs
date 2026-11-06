@@ -2247,9 +2247,7 @@ pub(super) fn load_query_recipe_with_bytes(
     (Option<crate::query_projection::SelectedRecipe>, usize),
     crate::storage::query::QueryRecipeLoadError,
 > {
-    use crate::storage::query::{
-        QueryRecipeLoadError as Error, QueryRecipeResidence,
-    };
+    use crate::storage::query::{QueryRecipeLoadError as Error, QueryRecipeResidence};
     if current != &observation.destination {
         return Err(Error::ObservationChanged);
     }
@@ -2290,7 +2288,8 @@ pub(super) fn load_query_recipe_with_bytes(
             super::projection_tags::check(db, current, selected, owner)?;
             payload
         }
-
+        #[cfg(feature = "postgres")]
+        QueryRecipeResidence::Immutable { .. } => return Err(Error::ObservationChanged),
     };
     // Inline selected metadata remains the ordinary producer's current
     // representation. It has authenticated above and owns no external cell.

@@ -12415,8 +12415,22 @@ fn semantic_stage_history_custody_budget_overflow_rolls_back_and_defers() {
         1,
         "one original owner is checkpointed per attempt"
     );
-    assert_eq!(before.3.iter().filter(|(_, kind, _, _, _, _, _)| kind == "catalog").count(), 2);
-    assert_eq!(before.3.iter().filter(|(_, kind, _, _, _, _, _)| kind == "history").count(), 1);
+    assert_eq!(
+        before
+            .3
+            .iter()
+            .filter(|(_, kind, _, _, _, _, _)| kind == "catalog")
+            .count(),
+        2
+    );
+    assert_eq!(
+        before
+            .3
+            .iter()
+            .filter(|(_, kind, _, _, _, _, _)| kind == "history")
+            .count(),
+        1
+    );
     assert_eq!(before.4, prepared.claims);
     let checkpoint_key = &before.2[0].0;
     let checkpoint_owner = prepared

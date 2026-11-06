@@ -119,20 +119,21 @@ pub(crate) fn current_query_context_header(
         candidate,
     )?;
     match &observation.residence {
-        QueryRecipeResidence::Immutable { .. } => {
-            super::proof_generations::load_query_recipe(db, binding, &observation).map_err(
-                |error| match error {
-                    QueryRecipeLoadError::Storage(error) => error,
-                    _ => StorageError::ScopeChanged,
-                },
-            )?;
-            Ok(None)
-        }
+        #[cfg(feature = "postgres")]
+        QueryRecipeResidence::Immutable { .. } => Err(StorageError::ScopeChanged),
         QueryRecipeResidence::NativeCatalog { .. } => {
             let encoded =
                 crate::query_projection::header(db, &crate::query_projection::identity(candidate))
-                    .map_err(super::failed)?
-                    .ok_or(StorageError::ScopeChanged)?;
+                    .map_err(super::failed)?;
+            let Some(encoded) = encoded else {
+                super::proof_generations::load_query_recipe(db, binding, &observation).map_err(
+                    |error| match error {
+                        QueryRecipeLoadError::Storage(error) => error,
+                        _ => StorageError::ScopeChanged,
+                    },
+                )?;
+                return Ok(None);
+            };
             let header: Value =
                 serde_json::from_str(&encoded).map_err(|_| StorageError::ScopeChanged)?;
             use sha2::Digest;

@@ -551,7 +551,9 @@ impl crate::storage::catalog::VerifiedHistoryCompositionStore for OriginalHistor
                 } else {
                     crate::storage::catalog::CatalogObservationOwner::Catalog
                 };
-                if super::projection_tags::check_custody(self.db, &binding, previous_row, owner).is_err() {
+                if super::projection_tags::check_custody(self.db, &binding, previous_row, owner)
+                    .is_err()
+                {
                     snapshot.unavailable = true;
                 } else {
                     let mut cwds = std::collections::BTreeMap::new();
