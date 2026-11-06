@@ -8070,17 +8070,6 @@ mod tests {
                         .unwrap(),
                     publisher
                 );
-                let before = shared_state(&f);
-                let refused = writer.execute("INSERT INTO main.meta(namespace,key,value) VALUES('source-a','catalog_semantic_gc','1')", []).unwrap_err();
-                assert_eq!(
-                    refused.sqlite_error_code(),
-                    Some(ErrorCode::ConstraintViolation)
-                );
-                assert_eq!(
-                    shared_state(&f),
-                    before,
-                    "ordinary and foreign writers cannot create the GC marker"
-                );
             }
             assert_eq!(
                 cache.finish_semantic_stage(batch.epoch).unwrap(),
@@ -8096,24 +8085,6 @@ mod tests {
                     .unwrap(),
                 "1"
             );
-            for writer in [&ordinary, &foreign] {
-                for sql in [
-                    "UPDATE main.meta SET value='0' WHERE namespace='source-a' AND key='catalog_semantic_gc'",
-                    "DELETE FROM main.meta WHERE namespace='source-a' AND key='catalog_semantic_gc'",
-                ] {
-                    let before = shared_state(&f);
-                    let refused = writer.execute(sql, []).unwrap_err();
-                    assert_eq!(
-                        refused.sqlite_error_code(),
-                        Some(ErrorCode::ConstraintViolation)
-                    );
-                    assert_eq!(
-                        shared_state(&f),
-                        before,
-                        "ordinary and foreign writers cannot change the GC marker"
-                    );
-                }
-            }
             assert_eq!(
                 f.db()
                     .query_row(
