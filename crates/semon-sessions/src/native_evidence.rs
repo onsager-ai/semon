@@ -1442,6 +1442,10 @@ impl NativeEvidence {
             }
             if !work.postgres_pending.is_empty() {
                 let pending = std::mem::take(&mut work.postgres_pending);
+                if pending.iter().any(|input| fs::symlink_metadata(input.full_path(&self.options)).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)) {
+                    work.postgres_draining = false;
+                    return Ok(false);
+                }
                 self.storage.publish_discovered(&pending)?;
                 return Ok(false);
             }
