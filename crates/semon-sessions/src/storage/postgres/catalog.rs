@@ -326,6 +326,9 @@ impl PgProjectionTransaction<'_> {
         namespace: &Namespace,
         row: &CatalogRow,
     ) -> Result<(), StorageError> {
+        if self.facts_write_pending(namespace).await? {
+            return Err(backend("Facts write is pending"));
+        }
         for source in &row.sources {
             let path = source
                 .path

@@ -226,6 +226,145 @@ pub(super) fn lifecycle(dsn: &str) {
         .status,
         404
     );
+    // Runtime custody writes use the admitted owner, never a second SQLite
+    // connection. An interrupted intent keeps Current unavailable on restart.
+    let input = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: "sessions/2026/09/24/rollout-parser-cases.jsonl".into(),
+    };
+    assert!(
+        crate::SessionSourceWrite::begin_in(&sources, "foreign-runtime", &input, None, 0).is_err()
+    );
+    let length = std::fs::metadata(&path).unwrap().len();
+    let interrupted =
+        crate::SessionSourceWrite::begin_in(&sources, "injected-runtime", &input, None, length)
+            .unwrap();
+    assert!(
+        evidence
+            .storage
+            .publish_discovered(std::slice::from_ref(&input))
+            .is_err()
+    );
+    assert!(crate::collect_in(&sources, "injected-runtime").is_err());
+    let pending = core.respond(
+        "GET",
+        "/api/sessions",
+        "machine=injected-runtime&limit=60",
+        None,
+    );
+    assert_eq!(pending.status, 503);
+    drop(interrupted);
+    let reopened =
+        RuntimeStore::postgres(&options, Namespace::new("injected-runtime").unwrap(), dsn).unwrap();
+    assert_eq!(
+        reopened
+            .page(
+                "injected-runtime",
+                &crate::catalog::Request::parse("limit=60").unwrap(),
+                None
+            )
+            .status,
+        503
+    );
+    drop(reopened);
+    let write = crate::SessionSourceWrite::begin_in(
+        &sources,
+        "injected-runtime",
+        &input,
+        Some(&"a".repeat(32)),
+        length,
+    )
+    .unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    write.complete(length).unwrap();
+    evidence
+        .storage
+        .publish_discovered(std::slice::from_ref(&input))
+        .unwrap();
+    let wanted = crate::read_facts(options.facts.as_ref().unwrap()).unwrap();
+    let facts_write =
+        crate::SessionFactsWrite::begin_in(&sources, "injected-runtime", &wanted).unwrap();
+    assert_eq!(
+        core.respond(
+            "GET",
+            "/api/sessions",
+            "machine=injected-runtime&limit=60",
+            None
+        )
+        .status,
+        503
+    );
+    facts_write.complete().unwrap();
+    evidence
+        .storage
+        .publish_discovered(std::slice::from_ref(&input))
+        .unwrap();
+    assert_eq!(
+        core.respond(
+            "GET",
+            "/api/sessions",
+            "machine=injected-runtime&limit=60",
+            None
+        )
+        .status,
+        200
+    );
+    assert!(
+        !crate::collect_in(&sources, "injected-runtime")
+            .unwrap()
+            .is_empty()
+    );
+    assert!(crate::local_facts_in(&sources, "injected-runtime").is_err());
+    let local_options = crate::Options {
+        facts: None,
+        ..options.clone()
+    };
+    let local_storage = RuntimeStore::postgres(
+        &local_options,
+        Namespace::new("local-collection").unwrap(),
+        dsn,
+    )
+    .unwrap();
+    let local_sources = SessionSources::from_evidence(vec![(
+        "local-collection".into(),
+        NativeEvidence::with_storage(local_options, local_storage),
+    )]);
+    let collected = crate::local_facts_in(&local_sources, "local-collection").unwrap();
+    assert_eq!(collected.version, crate::FACTS_VERSION);
+    assert!(
+        collected
+            .codex_rollouts
+            .as_ref()
+            .unwrap()
+            .contains(&input.path)
+    );
+    assert!(crate::FactsSource::new_in(&sources, "foreign-runtime").is_err());
+    let empty_input = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: "sessions/2026/09/24/empty.jsonl".into(),
+    };
+    std::fs::write(empty_input.full_path(&options), b"").unwrap();
+    evidence
+        .storage
+        .discover_sources(std::slice::from_ref(&empty_input), false, false)
+        .unwrap();
+    evidence
+        .storage
+        .publish_discovered(std::slice::from_ref(&empty_input))
+        .unwrap();
+    assert!(
+        !evidence
+            .storage
+            .pending_sources()
+            .unwrap()
+            .contains(&empty_input)
+    );
+    std::fs::remove_file(empty_input.full_path(&options)).unwrap();
     // Reconcile observed removal into retained custody and a valid empty page.
     std::fs::remove_file(&path).unwrap();
     {

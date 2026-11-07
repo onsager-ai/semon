@@ -114,6 +114,8 @@ CREATE TABLE semon_projection.proof_nodes (
 CREATE TABLE semon_projection.reported_facts (
     namespace text PRIMARY KEY REFERENCES semon_projection.namespaces(namespace),
     revision bigint NOT NULL CHECK (revision >= 0),
+    pending boolean NOT NULL DEFAULT false,
+    wanted_metadata text CHECK (octet_length(wanted_metadata) <= 1048576),
     metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576)
 );
 CREATE TABLE semon_projection.checkpoints (

@@ -43,14 +43,76 @@ pub struct SessionSourceWrite {
     _lock: SourceLock,
     options: Options,
     input: Input,
-    revision: i64,
+    backend: SourceWriteBackend,
     before: Option<Stat>,
-    previous: Option<AppendEvidence>,
     generation: Option<String>,
     from: u64,
 }
 
+enum SourceWriteBackend {
+    Sqlite {
+        revision: i64,
+        previous: Option<AppendEvidence>,
+    },
+    #[cfg(feature = "postgres")]
+    Postgres {
+        owner: std::sync::Arc<crate::native_evidence::NativeEvidence>,
+        intent: crate::PgRawIntent,
+    },
+}
+
 impl SessionSourceWrite {
+    /// Begin using an admitted source's existing runtime backend. The returned
+    /// writer retains that owner and the exclusive Raw fence until completion.
+    pub fn begin_in(
+        sources: &crate::SessionSources,
+        source_key: &str,
+        input: &Input,
+        generation: Option<&str>,
+        from: u64,
+    ) -> io::Result<Self> {
+        let owner = sources.custody_source(source_key)?;
+        #[cfg(feature = "postgres")]
+        if owner.storage.is_postgres() {
+            if generation.is_some_and(|value| {
+                value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid Raw generation",
+                ));
+            }
+            if !crate::is_input_path(input.root.as_str(), &input.path) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "write intent outside native log allowlist",
+                ));
+            }
+            if !input.path.ends_with(".jsonl") {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "PostgreSQL runtime sidecar custody is unavailable",
+                ));
+            }
+            let namespace = crate::storage::Namespace::new(source_key).map_err(io::Error::other)?;
+            let source_lock =
+                SourceLock::acquire(&owner.options, &lock_key(&owner.options, input), true)?;
+            let before = Stat::of(&input.full_path(&owner.options)).ok();
+            let intent = owner.storage.begin_raw_write(input)?;
+            return Ok(Self {
+                namespace,
+                _lock: source_lock,
+                options: owner.options.clone(),
+                input: input.clone(),
+                backend: SourceWriteBackend::Postgres { owner, intent },
+                before,
+                generation: generation.map(str::to_owned),
+                from,
+            });
+        }
+        Self::begin(&owner.options, source_key, input, generation, from)
+    }
+
     pub fn begin(
         options: &Options,
         source_key: &str,
@@ -95,9 +157,8 @@ impl SessionSourceWrite {
             _lock: source_lock,
             options: options.clone(),
             input: input.clone(),
-            revision,
+            backend: SourceWriteBackend::Sqlite { revision, previous },
             before,
-            previous,
             generation: generation
                 .filter(|_| input.path.ends_with(".jsonl"))
                 .filter(|value| {
@@ -110,6 +171,46 @@ impl SessionSourceWrite {
 
     pub fn complete(self, to: u64) -> io::Result<()> {
         let after = Stat::of(&self.input.full_path(&self.options))?;
+        let (revision, previous) = match self.backend {
+            SourceWriteBackend::Sqlite { revision, previous } => (revision, previous),
+            #[cfg(feature = "postgres")]
+            SourceWriteBackend::Postgres { owner, intent } => {
+                // The host fsyncs before completion. Independently qualify the
+                // entire generation under the still-held Raw custody fence.
+                use sha2::{Digest, Sha256};
+                let path = self.input.full_path(&self.options);
+                let mut file = crate::open_input(&path)?;
+                let before = Stat::from_metadata(&file.metadata()?)?;
+                if before != after || after.size != to {
+                    return Err(io::Error::other("Raw completion length changed"));
+                }
+                let mut hash = Sha256::new();
+                use io::Read;
+                let mut buffer = [0u8; 64 * 1024];
+                loop {
+                    let read = file.read(&mut buffer)?;
+                    if read == 0 {
+                        break;
+                    }
+                    hash.update(&buffer[..read]);
+                }
+                if Stat::from_metadata(&file.metadata()?)? != before || Stat::of(&path)? != before {
+                    return Err(io::Error::other("Raw changed during completion"));
+                }
+                let sha256: [u8; 32] = hash.finalize().into();
+                let generation = self
+                    .generation
+                    .unwrap_or_else(|| format!("{:x}", Sha256::digest(sha256))[..32].to_owned());
+                return owner.storage.complete_raw_write(
+                    intent,
+                    &crate::PgRawGeneration {
+                        generation,
+                        length: to,
+                        sha256,
+                    },
+                );
+            }
+        };
         let evidence = match (self.generation, self.before) {
             (Some(generation), Some(before))
                 if before.size == self.from
@@ -118,8 +219,7 @@ impl SessionSourceWrite {
                     && before.ino == after.ino
                     && to >= self.from =>
             {
-                let base = self
-                    .previous
+                let base = previous
                     .filter(|previous| {
                         previous.generation == generation && previous.after == before
                     })
@@ -136,7 +236,7 @@ impl SessionSourceWrite {
             &self.options,
             &self.namespace,
             &self.input,
-            self.revision,
+            revision,
             evidence.as_ref(),
         )
     }
@@ -161,8 +261,24 @@ pub(crate) fn lock_key(options: &Options, input: &Input) -> String {
 /// the OS lock, leaving its durable intent available for conservative replay.
 pub(crate) struct SourceLock(#[cfg(unix)] std::fs::File);
 impl SourceLock {
-    #[cfg(unix)]
     pub(crate) fn acquire(options: &Options, path: &str, exclusive: bool) -> io::Result<Self> {
+        Self::acquire_inner(options, path, exclusive, false)
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn try_shared(options: &Options, path: &str) -> io::Result<Self> {
+        // Never wait for a host writer while holding the runtime reactor mutex:
+        // its completion needs that same reactor. Refuse this producer attempt.
+        Self::acquire_inner(options, path, false, true)
+    }
+
+    #[cfg(unix)]
+    fn acquire_inner(
+        options: &Options,
+        path: &str,
+        exclusive: bool,
+        nonblocking: bool,
+    ) -> io::Result<Self> {
         use sha2::{Digest, Sha256};
         use std::os::unix::{
             fs::{DirBuilderExt, OpenOptionsExt},
@@ -194,14 +310,20 @@ impl SourceLock {
         } else {
             libc::LOCK_SH
         };
+        let operation = operation | if nonblocking { libc::LOCK_NB } else { 0 };
         if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(Self(file))
     }
     #[cfg(not(unix))]
-    pub(crate) fn acquire(options: &Options, path: &str, exclusive: bool) -> io::Result<Self> {
-        let _ = (options, path);
+    fn acquire_inner(
+        options: &Options,
+        path: &str,
+        exclusive: bool,
+        nonblocking: bool,
+    ) -> io::Result<Self> {
+        let _ = (options, path, nonblocking);
         if exclusive {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -232,9 +354,43 @@ pub struct SessionFactsWrite {
     before: crate::Facts,
     wanted: crate::Facts,
     push_driven: bool,
+    #[cfg(feature = "postgres")]
+    postgres: Option<(std::sync::Arc<crate::native_evidence::NativeEvidence>, u64)>,
     _lock: SourceLock,
 }
 impl SessionFactsWrite {
+    /// Journal Facts through an admitted source's runtime backend. Complete
+    /// after the host has durably published the exact wanted Facts file.
+    pub fn begin_in(
+        sources: &crate::SessionSources,
+        source_key: &str,
+        wanted: &crate::Facts,
+    ) -> io::Result<Self> {
+        let owner = sources.custody_source(source_key)?;
+        #[cfg(feature = "postgres")]
+        if owner.storage.is_postgres() {
+            if owner.options.facts.is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "reported Facts path required",
+                ));
+            }
+            let namespace = crate::storage::Namespace::new(source_key).map_err(io::Error::other)?;
+            let source_lock = SourceLock::acquire(&owner.options, "facts", true)?;
+            let revision = owner.storage.begin_facts_write(wanted)?;
+            return Ok(Self {
+                namespace,
+                options: owner.options.clone(),
+                before: crate::Facts::default(),
+                wanted: wanted.clone(),
+                push_driven: true,
+                postgres: Some((owner, revision)),
+                _lock: source_lock,
+            });
+        }
+        Self::begin(&owner.options, source_key, wanted)
+    }
+
     pub fn begin(options: &Options, source_key: &str, wanted: &crate::Facts) -> io::Result<Self> {
         Self::begin_with_source_journal(options, source_key, wanted, true)
     }
@@ -269,10 +425,26 @@ impl SessionFactsWrite {
             before,
             wanted: wanted.clone(),
             push_driven,
+            #[cfg(feature = "postgres")]
+            postgres: None,
             _lock: source_lock,
         })
     }
     pub fn complete(self) -> io::Result<()> {
+        #[cfg(feature = "postgres")]
+        if let Some((owner, revision)) = self.postgres {
+            let actual = self
+                .options
+                .facts
+                .as_ref()
+                .ok_or_else(|| io::Error::other("reported Facts path required"))?;
+            if crate::read_facts(actual)? != self.wanted {
+                return Err(io::Error::other(
+                    "published Facts differ from custody intent",
+                ));
+            }
+            return owner.storage.complete_facts_write(revision, &self.wanted);
+        }
         // Re-enqueue after publication; claimed revisions can never ACK a newer
         // facts update, including recovery from a lost acknowledgment.
         crate::events::store::enqueue_facts(

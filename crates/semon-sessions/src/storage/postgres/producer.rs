@@ -210,13 +210,7 @@ impl PgProjectionStore {
         }
         let component: Vec<_> = component.into_iter().collect();
         match self.publish_sources(namespace, options, &component).await {
-            Ok(Some(_)) => {
-                let tx = self.begin(namespace).await?;
-                for input in inputs {
-                    tx.tx.execute("UPDATE semon_projection.discovery SET pending=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
-                }
-                tx.commit(namespace).await
-            }
+            Ok(Some(_)) => Ok(()),
             Ok(None) => Err(backend("native Catalog generation changed")),
             Err(error) => {
                 // A refused cohort is durable unavailable work, not a hot queue
@@ -255,18 +249,22 @@ impl PgProjectionStore {
         {
             return Err(backend("invalid native producer cohort"));
         }
+        let _facts_lock =
+            crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?;
         let _source_locks = inputs
             .iter()
             .map(|input| {
-                crate::source_change::SourceLock::acquire(
+                crate::source_change::SourceLock::try_shared(
                     options,
                     &crate::source_change::lock_key(options, input),
-                    false,
                 )
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(backend)?;
         let tx = self.begin(namespace).await?;
+        if tx.facts_write_pending(namespace).await? {
+            return Err(backend("Facts write is pending"));
+        }
         for input in inputs {
             if tx.raw_write_pending(namespace, input).await? {
                 return Err(backend("Raw write is pending"));
@@ -297,18 +295,52 @@ impl PgProjectionStore {
             claims.push((name.to_owned(), Some(tag.epoch)));
             files.push((name.to_owned(), ledger, index));
         }
+        let reported_runs = tx
+            .reported_facts(namespace)
+            .await?
+            .map(|(_, facts)| facts.reported_runs)
+            .unwrap_or_default();
         tx.commit(namespace).await?;
-        let mut cache = EventCache::from_projection(files, claims);
+        let nonempty = inputs
+            .iter()
+            .filter(|input| {
+                files.iter().any(|(path, ledger, _)| {
+                    *path == input.full_path(options).to_string_lossy() && ledger.stat.size > 0
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut cache = EventCache::from_projection(files, claims.clone());
+        cache.set_reported_runs(reported_runs);
         let options = Options {
             scan_window: false,
             ..options.clone()
         };
-        let prepared =
-            crate::model::prepare_sources(&options, &mut cache, inputs, crate::model::now_ms())
+        let mut prepared =
+            crate::model::prepare_sources(&options, &mut cache, &nonempty, crate::model::now_ms())
                 .map_err(backend)?;
+        prepared.claims = claims;
         if prepared.rows.is_empty() {
             let tx = self.begin(namespace).await?;
+            tx.tx
+                .query_one(
+                    "SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE",
+                    &[&namespace.binding()],
+                )
+                .await
+                .map_err(backend)?;
+            if tx.catalog_generation(namespace).await? != expected {
+                return Ok(None);
+            }
+            for (path, epoch) in &prepared.claims {
+                if tx.ledger(namespace, path).await?.map(|tag| tag.epoch) != *epoch {
+                    return Ok(None);
+                }
+            }
             for input in inputs {
+                if tx.raw_write_pending(namespace, input).await? {
+                    return Ok(None);
+                }
                 let path = input.full_path(&options);
                 let name = path
                     .to_str()
@@ -324,6 +356,9 @@ impl PgProjectionStore {
             }
             let generation = expected.unwrap_or_else(|| "0".repeat(64));
             tx.tx.execute("INSERT INTO semon_projection.catalog_heads(namespace,generation) VALUES($1,$2) ON CONFLICT DO NOTHING", &[&namespace.binding(), &generation]).await.map_err(backend)?;
+            for input in inputs {
+                tx.tx.execute("UPDATE semon_projection.discovery SET pending=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
+            }
             tx.commit(namespace).await?;
             return Ok(Some(generation));
         }
@@ -397,6 +432,14 @@ impl PgProjectionStore {
                 expected.as_deref(),
             )
             .await?;
+        if generation.is_some() {
+            // Checkpoint only the source generations qualified by this exact
+            // publication transaction. A later Raw/Facts completion requeues
+            // its work instead of losing it in a separate dequeue transaction.
+            for input in inputs {
+                tx.tx.execute("UPDATE semon_projection.discovery SET pending=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
+            }
+        }
         tx.commit(namespace).await?;
         Ok(generation)
     }

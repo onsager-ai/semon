@@ -300,16 +300,45 @@ PostgreSQL session backend yet.
   Complete global lineage, empty replacement History handoff, composite History
   and atomic discovery checkpoints still require qualification. The Catalog
   continues to report partial completeness.
-- Still required: explicit startup backend configuration; host custody callers
-  (`SessionSourceWrite`, `SessionFactsWrite`, retention, collect/FactsSource);
-  remaining direct selected readers and full discovery reconciliation. No
-  PostgreSQL startup option is exposed while these paths require SQLite. Selected
-  activity, complete search coverage, composite Current/History merging, selected
-  details/causal context/fields/annotations, retained-prefix lazy proof reads,
-  proof-generation collection and bounded delta preparation remain pending. Full
-  shared lifecycle conformance and full-pipeline startup RLS/no-hidden-SQLite
-  qualification remain pending. Follow-up CI evidence is reported against its
-  pushed SHA; the earlier private-injection timings above do not qualify startup.
+- Host custody adoption (2026-11-07): `SessionSourceWrite::begin_in` and
+  `SessionFactsWrite::begin_in` borrow an admitted `SessionSources` runtime owner;
+  invalid, foreign and retired source keys refuse before custody I/O. PostgreSQL
+  JSONL intents commit before mutation, survive interruption/restart and complete
+  with an independently hashed, physically fenced generation after the host fsync.
+  Completion requeues discovery in the same transaction. Facts retain the last
+  completed report separately from a pending wanted report; exact revision/content
+  completion publishes it and requeues discovery atomically. Pending Facts refuse
+  Current reads and production. Schema 9 replaces schema 8 directly; there is no
+  migration. PostgreSQL sidecar/process-record custody remains explicitly refused.
+- Host collection adoption: `collect_in`, `FactsSource::new_in` and
+  `local_facts_in` use the admitted PostgreSQL indexes with an unattached in-memory
+  derivation cache, retaining reported usage in PostgreSQL across collections.
+  Local Facts collection refuses recorded-machine options, so local observations
+  cannot overwrite reported machine custody. Options-only APIs still explicitly
+  construct the default SQLite backend; existing CLI/receiver callers have not
+  yet adopted a selectable backend. PostgreSQL readers/producers try shared Raw
+  and Facts fences without waiting under the reactor mutex, so host completion
+  cannot deadlock behind a reader waiting for its exclusive custody fence.
+- Discovery success now clears pending work in its Catalog publication transaction,
+  including a qualified new empty source. A later Raw/Facts completion cannot be
+  acknowledged by an earlier publication's separate dequeue. Empty replacement
+  handoff and refused-work dequeue ordering remain incomplete.
+- Still required: explicit startup backend configuration; retention/readiness/proof
+  and relocation custody, sidecar/process-record writes, adoption by existing
+  CLI/receiver callers; remaining direct selected readers and full discovery
+  reconciliation. No PostgreSQL startup option is exposed while these paths require
+  SQLite. Selected activity, complete search coverage, composite Current/History
+  merging, empty-replacement History handoff, selected details/causal context/fields/
+  annotations, retained-prefix lazy proof reads, proof-generation collection and
+  bounded delta preparation remain pending. Full shared lifecycle conformance and
+  full-pipeline startup RLS/no-hidden-SQLite qualification remain pending.
+- Follow-up qualification extends the private-injection runtime probe with host
+  Raw/Facts interruption, restart and completion; pending-writer production/
+  collection refusal; admitted collection/local Facts and foreign-source refusal;
+  and empty-source checkpoint completion, under the existing inotify sentinel.
+  SQLite conformance adds the admitted local-key writer and retired-owner refusal.
+  No existing assertions or thresholds are loosened. CI evidence is reported
+  against its pushed SHA; private-injection timings do not qualify real startup.
 
 Acceptance checks: the slice 1 and 2 conformance suites run against both
 engines; a real restricted-role PostgreSQL proves RLS; no SQLite file is

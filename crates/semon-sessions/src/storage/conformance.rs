@@ -842,3 +842,24 @@ fn storage_withdrawal_during_a_failed_publication_keeps_history_in_custody() {
     assert_eq!(retained["lifecycle"], "retained", "{retained}");
     assert_eq!(bound(&a).as_deref(), Some("machine-a"));
 }
+
+#[test]
+fn admitted_local_custody_keeps_sqlite_default_and_refuses_retired_sources() {
+    let root = root();
+    let options = source(&root.0, "local-custody");
+    let path = native(&root.0, "local-write", "synthetic custody prompt");
+    let sources = crate::SessionSources::with_machines(vec![(String::new(), options.clone())]);
+    let input = crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/project/local-write.jsonl".into(),
+    };
+    let length = fs::metadata(path).unwrap().len();
+    crate::SessionSourceWrite::begin_in(&sources, "", &input, None, length)
+        .unwrap()
+        .complete(length)
+        .unwrap();
+    assert_eq!(bound(&options).as_deref(), Some("local"));
+    assert!(crate::SessionSourceWrite::begin_in(&sources, "unknown", &input, None, 0).is_err());
+    sources.retire();
+    assert!(crate::SessionSourceWrite::begin_in(&sources, "local", &input, None, 0).is_err());
+}

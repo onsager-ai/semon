@@ -152,15 +152,36 @@ pub fn local_facts(options: &Options, source_key: &str) -> io::Result<Facts> {
     Ok(facts)
 }
 
+/// Collect local Facts through an admitted runtime backend.
+pub fn local_facts_in(sources: &crate::SessionSources, source_key: &str) -> io::Result<Facts> {
+    FactsSource::new_in(sources, source_key)?.facts()
+}
+
 /// Computes local facts while keeping the event index open between calls.
 /// The index commits each file's change as it reads it.
 pub struct FactsSource {
     options: crate::Options,
     cache: Result<EventCache, String>,
     dirty: bool,
+    owner: Option<std::sync::Arc<crate::native_evidence::NativeEvidence>>,
 }
 
 impl FactsSource {
+    /// Collect using the admitted runtime owner, including its PostgreSQL index
+    /// and durable reported usage. This opens no SQLite store in PostgreSQL mode.
+    pub fn new_in(sources: &crate::SessionSources, source_key: &str) -> io::Result<Self> {
+        let owner = sources.custody_source(source_key)?;
+        if owner.storage.is_postgres() {
+            return Ok(Self {
+                options: owner.options.clone(),
+                cache: Err("runtime-owned facts index".into()),
+                dirty: false,
+                owner: Some(owner),
+            });
+        }
+        Ok(Self::new(&owner.options, source_key))
+    }
+
     /// Opens the event index once for repeated facts collection.
     pub fn new(options: &crate::Options, source_key: &str) -> Self {
         Self {
@@ -174,11 +195,21 @@ impl FactsSource {
                     Ok(cache)
                 }),
             dirty: false,
+            owner: None,
         }
     }
 
     /// Reads this machine's current facts, using the in-memory event cache.
     pub fn facts(&mut self) -> io::Result<Facts> {
+        if let Some(owner) = &self.owner {
+            #[cfg(feature = "postgres")]
+            return owner.storage.local_facts();
+            #[cfg(not(feature = "postgres"))]
+            {
+                let _ = owner;
+                return Err(io::Error::other("PostgreSQL feature required"));
+            }
+        }
         let cache = self
             .cache
             .as_mut()
@@ -195,7 +226,7 @@ impl FactsSource {
     }
 }
 
-fn collect_facts(
+pub(crate) fn collect_facts(
     options: &crate::Options,
     cache: &mut EventCache,
     dirty: &mut bool,

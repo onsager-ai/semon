@@ -274,6 +274,8 @@ impl PgProjectionStore {
         read: impl FnOnce(crate::model::QueryData) -> T,
     ) -> Result<T, StorageError> {
         ensure(&self.namespace, namespace)?;
+        let _facts_lock =
+            crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?;
         let runtime = crate::native_evidence::query_runtime_generation(options).map_err(backend)?;
         let tx = self.begin(namespace).await?;
         let generation = tx.catalog_generation(namespace).await?;
@@ -345,7 +347,7 @@ impl PgProjectionStore {
         let _locks = unique
             .keys()
             .map(|path| {
-                crate::source_change::SourceLock::acquire(options, &path.to_string_lossy(), false)
+                crate::source_change::SourceLock::try_shared(options, &path.to_string_lossy())
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(backend)?;
@@ -444,15 +446,16 @@ impl PgProjectionStore {
         now: i64,
     ) -> Result<crate::model::QueryData, StorageError> {
         ensure(&self.namespace, namespace)?;
+        let _facts_lock =
+            crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?;
         let inputs = crate::inputs(options).map_err(backend)?;
         let _source_locks = inputs
             .iter()
             .filter(|input| input.path.ends_with(".jsonl"))
             .map(|input| {
-                crate::source_change::SourceLock::acquire(
+                crate::source_change::SourceLock::try_shared(
                     options,
                     &crate::source_change::lock_key(options, input),
-                    false,
                 )
             })
             .collect::<Result<Vec<_>, _>>()
@@ -481,6 +484,9 @@ impl PgProjectionStore {
             files.push((name.to_owned(), ledger, index));
         }
         let mut cache = crate::events::EventCache::from_projection(files, Vec::new());
+        if let Some((_, facts)) = tx.reported_facts(namespace).await? {
+            cache.set_reported_runs(facts.reported_runs);
+        }
         let data = crate::model::build_query(
             options,
             &mut cache,

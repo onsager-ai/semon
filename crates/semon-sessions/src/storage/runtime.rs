@@ -51,6 +51,8 @@ pub(crate) struct ColdCatalog {
 }
 use std::io;
 
+mod custody;
+
 pub(crate) struct RuntimeStore {
     options: Options,
     namespace: Option<Namespace>,

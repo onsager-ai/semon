@@ -136,7 +136,7 @@ mod union;
 mod viewer;
 pub use facts::{
     FACTS_VERSION, Facts, FactsSource, NativeName, RUN_VARIABLES, ReportedModelUsage,
-    ReportedRunSnapshot, local_facts, local_runtime_facts, read_facts, write_facts,
+    ReportedRunSnapshot, local_facts, local_facts_in, local_runtime_facts, read_facts, write_facts,
 };
 pub use harness::{HARNESS_ICONS, HARNESSES, HarnessDefinition, harness};
 pub use inputs::{Input, InputRoot, inputs, is_input_path};
@@ -771,6 +771,16 @@ pub fn collect(options: &Options, source_key: &str) -> io::Result<Vec<Node>> {
     let namespace = storage::Namespace::new(source_key).map_err(io::Error::other)?;
     let mut cache = storage::sqlite::open_index(options, &namespace).map_err(io::Error::other)?;
     collect_with_index(options, &mut cache)
+}
+
+/// Collect through an admitted source's runtime backend.
+pub fn collect_in(sources: &SessionSources, source_key: &str) -> io::Result<Vec<Node>> {
+    let owner = sources.custody_source(source_key)?;
+    #[cfg(feature = "postgres")]
+    if owner.storage.is_postgres() {
+        return owner.storage.collect();
+    }
+    collect(&owner.options, source_key)
 }
 
 pub(crate) fn collect_with_index(
