@@ -323,15 +323,38 @@ PostgreSQL session backend yet.
   including a qualified new empty source. A later Raw/Facts completion cannot be
   acknowledged by an earlier publication's separate dequeue. Empty replacement
   handoff and refused-work dequeue ordering remain incomplete.
-- Still required: explicit startup backend configuration; retention/readiness/proof
-  and relocation custody, sidecar/process-record writes, adoption by existing
-  CLI/receiver callers; remaining direct selected readers and full discovery
-  reconciliation. No PostgreSQL startup option is exposed while these paths require
-  SQLite. Selected activity, complete search coverage, composite Current/History
-  merging, empty-replacement History handoff, selected details/causal context/fields/
-  annotations, retained-prefix lazy proof reads, proof-generation collection and
-  bounded delta preparation remain pending. Full shared lifecycle conformance and
-  full-pipeline startup RLS/no-hidden-SQLite qualification remain pending.
+- Runtime custody follow-up (2026-11-07): admitted-owner APIs now dispatch source
+  proofs, projection readiness and explicit index retention to PostgreSQL. Schema
+  10 adds forced-RLS retention markers bound to the exact ledger, normalized
+  index/proof digest and recipe generation, plus complete-discovery/refused-work
+  state. Readiness refuses partial discovery, pending or refused cohorts and
+  ambiguous owners. Retention captures outgoing History before Raw withdrawal;
+  discovery removal preserves explicitly retained normalized indexes. Changed
+  ledgers clear the marker. No Raw is deleted by these operations.
+- Sidecar and process-record writes now use the same durable PostgreSQL intent,
+  fsync/physical-fence and completion contract as JSONL. Pending runtime inputs
+  fence Current and collection; completion conservatively requeues known owners.
+  `SessionSourceRelocation::begin_in` fences both paths, verifies the complete
+  native prefix without a SQLite lookup, journals the destination and independently
+  verifies the copied bytes before completion. The CLI collection loop and received
+  Facts publication now adopt admitted owners. Options-only APIs remain explicitly
+  SQLite; the receiver transport itself still does not journal each Raw mutation.
+- Selected transcript windows now resolve exact retained-prefix proof generations
+  and fetch only covering block witnesses through the same repeatable-read
+  PostgreSQL snapshot as identity/recipes. A request-local 1 MiB evidence budget,
+  physical carrier pin and final recheck fence local bytes; no complete normalized
+  index decode or SQLite proof connection is used for this path. Append between
+  Index and Catalog publication is covered independently from altered-prefix
+  refusal. Provider-backed reads keep their independently authorized provider.
+- Still required: explicit startup backend configuration; complete receiver Raw
+  custody adoption and relocation Index reuse; remaining direct selected readers
+  and full discovery reconciliation. No PostgreSQL startup option is exposed while
+  these paths require SQLite or refuse. Selected activity, complete search coverage,
+  composite Current/History merging, empty-replacement History handoff, Catalog
+  Query composite-History, selected details/causal context/fields/annotations,
+  proof-generation collection and bounded delta preparation remain pending.
+  Full shared lifecycle conformance and full-pipeline startup RLS/no-hidden-SQLite
+  qualification remain pending; private-injection timings are not real startup.
 - Follow-up qualification extends the private-injection runtime probe with host
   Raw/Facts interruption, restart and completion; pending-writer production/
   collection refusal; admitted collection/local Facts and foreign-source refusal;

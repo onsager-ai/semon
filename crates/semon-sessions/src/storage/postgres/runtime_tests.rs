@@ -254,6 +254,7 @@ pub(super) fn lifecycle(dsn: &str) {
     );
     assert_eq!(pending.status, 503);
     drop(interrupted);
+    let restart_work = evidence.storage.work.lock().unwrap();
     let reopened =
         RuntimeStore::postgres(&options, Namespace::new("injected-runtime").unwrap(), dsn).unwrap();
     assert_eq!(
@@ -267,6 +268,7 @@ pub(super) fn lifecycle(dsn: &str) {
         503
     );
     drop(reopened);
+    drop(restart_work);
     let write = crate::SessionSourceWrite::begin_in(
         &sources,
         "injected-runtime",
@@ -344,6 +346,132 @@ pub(super) fn lifecycle(dsn: &str) {
             .contains(&input.path)
     );
     assert!(crate::FactsSource::new_in(&sources, "foreign-runtime").is_err());
+    let custody_work = evidence.storage.work.lock().unwrap();
+    // Sidecar and process-record intents use PostgreSQL and conservatively
+    // fence every Current owner until completion, including across restart.
+    for (relative, bytes) in [
+        (
+            "projects/project/subagents/agent-runtime.meta.json",
+            br#"{"agentType":"worker"}"#.as_slice(),
+        ),
+        (
+            "sessions/4242.json",
+            br#"{"sessionId":"runtime","pid":4242}"#.as_slice(),
+        ),
+    ] {
+        let runtime_input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: relative.into(),
+        };
+        let write = crate::SessionSourceWrite::begin_in(
+            &sources,
+            "injected-runtime",
+            &runtime_input,
+            None,
+            0,
+        )
+        .unwrap();
+        assert!(crate::collect_in(&sources, "injected-runtime").is_err());
+        assert_eq!(
+            evidence
+                .storage
+                .page(
+                    "injected-runtime",
+                    &crate::catalog::Request::parse("limit=60").unwrap(),
+                    None
+                )
+                .status,
+            503
+        );
+        let full = runtime_input.full_path(&options);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, bytes).unwrap();
+        std::fs::File::open(&full).unwrap().sync_all().unwrap();
+        write.complete(bytes.len() as u64).unwrap();
+        assert!(evidence.storage.pending_sources().unwrap().contains(&input));
+        evidence
+            .storage
+            .publish_discovered(std::slice::from_ref(&input))
+            .unwrap();
+    }
+    evidence
+        .storage
+        .discover_sources(std::slice::from_ref(&input), true, true)
+        .unwrap();
+    assert!(
+        crate::source_projection_ready_in(&sources, "injected-runtime", "codex", &input.path)
+            .unwrap()
+            .is_none()
+    );
+    evidence
+        .storage
+        .publish_discovered(std::slice::from_ref(&input))
+        .unwrap();
+    let proof = crate::session_source_proof_in(&sources, "injected-runtime", "codex", &input.path)
+        .unwrap()
+        .unwrap();
+    let ready =
+        crate::source_projection_ready_in(&sources, "injected-runtime", "codex", &input.path)
+            .unwrap()
+            .unwrap();
+    crate::retain_source_event_index_in(&sources, "injected-runtime", &proof, &ready).unwrap();
+    assert!(
+        crate::source_event_index_retained_in(&sources, "injected-runtime", &proof, &ready)
+            .unwrap()
+    );
+    assert!(
+        crate::session_source_proof_in(&sources, "foreign-runtime", "codex", &input.path).is_err()
+    );
+    assert!(
+        crate::source_projection_ready_in(&sources, "foreign-runtime", "codex", &input.path)
+            .is_err()
+    );
+    let relocation_input = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: "archived_sessions/relocated-parser-cases.jsonl".into(),
+    };
+    let prefix = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(std::fs::read(&path).unwrap()))
+    };
+    let native_id = proof.source.native_id.clone();
+    assert!(
+        crate::SessionSourceRelocation::begin_in(
+            &sources,
+            "injected-runtime",
+            &input,
+            &input,
+            &native_id,
+            &"a".repeat(32),
+            length,
+            &prefix,
+        )
+        .is_err()
+    );
+    let move_write = crate::SessionSourceRelocation::begin_in(
+        &sources,
+        "injected-runtime",
+        &input,
+        &relocation_input,
+        &native_id,
+        &"a".repeat(32),
+        length,
+        &prefix,
+    )
+    .unwrap();
+    let relocated = relocation_input.full_path(&options);
+    std::fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+    std::fs::copy(&path, &relocated).unwrap();
+    std::fs::File::open(&relocated).unwrap().sync_all().unwrap();
+    move_write.complete().unwrap();
+    assert!(
+        evidence
+            .storage
+            .pending_sources()
+            .unwrap()
+            .contains(&relocation_input)
+    );
+    std::fs::remove_file(&relocated).unwrap();
     let empty_input = crate::Input {
         root: crate::InputRoot::Codex,
         path: "sessions/2026/09/24/empty.jsonl".into(),
@@ -367,6 +495,7 @@ pub(super) fn lifecycle(dsn: &str) {
     std::fs::remove_file(empty_input.full_path(&options)).unwrap();
     // Reconcile observed removal into retained custody and a valid empty page.
     std::fs::remove_file(&path).unwrap();
+    drop(custody_work);
     {
         let mut work = evidence.storage.work.lock().unwrap();
         while !evidence

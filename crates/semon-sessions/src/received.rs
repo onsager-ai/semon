@@ -225,6 +225,7 @@ impl ReceivedMachines {
         seen: &Seen,
         hosts: &[String],
         warned: &mut BTreeSet<String>,
+        sources: &crate::SessionSources,
     ) {
         let mut warn = |kind: &str, now: bool, message: &dyn Fn() -> String| {
             let key = format!("{kind}:{name}");
@@ -293,8 +294,7 @@ impl ReceivedMachines {
         // acquire that mutex. Serialize publication under the same facts fence
         // as hosted receivers, and retain dirty work if publication fails.
         let publish = || -> io::Result<()> {
-            let intent =
-                crate::SessionFactsWrite::begin_observed(&self.options(name, seen), name, &facts)?;
+            let intent = crate::SessionFactsWrite::begin_observed_in(sources, name, &facts)?;
             crate::write_facts(&copy, &facts)?;
             intent.complete()
         };
@@ -384,7 +384,11 @@ mod tests {
             crate::write_facts(&incoming.join("facts.json"), facts).unwrap();
             let listing = receiver.scan();
             let seen = listing["synthetic"].as_ref().unwrap();
-            receiver.copy_facts("synthetic", seen, &[], warned);
+            let sources = crate::SessionSources::with_machines(vec![(
+                "synthetic".into(),
+                receiver.options("synthetic", seen),
+            )]);
+            receiver.copy_facts("synthetic", seen, &[], warned, &sources);
             receiver.options("synthetic", seen)
         };
         let options = copy(&facts, &mut warned);
