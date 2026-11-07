@@ -182,3 +182,74 @@ fn activity_codex_uses_only_accepted_native_response_facts_across_restart() {
         .unwrap();
     assert_eq!(outcomes, ["accepted", "duplicate", "conflict", "duplicate"]);
 }
+
+#[test]
+fn activity_request_blob_replay_preserves_change_fact_and_read_step_coverage() {
+    for (name, input, output, change) in [
+        (
+            "Bash",
+            json!({"command":"cd /synthetic && gh pr create --title synthetic --body-file /synthetic/body"}),
+            "https://github.com/example/project/pull/42",
+            true,
+        ),
+        (
+            "Bash",
+            json!({"command":"git add file && git commit -m synthetic"}),
+            "[topic abc1234] synthetic",
+            true,
+        ),
+        (
+            "Read",
+            json!({"file_path":"/synthetic/file","offset":1,"limit":5}),
+            "synthetic body",
+            false,
+        ),
+    ] {
+        let home = Home::new();
+        let mut records = vec![human("native", ts(0, 0), "Synthetic prompt")];
+        for minute in 1..=2 {
+            let call =
+                json!({"type":"tool_use","id":format!("call-{minute}"),"name":name,"input":input});
+            let mut assistant = assistant_usage(
+                "native",
+                ts(0, minute),
+                &format!("message-{minute}"),
+                "claude-sonnet-4-6",
+                json!({"input_tokens":10,"output_tokens":2}),
+            );
+            assistant["message"]["content"] = json!([call.clone()]);
+            records.push(assistant);
+            records.push(json!({"type":"api-request-blob","sessionId":"native","timestamp":ts(0,minute),"message":{"role":"assistant","content":[call]}}));
+            records.push(json!({"type":"user","sessionId":"native","timestamp":ts(0,minute),"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":format!("call-{minute}"),"content":output}]}}));
+        }
+        home.top("native", &records);
+        home.build_query();
+        let page = activity(&home, "native");
+        assert_eq!(page.total, 2);
+        if change {
+            let (_, rows) = read_catalog(&home);
+            let db =
+                rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+            let facts = session_activity::items(
+                &db,
+                &rows[0],
+                None,
+                &crate::pricing::snapshot().fingerprint,
+                true,
+                None,
+                256,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(facts.items.len(), 2, "{name} {input}");
+            assert!(facts.items.iter().all(|fact| !fact["step_id"].is_null()));
+        } else {
+            assert_eq!(
+                page.steps[1].waste,
+                Some(crate::events::session_activity::classify::WasteKind::RedundantRead)
+            );
+        }
+        home.build_query();
+        assert_eq!(activity(&home, "native"), page);
+    }
+}

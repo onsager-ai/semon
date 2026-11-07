@@ -241,7 +241,12 @@ export default async function viewerBacklog(browser) {
     // Catalog read instead of the current Sessions page's retained cache.
     const modeled = page.waitForResponse((response) => {
       const url = new URL(response.url());
-      return url.pathname === '/api/sessions' && !url.searchParams.has('sid') && response.ok();
+      return (
+        url.pathname === '/api/sessions' &&
+        !url.searchParams.has('sid') &&
+        response.ok() &&
+        versions.length === 2
+      );
     });
     await page.reload();
     await modeled;

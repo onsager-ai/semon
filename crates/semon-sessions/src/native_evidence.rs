@@ -910,20 +910,41 @@ impl NativeEvidence {
                 .snapshot
                 .get_or_insert_with(|| Snapshot::sources(&self.options, &[]));
             snapshot.extend_sources(&self.options, &inputs);
-            let seeds = inputs;
+            let mut seeds = inputs;
             let prepared = {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "cold_component");
-                cache.scan_byte_budget = Some(4 * 1024 * 1024);
-                let prepared = self.prepare_catalog_component_mode(
-                    cache,
-                    seeds.clone(),
-                    true,
-                    now,
-                    attempted_ticket.as_ref(),
-                );
-                cache.scan_byte_budget = None;
-                if let Some(prepared) = prepared? {
+                let prepared = loop {
+                    // Keep the normal 64-source path. On accounting overflow,
+                    // discard this unpublished attempt and retry fewer seeds.
+                    let (prepared, overflow) = {
+                        let _attempt = crate::selected_read::active()
+                            .then(crate::selected_read::Scope::producer_batch)
+                            .transpose()?;
+                        cache.scan_byte_budget = Some(4 * 1024 * 1024);
+                        let prepared = self.prepare_catalog_component_mode(
+                            cache,
+                            seeds.clone(),
+                            true,
+                            now,
+                            attempted_ticket.as_ref(),
+                        );
+                        cache.scan_byte_budget = None;
+                        let overflow = crate::selected_read::accounting_exhausted();
+                        (prepared, overflow)
+                    };
+                    if !overflow || seeds.len() <= 1 {
+                        break prepared?;
+                    }
+                    // All writes completed so far are receipt-qualified native
+                    // index checkpoints. Unpublished cold writes and decoded
+                    // payloads die with this cache; pending intents stay in SQL.
+                    drop(prepared);
+                    crate::selected_read::check()?;
+                    *cache = self.open_index()?;
+                    seeds.truncate(seeds.len().div_ceil(2));
+                };
+                if let Some(prepared) = prepared {
                     prepared
                 } else {
                     let paths = seeds
@@ -1344,6 +1365,111 @@ impl NativeEvidence {
         Ok(prepared)
     }
 
+    /// Resolve a cold focused activity request using native identity metadata,
+    /// then derive only its exact identity/lineage closure. Discovery retains
+    /// one bounded page; unrelated native event rows are never decoded.
+    pub(crate) fn activity_target(&self, requested: &str, now: i64) -> io::Result<Option<String>> {
+        let mut selectors = BTreeSet::from([requested.to_owned()]);
+        if let Some((harness, id)) = requested.trim_start_matches(':').split_once(':')
+            && matches!(harness, "claude" | "codex" | "copilot")
+        {
+            selectors.insert(id.to_owned());
+        }
+        let mut inputs = BTreeSet::new();
+        let cutoff = crate::model::scan_cutoff(&self.options, now);
+        let mut work = lock(&self.storage.work);
+        if self.closed.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "native query source is closed",
+            ));
+        }
+        self.prepare_events(&mut work, now)?;
+        let cache = work.events.as_mut().expect("event cache initialized");
+        loop {
+            let before = (inputs.len(), selectors.len());
+            let mut discovery = crate::inputs::Discovery::default();
+            loop {
+                crate::selected_read::check()?;
+                let page = discovery.next(&self.options, 64, 512)?;
+                for input in page.inputs {
+                    if cutoff.is_some_and(|cutoff| {
+                        fs::metadata(input.full_path(&self.options))
+                            .and_then(|metadata| metadata.modified())
+                            .ok()
+                            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                            .is_some_and(|time| {
+                                time.as_millis() < u128::try_from(cutoff).unwrap_or(0)
+                            })
+                    }) {
+                        continue;
+                    }
+                    let Some((id, parent)) = activity_source_identity(&input, &self.options)?
+                    else {
+                        continue;
+                    };
+                    if selectors.contains(&id) {
+                        selectors.insert(id);
+                        let _ = parent;
+                        inputs.insert(input);
+                        if inputs.len() > 64 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                "Selected activity lineage exceeds its source bound",
+                            ));
+                        }
+                    }
+                }
+                if page.complete {
+                    break;
+                }
+            }
+            if inputs.is_empty() {
+                return Ok(None);
+            }
+            if (inputs.len(), selectors.len()) != before {
+                continue;
+            }
+            let options = Options {
+                scan_window: false,
+                ..self.options.clone()
+            };
+            let prepared = model::prepare_sources(
+                &options,
+                cache,
+                &inputs.iter().cloned().collect::<Vec<_>>(),
+                now,
+            )?;
+            let target = prepared
+                .rows
+                .iter()
+                .find(|row| row.key == requested)
+                .or_else(|| {
+                    prepared
+                        .rows
+                        .iter()
+                        .find(|row| row.native_ids.iter().any(|id| id == requested))
+                })
+                .map(|row| row.key.clone());
+            let Some(target) = target else {
+                return Ok(None);
+            };
+            let row = prepared
+                .rows
+                .iter()
+                .find(|row| row.key == target)
+                .expect("selected owner exists");
+            crate::events::store::session_activity::publish_selected(
+                &self.options,
+                row,
+                self.storage.namespace(),
+            )?;
+            cache.release_published_indexes();
+            *write_lock(&self.query) = None;
+            return Ok(Some(target));
+        }
+    }
+
     /// Refresh an existing current owner through the shared Catalog producer.
     /// Cold discovery and unsupported role/identity changes still reconcile.
     pub(crate) fn local_query_target(&self, key: &str, now: i64) -> io::Result<Option<String>> {
@@ -1387,24 +1513,6 @@ impl NativeEvidence {
                     "Selected native source changed during refresh",
                 )
             })
-    }
-
-    /// Cold local activity calls use the existing source coordinator to publish
-    /// a qualified generation before entering the metadata-only pager.
-    pub(crate) fn prepare_activity_catalog(&self, now: i64) -> io::Result<()> {
-        let mut work = lock(&self.storage.work);
-        loop {
-            crate::selected_read::check()?;
-            if self.closed.load(Ordering::Acquire) {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "native query source is closed",
-                ));
-            }
-            if self.refresh_catalog(&mut work, now)? {
-                return Ok(());
-            }
-        }
     }
 
     /// Prepare/publish Catalog evidence directly, independent of Viewer state.
@@ -2225,6 +2333,71 @@ fn node_pids(nodes: &[Node], output: &mut BTreeSet<u32>) {
             output.insert(pid);
         }
         node_pids(&node.children, output);
+    }
+}
+
+fn activity_source_identity(
+    input: &crate::Input,
+    options: &Options,
+) -> io::Result<Option<(String, Option<String>)>> {
+    use std::io::{BufRead, BufReader, Read};
+    let path = input.full_path(options);
+    match input.root {
+        crate::InputRoot::Claude => {
+            let Some(stem) = path.file_stem().and_then(|name| name.to_str()) else {
+                return Ok(None);
+            };
+            let parent = path
+                .parent()
+                .filter(|parent| parent.file_name().is_some_and(|name| name == "subagents"))
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(str::to_owned);
+            Ok(Some((
+                if parent.is_some() {
+                    stem.strip_prefix("agent-").unwrap_or(stem)
+                } else {
+                    stem
+                }
+                .to_owned(),
+                parent,
+            )))
+        }
+        crate::InputRoot::Codex => {
+            if !crate::facts::MachineFacts::of(options).codex_rollout_is_current(options, &path) {
+                return Ok(None);
+            }
+            let file = crate::sealed::LogFile::open(&path)?;
+            let mut reader = BufReader::new(file.take(65537));
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line)?;
+            if line.len() > 65536 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Native identity header exceeds selected discovery bound",
+                ));
+            }
+            let record = serde_json::from_slice::<serde_json::Value>(&line).ok();
+            let header = record
+                .as_ref()
+                .map(crate::native_header::CodexHeader::from_record)
+                .unwrap_or_default();
+            let parent = record
+                .as_ref()
+                .and_then(crate::codex_meta_payload)
+                .filter(|metadata| {
+                    crate::field(metadata, "thread_source") != Some("guardian_review")
+                })
+                .and_then(|metadata| crate::field(metadata, "parent_thread_id"))
+                .map(str::to_owned);
+            Ok(header.native_id(&path).map(|id| (id, parent)))
+        }
+        crate::InputRoot::Copilot => Ok(path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .map(|id| (id.to_owned(), None))),
     }
 }
 

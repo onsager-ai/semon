@@ -89,7 +89,9 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v29: durable source-owned Codex turn activity, separate from writer liveness.
 /// v30: Claude usage retains the selected native observation offset.
 /// v31: source-bound typed activity observations, without tool input/output.
-pub(crate) const CACHE_VERSION: u32 = 31;
+/// v32: assistant-only Claude tools and expanded typed activity classification.
+/// v33: literal PR bodies and code-mode printed-output activity observations.
+pub(crate) const CACHE_VERSION: u32 = 34;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2704,7 +2706,7 @@ impl EventCache {
 
     /// The index `ledger` recorded for `path`: this process's when it is at
     /// that ledger, else the store's.
-    fn base(&mut self, path: &str, ledger: &Ledger) -> Base {
+    fn base(&mut self, path: &str, ledger: &Ledger) -> io::Result<Base> {
         if let Some(entry) = self.files.get(path)
             && entry.ledger == *ledger
             && let Some(index) = &entry.index
@@ -2716,14 +2718,17 @@ impl EventCache {
                     cost.pricing_fingerprint == crate::pricing::snapshot().fingerprint
                 })
         {
-            return Base::Found(Arc::clone(index));
+            return Ok(Base::Found(Arc::clone(index)));
         }
         // A pricing-only fingerprint mismatch falls through to the committed
         // SQLite index below. `load_file` restores retained facts/dimensions;
         // it does not open the native log body. Ordinary ledger movement still
         // follows the existing bounded append/rebuild path.
         let loaded = self.store.as_ref().map(|store| store.load_file(path));
-        match loaded {
+        // Request exhaustion is not a broken durable store. Propagate it before
+        // the generic store failure path can discard a healthy writer.
+        crate::selected_read::check()?;
+        Ok(match loaded {
             Some(Ok(Some((stored, index)))) if stored == *ledger => Base::Found(Arc::new(index)),
             Some(Ok(_)) => Base::Moved,
             Some(Err(StoreError::Data(_))) | None => Base::Unreadable,
@@ -2731,7 +2736,7 @@ impl EventCache {
                 self.store_failed(&error);
                 Base::Unreadable
             }
-        }
+        })
     }
 
     fn require_usage_store(&self, index: &FileIndex) -> io::Result<()> {
@@ -2986,7 +2991,7 @@ pub(crate) fn scan_file(
                     .and_then(|store| store.append_evidence(&key).ok().flatten())
                     .is_some_and(|evidence| evidence.qualifies(&ledger.stat, &stat));
             if ledger.stat == stat || evidence || ledger.resumes(&stat, &mut file) {
-                match cache.base(&key, ledger) {
+                match cache.base(&key, ledger)? {
                     Base::Found(index) => {
                         cache.require_usage_store(&index)?;
                         trusted_append = evidence
@@ -4844,6 +4849,13 @@ pub(crate) fn script_command(script: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn script_workdir(script: &str) -> Option<String> {
+    match script_arg(script, "exec_command", "workdir")? {
+        ScriptArg::Literal(path) if !path.is_empty() && path.len() <= 4096 => Some(path),
+        _ => None,
+    }
+}
+
 fn script_session_target(script: &str) -> Option<String> {
     match script_arg(script, "write_stdin", "session_id")? {
         ScriptArg::Literal(session) if !session.is_empty() && session.len() <= 64 => Some(session),
@@ -5145,6 +5157,15 @@ fn directly_prints_call(tokens: &[String], operation: &str, stringify: bool) -> 
 }
 
 fn assigned_result_is_printed(tokens: &[String], operation: &str, stringify: bool) -> bool {
+    assigned_result_projection(tokens, operation, stringify, false)
+}
+
+fn assigned_result_projection(
+    tokens: &[String],
+    operation: &str,
+    stringify: bool,
+    output_only: bool,
+) -> bool {
     if tokens.len() < 10
         || !matches!(tokens[0].as_str(), "i:const" | "i:let")
         || !tokens[1].starts_with("i:")
@@ -5191,6 +5212,14 @@ fn assigned_result_is_printed(tokens: &[String], operation: &str, stringify: boo
         return false;
     }
     at += 1;
+    if output_only {
+        if tokens.get(at).map(String::as_str) != Some("p:.")
+            || tokens.get(at + 1).map(String::as_str) != Some("i:output")
+        {
+            return false;
+        }
+        at += 2;
+    }
     let closes = if stringify { 2 } else { 1 };
     for _ in 0..closes {
         if tokens.get(at).map(String::as_str) != Some("p:)") {
@@ -5231,6 +5260,78 @@ fn result_source(script: &str) -> bool {
         || directly_prints_call(&tokens, operation, true)
         || assigned_result_is_printed(&tokens, operation, false)
         || assigned_result_is_printed(&tokens, operation, true)
+}
+
+/// A straight-line sequence of complete literal exec results can supply failure
+/// diagnostics even when multiple commands cannot own one activity selection.
+pub(crate) fn activity_results_source(script: &str) -> bool {
+    if script.len() > RESULT_SOURCE_BYTES_MAX {
+        return false;
+    }
+    let Some(tokens) = source_tokens(script) else {
+        return false;
+    };
+    let mut at = 0;
+    let mut count = 0;
+    while at < tokens.len() && count < 32 {
+        let Some(open) = tokens[at..].iter().position(|token| token == "p:(") else {
+            return false;
+        };
+        let Some(close) = matching_call_end(&tokens, at + open) else {
+            return false;
+        };
+        let end = close + 1;
+        let statement = &tokens[at..end];
+        if !["exec_command", "write_stdin"].iter().any(|operation| {
+            directly_prints_call(statement, operation, false)
+                || directly_prints_call(statement, operation, true)
+        }) {
+            return false;
+        }
+        at = end;
+        if tokens.get(at).map(String::as_str) == Some("p:;") {
+            at += 1;
+        }
+        count += 1;
+    }
+    count > 0 && at == tokens.len()
+}
+
+/// Only an exactly printed native wait result may supply nested wait timing.
+/// Arbitrary code-mode JSON remains opaque to activity classification.
+pub(crate) fn activity_wait_source(script: &str) -> bool {
+    if script.len() > RESULT_SOURCE_BYTES_MAX {
+        return false;
+    }
+    let Some(mut tokens) = source_tokens(script) else {
+        return false;
+    };
+    if tokens
+        .iter()
+        .take(3)
+        .map(String::as_str)
+        .eq(["i:console", "p:.", "i:log"])
+    {
+        tokens.splice(0..3, ["i:text".into()]);
+    }
+    directly_prints_call(&tokens, "wait_agent", false)
+        || directly_prints_call(&tokens, "wait_agent", true)
+        || assigned_result_is_printed(&tokens, "wait_agent", false)
+        || assigned_result_is_printed(&tokens, "wait_agent", true)
+}
+
+/// Activity may inspect one literal exec call whose raw output is printed.
+/// This does not grant native process/session outcome ownership: that requires
+/// the complete exec result accepted by `result_source`.
+pub(crate) fn activity_output_source(script: &str) -> bool {
+    if script.len() > RESULT_SOURCE_BYTES_MAX
+        || script_flags(script) & (EXEC_COMMAND | STDIN | AMBIGUOUS_COMMANDS) != EXEC_COMMAND
+        || script_command(script).is_none()
+    {
+        return false;
+    }
+    source_tokens(script)
+        .is_some_and(|tokens| assigned_result_projection(&tokens, "exec_command", false, true))
 }
 
 /// A code-mode script's output that is one exec result. Unknown and non-text
@@ -5829,7 +5930,7 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                             },
                         );
                     }
-                    Some("tool_use") => tool_event(
+                    Some("tool_use") if role == Some("assistant") => tool_event(
                         summary,
                         Event {
                             k: Kind::Tool,
@@ -5852,7 +5953,7 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                             ..Event::default()
                         },
                     ),
-                    Some("tool_result") => {
+                    Some("tool_result") if role == Some("user") => {
                         if let Some(id) = field(item, "tool_use_id") {
                             let error = item.get("is_error").and_then(Value::as_bool) == Some(true);
                             let kind = field(record, "toolDenialKind");
@@ -9595,6 +9696,33 @@ mod tests {
         drop(cache);
         drop(restarted);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_accounting_refusal_keeps_scoped_store_available() {
+        for (rows, bytes) in [(0, usize::MAX), (usize::MAX, 1)] {
+            let root = scratch("selected-budget-store");
+            let path = root.join("log.jsonl");
+            let cache_path = root.join("index.json");
+            write_lines(&path, &[claude_tool("call"), claude_result("call")]);
+            let mut cache = EventCache::open_scoped(&cache_path).unwrap();
+            let expected = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            let expected = index_snapshot(&expected);
+            cache.release_published_indexes();
+            let before = parsed();
+            {
+                let control = crate::SelectedReadControl::default().with_limits(rows, bytes);
+                let _scope = crate::selected_read::Scope::enter(&control);
+                assert!(scan_file(&path, "claude", &mut cache, &mut false).is_err());
+                assert!(cache.persistent(), "request budget discarded durable store");
+                assert!(!cache.scoped_store_lost());
+            }
+            let healthy = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            assert_eq!(index_snapshot(&healthy), expected);
+            assert_eq!(parsed(), before, "budget refusal replayed native history");
+            drop(cache);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
