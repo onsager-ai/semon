@@ -7,6 +7,35 @@ use crate::events::{FileIndex, Ledger};
 use sha2::{Digest, Sha256};
 use std::{path::Path, sync::Arc};
 
+/// `Event::activity_observation` is `serde(skip)` in the native index, so the
+/// normalized record carries it explicitly under its own key.
+fn encode_event(event: &crate::events::Event) -> Result<String, StorageError> {
+    let mut record = serde_json::to_value(event).map_err(backend)?;
+    if let Some(observation) = &event.activity_observation {
+        let object = record
+            .as_object_mut()
+            .ok_or_else(|| StorageError::Backend("normalized event is not an object".into()))?;
+        object.insert(
+            "activity_observation".into(),
+            serde_json::to_value(observation).map_err(backend)?,
+        );
+    }
+    serde_json::to_string(&record).map_err(backend)
+}
+
+fn decode_event(text: &str) -> Result<crate::events::Event, StorageError> {
+    let mut record: serde_json::Value = serde_json::from_str(text).map_err(backend)?;
+    let observation = record
+        .as_object_mut()
+        .and_then(|object| object.remove("activity_observation"))
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(backend)?;
+    let mut event: crate::events::Event = serde_json::from_value(record).map_err(backend)?;
+    event.activity_observation = observation;
+    Ok(event)
+}
+
 fn generation(tag: ProjectionTag) -> String {
     format!("{:x}", Sha256::digest(format!("{tag:?}").as_bytes()))
 }
@@ -121,16 +150,12 @@ impl PgProjectionTransaction<'_> {
             let len = match row.get::<_, i16>(0) {
                 0 => {
                     let len = index.events.len();
-                    index
-                        .events
-                        .push(serde_json::from_str(text).map_err(backend)?);
+                    index.events.push(decode_event(text)?);
                     len
                 }
                 1 => {
                     let len = index.extras.len();
-                    index
-                        .extras
-                        .push(serde_json::from_str(text).map_err(backend)?);
+                    index.extras.push(decode_event(text)?);
                     len
                 }
                 2 => {
@@ -218,11 +243,7 @@ impl PgProjectionTransaction<'_> {
         let mut records = Vec::new();
         for (kind, events) in [(0_i16, &index.events), (1, &index.extras)] {
             for (ordinal, event) in events.iter().enumerate() {
-                records.push((
-                    kind,
-                    number(ordinal as u64)?,
-                    serde_json::to_string(event).map_err(backend)?,
-                ));
+                records.push((kind, number(ordinal as u64)?, encode_event(event)?));
             }
         }
         for (ordinal, signal) in index.signals.iter().enumerate() {

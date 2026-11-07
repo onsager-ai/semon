@@ -50,6 +50,8 @@ async fn observation(
         last: Some(index.events.len() as i64),
         tokens: [0.0; 3],
         cost: Default::default(),
+        session_activity: None,
+        activity_analytics: None,
         sources: vec![source],
     };
     let slots = index
