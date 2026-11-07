@@ -306,7 +306,13 @@ impl PgProjectionStore {
                 .map_err(backend)?;
         if prepared.rows.is_empty() {
             let tx = self.begin(namespace).await?;
-            tx.tx.query_one("SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE", &[&namespace.binding()]).await.map_err(backend)?;
+            tx.tx
+                .query_one(
+                    "SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE",
+                    &[&namespace.binding()],
+                )
+                .await
+                .map_err(backend)?;
             if tx.catalog_generation(namespace).await? != expected {
                 return Ok(None);
             }
