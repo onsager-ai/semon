@@ -6469,3 +6469,60 @@ fn activity_family_deduplicates_exact_shared_keys_without_inventing_ownership() 
         .is_empty()
     );
 }
+
+#[test]
+fn activity_fact_pages_use_stable_identity_order_and_detect_source_refresh() {
+    let home = Home::new("fact-pages");
+    let mut records = vec![human("facts", ts(1, 0), "Synthetic facts")];
+    for minute in [3, 1, 2] {
+        let id = format!("commit-{minute}");
+        records.push(assistant(
+            "facts",
+            ts(1, minute),
+            vec![tool(
+                &id,
+                "Bash",
+                json!({"command":"git commit -m synthetic"}),
+            )],
+        ));
+        records.push(json!({"type":"user","sessionId":"facts","timestamp":ts(1,minute),
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":format!("[topic abcdef{minute}] synthetic")}]}}));
+    }
+    home.top("facts", &records);
+    let mut query = home.query();
+    let first = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"facts","kind":"facts","limit":2}),
+    );
+    let last = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"facts","kind":"facts","limit":2,"generation":first["generation"],"cursor":first["next_cursor"]}),
+    );
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    assert_eq!(last["items"].as_array().unwrap().len(), 1);
+    let ids: Vec<_> = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(last["items"].as_array().unwrap())
+        .map(|item| item["identity"].as_str().unwrap())
+        .collect();
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(last["next_cursor"].is_null());
+    records.push(assistant(
+        "facts",
+        ts(1, 4),
+        vec![text("Changed generation")],
+    ));
+    home.top("facts", &records);
+    assert_eq!(
+        failure(
+            &mut query,
+            "get_session_activity",
+            json!({"id":"facts","generation":first["generation"]})
+        ),
+        "stale_projection"
+    );
+}

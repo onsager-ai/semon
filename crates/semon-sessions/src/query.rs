@@ -1250,8 +1250,15 @@ impl Query {
             if self.sources.is_retired() {
                 return Err(QueryError::new("io", "native query source is closed"));
             }
-            answer["window_start"] =
-                json!(crate::model::QueryData::identity(&evidence.options, now).window_start);
+            answer["window_start"] = json!(
+                self.sources
+                    .machines
+                    .iter()
+                    .filter_map(|(_, source)| {
+                        crate::model::QueryData::identity(&source.options, now).window_start
+                    })
+                    .max()
+            );
             return Ok(answer);
         }
         if tool == "get_session"

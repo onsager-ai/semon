@@ -2,8 +2,9 @@
 
 The internal pure derivation in `events/session_activity.rs` consumes normalized
 native usage and compaction signals for one canonical session. The session model
-publishes its typed results through `events/store/session_activity.rs`; it adds
-no Query, MCP, Catalog JSON or transcript fields.
+publishes its typed results through `events/store/session_activity.rs`. Query
+JSON and MCP expose compact Catalog summaries and bounded detail pages; ordinary
+transcript and viewer payloads retain their existing contract.
 
 The producer supplies the existing Claude usage merge order and exact
 `claude_usage::shared` ownership map. One message ID is one observed step within
