@@ -295,6 +295,7 @@ impl PgProjectionStore {
             claims.push((name.to_owned(), Some(tag.epoch)));
             files.push((name.to_owned(), ledger, index));
         }
+        let reported_runs = tx.reported_facts(namespace).await?.map(|(_, facts)| facts.reported_runs).unwrap_or_default();
         tx.commit(namespace).await?;
         let nonempty = inputs
             .iter()
@@ -306,6 +307,7 @@ impl PgProjectionStore {
             .cloned()
             .collect::<Vec<_>>();
         let mut cache = EventCache::from_projection(files, claims.clone());
+        cache.set_reported_runs(reported_runs);
         let options = Options {
             scan_window: false,
             ..options.clone()

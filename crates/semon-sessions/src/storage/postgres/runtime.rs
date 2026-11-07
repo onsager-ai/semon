@@ -484,6 +484,9 @@ impl PgProjectionStore {
             files.push((name.to_owned(), ledger, index));
         }
         let mut cache = crate::events::EventCache::from_projection(files, Vec::new());
+        if let Some((_, facts)) = tx.reported_facts(namespace).await? {
+            cache.set_reported_runs(facts.reported_runs);
+        }
         let data = crate::model::build_query(
             options,
             &mut cache,

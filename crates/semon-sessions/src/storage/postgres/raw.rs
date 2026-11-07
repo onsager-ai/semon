@@ -86,7 +86,7 @@ impl PgProjectionTransaction<'_> {
             "UPDATE semon_projection.raw_sources SET pending=false,generation=$5 WHERE namespace=$1 AND root=$2 AND path=$3 AND revision=$4 AND pending AND intent_id=$6",
             &[&namespace.binding(), &intent.root, &intent.path, &intent.revision, &metadata, &intent.intent_id],
         ).await.map_err(backend)? == 1;
-        if completed {
+        if completed && intent.path.ends_with(".jsonl") {
             self.tx.execute("INSERT INTO semon_projection.discovery(namespace,root,path) VALUES($1,$2,$3) ON CONFLICT(namespace,root,path) DO UPDATE SET seen=true,pending=true", &[&namespace.binding(), &intent.root, &intent.path]).await.map_err(backend)?;
         }
         Ok(completed)
