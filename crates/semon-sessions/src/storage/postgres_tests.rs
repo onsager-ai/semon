@@ -577,9 +577,31 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
     // Retained normalized indexes are strict custody and obey SQL RLS even
     // when the application bypasses the Rust namespace capability.
     let tx = raw.transaction().await.unwrap();
-    tx.query_one("SELECT set_config('semon.namespace','foreign-retention',true)", &[]).await.unwrap();
-    assert_eq!(tx.query_one("SELECT count(*) FROM semon_projection.retained_indexes", &[]).await.unwrap().get::<_, i64>(0), 0);
-    assert_eq!(tx.execute("DELETE FROM semon_projection.retained_indexes WHERE namespace='injected-runtime'", &[]).await.unwrap(), 0);
+    tx.query_one(
+        "SELECT set_config('semon.namespace','foreign-retention',true)",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        tx.query_one(
+            "SELECT count(*) FROM semon_projection.retained_indexes",
+            &[]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
+    assert_eq!(
+        tx.execute(
+            "DELETE FROM semon_projection.retained_indexes WHERE namespace='injected-runtime'",
+            &[]
+        )
+        .await
+        .unwrap(),
+        0
+    );
     assert!(tx.execute("INSERT INTO semon_projection.retained_indexes(namespace,path,ledger,index_digest,projection) VALUES('injected-runtime','foreign','{}',decode(repeat('00',32),'hex'),'{}')", &[]).await.is_err());
     tx.rollback().await.unwrap();
     admin.batch_execute("UPDATE semon_projection.units SET projector=0; UPDATE semon_projection.ledgers SET projector=0").await.unwrap();
