@@ -1,0 +1,184 @@
+//! Synthetic activity publication through the complete native model producer.
+use super::*;
+use crate::events::{
+    session_activity::{ActivityStepId, Ownership},
+    store::session_activity::{self, Page},
+};
+
+fn activity(home: &Home, key: &str) -> Page {
+    let (_, rows) = read_catalog(home);
+    let row = rows.iter().find(|row| row.key == key).unwrap();
+    let c = rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let tx = c.unchecked_transaction().unwrap();
+    session_activity::page(
+        &tx,
+        row,
+        None,
+        &crate::pricing::snapshot().fingerprint,
+        0,
+        256,
+    )
+    .unwrap()
+    .unwrap()
+}
+
+#[test]
+fn activity_claude_content_blocks_unrelated_ids_append_and_restart() {
+    let home = Home::new();
+    let first = uuid(
+        assistant_usage(
+            "first",
+            ts(0, 1),
+            "same-message",
+            "claude-sonnet-4-6",
+            json!({"input_tokens":11,"output_tokens":3}),
+        ),
+        "first-record",
+    );
+    let mut repeated = first.clone();
+    repeated["message"]["content"] =
+        json!([{"type":"text","text":"synthetic second content block"}]);
+    home.top(
+        "first",
+        &[
+            human("first", ts(0, 0), "synthetic prompt"),
+            first,
+            repeated,
+        ],
+    );
+    home.top(
+        "other",
+        &[
+            human("other", ts(0, 0), "synthetic prompt"),
+            uuid(
+                assistant_usage(
+                    "other",
+                    ts(0, 1),
+                    "same-message",
+                    "claude-sonnet-4-6",
+                    json!({"input_tokens":17,"output_tokens":5}),
+                ),
+                "other-record",
+            ),
+        ],
+    );
+    home.build_query();
+    let initial = activity(&home, "first");
+    assert_eq!(initial.total, 1);
+    assert_eq!(initial.steps[0].tokens.input, 11);
+    assert_eq!(initial.steps[0].ownership, Ownership::Exclusive);
+    assert_eq!(activity(&home, "other").steps[0].tokens.input, 17);
+    home.build_query();
+    assert_eq!(activity(&home, "first"), initial);
+    append_records(
+        &home,
+        "first",
+        &[uuid(
+            assistant_usage(
+                "first",
+                ts(0, 2),
+                "next-message",
+                "claude-sonnet-4-6",
+                json!({"input_tokens":13,"output_tokens":7}),
+            ),
+            "next-record",
+        )],
+    );
+    home.build_query();
+    let appended = activity(&home, "first");
+    assert_eq!(appended.total, 2);
+    assert_ne!(appended.generation, initial.generation);
+    assert_eq!(appended.steps[0].elapsed_ms, Some(60_000));
+    assert!(appended.steps[1].position.offset > appended.steps[0].position.offset);
+    home.build_query();
+    assert_eq!(activity(&home, "first"), appended);
+    let c = rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    c.execute(
+        "UPDATE session_activity_projections SET rules_version=0 WHERE session_key='first'",
+        [],
+    )
+    .unwrap();
+    home.build_query();
+    assert_eq!(activity(&home, "first"), appended);
+    let (_, rows) = read_catalog(&home);
+    let json = serde_json::to_value(&rows[0]).unwrap();
+    assert!(json.get("session_activity").is_none());
+}
+
+#[test]
+fn activity_exact_copied_claude_records_remain_shared_observations() {
+    let home = Home::new();
+    for id in ["first", "second"] {
+        home.top(
+            id,
+            &[
+                human(id, ts(0, 0), "synthetic prompt"),
+                uuid(
+                    assistant_usage(
+                        id,
+                        ts(0, 1),
+                        "copied-message",
+                        "claude-sonnet-4-6",
+                        json!({"input_tokens":19,"output_tokens":7}),
+                    ),
+                    "copied-record",
+                ),
+            ],
+        );
+    }
+    home.build_query();
+    let first = activity(&home, "first");
+    let second = activity(&home, "second");
+    assert_eq!(first.total, 1);
+    assert_eq!(first.steps[0].ownership, second.steps[0].ownership);
+    assert!(matches!(first.steps[0].ownership, Ownership::Shared(_)));
+}
+
+#[test]
+fn activity_codex_uses_only_accepted_native_response_facts_across_restart() {
+    let home = Home::new();
+    let payload = json!({"thread_id":"native","session_id":"native","turn_id":"turn","response_id":"response","usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38,"cached_input_tokens":3,"cache_write_input_tokens":2,"reasoning_output_tokens":0}});
+    let accepted = codex_line(ts(0, 1), "token_usage_record", payload.clone());
+    let mut conflict = payload.clone();
+    conflict["usage"]["input_tokens"] = json!(99);
+    home.codex(
+        "native",
+        json!({}),
+        &[
+            codex_line(ts(0, 0), "turn_context", json!({"model":"gpt-test"})),
+            accepted.clone(),
+            accepted.clone(),
+            codex_line(ts(0, 1), "token_usage_record", conflict),
+        ],
+    );
+    home.build_query();
+    let initial = activity(&home, "native");
+    assert_eq!(initial.total, 1);
+    assert_eq!(initial.steps[0].tokens.input, 28);
+    assert_eq!(initial.steps[0].tokens.cache_read, 3);
+    assert!(matches!(initial.steps[0].id, ActivityStepId::Codex(_)));
+    home.build_query();
+    assert_eq!(activity(&home, "native"), initial);
+    let path = home
+        .root
+        .join("codex/sessions/2026/09/24/rollout-native.jsonl");
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(file, "{accepted}").unwrap();
+    drop(file);
+    home.build_query();
+    let appended = activity(&home, "native");
+    assert_eq!(appended.steps, initial.steps);
+    assert_ne!(
+        appended.generation, initial.generation,
+        "consumed source generation advances even for duplicate facts"
+    );
+    let c = rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let outcomes: Vec<String> = c
+        .prepare("SELECT model_outcome FROM native_usage_facts ORDER BY native_offset")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(outcomes, ["accepted", "duplicate", "conflict", "duplicate"]);
+}

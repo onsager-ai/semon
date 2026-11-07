@@ -27,10 +27,6 @@ use sha2::{Digest, Sha256};
 
 use crate::{Tokens, attachments, field, sealed::LogFile};
 
-#[allow(
-    dead_code,
-    reason = "Activity publication is a separate follow-up slice"
-)]
 pub(crate) mod session_activity;
 pub(crate) mod store;
 pub(crate) use store::open_regular;
@@ -91,7 +87,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v28: source-qualified code-mode output/terminal attribution and direct formatter
 /// outcomes; event-state envelopes preserve bounded selected output evidence.
 /// v29: durable source-owned Codex turn activity, separate from writer liveness.
-pub(crate) const CACHE_VERSION: u32 = 29;
+/// v30: Claude usage retains the selected native observation offset.
+pub(crate) const CACHE_VERSION: u32 = 30;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,6 +113,7 @@ impl ModelTokens {
 /// separate for the model JSON.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MessageUsage {
+    pub(crate) offset: u64,
     #[serde(default)]
     pub(crate) record_ids: BTreeSet<String>,
     pub(crate) model: Option<String>,
@@ -772,6 +770,10 @@ impl FileIndex {
             .map_or(&self.codex_usage_events, |usage| &usage.events)
     }
 
+    pub(crate) fn has_native_usage(&self) -> bool {
+        self.codex_native_usage.is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn native_usage_history_sizes(&self) -> Option<(usize, usize)> {
         self.codex_native_usage
@@ -1213,6 +1215,16 @@ pub(crate) trait IndexStore: Send {
     /// `path`'s committed ledger and index, read together.
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError>;
 
+    fn activity_codex_steps(
+        &self,
+        _path: &str,
+        _ledger: &Ledger,
+    ) -> Result<Vec<session_activity::UsageStep>, StoreError> {
+        Err(StoreError::Data(
+            "normalized activity facts unavailable".into(),
+        ))
+    }
+
     fn native_usage_seen(
         &self,
         _path: &str,
@@ -1451,6 +1463,25 @@ impl EventCache {
         self.files
             .get(path.to_str()?)
             .and_then(|file| file.index.as_ref().map(Arc::clone))
+    }
+
+    pub(crate) fn has_activity_store(&self) -> bool {
+        self.store.is_some()
+    }
+
+    pub(crate) fn activity_codex_steps(
+        &self,
+        source: &crate::model::summary::CatalogSource,
+    ) -> io::Result<Vec<session_activity::UsageStep>> {
+        let path = source
+            .path
+            .to_str()
+            .ok_or_else(|| io::Error::other("Invalid activity source path"))?;
+        self.store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("Activity source store unavailable"))?
+            .activity_codex_steps(path, &crate::source_carrier::ledger(source))
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     /// Current ownership needs ledger and independent role evidence only.
@@ -5493,6 +5524,7 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
         summary.usage_by_id.insert(
             id.to_owned(),
             MessageUsage {
+                offset,
                 record_ids,
                 model: field(message, "model").map(str::to_owned),
                 tokens: Tokens {

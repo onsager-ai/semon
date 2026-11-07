@@ -1,0 +1,211 @@
+use super::super::tests::{catalog_native_fixture, catalog_write, opened, scratch};
+use super::*;
+use crate::events::session_activity::{ActivityStepId, Ownership};
+
+fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
+    page(
+        c,
+        row,
+        None,
+        &crate::pricing::snapshot().fingerprint,
+        0,
+        256,
+    )
+    .unwrap()
+    .unwrap()
+}
+
+#[test]
+fn activity_catalog_publication_rolls_back_header_steps_and_catalog_together() {
+    let root = scratch("activity-atomic");
+    let (options, mut rows, slots) = catalog_native_fixture(&root, 2, true);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter_mut().find(|row| row.harness == "claude").unwrap();
+    let key = row.key.clone();
+    let before = read(&store.connection, row);
+    let generation = store.session_catalog_generation().unwrap();
+    row.session_activity.as_mut().unwrap().activity.steps[0]
+        .tokens
+        .output += 1;
+    store.connection.execute_batch("CREATE TEMP TRIGGER fail_activity BEFORE INSERT ON main.session_activity_steps BEGIN SELECT RAISE(ABORT,'activity failure'); END;").unwrap();
+    assert!(catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).is_err());
+    assert_eq!(store.session_catalog_generation().unwrap(), generation);
+    assert_eq!(
+        read(
+            &store.connection,
+            rows.iter().find(|row| row.key == key).unwrap()
+        ),
+        before
+    );
+    store
+        .connection
+        .execute_batch("DROP TRIGGER fail_activity")
+        .unwrap();
+    assert_eq!(
+        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto)
+            .unwrap()
+            .0,
+        Outcome::Written
+    );
+    assert_ne!(
+        read(
+            &store.connection,
+            rows.iter().find(|row| row.key == key).unwrap()
+        )
+        .generation,
+        before.generation
+    );
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn activity_pages_require_exact_sources_generation_rules_and_prices() {
+    let root = scratch("activity-generation");
+    let (options, rows, slots) = catalog_native_fixture(&root, 2, true);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let initial = read(&store.connection, row);
+    let price = crate::pricing::snapshot().fingerprint.clone();
+    assert_eq!(initial.total, 1);
+    assert!(matches!(initial.steps[0].id, ActivityStepId::Claude(_)));
+    assert_eq!(initial.steps[0].ownership, Ownership::Exclusive);
+    assert!(
+        page(&store.connection, row, Some("stale"), &price, 0, 1)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        page(&store.connection, row, None, "stale-prices", 0, 1)
+            .unwrap()
+            .is_none()
+    );
+    let mut moved = row.clone();
+    moved.sources[0].offset += 1;
+    assert!(
+        page(&store.connection, &moved, None, &price, 0, 1)
+            .unwrap()
+            .is_none()
+    );
+    store
+        .connection
+        .execute(
+            "UPDATE session_activity_projections SET rules_version=0 WHERE session_key=?1",
+            [&row.key],
+        )
+        .unwrap();
+    assert!(
+        page(&store.connection, row, None, &price, 0, 1)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        repairs(&store.connection)
+            .unwrap()
+            .contains(&row.sources[0].path.to_string_lossy().into_owned())
+    );
+    assert_eq!(
+        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto)
+            .unwrap()
+            .0,
+        Outcome::Written
+    );
+    assert_eq!(read(&store.connection, row), initial);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn activity_repricing_resumes_and_never_serves_mixed_prices() {
+    let root = scratch("activity-reprice");
+    let (options, mut rows, _) = catalog_native_fixture(&root, 2, true);
+    let row = rows.iter_mut().find(|row| row.harness == "claude").unwrap();
+    let original = row.session_activity.as_ref().unwrap().clone();
+    let usage = (0..260)
+        .map(|n| {
+            UsageStep::claude(
+                format!("m-{n:03}"),
+                SourcePosition {
+                    source: row.sources[0].path.to_string_lossy().into_owned(),
+                    offset: n,
+                },
+                match original.inputs.values().next().unwrap() {
+                    Usage::Claude(used) => used.clone(),
+                    _ => unreachable!(),
+                },
+            )
+        })
+        .collect();
+    let old = crate::pricing::snapshot();
+    let projection = Projection::derive(
+        row.key.clone(),
+        usage,
+        &Default::default(),
+        Vec::new(),
+        old.clone(),
+    );
+    let path = crate::events::EventCache::path(&options.cache);
+    let (mut store, _) = opened(&path);
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, &projection).unwrap();
+    tx.commit().unwrap();
+    let before = read(&store.connection, row);
+    let mut new = (*old).clone();
+    new.fingerprint = "synthetic-reprice".into();
+    let new = Arc::new(new);
+    let tx = store.connection.transaction().unwrap();
+    assert!(reprice_step(&tx, &new).unwrap());
+    tx.commit().unwrap();
+    assert!(
+        page(&store.connection, row, None, &old.fingerprint, 0, 256)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        page(&store.connection, row, None, &new.fingerprint, 0, 256)
+            .unwrap()
+            .is_none()
+    );
+    drop(store);
+    let (mut store, _) = opened(&path);
+    for _ in 0..3 {
+        let tx = store.connection.transaction().unwrap();
+        reprice_step(&tx, &new).unwrap();
+        tx.commit().unwrap();
+    }
+    let after = page(&store.connection, row, None, &new.fingerprint, 0, 256)
+        .unwrap()
+        .unwrap();
+    assert_eq!(after.total, 260);
+    assert_eq!(after.steps.len(), 256);
+    assert_ne!(after.generation, before.generation);
+    assert!(
+        page(
+            &store.connection,
+            row,
+            Some(&before.generation),
+            &new.fingerprint,
+            0,
+            1
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(
+        page(
+            &store.connection,
+            row,
+            Some(&after.generation),
+            &new.fingerprint,
+            256,
+            256
+        )
+        .unwrap()
+        .unwrap()
+        .steps
+        .len(),
+        4
+    );
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}

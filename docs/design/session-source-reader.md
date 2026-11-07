@@ -331,10 +331,11 @@ claim and the native allowlist.
 
 ## Current Semon storage contract
 
-The Event Index initializes schema 34 with parser/cache version 29 in one
+The Event Index initializes schema 35 with parser/cache version 30 in one
 transaction, including pricing fingerprints and native usage readiness default
-0. Schema 34 includes the scheduling indexes and fences the retired proof/tree/usage
-representations as one contract.
+0. Schema 35 includes the scheduling indexes, generation-bound activity steps
+and exact Claude usage offsets, and fences retired proof/tree/usage representations
+as one contract.
 Normal writable producer opens (complete and scoped/background) automatically
 clear a recognized obsolete Semon index and initialize the current empty schema;
 normal native collection then reindexes supported original sources. This is

@@ -125,6 +125,8 @@ impl CatalogLifecycle {
 #[serde(deny_unknown_fields)]
 pub(crate) struct CatalogRow {
     #[serde(skip)]
+    pub(crate) session_activity: Option<events::store::session_activity::Projection>,
+    #[serde(skip)]
     pub(crate) overview: Option<crate::overview::Summary>,
     #[serde(skip)]
     pub(crate) trace: Option<crate::causal_trace::Projection>,
@@ -188,7 +190,7 @@ pub(crate) struct CatalogSource {
     pub(crate) native_role: Option<Value>,
 }
 
-pub(crate) const CATALOG_VERSION: u32 = 5;
+pub(crate) const CATALOG_VERSION: u32 = 6;
 
 pub(super) fn source(file: &super::SourceFile) -> CatalogSource {
     let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;
@@ -229,6 +231,7 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
             .into_iter()
             .collect();
         rows.push(CatalogRow {
+            session_activity: None,
             overview: None,
             trace: None,
             query: None,
