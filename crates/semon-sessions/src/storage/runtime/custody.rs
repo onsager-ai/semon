@@ -6,6 +6,49 @@ use std::io;
 
 #[cfg(feature = "postgres")]
 impl RuntimeStore {
+    pub(crate) fn source_proof(&self, root: &str, path: &str) -> io::Result<Option<crate::SessionSourceProof>> {
+        self.validate()?;
+        let mut postgres = self.postgres.as_ref().expect("PostgreSQL backend").lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let super::Postgres { runtime, store } = &mut *postgres;
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+        runtime.block_on(async {
+            let tx = store.begin(namespace).await.map_err(io::Error::other)?;
+            let proof = tx.source_proof(namespace, &self.options, root, path).await.map_err(io::Error::other)?;
+            tx.commit(namespace).await.map_err(io::Error::other)?;
+            Ok(proof)
+        })
+    }
+
+    pub(crate) fn projection_ready(&self, root: &str, path: &str) -> io::Result<Option<crate::SourceProjectionReady>> {
+        self.validate()?;
+        let mut postgres = self.postgres.as_ref().expect("PostgreSQL backend").lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let super::Postgres { runtime, store } = &mut *postgres;
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+        runtime.block_on(async {
+            let tx = store.begin(namespace).await.map_err(io::Error::other)?;
+            let ready = tx.projection_ready(namespace, &self.options, root, path).await.map_err(io::Error::other)?;
+            tx.commit(namespace).await.map_err(io::Error::other)?;
+            Ok(ready)
+        })
+    }
+
+    pub(crate) fn retained_index(&self, proof: &crate::SessionSourceProof, projection: &crate::SourceProjectionReady, retain: bool) -> io::Result<bool> {
+        self.validate()?;
+        let mut postgres = self.postgres.as_ref().expect("PostgreSQL backend").lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let super::Postgres { runtime, store } = &mut *postgres;
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+        runtime.block_on(async {
+            let tx = store.begin(namespace).await.map_err(io::Error::other)?;
+            let retained = if retain {
+                tx.retain_index(namespace, &self.options, proof, projection).await
+            } else {
+                tx.index_retained(namespace, &self.options, proof, projection).await
+            }.map_err(io::Error::other)?;
+            if retained { tx.commit(namespace).await.map_err(io::Error::other)?; }
+            Ok(retained)
+        })
+    }
+
     pub(crate) fn local_facts(&self) -> io::Result<crate::Facts> {
         let mut postgres = self
             .postgres

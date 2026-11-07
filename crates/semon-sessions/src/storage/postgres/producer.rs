@@ -15,6 +15,7 @@ impl PgProjectionStore {
         ensure(&self.namespace, namespace)?;
         let tx = self.begin(namespace).await?;
         if start {
+            tx.tx.execute("UPDATE semon_projection.namespaces SET discovery_complete=false WHERE namespace=$1", &[&namespace.binding()]).await.map_err(backend)?;
             tx.tx
                 .execute(
                     "UPDATE semon_projection.discovery SET seen=false WHERE namespace=$1",
@@ -32,6 +33,7 @@ impl PgProjectionStore {
             tx.tx.execute("INSERT INTO semon_projection.discovery(namespace,root,path) VALUES($1,$2,$3) ON CONFLICT(namespace,root,path) DO UPDATE SET seen=true,pending=true", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
         }
         if complete {
+            tx.tx.execute("UPDATE semon_projection.namespaces SET discovery_complete=true WHERE namespace=$1", &[&namespace.binding()]).await.map_err(backend)?;
             let absent = tx.tx.query("SELECT root,path FROM semon_projection.discovery WHERE namespace=$1 AND NOT seen", &[&namespace.binding()]).await.map_err(backend)?;
             for row in absent {
                 let root: &str = row.get(0);

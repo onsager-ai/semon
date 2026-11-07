@@ -9,6 +9,7 @@ mod collection;
 mod index;
 mod producer;
 mod raw;
+mod retention;
 mod runtime;
 mod selected;
 pub use raw::{PgRawGeneration, PgRawIntent};
@@ -36,7 +37,7 @@ fn backend(error: impl std::fmt::Display) -> StorageError {
 
 fn stamp() -> String {
     format!(
-        "semon-session-store/1 backend=postgres schema=9 parser={} projector={}",
+        "semon-session-store/1 backend=postgres schema=10 parser={} projector={}",
         crate::events::CACHE_VERSION,
         crate::model::summary::CATALOG_VERSION
     )

@@ -1570,6 +1570,7 @@ mod native_home_tests {
 
 mod retention;
 pub use retention::{
-    SourceProjectionReady, retain_source_event_index, source_event_index_retained,
-    source_projection_ready,
+    SourceProjectionReady, retain_source_event_index, retain_source_event_index_in,
+    session_source_proof_in, source_event_index_retained, source_event_index_retained_in,
+    source_projection_ready, source_projection_ready_in,
 };

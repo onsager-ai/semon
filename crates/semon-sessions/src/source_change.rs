@@ -88,12 +88,6 @@ impl SessionSourceWrite {
                     "write intent outside native log allowlist",
                 ));
             }
-            if !input.path.ends_with(".jsonl") {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "PostgreSQL runtime sidecar custody is unavailable",
-                ));
-            }
             let namespace = crate::storage::Namespace::new(source_key).map_err(io::Error::other)?;
             let source_lock =
                 SourceLock::acquire(&owner.options, &lock_key(&owner.options, input), true)?;
@@ -529,6 +523,38 @@ pub fn verify_codex_relocation(
     Ok(matches && Stat::of(&old)? == before)
 }
 
+#[cfg(feature = "postgres")]
+fn verify_codex_relocation_raw(
+    options: &Options,
+    from: &Input,
+    to: &Input,
+    native_id: &str,
+    length: u64,
+    expected: &str,
+) -> io::Result<bool> {
+    if from.root != crate::InputRoot::Codex || to.root != crate::InputRoot::Codex
+        || !crate::is_input_path("codex", &from.path) || !crate::is_input_path("codex", &to.path)
+        || from.path.starts_with("archived_sessions/") == to.path.starts_with("archived_sessions/")
+        || length == 0 || expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
+    { return Ok(false); }
+    let path = from.full_path(options);
+    let before = Stat::of(&path)?;
+    if before.size < length || crate::codex_native_id_prefix(&path, length)?.as_deref() != Some(native_id) { return Ok(false); }
+    use sha2::{Digest, Sha256};
+    use io::Read;
+    let mut file = crate::sealed::LogFile::open(&path)?;
+    let mut remaining = length;
+    let mut hash = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let count = file.read(&mut buffer[..remaining.min(64 * 1024) as usize])?;
+        if count == 0 { return Ok(false); }
+        hash.update(&buffer[..count]);
+        remaining -= count as u64;
+    }
+    Ok(format!("{:x}", hash.finalize()) == expected && Stat::of(&path)? == before && Stat::from_metadata(&file.metadata()?)? == before)
+}
+
 /// A native relocation intent fences both paths and survives an interrupted
 /// Raw publication in the existing source journal. No source authority is
 /// granted here: facts still choose the one current Codex rollout path.
@@ -541,9 +567,44 @@ pub struct SessionSourceRelocation {
     length: u64,
     prefix: String,
     before: Stat,
+    #[cfg(feature = "postgres")]
+    postgres: Option<(std::sync::Arc<crate::native_evidence::NativeEvidence>, crate::PgRawIntent)>,
     _locks: Vec<SourceLock>,
 }
 impl SessionSourceRelocation {
+    /// Retain both Raw fences and journal the destination on the admitted owner.
+    #[allow(clippy::too_many_arguments)]
+    pub fn begin_in(
+        sources: &crate::SessionSources,
+        source_key: &str,
+        from: &Input,
+        to: &Input,
+        native_id: &str,
+        generation: &str,
+        length: u64,
+        prefix: &str,
+    ) -> io::Result<Self> {
+        let owner = sources.custody_source(source_key)?;
+        #[cfg(feature = "postgres")]
+        if owner.storage.is_postgres() {
+            let options = &owner.options;
+            let mut keys = [lock_key(options, from), lock_key(options, to)];
+            keys.sort();
+            let locks = keys.iter().map(|key| SourceLock::acquire(options, key, true)).collect::<io::Result<Vec<_>>>()?;
+            if generation.len() != 32 || !generation.bytes().all(|byte| byte.is_ascii_hexdigit())
+                || !verify_codex_relocation_raw(options, from, to, native_id, length, prefix)?
+            { return Err(io::Error::new(io::ErrorKind::InvalidData, "native relocation generation is unverified")); }
+            let before = Stat::of(&from.full_path(options))?;
+            let intent = owner.storage.begin_raw_write(to)?;
+            return Ok(Self {
+                options: options.clone(), from: from.clone(), to: to.clone(), native_id: native_id.into(),
+                generation: generation.into(), length, prefix: prefix.into(), before,
+                postgres: Some((owner, intent)), _locks: locks,
+            });
+        }
+        Self::begin(&owner.options, from, to, native_id, generation, length, prefix)
+    }
+
     pub fn begin(
         options: &Options,
         from: &Input,
@@ -579,6 +640,8 @@ impl SessionSourceRelocation {
             length,
             prefix: prefix.into(),
             before,
+            #[cfg(feature = "postgres")]
+            postgres: None,
             _locks: locks,
         })
     }
@@ -588,6 +651,31 @@ impl SessionSourceRelocation {
                 io::ErrorKind::WouldBlock,
                 "relocation source changed during copy",
             ));
+        }
+        #[cfg(feature = "postgres")]
+        if let Some((owner, intent)) = self.postgres {
+            use sha2::{Digest, Sha256};
+            let path = self.to.full_path(&self.options);
+            let before = Stat::of(&path)?;
+            if before.size != self.length || crate::codex_native_id_prefix(&path, self.length)?.as_deref() != Some(self.native_id.as_str()) {
+                return Err(io::Error::other("relocation destination changed"));
+            }
+            let mut file = crate::sealed::LogFile::open(&path)?;
+            let mut hash = Sha256::new();
+            let mut buffer = [0u8; 64 * 1024];
+            use io::Read;
+            loop {
+                let count = file.read(&mut buffer)?;
+                if count == 0 { break; }
+                hash.update(&buffer[..count]);
+            }
+            let digest: [u8; 32] = hash.finalize().into();
+            if digest.iter().map(|byte| format!("{byte:02x}")).collect::<String>() != self.prefix
+                || Stat::of(&path)? != before
+                || Stat::from_metadata(&file.metadata()?)? != before
+                || Stat::of(&self.from.full_path(&self.options))? != self.before
+            { return Err(io::Error::other("relocation bytes changed")); }
+            return owner.storage.complete_raw_write(intent, &crate::PgRawGeneration { generation: self.generation, length: self.length, sha256: digest });
         }
         let evidence = RelocationEvidence {
             from_path: self

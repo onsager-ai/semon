@@ -253,6 +253,7 @@ impl PgProjectionTransaction<'_> {
                 serde_json::to_string(signal).map_err(backend)?,
             ));
         }
+        self.tx.execute("DELETE FROM semon_projection.retained_indexes WHERE namespace=$1 AND path=$2 AND ledger<>$3", &[&namespace.binding(), &path, &encoded_ledger]).await.map_err(backend)?;
         let next = ProjectionTag::of_ledger(ledger, 0, crate::model::summary::CATALOG_VERSION);
         let Some(tag) = self
             .write_ledger(namespace, path, expected, next, append)
