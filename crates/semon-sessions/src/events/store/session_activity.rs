@@ -121,7 +121,8 @@ pub(crate) fn publish_selected(
         .session_activity
         .as_ref()
         .ok_or_else(|| io::Error::other("Selected activity is unavailable"))?;
-    let mut db = Connection::open(EventCache::path(&options.cache)).map_err(io::Error::other)?;
+    let mut db = Connection::open(crate::events::EventCache::path(&options.cache))
+        .map_err(io::Error::other)?;
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;

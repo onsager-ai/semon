@@ -1427,22 +1427,6 @@ impl NativeEvidence {
                 &inputs.iter().cloned().collect::<Vec<_>>(),
                 now,
             )?;
-            for row in &prepared.rows {
-                selectors.insert(row.key.clone());
-                selectors.extend(row.native_ids.iter().cloned());
-            }
-            for row in &prepared.rows {
-                for source in &row.sources {
-                    if let Some(input) = catalog_input(&source.path, &self.options) {
-                        inputs.insert(input);
-                    }
-                }
-            }
-            if (inputs.len(), selectors.len()) != before {
-                // Newly discovered parents/aliases may have appeared earlier in
-                // directory order. Resolve them before publishing any owner.
-                continue;
-            }
             let target = prepared
                 .rows
                 .iter()
