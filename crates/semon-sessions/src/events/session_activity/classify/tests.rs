@@ -517,6 +517,17 @@ fn scanner_capture_resolves_exact_ids_and_retains_no_bodies() {
 
 #[test]
 fn codex_custom_exec_nested_wait_is_captured_without_command_guessing() {
+    assert!(crate::events::activity_wait_source(
+        "console.log(await tools.wait_agent({ids:['synthetic']}))"
+    ));
+    for script in [
+        "console.log({type:'CollabAgentToolCall',tool:'wait'})",
+        "const result = await tools.wait_agent({ids:['synthetic']}); text({type:'CollabAgentToolCall',tool:'wait'});",
+        "console.log(await tools.wait_agent({ids:selectIds()}))",
+        "console.log(await tools.wait_agent({ids:['synthetic']})); console.log('extra')",
+    ] {
+        assert!(!crate::events::activity_wait_source(script), "{script}");
+    }
     let mut index = FileIndex::default();
     let records = [
         json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"wait-call","name":"exec","input":"console.log(await tools.wait_agent({ids:['synthetic']}))"}}),

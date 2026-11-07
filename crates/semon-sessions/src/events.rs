@@ -5262,6 +5262,29 @@ fn result_source(script: &str) -> bool {
         || assigned_result_is_printed(&tokens, operation, true)
 }
 
+/// Only an exactly printed native wait result may supply nested wait timing.
+/// Arbitrary code-mode JSON remains opaque to activity classification.
+pub(crate) fn activity_wait_source(script: &str) -> bool {
+    if script.len() > RESULT_SOURCE_BYTES_MAX {
+        return false;
+    }
+    let Some(mut tokens) = source_tokens(script) else {
+        return false;
+    };
+    if tokens
+        .iter()
+        .take(3)
+        .map(String::as_str)
+        .eq(["i:console", "p:.", "i:log"])
+    {
+        tokens.splice(0..3, ["i:text".into()]);
+    }
+    directly_prints_call(&tokens, "wait_agent", false)
+        || directly_prints_call(&tokens, "wait_agent", true)
+        || assigned_result_is_printed(&tokens, "wait_agent", false)
+        || assigned_result_is_printed(&tokens, "wait_agent", true)
+}
+
 /// Activity may inspect one literal exec call whose raw output is printed.
 /// This does not grant native process/session outcome ownership: that requires
 /// the complete exec result accepted by `result_source`.

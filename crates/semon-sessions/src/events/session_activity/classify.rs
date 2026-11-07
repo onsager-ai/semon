@@ -1099,7 +1099,10 @@ pub(crate) fn capture(
                     // forge an exec outcome, nor leave a terminal script's
                     // mutation barrier open just because its data is JSON.
                     observation.envelopes = name != "exec"
-                        || field(payload, "input").is_some_and(crate::events::result_source);
+                        || field(payload, "input").is_some_and(|script| {
+                            crate::events::result_source(script)
+                                || crate::events::activity_wait_source(script)
+                        });
                     if name == "exec" && input.is_null() {
                         observation.commands = vec![Command::Unknown];
                     }
