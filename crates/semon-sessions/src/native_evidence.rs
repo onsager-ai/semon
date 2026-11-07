@@ -2383,13 +2383,20 @@ fn activity_source_identity(
                     "Native identity header exceeds selected discovery bound",
                 ));
             }
-            let header = serde_json::from_slice::<serde_json::Value>(&line)
-                .ok()
-                .map(|record| crate::native_header::CodexHeader::from_record(&record))
+            let record = serde_json::from_slice::<serde_json::Value>(&line).ok();
+            let header = record
+                .as_ref()
+                .map(crate::native_header::CodexHeader::from_record)
                 .unwrap_or_default();
-            Ok(header
-                .native_id(&path)
-                .map(|id| (id, header.metadata.parent_thread)))
+            let parent = record
+                .as_ref()
+                .and_then(crate::codex_meta_payload)
+                .filter(|metadata| {
+                    crate::field(metadata, "thread_source") != Some("guardian_review")
+                })
+                .and_then(|metadata| crate::field(metadata, "parent_thread_id"))
+                .map(str::to_owned);
+            Ok(header.native_id(&path).map(|id| (id, parent)))
         }
         crate::InputRoot::Copilot => Ok(path
             .parent()
