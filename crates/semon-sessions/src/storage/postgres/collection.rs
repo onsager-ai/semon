@@ -56,7 +56,10 @@ impl PgProjectionStore {
         }
         let _locks = collection_locks(options)?;
         let tx = self.begin(namespace).await?;
-        let expected = tx.reported_facts(namespace).await?.map(|(revision, _)| revision);
+        let expected = tx
+            .reported_facts(namespace)
+            .await?
+            .map(|(revision, _)| revision);
         tx.commit(namespace).await?;
         let mut cache = self.collection_index(namespace, options).await?;
         let mut dirty = false;
