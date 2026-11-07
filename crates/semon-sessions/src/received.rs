@@ -384,7 +384,10 @@ mod tests {
             crate::write_facts(&incoming.join("facts.json"), facts).unwrap();
             let listing = receiver.scan();
             let seen = listing["synthetic"].as_ref().unwrap();
-            let sources = crate::SessionSources::with_machines(vec![("synthetic".into(), receiver.options("synthetic", seen))]);
+            let sources = crate::SessionSources::with_machines(vec![(
+                "synthetic".into(),
+                receiver.options("synthetic", seen),
+            )]);
             receiver.copy_facts("synthetic", seen, &[], warned, &sources);
             receiver.options("synthetic", seen)
         };
