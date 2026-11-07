@@ -71,6 +71,17 @@ pub(super) fn lifecycle(dsn: &str) {
             .all(|row| row["key"] != "foreign-session")
     );
     let key = body["items"][0]["key"].as_str().unwrap();
+    assert!(evidence.storage.work.lock().unwrap().events.is_none());
+    assert_eq!(evidence.storage.generation().unwrap().as_deref(), body["generation"].as_str());
+    let resolution = core.respond("GET", "/api/session-resolve", &format!(
+        "machine=injected-runtime&harness=codex&native_id={}",
+        crate::viewer::percent_encode(body["items"][0]["native_ids"][0].as_str().unwrap()),
+    ), None);
+    assert_eq!(resolution.status, 200, "{}", String::from_utf8_lossy(&resolution.body));
+    let resolution: Value = serde_json::from_slice(&resolution.body).unwrap();
+    assert_eq!(resolution["resolution"]["state"], "provisional");
+    assert_eq!(resolution["resolution"]["catalog_key"], key);
+    assert!(evidence.storage.resolve_native("foreign-runtime", "codex", key, crate::CatalogReadScope::Current).is_err());
     let transcript = core.respond(
         "GET",
         "/api/session-transcript",

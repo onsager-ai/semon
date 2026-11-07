@@ -4,6 +4,59 @@ use super::{Namespace, PgProjectionStore, StorageError, backend, ensure};
 use crate::{CatalogReadScope, Options, SessionSourceReader, ViewerReply};
 
 impl PgProjectionStore {
+    pub(crate) async fn resolve_native(
+        &mut self,
+        namespace: &Namespace,
+        options: &Options,
+        harness: &str,
+        native_id: &str,
+        scope: CatalogReadScope,
+    ) -> Result<crate::CatalogNativeResolution, StorageError> {
+        ensure(&self.namespace, namespace)?;
+        let tx = self.begin(namespace).await?;
+        let mut result = crate::CatalogNativeResolution {
+            state: crate::CatalogNativeResolutionState::Unavailable,
+            source_key: namespace.to_string(),
+            harness: harness.to_owned(),
+            native_id: native_id.to_owned(),
+            read_scope: scope,
+            catalog_key: None,
+            generation: tx.catalog_generation(namespace).await?,
+        };
+        if result.generation.is_none() {
+            return Ok(result);
+        }
+        let mut keys = tx.tx.query(
+            "SELECT session_key FROM semon_projection.catalog WHERE namespace=$1 AND lifecycle='current' AND harness=$2 AND EXISTS(SELECT 1 FROM jsonb_array_elements(metadata::jsonb->'sources') s WHERE s->>'native_id'=$3) ORDER BY session_key LIMIT 2",
+            &[&namespace.binding(), &harness, &native_id],
+        ).await.map_err(backend)?;
+        if keys.is_empty() && scope == CatalogReadScope::RetainedHistory {
+            keys = tx.tx.query(
+                "SELECT session_key FROM (SELECT session_key,metadata,harness FROM semon_projection.catalog WHERE namespace=$1 UNION ALL SELECT session_key,metadata,harness FROM semon_projection.history_catalog WHERE namespace=$1) owners WHERE harness=$2 AND EXISTS(SELECT 1 FROM jsonb_array_elements(metadata::jsonb->'sources') s WHERE s->>'native_id'=$3) GROUP BY session_key ORDER BY session_key LIMIT 2",
+                &[&namespace.binding(), &harness, &native_id],
+            ).await.map_err(backend)?;
+        }
+        result.state = match keys.as_slice() {
+            [] => crate::CatalogNativeResolutionState::Pending,
+            [key] => {
+                let key: &str = key.get(0);
+                let row = tx.catalog_row(namespace, key, scope).await?
+                    .ok_or_else(|| backend("native alias owner unavailable"))?;
+                if row.harness != harness || !row.sources.iter().any(|source| {
+                    source.native_id == native_id && crate::catalog::source_relative(options, harness, source).is_some()
+                }) {
+                    return Err(backend("native alias authority mismatch"));
+                }
+                result.catalog_key = Some(key.to_owned());
+                // Explicit cohort publication cannot prove complete machine ownership.
+                crate::CatalogNativeResolutionState::Provisional
+            }
+            _ => crate::CatalogNativeResolutionState::Ambiguous,
+        };
+        tx.commit(namespace).await?;
+        Ok(result)
+    }
+
     pub(crate) async fn native_query(
         &mut self,
         namespace: &Namespace,

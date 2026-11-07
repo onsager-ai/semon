@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [main, codex/477-rebuild-20261106, 'codex/477-rebuild-diagnostic-20261106-*']
+    branches: [main, codex/477-rebuild-20261106, 'codex/477-rebuild-diagnostic-20261106-*', codex/477-pg-selectable-20261107, 'codex/477-pgsel-diagnostic-20261107-*']
 permissions:
   contents: read
 env:

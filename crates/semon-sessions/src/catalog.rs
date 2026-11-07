@@ -1909,7 +1909,7 @@ mod tests {
         }
         fn publish_existing(&self) {
             let evidence = crate::native_evidence::NativeEvidence::new(self.options.clone());
-            let mut work = crate::viewer::lock(&evidence.work);
+            let mut work = crate::viewer::lock(&evidence.storage.work);
             while !evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
                 .unwrap()
@@ -1942,7 +1942,7 @@ mod tests {
             fixture.source(&format!("unrelated-{index:04}"));
         }
         let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-        let mut work = crate::viewer::lock(&evidence.work);
+        let mut work = crate::viewer::lock(&evidence.storage.work);
         while !session_catalog_page_ready(&fixture.options).unwrap() {
             evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
@@ -2016,7 +2016,7 @@ mod tests {
             fixture.source(&format!("unrelated-{index:04}"));
         }
         let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-        let mut work = crate::viewer::lock(&evidence.work);
+        let mut work = crate::viewer::lock(&evidence.storage.work);
         while !session_catalog_page_ready(&fixture.options).unwrap() {
             evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
@@ -2112,7 +2112,7 @@ mod tests {
             fixture.source(&format!("unrelated-{index:04}"));
         }
         let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-        let mut work = crate::viewer::lock(&evidence.work);
+        let mut work = crate::viewer::lock(&evidence.storage.work);
         while !session_catalog_page_ready(&fixture.options).unwrap() {
             evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
@@ -2212,7 +2212,7 @@ mod tests {
             )
             .unwrap();
         let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-        let mut work = crate::viewer::lock(&evidence.work);
+        let mut work = crate::viewer::lock(&evidence.storage.work);
         work.events = Some(cache);
         let relative = fixture.codex_source("new-during-history", None, 1);
         let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
@@ -2260,7 +2260,7 @@ mod tests {
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             intent.complete().unwrap();
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-            let mut work = crate::viewer::lock(&evidence.work);
+            let mut work = crate::viewer::lock(&evidence.storage.work);
             evidence
                 .prepare_events(&mut work, crate::model::now_ms())
                 .unwrap();
@@ -2335,7 +2335,7 @@ mod tests {
         let fixture = Fixture::new();
         let path = fixture.source("unobserved-runtime");
         let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-        let mut work = crate::viewer::lock(&evidence.work);
+        let mut work = crate::viewer::lock(&evidence.storage.work);
         evidence
             .prepare_events(&mut work, crate::model::now_ms())
             .unwrap();
@@ -2436,7 +2436,7 @@ mod tests {
             }
 
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-            let mut work = crate::viewer::lock(&evidence.work);
+            let mut work = crate::viewer::lock(&evidence.storage.work);
             let mut complete = false;
             for _ in 0..128 {
                 if evidence
@@ -4889,7 +4889,7 @@ mod tests {
         crate::overview_repair::BEFORE_PUBLICATION.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
                 let evidence = crate::native_evidence::NativeEvidence::new(options);
-                let mut work = crate::viewer::lock(&evidence.work);
+                let mut work = crate::viewer::lock(&evidence.storage.work);
                 while !evidence
                     .refresh_catalog(&mut work, crate::model::now_ms())
                     .unwrap()
@@ -4957,7 +4957,7 @@ mod tests {
             crate::transcript_range::AFTER_SELECTION.with(|hook| {
                 *hook.borrow_mut() = Some(Box::new(move || {
                     let evidence = crate::native_evidence::NativeEvidence::new(options);
-                    let mut work = crate::viewer::lock(&evidence.work);
+                    let mut work = crate::viewer::lock(&evidence.storage.work);
                     while !evidence
                         .refresh_catalog(&mut work, crate::model::now_ms())
                         .unwrap()
@@ -5055,7 +5055,7 @@ mod tests {
                 *hook.borrow_mut() = Some(Box::new(move || {
                     writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"assistant","sessionId":"selected","uuid":"appended","parentUuid":"selected","timestamp":"2026-10-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":"new native answer"}]}})).unwrap();
                     let evidence = crate::native_evidence::NativeEvidence::new(options);
-                    let mut work = crate::viewer::lock(&evidence.work);
+                    let mut work = crate::viewer::lock(&evidence.storage.work);
                     while !evidence
                         .refresh_catalog(&mut work, crate::model::now_ms())
                         .unwrap()
@@ -7863,7 +7863,7 @@ mod tests {
                 let records = crate::events::PARSED.with(std::cell::Cell::get);
                 let started = std::time::Instant::now();
                 let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-                let mut work = crate::viewer::lock(&evidence.work);
+                let mut work = crate::viewer::lock(&evidence.storage.work);
                 let mut steps = 0;
                 while !evidence
                     .refresh_catalog(&mut work, crate::model::now_ms())
@@ -8114,7 +8114,7 @@ mod tests {
         db.execute_batch("CREATE TRIGGER reject_move BEFORE UPDATE ON session_catalog BEGIN SELECT RAISE(ABORT,'injected publication failure'); END;").unwrap();
         {
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-            let mut work = crate::viewer::lock(&evidence.work);
+            let mut work = crate::viewer::lock(&evidence.storage.work);
             assert!(
                 evidence
                     .refresh_catalog(&mut work, crate::model::now_ms())
@@ -8383,7 +8383,7 @@ mod tests {
             let (started, starts) = mpsc::channel();
             let (finished, finishes) = mpsc::channel();
             let worker = thread::spawn(move || {
-                let mut work = crate::viewer::lock(&evidence.work);
+                let mut work = crate::viewer::lock(&evidence.storage.work);
                 started.send(()).unwrap();
                 let result = (|| -> std::io::Result<()> {
                     for _ in 0..256 {
@@ -8614,7 +8614,7 @@ mod tests {
             // A new owner on every step exercises durable discovery and parser
             // checkpoints, without any in-memory snapshot or index reuse.
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-            let mut work = crate::viewer::lock(&evidence.work);
+            let mut work = crate::viewer::lock(&evidence.storage.work);
             let before = crate::events::PARSED.with(std::cell::Cell::get);
             let hashed = crate::events::HASHED_BYTES.with(std::cell::Cell::get);
             let start = std::time::Instant::now();
@@ -8659,7 +8659,7 @@ mod tests {
         assert_eq!(records, 513, "restarted cold steps reparsed records");
         assert!(steps >= 4);
         let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-        let mut work = crate::viewer::lock(&evidence.work);
+        let mut work = crate::viewer::lock(&evidence.storage.work);
         let parsed = crate::events::PARSED.with(std::cell::Cell::get);
         let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
         let mut complete = false;
@@ -8716,7 +8716,7 @@ mod tests {
             let derived = crate::events::CATALOG_DERIVED_SOURCES.with(std::cell::Cell::get);
             let discovery = crate::inputs::DISCOVERY_ENTRIES.with(std::cell::Cell::get);
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-            let mut work = crate::viewer::lock(&evidence.work);
+            let mut work = crate::viewer::lock(&evidence.storage.work);
             assert!(
                 evidence
                     .refresh_catalog(&mut work, crate::model::now_ms())
@@ -8776,7 +8776,7 @@ mod tests {
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
             evidence.request_metadata_audit_if_idle();
             evidence.request_metadata_audit_if_idle();
-            let mut work = crate::viewer::lock(&evidence.work);
+            let mut work = crate::viewer::lock(&evidence.storage.work);
             let mut steps = 0;
             loop {
                 steps += 1;
@@ -8840,7 +8840,7 @@ mod tests {
         facts.codex_rollouts = Some(paths);
         crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
         let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-        let mut work = crate::viewer::lock(&evidence.work);
+        let mut work = crate::viewer::lock(&evidence.storage.work);
         let mut complete = false;
         for _ in 0..16 {
             if evidence
@@ -8912,7 +8912,7 @@ mod tests {
             let full_prefix = crate::events::HASHED_BYTES.with(std::cell::Cell::get);
             let started = std::time::Instant::now();
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-            let mut work = crate::viewer::lock(&evidence.work);
+            let mut work = crate::viewer::lock(&evidence.storage.work);
             assert!(
                 evidence
                     .refresh_catalog(&mut work, crate::model::now_ms())
@@ -8955,7 +8955,7 @@ mod tests {
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             let restarted = std::time::Instant::now();
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-            let mut work = crate::viewer::lock(&evidence.work);
+            let mut work = crate::viewer::lock(&evidence.storage.work);
             assert!(
                 evidence
                     .refresh_catalog(&mut work, crate::model::now_ms())
@@ -9259,7 +9259,7 @@ mod tests {
         let mut complete = false;
         for _ in 0..128 {
             if evidence
-                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), now)
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), now)
                 .unwrap()
             {
                 complete = true;
@@ -9390,7 +9390,7 @@ mod tests {
             &observer,
         ]));
         let view = observer.shared_view();
-        let _work = crate::viewer::lock(&view.evidence.work);
+        let _work = crate::viewer::lock(&view.evidence.storage.work);
         let (sent, received) = std::sync::mpsc::channel();
         let waiting_sources = sources.clone();
         let waiter = std::thread::spawn(move || {

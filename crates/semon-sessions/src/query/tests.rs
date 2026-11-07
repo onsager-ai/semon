@@ -484,7 +484,7 @@ fn query_producer_preserves_large_native_tool_record_derivation() {
     assert_eq!(core.respond("GET", "/api/model", "", None).status, 404);
     let views = core.machine_views();
     let view = &views[0];
-    let mut work = crate::viewer::lock(&view.evidence.work);
+    let mut work = crate::viewer::lock(&view.evidence.storage.work);
     loop {
         view.evidence
             .refresh_catalog(&mut work, crate::model::now_ms())
@@ -1466,7 +1466,7 @@ fn read_transcript_pages_as_the_viewer_does() {
     let evidence = &sources.machines[0].1;
     let mut complete = false;
     {
-        let mut work = evidence.work.lock().unwrap();
+        let mut work = evidence.storage.work.lock().unwrap();
         for _ in 0..16 {
             if evidence.refresh_catalog(&mut work, NOW).unwrap() {
                 complete = true;
@@ -2476,7 +2476,7 @@ fn native_owner_reuses_one_complete_index_across_query_tree_and_catalog_reads() 
     assert!(count > 0);
     assert!(Arc::ptr_eq(&first, &view.evidence.query_at(NOW).unwrap()));
     let publish = || {
-        let mut work = view.evidence.work.lock().unwrap();
+        let mut work = view.evidence.storage.work.lock().unwrap();
         while !view.evidence.refresh_catalog(&mut work, NOW).unwrap() {}
         drop(work);
         let page = crate::session_catalog_page(&home.options, "fixture", "limit=60");
@@ -2525,7 +2525,7 @@ fn native_owner_retirement_refuses_a_waiting_cold_read_and_keeps_a_warm_cohort()
     let home = Home::new("retired-native-owner");
     home.top("lead", &[human("lead", ts(1, 0), "Verified evidence")]);
     let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
-    let work = evidence.work.lock().unwrap();
+    let work = evidence.storage.work.lock().unwrap();
     let (started, waiting) = mpsc::channel();
     let worker = {
         let evidence = evidence.clone();
@@ -2630,7 +2630,7 @@ fn admitted_sources_share_the_index_with_a_later_viewer_and_drain_on_close() {
     );
     {
         let view = core.machine_views()[0].clone();
-        let mut work = crate::viewer::lock(&view.evidence.work);
+        let mut work = crate::viewer::lock(&view.evidence.storage.work);
         loop {
             view.evidence.refresh_catalog(&mut work, NOW).unwrap();
             if !view.evidence.catalog_pending(&work) {
@@ -3707,7 +3707,7 @@ fn selected_query_preserves_the_independent_tool_reference_and_union_labels() {
             }
             for (_, source) in &sources.machines {
                 assert!(
-                    source.work.lock().unwrap().events.is_none(),
+                    source.storage.work.lock().unwrap().events.is_none(),
                     "focused read prepared an unrelated source owner"
                 );
             }
@@ -4007,7 +4007,7 @@ fn focused_far_end_and_unsent_handoffs_use_native_owner_evidence_and_union_alias
         );
         assert!(focused.native.is_none());
         for (_, source) in &sources.machines {
-            assert!(source.work.lock().unwrap().events.is_none());
+            assert!(source.storage.work.lock().unwrap().events.is_none());
         }
     }
 }
@@ -5557,7 +5557,7 @@ fn native_catalog_observer_transfers_one_evidence_owner_without_draining() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let evidence = observer.shared_view().evidence.clone();
-    assert!(evidence.work.lock().unwrap().events.is_some());
+    assert!(evidence.storage.work.lock().unwrap().events.is_some());
     let sources = Arc::new(SessionSources::from_catalog_observers(vec![&observer]));
     assert!(Arc::ptr_eq(&sources.machines[0].1, &evidence));
     let mut query = Query::from_sources(sources.clone());

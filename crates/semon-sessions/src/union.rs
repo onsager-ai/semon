@@ -1234,7 +1234,7 @@ impl ViewerCore {
             if !inventory.valid() || inventory.index(source) != Some(index) {
                 continue;
             }
-            let work_guard = match view.evidence.work.try_lock() {
+            let work_guard = match view.evidence.storage.work.try_lock() {
                 Ok(guard) => guard,
                 Err(_) => {
                     unavailable = true;
@@ -1462,6 +1462,10 @@ impl ViewerCore {
                         .page(key, &request.expect("Catalog request"), None)
                 }
                 "/api/session-transcript" => view.evidence.storage.transcript(key, query, None),
+                "/api/session-resolve" => crate::native_resolution::page_with_reader(
+                    key, query, || Ok(()),
+                    |harness, native, scope| view.evidence.storage.resolve_native(key, harness, native, scope),
+                ),
                 _ => crate::catalog::error(
                     503,
                     "capability_unavailable",
@@ -1681,11 +1685,10 @@ impl ViewerCore {
             crate::CatalogIdentityError,
         > {
             let mut selected =
-                crate::catalog::qualified_current_identity(view.options(), source, id)?;
+                view.evidence.storage.selection(source, id, crate::CatalogReadScope::Current, true)?.map(|(identity, _)| identity);
             if selected.is_none() {
                 for harness in ["claude", "codex", "copilot"] {
-                    let resolved = crate::session_catalog_resolve_native(
-                        view.options(),
+                    let resolved = view.evidence.storage.resolve_native(
                         source,
                         harness,
                         id,
@@ -1701,7 +1704,8 @@ impl ViewerCore {
                         .as_deref()
                         .ok_or(crate::CatalogIdentityError::Unavailable)?;
                     let identity =
-                        crate::catalog::qualified_current_identity(view.options(), source, key)?
+                        view.evidence.storage.selection(source, key, crate::CatalogReadScope::Current, true)?
+                            .map(|(identity, _)| identity)
                             .ok_or(crate::CatalogIdentityError::Unavailable)?;
                     if identity.generation != resolved.generation.as_deref().unwrap_or("")
                         || identity.native_id.as_deref() != Some(id)

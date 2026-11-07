@@ -7092,7 +7092,7 @@ mod tests {
             let complete = (0..128).any(|_| {
                 evidence
                     .refresh_catalog(
-                        &mut crate::viewer::lock(&evidence.work),
+                        &mut crate::viewer::lock(&evidence.storage.work),
                         CATALOG_FIXTURE_NOW,
                     )
                     .unwrap()
@@ -7148,7 +7148,7 @@ mod tests {
         tx.commit().unwrap();
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
         evidence.note_catalog_search(Some((key, Some("claude"))));
-        let mut work = crate::viewer::lock(&evidence.work);
+        let mut work = crate::viewer::lock(&evidence.storage.work);
         assert!(matches!(
             evidence
                 .prepare_catalog(&mut work, CATALOG_FIXTURE_NOW)
@@ -7351,7 +7351,7 @@ mod tests {
         let upgraded = (0..128).any(|_| {
             evidence
                 .refresh_catalog(
-                    &mut crate::viewer::lock(&evidence.work),
+                    &mut crate::viewer::lock(&evidence.storage.work),
                     CATALOG_FIXTURE_NOW,
                 )
                 .unwrap();
@@ -7379,7 +7379,7 @@ mod tests {
         let searched = (0..128).any(|_| {
             evidence
                 .refresh_catalog(
-                    &mut crate::viewer::lock(&evidence.work),
+                    &mut crate::viewer::lock(&evidence.storage.work),
                     CATALOG_FIXTURE_NOW,
                 )
                 .unwrap();
@@ -8805,7 +8805,7 @@ mod tests {
             assert!((0..128).any(|_| {
                 evidence
                     .refresh_catalog(
-                        &mut crate::viewer::lock(&evidence.work),
+                        &mut crate::viewer::lock(&evidence.storage.work),
                         CATALOG_FIXTURE_NOW,
                     )
                     .unwrap()
@@ -9004,7 +9004,7 @@ mod tests {
         let complete = (0..128).any(|_| {
             evidence
                 .refresh_catalog(
-                    &mut crate::viewer::lock(&evidence.work),
+                    &mut crate::viewer::lock(&evidence.storage.work),
                     CATALOG_FIXTURE_NOW,
                 )
                 .unwrap()
@@ -10720,7 +10720,7 @@ mod tests {
             let complete = (0..128).any(|_| {
                 evidence
                     .refresh_catalog(
-                        &mut crate::viewer::lock(&evidence.work),
+                        &mut crate::viewer::lock(&evidence.storage.work),
                         CATALOG_FIXTURE_NOW,
                     )
                     .unwrap()

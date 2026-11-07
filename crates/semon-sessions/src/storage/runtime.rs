@@ -3,12 +3,55 @@
 //! Startup selection remains private until every runtime consumer uses this port.
 use super::{Namespace, OnSearch, StorageError};
 use crate::{Options, ViewerReply, catalog::Request, events::EventCache};
+use std::{collections::BTreeSet, time::Instant};
+
+/// Backend work is owned with its source's runtime handle and single writer.
+#[derive(Default)]
+pub(crate) struct Work {
+    #[cfg(feature = "postgres")]
+    pub(crate) postgres_discovery: Option<crate::inputs::Discovery>,
+    #[cfg(feature = "postgres")]
+    pub(crate) postgres_pending: Vec<crate::Input>,
+    pub(crate) events: Option<EventCache>,
+    pub(crate) texts: crate::model::Texts,
+    pub(crate) catalog_snapshot: Option<crate::native_evidence::Snapshot>,
+    pub(crate) observed_catalog_generation: Option<String>,
+    pub(crate) cold_catalog: Option<ColdCatalog>,
+    pub(crate) pending_sources: bool,
+    pub(crate) tree_repair_pending: bool,
+    pub(crate) audit: Option<CatalogAudit>,
+    pub(crate) audit_revision: u64,
+    pub(crate) built_at: Option<Instant>,
+}
+
+#[derive(Default)]
+pub(crate) struct CatalogAudit {
+    pub(crate) revision: u64,
+    pub(crate) cursor: crate::inputs::Discovery,
+    pub(crate) discovered: bool,
+    pub(crate) after: String,
+    pub(crate) checked: bool,
+    pub(crate) started: bool,
+    pub(crate) snapshot: Option<crate::native_evidence::Snapshot>,
+}
+
+#[derive(Default)]
+pub(crate) struct ColdCatalog {
+    pub(crate) revision: u64,
+    pub(crate) cursor: crate::inputs::Discovery,
+    pub(crate) pids: BTreeSet<u32>,
+    pub(crate) snapshot: Option<crate::native_evidence::Snapshot>,
+    pub(crate) started: bool,
+    pub(crate) newest: BTreeSet<(std::cmp::Reverse<Option<std::time::SystemTime>>, crate::Input)>,
+}
 use std::io;
 
 pub(crate) struct RuntimeStore {
     options: Options,
     namespace: Option<Namespace>,
     error: Option<StorageError>,
+    /// The source-owned producer fence and backend work state.
+    pub(crate) work: std::sync::Mutex<Work>,
     #[cfg(feature = "postgres")]
     postgres: Option<std::sync::Mutex<Postgres>>,
 }
@@ -25,6 +68,7 @@ impl RuntimeStore {
             options: options.clone(),
             namespace,
             error: None,
+            work: Default::default(),
             #[cfg(feature = "postgres")]
             postgres: None,
         }
@@ -71,6 +115,7 @@ impl RuntimeStore {
             options: options.clone(),
             namespace: Some(namespace),
             error: None,
+            work: Default::default(),
             postgres: Some(std::sync::Mutex::new(Postgres { runtime, store })),
         })
     }
@@ -137,6 +182,71 @@ impl RuntimeStore {
             ));
         }
         super::sqlite::selected_connection(&self.options, key)
+    }
+
+    pub(crate) fn generation(&self) -> io::Result<Option<String>> {
+        self.validate()?;
+        #[cfg(feature = "postgres")]
+        if let Some(postgres) = &self.postgres {
+            let mut postgres = postgres
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Postgres { runtime, store } = &mut *postgres;
+            let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+            return runtime.block_on(async {
+                let tx = store.begin(namespace).await.map_err(io::Error::other)?;
+                let generation = tx.catalog_generation(namespace).await.map_err(io::Error::other)?;
+                tx.commit(namespace).await.map_err(io::Error::other)?;
+                Ok(generation)
+            });
+        }
+        use rusqlite::OptionalExtension;
+        let key = self.namespace.as_ref().map_or("local", Namespace::as_str);
+        let connection = self.selected_connection(key).map_err(io::Error::other)?;
+        crate::events::store::require_current(&connection).map_err(io::Error::other)?;
+        if let Some(namespace) = &self.namespace {
+            super::sqlite::qualify(&connection, namespace).map_err(io::Error::other)?;
+        }
+        connection.query_row(
+            "SELECT value FROM meta WHERE key='catalog_generation'", [], |row| row.get(0),
+        ).optional().map_err(io::Error::other)
+    }
+
+    pub(crate) fn selection(
+        &self,
+        key: &str,
+        catalog_key: &str,
+        scope: crate::CatalogReadScope,
+        require_complete: bool,
+    ) -> Result<Option<(crate::CatalogSessionIdentity, serde_json::Value)>, crate::CatalogIdentityError> {
+        let query = format!("sid={}&scope={}", crate::viewer::percent_encode(catalog_key), crate::catalog_search::scope_key(scope));
+        let mut request = Request::parse(&query).map_err(|_| crate::CatalogIdentityError::InvalidArguments)?;
+        request.require_complete = require_complete;
+        crate::catalog::selection_from_reply(self.page(key, &request, None), key, catalog_key, scope, require_complete)
+    }
+
+    pub(crate) fn resolve_native(
+        &self,
+        key: &str,
+        harness: &str,
+        native_id: &str,
+        scope: crate::CatalogReadScope,
+    ) -> Result<crate::CatalogNativeResolution, crate::CatalogIdentityError> {
+        if !crate::native_resolution::valid_resolution_arguments(key, harness, native_id) {
+            return Err(crate::CatalogIdentityError::InvalidArguments);
+        }
+        self.validate().map_err(|_| crate::CatalogIdentityError::Unavailable)?;
+        #[cfg(feature = "postgres")]
+        if let Some(postgres) = &self.postgres {
+            let namespace = Namespace::new(key).map_err(|_| crate::CatalogIdentityError::InvalidArguments)?;
+            super::ensure(self.namespace.as_ref().expect("PostgreSQL namespace"), &namespace)
+                .map_err(|_| crate::CatalogIdentityError::Unavailable)?;
+            let mut postgres = postgres.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Postgres { runtime, store } = &mut *postgres;
+            return runtime.block_on(store.resolve_native(&namespace, &self.options, harness, native_id, scope))
+                .map_err(|_| crate::CatalogIdentityError::Unavailable);
+        }
+        crate::native_resolution::sqlite_resolve_native(&self.options, key, harness, native_id, scope)
     }
 
     pub(crate) fn page_ready(&self) -> io::Result<bool> {
