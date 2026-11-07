@@ -125,6 +125,10 @@ pub(crate) struct NativeRecords<'a> {
     fields: BTreeMap<(PathBuf, u64, u32), crate::native_field::NativeField>,
 }
 impl NativeRecords<'_> {
+    #[cfg(feature = "postgres")]
+    pub(crate) fn index_store_is_projection(&self) -> bool {
+        self.selected.is_some_and(EventCache::projection_only)
+    }
     pub(crate) fn bytes(&self, path: &Path) -> Option<&[u8]> {
         self.full.get(path).map(Vec::as_slice)
     }
@@ -1392,6 +1396,60 @@ fn with_records<T>(
         return Err(error);
     }
     Ok(result)
+}
+
+/// Adapt an already-qualified PostgreSQL index snapshot to the native selected
+/// derivation. No SQL connection or provider escapes the request.
+#[cfg(feature = "postgres")]
+pub(crate) fn projected_query(
+    options: &Options,
+    rows: &[CatalogRow],
+    files: Vec<(String, crate::events::Ledger, crate::events::FileIndex)>,
+    fields: BTreeMap<(PathBuf, u64, u32), crate::native_field::NativeField>,
+    provider: Option<&dyn SessionSourceReader>,
+    mode: SessionSourceReadMode,
+    now: i64,
+) -> io::Result<crate::model::QueryData> {
+    let proofs = crate::query_source::Sources::capture(options, rows.iter().flat_map(|row| &row.sources).filter_map(|source| {
+        if !crate::model::catalog_source_in_window(source, crate::model::scan_cutoff(options, now)) {
+            return None;
+        }
+        let chunks = files.iter().find(|(path, _, _)| source.path.to_str() == Some(path.as_str())).and_then(|(_, _, index)| index.source_chunks.clone());
+        Some((source.clone(), chunks))
+    }))?;
+    let records = proofs.reader_with_mode(provider, mode);
+    records.verify_all()?;
+    let selected = EventCache::from_projection(files, Vec::new());
+    let bytes_left = std::cell::RefCell::new(BYTES_MAX as usize);
+    let bounded = crate::source_reader::BudgetedReader::new(&records, 1024);
+    let windows = RecordWindows::default();
+    let raw = |path: &Path, offset: u64| {
+        crate::selected_read::check()?;
+        crate::source_reader::read_record_bytes_bounded(
+            &WindowReader { reader: &bounded, windows: &windows },
+            records.source_ref(path).ok_or_else(|| failure("Unknown projected source"))?,
+            offset, 32 * 1024 * 1024, &mut bytes_left.borrow_mut(),
+        )
+    };
+    let read = |path: &Path, offset: u64| {
+        crate::tx::parse_native_record(&raw(path, offset)?)
+            .ok_or_else(|| failure("Malformed projected native record"))
+    };
+    let evidence = |path: &Path, proof: &crate::native_record::Record| {
+        crate::source_reader::read_evidence_bounded(
+            &bounded, records.source_ref(path).ok_or_else(|| failure("Unknown projected source"))?,
+            proof, &mut bytes_left.borrow_mut(),
+        )
+    };
+    let native = NativeRecords {
+        full: BTreeMap::new(), selected: Some(&selected),
+        read: Some(Box::new(read)), raw: Some(Box::new(raw)), evidence: Some(Box::new(evidence)),
+        error: std::cell::RefCell::new(None), fields,
+    };
+    let data = crate::model::query_history(options, rows, &native, now)?;
+    if let Some(error) = native.error.take() { return Err(error); }
+    records.finish()?;
+    Ok(data)
 }
 
 /// Selected native Query evidence uses the same original-generation reader as

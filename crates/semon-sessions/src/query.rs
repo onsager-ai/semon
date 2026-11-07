@@ -1233,10 +1233,10 @@ impl Query {
         if self.sources.is_retired() {
             return Err(QueryError::new("io", "native query source is closed"));
         }
-        if evidence.storage.is_postgres() {
+        if evidence.storage.is_postgres() && tool == "get_session_activity" {
             return Err(QueryError::new(
                 "capability_unavailable",
-                "Focused Query recipes are not yet available on PostgreSQL",
+                "Selected activity is not yet available on PostgreSQL",
             ));
         }
         let mut focused_args = args.clone();
@@ -1281,6 +1281,7 @@ impl Query {
             return Ok(answer);
         }
         if tool == "get_session"
+            && !evidence.storage.is_postgres()
             && let Some(mut answer) = transcript::session(
                 &evidence.options,
                 catalog_key,
@@ -1314,6 +1315,7 @@ impl Query {
             return Ok(answer);
         }
         if tool == "read_transcript"
+            && !evidence.storage.is_postgres()
             && let Some(mut answer) = transcript::read(
                 &evidence.options,
                 catalog_key,
@@ -1337,8 +1339,7 @@ impl Query {
             answer["window_start"] = json!(self.start);
             return Ok(answer);
         }
-        let result = crate::overview_repair::with_query(
-            &evidence.options,
+        let result = evidence.storage.with_selected_query(
             catalog_key,
             provider,
             mode,

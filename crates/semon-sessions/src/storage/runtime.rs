@@ -427,6 +427,27 @@ impl RuntimeStore {
         Ok(())
     }
 
+    pub(crate) fn with_selected_query<T>(
+        &self,
+        key: &str,
+        provider: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+        now: i64,
+        read: impl FnOnce(crate::model::QueryData) -> T,
+    ) -> io::Result<T> {
+        self.validate()?;
+        #[cfg(feature = "postgres")]
+        if let Some(postgres) = &self.postgres {
+            let mut postgres = postgres.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Postgres { runtime, store } = &mut *postgres;
+            let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+            return runtime.block_on(async {
+                store.selected_query(namespace, &self.options, key, provider, mode, now, read).await.map_err(io::Error::other)
+            });
+        }
+        crate::overview_repair::with_query(&self.options, key, provider, mode, now, read)
+    }
+
     #[cfg(feature = "postgres")]
     pub(crate) fn query(&self, now: i64) -> io::Result<crate::model::QueryData> {
         let postgres = self

@@ -62,6 +62,93 @@ impl PgProjectionStore {
         Ok(result)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn selected_query<T>(
+        &mut self,
+        namespace: &Namespace,
+        options: &Options,
+        key: &str,
+        provider: Option<&dyn SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+        now: i64,
+        read: impl FnOnce(crate::model::QueryData) -> T,
+    ) -> Result<T, StorageError> {
+        ensure(&self.namespace, namespace)?;
+        let runtime = crate::native_evidence::query_runtime_generation(options).map_err(backend)?;
+        let tx = self.begin(namespace).await?;
+        let generation = tx.catalog_generation(namespace).await?;
+        // Follow published ownership and native identity collisions. A missing
+        // related owner remains an explicit refusal, never a workspace scan.
+        let mut pending = std::collections::BTreeSet::from([key.to_owned()]);
+        let mut rows = std::collections::BTreeMap::new();
+        while let Some(key) = pending.pop_first() {
+            if rows.contains_key(&key) { continue; }
+            let row = tx.catalog_row(namespace, &key, CatalogReadScope::RetainedHistory).await?
+                .ok_or_else(|| backend("selected Query owner unavailable"))?;
+            let mut names = row.native_ids.clone();
+            names.push(row.key.clone());
+            let related = tx.tx.query(
+                "SELECT session_key FROM semon_projection.catalog WHERE namespace=$1 AND (session_key=$2 OR metadata::jsonb->>'parent'=$2 OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(metadata::jsonb->'native_ids') n WHERE n=ANY($3::text[]))) ORDER BY session_key LIMIT 65",
+                &[&namespace.binding(), &row.parent.as_deref().unwrap_or(""), &names],
+            ).await.map_err(backend)?;
+            if related.len() > 64 { return Err(backend("selected Query relationship bound")); }
+            pending.extend(related.iter().map(|row| row.get::<_, String>(0)));
+            if let Some(parent) = &row.parent { pending.insert(parent.clone()); }
+            rows.insert(key, row);
+            if rows.len() > 64 { return Err(backend("selected Query relationship bound")); }
+        }
+        let rows: Vec<_> = rows.into_values().collect();
+        let mut unique = std::collections::BTreeMap::new();
+        for row in &rows {
+            for source in &row.sources {
+                if crate::catalog::source_relative(options, &row.harness, source).is_none() {
+                    return Err(backend("selected Query source outside native authority"));
+                }
+                if let Some(prior) = unique.insert(source.path.clone(), source.clone())
+                    && prior != *source { return Err(backend("selected Query source generations disagree")); }
+            }
+        }
+        if unique.len() > 64 { return Err(backend("selected Query source bound")); }
+        let _locks = unique.keys().map(|path| crate::source_change::SourceLock::acquire(options, &path.to_string_lossy(), false))
+            .collect::<Result<Vec<_>, _>>().map_err(backend)?;
+        let mut files = Vec::new();
+        for (path, source) in unique {
+            if !crate::model::catalog_source_in_window(&source, crate::model::scan_cutoff(options, now)) { continue; }
+            let input = crate::native_evidence::catalog_input(&path, options).ok_or_else(|| backend("invalid native Query source"))?;
+            if tx.raw_write_pending(namespace, &input).await? { return Err(backend("Raw write is pending")); }
+            let name = path.to_str().ok_or_else(|| backend("invalid native Query path"))?;
+            let (ledger, index) = tx.load_index(namespace, name).await?.ok_or_else(|| backend("selected Query index unavailable"))?;
+            if ledger != crate::source_carrier::ledger(&source) { return Err(backend("selected Query index generation changed")); }
+            crate::selected_read::charge(index.events.len().saturating_add(index.extras.len()).saturating_mul(std::mem::size_of::<crate::events::Event>()), 0).map_err(backend)?;
+            files.push((name.to_owned(), ledger, index));
+        }
+        let mut fields = std::collections::BTreeMap::new();
+        for row in &rows {
+            let (_, total, _) = tx.recipe_page(namespace, &row.key, CatalogReadScope::RetainedHistory, None, 0, 1).await?;
+            if total > 4096 { return Err(backend("selected Query recipe bound")); }
+            for after in (0..total).step_by(100) {
+                let (_, _, slots) = tx.recipe_page(namespace, &row.key, CatalogReadScope::RetainedHistory, None, after, 100).await?;
+                for slot in slots {
+                    if let (Some(file), Some(field)) = (slot.file, slot.field) { fields.insert((file.path, slot.offset, slot.block), field); }
+                }
+            }
+        }
+        let data = crate::overview_repair::projected_query(options, &rows, files, fields, provider, mode, now).map_err(backend)?;
+        let witness = data.sources.reader_with_mode(provider, mode);
+        witness.verify_all().map_err(backend)?;
+        drop(witness);
+        let result = read(data);
+        crate::selected_read::check().map_err(backend)?;
+        tx.commit(namespace).await?;
+        let check = self.begin(namespace).await?;
+        if check.catalog_generation(namespace).await? != generation
+            || crate::native_evidence::query_runtime_generation(options).map_err(backend)? != runtime {
+            return Err(backend("selected Query publication changed"));
+        }
+        check.commit(namespace).await?;
+        Ok(result)
+    }
+
     pub(crate) async fn native_query(
         &mut self,
         namespace: &Namespace,
