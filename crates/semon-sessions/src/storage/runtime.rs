@@ -440,7 +440,7 @@ impl RuntimeStore {
             .map_err(io::Error::other)
     }
 
-    #[cfg(feature = "postgres")]
+    #[cfg(all(test, feature = "postgres"))]
     pub(crate) fn publish_sources(&self, inputs: &[crate::Input]) -> io::Result<()> {
         let namespace = self
             .namespace
@@ -450,7 +450,7 @@ impl RuntimeStore {
         self.publish_for(&namespace, inputs)
     }
 
-    #[cfg(feature = "postgres")]
+    #[cfg(all(test, feature = "postgres"))]
     pub(crate) fn publish_for(
         &self,
         namespace: &Namespace,
