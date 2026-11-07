@@ -295,7 +295,11 @@ impl PgProjectionStore {
             claims.push((name.to_owned(), Some(tag.epoch)));
             files.push((name.to_owned(), ledger, index));
         }
-        let reported_runs = tx.reported_facts(namespace).await?.map(|(_, facts)| facts.reported_runs).unwrap_or_default();
+        let reported_runs = tx
+            .reported_facts(namespace)
+            .await?
+            .map(|(_, facts)| facts.reported_runs)
+            .unwrap_or_default();
         tx.commit(namespace).await?;
         let nonempty = inputs
             .iter()
