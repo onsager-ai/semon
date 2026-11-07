@@ -89,7 +89,10 @@ impl SessionSourceWrite {
                 ));
             }
             if !input.path.ends_with(".jsonl") {
-                return Err(io::Error::new(io::ErrorKind::Unsupported, "PostgreSQL runtime sidecar custody is unavailable"));
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "PostgreSQL runtime sidecar custody is unavailable",
+                ));
             }
             let namespace = crate::storage::Namespace::new(source_key).map_err(io::Error::other)?;
             let source_lock =
@@ -367,7 +370,10 @@ impl SessionFactsWrite {
         #[cfg(feature = "postgres")]
         if owner.storage.is_postgres() {
             if owner.options.facts.is_none() {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "reported Facts path required"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "reported Facts path required",
+                ));
             }
             let namespace = crate::storage::Namespace::new(source_key).map_err(io::Error::other)?;
             let source_lock = SourceLock::acquire(&owner.options, "facts", true)?;
