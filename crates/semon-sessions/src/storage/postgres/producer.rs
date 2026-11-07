@@ -296,7 +296,15 @@ impl PgProjectionStore {
             files.push((name.to_owned(), ledger, index));
         }
         tx.commit(namespace).await?;
-        let nonempty = inputs.iter().filter(|input| files.iter().any(|(path, ledger, _)| *path == input.full_path(options).to_string_lossy() && ledger.stat.size > 0)).cloned().collect::<Vec<_>>();
+        let nonempty = inputs
+            .iter()
+            .filter(|input| {
+                files.iter().any(|(path, ledger, _)| {
+                    *path == input.full_path(options).to_string_lossy() && ledger.stat.size > 0
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let mut cache = EventCache::from_projection(files, claims.clone());
         let options = Options {
             scan_window: false,
