@@ -6584,3 +6584,60 @@ fn activity_pages_keep_native_ids_global_across_machines() {
         "unknown_session"
     );
 }
+
+#[test]
+fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
+    // More total rows than one request budget, but each released producer slice
+    // fits. Exercise the fresh-process shape after list_sessions populated it.
+    let home = Home::new("activity-batches");
+    for n in 0..144 {
+        let sid = format!("session-{n:03}");
+        let mut records = vec![human(&sid, ts(1, 0), "Synthetic prompt")];
+        for minute in 1..=12 {
+            records.push(assistant(
+                &sid,
+                ts(1, minute),
+                vec![text("Synthetic response")],
+            ));
+        }
+        home.top(&sid, &records);
+    }
+    let listed = call(&mut home.query(), "list_sessions", json!({"limit":1000}));
+    assert_eq!(listed["total"], 144);
+    // Require the ordinary producer to revisit all owners on restart. This is
+    // a current-store rules invalidation, not a legacy schema fixture.
+    let db = rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    db.execute(
+        "UPDATE session_activity_projections SET rules_version=0",
+        [],
+    )
+    .unwrap();
+    drop(db);
+    let control = crate::SelectedReadControl::default().with_limits(2200, 64 * 1024 * 1024);
+    let page = {
+        let _scope = crate::selected_read::Scope::enter(&control);
+        call(
+            &mut home.query(),
+            "get_session_activity",
+            json!({"id":"session-000","limit":5}),
+        )
+    };
+    assert_eq!(page["items"].as_array().unwrap().len(), 5);
+    assert!(page["generation"].is_string());
+    let db = rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let current: u64 = db
+        .query_row(
+            "SELECT count(*) FROM session_activity_projections WHERE rules_version=?1",
+            [crate::events::session_activity::ACTIVITY_RULES_VERSION],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(current, 144, "all batches must be durably published");
+    let next = call(
+        &mut home.query(),
+        "get_session_activity",
+        json!({"id":"session-000","generation":page["generation"],"cursor":page["next_cursor"],"limit":5}),
+    );
+    assert_eq!(next["items"].as_array().unwrap().len(), 5);
+    assert_eq!(next["generation"], page["generation"]);
+}

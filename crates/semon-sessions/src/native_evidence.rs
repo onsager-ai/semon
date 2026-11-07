@@ -1388,7 +1388,18 @@ impl NativeEvidence {
                     "native query source is closed",
                 ));
             }
-            if self.refresh_catalog(&mut work, now)? {
+            let complete = {
+                let _batch = crate::selected_read::Scope::producer_batch()?;
+                let result = self.refresh_catalog(&mut work, now);
+                // The next slice cannot inherit decoded payloads admitted by
+                // this budget, including when preparation refused partway.
+                if let Some(cache) = &mut work.events {
+                    cache.release_published_indexes();
+                }
+                work.texts.release_published_derivations();
+                result?
+            };
+            if complete {
                 return Ok(());
             }
         }

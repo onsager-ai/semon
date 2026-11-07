@@ -96,6 +96,29 @@ impl Scope {
             previous
         }))
     }
+    /// A producer slice releases all decoded indexes before the next slice.
+    /// Give that slice its own accounting ceiling, retaining the enclosing
+    /// request's deadline/cancellation and leaving its detail budget untouched.
+    pub(crate) fn producer_batch() -> io::Result<Self> {
+        check()?;
+        Ok(Self(ACTIVE.with(|active| {
+            let mut active = active.borrow_mut();
+            let previous = active.clone();
+            let control = previous
+                .as_ref()
+                .map_or_else(SelectedReadControl::default, |budget| {
+                    budget.control.clone()
+                });
+            *active = Some(Rc::new(Budget {
+                control,
+                rows: Cell::new(0),
+                bytes: Cell::new(0),
+                exhausted: Cell::new(false),
+            }));
+            previous
+        })))
+    }
+
     pub(crate) fn ensure() -> Option<Self> {
         ACTIVE
             .with(|active| active.borrow().is_none())

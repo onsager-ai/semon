@@ -89,7 +89,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v29: durable source-owned Codex turn activity, separate from writer liveness.
 /// v30: Claude usage retains the selected native observation offset.
 /// v31: source-bound typed activity observations, without tool input/output.
-pub(crate) const CACHE_VERSION: u32 = 31;
+/// v32: assistant-only Claude tools and expanded typed activity classification.
+pub(crate) const CACHE_VERSION: u32 = 32;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2704,7 +2705,7 @@ impl EventCache {
 
     /// The index `ledger` recorded for `path`: this process's when it is at
     /// that ledger, else the store's.
-    fn base(&mut self, path: &str, ledger: &Ledger) -> Base {
+    fn base(&mut self, path: &str, ledger: &Ledger) -> io::Result<Base> {
         if let Some(entry) = self.files.get(path)
             && entry.ledger == *ledger
             && let Some(index) = &entry.index
@@ -2716,14 +2717,17 @@ impl EventCache {
                     cost.pricing_fingerprint == crate::pricing::snapshot().fingerprint
                 })
         {
-            return Base::Found(Arc::clone(index));
+            return Ok(Base::Found(Arc::clone(index)));
         }
         // A pricing-only fingerprint mismatch falls through to the committed
         // SQLite index below. `load_file` restores retained facts/dimensions;
         // it does not open the native log body. Ordinary ledger movement still
         // follows the existing bounded append/rebuild path.
         let loaded = self.store.as_ref().map(|store| store.load_file(path));
-        match loaded {
+        // Request exhaustion is not a broken durable store. Propagate it before
+        // the generic store failure path can discard a healthy writer.
+        crate::selected_read::check()?;
+        Ok(match loaded {
             Some(Ok(Some((stored, index)))) if stored == *ledger => Base::Found(Arc::new(index)),
             Some(Ok(_)) => Base::Moved,
             Some(Err(StoreError::Data(_))) | None => Base::Unreadable,
@@ -2731,7 +2735,7 @@ impl EventCache {
                 self.store_failed(&error);
                 Base::Unreadable
             }
-        }
+        })
     }
 
     fn require_usage_store(&self, index: &FileIndex) -> io::Result<()> {
@@ -2986,7 +2990,7 @@ pub(crate) fn scan_file(
                     .and_then(|store| store.append_evidence(&key).ok().flatten())
                     .is_some_and(|evidence| evidence.qualifies(&ledger.stat, &stat));
             if ledger.stat == stat || evidence || ledger.resumes(&stat, &mut file) {
-                match cache.base(&key, ledger) {
+                match cache.base(&key, ledger)? {
                     Base::Found(index) => {
                         cache.require_usage_store(&index)?;
                         trusted_append = evidence
@@ -4844,6 +4848,13 @@ pub(crate) fn script_command(script: &str) -> Option<String> {
     }
 }
 
+pub(crate) fn script_workdir(script: &str) -> Option<String> {
+    match script_arg(script, "exec_command", "workdir")? {
+        ScriptArg::Literal(path) if !path.is_empty() && path.len() <= 4096 => Some(path),
+        _ => None,
+    }
+}
+
 fn script_session_target(script: &str) -> Option<String> {
     match script_arg(script, "write_stdin", "session_id")? {
         ScriptArg::Literal(session) if !session.is_empty() && session.len() <= 64 => Some(session),
@@ -5829,7 +5840,7 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                             },
                         );
                     }
-                    Some("tool_use") => tool_event(
+                    Some("tool_use") if role == Some("assistant") => tool_event(
                         summary,
                         Event {
                             k: Kind::Tool,
@@ -5852,7 +5863,7 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                             ..Event::default()
                         },
                     ),
-                    Some("tool_result") => {
+                    Some("tool_result") if role == Some("user") => {
                         if let Some(id) = field(item, "tool_use_id") {
                             let error = item.get("is_error").and_then(Value::as_bool) == Some(true);
                             let kind = field(record, "toolDenialKind");
@@ -9595,6 +9606,33 @@ mod tests {
         drop(cache);
         drop(restarted);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn selected_accounting_refusal_keeps_scoped_store_available() {
+        for (rows, bytes) in [(0, usize::MAX), (usize::MAX, 1)] {
+            let root = scratch("selected-budget-store");
+            let path = root.join("log.jsonl");
+            let cache_path = root.join("index.json");
+            write_lines(&path, &[claude_tool("call"), claude_result("call")]);
+            let mut cache = EventCache::open_scoped(&cache_path).unwrap();
+            let expected = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            let expected = index_snapshot(&expected);
+            cache.release_published_indexes();
+            let before = parsed();
+            {
+                let control = crate::SelectedReadControl::default().with_limits(rows, bytes);
+                let _scope = crate::selected_read::Scope::enter(&control);
+                assert!(scan_file(&path, "claude", &mut cache, &mut false).is_err());
+                assert!(cache.persistent(), "request budget discarded durable store");
+                assert!(!cache.scoped_store_lost());
+            }
+            let healthy = scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            assert_eq!(index_snapshot(&healthy), expected);
+            assert_eq!(parsed(), before, "budget refusal replayed native history");
+            drop(cache);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]

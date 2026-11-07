@@ -81,7 +81,9 @@ pub(crate) struct ChangeFact {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Command {
     Read(String, ReadTool),
-    Search(SearchTool),
+    Search(String, SearchTool),
+    Setup,
+    Stage,
     Inspect,
     Commit,
     Push,
@@ -155,8 +157,17 @@ fn components(text: &str) -> Option<Vec<Vec<String>>> {
     let mut word_started = false;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '$' || c == '`' || c == '\\' {
+        // Single-quoted shell text is literal, including dollars/backticks.
+        if quote != Some('\'') && (c == '$' || c == '`') {
             return None;
+        }
+        if c == '\\' && quote != Some('\'') {
+            let next = chars.next()?;
+            if next != '\n' {
+                word.push(next);
+                word_started = true;
+            }
+            continue;
         }
         if let Some(q) = quote {
             if c == q {
@@ -221,16 +232,19 @@ fn command(words: &[String]) -> Command {
             rest = next;
         }
         return match rest.first().copied() {
+            Some("add") => Command::Stage,
             Some("commit") => Command::Commit,
             Some("push") => Command::Push,
             Some("status" | "diff" | "log" | "show" | "rev-parse") => Command::Inspect,
-            Some(
-                "add" | "checkout" | "switch" | "reset" | "restore" | "apply" | "merge" | "rebase",
-            ) => Command::Mutation,
+            Some("checkout" | "switch" | "reset" | "restore" | "apply" | "merge" | "rebase") => {
+                Command::Mutation
+            }
             _ => Command::Unknown,
         };
     }
+    let fingerprint = || digest(&serde_json::to_vec(words).expect("strings serialize"));
     match args.as_slice() {
+        ["cd", path] if !path.starts_with('-') => Command::Setup,
         ["gh", "run", "watch", ..] => Command::Watch,
         ["gh", "pr", "checks", rest @ ..] if rest.contains(&"--watch") => Command::Watch,
         ["gh", "pr", "create", ..] => Command::PullRequest,
@@ -239,9 +253,9 @@ fn command(words: &[String]) -> Command {
                 .iter()
                 .any(|arg| *arg == "--pre" || arg.starts_with("--pre=")) =>
         {
-            Command::Search(SearchTool::Rg)
+            Command::Search(fingerprint(), SearchTool::Rg)
         }
-        ["grep", ..] => Command::Search(SearchTool::Grep),
+        ["grep", ..] => Command::Search(fingerprint(), SearchTool::Grep),
         ["cat", ..] => Command::Read(
             digest(&serde_json::to_vec(words).expect("strings serialize")),
             ReadTool::Cat,
@@ -260,6 +274,42 @@ fn command(words: &[String]) -> Command {
         ["rm" | "mv" | "cp" | "touch" | "mkdir" | "rmdir" | "tee", ..] => Command::Mutation,
         _ => Command::Unknown,
     }
+}
+
+/// Unwrap only literal shell invocations. A script remains subject to the same
+/// grammar and component/depth bounds; shell expansions never become evidence.
+fn shell_commands(text: &str, depth: usize) -> Option<Vec<Command>> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    let parts = components(text)?;
+    let mut commands = Vec::new();
+    let mut directories = Vec::new();
+    for words in parts {
+        let args: Vec<_> = words.iter().map(String::as_str).collect();
+        let mut kinds = match args.as_slice() {
+            [
+                "bash" | "/bin/bash" | "sh" | "/bin/sh",
+                "-c" | "-lc",
+                script,
+            ] => shell_commands(script, depth + 1)?,
+            ["cd", path] if !path.starts_with('-') => {
+                directories.push((*path).to_owned());
+                vec![Command::Setup]
+            }
+            _ => vec![command(&words)],
+        };
+        for kind in &mut kinds {
+            if let Command::Read(fingerprint, _) | Command::Search(fingerprint, _) = kind {
+                *fingerprint = digest(&serde_json::to_vec(&(&*fingerprint, &directories)).ok()?);
+            }
+        }
+        commands.extend(kinds);
+        if commands.len() > MAX_COMPONENTS {
+            return None;
+        }
+    }
+    Some(commands)
 }
 
 fn sed_selection(selection: &str) -> bool {
@@ -290,6 +340,10 @@ pub(super) fn call(
     step_id: Option<ActivityStepId>,
     call_digest: String,
 ) -> Observation {
+    let name = name
+        .strip_prefix("functions.")
+        .or_else(|| name.strip_prefix("tools."))
+        .unwrap_or(name);
     let input = input_value(input).unwrap_or(Cow::Owned(Value::Null));
     let background = input.get("run_in_background").and_then(Value::as_bool) == Some(true);
     let mut commands = match name {
@@ -297,8 +351,7 @@ pub(super) fn call(
             .get("command")
             .or_else(|| input.get("cmd"))
             .and_then(Value::as_str)
-            .and_then(components)
-            .map(|parts| parts.iter().map(|words| command(words)).collect())
+            .and_then(|text| shell_commands(text, 0))
             .unwrap_or_else(|| vec![Command::Ambiguous]),
         "Read" | "read_file" => {
             let path = input
@@ -328,13 +381,16 @@ pub(super) fn call(
                 None => vec![Command::Unknown],
             }
         }
-        "Grep" | "Glob" => vec![Command::Search(SearchTool::Native)],
+        "Grep" | "Glob" => vec![Command::Search(
+            digest(&serde_json::to_vec(&(name, &*input)).expect("search selection serializes")),
+            SearchTool::Native,
+        )],
         "Write" | "Edit" | "apply_patch" => vec![Command::Mutation],
         "Agent" | "Task" | "wait_agent" => Vec::new(),
         _ => vec![Command::Unknown],
     };
     for command in &mut commands {
-        if let Command::Read(fingerprint, _) = command {
+        if let Command::Read(fingerprint, _) | Command::Search(fingerprint, _) = command {
             let workdir = input
                 .get("workdir")
                 .or_else(|| input.get("cwd"))
@@ -564,7 +620,7 @@ fn failure(commands: &[Command], result: &ResultEvidence) -> Option<WasteKind> {
         .iter()
         .filter(|kind| match diagnostic {
             "cat" => matches!(kind, Command::Read(_, ReadTool::Cat)),
-            "rg" => matches!(kind, Command::Search(SearchTool::Rg)),
+            "rg" => matches!(kind, Command::Search(_, SearchTool::Rg)),
             _ => false,
         })
         .count();
@@ -597,8 +653,23 @@ fn repository(url: &str) -> Option<String> {
 fn changes(commands: &[Command], text: &str) -> Vec<Change> {
     let mut facts = Vec::new();
     let mut destination = None;
-    // Compound output cannot prove which command printed a commit/PR marker.
-    if commands.len() != 1 {
+    // Only setup and uniquely identified change commands may share output.
+    // Reads, inspection and unknown programs could print plausible markers.
+    if commands.is_empty()
+        || commands.iter().any(|command| {
+            !matches!(
+                command,
+                Command::Setup
+                    | Command::Stage
+                    | Command::Commit
+                    | Command::Push
+                    | Command::PullRequest
+            )
+        })
+        || [Command::Commit, Command::Push, Command::PullRequest]
+            .iter()
+            .any(|kind| commands.iter().filter(|command| *command == kind).count() > 1)
+    {
         return facts;
     }
     for line in text.lines().take(4096) {
@@ -608,7 +679,14 @@ fn changes(commands: &[Command], text: &str) -> Vec<Change> {
                 .and_then(|line| line.split_once(']').map(|(header, _)| header))
         {
             let mut fields = header.split_whitespace();
-            if let (Some(branch), Some(sha), None) = (fields.next(), fields.next(), fields.next())
+            let branch = fields.next();
+            let second = fields.next();
+            let sha = if second == Some("(root-commit)") {
+                fields.next()
+            } else {
+                second
+            };
+            if let (Some(branch), Some(sha), None) = (branch, sha, fields.next())
                 && identifier(branch)
                 && (7..=64).contains(&sha.len())
                 && sha.bytes().all(|c| c.is_ascii_hexdigit())
@@ -726,9 +804,19 @@ pub(super) fn finish(
                 })
         });
     } else {
-        observation.empty_search = matches!(observation.commands.as_slice(), [Command::Search(_)])
-            && result.exit == Some(1)
-            && result.text.trim().is_empty();
+        let mut substantive = observation
+            .commands
+            .iter()
+            .filter(|command| **command != Command::Setup);
+        let search = substantive.next();
+        observation.empty_search = substantive.next().is_none()
+            && (matches!(search, Some(Command::Search(_, _)))
+                && result.exit == Some(1)
+                && result.text.trim().is_empty()
+                || matches!(search, Some(Command::Search(_, SearchTool::Native)))
+                    && !result.error
+                    && result.exit.is_none_or(|code| code == 0)
+                    && matches!(result.text.trim(), "No matches found" | "No files found"));
         if !observation.empty_search {
             observation.waste = failure(&observation.commands, &result);
         }
@@ -752,6 +840,11 @@ pub(crate) fn capture(
     let hash = digest(bytes);
     let time = record_time(record);
     if harness == "claude" {
+        // Request blobs contain copies of assistant tool blocks, without their
+        // native message ownership. They are not additional calls or mutations.
+        if !matches!(field(record, "type"), Some("assistant" | "user")) {
+            return;
+        }
         let Some(items) = record.pointer("/message/content").and_then(Value::as_array) else {
             return;
         };
@@ -818,8 +911,9 @@ pub(crate) fn capture(
                             .filter(|text| {
                                 text.len() <= MAX_BYTES && crate::events::result_source(text)
                             })
-                            .and_then(crate::events::script_command)
-                            .map(|command| serde_json::json!({"cmd": command}))
+                            .and_then(|script| crate::events::script_command(script).map(|command| {
+                                serde_json::json!({"cmd": command, "workdir": crate::events::script_workdir(script)})
+                            }))
                             .unwrap_or(Value::Null);
                         &decoded_input
                     } else {
@@ -828,7 +922,7 @@ pub(crate) fn capture(
                     let mut observation = call(
                         if name == "exec" { "exec_command" } else { name },
                         input,
-                        None,
+                        codex_step(payload),
                         hash.clone(),
                     );
                     bind_source_context(&mut observation, index.cwd.as_deref());
@@ -858,9 +952,25 @@ pub(crate) fn capture(
     }
 }
 
+/// An explicit complete identity is evidence. A turn ID, item ID, ordinal or
+/// neighboring usage record alone cannot identify the model response.
+fn codex_step(payload: &Value) -> Option<ActivityStepId> {
+    let ids = ["thread_id", "session_id", "turn_id", "response_id"]
+        .map(|key| field(payload, key).filter(|id| !id.is_empty() && id.len() <= 4096));
+    let [Some(thread), Some(session), Some(turn), Some(response)] = ids else {
+        return None;
+    };
+    Some(ActivityStepId::Codex([
+        thread.into(),
+        session.into(),
+        turn.into(),
+        response.into(),
+    ]))
+}
+
 fn bind_source_context(observation: &mut Observation, cwd: Option<&str>) {
     for command in &mut observation.commands {
-        if let Command::Read(fingerprint, _) = command {
+        if let Command::Read(fingerprint, _) | Command::Search(fingerprint, _) = command {
             *fingerprint = digest(
                 &serde_json::to_vec(&(&*fingerprint, cwd.filter(|path| path.len() <= 4096)))
                     .expect("source read context serializes"),
@@ -929,6 +1039,7 @@ pub(crate) fn classify_reads(
                 matches!(
                     command,
                     Command::Mutation
+                        | Command::Stage
                         | Command::Ambiguous
                         | Command::Unknown
                         | Command::Commit
@@ -954,7 +1065,7 @@ pub(crate) fn classify_reads(
             continue;
         }
         for command in &observation.commands {
-            if let Command::Read(fingerprint, _) = command {
+            if let Command::Read(fingerprint, _) | Command::Search(fingerprint, _) = command {
                 if let Some((previous_compact, previous_end)) = reads.get(fingerprint)
                     && *previous_end < row.position.offset
                     && observation.completed

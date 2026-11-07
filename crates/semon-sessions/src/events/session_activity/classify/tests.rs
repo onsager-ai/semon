@@ -622,3 +622,289 @@ fn relative_read_fingerprints_include_working_directory_without_storing_it() {
     classify_reads(&mut rows, &[]);
     assert!(rows[1].observation.waste.is_none());
 }
+
+#[test]
+fn literal_shell_wrappers_and_safe_change_compounds_table() {
+    let pr = "https://github.com/example/project/pull/42";
+    let commit = "[topic abc1234] synthetic";
+    let cases = [
+        (
+            "gh pr create --title 'literal $title' --body 'synthetic'",
+            pr,
+            1,
+        ),
+        ("cd /synthetic && gh pr create --title synthetic", pr, 1),
+        (
+            "bash -lc 'cd /synthetic && gh pr create --body synthetic'",
+            pr,
+            1,
+        ),
+        (
+            "git add file && git -c user.name=Example commit -m synthetic",
+            commit,
+            1,
+        ),
+        (
+            "git commit -m synthetic",
+            "[topic (root-commit) abc1234] synthetic",
+            1,
+        ),
+        (
+            "git add file && git commit -m synthetic && git push",
+            "[topic abc1234] synthetic\nTo https://github.com/example/project.git\n abc1234..def5678 topic -> topic",
+            2,
+        ),
+        ("cat file && gh pr create", pr, 0),
+        ("printf decoy; gh pr create", pr, 0),
+        ("gh pr create; gh pr create", pr, 0),
+        ("bash -lc 'gh pr create; echo decoy'", pr, 0),
+        ("bash -lc 'gh pr create $(unknown)'", pr, 0),
+        ("gh pr create > file", pr, 0),
+    ];
+    for (command, output, count) in cases {
+        for name in ["Bash", "exec_command", "functions.exec_command"] {
+            let observation =
+                observed(name, command, json!({"exit_code":0,"output":output}), false);
+            assert_eq!(observation.changes.len(), count, "{name}: {command}");
+        }
+    }
+}
+
+#[test]
+fn native_and_shell_read_selection_coverage_table() {
+    let cases = [
+        (
+            "Read",
+            json!({"file_path":"/synthetic/file","offset":1,"limit":5}),
+            json!("body"),
+        ),
+        (
+            "functions.Read",
+            json!({"file_path":"/synthetic/file","pages":"1-2"}),
+            json!([{"type":"text","text":"body"}]),
+        ),
+        (
+            "Bash",
+            json!({"command":"sed -n '1,5p' file"}),
+            json!("body"),
+        ),
+        ("Bash", json!({"command":"cat file"}), json!("body")),
+        (
+            "exec_command",
+            json!({"cmd":"bash -lc 'cat file'"}),
+            json!({"exit_code":0,"output":"body"}),
+        ),
+        (
+            "exec_command",
+            json!({"cmd":"cd /synthetic && sed -n '1,5p' file"}),
+            json!({"exit_code":0,"output":"body"}),
+        ),
+        (
+            "exec_command",
+            json!({"cmd":"rg --files src"}),
+            json!({"exit_code":0,"output":"src/file"}),
+        ),
+        (
+            "exec_command",
+            json!({"cmd":"rg -n needle file"}),
+            json!({"exit_code":0,"output":"1:needle"}),
+        ),
+        (
+            "exec_command",
+            json!({"cmd":"bash -lc 'rg -n needle file'"}),
+            json!({"exit_code":0,"output":"1:needle"}),
+        ),
+        (
+            "Grep",
+            json!({"pattern":"needle","path":"/synthetic"}),
+            json!("file:needle"),
+        ),
+    ];
+    for (name, input, output) in cases {
+        let mut rows = Vec::new();
+        for offset in [10, 30] {
+            let mut observation = call(name, &input, None, "hash".into());
+            observation.envelopes = name.contains("exec_command");
+            finish(&mut observation, &output, false, None, None, "hash".into());
+            rows.push(located(offset, observation));
+        }
+        classify_reads(&mut rows, &[]);
+        assert_eq!(
+            rows[1].observation.waste,
+            Some(WasteKind::RedundantRead),
+            "{name} {input}"
+        );
+        rows[1].observation.waste = None;
+        classify_reads(&mut rows, &[("synthetic".into(), 20)]);
+        assert_eq!(
+            rows[1].observation.waste,
+            Some(WasteKind::Refill),
+            "{name} {input}"
+        );
+    }
+    for (name, command, output) in [
+        (
+            "exec_command",
+            "rg needle file",
+            json!({"exit_code":1,"output":""}),
+        ),
+        (
+            "exec_command",
+            "bash -lc 'rg needle file'",
+            json!({"metadata":{"exit_code":1},"output":""}),
+        ),
+        (
+            "exec_command",
+            "cd /synthetic && grep needle file",
+            json!({"exit_code":1,"output":""}),
+        ),
+        (
+            "exec_command",
+            "rg needle file",
+            json!("Wall time: 0.1000 seconds\nProcess exited with code 1\nOutput:\n"),
+        ),
+    ] {
+        let observation = observed(name, command, output, false);
+        assert!(observation.empty_search, "{command}");
+        assert!(observation.waste.is_none());
+    }
+    for (name, text) in [("Grep", "No matches found"), ("Glob", "No files found")] {
+        let mut observation = call(name, &json!({"pattern":"needle"}), None, "hash".into());
+        finish(
+            &mut observation,
+            &json!(text),
+            false,
+            None,
+            None,
+            "hash".into(),
+        );
+        assert!(observation.empty_search);
+    }
+}
+
+#[test]
+fn request_blobs_do_not_duplicate_tools_or_break_exact_claude_ownership() {
+    for reverse in [false, true] {
+        let mut index = FileIndex::default();
+        let call = json!({"type":"tool_use","id":"call","name":"Bash","input":{"command":"cd /synthetic && gh pr create --title synthetic"}});
+        let assistant = json!({"type":"assistant","message":{"id":"message","role":"assistant","content":[call.clone()]}});
+        let blob =
+            json!({"type":"api-request-blob","message":{"role":"assistant","content":[call]}});
+        let mut records = if reverse {
+            vec![blob, assistant]
+        } else {
+            vec![assistant, blob]
+        };
+        records.push(json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call","content":"https://github.com/example/project/pull/42"}]}}));
+        for (n, record) in records.iter().enumerate() {
+            crate::events::claude(&mut index, record, n as u64 * 100);
+            capture(
+                &mut index,
+                "claude",
+                record,
+                n as u64 * 100,
+                &serde_json::to_vec(record).unwrap(),
+            );
+        }
+        let events: Vec<_> = index
+            .events
+            .iter()
+            .filter(|event| event.k == Kind::Tool)
+            .collect();
+        assert_eq!(events.len(), 1);
+        let observation = events[0].activity_observation.as_ref().unwrap();
+        assert_eq!(
+            observation.step_id,
+            Some(ActivityStepId::Claude("message".into()))
+        );
+        assert!(observation.completed);
+        assert_eq!(observation.changes.len(), 1);
+    }
+}
+
+#[test]
+fn codex_capture_requires_complete_explicit_identity_and_preserves_script_workdir() {
+    for (identity, expected) in [
+        (json!({"turn_id":"turn"}), None),
+        (
+            json!({"thread_id":"thread","session_id":"session","turn_id":"turn","response_id":"response"}),
+            Some(ActivityStepId::Codex([
+                "thread".into(),
+                "session".into(),
+                "turn".into(),
+                "response".into(),
+            ])),
+        ),
+    ] {
+        let mut index = FileIndex::default();
+        let mut payload = json!({"type":"custom_tool_call","call_id":"call","name":"exec","input":"text(await tools.exec_command({cmd:'cat file',workdir:'/synthetic'}))"});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(identity.as_object().unwrap().clone());
+        let records = [
+            json!({"type":"response_item","payload":payload}),
+            json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":"{\"exit_code\":0,\"output\":\"body\"}"}]}}),
+        ];
+        for (n, record) in records.iter().enumerate() {
+            crate::events::codex(&mut index, record, n as u64 * 100);
+            capture(
+                &mut index,
+                "codex",
+                record,
+                n as u64 * 100,
+                &serde_json::to_vec(record).unwrap(),
+            );
+        }
+        let observation = index.events[0].activity_observation.as_ref().unwrap();
+        assert_eq!(observation.step_id, expected);
+        assert!(observation.completed);
+        let mut other = call(
+            "exec_command",
+            &json!({"cmd":"cat file","workdir":"/other"}),
+            None,
+            "hash".into(),
+        );
+        bind_source_context(&mut other, None);
+        assert_ne!(observation.commands, other.commands);
+        assert!(
+            !serde_json::to_string(observation)
+                .unwrap()
+                .contains("/synthetic")
+        );
+    }
+}
+
+#[test]
+fn repeated_or_conflicting_native_call_ids_still_refuse_attribution() {
+    for name in ["Bash", "Read"] {
+        let mut index = FileIndex::default();
+        let input = if name == "Bash" {
+            json!({"command":"git commit -m synthetic"})
+        } else {
+            json!({"file_path":"file"})
+        };
+        let records = [
+            json!({"type":"assistant","message":{"id":"first","content":[{"type":"tool_use","id":"repeated","name":name,"input":input}]}}),
+            json!({"type":"assistant","message":{"id":"second","content":[{"type":"tool_use","id":"repeated","name":name,"input":input}]}}),
+            json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"repeated","content":"[topic abc1234] synthetic"}]}}),
+        ];
+        for (n, record) in records.iter().enumerate() {
+            crate::events::claude(&mut index, record, n as u64 * 100);
+            capture(
+                &mut index,
+                "claude",
+                record,
+                n as u64 * 100,
+                &serde_json::to_vec(record).unwrap(),
+            );
+        }
+        assert!(
+            index
+                .events
+                .iter()
+                .filter_map(|event| event.activity_observation.as_ref())
+                .all(|observation| !observation.completed && observation.changes.is_empty())
+        );
+    }
+}
