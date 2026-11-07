@@ -60,12 +60,8 @@ pub(super) fn read(
     {
         return Err(unavailable("Selected Catalog source mismatch"));
     }
-    if options.scan_window
-        && !options.all
-        && !crate::overview_repair::query_window_context_current(&snapshot, options, key, now)
-            .map_err(unavailable)?
-    {
-        return Err(unavailable("Incomplete file-window activity cohort"));
+    if !EventCache::selected_roles_current(&snapshot, &row.sources).map_err(unavailable)? {
+        return Err(unavailable("Selected activity source roles changed"));
     }
     let saved = row
         .query

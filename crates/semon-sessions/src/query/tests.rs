@@ -6586,10 +6586,72 @@ fn activity_pages_keep_native_ids_global_across_machines() {
 }
 
 #[test]
+fn activity_cold_direct_call_does_not_prepare_unrelated_sources() {
+    for listed_first in [false, true] {
+        let home = Home::new("activity-selected-cold");
+        for n in 0..192 {
+            let id = format!("session-{n:03}");
+            let mut records = vec![human(&id, ts(1, 0), "Synthetic prompt")];
+            for minute in 1..=8 {
+                records.push(assistant(
+                    &id,
+                    ts(1, minute),
+                    vec![text("Synthetic response")],
+                ));
+            }
+            home.top(&id, &records);
+        }
+        if listed_first {
+            call(
+                &mut Query::new(home.options.clone()),
+                "list_sessions",
+                json!({"limit":1000}),
+            );
+        }
+        crate::selected_read::take_accounting();
+        let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let control = crate::SelectedReadControl::default().with_limits(1000, 64 * 1024 * 1024);
+        let page = {
+            let _scope = crate::selected_read::Scope::enter(&control);
+            call(
+                &mut Query::new(home.options.clone()),
+                "get_session_activity",
+                json!({"id":"session-000","limit":5}),
+            )
+        };
+        let loaded = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+        let (charged, peak_rows, peak_bytes) = crate::selected_read::take_accounting();
+        eprintln!(
+            "selected activity listed_first={listed_first} sources=192 index_loads={loaded} charged_rows={charged} peak_rows={peak_rows} peak_bytes={peak_bytes}"
+        );
+        assert!(loaded <= 2, "unrelated native rows were decoded");
+        assert!(charged <= 1000);
+        assert_eq!(page["items"].as_array().unwrap().len(), 5);
+        let next = call(
+            &mut Query::new(home.options.clone()),
+            "get_session_activity",
+            json!({"id":"session-000","limit":5,"generation":page["generation"],"cursor":page["next_cursor"]}),
+        );
+        assert_eq!(next["items"].as_array().unwrap().len(), 3);
+        assert_eq!(next["generation"], page["generation"]);
+        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
+            .unwrap();
+        let projections: i64 = db
+            .query_row(
+                "SELECT count(*) FROM session_activity_projections",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projections, 1);
+    }
+}
+
+#[test]
 fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
-    // Same synthetic workload, ordinary 64-seed admission versus adaptive
-    // splitting under a deliberately small request ceiling. Neither changes
-    // the production limits, and both begin with a prior listing's index.
+    // A fresh activity process must read only the selected projection from a
+    // listing-created index. Unrelated native preparation exceeds the smaller
+    // control, even though the selected twelve-step session fits comfortably.
     let home = Home::new("activity-batches");
     for n in 0..144 {
         let sid = format!("session-{n:03}");
@@ -6603,7 +6665,7 @@ fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
         }
         home.top(&sid, &records);
     }
-    for (label, rows) in [("ordinary", 131_072), ("adaptive", 100)] {
+    for (label, rows) in [("ordinary", 131_072), ("selected", 1000)] {
         let mut options = home.options.clone();
         options.cache = home.root.join(format!("{label}.json"));
         let listed = call(
@@ -6629,9 +6691,10 @@ fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
             "activity batches {label}: sessions=144 steps=1728 total_charged_rows={total} peak_attempt_rows={peak_rows} peak_attempt_bytes={peak_bytes} wall_ms={}",
             elapsed.as_millis()
         );
-        if label == "adaptive" {
-            assert!(total > rows, "workload must exceed the cumulative ceiling");
-        }
+        assert!(
+            total <= rows,
+            "unrelated sources consumed selected accounting"
+        );
         assert!(
             peak_rows <= rows + 1,
             "each attempt must stop before allocating its overflow row"
@@ -6646,7 +6709,7 @@ fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(current, 144, "all batches must be durably published");
+        assert_eq!(current, 1, "only the selected session may be published");
         let next = call(
             &mut Query::new(options),
             "get_session_activity",

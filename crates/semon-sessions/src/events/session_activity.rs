@@ -18,7 +18,7 @@ use crate::{claude_usage::Shared, pricing};
 pub(crate) mod analytics;
 pub(crate) mod classify;
 
-pub(crate) const ACTIVITY_RULES_VERSION: u32 = 3;
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 4;
 const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is

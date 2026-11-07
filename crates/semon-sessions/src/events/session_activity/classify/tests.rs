@@ -941,6 +941,169 @@ fn terminal_failed_mutations_end_overlap_barriers_without_preserving_old_reads()
 }
 
 #[test]
+fn native_output_projection_and_literal_pr_bodies_table() {
+    let pr = "warning: synthetic\nCreating pull request for topic into main\nhttps://github.com/example/project/pull/42\n";
+    for command in [
+        "gh pr create --base main --title synthetic --body-file /synthetic/body",
+        "cd /synthetic && gh pr create --base main --title synthetic --body-file /synthetic/body",
+        "gh pr create --title synthetic --body-file - <<'BODY'\nLiteral $value and `text`\nBODY\n",
+        "cat > /synthetic/body <<'BODY'\nLiteral body\nBODY\ngh pr create --title synthetic --body-file /synthetic/body",
+    ] {
+        for projected in [false, true] {
+            let mut index = FileIndex::default();
+            let script = format!(
+                "const result = await tools.exec_command({{cmd:{},workdir:'/synthetic'}}); text(result.output);",
+                serde_json::to_string(command).unwrap()
+            );
+            let records = if projected {
+                vec![
+                    json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call","name":"exec","input":script}}),
+                    json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":pr}]}}),
+                ]
+            } else {
+                vec![
+                    json!({"type":"assistant","message":{"id":"message","content":[{"type":"tool_use","id":"call","name":"Bash","input":{"command":command}}]}}),
+                    json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call","content":pr}]}}),
+                ]
+            };
+            for (n, record) in records.iter().enumerate() {
+                if projected {
+                    crate::events::codex(&mut index, record, n as u64 * 100);
+                } else {
+                    crate::events::claude(&mut index, record, n as u64 * 100);
+                }
+                capture(
+                    &mut index,
+                    if projected { "codex" } else { "claude" },
+                    record,
+                    n as u64 * 100,
+                    &serde_json::to_vec(record).unwrap(),
+                );
+            }
+            let observation = index
+                .events
+                .iter()
+                .find_map(|event| event.activity_observation.as_ref())
+                .unwrap();
+            assert_eq!(
+                observation.changes.len(),
+                1,
+                "projected={projected} {command}"
+            );
+            assert!(observation.completed);
+        }
+    }
+    for script in [
+        "const result = await tools.exec_command({cmd:'cat file'}); text(result.output);",
+        "let result = await tools.exec_command({cmd:'cat file'}); text(result.output);",
+    ] {
+        assert!(crate::events::activity_output_source(script));
+        assert!(!crate::events::result_source(script));
+    }
+    for script in [
+        "const result = await tools.exec_command({cmd:'cat file'}); text(other.output);",
+        "const result = await tools.exec_command({cmd:'cat file'}); result.output='forged'; text(result.output);",
+        "const result = await tools.exec_command({cmd:'cat file'}); text(result.output || 'forged');",
+        "const result = await tools.exec_command({cmd:'cat file'}); text(result.output); text('forged');",
+    ] {
+        assert!(!crate::events::activity_output_source(script), "{script}");
+    }
+}
+
+#[test]
+fn code_mode_printed_output_repeats_native_shell_reads() {
+    for command in [
+        "cat file",
+        "sed -n '1,20p' file",
+        "nl -ba file | sed -n '1,20p'",
+        "bash -lc 'rg needle file'",
+    ] {
+        let mut index = FileIndex::default();
+        for n in 0..2 {
+            let script = format!(
+                "const result = await tools.exec_command({{cmd:{},workdir:'/synthetic'}}); text(result.output);",
+                serde_json::to_string(command).unwrap()
+            );
+            let records = [
+                json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":format!("call-{n}"),"name":"exec","input":script}}),
+                json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":format!("call-{n}"),"output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":"synthetic output"}]}}),
+            ];
+            for (at, record) in records.iter().enumerate() {
+                let offset = (n * 200 + at * 100) as u64;
+                crate::events::codex(&mut index, record, offset);
+                capture(
+                    &mut index,
+                    "codex",
+                    record,
+                    offset,
+                    &serde_json::to_vec(record).unwrap(),
+                );
+            }
+        }
+        let mut rows = index
+            .events
+            .iter()
+            .filter_map(|event| {
+                event
+                    .activity_observation
+                    .clone()
+                    .map(|observation| LocatedObservation {
+                        position: super::SourcePosition {
+                            source: "synthetic".into(),
+                            offset: event.o,
+                        },
+                        timestamp: event.t,
+                        result_offset: event.r.as_ref().map(|reply| reply.o),
+                        observation,
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        classify_reads(&mut rows, &[]);
+        assert_eq!(
+            rows[1].observation.waste,
+            Some(WasteKind::RedundantRead),
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn selected_text_pipelines_are_reads_but_arbitrary_filters_remain_unknown() {
+    for command in [
+        "nl -ba file | sed -n '1,20p'",
+        "cat file | head -n 20",
+        "rg needle file | head -n 20",
+    ] {
+        let mut rows = vec![
+            located(10, observed("Bash", command, json!("body"), false)),
+            located(30, observed("Bash", command, json!("body"), false)),
+        ];
+        classify_reads(&mut rows, &[]);
+        assert_eq!(
+            rows[1].observation.waste,
+            Some(WasteKind::RedundantRead),
+            "{command}"
+        );
+    }
+    for command in [
+        "cat file | sh",
+        "cat file | head; touch file",
+        "gh pr create | cat",
+        "cat file <<EOF\nbody\nEOF",
+    ] {
+        let observation = observed("Bash", command, json!("body"), false);
+        assert!(
+            observation
+                .commands
+                .iter()
+                .any(|command| matches!(command, Command::Unknown | Command::Ambiguous)),
+            "{command}"
+        );
+    }
+}
+
+#[test]
 fn directory_changes_cannot_reuse_bare_or_relative_read_selections() {
     for commands in [
         ["cat file", "cd /other", "cat file"],

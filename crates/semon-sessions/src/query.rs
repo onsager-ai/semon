@@ -1013,12 +1013,45 @@ impl Query {
         }
         let _activity_scope =
             (tool == "get_session_activity").then(crate::selected_read::Scope::ensure);
-        if tool == "get_session_activity" && !self.embedded {
-            for (_, evidence) in &self.sources.machines {
-                evidence
-                    .prepare_activity_catalog(now)
-                    .map_err(|error| QueryError::io(&error))?;
+        if tool == "get_session_activity" && !self.embedded && !self.sources.is_retired() {
+            let id = args["id"].as_str().expect("validated activity id");
+            let mut selected = None;
+            for (source_key, evidence) in &self.sources.machines {
+                if let Some(key) = evidence
+                    .activity_target(id, now)
+                    .map_err(|error| QueryError::io(&error))?
+                {
+                    if selected.is_some() {
+                        return Err(QueryError::new(
+                            "id_conflict",
+                            format!("two machines both have {id}"),
+                        ));
+                    }
+                    selected = Some((
+                        if source_key.is_empty() {
+                            "local"
+                        } else {
+                            source_key
+                        }
+                        .to_owned(),
+                        key,
+                    ));
+                }
             }
+            let Some((source_key, key)) = selected else {
+                return Err(QueryError::unknown_session(id));
+            };
+            let mut focused = args.clone();
+            focused["id"] = json!(key);
+            return self.execute_selected_at(
+                &source_key,
+                &key,
+                tool,
+                &focused,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                now,
+            );
         }
         if !self.embedded
             && !postgres

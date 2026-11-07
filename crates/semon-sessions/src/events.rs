@@ -90,7 +90,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v30: Claude usage retains the selected native observation offset.
 /// v31: source-bound typed activity observations, without tool input/output.
 /// v32: assistant-only Claude tools and expanded typed activity classification.
-pub(crate) const CACHE_VERSION: u32 = 32;
+/// v33: literal PR bodies and code-mode printed-output activity observations.
+pub(crate) const CACHE_VERSION: u32 = 33;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -5156,6 +5157,15 @@ fn directly_prints_call(tokens: &[String], operation: &str, stringify: bool) -> 
 }
 
 fn assigned_result_is_printed(tokens: &[String], operation: &str, stringify: bool) -> bool {
+    assigned_result_projection(tokens, operation, stringify, false)
+}
+
+fn assigned_result_projection(
+    tokens: &[String],
+    operation: &str,
+    stringify: bool,
+    output_only: bool,
+) -> bool {
     if tokens.len() < 10
         || !matches!(tokens[0].as_str(), "i:const" | "i:let")
         || !tokens[1].starts_with("i:")
@@ -5202,6 +5212,14 @@ fn assigned_result_is_printed(tokens: &[String], operation: &str, stringify: boo
         return false;
     }
     at += 1;
+    if output_only {
+        if tokens.get(at).map(String::as_str) != Some("p:.")
+            || tokens.get(at + 1).map(String::as_str) != Some("i:output")
+        {
+            return false;
+        }
+        at += 2;
+    }
     let closes = if stringify { 2 } else { 1 };
     for _ in 0..closes {
         if tokens.get(at).map(String::as_str) != Some("p:)") {
@@ -5242,6 +5260,20 @@ fn result_source(script: &str) -> bool {
         || directly_prints_call(&tokens, operation, true)
         || assigned_result_is_printed(&tokens, operation, false)
         || assigned_result_is_printed(&tokens, operation, true)
+}
+
+/// Activity may inspect one literal exec call whose raw output is printed.
+/// This does not grant native process/session outcome ownership: that requires
+/// the complete exec result accepted by `result_source`.
+pub(crate) fn activity_output_source(script: &str) -> bool {
+    if script.len() > RESULT_SOURCE_BYTES_MAX
+        || script_flags(script) & (EXEC_COMMAND | STDIN | AMBIGUOUS_COMMANDS) != EXEC_COMMAND
+        || script_command(script).is_none()
+    {
+        return false;
+    }
+    source_tokens(script)
+        .is_some_and(|tokens| assigned_result_projection(&tokens, "exec_command", false, true))
 }
 
 /// A code-mode script's output that is one exec result. Unknown and non-text

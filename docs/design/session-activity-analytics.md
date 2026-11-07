@@ -39,10 +39,10 @@ thrash and retain those three step identities. Fewer than three steps cannot
 form a thrash window. Derive each physical session independently; interleaving
 parent and child steps must never create a family thrash window.
 
-Schema 39 stores a session activity header, ordered step rows keyed by
+Schema 40 stores a session activity header, ordered step rows keyed by
 `(session_key, generation, ordinal)`, separate ordered compaction rows, compact summary metadata, and typed
 change facts keyed by session, generation and stable identity.
-Parser 32 retains the exact last Claude usage observation offset alongside the
+Parser 33 retains the exact last Claude usage observation offset alongside the
 existing message ID and assistant UUIDs. The producer uses its established file
 merge order and copied-record ownership map; Codex reads only model-accepted
 facts whose normalized source receipt matches the selected consumed ledger.
@@ -68,7 +68,7 @@ generation. Unknown prices remain unknown. Step arrays stay out of cached descri
 relationships rather than entering the stable description cache. Catalog version 7
 and the semantic recipe bind this output.
 
-Rules version 3 classifies the first waste per step in this order: orchestration
+Rules version 4 classifies the first waste per step in this order: orchestration
 wait, explicit tool failure, refill after compaction, redundant read. Failures
 retain path-not-found and malformed-command (Tooling), rate/auth/network/server
 failure (External), or other failure (Unmapped). Empty search is an independent
@@ -115,21 +115,17 @@ records remain unlinked; multiple responses can belong to one turn.
 No command text, stdout/stderr or result body is persisted. Facts publish and
 advance pricing generations atomically with the step projection.
 
-Cold local activity preparation uses the existing persisted Catalog producer
-in bounded slices. Each completed slice releases its decoded index and text
-payloads before the next slice receives a fresh 131,072-row/64 MiB accounting
-budget. Cold preparation keeps its ordinary 64-seed cohort. An accounting
-refusal discards only the unpublished attempt's payloads, reopens the scoped
-writer, and halves that seed cohort; durable pending source intents and exact
-native checkpoints remain. A one-seed over-budget component still refuses.
-Cancellation, expiry and source conflicts never trigger this split.
-The enclosing request retains its deadline and cancellation, and the
-final detail page keeps its independent bounded admission. This is a live
-preparation bound, not a cumulative limit on all sessions in a normal window.
-A terminal selected-read limit propagates without treating the durable Event
-Index as broken or falling back to an in-memory scoped producer. The limits are
-unchanged; activity observations increase row size, while the underlying limit
-predates this projection.
+Cold local activity preparation discovers native identities in bounded directory
+pages, then derives only the requested identity's sources and exact lineage
+closure. Claude identities come from native paths; Codex reads at most 64 KiB of
+the first record. Unrelated event indexes are never decoded. The same focused
+Catalog producer publishes through the existing partial-publication claims,
+source-ledger and generation fences; this does not declare a complete global
+Catalog. A direct cold call needs no prior listing. The request's unchanged
+131,072-row/64 MiB accounting ceiling, deadline and cancellation cover the selected
+derivation and page. Oversized selected components still refuse. A terminal
+selected-read limit propagates without treating the durable Event Index as broken
+or falling back to an in-memory scoped producer.
 
 Query JSON and MCP expose the same `get_session_activity` tool. Select `kind`
 `steps` (default) or `facts`, with `limit` 1–256 (default 100). Responses contain

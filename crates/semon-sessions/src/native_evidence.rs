@@ -1352,6 +1352,121 @@ impl NativeEvidence {
         Ok(prepared)
     }
 
+    /// Resolve a cold focused activity request using native identity metadata,
+    /// then derive only its exact identity/lineage closure. Discovery retains
+    /// one bounded page; unrelated native event rows are never decoded.
+    pub(crate) fn activity_target(&self, requested: &str, now: i64) -> io::Result<Option<String>> {
+        let mut selectors = BTreeSet::from([requested.to_owned()]);
+        if let Some((harness, id)) = requested.trim_start_matches(':').split_once(':')
+            && matches!(harness, "claude" | "codex" | "copilot")
+        {
+            selectors.insert(id.to_owned());
+        }
+        let mut inputs = BTreeSet::new();
+        let mut work = lock(&self.work);
+        if self.closed.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "native query source is closed",
+            ));
+        }
+        self.prepare_events(&mut work, now)?;
+        let cache = work.events.as_mut().expect("event cache initialized");
+        loop {
+            let before = (inputs.len(), selectors.len());
+            let mut discovery = crate::inputs::Discovery::default();
+            loop {
+                crate::selected_read::check()?;
+                let page = discovery.next(&self.options, 64, 512)?;
+                for input in page.inputs {
+                    let Some((id, parent)) = activity_source_identity(&input, &self.options)?
+                    else {
+                        continue;
+                    };
+                    if selectors.contains(&id)
+                        || parent
+                            .as_ref()
+                            .is_some_and(|parent| selectors.contains(parent))
+                    {
+                        selectors.insert(id);
+                        selectors.extend(parent);
+                        inputs.insert(input);
+                        if inputs.len() > 64 {
+                            return Err(io::Error::new(
+                                io::ErrorKind::WouldBlock,
+                                "Selected activity lineage exceeds its source bound",
+                            ));
+                        }
+                    }
+                }
+                if page.complete {
+                    break;
+                }
+            }
+            if inputs.is_empty() {
+                return Ok(None);
+            }
+            if (inputs.len(), selectors.len()) != before {
+                continue;
+            }
+            let prepared = self
+                .prepare_catalog_component(cache, inputs.iter().cloned().collect(), now)?
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "Selected activity lineage is incomplete",
+                    )
+                })?;
+            for row in &prepared.rows {
+                selectors.insert(row.key.clone());
+                selectors.extend(row.native_ids.iter().cloned());
+            }
+            selectors.extend(prepared.native_parents().into_iter().map(|(_, id)| id));
+            selectors.extend(
+                prepared
+                    .lineage_dependencies
+                    .iter()
+                    .map(|(_, id)| id.clone()),
+            );
+            for row in &prepared.rows {
+                for source in &row.sources {
+                    if let Some(input) = catalog_input(&source.path, &self.options) {
+                        inputs.insert(input);
+                    }
+                }
+            }
+            if (inputs.len(), selectors.len()) != before {
+                // Newly discovered parents/aliases may have appeared earlier in
+                // directory order. Resolve them before publishing any owner.
+                continue;
+            }
+            let target = prepared
+                .rows
+                .iter()
+                .find(|row| row.key == requested)
+                .or_else(|| {
+                    prepared
+                        .rows
+                        .iter()
+                        .find(|row| row.native_ids.iter().any(|id| id == requested))
+                })
+                .map(|row| row.key.clone());
+            let Some(target) = target else {
+                return Ok(None);
+            };
+            if cache.publish_partial_catalog_fenced(&prepared)?.0 != crate::events::Outcome::Written
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Selected activity publication changed",
+                ));
+            }
+            cache.release_published_indexes();
+            *write_lock(&self.query) = None;
+            return Ok(Some(target));
+        }
+    }
+
     /// Refresh an existing current owner through the shared Catalog producer.
     /// Cold discovery and unsupported role/identity changes still reconcile.
     pub(crate) fn local_query_target(&self, key: &str, now: i64) -> io::Result<Option<String>> {
@@ -1395,35 +1510,6 @@ impl NativeEvidence {
                     "Selected native source changed during refresh",
                 )
             })
-    }
-
-    /// Cold local activity calls use the existing source coordinator to publish
-    /// a qualified generation before entering the metadata-only pager.
-    pub(crate) fn prepare_activity_catalog(&self, now: i64) -> io::Result<()> {
-        let mut work = lock(&self.work);
-        loop {
-            crate::selected_read::check()?;
-            if self.closed.load(Ordering::Acquire) {
-                return Err(io::Error::new(
-                    io::ErrorKind::BrokenPipe,
-                    "native query source is closed",
-                ));
-            }
-            let complete = {
-                let _batch = crate::selected_read::Scope::producer_batch()?;
-                let result = self.refresh_catalog(&mut work, now);
-                // The next slice cannot inherit decoded payloads admitted by
-                // this budget, including when preparation refused partway.
-                if let Some(cache) = &mut work.events {
-                    cache.release_published_indexes();
-                }
-                work.texts.release_published_derivations();
-                result?
-            };
-            if complete {
-                return Ok(());
-            }
-        }
     }
 
     /// Prepare/publish Catalog evidence directly, independent of Viewer state.
@@ -2252,6 +2338,64 @@ fn node_pids(nodes: &[Node], output: &mut BTreeSet<u32>) {
             output.insert(pid);
         }
         node_pids(&node.children, output);
+    }
+}
+
+fn activity_source_identity(
+    input: &crate::Input,
+    options: &Options,
+) -> io::Result<Option<(String, Option<String>)>> {
+    use std::io::{BufRead, BufReader, Read};
+    let path = input.full_path(options);
+    match input.root {
+        crate::InputRoot::Claude => {
+            let Some(stem) = path.file_stem().and_then(|name| name.to_str()) else {
+                return Ok(None);
+            };
+            let parent = path
+                .parent()
+                .filter(|parent| parent.file_name().is_some_and(|name| name == "subagents"))
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .map(str::to_owned);
+            Ok(Some((
+                if parent.is_some() {
+                    stem.strip_prefix("agent-").unwrap_or(stem)
+                } else {
+                    stem
+                }
+                .to_owned(),
+                parent,
+            )))
+        }
+        crate::InputRoot::Codex => {
+            if !crate::facts::MachineFacts::of(options).codex_rollout_is_current(options, &path) {
+                return Ok(None);
+            }
+            let file = crate::sealed::LogFile::open(&path)?;
+            let mut reader = BufReader::new(file.take(65537));
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line)?;
+            if line.len() > 65536 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "Native identity header exceeds selected discovery bound",
+                ));
+            }
+            let header = serde_json::from_slice::<serde_json::Value>(&line)
+                .ok()
+                .map(|record| crate::native_header::CodexHeader::from_record(&record))
+                .unwrap_or_default();
+            Ok(header
+                .native_id(&path)
+                .map(|id| (id, header.metadata.parent_thread)))
+        }
+        crate::InputRoot::Copilot => Ok(path
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .map(|id| (id.to_owned(), None))),
     }
 }
 
