@@ -274,7 +274,8 @@ impl PgProjectionStore {
         read: impl FnOnce(crate::model::QueryData) -> T,
     ) -> Result<T, StorageError> {
         ensure(&self.namespace, namespace)?;
-        let _facts_lock = crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?;
+        let _facts_lock =
+            crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?;
         let runtime = crate::native_evidence::query_runtime_generation(options).map_err(backend)?;
         let tx = self.begin(namespace).await?;
         let generation = tx.catalog_generation(namespace).await?;
@@ -445,7 +446,8 @@ impl PgProjectionStore {
         now: i64,
     ) -> Result<crate::model::QueryData, StorageError> {
         ensure(&self.namespace, namespace)?;
-        let _facts_lock = crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?;
+        let _facts_lock =
+            crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?;
         let inputs = crate::inputs(options).map_err(backend)?;
         let _source_locks = inputs
             .iter()
