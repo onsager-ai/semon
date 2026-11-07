@@ -296,14 +296,16 @@ impl PgProjectionStore {
             files.push((name.to_owned(), ledger, index));
         }
         tx.commit(namespace).await?;
-        let mut cache = EventCache::from_projection(files, claims);
+        let nonempty = inputs.iter().filter(|input| files.iter().any(|(path, ledger, _)| *path == input.full_path(options).to_string_lossy() && ledger.stat.size > 0)).cloned().collect::<Vec<_>>();
+        let mut cache = EventCache::from_projection(files, claims.clone());
         let options = Options {
             scan_window: false,
             ..options.clone()
         };
-        let prepared =
-            crate::model::prepare_sources(&options, &mut cache, inputs, crate::model::now_ms())
+        let mut prepared =
+            crate::model::prepare_sources(&options, &mut cache, &nonempty, crate::model::now_ms())
                 .map_err(backend)?;
+        prepared.claims = claims;
         if prepared.rows.is_empty() {
             let tx = self.begin(namespace).await?;
             tx.tx
