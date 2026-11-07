@@ -245,9 +245,11 @@ fn emit_catalog_publish_attempt(
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-// Contract fence: older owned indexes rebuild together. Version 37 adds
-// compact activity summaries for bounded family publication.
-pub(crate) const SCHEMA_VERSION: i64 = 37;
+// Contract fence: older owned indexes rebuild together. Version 38 combines
+// the per-database storage version stamp (current stores do not run storage
+// DDL), the ledger epoch on source ledgers and published sources, and compact
+// activity summaries for bounded family publication.
+pub(crate) const SCHEMA_VERSION: i64 = 38;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -314,6 +316,7 @@ CREATE TABLE IF NOT EXISTS session_catalog_sources (
     harness TEXT NOT NULL,
     native_id TEXT NOT NULL,
     source_path TEXT NOT NULL,
+    ledger_epoch INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY(session_key, source_path)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS session_catalog_native ON session_catalog_sources(harness, native_id, session_key);
@@ -384,7 +387,8 @@ CREATE TABLE IF NOT EXISTS files (
     rate_limits TEXT,
     codex_native_usage TEXT,
     codex_pricing_fingerprint TEXT,
-    copilot TEXT
+    copilot TEXT,
+    epoch INTEGER NOT NULL DEFAULT 0
 ) STRICT;
 CREATE TABLE IF NOT EXISTS events (
     file_id INTEGER NOT NULL,
@@ -1251,6 +1255,7 @@ fn enqueue_dependency_tx(tx: &Transaction<'_>, harness: &str, id: &str) -> rusql
 
 pub(crate) fn enqueue_facts(
     options: &crate::Options,
+    namespace: &crate::storage::Namespace,
     before: &crate::Facts,
     after: &crate::Facts,
     push_driven: bool,
@@ -1259,6 +1264,7 @@ pub(crate) fn enqueue_facts(
         .map_err(|error| io::Error::other(error.to_string()))?;
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    crate::storage::sqlite::bind_connection(&tx, namespace).map_err(io::Error::other)?;
     let global = before.hostname != after.hostname
         || before.home != after.home
         || before.offline_since != after.offline_since;
@@ -1554,6 +1560,7 @@ fn resume_runtime_input_tx(
 
 pub(crate) fn begin_source_write(
     options: &crate::Options,
+    namespace: &crate::storage::Namespace,
     input: &crate::Input,
 ) -> io::Result<(i64, Option<crate::source_change::AppendEvidence>)> {
     let (store, _) = SqliteStore::attempt_scoped(&super::EventCache::path(&options.cache), true)
@@ -1561,6 +1568,7 @@ pub(crate) fn begin_source_write(
     let path = input.full_path(options).to_string_lossy().into_owned();
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    crate::storage::sqlite::bind_connection(&tx, namespace).map_err(io::Error::other)?;
     let previous = read_append_evidence(&tx, &path).map_err(io::Error::other)?;
     #[cfg(test)]
     if let Some(hook) = BEFORE_SOURCE_INVALIDATION.with(|hook| hook.borrow_mut().take()) {
@@ -1618,6 +1626,7 @@ pub(crate) fn begin_source_write(
 
 pub(crate) fn complete_source_write(
     options: &crate::Options,
+    namespace: &crate::storage::Namespace,
     input: &crate::Input,
     revision: i64,
     evidence: Option<&crate::source_change::AppendEvidence>,
@@ -1627,6 +1636,7 @@ pub(crate) fn complete_source_write(
     let path = input.full_path(options).to_string_lossy().into_owned();
     let tx = Transaction::new_unchecked(&store.connection, TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    crate::storage::sqlite::bind_connection(&tx, namespace).map_err(io::Error::other)?;
     let actual: Option<i64> = tx
         .query_row(
             "SELECT revision FROM session_catalog_invalidations WHERE source_path=?1",
@@ -2709,6 +2719,39 @@ impl IndexStore for SqliteStore {
     ) -> Result<Option<Vec<ReportedRunSnapshot>>, StoreError> {
         self.write_runs(runs, stamp).map_err(failure)
     }
+
+    fn bind_storage_namespace(&mut self, namespace: &str) -> Result<String, StoreError> {
+        // A binding is written once and never changed: an already bound,
+        // stamped database needs no writer reservation to report it.
+        let (stamp, bound) = crate::storage::sqlite::binding(&self.connection).map_err(failure)?;
+        if let Some(bound) = bound
+            && stamp.as_deref() == Some(crate::storage::sqlite::stamp().as_str())
+        {
+            return Ok(bound);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        require_current_sql(&transaction).map_err(failure)?;
+        let (stamp, bound) = crate::storage::sqlite::binding(&transaction).map_err(failure)?;
+        if stamp.as_deref() != Some(crate::storage::sqlite::stamp().as_str()) {
+            return Err(StoreError::Failed(
+                "unsupported session store: version stamp".into(),
+            ));
+        }
+        if let Some(bound) = bound {
+            return Ok(bound);
+        }
+        transaction
+            .execute(
+                "INSERT INTO meta(key,value) VALUES('storage_namespace',?1)",
+                [namespace],
+            )
+            .map_err(failure)?;
+        transaction.commit().map_err(failure)?;
+        Ok(namespace.to_owned())
+    }
 }
 
 /// Source observation work survives a process restart. The journal contains
@@ -3346,7 +3389,9 @@ impl SqliteStore {
                     let mut remove_sources = transaction
                         .prepare("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1")
                         .map_err(failure)?;
-                    let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path) VALUES (?1,?2,?3,?4) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id").map_err(failure)?;
+                    // The publication fence above proved each source's ledger equal to
+                    // the committed one, so its epoch is the one the unit derives from.
+                    let mut put_source = transaction.prepare("INSERT INTO session_catalog_sources(session_key,harness,native_id,source_path,ledger_epoch) VALUES (?1,?2,?3,?4,(SELECT epoch FROM files WHERE path=?4)) ON CONFLICT(session_key,source_path) DO UPDATE SET lifecycle='current',harness=excluded.harness,native_id=excluded.native_id,ledger_epoch=excluded.ledger_epoch").map_err(failure)?;
                     metadata_measurements.record("statements", statements_started, 1);
                     let bulk_changed = if batch_bytes.is_some() {
                         if producer.is_some() {
@@ -4883,8 +4928,8 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
                     transaction.execute_batch(ddl)?;
                 }
                 transaction.execute(
-                    "INSERT INTO meta(key,value) VALUES('cache_version',?1)",
-                    [CACHE_VERSION.to_string()],
+                    "INSERT INTO meta(key,value) VALUES('cache_version',?1),('storage_stamp',?2)",
+                    [CACHE_VERSION.to_string(), crate::storage::sqlite::stamp()],
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
                 initialized = true;
@@ -5627,6 +5672,35 @@ fn gap(what: &str) -> rusqlite::Error {
 
 // ---- Reading -------------------------------------------------------------------------------
 
+/// The committed ledger of one source path and its epoch, for projection tag
+/// checks. The epoch advances each time the ledger is replaced, not appended.
+pub(crate) fn committed_ledger(
+    connection: &Connection,
+    path: &str,
+) -> rusqlite::Result<Option<(Ledger, i64)>> {
+    let Some((_, ledger)) = ledger_row(connection, path)? else {
+        return Ok(None);
+    };
+    let epoch = connection
+        .prepare_cached("SELECT epoch FROM files WHERE path=?1")?
+        .query_row([path], |row| row.get(0))?;
+    Ok(Some((ledger, epoch)))
+}
+
+/// The ledger epoch a Current unit's source was published at.
+pub(crate) fn published_epoch(
+    connection: &Connection,
+    session_key: &str,
+    path: &str,
+) -> rusqlite::Result<Option<i64>> {
+    connection
+        .prepare_cached(
+            "SELECT ledger_epoch FROM session_catalog_sources WHERE session_key=?1 AND source_path=?2",
+        )?
+        .query_row([session_key, path], |row| row.get(0))
+        .optional()
+}
+
 fn ledger_row(connection: &Connection, path: &str) -> rusqlite::Result<Option<(i64, Ledger)>> {
     connection
         .prepare_cached(
@@ -6083,6 +6157,9 @@ fn write_index_changes_measured(
         index,
         measurements,
     )?;
+    if changes.is_none() {
+        advance_ledger_epoch(transaction, path)?;
+    }
     native_usage::write(transaction, path, ledger, index)?;
     let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')", [path])?;
@@ -6143,6 +6220,24 @@ fn write_index_changes_measured(
         super::INDEX_WRITTEN_ROWS
             .with(|n| n.set(n.get() + (written_after - written_before) as u64));
     }
+    Ok(())
+}
+
+/// A ledger written without append changes replaces the source's rows, so it
+/// takes a fresh epoch from one database-wide counter. A file row removed and
+/// written again can therefore never reuse an epoch a publication recorded.
+fn advance_ledger_epoch(transaction: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
+    transaction
+        .prepare_cached(
+            "INSERT INTO meta(key,value) VALUES('ledger_epoch','1') \
+             ON CONFLICT(key) DO UPDATE SET value=CAST(CAST(meta.value AS INTEGER)+1 AS TEXT)",
+        )?
+        .execute([])?;
+    transaction
+        .prepare_cached(
+            "UPDATE files SET epoch=(SELECT CAST(value AS INTEGER) FROM meta WHERE key='ledger_epoch') WHERE path=?1",
+        )?
+        .execute([path])?;
     Ok(())
 }
 
@@ -7030,13 +7125,13 @@ mod tests {
                 .unwrap()
         }));
         drop(initial);
-        let proof = crate::session_source_proof(&options, "codex", relative)
+        let proof = crate::session_source_proof(&options, "", "codex", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&options, "codex", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&options, "", &proof, &ready).unwrap();
         fs::remove_file(original).unwrap();
         let replacement = options
             .claude_home
@@ -8592,13 +8687,13 @@ mod tests {
             let key = "native-cx-01";
             let old = old_rows.iter().find(|row| row.key == key).unwrap();
             let relative = "sessions/2026/09/24/rollout-native-cx-01.jsonl";
-            let proof = crate::session_source_proof(&options, "codex", relative)
+            let proof = crate::session_source_proof(&options, "", "codex", relative)
                 .unwrap()
                 .unwrap();
             let ready = crate::source_projection_ready(&options, "codex", relative)
                 .unwrap()
                 .unwrap();
-            crate::retain_source_event_index(&options, &proof, &ready).unwrap();
+            crate::retain_source_event_index(&options, "", &proof, &ready).unwrap();
             let original =
                 Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
             let original_recipes = catalog_recipes(&original, "session_slots", key);
@@ -8717,13 +8812,13 @@ mod tests {
             }));
             evidence.retire();
             drop(evidence);
-            let proof = crate::session_source_proof(&options, "codex", relative)
+            let proof = crate::session_source_proof(&options, "", "codex", relative)
                 .unwrap()
                 .unwrap();
             let ready = crate::source_projection_ready(&options, "codex", relative)
                 .unwrap()
                 .unwrap();
-            crate::retain_source_event_index(&options, &proof, &ready).unwrap();
+            crate::retain_source_event_index(&options, "", &proof, &ready).unwrap();
             let original =
                 Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
             let expected = catalog_recipes(&original, "session_slots", key);
@@ -8927,13 +9022,13 @@ mod tests {
             2,
             "real native clear marker must establish complete owner closure"
         );
-        let proof = crate::session_source_proof(&options, "claude", relative)
+        let proof = crate::session_source_proof(&options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&options, "claude", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&options, "", &proof, &ready).unwrap();
         let seed = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
         let original_recipes = catalog_recipes(&seed, "session_slots", &old.key)
             .into_iter()
@@ -10392,7 +10487,7 @@ mod tests {
                 proc_root: root.join("proc"),
                 ..crate::Options::default()
             };
-            let error = crate::local_facts(&options).unwrap_err();
+            let error = crate::local_facts(&options, "").unwrap_err();
             assert!(error.to_string().contains(reason), "{name}: {error}");
             unchanged();
             let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();

@@ -39,6 +39,7 @@ pub(crate) struct RuntimeInputEvidence {
 /// The caller must verify that `generation` matches its previous custody proof;
 /// pass None for untrusted writes, replacements, or ambiguous generations.
 pub struct SessionSourceWrite {
+    namespace: crate::storage::Namespace,
     _lock: SourceLock,
     options: Options,
     input: Input,
@@ -52,6 +53,7 @@ pub struct SessionSourceWrite {
 impl SessionSourceWrite {
     pub fn begin(
         options: &Options,
+        source_key: &str,
         input: &Input,
         generation: Option<&str>,
         from: u64,
@@ -62,13 +64,16 @@ impl SessionSourceWrite {
                 "write intent outside native log allowlist",
             ));
         }
+        let namespace = crate::storage::Namespace::new(source_key).map_err(io::Error::other)?;
         let source_lock = SourceLock::acquire(options, &lock_key(options, input), true)?;
+        drop(crate::storage::sqlite::open_index(options, &namespace).map_err(io::Error::other)?);
         crate::events::store::resume_runtime_input(
             options,
             input.full_path(options).to_string_lossy().as_ref(),
         )?;
         let before = Stat::of(&input.full_path(options)).ok();
-        let (revision, previous) = crate::events::store::begin_source_write(options, input)?;
+        let (revision, previous) =
+            crate::events::store::begin_source_write(options, &namespace, input)?;
         if input.root == crate::InputRoot::Claude && input.path.starts_with("sessions/") {
             let previous_id = crate::read_regular_at_most(&input.full_path(options), 65536)
                 .ok()
@@ -86,6 +91,7 @@ impl SessionSourceWrite {
             }
         }
         Ok(Self {
+            namespace,
             _lock: source_lock,
             options: options.clone(),
             input: input.clone(),
@@ -128,6 +134,7 @@ impl SessionSourceWrite {
         };
         crate::events::store::complete_source_write(
             &self.options,
+            &self.namespace,
             &self.input,
             self.revision,
             evidence.as_ref(),
@@ -220,6 +227,7 @@ impl Drop for SourceLock {
 /// A facts update holds the same durable intent and OS-fence contract as Raw.
 /// The producer processes only changed native/runtime dependency selectors.
 pub struct SessionFactsWrite {
+    namespace: crate::storage::Namespace,
     options: Options,
     before: crate::Facts,
     wanted: crate::Facts,
@@ -227,19 +235,25 @@ pub struct SessionFactsWrite {
     _lock: SourceLock,
 }
 impl SessionFactsWrite {
-    pub fn begin(options: &Options, wanted: &crate::Facts) -> io::Result<Self> {
-        Self::begin_with_source_journal(options, wanted, true)
+    pub fn begin(options: &Options, source_key: &str, wanted: &crate::Facts) -> io::Result<Self> {
+        Self::begin_with_source_journal(options, source_key, wanted, true)
     }
     // The reference receiver journals facts, but its Raw transport does not
     // journal every mutation. Keep ordinary metadata discovery for that reader.
-    pub(crate) fn begin_observed(options: &Options, wanted: &crate::Facts) -> io::Result<Self> {
-        Self::begin_with_source_journal(options, wanted, false)
+    pub(crate) fn begin_observed(
+        options: &Options,
+        source_key: &str,
+        wanted: &crate::Facts,
+    ) -> io::Result<Self> {
+        Self::begin_with_source_journal(options, source_key, wanted, false)
     }
     fn begin_with_source_journal(
         options: &Options,
+        source_key: &str,
         wanted: &crate::Facts,
         push_driven: bool,
     ) -> io::Result<Self> {
+        let namespace = crate::storage::Namespace::new(source_key).map_err(io::Error::other)?;
         #[cfg(feature = "test-hooks")]
         crate::test_hooks::run(options, "facts_write_wait");
         let source_lock = SourceLock::acquire(options, "facts", true)?;
@@ -248,8 +262,9 @@ impl SessionFactsWrite {
             .as_ref()
             .and_then(|path| crate::read_facts(path).ok())
             .unwrap_or_default();
-        crate::events::store::enqueue_facts(options, &before, wanted, push_driven)?;
+        crate::events::store::enqueue_facts(options, &namespace, &before, wanted, push_driven)?;
         Ok(Self {
+            namespace,
             options: options.clone(),
             before,
             wanted: wanted.clone(),
@@ -262,6 +277,7 @@ impl SessionFactsWrite {
         // facts update, including recovery from a lost acknowledgment.
         crate::events::store::enqueue_facts(
             &self.options,
+            &self.namespace,
             &self.before,
             &self.wanted,
             self.push_driven,

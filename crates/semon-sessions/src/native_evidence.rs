@@ -22,6 +22,10 @@ pub(crate) use runtime::RuntimeObservations;
 
 pub(crate) struct NativeEvidence {
     pub(crate) options: Options,
+    /// The source namespace its host configured. The producer binds its
+    /// database to it and refuses a database bound to another namespace.
+    /// Only test constructions observe a database without a host namespace.
+    pub(crate) storage: crate::storage::runtime::RuntimeStore,
     pub(crate) work: Mutex<Work>,
     pub(crate) catalog_demand: AtomicBool,
     catalog_search: Mutex<CatalogSearchQueue>,
@@ -230,7 +234,10 @@ impl SessionSources {
         Self::from_evidence(
             machines
                 .into_iter()
-                .map(|(key, options)| (key, NativeEvidence::new(options)))
+                .map(|(key, options)| {
+                    let evidence = NativeEvidence::for_source_key(&key, options);
+                    (key, evidence)
+                })
                 .collect(),
         )
     }
@@ -239,10 +246,10 @@ impl SessionSources {
     /// reopening indexes or creating a second writer. The host transfers their
     /// lifecycle ownership into this machine set: retiring or closing this set
     /// also retires the original observers. This grants no source authority.
-    pub fn from_catalog_observers(machines: Vec<(String, &crate::SessionCatalogObserver)>) -> Self {
+    pub fn from_catalog_observers(machines: Vec<&crate::SessionCatalogObserver>) -> Self {
         let views: Vec<_> = machines
             .into_iter()
-            .map(|(key, observer)| (key, observer.shared_view()))
+            .map(|observer| (observer.source_key().to_owned(), observer.shared_view()))
             .collect();
         let sources = Self::from_evidence(
             views
@@ -256,7 +263,7 @@ impl SessionSources {
         sources
     }
 
-    fn from_evidence(machines: Vec<(String, Arc<NativeEvidence>)>) -> Self {
+    pub(crate) fn from_evidence(machines: Vec<(String, Arc<NativeEvidence>)>) -> Self {
         let local = machines.len() == 1 && machines[0].0.is_empty();
         let inventory = crate::SessionSourceInventory::new(machines.iter().map(|(key, _)| {
             let key = if local {
@@ -441,10 +448,37 @@ impl SessionSources {
 }
 
 impl NativeEvidence {
-    /// Construction is lazy: no source, cache or refresh worker is opened.
+    /// A producer without a host namespace, for tests that observe one
+    /// database directly; it neither binds nor checks a binding.
+    #[cfg(test)]
     pub(crate) fn new(options: Options) -> Arc<Self> {
+        Self::construct(None, options)
+    }
+
+    /// Construction is lazy: no source, cache or refresh worker is opened.
+    #[cfg(test)]
+    pub(crate) fn for_source(namespace: crate::storage::Namespace, options: Options) -> Arc<Self> {
+        Self::construct(Some(namespace), options)
+    }
+
+    pub(crate) fn for_source_key(key: &str, options: Options) -> Arc<Self> {
+        let storage = crate::storage::runtime::RuntimeStore::for_source(&options, key);
+        Self::with_storage(options, storage)
+    }
+
+    #[cfg(test)]
+    fn construct(namespace: Option<crate::storage::Namespace>, options: Options) -> Arc<Self> {
+        let storage = crate::storage::runtime::RuntimeStore::sqlite(&options, namespace);
+        Self::with_storage(options, storage)
+    }
+
+    pub(crate) fn with_storage(
+        options: Options,
+        storage: crate::storage::runtime::RuntimeStore,
+    ) -> Arc<Self> {
         Arc::new(Self {
             options,
+            storage,
             work: Mutex::default(),
             catalog_demand: AtomicBool::new(false),
             catalog_search: Mutex::default(),
@@ -613,8 +647,35 @@ impl NativeEvidence {
         self.closed.store(true, Ordering::Release);
     }
 
+    /// The source key this producer was configured under, in tests.
+    #[cfg(test)]
+    pub(crate) fn source_key(&self) -> String {
+        self.storage
+            .namespace()
+            .map_or_else(String::new, |namespace| namespace.as_str().to_owned())
+    }
+
+    /// The key a test reads this producer's database under.
+    #[cfg(test)]
+    pub(crate) fn read_key(&self) -> String {
+        self.storage
+            .namespace()
+            .map_or("local", |namespace| namespace.binding())
+            .to_owned()
+    }
+
+    /// Open main's single scoped writer, bound to the host's namespace.
+    pub(crate) fn open_index(&self) -> io::Result<EventCache> {
+        self.storage.open_index()
+    }
+
     /// Initialize the source index and publish a bounded cold catalog page.
+    pub(crate) fn validate_configuration(&self) -> io::Result<()> {
+        self.storage.validate()
+    }
+
     pub(crate) fn prepare_events(&self, work: &mut Work, now: i64) -> io::Result<()> {
+        self.validate_configuration()?;
         if work
             .events
             .as_ref()
@@ -624,12 +685,10 @@ impl NativeEvidence {
         }
         if work.events.is_none() {
             let _timing = crate::native_timing::Phase::new(&self.options.cache, "index_open");
-            work.events = Some(match EventCache::open_scoped(&self.options.cache) {
+            work.events = Some(match self.open_index() {
                 Ok(cache) => cache,
-                Err(error) if self.catalog_demand.load(Ordering::Relaxed) => {
-                    return Err(io::Error::other(error));
-                }
-                Err(_) => EventCache::open(&self.options.cache).map_err(io::Error::other)?,
+                Err(error) if self.catalog_demand.load(Ordering::Relaxed) => return Err(error),
+                Err(_) => self.storage.open_native_index()?,
             });
         }
         let cache = work.events.as_mut().expect("event cache initialized");
@@ -1347,6 +1406,29 @@ impl NativeEvidence {
         now: i64,
         before_build: impl FnMut() -> io::Result<()>,
     ) -> io::Result<bool> {
+        #[cfg(feature = "postgres")]
+        if self.storage.is_postgres() {
+            let mut before_build = before_build;
+            before_build()?;
+            if !work.postgres_pending.is_empty() {
+                self.storage.publish_sources(&work.postgres_pending)?;
+                work.postgres_pending.clear();
+                return Ok(false);
+            }
+            let discovery = work.postgres_discovery.get_or_insert_with(Default::default);
+            let page = discovery.next(&self.options, 64, 512)?;
+            // Keep a refused cohort for retry: advancing discovery must never
+            // turn an unpublished source into an apparently completed scan.
+            work.postgres_pending.extend(page.inputs);
+            if !work.postgres_pending.is_empty() {
+                self.storage.publish_sources(&work.postgres_pending)?;
+                work.postgres_pending.clear();
+            }
+            if page.complete {
+                work.postgres_discovery = None;
+            }
+            return Ok(page.complete);
+        }
         let complete = self.refresh_catalog_step(work, now, before_build)?;
         if complete {
             lock(&self.catalog_search).close();
@@ -1767,6 +1849,10 @@ impl NativeEvidence {
     /// Native queries refresh this owner's source cache and coherent cohort.
     /// This owner has no compatibility transport or background refresh workers.
     pub(crate) fn catalog_continuation(&self, work: &Work) -> bool {
+        #[cfg(feature = "postgres")]
+        if self.storage.is_postgres() {
+            return work.postgres_discovery.is_some() || !work.postgres_pending.is_empty();
+        }
         work.tree_repair_pending
             || work.cold_catalog.is_some()
             || work.audit.is_some()
@@ -1775,6 +1861,10 @@ impl NativeEvidence {
     }
 
     pub(crate) fn catalog_pending(&self, work: &Work) -> bool {
+        #[cfg(feature = "postgres")]
+        if self.storage.is_postgres() {
+            return self.catalog_continuation(work);
+        }
         work.tree_repair_pending
             || work
                 .events
@@ -1787,6 +1877,18 @@ impl NativeEvidence {
     }
 
     pub(crate) fn query_at(&self, now: i64) -> io::Result<Arc<model::QueryData>> {
+        #[cfg(feature = "postgres")]
+        if self.storage.is_postgres() {
+            self.validate_configuration()?;
+            let _work = lock(&self.work);
+            if self.closed.load(Ordering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "native query source is closed",
+                ));
+            }
+            return self.storage.query(now).map(Arc::new);
+        }
         let retained = || {
             self.closed.load(Ordering::Acquire).then(|| {
                 read_lock(&self.query)
@@ -1853,6 +1955,10 @@ fn write_lock<T>(value: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 /// The single native source index and producer state shared by supported readers.
 #[derive(Default)]
 pub(crate) struct Work {
+    #[cfg(feature = "postgres")]
+    postgres_discovery: Option<crate::inputs::Discovery>,
+    #[cfg(feature = "postgres")]
+    postgres_pending: Vec<crate::Input>,
     pub(crate) events: Option<EventCache>,
     pub(crate) texts: Texts,
     pub(crate) catalog_snapshot: Option<Snapshot>,
@@ -2693,7 +2799,7 @@ mod catalog_owner_tests {
         };
         let runtime_path = runtime.full_path(&evidence.options);
         let intent =
-            crate::SessionSourceWrite::begin(&evidence.options, &runtime, None, 0).unwrap();
+            crate::SessionSourceWrite::begin(&evidence.options, "", &runtime, None, 0).unwrap();
         fs::write(
             &runtime_path,
             r#"{"sessionId":"selected","name":"pending runtime"}"#,
@@ -3435,7 +3541,7 @@ mod catalog_owner_tests {
             path: "projects/project/parent/subagents/agent-child.meta.json".into(),
         };
         let sidecar_path = sidecar.full_path(&options);
-        let intent = crate::SessionSourceWrite::begin(&options, &sidecar, None, 0).unwrap();
+        let intent = crate::SessionSourceWrite::begin(&options, "", &sidecar, None, 0).unwrap();
         fs::write(
             &sidecar_path,
             r#"{"description":"first-sidecar-label","toolUseId":"first-launch"}"#,

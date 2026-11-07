@@ -1558,7 +1558,7 @@ fn push_running(
         let lock = hold.share();
         let Some(facts) = stop.run("facts", move || {
             let _lock = lock;
-            semon_sessions::local_facts(&sessions).map_err(|error| error.to_string())
+            semon_sessions::local_facts(&sessions, "").map_err(|error| error.to_string())
         })?
         else {
             return Ok(());
@@ -1770,7 +1770,7 @@ impl FactsWorker {
     fn start(sessions: &Options, lock: Arc<StateLock>) -> Result<Self> {
         let sessions = sessions.clone();
         Self::start_with(lock, move || {
-            let mut source = FactsSource::new(&sessions);
+            let mut source = FactsSource::new(&sessions, "");
             move || source.facts().map_err(|error| error.to_string())
         })
     }

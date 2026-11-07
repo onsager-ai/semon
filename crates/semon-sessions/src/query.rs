@@ -1000,6 +1000,17 @@ impl Query {
     }
 
     fn execute_at(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
+        let postgres = self
+            .sources
+            .machines
+            .iter()
+            .any(|(_, source)| source.storage.is_postgres());
+        if postgres && tool == "get_session_activity" {
+            return Err(QueryError::new(
+                "capability_unavailable",
+                "Session activity is not yet available on PostgreSQL",
+            ));
+        }
         let _activity_scope =
             (tool == "get_session_activity").then(crate::selected_read::Scope::ensure);
         if tool == "get_session_activity" && !self.embedded {
@@ -1010,6 +1021,7 @@ impl Query {
             }
         }
         if !self.embedded
+            && !postgres
             && self.sources.machines.len() == 1
             && !self.sources.is_retired()
             && matches!(
@@ -1041,6 +1053,7 @@ impl Query {
             }
         }
         if !self.embedded
+            && !postgres
             && self.sources.machines.len() > 1
             && !self.sources.is_retired()
             && matches!(
@@ -1219,6 +1232,12 @@ impl Query {
             .ok_or_else(|| QueryError::unknown_session(catalog_key))?;
         if self.sources.is_retired() {
             return Err(QueryError::new("io", "native query source is closed"));
+        }
+        if evidence.storage.is_postgres() {
+            return Err(QueryError::new(
+                "capability_unavailable",
+                "Focused Query recipes are not yet available on PostgreSQL",
+            ));
         }
         let mut focused_args = args.clone();
         if self.sources.machines.len() > 1 {

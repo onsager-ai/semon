@@ -327,12 +327,15 @@ impl DirtyRows {
 
 /// One file's event index and the facts the model needs about it. Metadata
 /// only (risk:secret).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct FileIndex {
+    #[serde(skip)]
     pub(crate) dirty_rows: Option<DirtyRows>,
     /// Only this parse batch; durable facts and identities stay in the Event Index.
+    #[serde(skip)]
     pub(crate) native_usage_observations: Option<Vec<store::native_usage::Observation>>,
     pub(crate) tree_summary: Option<crate::native_tree::Summary>,
+    #[serde(skip)]
     pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
     pub(crate) marker_index: Option<crate::native_marker::Index>,
     pub(crate) handoff_index: Option<crate::native_handoff::Index>,
@@ -340,13 +343,16 @@ pub(crate) struct FileIndex {
     pub(crate) codex_header: Option<crate::native_header::CodexHeader>,
     /// A subagent sidecar has its own generation, separate from the native log.
     pub(crate) claude_sidecar: Option<crate::native_sidecar::ClaudeSidecar>,
+    #[serde(skip)]
     pub(crate) events: Vec<Event>,
     /// Transcript-only items the model's rules never read: thinking blocks,
     /// harness text added before a Codex prompt, and completed Codex operations.
     /// Kept apart from `events` so they can't change how events collapse or
     /// turns split.
+    #[serde(skip)]
     pub(crate) extras: Vec<Event>,
     /// Harness signals indexed for analysis, never shown in the transcript.
+    #[serde(skip)]
     pub(crate) signals: Vec<Signal>,
     /// Tool calls still waiting for a result: call id -> event index.
     pub(crate) pending: BTreeMap<String, usize>,
@@ -382,7 +388,7 @@ pub(crate) struct FileIndex {
 /// A harness signal that isn't a transcript event: indexed for analysis only,
 /// never shown in the transcript. Content-free like the rest of the cache:
 /// `n` holds only a short enum-like tag, never log text.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Signal {
     pub(crate) k: SignalKind,
     /// Byte offset of the line.
@@ -1302,6 +1308,11 @@ pub(crate) trait IndexStore: Send {
         runs: &[crate::facts::ReportedRunSnapshot],
         stamp: &ReportedFileStamp,
     ) -> Result<Option<Vec<crate::facts::ReportedRunSnapshot>>, StoreError>;
+
+    /// Bind an unbound database to the logical `namespace` in one writer
+    /// transaction and return the namespace it is bound to afterwards. A
+    /// database already bound to another namespace is returned unchanged.
+    fn bind_storage_namespace(&mut self, namespace: &str) -> Result<String, StoreError>;
 }
 
 /// One file's index in memory, and the ledger it was read at.
@@ -1321,6 +1332,9 @@ pub(crate) struct EventCache {
     claude_json_stamp: Option<ReportedFileStamp>,
     store: Option<Box<dyn IndexStore>>,
     scoped: bool,
+    /// Claims captured by a non-SQLite producer with its normalized indexes.
+    #[cfg(feature = "postgres")]
+    projection_claims: Option<Vec<(String, Option<i64>)>>,
     retention_base: Vec<(String, Option<Ledger>)>,
     /// Source fences for the lazy producer, independently of legacy reopen state.
     lock_cache: Option<PathBuf>,
@@ -1460,6 +1474,29 @@ impl EventCache {
         store::read_selected(connection, sources, native_ids).map(Self::from_loaded)
     }
 
+    /// Request-local native derivation over a PostgreSQL snapshot. All durable
+    /// writes remain with the PostgreSQL producer; this cache owns no SQL store.
+    #[cfg(feature = "postgres")]
+    pub(crate) fn from_projection(
+        files: Vec<(String, Ledger, FileIndex)>,
+        claims: Vec<(String, Option<i64>)>,
+    ) -> Self {
+        let mut cache = Self::from_loaded(Loaded {
+            files,
+            ..Loaded::default()
+        });
+        cache.projection_claims = Some(claims);
+        cache
+    }
+
+    pub(crate) fn projection_only(&self) -> bool {
+        #[cfg(feature = "postgres")]
+        if self.projection_claims.is_some() {
+            return true;
+        }
+        false
+    }
+
     pub(crate) fn selected_index(&self, path: &Path) -> Option<Arc<FileIndex>> {
         self.files
             .get(path.to_str()?)
@@ -1559,6 +1596,11 @@ impl EventCache {
 
     pub(crate) fn scoped_store_lost(&self) -> bool {
         self.scoped && self.store.is_none()
+    }
+
+    /// Whether this index writes through to a durable store.
+    pub(crate) fn persistent(&self) -> bool {
+        self.store.is_some()
     }
 
     pub(crate) fn is_scoped(&self) -> bool {
@@ -1860,6 +1902,19 @@ impl EventCache {
         &self,
         paths: &[String],
     ) -> io::Result<Vec<(String, Option<i64>)>> {
+        #[cfg(feature = "postgres")]
+        if let Some(claims) = &self.projection_claims {
+            return paths
+                .iter()
+                .map(|path| {
+                    claims
+                        .iter()
+                        .find(|(saved, _)| saved == path)
+                        .cloned()
+                        .ok_or_else(|| io::Error::other("projection source was not captured"))
+                })
+                .collect();
+        }
         self.store
             .as_ref()
             .ok_or_else(|| io::Error::other("scoped producer store unavailable"))?
@@ -2199,6 +2254,16 @@ impl EventCache {
             // A failed cache publication never changes the serving snapshot.
             let _ = store.save_session_descriptions(&descriptions);
         }
+    }
+
+    /// See [`IndexStore::bind_storage_namespace`]; it uses the writer's own
+    /// connection, so binding adds no second writer.
+    pub(crate) fn bind_storage_namespace(&mut self, namespace: &str) -> io::Result<String> {
+        self.store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("session index store unavailable"))?
+            .bind_storage_namespace(namespace)
+            .map_err(|error| io::Error::other(error.to_string()))
     }
 
     pub(crate) fn session_catalog_generation(&self) -> Option<String> {
@@ -2792,6 +2857,33 @@ pub(crate) fn crate_id_for_relocation(path: &Path) -> Option<String> {
     crate::codex_native_id_prefix(path, Stat::of(path).ok()?.size)
         .ok()
         .flatten()
+}
+
+/// Reuse the native parser with an explicitly supplied PostgreSQL index base.
+/// No local store is attached, and no SQLite pathname is resolved.
+#[cfg(feature = "postgres")]
+pub(crate) fn scan_postgres_file(
+    path: &Path,
+    harness: &str,
+    previous: Option<(Ledger, FileIndex)>,
+) -> io::Result<(Ledger, FileIndex, bool)> {
+    let loaded = Loaded {
+        files: previous
+            .into_iter()
+            .map(|(ledger, index)| (path.to_string_lossy().into_owned(), ledger, index))
+            .collect(),
+        ..Loaded::default()
+    };
+    let mut cache = EventCache::from_loaded(loaded);
+    let index = scan_file(path, harness, &mut cache, &mut false)?;
+    let ledger = cache
+        .files
+        .get(path.to_string_lossy().as_ref())
+        .ok_or_else(|| io::Error::other("native parser ledger unavailable"))?
+        .ledger
+        .clone();
+    let append = !cache.replaced.contains(path.to_string_lossy().as_ref());
+    Ok((ledger, (*index).clone(), append))
 }
 
 pub(crate) fn scan_file(
@@ -9392,7 +9484,7 @@ mod tests {
             for _ in 0..5 {
                 let from = fs::metadata(&path).unwrap().len();
                 let intent =
-                    crate::SessionSourceWrite::begin(&options, &input, Some(generation), from)
+                    crate::SessionSourceWrite::begin(&options, "", &input, Some(generation), from)
                         .unwrap();
                 let lock_key = crate::source_change::lock_key(&options, &input);
                 let lock_path = options
@@ -9438,7 +9530,8 @@ mod tests {
             // A crash between Raw fsync and evidence commit withdraws trust.
             let from = fs::metadata(&path).unwrap().len();
             let intent =
-                crate::SessionSourceWrite::begin(&options, &input, Some(generation), from).unwrap();
+                crate::SessionSourceWrite::begin(&options, "", &input, Some(generation), from)
+                    .unwrap();
             let mut writer = fs::OpenOptions::new().append(true).open(&path).unwrap();
             writer.write_all(append.as_bytes()).unwrap();
             writer.sync_all().unwrap();
@@ -9452,7 +9545,8 @@ mod tests {
             // Corrupt continuation words cannot bless the previous prefix.
             let from = fs::metadata(&path).unwrap().len();
             let intent =
-                crate::SessionSourceWrite::begin(&options, &input, Some(generation), from).unwrap();
+                crate::SessionSourceWrite::begin(&options, "", &input, Some(generation), from)
+                    .unwrap();
             writer.write_all(append.as_bytes()).unwrap();
             writer.sync_all().unwrap();
             intent.complete(from + append.len() as u64).unwrap();

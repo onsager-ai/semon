@@ -296,7 +296,7 @@ mod tests {
             serde_json::from_str(&self.encoded().unwrap()).unwrap()
         }
         fn proof(&self) -> crate::SessionSourceProof {
-            crate::session_source_proof(&self.options, "claude", RELATIVE)
+            crate::session_source_proof(&self.options, "", "claude", RELATIVE)
                 .unwrap()
                 .unwrap()
         }
@@ -307,7 +307,7 @@ mod tests {
         }
         fn refuse_eviction(&self) {
             assert_eq!(
-                crate::retain_source_event_index(&self.options, &self.proof(), &self.ready()),
+                crate::retain_source_event_index(&self.options, "", &self.proof(), &self.ready()),
                 Err(crate::CatalogIdentityError::ScopeChanged)
             );
         }
@@ -593,7 +593,7 @@ mod tests {
         home.query();
         let proof = home.proof();
         let ready = home.ready();
-        crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&home.options, "", &proof, &ready).unwrap();
         assert!(crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
         let key = format!("archive_event_index:{}", home.path.display());
         let encoded: String = home
@@ -609,7 +609,7 @@ mod tests {
         home.refuse_eviction();
         home.query();
         let ready = home.ready();
-        crate::retain_source_event_index(&home.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&home.options, "", &proof, &ready).unwrap();
         let encoded: String = home
             .connection()
             .query_row("SELECT value FROM meta WHERE key=?1", [&key], |row| {
@@ -662,7 +662,7 @@ mod tests {
             Err(crate::CatalogIdentityError::Unavailable)
         );
         assert_eq!(
-            crate::retain_source_event_index(&home.options, &proof, &ready),
+            crate::retain_source_event_index(&home.options, "", &proof, &ready),
             Err(crate::CatalogIdentityError::Unavailable)
         );
         assert_eq!(

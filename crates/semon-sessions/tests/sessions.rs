@@ -25,7 +25,7 @@ fn native_codex_fork_tree_reports_child_request_usage_without_inherited_counters
         ),
     );
     fixture.write("codex/sessions/child.jsonl", include_str!("../../../tests/fixtures/compatibility/codex-0.159.0-alpha.3/fork/child-turn-rollout.jsonl"));
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     let child = nodes
         .iter()
         .find(|node| node.id == "native-codex-fork-child")
@@ -37,7 +37,7 @@ fn native_codex_fork_tree_reports_child_request_usage_without_inherited_counters
     // the historical file byte-for-byte, including its older usage semantics.
     let old = br#"{"version":3,"files":{"child":{"summary":{"codex_tokens":{"input":999,"output":999}}}}}"#;
     fs::write(&fixture.options.cache, old).unwrap();
-    let reread = collect(&fixture.options).unwrap();
+    let reread = collect(&fixture.options, "").unwrap();
     assert_eq!(
         reread
             .iter()
@@ -215,7 +215,7 @@ fn claude_liveness_dedup_tools_and_secret_boundary() {
             ),
         ],
     );
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     assert_eq!(nodes.len(), 1);
     let node = &nodes[0];
     assert_eq!(node.state, "busy");
@@ -261,12 +261,12 @@ fn subagent_state_follows_parent_tool_result() {
         "claude/projects/project/parent/subagents/agent-one.meta.json",
         &json!({"description":"inspect","toolUseId":"task-1"}).to_string(),
     );
-    let first = collect(&fixture.options).unwrap();
+    let first = collect(&fixture.options, "").unwrap();
     assert_eq!(first[0].children[0].state, "running");
     assert_eq!(first[0].children[0].malformed_lines, 1);
     let mut file = fs::OpenOptions::new().append(true).open(parent).unwrap();
     writeln!(file, "{}", claude_line("parent", vec![result("task-1")], 1)).unwrap();
-    let second = collect(&fixture.options).unwrap();
+    let second = collect(&fixture.options, "").unwrap();
     assert_eq!(second[0].children[0].state, "done");
 }
 
@@ -288,7 +288,7 @@ fn live_shell_status_is_preserved_and_counts_as_an_alive_parent() {
     );
     fixture.options.all = false;
     fixture.options.since = Duration::from_secs(1);
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     assert_eq!(nodes[0].state, "shell");
     assert_eq!(nodes[0].children[0].state, "running");
 }
@@ -307,7 +307,7 @@ fn unreadable_sources_leave_unknown_nodes_and_do_not_abort() {
     let codex = fixture.codex("codex-unreadable", None, &[]);
     fs::set_permissions(&codex, fs::Permissions::from_mode(0o000)).unwrap();
     fixture.claude("good", &[claude_line("good", vec![], 1)]);
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     let claude_node = nodes
         .iter()
         .find(|node| node.id == "claude-unreadable")
@@ -337,7 +337,7 @@ fn claude_skips_and_counts_nul_filled_complete_lines() {
         "claude/projects/project/damaged.jsonl",
         &format!("{first}\n{}\n{last}\n", "\0".repeat(128)),
     );
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     let clean = nodes.iter().find(|node| node.id == "clean").unwrap();
     let damaged = nodes.iter().find(|node| node.id == "damaged").unwrap();
     assert_eq!(damaged.tokens, clean.tokens);
@@ -357,7 +357,7 @@ fn claude_skips_and_counts_nul_filled_complete_lines() {
         1
     );
     assert_eq!(
-        collect(&fixture.options)
+        collect(&fixture.options, "")
             .unwrap()
             .iter()
             .find(|node| node.id == "damaged")
@@ -375,7 +375,7 @@ fn valid_json_non_object_line_is_counted_as_malformed() {
         "claude/projects/project/non-object.jsonl",
         &format!("42\n{}\n", claude_line("non-object", vec![], 1)),
     );
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     assert_eq!(nodes[0].malformed_lines, 1);
     assert_eq!(nodes[0].tokens.output, 1);
 }
@@ -423,7 +423,7 @@ fn codex_subagents_use_thread_ids_and_lock_states() {
     );
     #[cfg(unix)]
     set_lock(&fixture, "parent", true);
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].children.len(), 2);
     let child_a = nodes[0]
@@ -458,7 +458,7 @@ fn codex_subagents_use_thread_ids_and_lock_states() {
         assert_eq!(nodes[0].state, "running");
         assert_eq!(nodes[0].pid, Some(4242));
         fs::remove_file(fixture.options.proc_root.join("locks")).unwrap();
-        assert_eq!(collect(&fixture.options).unwrap()[0].state, "unknown");
+        assert_eq!(collect(&fixture.options, "").unwrap()[0].state, "unknown");
     }
 }
 
@@ -488,7 +488,7 @@ fn codex_skips_and_counts_nul_filled_complete_lines() {
     damaged_bytes.push(b'\n');
     damaged_bytes.extend_from_slice(&bytes[second_newline..]);
     fs::write(path, damaged_bytes).unwrap();
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     let clean = nodes.iter().find(|node| node.id == "clean").unwrap();
     let damaged = nodes.iter().find(|node| node.id == "damaged").unwrap();
     assert_eq!(damaged.tokens, clean.tokens);
@@ -496,7 +496,7 @@ fn codex_skips_and_counts_nul_filled_complete_lines() {
     assert_eq!(damaged.last_activity, clean.last_activity);
     assert_eq!(damaged.malformed_lines, 1);
     assert_eq!(
-        collect(&fixture.options)
+        collect(&fixture.options, "")
             .unwrap()
             .iter()
             .find(|node| node.id == "damaged")
@@ -518,7 +518,7 @@ fn codex_with_damaged_first_line_has_unknown_metadata() {
             codex_line("turn_context", json!({"model":"gpt-test"}))
         ),
     );
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     assert_eq!(nodes.len(), 1);
     assert_eq!(nodes[0].id, id);
     assert_eq!(nodes[0].label, None);
@@ -539,7 +539,7 @@ fn held_old_codex_lock_still_shows_a_live_root() {
     set_lock(&fixture, "old-live", true);
     fixture.options.all = false;
     fixture.options.since = Duration::from_secs(1);
-    let roots = collect(&fixture.options).unwrap();
+    let roots = collect(&fixture.options, "").unwrap();
     assert_eq!(roots.len(), 1);
     assert_eq!(roots[0].id, "old-live");
     assert_eq!(roots[0].state, "running");
@@ -585,7 +585,7 @@ fn links_new_and_old_markers_and_leaves_unmarked_unlinked() {
         codex_line("response_item", json!({"role":"assistant","content":[{"type":"output_text","text":"started"}]})),
         codex_line("event_msg", json!({"type":"user_message","message":"Semon-Parent: claude:claude-parent:skill-id"})),
     ]);
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     let parent = nodes
         .iter()
         .find(|node| node.id == "claude-parent")
@@ -632,7 +632,7 @@ fn links_new_and_old_markers_and_leaves_unmarked_unlinked() {
     let cache = fixture.tree_metadata();
     assert!(!cache.contains(prompt));
     assert_eq!(
-        collect(&fixture.options)
+        collect(&fixture.options, "")
             .unwrap()
             .iter()
             .find(|node| node.id == "claude-parent")
@@ -748,7 +748,7 @@ fn variable_built_handoffs_choose_the_launch_call_and_share_calls() {
         ]);
     }
     for _ in 0..2 {
-        let nodes = collect(&fixture.options).unwrap();
+        let nodes = collect(&fixture.options, "").unwrap();
         for (id, parent, _, _, expected) in cases {
             let parent = nodes.iter().find(|node| node.id == parent).unwrap();
             let child = parent.children.iter().find(|node| node.id == id).unwrap();
@@ -767,9 +767,9 @@ fn window_session_and_json_schema() {
     fixture.claude("older", &[claude_line("older", vec![], 1)]);
     fixture.options.all = false;
     fixture.options.since = Duration::from_secs(1);
-    assert!(collect(&fixture.options).unwrap().is_empty());
+    assert!(collect(&fixture.options, "").unwrap().is_empty());
     fixture.options.session = Some("older".into());
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     assert_eq!(nodes.len(), 1);
     let parsed: Value = serde_json::from_str(&render_json(&nodes)).unwrap();
     assert_eq!(parsed["schema_version"], 1);
@@ -782,22 +782,22 @@ fn window_session_and_json_schema() {
 fn cache_resumes_growth_and_rescans_inode_change() {
     let fixture = Fixture::new();
     let path = fixture.claude("cache", &[claude_line("cache", vec![], 1)]);
-    let first = collect(&fixture.options).unwrap();
+    let first = collect(&fixture.options, "").unwrap();
     assert_eq!(first[0].tokens.output, 1);
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
     writeln!(file, "{}", json!({"timestamp":"2026-09-24T00:00:01Z","message":{"id":"message-2","model":"claude-test","usage":{"input_tokens":1,"output_tokens":3}}})).unwrap();
-    let grown = collect(&fixture.options).unwrap();
+    let grown = collect(&fixture.options, "").unwrap();
     assert_eq!(grown[0].tokens.output, 4);
     let fresh_cache = fixture.root.join("fresh.json");
     let mut fresh_options = fixture.options.clone();
     fresh_options.cache = fresh_cache;
-    assert_eq!(collect(&fresh_options).unwrap()[0].tokens.output, 4);
+    assert_eq!(collect(&fresh_options, "").unwrap()[0].tokens.output, 4);
     let replacement = fixture.write(
         "replacement",
         &format!("{}\n", claude_line("cache", vec![], 9)),
     );
     fs::rename(replacement, path).unwrap();
-    assert_eq!(collect(&fixture.options).unwrap()[0].tokens.output, 9);
+    assert_eq!(collect(&fixture.options, "").unwrap()[0].tokens.output, 9);
 }
 
 #[test]
@@ -811,7 +811,7 @@ fn timestamp_parser_handles_offsets_through_age() {
         "timestamp",
         &[json!({"timestamp":"2026-09-24T08:00:00+08:00","message":{}})],
     );
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     let expected = now.saturating_sub(1_790_208_000);
     assert!(
         nodes[0]
@@ -1340,7 +1340,7 @@ fn planted_secrets_never_reach_the_cache_and_reach_native_query_only_as_their_se
     }
     let evidence =
         json!({"sessions": sessions, "handoffs": handoffs.into_values().collect::<Vec<_>>()});
-    let nodes = collect(&fixture.options).unwrap();
+    let nodes = collect(&fixture.options, "").unwrap();
     let cache = fixture.tree_metadata();
     // The event index's bytes, and its WAL's if it has one: a secret stored
     // in any row would show here as plain UTF-8.
@@ -1472,7 +1472,7 @@ fn native_claude_copied_usage_tree_preserves_observed_and_unknown_owner() {
     let mut options = fixture.options.clone();
     options.all = true;
     for _ in 0..2 {
-        let nodes = collect(&options).unwrap();
+        let nodes = collect(&options, "").unwrap();
         let parent = nodes
             .iter()
             .find(|n| n.id == "native-claude-parent")

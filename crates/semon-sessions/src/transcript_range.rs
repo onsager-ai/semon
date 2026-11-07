@@ -7,14 +7,13 @@ use crate::{
     slot_projection::{SavedSlot, VERSION},
     viewer::{ViewerReply, decoded, query_value},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
 const MAX_LIMIT: usize = 100;
@@ -173,11 +172,8 @@ pub(crate) fn session_turn_anchor_with_gate(
         if let Err(reply) = before_read() {
             return Ok(reply);
         }
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        db.busy_timeout(Duration::from_millis(100))?;
+        let mut db = crate::storage::runtime::RuntimeStore::for_source(options, source_key)
+            .selected_connection(source_key)?;
         let tx = db.transaction()?;
         let identity = match catalog::catalog_selection_in_snapshot(
             options,
@@ -303,11 +299,8 @@ pub(crate) fn session_annotations_with_gate(
         if let Err(reply) = before_read() {
             return Ok(reply);
         }
-        let mut db = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )?;
-        db.busy_timeout(Duration::from_millis(100))?;
+        let mut db = crate::storage::runtime::RuntimeStore::for_source(options, source_key)
+            .selected_connection(source_key)?;
         let tx = db.transaction()?;
         let (identity, session) = match catalog::catalog_selection_in_snapshot(
             options,
@@ -437,7 +430,7 @@ pub(crate) fn error_generation(projection: &str, session: &Value) -> String {
     )
 }
 
-fn entry_generation(stored: &str) -> String {
+pub(crate) fn entry_generation(stored: &str) -> String {
     use sha2::{Digest, Sha256};
     format!(
         "{:x}",
@@ -480,7 +473,7 @@ pub(crate) fn observation(
 }
 
 struct Selection {
-    proof_db: Arc<crate::events::store::chunk_proofs::Snapshot>,
+    proof_db: Option<Arc<crate::events::store::chunk_proofs::Snapshot>>,
     identity: CatalogSessionIdentity,
     session: Value,
     generation: String,
@@ -651,11 +644,8 @@ pub(crate) fn read(
     if let Err(reply) = before_read() {
         return Ok(reply);
     }
-    let mut connection = Connection::open_with_flags(
-        EventCache::path(&options.cache),
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
-    connection.busy_timeout(Duration::from_millis(100))?;
+    let mut connection = crate::storage::runtime::RuntimeStore::for_source(options, source_key)
+        .selected_connection(source_key)?;
     let mut transaction = connection.transaction()?;
     crate::events::store::require_current(&transaction)?;
     #[cfg(feature = "test-hooks")]
@@ -816,7 +806,9 @@ pub(crate) fn read(
     transaction.set_drop_behavior(rusqlite::DropBehavior::Ignore);
     drop(transaction);
     let selection = Selection {
-        proof_db: crate::events::store::chunk_proofs::Snapshot::new(connection),
+        proof_db: Some(crate::events::store::chunk_proofs::Snapshot::new(
+            connection,
+        )),
         identity,
         session,
         generation,
@@ -849,6 +841,49 @@ pub(crate) fn read(
         return Ok(render_field(options, selection, provider, chunk, mode));
     }
     Ok(render(options, selection, provider, mode, requested_part))
+}
+
+/// Render a PostgreSQL recipe window with a request-owned authorized source
+/// reader. Metadata stays in the caller's SQL snapshot; the host reader
+/// independently qualifies the exact byte generation and its proofs.
+#[cfg(feature = "postgres")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_postgres(
+    options: &Options,
+    identity: CatalogSessionIdentity,
+    session: Value,
+    stored_generation: &str,
+    total: usize,
+    first: usize,
+    slots: Vec<SavedSlot>,
+    sources: Vec<CatalogSource>,
+    reader: &dyn SessionSourceReader,
+) -> ViewerReply {
+    let end = first.saturating_add(slots.len()).min(total);
+    let selection = Selection {
+        proof_db: None,
+        identity,
+        session,
+        generation: entry_generation(stored_generation),
+        total,
+        first,
+        end,
+        start: first,
+        slots,
+        sources: sources
+            .into_iter()
+            .map(|source| (source.path.clone(), source))
+            .collect(),
+        history_incomplete: false,
+        context: json!({"state":"incomplete","turns":[],"handoffs":[],"sessions":{},"previews":{}}),
+    };
+    render(
+        options,
+        selection,
+        Some(reader),
+        SessionSourceReadMode::ProviderOnly,
+        SelectedPart::Transcript,
+    )
 }
 
 // Closed, body-free diagnostics let a host distinguish metadata/cursor races
@@ -1420,7 +1455,7 @@ fn render(
         })
         .collect();
     let local = Local {
-        proof_db: Some(selection.proof_db.clone()),
+        proof_db: selection.proof_db.clone(),
         options,
         mode,
         observed: std::sync::Mutex::default(),
@@ -2024,7 +2059,7 @@ fn render_field(
         })
         .collect();
     let local = Local {
-        proof_db: Some(selection.proof_db.clone()),
+        proof_db: selection.proof_db.clone(),
         options,
         mode,
         observed: std::sync::Mutex::default(),

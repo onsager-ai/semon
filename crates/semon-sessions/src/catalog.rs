@@ -63,9 +63,12 @@ pub struct SessionSourceProof {
 /// The host must validate the source identity again while copying its bytes.
 pub fn session_source_proof(
     options: &Options,
+    source_key: &str,
     root: &str,
     path: &str,
 ) -> Result<Option<SessionSourceProof>, CatalogIdentityError> {
+    let namespace = crate::storage::Namespace::new(source_key)
+        .map_err(|_| CatalogIdentityError::InvalidArguments)?;
     use CatalogIdentityError::{InvalidArguments, Unavailable};
     if !crate::is_input_path(root, path) || path.len() > 4096 {
         return Err(InvalidArguments);
@@ -100,6 +103,7 @@ pub fn session_source_proof(
         connection.busy_timeout(Duration::from_millis(100))?;
         let transaction = connection.transaction()?;
         crate::events::store::require_current(&transaction)?;
+        crate::storage::sqlite::qualify(&transaction, &namespace)?;
         let encoded: Option<(String, Option<String>)> = transaction.query_row(
             "SELECT c.session_key,CASE WHEN length(CAST(c.metadata AS BLOB))<=1048576 THEN c.metadata ELSE NULL END FROM session_catalog_sources s INDEXED BY session_catalog_current_source_path JOIN session_catalog c ON c.session_key=s.session_key WHERE s.lifecycle='current' AND s.source_path=?1 ORDER BY s.session_key LIMIT 1",
             [absolute], |row| Ok((row.get(0)?, row.get(1)?)),
@@ -157,7 +161,7 @@ pub fn session_source_proof(
         transaction.commit()?;
         // Reuse the catalog's current-root/native-selection validation. A
         // publication race fails closed rather than mixing catalog generations.
-        let identity = session_catalog_identity(options, "source-proof", &key)?
+        let identity = session_catalog_identity(options, namespace.binding(), &key)?
             .ok_or_else(|| io::Error::other("source catalog changed"))?;
         let observed = identity
             .source_refs
@@ -374,7 +378,7 @@ fn catalog_selection_read(
     require_complete: bool,
     snapshot: Option<&rusqlite::Transaction<'_>>,
 ) -> Result<Option<(CatalogSessionIdentity, Value)>, CatalogIdentityError> {
-    use CatalogIdentityError::{InvalidArguments, ScopeChanged, Unavailable};
+    use CatalogIdentityError::{InvalidArguments, Unavailable};
     if source_key.is_empty()
         || source_key.len() > 4096
         || canonical_catalog_key.is_empty()
@@ -395,11 +399,30 @@ fn catalog_selection_read(
     };
     let reply = match snapshot {
         Some(snapshot) => {
-            read_page_snapshot(options, source_key, &request, snapshot, false, &mut None)
+            let namespace =
+                crate::storage::Namespace::new(source_key).map_err(|_| InvalidArguments)?;
+            read_page_snapshot(options, &namespace, &request, snapshot, false, &mut None)
+                .map_err(|_| Unavailable)?
         }
-        None => read_page(options, source_key, &request, None),
-    }
-    .map_err(|_| Unavailable)?;
+        None => crate::storage::catalog_page(options, source_key, &request, None),
+    };
+    selection_from_reply(
+        reply,
+        source_key,
+        canonical_catalog_key,
+        scope,
+        require_complete,
+    )
+}
+
+pub(crate) fn selection_from_reply(
+    reply: ViewerReply,
+    source_key: &str,
+    canonical_catalog_key: &str,
+    scope: CatalogReadScope,
+    require_complete: bool,
+) -> Result<Option<(CatalogSessionIdentity, Value)>, CatalogIdentityError> {
+    use CatalogIdentityError::{ScopeChanged, Unavailable};
     let body: Value = serde_json::from_slice(&reply.body).map_err(|_| Unavailable)?;
     match reply.status {
         404 => return Ok(None),
@@ -972,15 +995,7 @@ pub(crate) fn page_with_gate(
     if let Err(reply) = before_read() {
         return reply;
     }
-    match read_page(options, machine, &request, on_search) {
-        Ok(reply) => reply,
-        Err(_) => error(
-            503,
-            "catalog_unavailable",
-            "The session catalog is unavailable. Retry after the background observation completes.",
-            true,
-        ),
-    }
+    crate::storage::catalog_page(options, machine, &request, on_search)
 }
 
 /// Whether a normal first Catalog page can read the current persisted
@@ -989,6 +1004,10 @@ pub(crate) fn page_with_gate(
 /// Missing, blank or unpublished stores return `false`; invalid, unsupported and
 /// I/O failures propagate. This check does not admit or start an observer.
 pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
+    crate::storage::runtime::RuntimeStore::sqlite(options, None).page_ready()
+}
+
+pub(crate) fn sqlite_page_ready(options: &Options) -> io::Result<bool> {
     let path = EventCache::path(&options.cache);
     match std::fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() && metadata.len() == 0 => return Ok(false),
@@ -1032,9 +1051,10 @@ pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
     Ok(true)
 }
 
-fn read_page(
+/// The SQLite snapshot behind the storage port's Catalog reader.
+pub(crate) fn read_page(
     options: &Options,
-    machine: &str,
+    namespace: &crate::storage::Namespace,
     request: &Request,
     on_search: Option<&mut dyn FnMut(CatalogSearchAdmission) -> bool>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
@@ -1047,7 +1067,7 @@ fn read_page(
     let mut admission = None;
     let reply = read_page_snapshot(
         options,
-        machine,
+        namespace,
         request,
         &transaction,
         on_search.is_some(),
@@ -1066,13 +1086,15 @@ fn read_page(
 
 fn read_page_snapshot(
     options: &Options,
-    machine: &str,
+    namespace: &crate::storage::Namespace,
     request: &Request,
     transaction: &rusqlite::Transaction<'_>,
     admit_search: bool,
     admission: &mut Option<CatalogSearchAdmission>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     crate::events::store::require_current(transaction)?;
+    crate::storage::sqlite::qualify(transaction, namespace)?;
+    let machine = namespace.as_str();
     if request.cursor.as_ref().is_some_and(|cursor| {
         cursor.scope != request.scope
             || cursor.machine != machine
@@ -1096,12 +1118,6 @@ fn read_page_snapshot(
         .facts
         .as_ref()
         .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
-    let facts_known =
-        options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
-    let codex_selection_known = options.facts.is_none()
-        || recorded
-            .as_ref()
-            .is_some_and(|source| source.selection_known());
     let meta = |key: &str| {
         transaction
             .query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
@@ -1184,6 +1200,16 @@ fn read_page_snapshot(
     } else {
         (rows(transaction, request)?, None, None)
     };
+    // Each Current unit's projection tag must still describe its Raw source;
+    // the producer's invalidation rebuilds a mismatched unit from Raw.
+    if crate::storage::sqlite::projection_mismatch(transaction, &selected)?.is_some() {
+        return Ok(error(
+            503,
+            "projection_stale",
+            "A session projection no longer matches its native source. Retry after it is rebuilt.",
+            true,
+        ));
+    }
     let mut partial_history = std::collections::BTreeSet::new();
     for row in &selected {
         if transaction.query_row(
@@ -1351,6 +1377,220 @@ fn read_page_snapshot(
     } else {
         None
     };
+    present_page(
+        options,
+        machine,
+        request,
+        PresentedPage {
+            generation,
+            observed_at,
+            completeness,
+            selected,
+            next,
+            details,
+            transcript,
+            partial_history,
+            search_report,
+        },
+        runtime,
+        runtime_observations,
+        recorded,
+    )
+}
+
+#[cfg(feature = "postgres")]
+pub(crate) async fn postgres_page(
+    tx: &crate::storage::postgres::PgProjectionTransaction<'_>,
+    namespace: &crate::storage::Namespace,
+    options: &Options,
+    request: &Request,
+) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    let machine = namespace.as_str();
+    if request.cursor.as_ref().is_some_and(|cursor| {
+        cursor.scope != request.scope
+            || cursor.machine != machine
+            || cursor.harness != request.harness
+            || cursor.repo != request.repo
+            || cursor.model != request.model
+            || cursor.q != request.q
+    }) {
+        return Ok(error(
+            400,
+            "cursor_scope_mismatch",
+            "Discard the cursor when changing machine or filters.",
+            false,
+        ));
+    }
+    let generation = tx
+        .catalog_generation(namespace)
+        .await?
+        .ok_or_else(|| io::Error::other("catalog not published"))?;
+    if request
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.generation != generation)
+    {
+        return Ok(error(
+            409,
+            "stale_cursor",
+            "The catalog changed. Discard this cursor.",
+            true,
+        ));
+    }
+    let after = request
+        .cursor
+        .as_ref()
+        .map(|cursor| (cursor.last, cursor.key.as_str()));
+    let (selected, position, search_report) = if let Some(key) = &request.sid {
+        (
+            tx.catalog_row(namespace, key, request.scope)
+                .await?
+                .into_iter()
+                .collect(),
+            None,
+            None,
+        )
+    } else {
+        let found = tx
+            .filtered_catalog_page(
+                namespace,
+                request.scope,
+                request.harness.as_deref(),
+                request.repo.as_deref(),
+                request.model.as_deref(),
+                request.q.as_deref(),
+                after,
+                request.limit,
+            )
+            .await?;
+        (
+            found.rows,
+            found.next,
+            request.q.as_ref().map(|_| crate::catalog_search::Report {
+                partial: found.partial,
+                candidates: found.candidates,
+                index_complete: false,
+            }),
+        )
+    };
+    if request.sid.is_some() && selected.is_empty() {
+        return Ok(error(
+            404,
+            "session_not_found",
+            "The selected session is absent from this catalog.",
+            false,
+        ));
+    }
+    let next = position
+        .map(|(last, key)| {
+            serde_json::to_string(&Cursor {
+                inclusive: false,
+                scope: request.scope,
+                version: 1,
+                generation: generation.clone(),
+                machine: machine.to_owned(),
+                harness: request.harness.clone(),
+                repo: request.repo.clone(),
+                model: request.model.clone(),
+                q: request.q.clone(),
+                last,
+                key,
+            })
+        })
+        .transpose()?;
+    if request.scope == CatalogReadScope::Current {
+        for row in &selected {
+            for source in &row.sources {
+                let input = crate::native_evidence::catalog_input(&source.path, options)
+                    .ok_or_else(|| io::Error::other("Catalog source outside configured roots"))?;
+                if tx.raw_write_pending(namespace, &input).await? {
+                    return Ok(error(
+                        503,
+                        "projection_stale",
+                        "A native source write is pending.",
+                        true,
+                    ));
+                }
+            }
+        }
+    }
+    let transcript = if let Some(row) = selected.first().filter(|_| request.sid.is_some()) {
+        let (recipe, total, _) = tx
+            .recipe_page(namespace, &row.key, request.scope, None, 0, 1)
+            .await?;
+        Some(
+            json!({"version":crate::slot_projection::VERSION,"generation":crate::transcript_range::entry_generation(&recipe),"total":total}),
+        )
+    } else {
+        None
+    };
+    let runtime = crate::native_evidence::query_runtime_generation(options).ok();
+    let runtime_observations = crate::native_evidence::RuntimeObservations::projection(options);
+    let recorded = options
+        .facts
+        .as_ref()
+        .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
+    present_page(
+        options,
+        machine,
+        request,
+        PresentedPage {
+            generation,
+            observed_at: None,
+            // Explicit cohorts do not establish complete machine membership or
+            // global lineage ownership. Startup discovery has not adopted PG.
+            completeness: "partial".into(),
+            selected,
+            next,
+            details: None,
+            transcript,
+            partial_history: Default::default(),
+            search_report,
+        },
+        runtime,
+        runtime_observations,
+        recorded,
+    )
+}
+
+pub(crate) struct PresentedPage {
+    pub(crate) generation: String,
+    pub(crate) observed_at: Option<i64>,
+    pub(crate) completeness: String,
+    pub(crate) selected: Vec<CatalogRow>,
+    pub(crate) next: Option<String>,
+    pub(crate) details: Option<Value>,
+    pub(crate) transcript: Option<Value>,
+    pub(crate) partial_history: std::collections::BTreeSet<String>,
+    pub(crate) search_report: Option<crate::catalog_search::Report>,
+}
+
+fn present_page(
+    options: &Options,
+    machine: &str,
+    request: &Request,
+    page: PresentedPage,
+    runtime: Option<String>,
+    runtime_observations: crate::native_evidence::RuntimeObservations,
+    recorded: Option<crate::facts::source_authority::CurrentSources>,
+) -> Result<ViewerReply, Box<dyn std::error::Error>> {
+    let PresentedPage {
+        generation,
+        observed_at,
+        completeness,
+        selected,
+        next,
+        details,
+        transcript,
+        partial_history,
+        search_report,
+    } = page;
+    let facts_known =
+        options.facts.is_none() || recorded.as_ref().is_some_and(|source| source.facts_known());
+    let codex_selection_known = options.facts.is_none()
+        || recorded
+            .as_ref()
+            .is_some_and(|source| source.selection_known());
     // The legacy model tolerates absent facts/old source selection. Focused
     // observations must retain that absence rather than invent current facts.
     let machine_label = match &options.facts {
@@ -1986,7 +2226,7 @@ mod tests {
             } else {
                 facts.codex_locks.remove("unrelated-running-thread");
             }
-            let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            let intent = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             intent.complete().unwrap();
             if evidence
@@ -2016,7 +2256,7 @@ mod tests {
             let path = fixture.options.codex_home.join(&relative);
             let mut facts = crate::read_facts(fixture.options.facts.as_ref().unwrap()).unwrap();
             facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative]));
-            let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            let intent = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             intent.complete().unwrap();
             let evidence = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
@@ -2053,7 +2293,7 @@ mod tests {
                 facts.codex_locks.insert("affected".into(), 42);
                 facts.proc_starts.insert(42, 7);
             }
-            let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            let intent = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             intent.complete().unwrap();
             let dirty: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM catalog_semantic_sources s JOIN session_catalog_invalidations i USING(source_path) WHERE i.revision IS NOT s.claim)", [], |r| r.get(0)).unwrap();
@@ -2590,7 +2830,7 @@ mod tests {
         }
         drop(file);
         native_refresh(&fixture);
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
@@ -2603,7 +2843,7 @@ mod tests {
             "fixture includes event and token metadata"
         );
         assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
-        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&fixture.options, "", &proof, &ready).unwrap();
         assert!(crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         let marker: String = connection
             .query_row(
@@ -2647,13 +2887,13 @@ mod tests {
         let fixture = Fixture::new();
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&fixture.options, "", &proof, &ready).unwrap();
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         let mut statement = connection
             .prepare("SELECT key,value FROM meta WHERE key GLOB 'native_source_chunks:*'")
@@ -2684,7 +2924,7 @@ mod tests {
                 .unwrap();
             assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
             assert_eq!(
-                crate::retain_source_event_index(&fixture.options, &proof, &ready),
+                crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
                 Err(CatalogIdentityError::ScopeChanged)
             );
             connection
@@ -2703,13 +2943,13 @@ mod tests {
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
         let path = fixture.options.claude_home.join(relative);
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&fixture.options, "", &proof, &ready).unwrap();
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         let key = format!("native_parent_marker:{}", path.display());
         let encoded: String = connection
@@ -2726,7 +2966,7 @@ mod tests {
             .unwrap();
         assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::ScopeChanged)
         );
         connection
@@ -2767,7 +3007,7 @@ mod tests {
             Err(CatalogIdentityError::Unavailable)
         );
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
         // A writable producer now discards obsolete derived contracts; these
@@ -2802,19 +3042,19 @@ mod tests {
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
         let path = fixture.options.claude_home.join(relative);
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&fixture.options, "", &proof, &ready).unwrap();
         use std::io::Write;
         writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", json!({"type":"user","uuid":"new-prefix","message":{"role":"user","content":"new generation"}})).unwrap();
         native_refresh(&fixture);
         assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::ScopeChanged)
         );
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
@@ -2841,13 +3081,13 @@ mod tests {
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
         let path = fixture.options.claude_home.join(relative);
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
             .unwrap()
             .unwrap();
-        crate::retain_source_event_index(&fixture.options, &proof, &ready).unwrap();
+        crate::retain_source_event_index(&fixture.options, "", &proof, &ready).unwrap();
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
         let key = format!(
             "native_launch_calls:{:x}:header",
@@ -2867,7 +3107,7 @@ mod tests {
             .unwrap();
         assert!(!crate::source_event_index_retained(&fixture.options, &proof, &ready).unwrap());
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::ScopeChanged)
         );
         connection
@@ -2904,7 +3144,7 @@ mod tests {
             Err(CatalogIdentityError::Unavailable)
         );
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
         // A writable producer now discards obsolete derived contracts; these
@@ -2939,7 +3179,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
@@ -2948,13 +3188,13 @@ mod tests {
         let mut changed = proof.clone();
         changed.ino = changed.ino.wrapping_add(1);
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &changed, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &changed, &ready),
             Err(CatalogIdentityError::ScopeChanged)
         );
         let mut changed = ready.clone();
         changed.projection_generation = "0".repeat(64);
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &changed),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &changed),
             Err(CatalogIdentityError::ScopeChanged)
         );
         let mut changed = proof.clone();
@@ -2962,12 +3202,12 @@ mod tests {
         let mut projection = ready.clone();
         projection.source = changed.source.clone();
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &changed, &projection),
+            crate::retain_source_event_index(&fixture.options, "", &changed, &projection),
             Err(CatalogIdentityError::InvalidArguments)
         );
         let missing = Fixture::new();
         assert_eq!(
-            crate::retain_source_event_index(&missing.options, &proof, &ready),
+            crate::retain_source_event_index(&missing.options, "", &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
         assert!(!EventCache::path(&missing.options.cache).exists());
@@ -2979,7 +3219,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.publish(1);
         let relative = "projects/project/session-00000.jsonl";
-        let proof = session_source_proof(&fixture.options, "claude", relative)
+        let proof = session_source_proof(&fixture.options, "", "claude", relative)
             .unwrap()
             .unwrap();
         let ready = crate::source_projection_ready(&fixture.options, "claude", relative)
@@ -2990,7 +3230,7 @@ mod tests {
             .execute("UPDATE files SET pending='malformed'", [])
             .unwrap();
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
         connection
@@ -3001,7 +3241,7 @@ mod tests {
             .unwrap();
         let unsupported = crate::native_timing::cleanup_tests::snapshot(&connection);
         assert_eq!(
-            crate::retain_source_event_index(&fixture.options, &proof, &ready),
+            crate::retain_source_event_index(&fixture.options, "", &proof, &ready),
             Err(CatalogIdentityError::Unavailable)
         );
         assert!(EventCache::open_scoped(&fixture.options.cache).is_err());
@@ -3405,7 +3645,9 @@ mod tests {
         assert!(!path.exists());
         // A replacement observed at the same path and offsets cannot borrow
         // the old publication's private recipes, even before its new overview
-        // is published. Reject before issuing any provider reads.
+        // is published. Reject before issuing any provider reads: the
+        // published unit's projection tag no longer matches the committed
+        // ledger, so the Catalog identity read itself refuses it.
         db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.sources[0].prefix_sha256',json(?1)) WHERE session_key='home'", [json!(vec![9;32]).to_string()]).unwrap();
         assert_eq!(
             crate::session_home_details_with_mode(
@@ -3416,7 +3658,7 @@ mod tests {
                 crate::SessionSourceReadMode::ProviderOnly
             )
             .status,
-            409
+            503
         );
     }
 
@@ -3758,19 +4000,24 @@ mod tests {
         let fixture = Fixture::new();
         fixture.publish(100);
         let path = "projects/project/session-00000.jsonl";
-        let proof = session_source_proof(&fixture.options, "claude", path)
+        let proof = session_source_proof(&fixture.options, "", "claude", path)
             .unwrap()
             .unwrap();
         assert_eq!(proof.source.native_id, "session-00000");
         assert_eq!(proof.source.offset, proof.size);
         assert_eq!(proof.freshness.state, "cached");
         assert!(
-            session_source_proof(&fixture.options, "claude", "projects/project/missing.jsonl")
-                .unwrap()
-                .is_none()
+            session_source_proof(
+                &fixture.options,
+                "",
+                "claude",
+                "projects/project/missing.jsonl"
+            )
+            .unwrap()
+            .is_none()
         );
         assert_eq!(
-            session_source_proof(&fixture.options, "claude", "../bad.jsonl"),
+            session_source_proof(&fixture.options, "", "claude", "../bad.jsonl"),
             Err(CatalogIdentityError::InvalidArguments)
         );
         let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
@@ -3785,7 +4032,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            session_source_proof(&fixture.options, "claude", path),
+            session_source_proof(&fixture.options, "", "claude", path),
             Err(CatalogIdentityError::Unavailable)
         );
         connection
@@ -3796,7 +4043,7 @@ mod tests {
             .unwrap();
         fs::remove_file(fixture.options.facts.as_ref().unwrap()).unwrap();
         assert_eq!(
-            session_source_proof(&fixture.options, "claude", path),
+            session_source_proof(&fixture.options, "", "claude", path),
             Err(CatalogIdentityError::Unavailable)
         );
     }
@@ -3860,10 +4107,14 @@ mod tests {
         bytes.extend_from_slice(b"{\"type\":\"user\"");
         fs::write(&native, &bytes).unwrap();
         fixture.publish_existing();
-        let proof =
-            session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl")
-                .unwrap()
-                .unwrap();
+        let proof = session_source_proof(
+            &fixture.options,
+            "",
+            "claude",
+            "projects/project/partial.jsonl",
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(proof.source.offset, complete.len() as u64);
         assert_eq!(proof.size, bytes.len() as u64);
         assert_eq!(proof.freshness.state, "incomplete");
@@ -3875,7 +4126,12 @@ mod tests {
         fs::write(&replacement, &bytes).unwrap();
         fs::rename(replacement, native).unwrap();
         assert_eq!(
-            session_source_proof(&fixture.options, "claude", "projects/project/partial.jsonl"),
+            session_source_proof(
+                &fixture.options,
+                "",
+                "claude",
+                "projects/project/partial.jsonl"
+            ),
             Err(CatalogIdentityError::Unavailable)
         );
     }
@@ -3896,6 +4152,7 @@ mod tests {
             SQL_STEPS.with(|value| value.set(0));
             let proof = session_source_proof(
                 &fixture.options,
+                "",
                 "claude",
                 "projects/project/session-00000.jsonl",
             )
@@ -3909,6 +4166,7 @@ mod tests {
                 assert!(
                     session_source_proof(
                         &fixture.options,
+                        "",
                         "claude",
                         "projects/project/session-00000.jsonl"
                     )
@@ -5153,8 +5411,8 @@ mod tests {
             db.execute_batch(change).unwrap();
             drop(db);
             let original = fs::read(&path).unwrap();
-            assert!(crate::collect(&fixture.options).is_err());
-            assert!(crate::local_facts(&fixture.options).is_err());
+            assert!(crate::collect(&fixture.options, "").is_err());
+            assert!(crate::local_facts(&fixture.options, "").is_err());
             assert_eq!(fixture.body("").0, 503);
             assert_eq!(
                 crate::session_transcript_range(
@@ -5203,7 +5461,7 @@ mod tests {
     fn source_observer_publishes_first_push_without_a_viewer_core() {
         let fixture = Fixture::new();
         fixture.source("first-push");
-        let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
+        let observer = crate::SessionCatalogObserver::new("configured", fixture.options.clone());
         assert!(!EventCache::path(&fixture.options.cache).exists());
         observer.changed().unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -7590,7 +7848,7 @@ mod tests {
                     writeln!(fs::OpenOptions::new().append(true).open(&new).unwrap(),"{}",json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"synthetic appended response"}]}})).unwrap();
                 }
                 facts.codex_rollouts = Some(BTreeSet::from([to.to_owned()]));
-                let intent = SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+                let intent = SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
                 crate::write_facts(facts_path, &facts).unwrap();
                 intent.complete().unwrap();
                 crate::invalidate_session_sources(
@@ -7722,7 +7980,7 @@ mod tests {
         let facts_path = fixture.options.facts.as_ref().unwrap();
         let mut facts = crate::read_facts(facts_path).unwrap();
         facts.hostname = "updated-after-publication".into();
-        let intent = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+        let intent = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
         crate::write_facts(facts_path, &facts).unwrap();
         intent.complete().unwrap();
         let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
@@ -7763,6 +8021,7 @@ mod tests {
         };
         let intent = crate::SessionSourceWrite::begin(
             &fixture.options,
+            "",
             &input,
             Some("0123456789abcdef0123456789abcdef"),
             from,
@@ -7778,7 +8037,7 @@ mod tests {
         intent.complete(from + line.len() as u64).unwrap();
         let pool = crate::RefreshPool::new(1);
         let observer =
-            crate::SessionCatalogObserver::with_pool(fixture.options.clone(), pool.clone());
+            crate::SessionCatalogObserver::with_pool("", fixture.options.clone(), pool.clone());
         // No Push notification reaches the new observer. Persisted read interest
         // must find the unacknowledged revision left by the previous owner.
         observer.watch().unwrap();
@@ -7849,7 +8108,7 @@ mod tests {
         fs::create_dir_all(new.parent().unwrap()).unwrap();
         fs::rename(&old, &new).unwrap();
         facts.codex_rollouts = Some(BTreeSet::from([archived.to_owned()]));
-        let intent = SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+        let intent = SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
         crate::write_facts(facts_path, &facts).unwrap();
         intent.complete().unwrap();
         db.execute_batch("CREATE TRIGGER reject_move BEFORE UPDATE ON session_catalog BEGIN SELECT RAISE(ABORT,'injected publication failure'); END;").unwrap();
@@ -7890,6 +8149,7 @@ mod tests {
         };
         let intent = SessionSourceWrite::begin(
             &fixture.options,
+            "",
             &input,
             Some("0123456789abcdef0123456789abcdef"),
             from,
@@ -7961,7 +8221,7 @@ mod tests {
                 observed_at: 1,
                 freshness: "fresh".into(),
             });
-            let write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            let write = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             write.complete().unwrap();
             fixture.publish_existing();
@@ -8000,7 +8260,7 @@ mod tests {
                         );
                     }
                 }
-                let write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+                let write = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
                 crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
                 write.complete().unwrap();
                 let before = crate::events::FILE_READS.with(std::cell::Cell::get);
@@ -8036,7 +8296,7 @@ mod tests {
             facts.mirror_sequence = Some(123);
             facts.mirror_observation_id = Some("heartbeat".into());
             facts.native_names[0].observed_at = 2;
-            let write = crate::SessionFactsWrite::begin(&fixture.options, &facts).unwrap();
+            let write = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();
             write.complete().unwrap();
             let loads = crate::events::FILE_READS.with(std::cell::Cell::get);
@@ -8066,6 +8326,7 @@ mod tests {
         let from = fs::metadata(&path).unwrap().len();
         let intent = crate::SessionSourceWrite::begin(
             &fixture.options,
+            "",
             &input,
             Some("1".repeat(32).as_str()),
             from,
@@ -8207,7 +8468,8 @@ mod tests {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             for phase in 0..3 {
                 let intent =
-                    crate::SessionSourceWrite::begin(&fixture.options, &input, None, 0).unwrap();
+                    crate::SessionSourceWrite::begin(&fixture.options, "", &input, None, 0)
+                        .unwrap();
                 fs::write(&path,json!({"sessionId":if phase==0 {"selected-a"} else {"selected-b"},"name":format!("runtime-{phase}")}).to_string()).unwrap();
                 if phase == 1 {
                     drop(intent); // Raw committed, process lost before Index intent completion.
@@ -8438,6 +8700,7 @@ mod tests {
             };
             let intent = crate::SessionSourceWrite::begin(
                 &fixture.options,
+                "",
                 &input,
                 Some("0123456789abcdef0123456789abcdef"),
                 0,
@@ -8624,6 +8887,7 @@ mod tests {
             let from = fs::metadata(&path).unwrap().len();
             let intent = crate::SessionSourceWrite::begin(
                 &fixture.options,
+                "",
                 &input,
                 Some("0123456789abcdef0123456789abcdef"),
                 from,
@@ -9059,6 +9323,7 @@ mod tests {
         assert_eq!(fixture.body("").0, 503);
 
         let observer = crate::SessionCatalogObserver::with_pool(
+            "",
             fixture.options.clone(),
             crate::RefreshPool::new(1),
         );
@@ -9087,6 +9352,7 @@ mod tests {
         drop(db);
 
         let observer = crate::SessionCatalogObserver::with_pool(
+            "",
             fixture.options.clone(),
             crate::RefreshPool::new(1),
         );
@@ -9115,12 +9381,14 @@ mod tests {
         fixture.publish_existing();
 
         let pool = crate::RefreshPool::new(1);
-        let observer =
-            crate::SessionCatalogObserver::with_pool(fixture.options.clone(), pool.clone());
-        let sources = std::sync::Arc::new(crate::SessionSources::from_catalog_observers(vec![(
-            "source".into(),
+        let observer = crate::SessionCatalogObserver::with_pool(
+            "source",
+            fixture.options.clone(),
+            pool.clone(),
+        );
+        let sources = std::sync::Arc::new(crate::SessionSources::from_catalog_observers(vec![
             &observer,
-        )]));
+        ]));
         let view = observer.shared_view();
         let _work = crate::viewer::lock(&view.evidence.work);
         let (sent, received) = std::sync::mpsc::channel();
@@ -9166,6 +9434,7 @@ mod tests {
     fn initial_catalog_wait_reports_deadline_and_retirement() {
         let fixture = Fixture::new();
         let observer = crate::SessionCatalogObserver::with_pool(
+            "",
             fixture.options.clone(),
             crate::RefreshPool::new(1),
         );

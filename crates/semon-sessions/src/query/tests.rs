@@ -1492,7 +1492,7 @@ fn read_transcript_pages_as_the_viewer_does() {
         if let Some(turn) = args["turn"].as_str() {
             let anchor = crate::session_turn_anchor(
                 &home.options,
-                "fixture",
+                "local",
                 &format!("sid={sid}&turn={turn}"),
             );
             assert_eq!(anchor.status, 200);
@@ -1503,7 +1503,7 @@ fn read_transcript_pages_as_the_viewer_does() {
                 anchor["generation"].as_str().unwrap()
             ));
         }
-        let served = crate::session_transcript_range(&home.options, "fixture", &url, None);
+        let served = crate::session_transcript_range(&home.options, "local", &url, None);
         assert_eq!(served.status, 200, "{url}");
         let served: Value = serde_json::from_slice(&served.body).unwrap();
         assert_eq!(served["api"], 1);
@@ -2379,7 +2379,7 @@ fn run_ids_come_from_the_allowlist_and_nothing_else() {
 #[test]
 fn run_ids_travel_in_the_facts_and_a_mirror_reads_no_proc() {
     let home = with_runs();
-    let facts = crate::local_facts(&home.options).unwrap();
+    let facts = crate::local_facts(&home.options, "").unwrap();
     let run = |pairs: &[(&str, &str)]| -> BTreeMap<String, String> {
         pairs
             .iter()
@@ -5540,8 +5540,11 @@ fn catalog_search_selected_work_stays_fixed_as_unrelated_history_grows() {
 fn native_catalog_observer_transfers_one_evidence_owner_without_draining() {
     let home = Home::new("native-observer-transfer");
     home.top("lead", &[human("lead", ts(23, 59), "shared native prompt")]);
-    let observer =
-        crate::SessionCatalogObserver::with_pool(home.options.clone(), crate::RefreshPool::new(1));
+    let observer = crate::SessionCatalogObserver::with_pool(
+        "",
+        home.options.clone(),
+        crate::RefreshPool::new(1),
+    );
     observer.demand().unwrap();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
@@ -5555,10 +5558,7 @@ fn native_catalog_observer_transfers_one_evidence_owner_without_draining() {
     }
     let evidence = observer.shared_view().evidence.clone();
     assert!(evidence.work.lock().unwrap().events.is_some());
-    let sources = Arc::new(SessionSources::from_catalog_observers(vec![(
-        String::new(),
-        &observer,
-    )]));
+    let sources = Arc::new(SessionSources::from_catalog_observers(vec![&observer]));
     assert!(Arc::ptr_eq(&sources.machines[0].1, &evidence));
     let mut query = Query::from_sources(sources.clone());
     let before = crate::events::FILE_READS.with(std::cell::Cell::get);

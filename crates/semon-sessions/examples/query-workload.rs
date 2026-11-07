@@ -110,7 +110,7 @@ fn main() -> io::Result<()> {
     let pool = RefreshPool::new(2);
     let observers: Vec<_> = inputs
         .iter()
-        .map(|(_, options)| SessionCatalogObserver::with_pool(options.clone(), pool.clone()))
+        .map(|(key, options)| SessionCatalogObserver::with_pool(key, options.clone(), pool.clone()))
         .collect();
     for observer in &observers {
         observer.demand()?;
@@ -144,11 +144,7 @@ fn main() -> io::Result<()> {
     let cold_rss = rss_kib();
     let cold_heap = heap_bytes();
     let sources = Arc::new(SessionSources::from_catalog_observers(
-        inputs
-            .iter()
-            .zip(&observers)
-            .map(|((key, _), observer)| (key.clone(), observer))
-            .collect(),
+        observers.iter().collect(),
     ));
     let mut query = Query::from_sources(sources.clone());
     let mut samples = Vec::new();

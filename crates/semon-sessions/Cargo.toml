@@ -16,8 +16,11 @@ serde_json.workspace = true
 sha2 = { workspace = true, features = ["compress"] }
 tiny_http.workspace = true
 zstd.workspace = true
+tokio-postgres = { version = "0.7.18", optional = true }
+tokio = { version = "1", optional = true, features = ["rt", "net", "time", "macros"] }
 
 [features]
+postgres = ["dep:tokio-postgres", "dep:tokio"]
 # Lets `SEMON_TEST_NOW` (epoch ms) pin the viewer's clock. Only CI's browser
 # suite builds with it, to serve a fixture whose times must stand still.
 test-clock = []

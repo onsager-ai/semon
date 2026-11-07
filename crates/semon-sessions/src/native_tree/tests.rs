@@ -222,7 +222,7 @@ fn native_usage_tree_dimensions_keep_root_small_and_restore_only_active_tools() 
             }
         }
         let path = home.write("claude/projects/repo/parent.jsonl", &text);
-        let nodes = collect(&home.options).unwrap();
+        let nodes = collect(&home.options, "").unwrap();
         assert_eq!(nodes[0].tokens.input, count);
         assert_eq!(nodes[0].open_tools.len(), 2);
         let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
@@ -236,12 +236,12 @@ fn native_usage_tree_dimensions_keep_root_small_and_restore_only_active_tools() 
         assert!(bytes < 2048);
         let parsed = events::PARSED.with(std::cell::Cell::get);
         let reads = events::FILE_READS.with(std::cell::Cell::get);
-        let restarted = collect(&home.options).unwrap();
+        let restarted = collect(&home.options, "").unwrap();
         assert_eq!(restarted[0].tokens.input, count);
         assert_eq!(events::PARSED.with(std::cell::Cell::get), parsed);
         assert_eq!(events::FILE_READS.with(std::cell::Cell::get), reads);
         fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(line(json!({"type":"assistant","message":{"id":"msg-0","usage":{"input_tokens":7},"content":[{"type":"tool_result","tool_use_id":"tool-0"},{"type":"tool_use","id":"tool-2","name":"Skill"}]}})).as_bytes()).unwrap();
-        let appended = collect(&home.options).unwrap();
+        let appended = collect(&home.options, "").unwrap();
         assert_eq!(appended[0].tokens.input, count + 6);
         assert_eq!(
             appended[0].open_tools.len(),
@@ -368,7 +368,7 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
     }
     text += &line(json!({"type":"assistant","message":{"id":"m-0","usage":{"input_tokens":9}}}));
     let path = home.write("claude/projects/repo/parent.jsonl", &text);
-    collect(&home.options).unwrap();
+    collect(&home.options, "").unwrap();
     let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
     db.execute(
         "DELETE FROM meta WHERE key LIKE 'native_tree_summary:%'",
@@ -409,7 +409,7 @@ fn current_claude_missing_projection_repairs_in_bounded_slices() {
         assert!(steps < 128);
     }
     assert!(steps > 16);
-    let nodes = collect(&home.options).unwrap();
+    let nodes = collect(&home.options, "").unwrap();
     assert_eq!(nodes[0].tokens.input, 8192 * 3 + 6);
     assert!(nodes[0].open_tools.is_empty());
     let root: i64 = db
@@ -434,7 +434,7 @@ fn warm_tree_does_not_decode_event_rows_or_fill_the_producer_cache_as_history_gr
         ) + &line(json!({"type":"user","message":{"content":"private native text"}}))
             .repeat(count);
         let path = home.write("claude/projects/repo/parent.jsonl", &text);
-        let expected = serde_json::to_value(collect(&home.options).unwrap()).unwrap();
+        let expected = serde_json::to_value(collect(&home.options, "").unwrap()).unwrap();
         let db = rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
         let rows: i64 = db
             .query_row("SELECT count(*) FROM events", [], |row| row.get(0))
@@ -472,7 +472,7 @@ fn tree_append_loads_only_the_changed_source_and_preserves_incremental_event_row
         "claude/projects/repo/other.jsonl",
         &line(json!({"type":"user","message":{"content":"other"}})),
     );
-    collect(&home.options).unwrap();
+    collect(&home.options, "").unwrap();
     let mut cache = home.cache();
     crate::collect_with_index(&home.options, &mut cache).unwrap();
     assert_eq!(cache.paths().count(), 0);
@@ -553,7 +553,7 @@ fn tree_restart_preserves_raw_activity_all_models_and_historical_tool_accounting
     for iteration in 0..2 {
         let parsed = events::PARSED.with(std::cell::Cell::get);
         let reads = events::FILE_READS.with(std::cell::Cell::get);
-        let nodes = collect(&home.options).unwrap();
+        let nodes = collect(&home.options, "").unwrap();
         assert_eq!(nodes.len(), 1);
         let node = &nodes[0];
         assert_eq!(
@@ -631,7 +631,7 @@ fn missing_corrupt_old_and_wrong_generation_tree_metadata_repair_without_event_r
         json!({"type":"assistant","timestamp":"2026-09-24T00:00:00Z","message":{"id":"one","model":"native","usage":{"input_tokens":1,"output_tokens":2}}}),
     );
     let path = home.write("claude/projects/repo/parent.jsonl", &text);
-    assert_eq!(collect(&home.options).unwrap()[0].tokens.total, 3);
+    assert_eq!(collect(&home.options, "").unwrap()[0].tokens.total, 3);
     let connection =
         rusqlite::Connection::open(events::EventCache::path(&home.options.cache)).unwrap();
     let key = format!("native_tree_summary:{}", path.display());
@@ -644,7 +644,7 @@ fn missing_corrupt_old_and_wrong_generation_tree_metadata_repair_without_event_r
         "UPDATE meta SET value=printf('%1048577s','x') WHERE key=?1",
     ] {
         connection.execute(change, [&key]).unwrap();
-        let nodes = collect(&home.options).unwrap();
+        let nodes = collect(&home.options, "").unwrap();
         assert_eq!(nodes[0].tokens.total, 3);
         assert_eq!(nodes[0].models, ["native"]);
         assert_eq!(events::PARSED.with(std::cell::Cell::get), parsed);
@@ -658,7 +658,7 @@ fn missing_corrupt_old_and_wrong_generation_tree_metadata_repair_without_event_r
         .unwrap()
         .write_all(line(json!({"message":{"id":"two","usage":{"output_tokens":4}}})).as_bytes())
         .unwrap();
-    assert_eq!(collect(&home.options).unwrap()[0].tokens.total, 7);
+    assert_eq!(collect(&home.options, "").unwrap()[0].tokens.total, 7);
     assert_eq!(events::PARSED.with(std::cell::Cell::get), parsed + 1);
 }
 
@@ -703,7 +703,7 @@ fn tree_indexed_launches_link_eof_markers_and_keep_prompt_inputs_out_of_metadata
     home.write("codex/sessions/child.jsonl", &child);
     for iteration in 0..2 {
         let parsed = events::PARSED.with(std::cell::Cell::get);
-        let nodes = collect(&home.options).unwrap();
+        let nodes = collect(&home.options, "").unwrap();
         let parent = nodes.iter().find(|node| node.id == "parent").unwrap();
         let child = parent
             .children
@@ -731,10 +731,10 @@ fn tree_indexed_launches_link_eof_markers_and_keep_prompt_inputs_out_of_metadata
 fn tree_replaces_summary_on_inode_change_instead_of_reusing_stale_tool_or_usage_state() {
     let home = Home::new();
     let path = home.write("claude/projects/repo/parent.jsonl", &line(json!({"message":{"id":"one","model":"old","usage":{"output_tokens":7},"content":[{"type":"tool_result","tool_use_id":"reused"}]}})));
-    assert_eq!(collect(&home.options).unwrap()[0].tokens.output, 7);
+    assert_eq!(collect(&home.options, "").unwrap()[0].tokens.output, 7);
     let replacement = home.write("replacement.jsonl", &line(json!({"message":{"id":"one","model":"new","usage":{"output_tokens":2},"content":[{"type":"tool_use","id":"reused","name":"Bash"}]}})));
     fs::rename(replacement, &path).unwrap();
-    let nodes = collect(&home.options).unwrap();
+    let nodes = collect(&home.options, "").unwrap();
     assert_eq!(nodes[0].tokens.output, 2);
     assert_eq!(nodes[0].models, ["new"]);
     assert_eq!(

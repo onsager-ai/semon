@@ -20,9 +20,7 @@ thread_local! {
 }
 
 use crate::{
-    Node, Options, collect_with_index,
-    events::EventCache,
-    model,
+    Node, Options, collect_with_index, model,
     native_evidence::{NativeEvidence, Snapshot, Work},
     refresh::{Key, RefreshPool},
     union::{Refresh, ViewerCore},
@@ -827,8 +825,13 @@ impl MachineView {
     /// refreshed before each read until [`MachineView::set_refresh`], and
     /// checked in the background by [`RefreshPool::shared`] until
     /// [`MachineView::set_pool`]. Nothing is read until the first request.
+    #[cfg(test)]
     pub(crate) fn new(options: Options) -> Arc<Self> {
         Self::from_evidence(NativeEvidence::new(options))
+    }
+
+    pub(crate) fn for_source_key(key: &str, options: Options) -> Arc<Self> {
+        Self::from_evidence(NativeEvidence::for_source_key(key, options))
     }
 
     /// Attach Viewer production to an existing native owner without a second
@@ -929,9 +932,7 @@ impl MachineView {
             return Err(io::Error::other("a tree build failed on purpose"));
         }
         if work.events.is_none() {
-            work.events = Some(
-                EventCache::open_scoped(&self.evidence.options.cache).map_err(io::Error::other)?,
-            );
+            work.events = Some(self.evidence.open_index()?);
         }
         let index = work.events.as_mut().expect("native index loaded");
         let roots = collect_with_index(&self.evidence.options, index)?;
@@ -1092,6 +1093,7 @@ impl MachineView {
     /// Demand for the persisted metadata catalog must not synchronously load
     /// all event indices just because this process has no shown model yet.
     pub(crate) fn note_catalog_read(&self) -> io::Result<()> {
+        self.evidence.validate_configuration()?;
         self.evidence.catalog_demand.store(true, Ordering::Relaxed);
         self.note_read(Kind::Catalog)
     }
@@ -1099,8 +1101,13 @@ impl MachineView {
     /// An already qualified persisted read needs updates after invalidation,
     /// without starting a cold producer merely because this owner is new.
     pub(crate) fn note_catalog_interest(&self) -> io::Result<()> {
+        self.evidence.validate_configuration()?;
         self.evidence.catalog_demand.store(true, Ordering::Relaxed);
-        let pending = crate::events::store::catalog_work_pending(&self.evidence.options)?;
+        let pending = if self.evidence.storage.is_postgres() {
+            true
+        } else {
+            crate::events::store::catalog_work_pending(&self.evidence.options)?
+        };
         self.note_read_with(Kind::Catalog, pending)
     }
 
@@ -1124,6 +1131,7 @@ impl MachineView {
         deadline: Instant,
         mut pool: Option<Arc<RefreshPool>>,
     ) -> io::Result<()> {
+        self.evidence.validate_configuration()?;
         let mut state = lock(&self.live.state);
         let mut demanded = false;
         loop {
@@ -1133,7 +1141,7 @@ impl MachineView {
                     "session catalog source is closed",
                 ));
             }
-            let ready = crate::session_catalog_page_ready(&self.evidence.options)?;
+            let ready = self.evidence.storage.page_ready()?;
             let now = Instant::now();
             if now >= deadline {
                 return Err(io::Error::new(
@@ -1620,7 +1628,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{native_evidence::Stamp, tx};
+    use crate::{events::EventCache, native_evidence::Stamp, tx};
 
     static NEXT: AtomicU64 = AtomicU64::new(0);
 
@@ -2011,7 +2019,7 @@ mod tests {
             panic!("single-source native Catalog publication did not complete");
         };
         let row = || {
-            let reply = crate::session_catalog_page(&fixture.options, "fixture", "limit=100");
+            let reply = crate::session_catalog_page(&fixture.options, "local", "limit=100");
             assert_eq!(reply.status, 200);
             let page: Value = serde_json::from_slice(&reply.body).unwrap();
             assert_eq!(page["completeness"]["state"], "complete");
@@ -2948,7 +2956,8 @@ mod tests {
             .unwrap()
         {}
         drop(work);
-        let reply = crate::session_catalog_page(view.options(), "fixture", "limit=100");
+        let reply =
+            crate::session_catalog_page(view.options(), &view.evidence.read_key(), "limit=100");
         assert_eq!(
             reply.status,
             200,
@@ -2961,7 +2970,7 @@ mod tests {
     fn native_selected(view: &MachineView, sid: &str) -> Value {
         let reply = crate::session_transcript_range(
             view.options(),
-            "fixture",
+            &view.evidence.read_key(),
             &format!("sid={sid}&after=0&limit=100"),
             None,
         );
@@ -3001,7 +3010,7 @@ mod tests {
         .unwrap();
         let reply = crate::session_transcript_range(
             core.options(),
-            "fixture",
+            &core.evidence.read_key(),
             &format!("sid={sid}&after=0&limit=100"),
             None,
         );
@@ -4431,10 +4440,13 @@ mod tests {
     fn one_machine_native_reads_preserve_content_across_embedding_modes() {
         let fixture = machine("laptop", "lane");
         let standalone = ViewerCore::new(fixture.options.clone());
-        let mut embedded =
-            ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);
-        let mut background =
-            ViewerCore::with_machines(vec![("some-key".into(), fixture.options.clone())]);
+        // Each source namespace keeps its own database over the same native home.
+        let keyed = Options {
+            cache: fixture.options.cache.with_file_name("some-key-index.json"),
+            ..fixture.options.clone()
+        };
+        let mut embedded = ViewerCore::with_machines(vec![("some-key".into(), keyed.clone())]);
+        let mut background = ViewerCore::with_machines(vec![("some-key".into(), keyed)]);
         background.set_refresh(Refresh::Background);
         for core in [&standalone, &embedded, &background] {
             publish_core_native(core);
@@ -5114,8 +5126,16 @@ mod tests {
         assert_eq!(day["current"]["started"], 1);
         assert!(day["sessions"].get(selected_id("a", "a-old")).is_none());
         // One machine through `with_machines` answers as it does alone.
-        let alone = ViewerCore::with_machines(vec![("k".into(), alpha.options.clone())]);
-        let single = ViewerCore::new(alpha.options.clone());
+        // Another source namespace keeps its own database over the same home.
+        let keyed = Options {
+            cache: alpha.options.cache.with_file_name("k-index.json"),
+            ..alpha.options.clone()
+        };
+        let alone = ViewerCore::with_machines(vec![("k".into(), keyed)]);
+        let single = ViewerCore::new(Options {
+            cache: alpha.options.cache.with_file_name("local-index.json"),
+            ..alpha.options.clone()
+        });
         publish_core_native(&alone);
         publish_core_native(&single);
         let (a, b) = (
@@ -5137,7 +5157,7 @@ mod tests {
     fn two_machines_with_one_hostname_stay_two_and_offline_facts_say_so() {
         let (first, second) = (machine("twin", "lane-1"), machine("twin", "lane-2"));
         let facts = second.root.join("facts.json");
-        let mut recorded = crate::local_facts(&second.options)
+        let mut recorded = crate::local_facts(&second.options, "two")
             .unwrap()
             .offline(1_790_000_000_000);
         recorded.hostname = "twin".into();
@@ -7553,7 +7573,7 @@ mod tests {
     fn native_permalinks_use_indexed_identity_without_workspace_models() {
         let (alpha, bravo) = (machine("twin", "lane-a"), machine("twin", "lane-b"));
         for fixture in [&alpha, &bravo] {
-            let observer = crate::SessionCatalogObserver::new(fixture.options.clone());
+            let observer = crate::SessionCatalogObserver::new("source", fixture.options.clone());
             observer.changed().unwrap();
             eventually("native permalink publication", || {
                 let reply = crate::session_catalog_page(&fixture.options, "source", "limit=1");
@@ -8160,13 +8180,16 @@ mod tests {
         let available = lane_fixture();
         let pool = RefreshPool::new(2);
         let blocked_observer =
-            crate::SessionCatalogObserver::with_pool(blocked.options.clone(), pool.clone());
-        let available_observer =
-            crate::SessionCatalogObserver::with_pool(available.options.clone(), pool.clone());
+            crate::SessionCatalogObserver::with_pool("held", blocked.options.clone(), pool.clone());
+        let available_observer = crate::SessionCatalogObserver::with_pool(
+            "available",
+            available.options.clone(),
+            pool.clone(),
+        );
         let blocked_view = blocked_observer.shared_view();
         let sources = Arc::new(crate::SessionSources::from_catalog_observers(vec![
-            ("held".into(), &blocked_observer),
-            ("available".into(), &available_observer),
+            &blocked_observer,
+            &available_observer,
         ]));
 
         let barrier = Arc::new(std::sync::Barrier::new(4));

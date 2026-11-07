@@ -25,6 +25,16 @@ impl RuntimeObservations {
     pub(crate) fn new(options: &Options) -> Self {
         Self::new_measured(options, &mut crate::native_timing::Measurements::default())
     }
+    #[cfg(feature = "postgres")]
+    pub(crate) fn projection(options: &Options) -> Self {
+        let mut observations = Self::fresh_with_store(
+            options,
+            &mut crate::native_timing::Measurements::default(),
+            false,
+        );
+        observations.fallback = query_runtime_generation(options).ok();
+        observations
+    }
     pub(crate) fn new_measured(
         options: &Options,
         measurements: &mut crate::native_timing::Measurements,
@@ -42,7 +52,22 @@ impl RuntimeObservations {
         initial_runtime: &str,
         measurements: &mut crate::native_timing::Measurements,
     ) -> ScopedRuntimeObservations {
-        let mut observations = Self::fresh_measured(options, measurements);
+        Self::publication_measured(options, initial_runtime, measurements, true)
+    }
+    pub(crate) fn projection_publication_measured(
+        options: &Options,
+        initial_runtime: &str,
+        measurements: &mut crate::native_timing::Measurements,
+    ) -> ScopedRuntimeObservations {
+        Self::publication_measured(options, initial_runtime, measurements, false)
+    }
+    fn publication_measured(
+        options: &Options,
+        initial_runtime: &str,
+        measurements: &mut crate::native_timing::Measurements,
+        sqlite: bool,
+    ) -> ScopedRuntimeObservations {
+        let mut observations = Self::fresh_with_store(options, measurements, sqlite);
         observations.fallback = Some(initial_runtime.to_owned());
         observations.into_scoped()
     }
@@ -52,6 +77,13 @@ impl RuntimeObservations {
     fn fresh_measured(
         options: &Options,
         measurements: &mut crate::native_timing::Measurements,
+    ) -> Self {
+        Self::fresh_with_store(options, measurements, true)
+    }
+    fn fresh_with_store(
+        options: &Options,
+        measurements: &mut crate::native_timing::Measurements,
+        sqlite: bool,
     ) -> Self {
         let started = measurements.start();
         let local = options.facts.is_none();
@@ -98,11 +130,15 @@ impl RuntimeObservations {
         }
         measurements.record("runtime_ctor_indices", started, 1);
         let started = measurements.start();
-        let connection = Connection::open_with_flags(
-            EventCache::path(&options.cache),
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .ok();
+        let connection = sqlite
+            .then(|| {
+                Connection::open_with_flags(
+                    EventCache::path(&options.cache),
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                )
+                .ok()
+            })
+            .flatten();
         measurements.record("runtime_ctor_connection", started, 1);
         Self {
             facts,

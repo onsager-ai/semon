@@ -257,9 +257,12 @@ fn archive_index_path(
 /// Ordinary missing sources remain subject to normal index removal.
 pub fn retain_source_event_index(
     options: &Options,
+    source_key: &str,
     proof: &SessionSourceProof,
     projection: &SourceProjectionReady,
 ) -> Result<(), CatalogIdentityError> {
+    let namespace = crate::storage::Namespace::new(source_key)
+        .map_err(|_| CatalogIdentityError::InvalidArguments)?;
     use CatalogIdentityError::{InvalidArguments, ScopeChanged, Unavailable};
     let path = archive_index_path(options, proof, projection)?;
     let full = path.to_str().ok_or(InvalidArguments)?;
@@ -276,6 +279,7 @@ pub fn retain_source_event_index(
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|_| Unavailable)?;
+    crate::storage::sqlite::qualify(&transaction, &namespace).map_err(|_| Unavailable)?;
     if !projection_ready(&transaction, &proof.source.root, &proof.source.path, full)?
         .is_some_and(|ready| same_projection(&ready, projection))
         || !crate::events::retain_archive_index(&transaction, full, proof, projection)

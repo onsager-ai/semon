@@ -81,7 +81,7 @@ fn wait_for_catalog_read(
         view.wait_until_initial_catalog(deadline)
             .map_err(|_| catalog_unavailable())?;
     } else {
-        match crate::session_catalog_page_ready(view.options()) {
+        match view.evidence.storage.page_ready() {
             // A native page may still hold its source Work fence here. Serve
             // a published generation without waiting; cold reads request the
             // ordinary coalesced producer and keep the existing retry path.
@@ -705,7 +705,7 @@ impl ViewerCore {
     #[cfg(test)]
     pub(crate) fn with_test_view(view: Arc<MachineView>) -> Self {
         let core = Self::with_machines(Vec::new());
-        *write_lock(&core.views) = Arc::new(vec![(String::new(), view)]);
+        *write_lock(&core.views) = Arc::new(vec![(view.evidence.source_key(), view)]);
         core
     }
 
@@ -752,8 +752,8 @@ impl ViewerCore {
     }
 
     /// A view of a machine, in this core's refresh mode.
-    fn view(&self, options: Options) -> Arc<MachineView> {
-        let view = MachineView::new(options);
+    fn view(&self, key: &str, options: Options) -> Arc<MachineView> {
+        let view = MachineView::for_source_key(key, options);
         view.set_pool(self.pool.clone());
         view.set_refresh(self.refresh);
         view
@@ -846,7 +846,7 @@ impl ViewerCore {
                 }
                 replaced => {
                     gone.extend(replaced);
-                    self.view(options)
+                    self.view(name, options)
                 }
             };
             next.push((name.clone(), view));
@@ -1096,6 +1096,19 @@ impl ViewerCore {
         if path == "/api/session-sources" {
             return self.source_inventory(&views).page(query);
         }
+        if views
+            .iter()
+            .any(|(_, view)| view.evidence.storage.is_postgres())
+            && path.starts_with("/api/")
+            && !matches!(path, "/api/sessions" | "/api/session-transcript")
+        {
+            return crate::catalog::error(
+                503,
+                "capability_unavailable",
+                "This session operation is not yet available on PostgreSQL.",
+                false,
+            );
+        }
         if matches!(path, "/api/viewer/home" | "/api/viewer/analytics") {
             let selected_source = match crate::overview_source_key(query) {
                 Ok(source) => source,
@@ -1186,6 +1199,15 @@ impl ViewerCore {
         };
         self.follow();
         let views = self.views();
+        if views
+            .iter()
+            .any(|(_, view)| view.evidence.storage.is_postgres())
+        {
+            return text(
+                503,
+                "Selected session routing is not yet available on PostgreSQL",
+            );
+        }
         let inventory = self.source_inventory(&views);
         let shell = || {
             let selected = inventory
@@ -1428,6 +1450,26 @@ impl ViewerCore {
         } else {
             key.as_str()
         };
+        #[cfg(feature = "postgres")]
+        if view.evidence.storage.is_postgres() {
+            if let Err(reply) = wait_for_catalog_read(view, deadline, allow_catalog_wait) {
+                return reply;
+            }
+            return match path {
+                "/api/sessions" => {
+                    view.evidence
+                        .storage
+                        .page(key, &request.expect("Catalog request"), None)
+                }
+                "/api/session-transcript" => view.evidence.storage.transcript(key, query, None),
+                _ => crate::catalog::error(
+                    503,
+                    "capability_unavailable",
+                    "This session operation is not yet available on PostgreSQL.",
+                    false,
+                ),
+            };
+        }
         let mut refresh_error = None;
         let mut reply = match path {
             "/api/session-locate" => {
@@ -1580,16 +1622,16 @@ impl ViewerCore {
                         admission.paths,
                     )
                 };
-                crate::catalog::page_with_gate(
-                    view.options(),
-                    key,
-                    request.expect("catalog route parsed request"),
-                    || {
-                        refresh_error =
-                            Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                        epoch.set(Some(view.evidence.catalog_search_epoch()));
-                        Ok(())
+                refresh_error = Some(
+                    match wait_for_catalog_read(view, deadline, allow_catalog_wait) {
+                        Ok(error) => error,
+                        Err(reply) => return reply,
                     },
+                );
+                epoch.set(Some(view.evidence.catalog_search_epoch()));
+                view.evidence.storage.page(
+                    key,
+                    &request.expect("catalog route parsed request"),
                     Some(&mut on_search),
                 )
             }
