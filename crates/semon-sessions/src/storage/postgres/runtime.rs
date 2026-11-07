@@ -622,53 +622,28 @@ impl PgProjectionStore {
         let (_, _, slots) = tx
             .recipe_page(namespace, &key, scope, Some(&generation), first, limit)
             .await?;
-        let sources = if provider.is_none() {
-            let mut proofs = Vec::new();
-            for source in &row.sources {
-                let name = source
-                    .path
-                    .to_str()
-                    .ok_or_else(|| backend("invalid native path"))?;
-                let (ledger, index) = tx
-                    .load_index(namespace, name)
-                    .await?
-                    .ok_or_else(|| backend("selected native proof unavailable"))?;
-                // Old selected prefixes need their own retained proof generation.
-                // Refuse here until that lazy proof reader is ported.
-                if ledger.offset != source.offset
-                    || ledger.prefix != source.prefix_sha256
-                    || ledger.tail != source.tail_sha256
-                {
-                    return Err(backend("selected native proof generation changed"));
-                }
-                proofs.push((source.clone(), index.source_chunks));
-            }
-            Some(
-                crate::query_source::Sources::capture(options, proofs.into_iter())
-                    .map_err(backend)?,
-            )
+        let reply = if let Some(reader) = provider {
+            crate::transcript_range::render_postgres(options, identity, session, &generation, total, first, slots, row.sources, reader)
         } else {
-            None
+            let mut proofs = std::collections::BTreeMap::new();
+            for source in &row.sources {
+                let input = crate::native_evidence::catalog_input(&source.path, options).ok_or_else(|| backend("invalid selected source"))?;
+                let proof_generation = tx.source_proof_generation(namespace, source).await?;
+                proofs.insert((input.root.as_str().into(), input.path), (source.clone(), proof_generation));
+            }
+            let (sender, requests) = std::sync::mpsc::channel();
+            let reader = super::proof_reader::LocalProofReader::new(options, &row.sources, sender)?;
+            let options = options.clone();
+            let rendering = tokio::task::spawn_blocking(move || {
+                crate::transcript_range::render_postgres(&options, identity, session, &generation, total, first, slots, row.sources, &reader)
+            });
+            while !rendering.is_finished() {
+                // Drive covering witnesses without leaving the selected snapshot.
+                super::proof_reader::serve(&tx, namespace, &requests, &proofs).await;
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            rendering.await.map_err(backend)?
         };
-        let records = sources.as_ref().map(crate::query_source::Sources::reader);
-        let reader = provider
-            .or_else(|| {
-                records
-                    .as_ref()
-                    .map(|reader| reader as &dyn SessionSourceReader)
-            })
-            .ok_or_else(|| backend("selected source reader unavailable"))?;
-        let reply = crate::transcript_range::render_postgres(
-            options,
-            identity,
-            session,
-            &generation,
-            total,
-            first,
-            slots,
-            row.sources,
-            reader,
-        );
         tx.commit(namespace).await?;
         Ok(reply)
     }

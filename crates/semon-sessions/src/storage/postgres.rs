@@ -8,6 +8,7 @@ use tokio_postgres::{Client, IsolationLevel, Transaction};
 mod collection;
 mod index;
 mod producer;
+mod proof_reader;
 mod raw;
 mod retention;
 mod runtime;

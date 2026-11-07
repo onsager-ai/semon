@@ -334,9 +334,38 @@ impl PgProjectionTransaction<'_> {
                 "unsupported projector version".into(),
             ));
         }
+        self.proof_block_generation(namespace, path, &generation(tag), tag.offset, &tag.prefix_sha256, &tag.tail_sha256, ordinal).await
+    }
+
+    /// Resolve an immutable consumed-prefix proof in this selected snapshot.
+    pub(crate) async fn source_proof_generation(
+        &self,
+        namespace: &Namespace,
+        source: &crate::model::summary::CatalogSource,
+    ) -> Result<String, StorageError> {
+        ensure(&self.namespace, namespace)?;
+        let path = source.path.to_str().ok_or_else(|| backend("invalid proof path"))?;
+        self.tx.query_opt(
+            "SELECT generation FROM semon_projection.proofs WHERE namespace=$1 AND path=$2 AND consumed=$3 AND prefix=$4 AND tail=$5 ORDER BY generation LIMIT 1",
+            &[&namespace.binding(), &path, &number(source.offset)?, &&source.prefix_sha256[..], &&source.tail_sha256[..]],
+        ).await.map_err(backend)?.map(|row| row.get(0)).ok_or_else(|| backend("selected prefix proof unavailable"))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn proof_block_generation(
+        &self,
+        namespace: &Namespace,
+        path: &str,
+        generation: &str,
+        offset: u64,
+        prefix: &[u8; 32],
+        tail: &[u8; 32],
+        ordinal: u64,
+    ) -> Result<Option<[u8; 32]>, StorageError> {
+        ensure(&self.namespace, namespace)?;
         let row = self.tx.query_opt(
             "SELECT b.digest,p.blocks,p.root FROM semon_projection.proof_blocks b JOIN semon_projection.proofs p USING(namespace,path,generation) WHERE b.namespace=$1 AND b.path=$2 AND b.generation=$3 AND b.ordinal=$4 AND p.consumed=$5 AND p.prefix=$6 AND p.tail=$7",
-            &[&namespace.binding(), &path, &generation(tag), &number(ordinal)?, &number(tag.offset)?, &&tag.prefix_sha256[..], &&tag.tail_sha256[..]],
+            &[&namespace.binding(), &path, &generation, &number(ordinal)?, &number(offset)?, &&prefix[..], &&tail[..]],
         ).await.map_err(backend)?;
         let Some(row) = row else { return Ok(None) };
         let digest: [u8; 32] = row
@@ -344,7 +373,7 @@ impl PgProjectionTransaction<'_> {
             .try_into()
             .map_err(|_| StorageError::Backend("invalid native proof digest".into()))?;
         let mut count = row.get::<_, i64>(1) as u64;
-        if count != tag.offset.div_ceil(crate::source_chunks::SIZE as u64) || ordinal >= count {
+        if count != offset.div_ceil(crate::source_chunks::SIZE as u64) || ordinal >= count {
             return Err(StorageError::Backend(
                 "native proof boundary mismatch".into(),
             ));
@@ -358,7 +387,7 @@ impl PgProjectionTransaction<'_> {
             let sibling = if (at ^ 1) < count { at ^ 1 } else { at };
             let row = self.tx.query_one(
                 "SELECT digest FROM semon_projection.proof_nodes WHERE namespace=$1 AND path=$2 AND generation=$3 AND level=$4 AND ordinal=$5",
-                &[&namespace.binding(), &path, &generation(tag), &level, &number(sibling)?],
+                &[&namespace.binding(), &path, &generation, &level, &number(sibling)?],
             ).await.map_err(backend)?;
             let other: [u8; 32] = row
                 .get::<_, Vec<u8>>(0)
