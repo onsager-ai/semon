@@ -635,11 +635,12 @@ impl PgProjectionStore {
             let reader = super::proof_reader::LocalProofReader::new(options, &row.sources, sender)?;
             let options = options.clone();
             let mut rendering = tokio::task::spawn_blocking(move || {
-                crate::transcript_range::render_postgres(&options, identity, session, &generation, total, first, slots, row.sources, &reader)
+                let reply = crate::transcript_range::render_postgres(&options, identity, session, &generation, total, first, slots, row.sources, &reader);
+                reader.verify().map(|()| reply)
             });
             loop {
                 tokio::select! {
-                    reply = &mut rendering => break reply.map_err(backend)?,
+                    reply = &mut rendering => break reply.map_err(backend)?.map_err(backend)?,
                     Some(request) = requests.recv() => {
                         super::proof_reader::serve(&tx, namespace, request, &proofs).await;
                     }

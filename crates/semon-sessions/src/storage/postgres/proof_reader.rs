@@ -32,6 +32,15 @@ impl LocalProofReader {
         }
         Ok(Self { sources: captured, sender, state: Mutex::default() })
     }
+
+    pub(super) fn verify(&self) -> io::Result<()> {
+        let state = self.state.lock().map_err(|_| io::Error::other("selected reader state unavailable"))?;
+        for (path, before) in &state.physical {
+            let file = crate::sealed::LogFile::open(path)?;
+            crate::source_carrier::recheck(path, &file, before)?;
+        }
+        Ok(())
+    }
 }
 
 impl SessionSourceReader for LocalProofReader {
