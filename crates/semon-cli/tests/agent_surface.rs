@@ -295,7 +295,33 @@ fn timeless(mut value: Value) -> Value {
             assert!(idle.is_some_and(|idle| idle > 60 * 60_000));
         }
     }
+    project_activity(&mut value);
     value
+}
+
+/// Keep the historical answers pinned while checking the additive summary.
+fn project_activity(value: &mut Value) {
+    match value {
+        Value::Object(fields) => {
+            if let Some(activity) = fields.remove("activity_analytics") {
+                if fields.get("harness").and_then(Value::as_str) == Some("codex") {
+                    assert!(activity.is_null());
+                } else {
+                    assert_eq!(activity["totals"]["observed"]["steps"], 1);
+                    assert_eq!(activity["totals"]["exclusive"]["steps"], 1);
+                    assert_eq!(activity["totals"]["shared"]["steps"], 0);
+                    assert_eq!(activity["thrash"], false);
+                    assert_eq!(activity["family"], Value::Null);
+                    assert!(activity.get("steps").is_none());
+                }
+            }
+            for field in fields.values_mut() {
+                project_activity(field);
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(project_activity),
+        _ => {}
+    }
 }
 
 /// Each tool, its arguments, and its answer (without the clock) on the
@@ -397,6 +423,22 @@ fn matching(expected: &Value, value: &Value) -> Value {
     expected
 }
 
+fn assert_activity_page(page: &Value) {
+    assert_eq!(page["session"]["id"], "done");
+    assert_eq!(page["kind"], "steps");
+    assert!(
+        page["generation"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty())
+    );
+    let items = page["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(page["next_cursor"], Value::Null);
+    for key in ["position", "command", "output", "body"] {
+        assert!(items[0].get(key).is_none(), "{key}");
+    }
+}
+
 #[test]
 fn semon_query_pins_every_tool_and_writes_only_its_cache() {
     let home = Home::new();
@@ -426,6 +468,7 @@ fn semon_query_pins_every_tool_and_writes_only_its_cache() {
         let got = timeless(home.query(&all));
         assert_eq!(got, matching(&answer, &got), "{all:?}");
     }
+    assert_activity_page(&home.query(&["query", "get_session_activity", "done", "--limit", "1"]));
     // An unknown id is a clear error: nonzero, a JSON error with --json.
     let output = home.semon(&["query", "get_session", "nobody", "--json"]);
     assert!(!output.status.success());
@@ -674,7 +717,13 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         .collect();
     assert_eq!(
         names,
-        ["list_sessions", "get_session", "read_transcript", "stalls"]
+        [
+            "list_sessions",
+            "get_session",
+            "get_session_activity",
+            "read_transcript",
+            "stalls"
+        ]
     );
     for tool in tools {
         let name = tool["name"].as_str().unwrap();
@@ -717,6 +766,11 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         let value = timeless(value);
         assert_eq!(value, matching(&answer, &value), "{tool} {arguments}");
     }
+
+    let (page, failed) =
+        content(&server.call(29, "get_session_activity", json!({"id":"done","limit":1})));
+    assert!(!failed, "{page}");
+    assert_activity_page(&page);
 
     // A tool's failure is a result with isError; the protocol's are errors.
     let (error, failed) = content(&server.call(30, "get_session", json!({"id": "nobody"})));

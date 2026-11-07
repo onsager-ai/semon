@@ -29,7 +29,7 @@ The selected visual reference is the actual complete `compat=1` application at
 Source `263a02da278716ab2309b8e34a463419e5c781e5`, captured with Hub
 `503fbe090749ea1d58b9ca9fa4ccae7289ee426e`. Hub main's design-assets merge
 `e15596cdeff9a2c5c9f9431cd52932603c41e22e` records those browser captures and
-source-derived DOM. Pen reconstruction exports are not pixel authority.
+source-derived DOM. Derived reconstruction exports are not pixel authority.
 The approved feedback-20261015-v6 redesign remains separate work after #380.
 
 ### Neutral-facet asset preparation
@@ -674,7 +674,7 @@ reverting the collection pause, native ownership, acceptance records or required
 coverage. Their pinned dev-skills revision is
 `a6fc52f4bf01c9ae97b108d2e8adc7662a40f199`. Shared generated workflows are
 adopted from those landed commits, not redesigned or hand-edited here. The new
-UI design brief and archived Stitch history retain their owning paths.
+UI design brief retains its owning path.
 
 No runtime source, generated asset, comparator, capture input or reference change
 is introduced by this integration. The existing Source/Hub pair and its check

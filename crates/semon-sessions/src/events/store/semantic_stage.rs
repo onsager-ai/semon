@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashMap};
 
 // Earlier stages may contain parent turns derived from partial receipt sets.
 // Rebuild their witnesses using complete physical sender receipt boundaries.
-pub(super) const RECIPE: &str = "recorded-origin-turn-complete-receipts-v3";
+pub(super) const RECIPE: &str = "recorded-origin-turn-complete-receipts-v4";
 fn recipe_current(c: &Connection) -> rusqlite::Result<bool> {
     let stored: Option<String> = c
         .query_row(

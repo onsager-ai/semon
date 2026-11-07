@@ -215,7 +215,7 @@ fn edge_kept(db: &Connection, id: &str, cutoff: i64) -> Result<bool, QueryError>
     }
     db.query_row("SELECT EXISTS(SELECT 1 FROM session_trace_turns t JOIN session_catalog c ON c.session_key=t.session_key WHERE t.session_key IN (SELECT session_key FROM session_trace_edges WHERE edge_id=?1) AND (json_extract(c.metadata,'$.query.last')>=?2 OR json_extract(c.metadata,'$.query.state') IN ('work','wait') OR EXISTS(SELECT 1 FROM session_trace_edges live WHERE live.session_key=t.session_key AND (json_extract(live.metadata,'$.at')>=?2 OR json_extract(live.metadata,'$.done')>=?2 OR json_extract(live.metadata,'$.status') IN ('work','wait','new')))) AND (json_extract(t.metadata,'$.start')=?1 OR EXISTS(SELECT 1 FROM json_each(t.metadata,'$.sent') WHERE value=?1)) AND (json_extract(t.metadata,'$.last')=1 OR json_extract(t.metadata,'$.at')>=?2 OR EXISTS(SELECT 1 FROM session_trace_edges e WHERE e.edge_id=json_extract(t.metadata,'$.start') AND (json_extract(e.metadata,'$.at')>=?2 OR json_extract(e.metadata,'$.done')>=?2 OR json_extract(e.metadata,'$.status') IN ('work','wait','new')))))", params![id,cutoff], |r|r.get(0)).map_err(unavailable)
 }
-fn window_member(
+pub(super) fn window_member(
     db: &Connection,
     key: &str,
     saved: &Value,

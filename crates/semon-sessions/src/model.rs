@@ -101,6 +101,8 @@ pub(crate) struct Session {
     /// in epoch ms]`. Native metadata retains the recorded start; current reads
     /// qualify liveness independently.
     pub(crate) activity: Option<(String, String, i64, i64)>,
+    #[serde(skip)]
+    pub(crate) activity_analytics: Option<events::session_activity::analytics::Analytics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) waiting_for: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1934,6 +1936,7 @@ impl<'a> Builder<'a> {
             start: 0,
             last: 0,
             activity: None,
+            activity_analytics: None,
             busy: Vec::new(),
             waiting_for: None,
             waiting_since: None,
@@ -2421,6 +2424,83 @@ impl<'a> Builder<'a> {
             })
             .collect();
         crate::claude_usage::shared(records.iter().map(|(key, records)| (*key, records)))
+    }
+
+    fn session_activity(
+        &self,
+        session: &Sess,
+    ) -> io::Result<Option<events::store::session_activity::Projection>> {
+        use events::session_activity::{SourcePosition, UsageStep};
+        if !matches!(
+            session.kind,
+            SessKind::Lineage | SessKind::Agent | SessKind::Codex
+        ) {
+            return Ok(None);
+        }
+        if session.kind == SessKind::Codex
+            && !session
+                .files
+                .iter()
+                .any(|at| self.files[*at].summary.has_native_usage())
+        {
+            return Ok(None);
+        }
+        let mut usage = Vec::new();
+        let mut signals = Vec::new();
+        let mut observations = Vec::new();
+        for position in &session.files {
+            let file = &self.files[*position];
+            let path = file
+                .path
+                .to_str()
+                .ok_or_else(|| io::Error::other("Invalid activity source path"))?;
+            if file.harness() == "claude" {
+                usage.extend(file.summary.usage().iter().map(|(id, used)| {
+                    UsageStep::claude(
+                        id.clone(),
+                        SourcePosition {
+                            source: path.into(),
+                            offset: used.offset,
+                        },
+                        used.clone(),
+                    )
+                }));
+            } else if file.summary.has_native_usage() {
+                usage.extend(self.cache.activity_codex_steps(&summary::source(file))?);
+            }
+            observations.extend(file.summary.events.iter().filter_map(|event| {
+                event.activity_observation.clone().map(|observation| {
+                    events::session_activity::classify::LocatedObservation {
+                        position: SourcePosition {
+                            source: path.into(),
+                            offset: event.o,
+                        },
+                        timestamp: event.r.as_ref().and_then(|reply| reply.t).or(event.t),
+                        result_offset: event.r.as_ref().map(|reply| reply.o),
+                        observation,
+                    }
+                })
+            }));
+            signals.extend(
+                file.summary
+                    .signals
+                    .iter()
+                    .cloned()
+                    .map(|signal| (path.into(), signal)),
+            );
+        }
+        Ok(Some(events::store::session_activity::Projection::derive(
+            session.key.clone(),
+            usage,
+            &self
+                .shared_usage
+                .get(&session.key)
+                .cloned()
+                .unwrap_or_default(),
+            signals,
+            observations,
+            crate::pricing::snapshot(),
+        )))
     }
 
     fn describe(&mut self, index: usize) {
@@ -7635,7 +7715,22 @@ pub(crate) fn query_history(
     now: i64,
 ) -> io::Result<QueryData> {
     match prepare_history_inner(options, rows, records, now, BuildTarget::Query)? {
-        BuildOutput::Query(data) => Ok(*data),
+        BuildOutput::Query(mut data) => {
+            // Qualified fallback derives transcript semantics without a writable
+            // event store. Reuse analytics only for that exact complete Catalog
+            // source vector; excluded file-window sources remain unavailable.
+            for row in rows {
+                if row
+                    .sources
+                    .iter()
+                    .all(|source| catalog_source_in_window(source, scan_cutoff(options, now)))
+                    && let Some(session) = data.sessions.get_mut(&row.key)
+                {
+                    session.activity_analytics = row.activity_analytics.clone();
+                }
+            }
+            Ok(*data)
+        }
         _ => Err(io::Error::other(
             "Qualified producer did not derive query evidence",
         )),
@@ -8171,6 +8266,47 @@ fn build_sources_inner(
             }
         }
     });
+    // Derive once from the complete producer cohort. Cached descriptions do
+    // not own analytics: exact copied ownership and relationships rebuild here.
+    let activity_projections: BTreeMap<_, _> = builder
+        .sessions
+        .iter()
+        .map(|session| {
+            // Claude usage is part of the qualified FileIndex even in a
+            // request-owned history read. Codex needs its accepted store facts.
+            let projection = if session.kind != SessKind::Codex
+                || (history_records.is_none() && builder.cache.has_activity_store())
+            {
+                builder.session_activity(session)?
+            } else {
+                None
+            };
+            Ok((session.key.clone(), projection))
+        })
+        .collect::<io::Result<_>>()?;
+    let family_activity =
+        events::session_activity::analytics::families(builder.sessions.iter().map(|session| {
+            (
+                session.key.as_str(),
+                session.parent.map(|at| builder.sessions[at].key.as_str()),
+                activity_projections
+                    .get(&session.key)
+                    .and_then(Option::as_ref)
+                    .map(|p| &p.activity),
+            )
+        }));
+    let summaries: BTreeMap<_, _> = activity_projections
+        .iter()
+        .filter_map(|(key, projection)| {
+            let mut summary =
+                events::session_activity::analytics::Analytics::of(&projection.as_ref()?.activity);
+            summary.family = family_activity.get(key.as_str()).cloned();
+            Some((key.clone(), summary))
+        })
+        .collect();
+    for session in &mut builder.sessions {
+        session.out.activity_analytics = summaries.get(&session.key).cloned();
+    }
     let post_started = std::time::Instant::now();
     let started = measurements.start();
     let mut handoffs: Vec<Handoff> = builder
@@ -8334,6 +8470,7 @@ fn build_sources_inner(
                 .get(&row.key)
                 .map(|at| &builder.sessions[*at])
             {
+                row.session_activity = activity_projections.get(&row.key).cloned().flatten();
                 let started = measurements.start();
                 row.trace = Some(
                     crate::causal_trace::Projection::capture(

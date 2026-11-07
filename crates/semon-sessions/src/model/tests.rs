@@ -1,5 +1,7 @@
 //! One test per rule in the design's table, on synthetic homes only.
 
+mod activity;
+
 use std::{
     io::Write,
     path::PathBuf,
@@ -3755,12 +3757,22 @@ fn assert_staged_owner_parity(home: &Home, inputs: &[crate::Input]) {
                 .iter()
                 .find(|candidate| candidate.key == row.key)
                 .unwrap();
-            assert_eq!(
-                serde_json::to_value(row).unwrap(),
-                serde_json::to_value(expected).unwrap(),
-                "{} catalog/Query",
-                row.key
-            );
+            let mut actual_json = serde_json::to_value(row).unwrap();
+            let mut expected_json = serde_json::to_value(expected).unwrap();
+            // A single-owner stage cannot include unpublished descendants.
+            // Publication folds their qualified summaries transactionally.
+            assert!(actual_json["activity_analytics"]["family"].is_null());
+            for value in [&mut actual_json, &mut expected_json] {
+                for pointer in [
+                    "/activity_analytics/family".to_owned(),
+                    format!("/query/rows/{}/summary/activity_analytics/family", row.key),
+                ] {
+                    if let Some(family) = value.pointer_mut(&pointer) {
+                        *family = serde_json::Value::Null;
+                    }
+                }
+            }
+            assert_eq!(actual_json, expected_json, "{} catalog/Query", row.key);
             assert_eq!(
                 format!("{:?}", row.trace),
                 format!("{:?}", expected.trace),

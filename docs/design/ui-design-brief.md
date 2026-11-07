@@ -26,23 +26,27 @@ Preserve the compact actual viewer, shared semantic CSS roles, Instrument Sans
 and JetBrains Mono, existing controls, flat rows, reading width and responsive
 navigation. The source in `crates/semon-sessions/src/viewer.css` owns tokens;
 `docs/design/design-contract.md` owns type, contrast and touch constraints.
-Use real screenshots and the editable [session canvas](session-inspection/session-inspection.pen)
-for review. A canvas is a derived intent model, not a replacement pixel oracle.
+Use real screenshots of the actual application for review; Storybook is the
+design/review surface. No derived mockup is a pixel oracle.
 Keep native forms, keyboard/focus, scroll and lifecycle owners intact.
 
 Routine source/cache/search architecture explanations are not required interface
 copy. Preserve correct source-scoped metadata filtering and meaningful exceptional
 states without adding explanatory paragraphs to compact controls.
 
+Source selection is Sessions context; its URL/history step retains per-source
+transcripts, loaded ranges, drafts, filters, focus and scroll. Destinations are
+projected from `ui/src/lib/navigation.json` (see [ui/README.md](../../ui/README.md)).
+
 The numbered refinements below retain their original section identities so
 existing links remain precise. Earlier generation proposals and raw artifacts
-are archived in [the historical record](../history/stitch/README.md).
+were purged from the repository on 2026-11-06 and remain only in superseded history.
 
 ## 9. Restrained surface refinement
 
 Incremental baseline: `bcc0a7624e753a818665518837d050af13395bef`.
-The user rejected the first whole-page Image Gen direction because it changed
-too much. Keep the existing shell, message alignment, fonts, widths, reading
+The user rejected the first whole-page generated-image direction because it
+changed too much. Keep the existing shell, message alignment, fonts, widths, reading
 scale, spacing and interaction owners. Flatten repeated informational enclosures
 without rearranging the workflow. Preserve grouped tools, thinking, child and
 handoff sessions, agent communication, metadata/configuration and composer.
@@ -68,13 +72,11 @@ handoff sessions, agent communication, metadata/configuration and composer.
   typeahead, Enter, nested Escape, mobile Back and native form value ownership.
   The mobile sheet heading is 13px and its close control is 40px with a 16px icon.
 
-Image Gen originals and rejection provenance are in
-`session-inspection/surface-refinement/`. The retained-layout
-image is an exploration, not a pixel specification: generated text and state
-details can be inaccurate. The implementation deliberately keeps the original
-message bubble and navigation shapes rather than adopting those redraw changes.
-The native session canvas records the linked-session surface component; actual
-before/after images verify unchanged reader geometry at 390/1280px in both themes.
+The rejected generated-image exploration is not a pixel specification: generated
+text and state details can be inaccurate. The implementation deliberately keeps
+the original message bubble and navigation shapes rather than adopting those
+redraw changes. Actual before/after images verify unchanged reader geometry at
+390/1280px in both themes.
 Hub consumes these shared styles only after reviewed source adoption.
 
 ## 10. Annotation refinement: compact related sessions
@@ -107,11 +109,8 @@ The bounded catalog does not expose complete relationship context: do not
 fabricate subagent/handoff links there. This pattern applies where real resolved
 relationships already exist.
 
-The editable canvas remains `session-inspection/session-inspection.pen`.
-Its current compact disclosure board supersedes the explicitly historical
-linked-session board. Annotation screenshots/checks are in
-`session-inspection/annotation-refinement/`; previous Image Gen
-proposals are retained as historical exploration, not implementation references.
+Actual annotation screenshots verify this pattern; earlier generated-image
+proposals are historical exploration, not implementation references.
 
 The later Codex/ChatGPT composer reference requests one continuous rounded input
 surface around prompt and bottom toolbar. Use `sh-composer-surface` inside the

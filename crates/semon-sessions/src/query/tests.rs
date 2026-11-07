@@ -1334,7 +1334,8 @@ fn list_sessions_summarizes_every_session_newest_first() {
     let home = fixture();
     let question = question_id(&fixture_relation_reference());
     let mut query = home.query();
-    let all = call(&mut query, "list_sessions", json!({}));
+    let mut all = call(&mut query, "list_sessions", json!({}));
+    project_activity(&mut all);
     let order = ["cx", "done", "crashed", "asker", "scan", "lead"];
     assert_eq!(
         all,
@@ -1392,7 +1393,8 @@ fn get_session_adds_busy_turns_and_handoffs_from_native_evidence() {
     let model = fixture_relation_reference();
     let question = question_id(&model);
     let mut query = home.query();
-    let got = call(&mut query, "get_session", json!({"id": "asker"}));
+    let mut got = call(&mut query, "get_session", json!({"id": "asker"}));
+    project_activity(&mut got);
     let of = |list: &str, keep: &dyn Fn(&Value) -> bool| -> Value {
         Value::Array(
             model[list]
@@ -1702,7 +1704,8 @@ fn stalls_give_one_closed_reason_per_session() {
     let home = fixture();
     let question = question_id(&fixture_relation_reference());
     let mut query = home.query();
-    let stalls = call(&mut query, "stalls", json!({"idle_minutes": 60}));
+    let mut stalls = call(&mut query, "stalls", json!({"idle_minutes": 60}));
+    project_activity(&mut stalls);
     let row = |id: &str, reason: &str, last: i64| {
         let mut row = summary(id, &question);
         row["stall_reason"] = json!(reason);
@@ -2991,7 +2994,7 @@ fn assert_contract_reference(
         1,
         "unique {scope} reference: {scenario}, multiple={multiple}, {tool} {args}"
     );
-    let actual = match actual {
+    let mut actual = match actual {
         Ok(value) => json!({"ok":value}),
         Err(error) => json!({"err":error.to_json()}),
     };
@@ -3020,6 +3023,7 @@ fn assert_contract_reference(
             _ => {}
         }
     }
+    project_activity(&mut actual);
     let mut expected = rows[0]["response"].clone();
     lifecycle_contract(&mut expected);
     assert_eq!(
@@ -6225,3 +6229,358 @@ fn paused_find_refuses_all_public_boundaries_before_evidence_or_provider_admissi
 }
 
 mod recovery_tests;
+
+// Historical captures predate activity analytics. Project away only the added
+// summary property; dedicated tests below own the new contract.
+fn project_activity(value: &mut Value) {
+    match value {
+        Value::Object(object) => {
+            object.remove("activity_analytics");
+            for child in object.values_mut() {
+                project_activity(child);
+            }
+        }
+        Value::Array(array) => {
+            for child in array {
+                project_activity(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn activity_fixture() -> Home {
+    let home = Home::new("activity");
+    let mut records = vec![human("activity", ts(1, 0), "Synthetic activity")];
+    // Deliberately reverse physical order to qualify deterministic timestamp order.
+    for minute in [3, 2, 1] {
+        let blocks = if minute == 2 {
+            vec![tool(
+                "commit",
+                "Bash",
+                json!({"command":"git commit -m synthetic"}),
+            )]
+        } else {
+            vec![text("Synthetic")]
+        };
+        records.push(assistant("activity", ts(1, minute), blocks));
+        if minute == 2 {
+            records.push(json!({"type":"user","sessionId":"activity","timestamp":ts(1,minute),
+                "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"commit","content":"[main abcdef1] synthetic"}]}}));
+        }
+    }
+    home.top("activity", &records);
+    home
+}
+
+#[test]
+fn activity_analytics_is_additive_and_preserves_unknown_cost_and_duration() {
+    let home = activity_fixture();
+    let mut query = home.query();
+    let listed = call(&mut query, "list_sessions", json!({}));
+    let summary = &listed["sessions"][0]["activity_analytics"];
+    assert_eq!(summary["totals"]["observed"]["steps"], 3);
+    assert_eq!(summary["totals"]["exclusive"]["steps"], 3);
+    assert_eq!(summary["totals"]["shared"]["steps"], 0);
+    assert_eq!(summary["by_band"]["Under50k"]["exclusive"]["steps"], 3);
+    assert_eq!(
+        summary["totals"]["observed"]["elapsed_ms"]["unknown_steps"],
+        1
+    );
+    assert_eq!(summary["change_facts"]["commits"], 1);
+    let selected = call(&mut query, "get_session", json!({"id":"activity"}));
+    assert_eq!(&selected["session"]["activity_analytics"], summary);
+    assert!(summary.get("steps").is_none());
+    assert!(summary.get("thrash_windows").is_none());
+    assert!(summary["exclusive_cost_complete"].is_boolean());
+}
+
+#[test]
+fn activity_family_rolls_up_without_child_step_duplication() {
+    let home = fixture();
+    let mut query = home.query();
+    let listed = call(&mut query, "list_sessions", json!({}));
+    let summary = |id: &str| {
+        listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == id)
+            .unwrap()["activity_analytics"]
+            .clone()
+    };
+    let parent = summary("lead");
+    let child = summary("scan");
+    assert_eq!(parent["totals"]["observed"]["steps"], 3);
+    assert_eq!(child["totals"]["observed"]["steps"], 1);
+    assert_eq!(parent["family"]["totals"]["observed"]["steps"], 4);
+    assert_eq!(parent["family"]["member_sessions"], 2);
+    assert_eq!(parent["family"]["thrashed_sessions"], 0);
+    assert_eq!(parent["family"]["total_step_time_ms"]["known"], 120000);
+    assert!(child["family"].is_null());
+    let page = call(&mut query, "get_session_activity", json!({"id":"lead"}));
+    assert_eq!(page["items"].as_array().unwrap().len(), 3);
+    assert!(page["items"].as_array().unwrap().iter().all(|item| {
+        item["id"]["Claude"]
+            .as_str()
+            .unwrap()
+            .starts_with("m-lead-")
+    }));
+}
+
+#[test]
+fn activity_pages_sort_bound_and_refuse_generation_mismatch() {
+    let home = activity_fixture();
+    let mut query = home.query();
+    let first = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","limit":2}),
+    );
+    assert_eq!(first["session"]["id"], "activity");
+    assert_eq!(first["next_cursor"], "2");
+    let items = first["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert!(items[0]["timestamp"].as_i64() < items[1]["timestamp"].as_i64());
+    assert!(items.iter().all(|item| item.get("position").is_none()));
+    let second = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","generation":first["generation"],"cursor":first["next_cursor"],"limit":2}),
+    );
+    assert_eq!(second["items"].as_array().unwrap().len(), 1);
+    assert!(second["next_cursor"].is_null());
+    assert_eq!(second["generation"], first["generation"]);
+    assert_eq!(
+        failure(
+            &mut query,
+            "get_session_activity",
+            json!({"id":"activity","generation":"stale"})
+        ),
+        "stale_projection"
+    );
+    assert_eq!(
+        failure(
+            &mut query,
+            "get_session_activity",
+            json!({"id":"activity","cursor":"1"})
+        ),
+        "invalid_arguments"
+    );
+    assert_eq!(
+        failure(
+            &mut query,
+            "get_session_activity",
+            json!({"id":"activity","limit":257})
+        ),
+        "invalid_arguments"
+    );
+    assert_eq!(
+        failure(&mut query, "get_session_activity", json!({"id":"absent"})),
+        "unknown_session"
+    );
+    let facts = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","generation":first["generation"],"kind":"facts","limit":1}),
+    );
+    assert_eq!(facts["items"].as_array().unwrap().len(), 1);
+    assert!(facts["items"][0]["change"]["Commit"].is_object());
+    assert!(facts["items"][0].get("position").is_none());
+    assert!(facts["items"][0].get("record_digest").is_none());
+    assert!(facts["next_cursor"].is_null());
+}
+
+#[test]
+fn mcp_activity_request_returns_the_same_typed_page_and_refuses_stale_generation() {
+    let home = activity_fixture();
+    let mut query = home.query();
+    let request = json!({"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"get_session_activity","arguments":{"id":"activity","limit":1}}});
+    let mut output = Vec::new();
+    crate::mcp::serve_mcp(&mut query, request.to_string().as_bytes(), &mut output).unwrap();
+    let reply: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(reply["result"]["isError"], false);
+    let page: Value =
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(page["session"]["id"], "activity");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(page["next_cursor"], "1");
+    let request = json!({"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"get_session_activity","arguments":{"id":"activity","generation":"stale"}}});
+    let mut output = Vec::new();
+    crate::mcp::serve_mcp(&mut query, request.to_string().as_bytes(), &mut output).unwrap();
+    let reply: Value = serde_json::from_slice(&output).unwrap();
+    assert_eq!(reply["result"]["isError"], true);
+    let error: Value =
+        serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(error["error"]["code"], "stale_projection");
+}
+
+#[test]
+fn activity_family_deduplicates_exact_shared_keys_without_inventing_ownership() {
+    use crate::events::session_activity::{self as activity, SourcePosition, UsageStep};
+    let usage = |session: &str| {
+        UsageStep::claude(
+            "same-message".into(),
+            SourcePosition {
+                source: session.into(),
+                offset: 0,
+            },
+            crate::events::MessageUsage::default(),
+        )
+    };
+    let copied = BTreeMap::from([("same-message".to_owned(), "exact-shared-key".to_owned())]);
+    let parent = activity::derive(
+        "parent".into(),
+        vec![usage("parent")],
+        &copied,
+        vec![],
+        crate::pricing::snapshot(),
+    );
+    let child = activity::derive(
+        "child".into(),
+        vec![usage("child")],
+        &copied,
+        vec![],
+        crate::pricing::snapshot(),
+    );
+    let families = activity::analytics::families(
+        [
+            ("parent", None, Some(&parent)),
+            ("child", Some("parent"), Some(&child)),
+        ]
+        .into_iter(),
+    );
+    let family = &families["parent"];
+    assert_eq!(family.counts.totals.observed.steps, 1);
+    assert_eq!(family.counts.totals.shared.steps, 1);
+    assert_eq!(family.counts.totals.exclusive.steps, 0);
+    assert!(!family.counts.exclusive_cost_complete);
+    assert_eq!(family.total_step_time_ms.unknown_steps, 2);
+    assert_eq!(parent.steps.len(), 1);
+    assert_eq!(child.steps.len(), 1);
+    assert!(
+        activity::analytics::families(
+            [
+                ("parent", Some("child"), Some(&parent)),
+                ("child", Some("parent"), Some(&child)),
+            ]
+            .into_iter()
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn activity_fact_pages_use_stable_identity_order_and_detect_source_refresh() {
+    let home = Home::new("fact-pages");
+    let mut records = vec![human("facts", ts(1, 0), "Synthetic facts")];
+    for minute in [3, 1, 2] {
+        let id = format!("commit-{minute}");
+        records.push(assistant(
+            "facts",
+            ts(1, minute),
+            vec![tool(
+                &id,
+                "Bash",
+                json!({"command":"git commit -m synthetic"}),
+            )],
+        ));
+        records.push(json!({"type":"user","sessionId":"facts","timestamp":ts(1,minute),
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":format!("[topic abcdef{minute}] synthetic")}]}}));
+    }
+    home.top("facts", &records);
+    let mut query = home.query();
+    let first = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"facts","kind":"facts","limit":2}),
+    );
+    let last = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"facts","kind":"facts","limit":2,"generation":first["generation"],"cursor":first["next_cursor"]}),
+    );
+    assert_eq!(first["items"].as_array().unwrap().len(), 2);
+    assert_eq!(last["items"].as_array().unwrap().len(), 1);
+    let ids: Vec<_> = first["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(last["items"].as_array().unwrap())
+        .map(|item| item["identity"].as_str().unwrap())
+        .collect();
+    assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
+    assert!(last["next_cursor"].is_null());
+    records.push(assistant(
+        "facts",
+        ts(1, 4),
+        vec![text("Changed generation")],
+    ));
+    home.top("facts", &records);
+    assert_eq!(
+        failure(
+            &mut query,
+            "get_session_activity",
+            json!({"id":"facts","generation":first["generation"]})
+        ),
+        "stale_projection"
+    );
+}
+
+#[test]
+fn sanitized_activity_query_matches_owned_golden() {
+    let home = activity_fixture();
+    let mut query = home.query();
+    let listed = call(&mut query, "list_sessions", json!({}));
+    let summary = &listed["sessions"][0]["activity_analytics"];
+    let page = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","limit":2}),
+    );
+    let actual = json!({
+        "summary": {
+            "observed_steps":summary["totals"]["observed"]["steps"],
+            "exclusive_steps":summary["totals"]["exclusive"]["steps"],
+            "shared_steps":summary["totals"]["shared"]["steps"],
+            "compactions":summary["compactions"],"thrash":summary["thrash"],
+            "empty_search_steps":summary["empty_search_steps"],
+            "change_facts":summary["change_facts"],
+            "elapsed_ms":summary["totals"]["observed"]["elapsed_ms"],
+            "family":summary["family"]
+        },
+        "page": {
+            "session":page["session"],"kind":page["kind"],
+            "items":page["items"].as_array().unwrap().iter().map(|item|json!({"id":item["id"],"timestamp":item["timestamp"]})).collect::<Vec<_>>(),
+            "next_cursor":page["next_cursor"]
+        }
+    });
+    let golden: Value = serde_json::from_str(include_str!("activity-golden.json")).unwrap();
+    assert_eq!(actual, golden);
+}
+
+#[test]
+fn activity_pages_keep_native_ids_global_across_machines() {
+    let home = activity_fixture();
+    let peer = Home::new("activity-peer");
+    peer.top("peer", &[human("peer", ts(1, 0), "Synthetic peer")]);
+    let mut query = Query::with_machines(vec![
+        ("a".into(), home.options.clone()),
+        ("b".into(), peer.options.clone()),
+    ]);
+    let page = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","limit":1}),
+    );
+    assert_eq!(page["session"]["id"], "activity");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        failure(
+            &mut query,
+            "get_session_activity",
+            json!({"id":"activity@activity"})
+        ),
+        "unknown_session"
+    );
+}

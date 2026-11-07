@@ -116,8 +116,8 @@ fn idle(path: &Path, fingerprint: &str) -> rusqlite::Result<bool> {
     )?;
     let (target, completed, pending): (Option<String>, Option<String>, bool) = connection
         .query_row(
-            "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),EXISTS(SELECT 1 FROM pricing_recompute_pending)",
-            params![TARGET, COMPLETED],
+            "SELECT (SELECT value FROM meta WHERE key=?1),(SELECT value FROM meta WHERE key=?2),(EXISTS(SELECT 1 FROM pricing_recompute_pending) OR EXISTS(SELECT 1 FROM session_activity_projections WHERE pricing_fingerprint<>?3))",
+            params![TARGET, COMPLETED, fingerprint],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
     Ok(target.as_deref() == Some(fingerprint)
@@ -153,9 +153,15 @@ fn step_inner(
             params![TARGET, COMPLETED],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
+    let activity_pending: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_activity_projections WHERE pricing_fingerprint<>?1)",
+        [&table.fingerprint],
+        |r| r.get(0),
+    )?;
     if current_target.as_deref() == Some(table.fingerprint.as_str())
         && current_completed.as_deref() == Some(table.fingerprint.as_str())
         && !has_pending
+        && !activity_pending
     {
         return Ok(false);
     }
@@ -206,7 +212,9 @@ fn step_inner(
     let migrated_completion = !full_pass
         && work.phase == 3
         && current_completed.as_deref() != Some(table.fingerprint.as_str());
-    let result = if full_pass {
+    let result = if activity_pending {
+        session_activity::reprice_step(&tx, &table)
+    } else if full_pass {
         match work.phase {
             0 => source_step(&tx, &mut work, &table, None).map(|_| true),
             1 => catalog_step(&tx, &mut work, &table, None).map(|_| true),
@@ -955,6 +963,8 @@ mod tests {
     }
     fn row(path: &str, ledger: &Ledger, cost: Cost, harness: &str) -> CatalogRow {
         CatalogRow {
+            session_activity: None,
+            activity_analytics: None,
             overview: None,
             trace: None,
             query: None,
@@ -1709,7 +1719,7 @@ mod tests {
             before
         );
         assert_eq!(parser_version(&c).unwrap(), Some(CACHE_VERSION));
-        assert_eq!(CACHE_VERSION, 29);
+        assert_eq!(CACHE_VERSION, 31);
         drop(c);
         let second = table("anthropic", "claude-opus-5-5", 12.0, 2);
         drain(&path, &second);

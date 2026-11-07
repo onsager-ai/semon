@@ -1376,6 +1376,24 @@ impl NativeEvidence {
             })
     }
 
+    /// Cold local activity calls use the existing source coordinator to publish
+    /// a qualified generation before entering the metadata-only pager.
+    pub(crate) fn prepare_activity_catalog(&self, now: i64) -> io::Result<()> {
+        let mut work = lock(&self.work);
+        loop {
+            crate::selected_read::check()?;
+            if self.closed.load(Ordering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "native query source is closed",
+                ));
+            }
+            if self.refresh_catalog(&mut work, now)? {
+                return Ok(());
+            }
+        }
+    }
+
     /// Prepare/publish Catalog evidence directly, independent of Viewer state.
     /// The caller holds native work; false yields a bounded discovery slice.
     pub(crate) fn refresh_catalog(&self, work: &mut Work, now: i64) -> io::Result<bool> {

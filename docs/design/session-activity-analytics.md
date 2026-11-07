@@ -1,9 +1,10 @@
 # Session activity analytics derivation
 
-The first implementation slice is an internal pure derivation in
-`events/session_activity.rs`. It consumes normalized native usage and compaction
-signals for one canonical session. It does not publish storage rows or expose
-Query, MCP, Catalog or transcript fields.
+The internal pure derivation in `events/session_activity.rs` consumes normalized
+native usage and compaction signals for one canonical session. The session model
+publishes its typed results through `events/store/session_activity.rs`. Query
+JSON and MCP expose compact Catalog summaries and bounded detail pages; ordinary
+transcript and viewer payloads retain their existing contract.
 
 The producer supplies the existing Claude usage merge order and exact
 `claude_usage::shared` ownership map. One message ID is one observed step within
@@ -38,12 +39,97 @@ thrash and retain those three step identities. Fewer than three steps cannot
 form a thrash window. Derive each physical session independently; interleaving
 parent and child steps must never create a family thrash window.
 
-Follow-up work must wire the exact selected source cohort into a versioned
-SQLite activity projection, publish it atomically with the Catalog generation,
-and qualify current and retained-history reads against their respective source
-generations. That work owns the schema bump, rules-version rebuild and separate
-pricing invalidation, append/restart tests, and bounded storage reads. The pure
-slice changes neither parser nor schema versions. Family roll-ups, waste rules,
-change facts and public reads remain separate work. Preserve the source and
-custody contracts in [retained native projections](retained-native-projections.md)
-and [native session source readers](session-source-reader.md).
+Schema 37 stores a session activity header, ordered step rows keyed by
+`(session_key, generation, ordinal)`, separate ordered compaction rows, compact summary metadata, and typed
+change facts keyed by session, generation and stable identity.
+Parser 31 retains the exact last Claude usage observation offset alongside the
+existing message ID and assistant UUIDs. The producer uses its established file
+merge order and copied-record ownership map; Codex reads only model-accepted
+facts whose normalized source receipt matches the selected consumed ledger.
+Header and detail publication shares the Catalog transaction and its complete
+source membership, ledger, claim and generation checks. Metadata-only updates
+cannot retain activity for a different source cohort.
+
+The header binds the source-vector generation, activity rules version, pricing
+fingerprint and row counts. The internal reader returns at most 256 ordered
+steps, checks the selected source cohort and rejects stale continuations, rules
+or prices. It belongs inside the caller's selection transaction. Activity rules
+changes enqueue current source owners through the existing Catalog invalidation
+path. Changed source generations derive again during normal model publication.
+Recognized obsolete indexes rebuild from supported sources under the existing
+refusal/rebuild policy; there is no migration or old-store reader.
+
+Each step saves typed pricing inputs without native bodies. The existing pricing
+producer reprices at most 128 activity rows per transaction across restart,
+including retained observations with unavailable native bytes. Step stamps prevent
+mixed-price pages; the final batch advances the header fingerprint and activity
+generation. Unknown prices remain unknown. Step arrays stay out of cached descriptions and session summaries. Compact
+`activity_analytics` is published with Catalog/query summaries; it rebuilds after
+relationships rather than entering the stable description cache. Catalog version 7
+and the semantic recipe bind this output.
+
+Rules version 2 classifies the first waste per step in this order: orchestration
+wait, explicit tool failure, refill after compaction, redundant read. Failures
+retain path-not-found and malformed-command (Tooling), rate/auth/network/server
+failure (External), or other failure (Unmapped). Empty search is an independent
+non-waste signal; other sleeps are Unmapped. Wait intervals retain their exact
+recorded endpoints independently of the capped step duration. Missing endpoints
+stay unknown. Compound failures need an identified diagnostic component; ambiguous
+failures remain Unmapped.
+
+The bounded classifier runs during the existing complete-line scan. Tool events
+retain only allowlisted command tags, read-selection hashes, call/result record
+digests, typed outcomes and sanitized change values. The file ledger binds these
+observations to the consumed source receipt. A source-local read repeat requires
+a completed prior read of the same selection and no intervening or overlapping
+unknown mutation; compaction changes a repeated read to Context refill. Unknown
+commands and mutating/agent calls break that proof. Decoding accepts recognized
+Codex result keys, text blocks and nested JSON strings, with a 256 KiB cumulative
+string budget, eight decoding levels and bounded block counts. Exit text in a
+successful result is not failure evidence.
+
+Change facts accept only recognized command/output pairs: commit branch/SHA,
+GitHub push destination plus successful ref updates, and a GitHub pull-request
+number from `gh pr create`. Fetch blocks and updates into `origin/*` are ignored.
+Facts retain a timestamp when recorded, source offset/digest, stable identity and
+an optional exact native step ID; source ordering never invents that identity.
+No command text, stdout/stderr or result body is persisted. Facts publish and
+advance pricing generations atomically with the step projection.
+
+Query JSON and MCP expose the same `get_session_activity` tool. Select `kind`
+`steps` (default) or `facts`, with `limit` 1–256 (default 100). Responses contain
+`session: {id, harness, native_ids}`, `generation`, `kind`, `items`, and nullable
+`next_cursor`. Pass that opaque string cursor and the same generation on the next
+request. Steps sort by producer ordinal (known timestamp, source position and
+exact identity); facts sort by stable identity with a keyset cursor. Selected
+Catalog source membership, rules, prices and generation qualify in one SQLite
+snapshot, with request-owned source witnesses. Mismatches return
+`stale_projection`; unknown sessions and invalid arguments refuse explicitly.
+No source paths, offsets, commands, raw bytes or output bodies leave these pages.
+
+`get_session` and `list_sessions` add nullable `activity_analytics`. A supported
+complete observation contains `rules_version`, `pricing_fingerprint`,
+`totals: {observed, exclusive, shared}`, `by_band`, `compactions`, `thrash`,
+`waste_by_kind`, `waste_by_category`, `empty_search_steps`, `change_facts` and
+`exclusive_cost_complete`. Each step total has `steps`, `list_cost_usd`,
+`carry_cost_usd` and `elapsed_ms`; measurements preserve `{known, unknown_steps}`.
+Absent native usage/projections remain null. No thrash-window/step arrays enter
+these summaries.
+
+A nullable `family` summarizes only the exact existing parent chain, using
+producer-side leaf reduction and bounded stored-summary refresh for independently
+published children. It deduplicates exact shared keys in ownership/context
+totals; exclusive ownership remains unresolved. Compactions, waste signals and
+change counts sum physical-session observations. `member_sessions` and
+`thrashed_sessions` report session counts. `total_step_time_ms` explicitly sums
+all capped physical-session step durations, including copied observations; it
+can exceed wall-clock time. No interleaved cross-session thrash is inferred.
+The stored fold caps at 256 members, 4096 shared observations and 4 MiB metadata;
+incomplete, cyclic or oversized families stay null. Children retain their own
+steps and parents acquire no child rows.
+
+Selecting distinct retained-history cohorts remains separate work. The retained latest observation
+can only qualify against its own exact source vector; a different history cohort
+is unavailable. Preserve the source and custody contracts in
+[retained native projections](retained-native-projections.md) and
+[native session source readers](session-source-reader.md).

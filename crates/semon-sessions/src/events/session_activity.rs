@@ -8,27 +8,34 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use super::{CodexNativeUsage, CodexUsageEvent, MessageUsage, ModelTokens, Signal, SignalKind};
+use serde::{Deserialize, Serialize};
+
+#[cfg(test)]
+use super::CodexNativeUsage;
+use super::{CodexUsageEvent, MessageUsage, ModelTokens, Signal, SignalKind};
 use crate::{claude_usage::Shared, pricing};
 
-pub(crate) const ACTIVITY_RULES_VERSION: u32 = 1;
+pub(crate) mod analytics;
+pub(crate) mod classify;
+
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 2;
 const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
 /// the complete native (thread, session, turn, response) tuple, not response alone.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum ActivityStepId {
     Claude(String),
     Codex([String; 4]),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct SourcePosition {
     pub(crate) source: String,
     pub(crate) offset: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum ContextBand {
     Under50k,
     From50kTo150k,
@@ -45,7 +52,7 @@ impl ContextBand {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Ownership {
     Exclusive,
     /// The exact key returned by `claude_usage::shared`; no original is inferred.
@@ -55,13 +62,15 @@ pub(crate) enum Ownership {
 /// A normalized usage row, before session ordering and pricing. Keep these
 /// constructors at the boundary so legacy cumulative Codex counters cannot be
 /// mistaken for native response facts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct UsageStep {
-    id: ActivityStepId,
-    position: SourcePosition,
-    usage: Usage,
+    pub(crate) id: ActivityStepId,
+    pub(crate) position: SourcePosition,
+    pub(crate) usage: Usage,
 }
 
-enum Usage {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) enum Usage {
     Claude(MessageUsage),
     Codex(CodexUsageEvent),
 }
@@ -79,8 +88,21 @@ impl UsageStep {
         }
     }
 
+    pub(crate) fn normalized_codex(
+        identity: [String; 4],
+        position: SourcePosition,
+        event: CodexUsageEvent,
+    ) -> Self {
+        Self {
+            id: ActivityStepId::Codex(identity),
+            position,
+            usage: Usage::Codex(event),
+        }
+    }
+
     /// `model_outcome` comes from the existing native fact table, after source
     /// receipt qualification. This filter does not establish that qualification.
+    #[cfg(test)]
     pub(crate) fn codex(
         payload: &serde_json::Value,
         model_outcome: &str,
@@ -106,7 +128,7 @@ impl UsageStep {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ActivityStep {
     pub(crate) id: ActivityStepId,
     pub(crate) position: SourcePosition,
@@ -120,9 +142,13 @@ pub(crate) struct ActivityStep {
     pub(crate) timestamp: Option<i64>,
     pub(crate) elapsed_ms: Option<u64>,
     pub(crate) compactions: u64,
+    pub(crate) waste: Option<classify::WasteKind>,
+    pub(crate) waste_category: Option<classify::WasteCategory>,
+    pub(crate) waits: Vec<classify::WaitInterval>,
+    pub(crate) empty_search: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Compaction {
     pub(crate) position: SourcePosition,
     pub(crate) timestamp: Option<i64>,
@@ -131,7 +157,7 @@ pub(crate) struct Compaction {
 
 /// A partial sum preserves both the measured amount and its missing coverage.
 /// In particular the final step does not invent a zero duration.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Measured<T> {
     pub(crate) known: T,
     pub(crate) unknown_steps: u64,
@@ -147,7 +173,7 @@ impl<T: std::ops::AddAssign> Measured<T> {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct StepTotals {
     pub(crate) steps: u64,
     pub(crate) list_cost_usd: Measured<f64>,
@@ -164,7 +190,7 @@ impl StepTotals {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct OwnershipTotals {
     pub(crate) observed: StepTotals,
     pub(crate) exclusive: StepTotals,
@@ -181,7 +207,7 @@ impl OwnershipTotals {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SessionActivityAggregate {
     pub(crate) totals: OwnershipTotals,
     pub(crate) by_band: BTreeMap<ContextBand, OwnershipTotals>,
@@ -193,7 +219,7 @@ pub(crate) struct SessionActivityAggregate {
     pub(crate) exclusive_cost_complete: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SessionActivity {
     pub(crate) session_key: String,
     pub(crate) rules_version: u32,
@@ -201,6 +227,83 @@ pub(crate) struct SessionActivity {
     pub(crate) steps: Vec<ActivityStep>,
     pub(crate) compactions: Vec<Compaction>,
     pub(crate) aggregate: SessionActivityAggregate,
+    pub(crate) facts: Vec<classify::ChangeFact>,
+}
+
+/// Tool observations can join a step only through exact native identity or a
+/// same-source following usage observation (or the trailing prior one). Facts retain
+/// only exact identities, never the interval association used for step waste.
+pub(crate) fn apply_observations(
+    activity: &mut SessionActivity,
+    mut observations: Vec<classify::LocatedObservation>,
+) {
+    let compactions: Vec<_> = activity
+        .compactions
+        .iter()
+        .map(|compact| (compact.position.source.clone(), compact.position.offset))
+        .collect();
+    classify::classify_reads(&mut observations, &compactions);
+    let mut exact = BTreeMap::new();
+    let mut sources: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
+    for (index, step) in activity.steps.iter().enumerate() {
+        exact.insert(step.id.clone(), index);
+        sources
+            .entry(step.position.source.clone())
+            .or_default()
+            .push((step.position.offset, index));
+    }
+    for offsets in sources.values_mut() {
+        offsets.sort_unstable();
+    }
+    for row in observations {
+        activity.facts.extend(
+            row.observation
+                .changes
+                .iter()
+                .cloned()
+                .map(|change| classify::fact(&row, change)),
+        );
+        let owner = if let Some(id) = &row.observation.step_id {
+            exact.get(id).copied()
+        } else {
+            sources.get(&row.position.source).and_then(|offsets| {
+                let next = offsets.partition_point(|(offset, _)| *offset < row.position.offset);
+                // Response usage follows its calls. This association never
+                // becomes an exact response identity on a change fact.
+                offsets
+                    .get(next)
+                    .or_else(|| offsets.last())
+                    .map(|(_, index)| *index)
+            })
+        };
+        if let Some(owner) = owner {
+            let step = &mut activity.steps[owner];
+            step.empty_search |= row.observation.empty_search;
+            if let Some(wait) = row.observation.wait {
+                step.waits.push(wait);
+            }
+            if let Some(waste) = row.observation.waste {
+                let rank = |kind| match kind {
+                    classify::WasteKind::OrchestrationWait => 0,
+                    classify::WasteKind::PathNotFound
+                    | classify::WasteKind::MalformedCommand
+                    | classify::WasteKind::ExternalFailure
+                    | classify::WasteKind::OtherFailure
+                    | classify::WasteKind::Sleep => 1,
+                    classify::WasteKind::Refill => 2,
+                    classify::WasteKind::RedundantRead => 3,
+                };
+                if step.waste.is_none_or(|old| rank(waste) < rank(old)) {
+                    step.waste = Some(waste);
+                    step.waste_category = Some(waste.category());
+                }
+            }
+        }
+    }
+    activity
+        .facts
+        .sort_by(|a, b| (&a.position, &a.identity).cmp(&(&b.position, &b.identity)));
+    activity.facts.dedup_by(|a, b| a.identity == b.identity);
 }
 
 /// Use the model's existing Claude merge order: the last normalized row for a
@@ -271,6 +374,10 @@ pub(crate) fn derive(
                 timestamp,
                 elapsed_ms: None,
                 compactions: 0,
+                waste: None,
+                waste_category: None,
+                waits: Vec::new(),
+                empty_search: false,
             }
         })
         .collect();
@@ -371,6 +478,7 @@ pub(crate) fn derive(
         steps,
         compactions,
         aggregate,
+        facts: Vec::new(),
     }
 }
 

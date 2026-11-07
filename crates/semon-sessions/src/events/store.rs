@@ -25,6 +25,7 @@ pub(crate) mod native_usage;
 mod relocation;
 pub(crate) mod reprice;
 mod semantic_stage;
+pub(crate) mod session_activity;
 pub(crate) mod tree_state;
 
 use std::{
@@ -244,10 +245,11 @@ fn emit_catalog_publish_attempt(
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-// Contract fence: older owned indexes rebuild together. Version 35 adds the
-// per-database storage version stamp; current stores do not run storage DDL.
-// Version 36 adds the ledger epoch to source ledgers and published sources.
-pub(crate) const SCHEMA_VERSION: i64 = 36;
+// Contract fence: older owned indexes rebuild together. Version 38 combines
+// the per-database storage version stamp (current stores do not run storage
+// DDL), the ledger epoch on source ledgers and published sources, and compact
+// activity summaries for bounded family publication.
+pub(crate) const SCHEMA_VERSION: i64 = 38;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -462,6 +464,7 @@ CREATE TABLE IF NOT EXISTS usage (
     billing_timestamp INTEGER,
     billing_split_unknown INTEGER NOT NULL,
     record_ids TEXT NOT NULL,
+    native_offset INTEGER NOT NULL,
     PRIMARY KEY (file_id, message_id)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS codex_usage (
@@ -598,6 +601,8 @@ struct EventState {
     result_source: bool,
     #[serde(default, skip_serializing_if = "super::is_false")]
     native_direct_call: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activity_observation: Option<super::session_activity::classify::Observation>,
 }
 
 const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
@@ -609,16 +614,16 @@ const USAGE_COLUMNS: &str = "message_id, model, input, cached_input, output, rea
      total, model_input, model_output, model_cache_write, model_cache_read, billing_input, \
      billing_output, billing_cache_read, billing_cache_write_5m, billing_cache_write_1h, \
      billing_web_search_requests, billing_speed, billing_service_tier, billing_prompt_size, \
-     billing_timestamp, billing_split_unknown, record_ids";
+     billing_timestamp, billing_split_unknown, record_ids, native_offset";
 
 const PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (file_id, message_id, model, input, \
      cached_input, output, reasoning_output, total, model_input, model_output, \
      model_cache_write, model_cache_read, billing_input, billing_output, billing_cache_read, \
      billing_cache_write_5m, billing_cache_write_1h, billing_web_search_requests, \
      billing_speed, billing_service_tier, billing_prompt_size, billing_timestamp, \
-     billing_split_unknown, record_ids) \
+     billing_split_unknown, record_ids, native_offset) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-     ?19, ?20, ?21, ?22, ?23, ?24)";
+     ?19, ?20, ?21, ?22, ?23, ?24, ?25)";
 
 const CODEX_USAGE_COLUMNS: &str = "seq, model, input, output, cache_write, cache_read, t";
 
@@ -2464,7 +2469,8 @@ impl IndexStore for SqliteStore {
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(failure)?
         };
-        for path in repairs {
+        let activity_repairs = session_activity::repairs(&tx).map_err(failure)?;
+        for path in repairs.into_iter().chain(activity_repairs) {
             if !semantic_stage::owns_header_repair(&tx, &path).map_err(failure)? {
                 invalidate_catalog_source(&tx, &path, "changed").map_err(failure)?;
             }
@@ -2501,6 +2507,26 @@ impl IndexStore for SqliteStore {
 
     fn load_file(&self, path: &str) -> Result<Option<(Ledger, FileIndex)>, StoreError> {
         self.read_one(path).map_err(failure)
+    }
+
+    fn activity_codex_steps(
+        &self,
+        path: &str,
+        ledger: &Ledger,
+    ) -> Result<Vec<super::session_activity::UsageStep>, StoreError> {
+        let tx = self.connection.unchecked_transaction().map_err(failure)?;
+        require_current_sql(&tx).map_err(failure)?;
+        if ledger_row(&tx, path)
+            .map_err(failure)?
+            .as_ref()
+            .map(|(_, ledger)| ledger)
+            != Some(ledger)
+        {
+            return Err(StoreError::Data(
+                "Activity source generation changed".into(),
+            ));
+        }
+        session_activity::accepted_codex(&tx, path, ledger).map_err(failure)
     }
 
     fn native_usage_seen(
@@ -3589,6 +3615,18 @@ impl SqliteStore {
                 metadata_measurements.emit(producer, "catalog_metadata");
                 overview_measurements.emit(producer, "overview_publish");
             }
+            for row in rows {
+                if let Some(activity) = &row.session_activity {
+                    session_activity::publish(&transaction, row, activity).map_err(failure)?;
+                } else {
+                    // Metadata-only publications must never leave an activity
+                    // header pretending to describe their new source cohort.
+                    session_activity::remove_mismatched(&transaction, row).map_err(failure)?;
+                }
+            }
+            for row in rows {
+                session_activity::refresh_summaries(&transaction, &row.key).map_err(failure)?;
+            }
             stage("catalog_metadata", &transaction);
             #[cfg(test)]
             if let CatalogWriter::Traversal { owners, measured } = writer {
@@ -4555,6 +4593,10 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT usage_ready FROM native_usage_sources LIMIT 0",
         "SELECT tree_root FROM native_tree_repairs LIMIT 0",
         "SELECT source_generation FROM session_slot_projections LIMIT 0",
+        "SELECT source_generation,generation,rules_version,pricing_fingerprint,total,summary FROM session_activity_projections LIMIT 0",
+        "SELECT generation,ordinal,metadata,waste_kind,waste_category,empty_search FROM session_activity_steps LIMIT 0",
+        "SELECT generation,identity,metadata FROM session_activity_facts LIMIT 0",
+        "SELECT generation,ordinal,metadata FROM session_activity_compactions LIMIT 0",
         "SELECT metadata FROM session_history_catalog LIMIT 0",
         "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
     ] {
@@ -4670,10 +4712,11 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
 }
 
 /// One authored DDL set, shared by cold initialization and whole-index rebuilds.
-fn storage_ddl() -> [&'static str; 10] {
+fn storage_ddl() -> [&'static str; 11] {
     [
         SCHEMA,
         native_usage::SCHEMA,
+        session_activity::SCHEMA,
         tree_state::SCHEMA,
         semantic_stage::SCHEMA,
         crate::overview::SCHEMA,
@@ -5872,14 +5915,15 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
         .get::<_, Option<String>>(12)?
         .map(|text| event_state(12, &text))
         .transpose()?;
-    let (y, poll_target, result_source, native_direct_call) = match state {
+    let (y, poll_target, result_source, native_direct_call, activity_observation) = match state {
         Some(state) => (
             state.yielded,
             state.poll_target,
             state.result_source,
             state.native_direct_call,
+            state.activity_observation,
         ),
-        None => (None, None, false, false),
+        None => (None, None, false, false, None),
     };
     let r = if row.get::<_, bool>(14)? {
         Some(Reply {
@@ -5922,6 +5966,7 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
         item: row.get::<_, Option<i64>>(21)?.map(uint),
         peer,
         u: row.get(26)?,
+        activity_observation,
     };
     Ok((row.get(0)?, seq_of(row.get(1)?), event))
 }
@@ -5929,6 +5974,7 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
 /// One `usage` row, selected as [`USAGE_COLUMNS`].
 fn read_usage(row: &Row<'_>) -> rusqlite::Result<(String, MessageUsage)> {
     let usage = MessageUsage {
+        offset: uint(row.get(23)?),
         record_ids: from_json(22, &row.get::<_, String>(22)?)?,
         model: row.get(1)?,
         tokens: Tokens {
@@ -6490,14 +6536,21 @@ fn put_event(
         item,
         peer,
         u,
+        activity_observation,
     } = event;
-    let y = if y.is_some() || poll_target.is_some() || *result_source || *native_direct_call {
+    let y = if y.is_some()
+        || poll_target.is_some()
+        || *result_source
+        || *native_direct_call
+        || activity_observation.is_some()
+    {
         Some(json(&EventState {
             version: 1,
             yielded: y.as_ref().map(|yielded| Box::new((**yielded).clone())),
             poll_target: poll_target.as_ref().cloned(),
             result_source: *result_source,
             native_direct_call: *native_direct_call,
+            activity_observation: activity_observation.clone(),
         })?)
     } else {
         None
@@ -6565,6 +6618,7 @@ fn put_usage(
     usage: &MessageUsage,
 ) -> rusqlite::Result<()> {
     let MessageUsage {
+        offset,
         record_ids,
         model,
         tokens:
@@ -6622,6 +6676,7 @@ fn put_usage(
         timestamp,
         split_unknown,
         json(record_ids)?,
+        int(*offset),
     ])?;
     Ok(())
 }
@@ -6663,7 +6718,7 @@ mod tests {
         ASYNC, Kind, Links, PIN, RateLimitWindow, RateLimits, SENDS, STDIN, SignalKind, UNKNOWN,
     };
 
-    fn scratch(name: &str) -> PathBuf {
+    pub(super) fn scratch(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
             "semon-store-{name}-{}-{}",
             std::process::id(),
@@ -6954,7 +7009,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    fn opened(path: &Path) -> (SqliteStore, Loaded) {
+    pub(super) fn opened(path: &Path) -> (SqliteStore, Loaded) {
         match SqliteStore::attempt(path) {
             Ok(opened) => opened,
             Err(error) => panic!("the store opens: {error}"),
@@ -6963,7 +7018,7 @@ mod tests {
 
     const CATALOG_FIXTURE_NOW: i64 = 1_790_294_400_000;
 
-    fn catalog_native_fixture(
+    pub(super) fn catalog_native_fixture(
         root: &Path,
         count: usize,
         seed_catalog: bool,
@@ -7563,7 +7618,7 @@ mod tests {
         state
     }
 
-    fn catalog_write(
+    pub(super) fn catalog_write(
         store: &mut SqliteStore,
         rows: &[crate::model::summary::CatalogRow],
         projections: &[crate::slot_projection::Projection],
@@ -9774,6 +9829,7 @@ mod tests {
                         start: Some("777".to_owned()),
                     }),
                     u: Some("uuid-1".to_owned()),
+                    activity_observation: None,
                 },
                 // A peer with nothing known is still a peer.
                 Event {
@@ -9836,6 +9892,7 @@ mod tests {
                 (
                     "msg-1".to_owned(),
                     MessageUsage {
+                        offset: 123,
                         record_ids: std::collections::BTreeSet::from(["record-uuid".into()]),
                         model: Some("claude-test".to_owned()),
                         tokens: Tokens {

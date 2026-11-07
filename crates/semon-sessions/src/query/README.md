@@ -361,6 +361,26 @@ compatibility Model construction are removed; global native reconciliation and
 unqualified selected semantic preparation remain distinct scaling costs.
 
 
+## Session activity
+
+Query JSON and MCP share `get_session_activity` for typed step or change-fact
+pages, with `kind`, `limit`, `generation` and opaque `cursor`. The page validates
+the selected Catalog source vector, rules and pricing in one snapshot; completion
+rechecks source custody and the selected publication. Continuations require the
+same generation. The default page has 100 items, with a 256-item maximum. Steps
+use producer ordinal order; facts use keyset paging by stable identity. Native
+bodies, commands, outputs and source positions are excluded. Hosted callers use
+the existing selected-source admission and request-owned reader. Cold local
+calls prepare the Catalog through its shared coordinator before reading pages.
+
+`get_session` and `list_sessions` add compact nullable `activity_analytics`, with
+exact parent-family totals and physical-session step-time. The design contract
+and all fields live in [session activity analytics](../../../../docs/design/session-activity-analytics.md).
+`activity-golden.json` owns sanitized expectations for the new summary/page
+contract. Historical `contract-reference.json` remains byte-for-byte frozen;
+the legacy comparator projects away only `activity_analytics`, which dedicated
+tests assert separately.
+
 ## Focused Query metadata and search
 
 Qualified physical `get_session` reads reuse the producer's exact summary and

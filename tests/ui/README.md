@@ -28,6 +28,42 @@ its completion witness is the native-publication success message in the CI log.
 
 ## Required coverage and historical reports
 
+- CI run 42348328683 for qualified activity summary parity (head `e5490a24b`,
+  merge preview `5348dc73`) supplied visual artifact 13564543219 and transport
+  artifact 13564721665. Both review proposals qualified fingerprint-only
+  maintenance with zero refusals: 155 visual and six transport records. Their
+  generated patches change only candidate fingerprints to
+  `b4bd958cfb6fe9b90a244c19435f2dffdee40f1b10140cc9081de5d6a0207042`.
+  Image/evidence digests, reference pins, review decisions and thresholds remain
+  unchanged; this maintenance establishes no new appearance approval.
+
+- CI run 42346736759 for the completed activity Query implementation (head
+  `8e261fe57`, merge preview `52c5a134`) supplied visual artifact 13563099592 and
+  transport artifact 13564465142. Both review proposals qualified fingerprint-only
+  maintenance with zero refusals: 155 visual and six transport records. Their
+  generated patches update only candidate fingerprints to
+  `461cc144e18a6377cbaff0b9578299f5f42d251dcdea1f55288b9a0f13d49c84`.
+  Image/evidence digests, reference pins, review decisions and thresholds remain
+  unchanged; this maintenance establishes no new appearance approval.
+
+- CI run 42345212724 for activity Query pages (head `84fe7b6be`, merge preview
+  `13115a08`) supplied visual artifact 13563662526 and transport artifact
+  13563905596. Both proposals qualified fingerprint-only maintenance with zero
+  refusals: 155 visual and six transport records. The generated review patches
+  change only candidate fingerprints to
+  `995a58e59292553857082dd6e4179ec4ea2525ccebad41b229a3924f93f353e0`.
+  Image/evidence digests, reference pins, review decisions and thresholds remain
+  unchanged; this maintenance establishes no new appearance approval.
+
+- CI run 42241827416 for the activity classification branch (head `be8d47f2e`,
+  merge preview `331d05d8`) supplied visual artifact 13516273045 and transport
+  artifact 13516266871. Both proposals qualified fingerprint-only maintenance
+  with zero refusals: 155 visual and six transport records. The generated patches
+  change only candidate fingerprints to
+  `81d90a3f481e2618c52d7b8678f8e93651d08f4881a16d1c0c9140b01bf3ec62`.
+  Image/evidence digests, reference pins, review decisions and thresholds remain
+  unchanged; this maintenance establishes no new appearance approval.
+
 - The Sessions-default decision in `docs/design/ui-design-brief.md` supersedes
   Home navigation and inbox assertions. Root/title waits now require Sessions;
   ordering leaves the list through Analytics and returns to Sessions; pending
@@ -143,17 +179,14 @@ its completion witness is the native-publication success message in the CI log.
   `9c833b783901760998ecdc8cb31c61f14a14410d30984eff67b77609c5c2b789`; image and
   evidence digests, decisions, review provenance and reference pins are unchanged.
   This is binding maintenance only and grants no new appearance approval.
-- CI run 42313402722 for the #477 storage rebuild (Source `8410cf49`) supplies
-  visual artifact 13549354209 and transport artifact 13549079190. The supported
-  audit and proposal generator qualify 155 visual and six transport records as
-  fingerprint-only, with no refusals. Independent Manager review compared all 966
-  image/evidence digests (keyed by comparator, scope, kind and key) with the
-  existing bindings: zero mismatches. It inspected phone home and desktop
-  machines diffs, which show only the previously approved changes. The adopted
-  patches change only candidate fingerprints to
-  `f3273fec47d9d9f25df5d410a8d329d5fcaf164ce344849c80503b4592948881`; decisions,
-  review provenance and reference pins are unchanged. This is binding maintenance
-  only and grants no new appearance approval.
+- CI run 42193624292 for session activity storage (merge preview `44d59c99`)
+  supplies the visual and transport artifacts from that run. The supported audit
+  and proposal generator qualify 155 visual and six transport records as
+  fingerprint-only, with zero refusals. Both generated patches change only
+  candidate fingerprints to
+  `204f8f547c1e6758ed9978d6779bd81a57bd30ab52c329d901aa5f931d6b6650`;
+  image/evidence digests, decisions, review provenance and reference pins remain
+  unchanged. This is binding maintenance and grants no new appearance approval.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw

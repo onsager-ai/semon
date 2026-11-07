@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "manifest_sha256": "5fae9532e9e0c6ecaeb8157905964a85c400e465f4586200c6ecd188f7e5aedc",
+  "manifest_sha256": "d77c0ed5b4e3b579b31ee1f9fddff4b95a17ec01cf1c7504bdb9c7cc65afb266",
   "block_sha256": "21b24d84a4636c657f08116aac12fb3d4a0ea717b66c92f4cfe1dff433f8d9a4",
   "resolved_skills": [
     "ci-triage",
@@ -82,53 +82,8 @@
       "owner": "shared",
       "mode": "100644"
     },
-    ".agents/skills/ui-design/references/integrations.md": {
-      "sha256": "3af777b4a5c00a896fb200d50dc7d0e0db787ffcb348eb2bee1f140e32f3a0bc",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".agents/skills/ui-design/scripts/package-lock.json": {
-      "sha256": "3694a56f6979cbbdd4a87635562300e1f24fe9c4e4719a42149eb5a002b1a5a2",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".agents/skills/ui-design/scripts/package.json": {
-      "sha256": "559afb4676f9f264560919b6b12f146b39d4286ca32d6f6332542e549ab38e38",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".agents/skills/ui-design/scripts/proxy.mjs": {
-      "sha256": "436ce07233732e7118fd6ce21b6837e4f071a3683aa418993babbf3aa0042277",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".agents/skills/ui-design/scripts/run.mjs": {
-      "sha256": "58bdd4d7b7f9fd36d7720ffc46b7fa6588d03e128ad184513607a243d5d5eee8",
-      "owner": "shared",
-      "mode": "100755"
-    },
-    ".agents/skills/ui-design/scripts/run.test.mjs": {
-      "sha256": "65dd6d62dec7bb3c4827f8e68f8fdc7336254f5a87268148fe57e764e14ea223",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".agents/skills/ui-design/scripts/setup.py": {
-      "sha256": "cfcc5fbfe206eed9cb838926260eabb747e4f532dbae49a7d1058b91bcb0928d",
-      "owner": "shared",
-      "mode": "100755"
-    },
-    ".agents/skills/ui-design/scripts/setup.test.py": {
-      "sha256": "108865a35ad6ffad08025749842620d0ba65b280603522c81b81c30ab002fdf7",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".agents/skills/ui-design/scripts/smoke.mjs": {
-      "sha256": "7b6d590dba8d4223a3c583422401d4313f462ccd4902f19d90f867763dd6eea0",
-      "owner": "shared",
-      "mode": "100755"
-    },
     ".agents/skills/ui-design/SKILL.md": {
-      "sha256": "2b2e16461ead87a05e3d6d50869573eddaf0e1d9a79c437b0df9ee892f863bc4",
+      "sha256": "7d4c8099fd5458b5d7f33c9d30ac4b004dcb2cacac27fdb05100e52f29b2a485",
       "owner": "shared",
       "mode": "100644"
     },
@@ -212,53 +167,8 @@
       "owner": "local-projection",
       "mode": "100644"
     },
-    ".claude/skills/ui-design/references/integrations.md": {
-      "sha256": "3af777b4a5c00a896fb200d50dc7d0e0db787ffcb348eb2bee1f140e32f3a0bc",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".claude/skills/ui-design/scripts/package-lock.json": {
-      "sha256": "3694a56f6979cbbdd4a87635562300e1f24fe9c4e4719a42149eb5a002b1a5a2",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".claude/skills/ui-design/scripts/package.json": {
-      "sha256": "559afb4676f9f264560919b6b12f146b39d4286ca32d6f6332542e549ab38e38",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".claude/skills/ui-design/scripts/proxy.mjs": {
-      "sha256": "436ce07233732e7118fd6ce21b6837e4f071a3683aa418993babbf3aa0042277",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".claude/skills/ui-design/scripts/run.mjs": {
-      "sha256": "58bdd4d7b7f9fd36d7720ffc46b7fa6588d03e128ad184513607a243d5d5eee8",
-      "owner": "shared",
-      "mode": "100755"
-    },
-    ".claude/skills/ui-design/scripts/run.test.mjs": {
-      "sha256": "65dd6d62dec7bb3c4827f8e68f8fdc7336254f5a87268148fe57e764e14ea223",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".claude/skills/ui-design/scripts/setup.py": {
-      "sha256": "cfcc5fbfe206eed9cb838926260eabb747e4f532dbae49a7d1058b91bcb0928d",
-      "owner": "shared",
-      "mode": "100755"
-    },
-    ".claude/skills/ui-design/scripts/setup.test.py": {
-      "sha256": "108865a35ad6ffad08025749842620d0ba65b280603522c81b81c30ab002fdf7",
-      "owner": "shared",
-      "mode": "100644"
-    },
-    ".claude/skills/ui-design/scripts/smoke.mjs": {
-      "sha256": "7b6d590dba8d4223a3c583422401d4313f462ccd4902f19d90f867763dd6eea0",
-      "owner": "shared",
-      "mode": "100755"
-    },
     ".claude/skills/ui-design/SKILL.md": {
-      "sha256": "2b2e16461ead87a05e3d6d50869573eddaf0e1d9a79c437b0df9ee892f863bc4",
+      "sha256": "7d4c8099fd5458b5d7f33c9d30ac4b004dcb2cacac27fdb05100e52f29b2a485",
       "owner": "shared",
       "mode": "100644"
     },
