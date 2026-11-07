@@ -125,7 +125,11 @@ fn open(options: &Options) -> Result<Connection, QueryError> {
         .map_err(unavailable)?;
     Ok(db)
 }
-pub(crate) fn sqlite_read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, QueryError> {
+pub(crate) fn sqlite_read(
+    options: &Options,
+    now: i64,
+    bytes_left: &mut usize,
+) -> Result<Part, QueryError> {
     let db = open(options)?;
     db.execute_batch("BEGIN").map_err(unavailable)?;
     crate::events::store::require_current(&db).map_err(unavailable)?;
@@ -368,11 +372,15 @@ pub(crate) fn sqlite_read(options: &Options, now: i64, bytes_left: &mut usize) -
 }
 pub(crate) fn sqlite_recheck(options: &Options, part: &Part) -> Result<(), QueryError> {
     let db = open(options)?;
-    if generation(&db)? != part.generation { return Err(unavailable("Native Catalog changed during the query")); }
+    if generation(&db)? != part.generation {
+        return Err(unavailable("Native Catalog changed during the query"));
+    }
     for (key, expected) in &part.witnesses {
         let actual:Option<String>=db.query_row("SELECT CASE WHEN h.session_key IS NOT NULL THEN json_extract(h.metadata,'$.query') ELSE json_extract(c.metadata,'$.query') END FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1",[key],|row|row.get(0)).optional().map_err(unavailable)?.flatten();
         let actual = actual.and_then(|text| serde_json::from_str::<Value>(&text).ok());
-        if actual.as_ref().map(Value::to_string).as_deref() != Some(expected.as_str()) { return Err(unavailable("Native Query facts changed during the query")); }
+        if actual.as_ref().map(Value::to_string).as_deref() != Some(expected.as_str()) {
+            return Err(unavailable("Native Query facts changed during the query"));
+        }
     }
     Ok(())
 }
@@ -696,14 +704,31 @@ impl Query {
             let key = if key.is_empty() { "local" } else { key };
             let catalog_key = &parts[*index].owners[id];
             if source.storage.is_postgres() {
-                let reader = provider.map(|provider| provider(key, catalog_key)).transpose().map_err(|error| QueryError::io(&error))?;
-                let answer = source.storage.with_selected_query(catalog_key, reader.as_deref(), mode, now, |data| {
-                    let native = QueryRead::new(vec![(key.to_owned(), Arc::new(data))], usize::MAX);
-                    let view = View::native(&native, now, ReadShape::Summaries, reader.as_deref().map(|reader| (reader, mode)))?;
-                    let session = view.sessions.iter().find(|(key,_)| key == id).map(|(_,value)|value).ok_or_else(|| unavailable("Native question owner unavailable"))?;
-                    let summary = view.summary(id, session);
-                    Ok::<_, QueryError>(summary["open_question"]["text"].clone())
-                }).map_err(|error| QueryError::io(&error))??;
+                let reader = provider
+                    .map(|provider| provider(key, catalog_key))
+                    .transpose()
+                    .map_err(|error| QueryError::io(&error))?;
+                let answer = source
+                    .storage
+                    .with_selected_query(catalog_key, reader.as_deref(), mode, now, |data| {
+                        let native =
+                            QueryRead::new(vec![(key.to_owned(), Arc::new(data))], usize::MAX);
+                        let view = View::native(
+                            &native,
+                            now,
+                            ReadShape::Summaries,
+                            reader.as_deref().map(|reader| (reader, mode)),
+                        )?;
+                        let session = view
+                            .sessions
+                            .iter()
+                            .find(|(key, _)| key == id)
+                            .map(|(_, value)| value)
+                            .ok_or_else(|| unavailable("Native question owner unavailable"))?;
+                        let summary = view.summary(id, session);
+                        Ok::<_, QueryError>(summary["open_question"]["text"].clone())
+                    })
+                    .map_err(|error| QueryError::io(&error))??;
                 row["open_question"]["text"] = answer;
                 continue;
             }
@@ -738,7 +763,10 @@ impl Query {
         // Remote preview I/O does not hold a collection transaction. Recheck the
         // published generation and process observations before returning it.
         for ((_, source), part) in self.sources.machines.iter().zip(parts) {
-            if crate::native_evidence::query_runtime_generation(&source.options).map_err(|error| QueryError::io(&error))? != part.runtime {
+            if crate::native_evidence::query_runtime_generation(&source.options)
+                .map_err(|error| QueryError::io(&error))?
+                != part.runtime
+            {
                 return Err(unavailable("Native Catalog changed during the query"));
             }
             source.storage.recheck_catalog_query(&part)?;

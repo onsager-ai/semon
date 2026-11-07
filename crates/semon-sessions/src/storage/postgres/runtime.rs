@@ -74,53 +74,131 @@ impl PgProjectionStore {
         let runtime = crate::native_evidence::query_runtime_generation(options).map_err(backend)?;
         let observations = crate::native_evidence::RuntimeObservations::projection(options);
         let mut part = crate::query::catalog::Part {
-            generation: tx.catalog_generation(namespace).await?.ok_or_else(|| backend("Catalog not published"))?,
-            runtime, rows: Default::default(), owners: Default::default(), content: Default::default(),
-            witnesses: Default::default(), edges: Default::default(), turns: Default::default(),
+            generation: tx
+                .catalog_generation(namespace)
+                .await?
+                .ok_or_else(|| backend("Catalog not published"))?,
+            runtime,
+            rows: Default::default(),
+            owners: Default::default(),
+            content: Default::default(),
+            witnesses: Default::default(),
+            edges: Default::default(),
+            turns: Default::default(),
         };
-        let cutoff = (!options.all).then(|| now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX)));
+        let cutoff = (!options.all).then(|| {
+            now.saturating_sub(i64::try_from(options.since.as_millis()).unwrap_or(i64::MAX))
+        });
         let mut after = None;
         let mut all = Vec::new();
         loop {
-            let page = tx.catalog_page(namespace, CatalogReadScope::Current, after.as_ref().map(|(last,key): &(i64,String)| (*last,key.as_str())), 100).await?;
+            let page = tx
+                .catalog_page(
+                    namespace,
+                    CatalogReadScope::Current,
+                    after
+                        .as_ref()
+                        .map(|(last, key): &(i64, String)| (*last, key.as_str())),
+                    100,
+                )
+                .await?;
             for row in page.rows {
                 let bytes = serde_json::to_vec(&row).map_err(backend)?.len();
-                *bytes_left = bytes_left.checked_sub(bytes).ok_or_else(|| backend("Catalog Query metadata budget"))?;
+                *bytes_left = bytes_left
+                    .checked_sub(bytes)
+                    .ok_or_else(|| backend("Catalog Query metadata budget"))?;
                 let context = tx.tx.query_opt("SELECT metadata,source_generation FROM semon_projection.query_context WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &row.key]).await.map_err(backend)?.ok_or_else(|| backend("Catalog Query context unavailable"))?;
                 let text: &str = context.get(0);
-                *bytes_left = bytes_left.checked_sub(text.len()).ok_or_else(|| backend("Catalog Query context budget"))?;
-                if context.get::<_, String>(1) != crate::retention::source_generation(&row.sources).map_err(backend)? { return Err(backend("Catalog Query context changed")); }
+                *bytes_left = bytes_left
+                    .checked_sub(text.len())
+                    .ok_or_else(|| backend("Catalog Query context budget"))?;
+                if context.get::<_, String>(1)
+                    != crate::retention::source_generation(&row.sources).map_err(backend)?
+                {
+                    return Err(backend("Catalog Query context changed"));
+                }
                 let context: serde_json::Value = serde_json::from_str(text).map_err(backend)?;
                 all.push((row, context));
             }
             after = page.next;
-            if after.is_none() { break; }
+            if after.is_none() {
+                break;
+            }
         }
         let mut keep = std::collections::BTreeSet::new();
         let mut needed = std::collections::BTreeSet::new();
         for (row, context) in &all {
-            let saved = row.query.as_ref().ok_or_else(|| backend("Catalog Query facts unavailable"))?;
-            if cutoff.is_none_or(|cutoff| saved["last"].as_i64().is_some_and(|last| last>=cutoff) || matches!(saved["state"].as_str(),Some("work"|"wait"))) { keep.insert(row.key.clone()); }
-            for edge in context["edges"].as_array().ok_or_else(|| backend("invalid Query edges"))? {
-                if cutoff.is_none_or(|cutoff| edge["at"].as_i64().is_some_and(|at|at>=cutoff) || edge["done"].as_i64().is_some_and(|at|at>=cutoff) || matches!(edge["status"].as_str(),Some("work"|"wait"|"new"))) {
+            let saved = row
+                .query
+                .as_ref()
+                .ok_or_else(|| backend("Catalog Query facts unavailable"))?;
+            if cutoff.is_none_or(|cutoff| {
+                saved["last"].as_i64().is_some_and(|last| last >= cutoff)
+                    || matches!(saved["state"].as_str(), Some("work" | "wait"))
+            }) {
+                keep.insert(row.key.clone());
+            }
+            for edge in context["edges"]
+                .as_array()
+                .ok_or_else(|| backend("invalid Query edges"))?
+            {
+                if cutoff.is_none_or(|cutoff| {
+                    edge["at"].as_i64().is_some_and(|at| at >= cutoff)
+                        || edge["done"].as_i64().is_some_and(|at| at >= cutoff)
+                        || matches!(edge["status"].as_str(), Some("work" | "wait" | "new"))
+                }) {
                     needed.insert(row.key.clone());
-                    if let Some(id)=edge["id"].as_str() { part.edges.insert(id.to_owned()); }
-                    keep.extend([edge["from"].as_str(),edge["to"].as_str()].into_iter().flatten().filter(|id|*id!="you").map(str::to_owned));
+                    if let Some(id) = edge["id"].as_str() {
+                        part.edges.insert(id.to_owned());
+                    }
+                    keep.extend(
+                        [edge["from"].as_str(), edge["to"].as_str()]
+                            .into_iter()
+                            .flatten()
+                            .filter(|id| *id != "you")
+                            .map(str::to_owned),
+                    );
                 }
             }
         }
         let initial = keep.clone();
         for (row, context) in &all {
-            if !initial.contains(&row.key) { continue; }
-            for turn in context["turns"].as_array().ok_or_else(|| backend("invalid Query turns"))? {
-                if cutoff.is_none_or(|cutoff| turn["last"]==true || turn["at"].as_i64().is_some_and(|at|at>=cutoff)) {
-                    if let Some(id)=turn["id"].as_str() { part.turns.insert(id.to_owned()); }
-                    let ids = turn["start"].as_str().into_iter().chain(turn["sent"].as_array().into_iter().flatten().filter_map(serde_json::Value::as_str));
+            if !initial.contains(&row.key) {
+                continue;
+            }
+            for turn in context["turns"]
+                .as_array()
+                .ok_or_else(|| backend("invalid Query turns"))?
+            {
+                if cutoff.is_none_or(|cutoff| {
+                    turn["last"] == true || turn["at"].as_i64().is_some_and(|at| at >= cutoff)
+                }) {
+                    if let Some(id) = turn["id"].as_str() {
+                        part.turns.insert(id.to_owned());
+                    }
+                    let ids = turn["start"].as_str().into_iter().chain(
+                        turn["sent"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(serde_json::Value::as_str),
+                    );
                     for id in ids {
                         part.edges.insert(id.to_owned());
                         for (_, other) in &all {
-                            for edge in other["edges"].as_array().into_iter().flatten().filter(|edge|edge["id"]==id) {
-                                keep.extend([edge["from"].as_str(),edge["to"].as_str()].into_iter().flatten().filter(|id|*id!="you").map(str::to_owned));
+                            for edge in other["edges"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter(|edge| edge["id"] == id)
+                            {
+                                keep.extend(
+                                    [edge["from"].as_str(), edge["to"].as_str()]
+                                        .into_iter()
+                                        .flatten()
+                                        .filter(|id| *id != "you")
+                                        .map(str::to_owned),
+                                );
                             }
                         }
                     }
@@ -129,18 +207,45 @@ impl PgProjectionStore {
         }
         needed.extend(keep.iter().cloned());
         for (row, _) in all {
-            if !needed.contains(&row.key) { continue; }
-            if row.sources.iter().any(|source| crate::catalog::source_relative(options,&row.harness,source).is_none()) { return Err(backend("Catalog Query source authority changed")); }
-            let saved = row.query.as_ref().ok_or_else(|| backend("Catalog Query facts unavailable"))?;
-            if !crate::model::summary::query_observation_matches(saved,&row.sources,true,observations.expected(&row).as_deref()).map_err(backend)? { return Err(backend("Catalog Query runtime changed")); }
-            part.witnesses.push((row.key.clone(),saved.to_string()));
-            for (id,saved) in saved["rows"].as_object().ok_or_else(|| backend("invalid Query summaries"))?.iter().filter(|(id,_)|keep.contains(*id)) {
-                if part.rows.get(id).is_some_and(|prior|prior!=saved) { return Err(backend("Catalog Query context disagrees")); }
-                part.rows.insert(id.clone(),saved.clone());
-                part.owners.insert(id.clone(),row.key.clone());
+            if !needed.contains(&row.key) {
+                continue;
+            }
+            if row.sources.iter().any(|source| {
+                crate::catalog::source_relative(options, &row.harness, source).is_none()
+            }) {
+                return Err(backend("Catalog Query source authority changed"));
+            }
+            let saved = row
+                .query
+                .as_ref()
+                .ok_or_else(|| backend("Catalog Query facts unavailable"))?;
+            if !crate::model::summary::query_observation_matches(
+                saved,
+                &row.sources,
+                true,
+                observations.expected(&row).as_deref(),
+            )
+            .map_err(backend)?
+            {
+                return Err(backend("Catalog Query runtime changed"));
+            }
+            part.witnesses.push((row.key.clone(), saved.to_string()));
+            for (id, saved) in saved["rows"]
+                .as_object()
+                .ok_or_else(|| backend("invalid Query summaries"))?
+                .iter()
+                .filter(|(id, _)| keep.contains(*id))
+            {
+                if part.rows.get(id).is_some_and(|prior| prior != saved) {
+                    return Err(backend("Catalog Query context disagrees"));
+                }
+                part.rows.insert(id.clone(), saved.clone());
+                part.owners.insert(id.clone(), row.key.clone());
             }
         }
-        if keep.iter().any(|id|!part.rows.contains_key(id)) { return Err(backend("Catalog Query relationship unavailable")); }
+        if keep.iter().any(|id| !part.rows.contains_key(id)) {
+            return Err(backend("Catalog Query relationship unavailable"));
+        }
         tx.commit(namespace).await?;
         Ok(part)
     }
@@ -176,13 +281,22 @@ impl PgProjectionStore {
             names.push(row.key.clone());
             let context = tx.tx.query_opt("SELECT metadata,source_generation FROM semon_projection.query_context WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &row.key]).await.map_err(backend)?
                 .ok_or_else(|| backend("selected Query relationship context unavailable"))?;
-            if context.get::<_, String>(1) != crate::retention::source_generation(&row.sources).map_err(backend)? {
+            if context.get::<_, String>(1)
+                != crate::retention::source_generation(&row.sources).map_err(backend)?
+            {
                 return Err(backend("selected Query relationship generation changed"));
             }
-            let context: serde_json::Value = serde_json::from_str(context.get(0)).map_err(backend)?;
-            let endpoints = context["edges"].as_array().ok_or_else(|| backend("invalid Query context"))?.iter()
-                .flat_map(|edge| [edge["from"].as_str(), edge["to"].as_str()]).flatten()
-                .filter(|key| *key != "you").map(str::to_owned).collect::<Vec<_>>();
+            let context: serde_json::Value =
+                serde_json::from_str(context.get(0)).map_err(backend)?;
+            let endpoints = context["edges"]
+                .as_array()
+                .ok_or_else(|| backend("invalid Query context"))?
+                .iter()
+                .flat_map(|edge| [edge["from"].as_str(), edge["to"].as_str()])
+                .flatten()
+                .filter(|key| *key != "you")
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
             let related = tx.tx.query(
                 "SELECT session_key FROM semon_projection.catalog WHERE namespace=$1 AND (session_key=$2 OR session_key=ANY($4::text[]) OR metadata::jsonb->>'parent'=$5 OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(metadata::jsonb->'native_ids') n WHERE n=ANY($3::text[]))) ORDER BY session_key LIMIT 65",
                 &[&namespace.binding(), &row.parent.as_deref().unwrap_or(""), &names, &endpoints, &row.key],
