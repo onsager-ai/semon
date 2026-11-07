@@ -205,7 +205,10 @@ impl FactsSource {
             #[cfg(feature = "postgres")]
             return owner.storage.local_facts();
             #[cfg(not(feature = "postgres"))]
-            { let _ = owner; return Err(io::Error::other("PostgreSQL feature required")); }
+            {
+                let _ = owner;
+                return Err(io::Error::other("PostgreSQL feature required"));
+            }
         }
         let cache = self
             .cache
