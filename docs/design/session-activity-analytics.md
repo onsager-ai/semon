@@ -114,7 +114,12 @@ advance pricing generations atomically with the step projection.
 Cold local activity preparation uses the existing persisted Catalog producer
 in bounded slices. Each completed slice releases its decoded index and text
 payloads before the next slice receives a fresh 131,072-row/64 MiB accounting
-budget. The enclosing request retains its deadline and cancellation, and the
+budget. Cold preparation keeps its ordinary 64-seed cohort. An accounting
+refusal discards only the unpublished attempt's payloads, reopens the scoped
+writer, and halves that seed cohort; durable pending source intents and exact
+native checkpoints remain. A one-seed over-budget component still refuses.
+Cancellation, expiry and source conflicts never trigger this split.
+The enclosing request retains its deadline and cancellation, and the
 final detail page keeps its independent bounded admission. This is a live
 preparation bound, not a cumulative limit on all sessions in a normal window.
 A terminal selected-read limit propagates without treating the durable Event

@@ -6587,8 +6587,9 @@ fn activity_pages_keep_native_ids_global_across_machines() {
 
 #[test]
 fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
-    // More total rows than one request budget, but each released producer slice
-    // fits. Exercise the fresh-process shape after list_sessions populated it.
+    // Same synthetic workload, ordinary 64-seed admission versus adaptive
+    // splitting under a deliberately small request ceiling. Neither changes
+    // the production limits, and both begin with a prior listing's index.
     let home = Home::new("activity-batches");
     for n in 0..144 {
         let sid = format!("session-{n:03}");
@@ -6602,42 +6603,56 @@ fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
         }
         home.top(&sid, &records);
     }
-    let listed = call(&mut home.query(), "list_sessions", json!({"limit":1000}));
-    assert_eq!(listed["total"], 144);
-    // Require the ordinary producer to revisit all owners on restart. This is
-    // a current-store rules invalidation, not a legacy schema fixture.
-    let db = rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
-    db.execute(
-        "UPDATE session_activity_projections SET rules_version=0",
-        [],
-    )
-    .unwrap();
-    drop(db);
-    let control = crate::SelectedReadControl::default().with_limits(2200, 64 * 1024 * 1024);
-    let page = {
-        let _scope = crate::selected_read::Scope::enter(&control);
-        call(
-            &mut home.query(),
+    for (label, rows) in [("ordinary", 131_072), ("adaptive", 100)] {
+        let mut options = home.options.clone();
+        options.cache = home.root.join(format!("{label}.json"));
+        let listed = call(
+            &mut Query::new(options.clone()),
+            "list_sessions",
+            json!({"limit":1000}),
+        );
+        assert_eq!(listed["total"], 144);
+        let control = crate::SelectedReadControl::default().with_limits(rows, 64 * 1024 * 1024);
+        crate::selected_read::take_accounting();
+        let started = std::time::Instant::now();
+        let page = {
+            let _scope = crate::selected_read::Scope::enter(&control);
+            call(
+                &mut Query::new(options.clone()),
+                "get_session_activity",
+                json!({"id":"session-000","limit":5}),
+            )
+        };
+        let elapsed = started.elapsed();
+        let (total, peak_rows, peak_bytes) = crate::selected_read::take_accounting();
+        println!(
+            "activity batches {label}: sessions=144 steps=1728 total_charged_rows={total} peak_attempt_rows={peak_rows} peak_attempt_bytes={peak_bytes} wall_ms={}",
+            elapsed.as_millis()
+        );
+        if label == "adaptive" {
+            assert!(total > rows, "workload must exceed the cumulative ceiling");
+        }
+        assert!(
+            peak_rows <= rows + 1,
+            "each attempt must stop before allocating its overflow row"
+        );
+        assert_eq!(page["items"].as_array().unwrap().len(), 5);
+        assert!(page["generation"].is_string());
+        let db = rusqlite::Connection::open(options.cache.with_extension("sqlite3")).unwrap();
+        let current: i64 = db
+            .query_row(
+                "SELECT count(*) FROM session_activity_projections WHERE rules_version=?1",
+                [crate::events::session_activity::ACTIVITY_RULES_VERSION],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current, 144, "all batches must be durably published");
+        let next = call(
+            &mut Query::new(options),
             "get_session_activity",
-            json!({"id":"session-000","limit":5}),
-        )
-    };
-    assert_eq!(page["items"].as_array().unwrap().len(), 5);
-    assert!(page["generation"].is_string());
-    let db = rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
-    let current: i64 = db
-        .query_row(
-            "SELECT count(*) FROM session_activity_projections WHERE rules_version=?1",
-            [crate::events::session_activity::ACTIVITY_RULES_VERSION],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(current, 144, "all batches must be durably published");
-    let next = call(
-        &mut home.query(),
-        "get_session_activity",
-        json!({"id":"session-000","generation":page["generation"],"cursor":page["next_cursor"],"limit":5}),
-    );
-    assert_eq!(next["items"].as_array().unwrap().len(), 5);
-    assert_eq!(next["generation"], page["generation"]);
+            json!({"id":"session-000","generation":page["generation"],"cursor":page["next_cursor"],"limit":5}),
+        );
+        assert_eq!(next["items"].as_array().unwrap().len(), 5);
+        assert_eq!(next["generation"], page["generation"]);
+    }
 }

@@ -897,20 +897,40 @@ impl NativeEvidence {
                 .snapshot
                 .get_or_insert_with(|| Snapshot::sources(&self.options, &[]));
             snapshot.extend_sources(&self.options, &inputs);
-            let seeds = inputs;
+            let mut seeds = inputs;
             let prepared = {
                 let _timing =
                     crate::native_timing::Phase::new(&self.options.cache, "cold_component");
-                cache.scan_byte_budget = Some(4 * 1024 * 1024);
-                let prepared = self.prepare_catalog_component_mode(
-                    cache,
-                    seeds.clone(),
-                    true,
-                    now,
-                    attempted_ticket.as_ref(),
-                );
-                cache.scan_byte_budget = None;
-                if let Some(prepared) = prepared? {
+                let prepared = loop {
+                    // Keep the normal 64-source path. On accounting overflow,
+                    // discard this unpublished attempt and retry fewer seeds.
+                    let (prepared, overflow) = {
+                        let _attempt = crate::selected_read::active()
+                            .then(crate::selected_read::Scope::producer_batch)
+                            .transpose()?;
+                        cache.scan_byte_budget = Some(4 * 1024 * 1024);
+                        let prepared = self.prepare_catalog_component_mode(
+                            cache,
+                            seeds.clone(),
+                            true,
+                            now,
+                            attempted_ticket.as_ref(),
+                        );
+                        cache.scan_byte_budget = None;
+                        let overflow = crate::selected_read::accounting_exhausted();
+                        (prepared, overflow)
+                    };
+                    if !overflow || seeds.len() <= 1 {
+                        break prepared?;
+                    }
+                    // All writes completed so far are receipt-qualified native
+                    // index checkpoints. Unpublished cold writes and decoded
+                    // payloads die with this cache; pending intents stay in SQL.
+                    *cache = self.open_index()?;
+                    seeds.truncate(seeds.len().div_ceil(2));
+                    crate::selected_read::check()?;
+                };
+                if let Some(prepared) = prepared {
                     prepared
                 } else {
                     let paths = seeds
