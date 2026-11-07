@@ -1,5 +1,7 @@
 # Session activity analytics derivation
 
+For the approved viewer direction, see [Session activity viewer](session-activity-viewer.md).
+
 The internal pure derivation in `events/session_activity.rs` consumes normalized
 native usage and compaction signals for one canonical session. The session model
 publishes its typed results through `events/store/session_activity.rs`. Query
