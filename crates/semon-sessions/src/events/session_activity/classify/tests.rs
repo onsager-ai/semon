@@ -1025,6 +1025,43 @@ fn native_output_projection_and_literal_pr_bodies_table() {
 }
 
 #[test]
+fn multiple_literal_exec_results_retain_failure_diagnostics_without_success_proof() {
+    let script = "text(await tools.exec_command({cmd:'cat absent'})); text(await tools.exec_command({cmd:'cat present'}));";
+    assert!(crate::events::activity_results_source(script));
+    assert!(!crate::events::activity_results_source(
+        "text({exit_code:1,output:'cat: absent: No such file or directory'});"
+    ));
+    for (message, expected) in [
+        (
+            "cat: absent: No such file or directory",
+            WasteKind::PathNotFound,
+        ),
+        ("HTTP 503", WasteKind::ExternalFailure),
+        ("syntax error", WasteKind::MalformedCommand),
+        ("failure", WasteKind::OtherFailure),
+    ] {
+        let mut observation = call("exec_command", &Value::Null, None, "hash".into());
+        observation.failure_results = true;
+        finish(
+            &mut observation,
+            &json!([
+                {"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},
+                {"type":"input_text","text":json!({"exit_code":1,"output":message}).to_string()},
+                {"type":"input_text","text":json!({"exit_code":0,"output":"body"}).to_string()}
+            ]),
+            false,
+            None,
+            None,
+            "result".into(),
+        );
+        assert_eq!(observation.waste, Some(expected));
+        assert!(observation.settled);
+        assert!(!observation.completed);
+        assert!(observation.changes.is_empty());
+    }
+}
+
+#[test]
 fn terminal_ambiguous_code_mode_does_not_suppress_all_later_reads() {
     let mut index = FileIndex::default();
     let records = [

@@ -122,6 +122,7 @@ pub(crate) struct Observation {
     orchestration: bool,
     formatter: bool,
     envelopes: bool,
+    failure_results: bool,
     completed: bool,
     settled: bool,
     background: bool,
@@ -573,6 +574,7 @@ pub(super) fn call(
         orchestration,
         formatter: false,
         envelopes: false,
+        failure_results: false,
         completed: false,
         settled: false,
         background,
@@ -950,6 +952,26 @@ pub(super) fn finish(
         }
         return;
     }
+    // Multiple exactly printed exec results may report a failure without
+    // proving which individual command owns a read, change or native outcome.
+    if observation.failure_results {
+        let mut budget = MAX_BYTES;
+        let parts = output
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(std::slice::from_ref(output));
+        for part in parts.iter().take(32) {
+            let mut diagnostic = ResultEvidence::default();
+            let part = part.get("text").unwrap_or(part);
+            if decode(part, 0, &mut budget, &mut diagnostic, true, true).is_some()
+                && failure(&[Command::Unknown], &diagnostic).is_some()
+            {
+                result.error = true;
+                result.text = diagnostic.text;
+                break;
+            }
+        }
+    }
     observation.settled = !observation.background && !result.running;
     observation.completed =
         observation.settled && !result.error && result.exit.is_none_or(|code| code == 0);
@@ -1098,6 +1120,11 @@ pub(crate) fn capture(
                     // An arbitrary script's printed JSON is opaque. It cannot
                     // forge an exec outcome, nor leave a terminal script's
                     // mutation barrier open just because its data is JSON.
+                    observation.failure_results = name == "exec"
+                        && field(payload, "input").is_some_and(|script| {
+                            crate::events::activity_results_source(script)
+                                || crate::events::activity_output_source(script)
+                        });
                     observation.envelopes = name != "exec"
                         || field(payload, "input").is_some_and(|script| {
                             crate::events::result_source(script)

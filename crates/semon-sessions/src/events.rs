@@ -91,7 +91,7 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v31: source-bound typed activity observations, without tool input/output.
 /// v32: assistant-only Claude tools and expanded typed activity classification.
 /// v33: literal PR bodies and code-mode printed-output activity observations.
-pub(crate) const CACHE_VERSION: u32 = 33;
+pub(crate) const CACHE_VERSION: u32 = 34;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -5260,6 +5260,41 @@ fn result_source(script: &str) -> bool {
         || directly_prints_call(&tokens, operation, true)
         || assigned_result_is_printed(&tokens, operation, false)
         || assigned_result_is_printed(&tokens, operation, true)
+}
+
+/// A straight-line sequence of complete literal exec results can supply failure
+/// diagnostics even when multiple commands cannot own one activity selection.
+pub(crate) fn activity_results_source(script: &str) -> bool {
+    if script.len() > RESULT_SOURCE_BYTES_MAX {
+        return false;
+    }
+    let Some(tokens) = source_tokens(script) else {
+        return false;
+    };
+    let mut at = 0;
+    let mut count = 0;
+    while at < tokens.len() && count < 32 {
+        let Some(open) = tokens[at..].iter().position(|token| token == "p:(") else {
+            return false;
+        };
+        let Some(close) = matching_call_end(&tokens, at + open) else {
+            return false;
+        };
+        let end = close + 1;
+        let statement = &tokens[at..end];
+        if !["exec_command", "write_stdin"].iter().any(|operation| {
+            directly_prints_call(statement, operation, false)
+                || directly_prints_call(statement, operation, true)
+        }) {
+            return false;
+        }
+        at = end;
+        if tokens.get(at).map(String::as_str) == Some("p:;") {
+            at += 1;
+        }
+        count += 1;
+    }
+    count > 0 && at == tokens.len()
 }
 
 /// Only an exactly printed native wait result may supply nested wait timing.
