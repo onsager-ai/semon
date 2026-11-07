@@ -6389,6 +6389,46 @@ fn activity_family_rolls_up_without_child_step_duplication() {
 }
 
 #[test]
+fn activity_projection_rejects_a_different_storage_namespace() {
+    let home = activity_fixture();
+    let mut query = home.query();
+    call(&mut query, "get_session_activity", json!({"id":"activity"}));
+    let evidence = &query.sources.machines[0].1;
+    let wrong = crate::storage::Namespace::new("other-source").unwrap();
+    let args = json!({"id":"activity"});
+    assert!(
+        super::activity::read(
+            &evidence.options,
+            Some(&wrong),
+            "activity",
+            &args,
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            0,
+        )
+        .is_err()
+    );
+    let db = rusqlite::Connection::open(crate::events::EventCache::path(&evidence.options.cache))
+        .unwrap();
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key='activity'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let row = serde_json::from_str(&metadata).unwrap();
+    assert!(
+        crate::events::store::session_activity::publish_selected(
+            &evidence.options,
+            &row,
+            Some(&wrong),
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn activity_pages_sort_bound_and_refuse_generation_mismatch() {
     let home = activity_fixture();
     let mut query = home.query();
