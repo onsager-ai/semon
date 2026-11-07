@@ -73,6 +73,25 @@ impl PgProjectionStore {
                 if let Some(header) = header {
                     identities.extend(header.native_id(&input.full_path(options)));
                     identities.extend(serde_json::to_value(&header.metadata).map_err(backend)?["parent_thread"].as_str().map(str::to_owned));
+                    let tx = self.begin(namespace).await?;
+                    let discovered = tx.tx.query("SELECT path FROM semon_projection.discovery WHERE namespace=$1 AND root='codex' AND seen ORDER BY path LIMIT 4097", &[&namespace.binding()]).await.map_err(backend)?;
+                    tx.commit(namespace).await?;
+                    if discovered.len()>4096 { return Err(backend("Codex lineage candidate bound")); }
+                    for candidate in discovered {
+                        let candidate = Input { root: crate::InputRoot::Codex, path: candidate.get(0) };
+                        if candidate==*input { continue; }
+                        let mut line = String::new();
+                        let file = crate::sealed::LogFile::open(&candidate.full_path(options)).map_err(backend)?;
+                        std::io::BufReader::new(file.take(32*1024*1024)).read_line(&mut line).map_err(backend)?;
+                        if let Some(value)=crate::tx::parse_native_record(line.as_bytes()) {
+                            let other = crate::native_header::CodexHeader::from_record(&value);
+                            let id = other.native_id(&candidate.full_path(options));
+                            let parent = serde_json::to_value(&other.metadata).map_err(backend)?["parent_thread"].as_str().map(str::to_owned);
+                            if id.as_ref().is_some_and(|id|identities.contains(id)) || parent.as_ref().is_some_and(|id|identities.contains(id)) {
+                                identities.extend(id); identities.extend(parent); component.insert(candidate);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -233,7 +252,9 @@ impl PgProjectionStore {
             .iter()
             .map(|row| row.key.as_str())
             .collect::<BTreeSet<_>>();
-        if !prepared.lineage_dependencies.is_empty()
+        if prepared.lineage_dependencies.iter().any(|(harness, native)| {
+            prepared.rows.iter().all(|row| row.harness != *harness || !row.native_ids.contains(native))
+        })
             || prepared.rows.iter().any(|row| {
                 row.parent
                     .as_deref()
