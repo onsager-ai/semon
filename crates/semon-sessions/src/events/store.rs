@@ -245,9 +245,9 @@ fn emit_catalog_publish_attempt(
 
 /// `PRAGMA user_version`: the shape of the tables. The parser's version is
 /// [`CACHE_VERSION`], kept in `meta`.
-// Contract fence: older owned indexes rebuild together. Version 35 adds
-// source-bound activity steps and Claude usage observation offsets.
-pub(crate) const SCHEMA_VERSION: i64 = 36;
+// Contract fence: older owned indexes rebuild together. Version 37 adds
+// compact activity summaries for bounded family publication.
+pub(crate) const SCHEMA_VERSION: i64 = 37;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -3570,6 +3570,18 @@ impl SqliteStore {
                 metadata_measurements.emit(producer, "catalog_metadata");
                 overview_measurements.emit(producer, "overview_publish");
             }
+            for row in rows {
+                if let Some(activity) = &row.session_activity {
+                    session_activity::publish(&transaction, row, activity).map_err(failure)?;
+                } else {
+                    // Metadata-only publications must never leave an activity
+                    // header pretending to describe their new source cohort.
+                    session_activity::remove_mismatched(&transaction, row).map_err(failure)?;
+                }
+            }
+            for row in rows {
+                session_activity::refresh_summaries(&transaction, &row.key).map_err(failure)?;
+            }
             stage("catalog_metadata", &transaction);
             #[cfg(test)]
             if let CatalogWriter::Traversal { owners, measured } = writer {
@@ -3722,15 +3734,6 @@ impl SqliteStore {
                         [],
                     )
                     .map_err(failure)?;
-            }
-            for row in rows {
-                if let Some(activity) = &row.session_activity {
-                    session_activity::publish(&transaction, row, activity).map_err(failure)?;
-                } else {
-                    // Metadata-only publications must never leave an activity
-                    // header pretending to describe their new source cohort.
-                    session_activity::remove_mismatched(&transaction, row).map_err(failure)?;
-                }
             }
             stage("slots", &transaction);
             commit_boundary.capture(&transaction);
@@ -4545,7 +4548,7 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT usage_ready FROM native_usage_sources LIMIT 0",
         "SELECT tree_root FROM native_tree_repairs LIMIT 0",
         "SELECT source_generation FROM session_slot_projections LIMIT 0",
-        "SELECT source_generation,generation,rules_version,pricing_fingerprint,total FROM session_activity_projections LIMIT 0",
+        "SELECT source_generation,generation,rules_version,pricing_fingerprint,total,summary FROM session_activity_projections LIMIT 0",
         "SELECT generation,ordinal,metadata,waste_kind,waste_category,empty_search FROM session_activity_steps LIMIT 0",
         "SELECT generation,identity,metadata FROM session_activity_facts LIMIT 0",
         "SELECT generation,ordinal,metadata FROM session_activity_compactions LIMIT 0",

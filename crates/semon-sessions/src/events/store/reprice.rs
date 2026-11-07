@@ -964,6 +964,7 @@ mod tests {
     fn row(path: &str, ledger: &Ledger, cost: Cost, harness: &str) -> CatalogRow {
         CatalogRow {
             session_activity: None,
+            activity_analytics: None,
             overview: None,
             trace: None,
             query: None,

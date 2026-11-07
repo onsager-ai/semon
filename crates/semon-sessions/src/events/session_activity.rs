@@ -15,6 +15,7 @@ use super::CodexNativeUsage;
 use super::{CodexUsageEvent, MessageUsage, ModelTokens, Signal, SignalKind};
 use crate::{claude_usage::Shared, pricing};
 
+pub(crate) mod analytics;
 pub(crate) mod classify;
 
 pub(crate) const ACTIVITY_RULES_VERSION: u32 = 2;

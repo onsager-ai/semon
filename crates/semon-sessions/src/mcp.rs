@@ -26,7 +26,7 @@ const INVALID_PARAMS: i64 = -32602;
 
 const INSTRUCTIONS: &str = "Semon reads the local Claude Code and Codex session logs, read-only. \
     list_sessions and stalls give facts about sessions (state, last log line, process, parent and children); \
-    get_session adds its turns and handoffs; read_transcript reads what a selected session said. \
+    get_session adds its turns and handoffs; get_session_activity pages typed activity steps and change facts; read_transcript reads what a selected session said. \
     Times are epoch milliseconds. A field Semon can't know exactly is null. \
     The tools read a window of recent logs (30 days unless the server was started with --since or --all); \
     every answer names its window_start, and a since before it is the error outside_window.";
@@ -320,7 +320,13 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["list_sessions", "get_session", "read_transcript", "stalls"]
+            [
+                "list_sessions",
+                "get_session",
+                "get_session_activity",
+                "read_transcript",
+                "stalls"
+            ]
         );
         assert_eq!(replies[2]["error"]["code"], PARSE_ERROR);
         let _ = fs::remove_dir_all(root);

@@ -929,7 +929,7 @@ fn usage() -> String {
          DIR/machines/, followed while serving; --no-local leaves this machine out. DIR is only read.\n\
          \n\
          Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [home options as for sessions, and --machine DIR]\n\
-         The agent read surface over native session evidence: list_sessions, get_session, read_transcript,\n\
+         The agent read surface over native session evidence: list_sessions, get_session, get_session_activity, read_transcript,\n\
          stalls. `semon query` alone lists each tool's arguments.\n\
          \n\
          Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\

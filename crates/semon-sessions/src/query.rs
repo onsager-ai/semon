@@ -273,6 +273,23 @@ fn retained_query_tools() -> Vec<QueryTool> {
             }),
         },
         QueryTool {
+            name: "get_session_activity",
+            description: "A bounded page of typed activity steps or change facts. Continue with the returned generation and next_cursor; stale generations are refused. No native bodies or commands.",
+            positional: Some("id"),
+            input_schema: json!({
+                "type":"object",
+                "properties": {
+                    "id": id_property("The selected session's id."),
+                    "generation": {"type":"string","minLength":1,"maxLength":128,"description":"Generation returned by the first page; required with cursor."},
+                    "kind": {"type":"string","enum":["steps","facts"],"default":"steps","description":"Read activity steps or typed change facts."},
+                    "cursor": {"type":"string","minLength":1,"maxLength":128,"description":"Opaque next_cursor returned by the preceding page."},
+                    "limit": {"type":"integer","minimum":1,"maximum":256,"default":100,"description":"Maximum items returned in this page."}
+                },
+                "required":["id"],
+                "additionalProperties":false
+            }),
+        },
+        QueryTool {
             name: "read_transcript",
             description: "A page of one session's transcript, the same page the viewer's /api/tx serves: entries \
                 with from and to (their positions) and total. With no anchor, the last page; before or after a \
@@ -668,6 +685,10 @@ impl View {
             // The live process's run ids (RUN_VARIABLES only), or null.
             "run": facts.and_then(|facts| facts.run.clone()),
         });
+        row["activity_analytics"] = session
+            .get("activity_analytics")
+            .cloned()
+            .unwrap_or(Value::Null);
         if let Some(evidence) = session.get("copilot") {
             row["copilot"] = evidence.clone();
         }
@@ -692,6 +713,7 @@ fn session_fields(session: &crate::model::Session, machine: Option<&str>) -> Val
     let mut row = json!({"name":session.name,"harness":session.harness,
         "model":session.model,"repo":session.repo,"branch":session.branch,
         "state":session.state,"last":session.last,"machine":machine.unwrap_or(&session.machine),"busy":session.busy});
+    row["activity_analytics"] = json!(session.activity_analytics);
     if let Some(turn) = &session.turn_lifecycle {
         row["turn_lifecycle"] = json!(turn);
     }
@@ -848,6 +870,7 @@ pub struct Query {
     native: Option<QueryRead>,
 }
 
+mod activity;
 mod catalog;
 mod search;
 mod transcript;
@@ -977,10 +1000,22 @@ impl Query {
     }
 
     fn execute_at(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
+        let _activity_scope =
+            (tool == "get_session_activity").then(crate::selected_read::Scope::ensure);
+        if tool == "get_session_activity" && !self.embedded {
+            for (_, evidence) in &self.sources.machines {
+                evidence
+                    .prepare_activity_catalog(now)
+                    .map_err(|error| QueryError::io(&error))?;
+            }
+        }
         if !self.embedded
             && self.sources.machines.len() == 1
             && !self.sources.is_retired()
-            && matches!(tool, "get_session" | "read_transcript")
+            && matches!(
+                tool,
+                "get_session" | "get_session_activity" | "read_transcript"
+            )
         {
             let id = args["id"].as_str().expect("validated focused id");
             let (source_key, evidence) = &self.sources.machines[0];
@@ -1008,7 +1043,10 @@ impl Query {
         if !self.embedded
             && self.sources.machines.len() > 1
             && !self.sources.is_retired()
-            && matches!(tool, "get_session" | "read_transcript")
+            && matches!(
+                tool,
+                "get_session" | "get_session_activity" | "read_transcript"
+            )
         {
             let id = args["id"].as_str().expect("validated focused id");
             let mut selected = None;
@@ -1061,6 +1099,7 @@ impl Query {
         let mut answer = match tool {
             "list_sessions" => self.list_sessions(args, now, None),
             "get_session" => self.get_session(args, now, None),
+            "get_session_activity" => self.get_session_activity(args, now),
             "read_transcript" => self.read_transcript(args, now, None),
             "find" => self.find(args, now, None),
             "stalls" => self.stalls(args, now, None),
@@ -1138,14 +1177,15 @@ impl Query {
         let empty = json!({});
         let args = if args.is_null() { &empty } else { args };
         validate_query_call(tool, args)?;
-        if !matches!(tool, "get_session" | "read_transcript")
-            || !args["id"].as_str().is_some_and(|id| {
-                id == catalog_key
-                    || id
-                        .rsplit_once('@')
-                        .is_some_and(|(own, _)| own == catalog_key)
-            })
-        {
+        if !matches!(
+            tool,
+            "get_session" | "get_session_activity" | "read_transcript"
+        ) || !args["id"].as_str().is_some_and(|id| {
+            id == catalog_key
+                || id
+                    .rsplit_once('@')
+                    .is_some_and(|(own, _)| own == catalog_key)
+        }) {
             return Err(QueryError::invalid(
                 "A focused tool requires the selected Catalog id",
             ));
@@ -1198,6 +1238,29 @@ impl Query {
             .as_ref()
             .map(|reader| reader as &dyn crate::SessionSourceReader);
         let rendering = provider.map(|reader| (reader, mode));
+        if tool == "get_session_activity" {
+            let mut answer = activity::read(
+                &evidence.options,
+                catalog_key,
+                &focused_args,
+                provider,
+                mode,
+                now,
+            )?;
+            if self.sources.is_retired() {
+                return Err(QueryError::new("io", "native query source is closed"));
+            }
+            answer["window_start"] = json!(
+                self.sources
+                    .machines
+                    .iter()
+                    .filter_map(|(_, source)| {
+                        crate::model::QueryData::identity(&source.options, now).window_start
+                    })
+                    .max()
+            );
+            return Ok(answer);
+        }
         if tool == "get_session"
             && let Some(mut answer) = transcript::session(
                 &evidence.options,
@@ -1399,6 +1462,35 @@ impl Query {
                 .collect(),
         );
         Ok(json!({"now": view.now, "session": out}))
+    }
+
+    fn get_session_activity(&self, args: &Value, now: i64) -> Result<Value, QueryError> {
+        let id = args["id"].as_str().expect("validated activity id");
+        let read = self.evidence();
+        if read.conflicts().contains(id) {
+            return Err(QueryError::new(
+                "id_conflict",
+                format!("two machines both have {id}"),
+            ));
+        }
+        for (index, part) in read.parts.iter().enumerate() {
+            if let Some((key, _)) = part
+                .data
+                .sessions
+                .iter()
+                .find(|(key, _)| part.served(key) == id)
+            {
+                return activity::read(
+                    &self.sources.machines[index].1.options,
+                    key,
+                    args,
+                    None,
+                    crate::SessionSourceReadMode::LocalThenProvider,
+                    now,
+                );
+            }
+        }
+        Err(QueryError::unknown_session(id))
     }
 
     fn read_transcript(

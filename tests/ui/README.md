@@ -28,6 +28,33 @@ its completion witness is the native-publication success message in the CI log.
 
 ## Required coverage and historical reports
 
+- CI run 42348328683 for qualified activity summary parity (head `e5490a24b`,
+  merge preview `5348dc73`) supplied visual artifact 13564543219 and transport
+  artifact 13564721665. Both review proposals qualified fingerprint-only
+  maintenance with zero refusals: 155 visual and six transport records. Their
+  generated patches change only candidate fingerprints to
+  `b4bd958cfb6fe9b90a244c19435f2dffdee40f1b10140cc9081de5d6a0207042`.
+  Image/evidence digests, reference pins, review decisions and thresholds remain
+  unchanged; this maintenance establishes no new appearance approval.
+
+- CI run 42346736759 for the completed activity Query implementation (head
+  `8e261fe57`, merge preview `52c5a134`) supplied visual artifact 13563099592 and
+  transport artifact 13564465142. Both review proposals qualified fingerprint-only
+  maintenance with zero refusals: 155 visual and six transport records. Their
+  generated patches update only candidate fingerprints to
+  `461cc144e18a6377cbaff0b9578299f5f42d251dcdea1f55288b9a0f13d49c84`.
+  Image/evidence digests, reference pins, review decisions and thresholds remain
+  unchanged; this maintenance establishes no new appearance approval.
+
+- CI run 42345212724 for activity Query pages (head `84fe7b6be`, merge preview
+  `13115a08`) supplied visual artifact 13563662526 and transport artifact
+  13563905596. Both proposals qualified fingerprint-only maintenance with zero
+  refusals: 155 visual and six transport records. The generated review patches
+  change only candidate fingerprints to
+  `995a58e59292553857082dd6e4179ec4ea2525ccebad41b229a3924f93f353e0`.
+  Image/evidence digests, reference pins, review decisions and thresholds remain
+  unchanged; this maintenance establishes no new appearance approval.
+
 - CI run 42241827416 for the activity classification branch (head `be8d47f2e`,
   merge preview `331d05d8`) supplied visual artifact 13516273045 and transport
   artifact 13516266871. Both proposals qualified fingerprint-only maintenance
