@@ -926,9 +926,10 @@ impl NativeEvidence {
                     // All writes completed so far are receipt-qualified native
                     // index checkpoints. Unpublished cold writes and decoded
                     // payloads die with this cache; pending intents stay in SQL.
+                    drop(prepared);
+                    crate::selected_read::check()?;
                     *cache = self.open_index()?;
                     seeds.truncate(seeds.len().div_ceil(2));
-                    crate::selected_read::check()?;
                 };
                 if let Some(prepared) = prepared {
                     prepared
