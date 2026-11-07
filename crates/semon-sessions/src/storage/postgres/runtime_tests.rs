@@ -344,6 +344,7 @@ pub(super) fn lifecycle(dsn: &str) {
             .contains(&input.path)
     );
     assert!(crate::FactsSource::new_in(&sources, "foreign-runtime").is_err());
+    let custody_work = evidence.storage.work.lock().unwrap();
     // Sidecar and process-record intents use PostgreSQL and conservatively
     // fence every Current owner until completion, including across restart.
     for (relative, bytes) in [
@@ -391,7 +392,6 @@ pub(super) fn lifecycle(dsn: &str) {
             .publish_discovered(std::slice::from_ref(&input))
             .unwrap();
     }
-    let custody_work = evidence.storage.work.lock().unwrap();
     evidence
         .storage
         .discover_sources(std::slice::from_ref(&input), true, true)
