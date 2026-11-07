@@ -913,6 +913,7 @@ mod sqlite_tests {
     fn row(key: &str, name: &str) -> CatalogRow {
         CatalogRow {
             session_activity: None,
+            activity_analytics: None,
             overview: None,
             trace: None,
             query: None,

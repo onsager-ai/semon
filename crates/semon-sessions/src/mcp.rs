@@ -320,7 +320,13 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            ["list_sessions", "get_session", "read_transcript", "stalls"]
+            [
+                "list_sessions",
+                "get_session",
+                "get_session_activity",
+                "read_transcript",
+                "stalls"
+            ]
         );
         assert_eq!(replies[2]["error"]["code"], PARSE_ERROR);
         let _ = fs::remove_dir_all(root);

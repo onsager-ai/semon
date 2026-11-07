@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS session_activity_projections (
  session_key TEXT PRIMARY KEY, generation TEXT NOT NULL,
  source_generation TEXT NOT NULL, rules_version INTEGER NOT NULL,
  pricing_fingerprint TEXT NOT NULL, total INTEGER NOT NULL,
- compactions INTEGER NOT NULL, thrash INTEGER NOT NULL
+ compactions INTEGER NOT NULL, thrash INTEGER NOT NULL, summary TEXT NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS session_activity_rules ON session_activity_projections(rules_version,session_key);
 CREATE INDEX IF NOT EXISTS session_activity_pricing ON session_activity_projections(pricing_fingerprint,session_key);
@@ -174,7 +174,7 @@ pub(super) fn publish(
     for fact in &activity.facts {
         put.execute(params![row.key, generation, fact.identity, json(fact)?])?;
     }
-    tx.execute("INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,rules_version=excluded.rules_version,pricing_fingerprint=excluded.pricing_fingerprint,total=excluded.total,compactions=excluded.compactions,thrash=excluded.thrash",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint,activity.steps.len() as i64,activity.compactions.len() as i64,activity.aggregate.thrash])?;
+    tx.execute("INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,rules_version=excluded.rules_version,pricing_fingerprint=excluded.pricing_fingerprint,total=excluded.total,compactions=excluded.compactions,thrash=excluded.thrash,summary=excluded.summary",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint,activity.steps.len() as i64,activity.compactions.len() as i64,activity.aggregate.thrash,json(&activity::analytics::Analytics::of(activity))?])?;
     Ok(())
 }
 
@@ -213,7 +213,7 @@ pub(super) fn repairs(c: &Connection) -> rusqlite::Result<Vec<String>> {
 }
 
 /// Internal bounded reader. Selection and pages must share the caller's SQLite
-/// snapshot. No operation is exported through Query or MCP in this slice.
+/// snapshot. Query and MCP use the sanitized items reader below.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Page {
     pub(crate) generation: String,
@@ -221,10 +221,6 @@ pub(crate) struct Page {
     pub(crate) steps: Vec<ActivityStep>,
 }
 
-#[allow(
-    dead_code,
-    reason = "Internal page contract; public selected reads follow separately"
-)]
 pub(crate) fn page(
     c: &Connection,
     row: &crate::model::summary::CatalogRow,
@@ -274,6 +270,239 @@ pub(crate) fn page(
     }))
 }
 
+pub(crate) struct Items {
+    pub(crate) generation: String,
+    pub(crate) items: Vec<serde_json::Value>,
+    pub(crate) next_cursor: Option<String>,
+}
+
+/// Steps retain producer ordinal order; facts use their stable identity key.
+/// Both streams share the selected source/rules/price/generation admission.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn items(
+    c: &Connection,
+    row: &crate::model::summary::CatalogRow,
+    expected: Option<&str>,
+    price: &str,
+    facts: bool,
+    cursor: Option<&str>,
+    limit: u32,
+) -> rusqlite::Result<Option<Items>> {
+    let start = if facts {
+        0
+    } else {
+        cursor
+            .map(str::parse::<u64>)
+            .transpose()
+            .map_err(|_| rusqlite::Error::InvalidQuery)?
+            .unwrap_or(0)
+    };
+    let Some(header) = page(
+        c,
+        row,
+        expected,
+        price,
+        if facts { 0 } else { start },
+        if facts { 0 } else { limit },
+    )?
+    else {
+        return Ok(None);
+    };
+    let limit = limit.min(256);
+    let mut items = Vec::new();
+    let next_cursor = if facts {
+        let mut statement = c.prepare("SELECT identity,metadata FROM session_activity_facts WHERE session_key=?1 AND generation=?2 AND identity>?3 ORDER BY identity LIMIT ?4")?;
+        let mut records = statement.query(params![
+            row.key,
+            header.generation,
+            cursor.unwrap_or(""),
+            limit + 1
+        ])?;
+        let mut last = None;
+        let mut more = false;
+        while let Some(record) = records.next()? {
+            crate::selected_read::row(record, 256)?;
+            if items.len() == limit as usize {
+                more = true;
+                break;
+            }
+            let fact: activity::classify::ChangeFact = from_json(1, &record.get::<_, String>(1)?)?;
+            last = Some(record.get::<_, String>(0)?);
+            items.push(serde_json::json!({"identity":fact.identity,"timestamp":fact.timestamp,"step_id":fact.step_id,"change":fact.change}));
+        }
+        if more { last } else { None }
+    } else {
+        for step in header.steps {
+            let mut item = serde_json::to_value(step).map_err(|_| rusqlite::Error::InvalidQuery)?;
+            item.as_object_mut()
+                .expect("typed activity step")
+                .remove("position");
+            items.push(item);
+        }
+        if start > header.total {
+            return Ok(None);
+        }
+        let next = start + items.len() as u64;
+        (next < header.total).then(|| next.to_string())
+    };
+    Ok(Some(Items {
+        generation: header.generation,
+        items,
+        next_cursor,
+    }))
+}
+
+/// Fold already-published compact summaries, never native bodies. Match every
+/// member's selected source vector and price. Oversize or incomplete families
+/// stay explicit unknown, matching the bounded family-cost producer.
+fn family(
+    c: &Connection,
+    key: &str,
+    price: &str,
+) -> rusqlite::Result<Option<activity::analytics::Family>> {
+    let mut statement = c.prepare("WITH RECURSIVE family(id) AS (SELECT ?1 UNION SELECT c.session_key FROM session_catalog c JOIN family f ON c.parent_key=f.id LIMIT 257) SELECT c.session_key,CASE WHEN octet_length(c.metadata)<=1048576 THEN c.metadata ELSE NULL END,a.generation,a.source_generation,a.rules_version,a.pricing_fingerprint,a.summary FROM family JOIN session_catalog c ON c.session_key=id LEFT JOIN session_activity_projections a ON a.session_key=id ORDER BY c.session_key")?;
+    let mut rows = statement.query([key])?;
+    let mut fold: Option<activity::analytics::Fold> = None;
+    let mut members = 0;
+    let mut shared_count = 0;
+    let mut member_ids = BTreeSet::new();
+    let mut root_parent = None;
+    let mut bytes = 0;
+    while let Some(record) = rows.next()? {
+        crate::selected_read::row(record, 256)?;
+        members += 1;
+        if members > 256 {
+            return Ok(None);
+        }
+        let Some(encoded) = record.get::<_, Option<String>>(1)? else {
+            return Ok(None);
+        };
+        bytes += encoded.len();
+        if bytes > 4 * 1024 * 1024 {
+            return Ok(None);
+        }
+        let row: crate::model::summary::CatalogRow = from_json(1, &encoded)?;
+        member_ids.insert(row.key.clone());
+        if row.key == key {
+            root_parent = row.parent.clone();
+        }
+        let source: Option<String> = record.get(3)?;
+        if source.as_deref()
+            != Some(
+                &crate::retention::source_generation(&row.sources)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+            )
+            || record.get::<_, Option<u32>>(4)? != Some(activity::ACTIVITY_RULES_VERSION)
+            || record.get::<_, Option<String>>(5)?.as_deref() != Some(price)
+        {
+            return Ok(None);
+        }
+        let summary: activity::analytics::Analytics = from_json(6, &record.get::<_, String>(6)?)?;
+        let generation: String = record.get(2)?;
+        let mut shared = Vec::new();
+        if summary.counts.totals.shared.steps > 0 {
+            let mut steps = c.prepare("SELECT metadata FROM session_activity_steps WHERE session_key=?1 AND generation=?2 AND json_type(metadata,'$.step.ownership.Shared')='text' ORDER BY ordinal LIMIT 4097")?;
+            let mut records = steps.query(params![row.key, generation])?;
+            while let Some(record) = records.next()? {
+                shared_count += 1;
+                if shared_count > 4096 {
+                    return Ok(None);
+                }
+                crate::selected_read::row(record, 256)?;
+                let encoded = record.get::<_, String>(0)?;
+                bytes += encoded.len();
+                if bytes > 4 * 1024 * 1024 {
+                    return Ok(None);
+                }
+                let saved: SavedStep = from_json(0, &encoded)?;
+                shared.push(saved.step);
+            }
+            if shared.len() as u64 != summary.counts.totals.shared.steps {
+                return Ok(None);
+            }
+        }
+        let next = activity::analytics::Fold::summary(&summary, shared);
+        if let Some(fold) = &mut fold {
+            fold.merge(next);
+        } else {
+            fold = Some(next);
+        }
+    }
+    if root_parent.is_some_and(|parent| member_ids.contains(&parent)) {
+        return Ok(None);
+    }
+    Ok(fold.filter(|_| members > 1).map(|fold| fold.family()))
+}
+
+fn save_summary(
+    tx: &Transaction<'_>,
+    row: &mut crate::model::summary::CatalogRow,
+    table: &str,
+) -> rusqlite::Result<()> {
+    if let Some(query) = &mut row.query {
+        query["rows"][&row.key]["summary"]["activity_analytics"] =
+            serde_json::to_value(&row.activity_analytics)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    }
+    tx.execute(
+        &format!("UPDATE {table} SET metadata=?2 WHERE session_key=?1"),
+        params![row.key, json(row)?],
+    )?;
+    // Summary-only changes leave ordered recipes unchanged, but their Catalog
+    // observation witness must advance in the same transaction.
+    let identity = crate::query_projection::identity(row);
+    if let Some(header) = crate::query_projection::header(tx, &identity)? {
+        let mut header: serde_json::Value = from_json(0, &header)?;
+        header["query_generation"] = serde_json::Value::String(format!(
+            "{:x}",
+            Sha256::digest(json(&row.query)?.as_bytes())
+        ));
+        tx.execute(
+            "UPDATE meta SET value=?2 WHERE key=?1",
+            params![
+                crate::query_projection::prefix("header", &identity),
+                json(&header)?
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn refresh_summaries(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<()> {
+    refresh_at_price(tx, key, &crate::pricing::snapshot().fingerprint)
+}
+
+fn refresh_at_price(tx: &Transaction<'_>, key: &str, price: &str) -> rusqlite::Result<()> {
+    let mut owners = tx.prepare("WITH RECURSIVE parents(id) AS (SELECT ?1 UNION SELECT c.parent_key FROM session_catalog c JOIN parents p ON c.session_key=p.id WHERE c.parent_key IS NOT NULL LIMIT 257) SELECT c.metadata FROM parents JOIN session_catalog c ON c.session_key=id ORDER BY c.session_key")?;
+    let encoded = owners
+        .query_map([key], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for encoded in encoded {
+        let mut row: crate::model::summary::CatalogRow = from_json(0, &encoded)?;
+        let source = crate::retention::source_generation(&row.sources)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let summary: Option<String> = tx.query_row("SELECT summary FROM session_activity_projections WHERE session_key=?1 AND source_generation=?2 AND rules_version=?3 AND pricing_fingerprint=?4", params![row.key, source, activity::ACTIVITY_RULES_VERSION, price], |r|r.get(0)).optional()?;
+        let summary = summary
+            .map(|text| from_json::<activity::analytics::Analytics>(0, &text))
+            .transpose()?;
+        row.activity_analytics = summary;
+        if let Some(summary) = &mut row.activity_analytics {
+            summary.family = family(tx, &row.key, price)?;
+        }
+        if json(&row)? != encoded {
+            save_summary(tx, &mut row, "session_catalog")?;
+            if let Some(history) = crate::history_projection::catalog(tx, &row.key)? {
+                let mut history: crate::model::summary::CatalogRow = from_json(0, &history)?;
+                if history.sources == row.sources {
+                    history.activity_analytics = row.activity_analytics.clone();
+                    save_summary(tx, &mut history, "session_history_catalog")?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Reprice at most 128 step rows per producer transaction, including retained
 /// projections whose native sources are no longer available. Readers reject a
 /// partially repriced page; only the final batch advances the header stamp.
@@ -287,10 +516,17 @@ pub(super) fn reprice_step(
     };
     let mut statement = tx.prepare("SELECT ordinal,metadata FROM session_activity_steps WHERE session_key=?1 AND generation=?2 AND pricing_fingerprint<>?3 ORDER BY ordinal LIMIT 128")?;
     let mut rows = statement.query(params![key, generation, table.fingerprint])?;
+    let encoded: String = tx.query_row(
+        "SELECT summary FROM session_activity_projections WHERE session_key=?1",
+        [&key],
+        |r| r.get(0),
+    )?;
+    let mut summary: activity::analytics::Analytics = from_json(0, &encoded)?;
     let mut changed = 0;
     while let Some(row) = rows.next()? {
         let ordinal: i64 = row.get(0)?;
         let mut saved: SavedStep = from_json(1, &row.get::<_, String>(1)?)?;
+        let before = saved.step.clone();
         let mut cost = crate::pricing::CostBuild::with_table(table.clone());
         match &saved.usage {
             Usage::Claude(usage) => cost.message(usage),
@@ -298,9 +534,21 @@ pub(super) fn reprice_step(
         }
         (saved.step.list_cost_usd, saved.step.carry_cost_usd) =
             cost.finish_step(saved.step.tokens.cache_read);
+        reprice_totals(&mut summary.counts.totals, &before, &saved.step);
+        reprice_totals(
+            summary.counts.by_band.entry(saved.step.band).or_default(),
+            &before,
+            &saved.step,
+        );
         tx.execute("UPDATE session_activity_steps SET pricing_fingerprint=?4,metadata=?5 WHERE session_key=?1 AND generation=?2 AND ordinal=?3",params![key,generation,ordinal,table.fingerprint,json(&saved)?])?;
         changed += 1;
     }
+    summary.counts.exclusive_cost_complete = summary.counts.totals.shared.steps == 0
+        && summary.counts.totals.exclusive.list_cost_usd.unknown_steps == 0;
+    tx.execute(
+        "UPDATE session_activity_projections SET summary=?2 WHERE session_key=?1",
+        params![key, json(&summary)?],
+    )?;
     if changed < 128 {
         let next = format!(
             "{:x}",
@@ -318,9 +566,48 @@ pub(super) fn reprice_step(
             "UPDATE session_activity_facts SET generation=?2 WHERE session_key=?1",
             params![key, next],
         )?;
-        tx.execute("UPDATE session_activity_projections SET pricing_fingerprint=?2,generation=?3 WHERE session_key=?1",params![key,table.fingerprint,next])?;
+        summary.pricing_fingerprint = table.fingerprint.clone();
+        tx.execute("UPDATE session_activity_projections SET pricing_fingerprint=?2,generation=?3,summary=?4 WHERE session_key=?1",params![key,table.fingerprint,next,json(&summary)?])?;
+        refresh_at_price(tx, &key, &table.fingerprint)?;
     }
     Ok(true)
+}
+
+fn reprice_totals(
+    totals: &mut activity::OwnershipTotals,
+    before: &ActivityStep,
+    after: &ActivityStep,
+) {
+    fn update(total: &mut activity::StepTotals, before: &ActivityStep, after: &ActivityStep) {
+        for (sum, old, new) in [
+            (
+                &mut total.list_cost_usd,
+                before.list_cost_usd,
+                after.list_cost_usd,
+            ),
+            (
+                &mut total.carry_cost_usd,
+                before.carry_cost_usd,
+                after.carry_cost_usd,
+            ),
+        ] {
+            if let Some(old) = old {
+                sum.known -= old;
+            } else {
+                sum.unknown_steps -= 1;
+            }
+            if let Some(new) = new {
+                sum.known += new;
+            } else {
+                sum.unknown_steps += 1;
+            }
+        }
+    }
+    update(&mut totals.observed, before, after);
+    match after.ownership {
+        activity::Ownership::Exclusive => update(&mut totals.exclusive, before, after),
+        activity::Ownership::Shared(_) => update(&mut totals.shared, before, after),
+    }
 }
 
 #[cfg(test)]

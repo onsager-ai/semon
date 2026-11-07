@@ -38,8 +38,8 @@ thrash and retain those three step identities. Fewer than three steps cannot
 form a thrash window. Derive each physical session independently; interleaving
 parent and child steps must never create a family thrash window.
 
-Schema 36 stores a session activity header, ordered step rows keyed by
-`(session_key, generation, ordinal)`, separate ordered compaction rows, and typed
+Schema 37 stores a session activity header, ordered step rows keyed by
+`(session_key, generation, ordinal)`, separate ordered compaction rows, compact summary metadata, and typed
 change facts keyed by session, generation and stable identity.
 Parser 31 retains the exact last Claude usage observation offset alongside the
 existing message ID and assistant UUIDs. The producer uses its established file
@@ -62,8 +62,10 @@ Each step saves typed pricing inputs without native bodies. The existing pricing
 producer reprices at most 128 activity rows per transaction across restart,
 including retained observations with unavailable native bytes. Step stamps prevent
 mixed-price pages; the final batch advances the header fingerprint and activity
-generation. Unknown prices remain unknown. No activity arrays or aggregates are
-added to the cached description or served session model.
+generation. Unknown prices remain unknown. Step arrays stay out of cached descriptions and session summaries. Compact
+`activity_analytics` is published with Catalog/query summaries; it rebuilds after
+relationships rather than entering the stable description cache. Catalog version 7
+and the semantic recipe bind this output.
 
 Rules version 2 classifies the first waste per step in this order: orchestration
 wait, explicit tool failure, refill after compaction, redundant read. Failures
@@ -93,8 +95,39 @@ an optional exact native step ID; source ordering never invents that identity.
 No command text, stdout/stderr or result body is persisted. Facts publish and
 advance pricing generations atomically with the step projection.
 
-Family roll-ups, public reads and selecting distinct
-retained-history cohorts remain separate work. The retained latest observation
+Query JSON and MCP expose the same `get_session_activity` tool. Select `kind`
+`steps` (default) or `facts`, with `limit` 1–256 (default 100). Responses contain
+`session: {id, harness, native_ids}`, `generation`, `kind`, `items`, and nullable
+`next_cursor`. Pass that opaque string cursor and the same generation on the next
+request. Steps sort by producer ordinal (known timestamp, source position and
+exact identity); facts sort by stable identity with a keyset cursor. Selected
+Catalog source membership, rules, prices and generation qualify in one SQLite
+snapshot, with request-owned source witnesses. Mismatches return
+`stale_projection`; unknown sessions and invalid arguments refuse explicitly.
+No source paths, offsets, commands, raw bytes or output bodies leave these pages.
+
+`get_session` and `list_sessions` add nullable `activity_analytics`. A supported
+complete observation contains `rules_version`, `pricing_fingerprint`,
+`totals: {observed, exclusive, shared}`, `by_band`, `compactions`, `thrash`,
+`waste_by_kind`, `waste_by_category`, `empty_search_steps`, `change_facts` and
+`exclusive_cost_complete`. Each step total has `steps`, `list_cost_usd`,
+`carry_cost_usd` and `elapsed_ms`; measurements preserve `{known, unknown_steps}`.
+Absent native usage/projections remain null. No thrash-window/step arrays enter
+these summaries.
+
+A nullable `family` summarizes only the exact existing parent chain, using
+producer-side leaf reduction and bounded stored-summary refresh for independently
+published children. It deduplicates exact shared keys in ownership/context
+totals; exclusive ownership remains unresolved. Compactions, waste signals and
+change counts sum physical-session observations. `member_sessions` and
+`thrashed_sessions` report session counts. `total_step_time_ms` explicitly sums
+all capped physical-session step durations, including copied observations; it
+can exceed wall-clock time. No interleaved cross-session thrash is inferred.
+The stored fold caps at 256 members, 4096 shared observations and 4 MiB metadata;
+incomplete, cyclic or oversized families stay null. Children retain their own
+steps and parents acquire no child rows.
+
+Selecting distinct retained-history cohorts remains separate work. The retained latest observation
 can only qualify against its own exact source vector; a different history cohort
 is unavailable. Preserve the source and custody contracts in
 [retained native projections](retained-native-projections.md) and

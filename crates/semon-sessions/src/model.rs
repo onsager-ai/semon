@@ -101,6 +101,8 @@ pub(crate) struct Session {
     /// in epoch ms]`. Native metadata retains the recorded start; current reads
     /// qualify liveness independently.
     pub(crate) activity: Option<(String, String, i64, i64)>,
+    #[serde(skip)]
+    pub(crate) activity_analytics: Option<events::session_activity::analytics::Analytics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) waiting_for: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1934,6 +1936,7 @@ impl<'a> Builder<'a> {
             start: 0,
             last: 0,
             activity: None,
+            activity_analytics: None,
             busy: Vec::new(),
             waiting_for: None,
             waiting_since: None,
@@ -2432,6 +2435,14 @@ impl<'a> Builder<'a> {
             session.kind,
             SessKind::Lineage | SessKind::Agent | SessKind::Codex
         ) {
+            return Ok(None);
+        }
+        if session.kind == SessKind::Codex
+            && !session
+                .files
+                .iter()
+                .any(|at| self.files[*at].summary.has_native_usage())
+        {
             return Ok(None);
         }
         let mut usage = Vec::new();
@@ -8226,6 +8237,41 @@ fn build_sources_inner(
             }
         }
     });
+    // Derive once from the complete producer cohort. Cached descriptions do
+    // not own analytics: exact copied ownership and relationships rebuild here.
+    let activity_projections: BTreeMap<_, _> =
+        if history_records.is_none() && builder.cache.has_activity_store() {
+            builder
+                .sessions
+                .iter()
+                .map(|session| Ok((session.key.clone(), builder.session_activity(session)?)))
+                .collect::<io::Result<_>>()?
+        } else {
+            BTreeMap::new()
+        };
+    let family_activity =
+        events::session_activity::analytics::families(builder.sessions.iter().map(|session| {
+            (
+                session.key.as_str(),
+                session.parent.map(|at| builder.sessions[at].key.as_str()),
+                activity_projections
+                    .get(&session.key)
+                    .and_then(Option::as_ref)
+                    .map(|p| &p.activity),
+            )
+        }));
+    let summaries: BTreeMap<_, _> = activity_projections
+        .iter()
+        .filter_map(|(key, projection)| {
+            let mut summary =
+                events::session_activity::analytics::Analytics::of(&projection.as_ref()?.activity);
+            summary.family = family_activity.get(key.as_str()).cloned();
+            Some((key.clone(), summary))
+        })
+        .collect();
+    for session in &mut builder.sessions {
+        session.out.activity_analytics = summaries.get(&session.key).cloned();
+    }
     let post_started = std::time::Instant::now();
     let started = measurements.start();
     let mut handoffs: Vec<Handoff> = builder
@@ -8389,9 +8435,7 @@ fn build_sources_inner(
                 .get(&row.key)
                 .map(|at| &builder.sessions[*at])
             {
-                if history_records.is_none() && builder.cache.has_activity_store() {
-                    row.session_activity = builder.session_activity(session)?;
-                }
+                row.session_activity = activity_projections.get(&row.key).cloned().flatten();
                 let started = measurements.start();
                 row.trace = Some(
                     crate::causal_trace::Projection::capture(

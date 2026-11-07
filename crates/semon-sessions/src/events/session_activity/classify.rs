@@ -12,7 +12,7 @@ const MAX_BYTES: usize = 256 * 1024;
 const MAX_DEPTH: usize = 8;
 const MAX_COMPONENTS: usize = 32;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum WasteKind {
     OrchestrationWait,
     PathNotFound,
@@ -24,7 +24,7 @@ pub(crate) enum WasteKind {
     Sleep,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum WasteCategory {
     Orchestration,
     Tooling,
