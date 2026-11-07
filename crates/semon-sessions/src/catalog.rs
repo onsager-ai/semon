@@ -305,16 +305,6 @@ pub(crate) fn qualified_history_identity(
     )
 }
 
-/// Control ownership must prove absence and uniqueness against a complete
-/// current publication, rather than admitting retained history as writable.
-pub(crate) fn qualified_current_identity(
-    options: &Options,
-    source_key: &str,
-    key: &str,
-) -> Result<Option<CatalogSessionIdentity>, CatalogIdentityError> {
-    catalog_identity(options, source_key, key, CatalogReadScope::Current, true)
-}
-
 fn catalog_identity(
     options: &Options,
     source_key: &str,

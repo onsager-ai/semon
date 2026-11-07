@@ -1100,7 +1100,7 @@ impl ViewerCore {
             .iter()
             .any(|(_, view)| view.evidence.storage.is_postgres())
             && path.starts_with("/api/")
-            && !matches!(path, "/api/sessions" | "/api/session-transcript")
+            && !matches!(path, "/api/sessions" | "/api/session-transcript" | "/api/session-resolve")
         {
             return crate::catalog::error(
                 503,

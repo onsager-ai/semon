@@ -1410,13 +1410,24 @@ pub(crate) fn projected_query(
     mode: SessionSourceReadMode,
     now: i64,
 ) -> io::Result<crate::model::QueryData> {
-    let proofs = crate::query_source::Sources::capture(options, rows.iter().flat_map(|row| &row.sources).filter_map(|source| {
-        if !crate::model::catalog_source_in_window(source, crate::model::scan_cutoff(options, now)) {
-            return None;
-        }
-        let chunks = files.iter().find(|(path, _, _)| source.path.to_str() == Some(path.as_str())).and_then(|(_, _, index)| index.source_chunks.clone());
-        Some((source.clone(), chunks))
-    }))?;
+    let proofs = crate::query_source::Sources::capture(
+        options,
+        rows.iter()
+            .flat_map(|row| &row.sources)
+            .filter_map(|source| {
+                if !crate::model::catalog_source_in_window(
+                    source,
+                    crate::model::scan_cutoff(options, now),
+                ) {
+                    return None;
+                }
+                let chunks = files
+                    .iter()
+                    .find(|(path, _, _)| source.path.to_str() == Some(path.as_str()))
+                    .and_then(|(_, _, index)| index.source_chunks.clone());
+                Some((source.clone(), chunks))
+            }),
+    )?;
     let records = proofs.reader_with_mode(provider, mode);
     records.verify_all()?;
     let selected = EventCache::from_projection(files, Vec::new());
@@ -1426,9 +1437,16 @@ pub(crate) fn projected_query(
     let raw = |path: &Path, offset: u64| {
         crate::selected_read::check()?;
         crate::source_reader::read_record_bytes_bounded(
-            &WindowReader { reader: &bounded, windows: &windows },
-            records.source_ref(path).ok_or_else(|| failure("Unknown projected source"))?,
-            offset, 32 * 1024 * 1024, &mut bytes_left.borrow_mut(),
+            &WindowReader {
+                reader: &bounded,
+                windows: &windows,
+            },
+            records
+                .source_ref(path)
+                .ok_or_else(|| failure("Unknown projected source"))?,
+            offset,
+            32 * 1024 * 1024,
+            &mut bytes_left.borrow_mut(),
         )
     };
     let read = |path: &Path, offset: u64| {
@@ -1437,17 +1455,27 @@ pub(crate) fn projected_query(
     };
     let evidence = |path: &Path, proof: &crate::native_record::Record| {
         crate::source_reader::read_evidence_bounded(
-            &bounded, records.source_ref(path).ok_or_else(|| failure("Unknown projected source"))?,
-            proof, &mut bytes_left.borrow_mut(),
+            &bounded,
+            records
+                .source_ref(path)
+                .ok_or_else(|| failure("Unknown projected source"))?,
+            proof,
+            &mut bytes_left.borrow_mut(),
         )
     };
     let native = NativeRecords {
-        full: BTreeMap::new(), selected: Some(&selected),
-        read: Some(Box::new(read)), raw: Some(Box::new(raw)), evidence: Some(Box::new(evidence)),
-        error: std::cell::RefCell::new(None), fields,
+        full: BTreeMap::new(),
+        selected: Some(&selected),
+        read: Some(Box::new(read)),
+        raw: Some(Box::new(raw)),
+        evidence: Some(Box::new(evidence)),
+        error: std::cell::RefCell::new(None),
+        fields,
     };
     let data = crate::model::query_history(options, rows, &native, now)?;
-    if let Some(error) = native.error.take() { return Err(error); }
+    if let Some(error) = native.error.take() {
+        return Err(error);
+    }
     records.finish()?;
     Ok(data)
 }

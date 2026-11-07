@@ -6534,9 +6534,11 @@ mod tests {
                         r#"{"toolUseId":"task-child","description":"Updated child inspection","model":"updated-model"}"#,
                     );
                 }
-                let mut work = Work::default();
-                work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
-                work.catalog_snapshot = Some(snapshot);
+                let mut work = Work {
+                    events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                    catalog_snapshot: Some(snapshot),
+                    ..Default::default()
+                };
                 let view = fixture.viewer();
                 let before = crate::events::FILE_READS.with(std::cell::Cell::get);
                 assert!(
@@ -6691,9 +6693,11 @@ mod tests {
             .unwrap();
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             fs::write(&child, record("child", Some("new-parent"))).unwrap();
-            let mut work = Work::default();
-            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
-            work.catalog_snapshot = Some(snapshot);
+            let mut work = Work {
+                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                catalog_snapshot: Some(snapshot),
+                ..Default::default()
+            };
             let view = fixture.viewer();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             assert!(
@@ -6779,9 +6783,11 @@ mod tests {
             .unwrap();
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             fixture.claude("new-isolated", &[json!({"type":"user","sessionId":"new-isolated","uuid":"new-isolated","origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-02T00:00:00Z","message":{"role":"user","content":"new prompt"}})]);
-            let mut work = Work::default();
-            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
-            work.catalog_snapshot = Some(snapshot);
+            let mut work = Work {
+                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                catalog_snapshot: Some(snapshot),
+                ..Default::default()
+            };
             let view = fixture.viewer();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             assert!(
@@ -6837,9 +6843,11 @@ mod tests {
             .unwrap();
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             say(&fixture, "isolated-0000", 1, "one changed source");
-            let mut work = Work::default();
-            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
-            work.catalog_snapshot = Some(snapshot);
+            let mut work = Work {
+                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                catalog_snapshot: Some(snapshot),
+                ..Default::default()
+            };
             let view = fixture.viewer();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             assert!(

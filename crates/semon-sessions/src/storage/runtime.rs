@@ -438,11 +438,16 @@ impl RuntimeStore {
         self.validate()?;
         #[cfg(feature = "postgres")]
         if let Some(postgres) = &self.postgres {
-            let mut postgres = postgres.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut postgres = postgres
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Postgres { runtime, store } = &mut *postgres;
             let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
             return runtime.block_on(async {
-                store.selected_query(namespace, &self.options, key, provider, mode, now, read).await.map_err(io::Error::other)
+                store
+                    .selected_query(namespace, &self.options, key, provider, mode, now, read)
+                    .await
+                    .map_err(io::Error::other)
             });
         }
         crate::overview_repair::with_query(&self.options, key, provider, mode, now, read)

@@ -1339,12 +1339,9 @@ impl Query {
             answer["window_start"] = json!(self.start);
             return Ok(answer);
         }
-        let result = evidence.storage.with_selected_query(
-            catalog_key,
-            provider,
-            mode,
-            now,
-            |data| {
+        let result = evidence
+            .storage
+            .with_selected_query(catalog_key, provider, mode, now, |data| {
                 let data = Arc::new(data);
                 let witness = data.sources.reader_with_mode(provider, mode);
                 witness
@@ -1377,15 +1374,14 @@ impl Query {
                 }?;
                 witness.finish().map_err(|error| QueryError::io(&error))?;
                 Ok(answer)
-            },
-        )
-        .map_err(|error| {
-            let mut error = selected_error(&error);
-            if error.stage.is_none() {
-                error.stage = Some("observation");
-            }
-            error
-        })?;
+            })
+            .map_err(|error| {
+                let mut error = selected_error(&error);
+                if error.stage.is_none() {
+                    error.stage = Some("observation");
+                }
+                error
+            })?;
         let mut answer: Value = result?;
         crate::selected_read::check().map_err(|error| selected_error(&error))?;
         answer["window_start"] = json!(self.start);

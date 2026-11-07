@@ -160,13 +160,37 @@ pub(super) fn lifecycle(dsn: &str) {
         "capability_unavailable"
     );
     for tool in ["get_session", "read_transcript"] {
-        let args = if tool == "read_transcript" { json!({"id":key,"limit":10}) } else { json!({"id":key}) };
-        let selected = query.call_selected("injected-runtime", key, tool, &args, None,
-            crate::SessionSourceReadMode::LocalOrPinnedProvider).unwrap();
+        let args = if tool == "read_transcript" {
+            json!({"id":key,"limit":10})
+        } else {
+            json!({"id":key})
+        };
+        let selected = query
+            .call_selected(
+                "injected-runtime",
+                key,
+                tool,
+                &args,
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            )
+            .unwrap();
         assert!(selected.get("error").is_none(), "{selected}");
     }
-    assert_eq!(query.call_selected("injected-runtime", key, "get_session_activity", &json!({"id":key}), None,
-        crate::SessionSourceReadMode::LocalOrPinnedProvider).unwrap_err().code, "capability_unavailable");
+    assert_eq!(
+        query
+            .call_selected(
+                "injected-runtime",
+                key,
+                "get_session_activity",
+                &json!({"id":key}),
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider
+            )
+            .unwrap_err()
+            .code,
+        "capability_unavailable"
+    );
     // A foreign source key cannot use this app-owned capability, even if the
     // same native paths exist. Lower-level conformance proves forced-RLS SQL.
     let foreign = evidence.storage.page(
