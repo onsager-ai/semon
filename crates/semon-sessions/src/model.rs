@@ -7715,7 +7715,22 @@ pub(crate) fn query_history(
     now: i64,
 ) -> io::Result<QueryData> {
     match prepare_history_inner(options, rows, records, now, BuildTarget::Query)? {
-        BuildOutput::Query(data) => Ok(*data),
+        BuildOutput::Query(mut data) => {
+            // Qualified fallback derives transcript semantics without a writable
+            // event store. Reuse analytics only for that exact complete Catalog
+            // source vector; excluded file-window sources remain unavailable.
+            for row in rows {
+                if row
+                    .sources
+                    .iter()
+                    .all(|source| catalog_source_in_window(source, scan_cutoff(options, now)))
+                    && let Some(session) = data.sessions.get_mut(&row.key)
+                {
+                    session.activity_analytics = row.activity_analytics.clone();
+                }
+            }
+            Ok(*data)
+        }
         _ => Err(io::Error::other(
             "Qualified producer did not derive query evidence",
         )),
