@@ -939,3 +939,32 @@ fn terminal_failed_mutations_end_overlap_barriers_without_preserving_old_reads()
         assert_eq!(rows[3].observation.waste, Some(WasteKind::RedundantRead));
     }
 }
+
+#[test]
+fn directory_changes_cannot_reuse_bare_or_relative_read_selections() {
+    for commands in [
+        ["cat file", "cd /other", "cat file"],
+        ["cat file", "cd /other && cat file", "cat file"],
+        [
+            "cd relative && cat file",
+            "git status",
+            "cd relative && cat file",
+        ],
+    ] {
+        let mut rows: Vec<_> = commands
+            .iter()
+            .enumerate()
+            .map(|(n, command)| {
+                located(
+                    10 + n as u64 * 10,
+                    observed("Bash", command, json!("body"), false),
+                )
+            })
+            .collect();
+        classify_reads(&mut rows, &[]);
+        assert!(
+            rows.last().unwrap().observation.waste.is_none(),
+            "{commands:?}"
+        );
+    }
+}

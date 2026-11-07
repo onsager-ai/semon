@@ -245,7 +245,7 @@ fn command(words: &[String]) -> Command {
     }
     let fingerprint = || digest(&serde_json::to_vec(words).expect("strings serialize"));
     match args.as_slice() {
-        ["cd", path] if !path.starts_with('-') => Command::Setup,
+        ["cd", path] if path.starts_with('/') => Command::Setup,
         ["gh", "run", "watch", ..] => Command::Watch,
         ["gh", "pr", "checks", rest @ ..] if rest.contains(&"--watch") => Command::Watch,
         ["gh", "pr", "create", ..] => Command::PullRequest,
@@ -294,7 +294,7 @@ fn shell_commands(text: &str, depth: usize) -> Option<Vec<Command>> {
                 "-c" | "-lc",
                 script,
             ] => shell_commands(script, depth + 1)?,
-            ["cd", path] if !path.starts_with('-') => {
+            ["cd", path] if path.starts_with('/') => {
                 directories.push((*path).to_owned());
                 vec![Command::Setup]
             }
@@ -1033,10 +1033,19 @@ pub(crate) fn classify_reads(
                     .map(|index| offsets[index])
             });
         let observation = &mut row.observation;
+        if observation.commands.contains(&Command::Setup) {
+            // Bash may retain cwd between calls. Only selections explicitly
+            // established under this absolute directory prefix can survive;
+            // a bare relative selection from an earlier cwd cannot match.
+            reads.retain(|fingerprint, _| observation.completed && observation.commands.iter().any(|command| {
+                matches!(command, Command::Read(key, _) | Command::Search(key, _) if key == fingerprint)
+            }));
+        }
         // Agent calls and unknown commands can mutate arbitrary paths. A
         // terminal failed result ends the overlap barrier but never proves that
         // earlier reads survived; unfinished mutators keep the barrier open.
         let mutation = observation.orchestration
+            || observation.commands.contains(&Command::Setup) && !observation.completed
             || observation.commands.iter().any(|command| {
                 matches!(
                     command,

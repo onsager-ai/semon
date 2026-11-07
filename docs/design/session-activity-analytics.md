@@ -88,8 +88,9 @@ invalidates earlier reads but ends its overlap barrier at the recorded result;
 running, background and undecodable results keep that barrier open.
 Native Read selections,
 `cat`, bounded `sed -n`/`head`/`tail`, and successful `rg`/`grep` selections
-participate; working directories and literal `cd` prefixes enter only their
-selection hashes. Literal `bash -c`/`bash -lc` and `sh` wrappers use the same
+participate; working directories and literal absolute `cd` prefixes enter only their
+selection hashes. Directory changes discard unrelated relative selections;
+relative `cd` remains unknown. Literal `bash -c`/`bash -lc` and `sh` wrappers use the same
 bounded grammar. Expansions, redirects, pipelines and arbitrary scripts stay
 unknown. Native Grep/Glob no-match replies and exit-1 empty shell searches are
 independent empty-search signals. Claude request-blob copies do not create tool
