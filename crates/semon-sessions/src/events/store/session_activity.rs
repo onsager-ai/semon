@@ -116,6 +116,7 @@ pub(super) fn accepted_codex(
 pub(crate) fn publish_selected(
     options: &crate::Options,
     row: &crate::model::summary::CatalogRow,
+    namespace: Option<&crate::storage::Namespace>,
 ) -> io::Result<()> {
     let projection = row
         .session_activity
@@ -126,6 +127,9 @@ pub(crate) fn publish_selected(
     let tx = db
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(io::Error::other)?;
+    if let Some(namespace) = namespace {
+        crate::storage::sqlite::bind_connection(&tx, namespace).map_err(io::Error::other)?;
+    }
     if !current(&tx).map_err(io::Error::other)? {
         return Err(io::Error::other("Selected activity index changed"));
     }

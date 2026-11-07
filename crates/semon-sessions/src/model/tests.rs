@@ -3904,7 +3904,7 @@ fn resumable_rich_codex_family_survives_owner_loss_and_late_native_append() {
     let mut complete = false;
     for _ in 0..128 {
         let done = evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
             .unwrap();
         let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
         let phase: Option<String> = db
@@ -4080,7 +4080,7 @@ fn resumable_claude_peer_component_preserves_exact_messages_and_learned_name() {
     let mut complete = false;
     for _ in 0..128 {
         if evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
             .unwrap()
         {
             complete = true;
@@ -4262,7 +4262,7 @@ fn late_native_claude_receipt_requalifies_previously_unmatched_sender() {
     let drain = || {
         for _ in 0..128 {
             if evidence
-                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
                 .unwrap()
             {
                 return;
@@ -4339,7 +4339,7 @@ fn assert_queued_identity_matches_oracle(home: &Home, options: &Options) -> Quer
     let mut complete = false;
     for _ in 0..512 {
         if evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
             .unwrap()
         {
             complete = true;
@@ -4587,7 +4587,7 @@ fn finish_companion_fixture_against_oracle(home: &Home, oracle: &QueryData) {
     let mut complete = false;
     for _ in 0..128 {
         if evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
             .unwrap()
         {
             complete = true;
@@ -11083,7 +11083,7 @@ fn semantic_index_own_writes_and_persisted_stage_resume_with_dirty_backlog() {
         // writes rather than reject its ledger/claim witnesses after restart.
         let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
         let done = evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
             .unwrap();
         evidence.retire();
         drop(evidence);
@@ -11199,7 +11199,7 @@ fn semantic_large_native_source_own_index_writes_survive_every_owner_restart() {
     for step in 0..1024 {
         let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
         let done = evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
             .unwrap_or_else(|error| panic!("large-source step={step} phases={phases:?}: {error}"));
         evidence.retire();
         drop(evidence);
@@ -11269,7 +11269,7 @@ fn first_acknowledged_owner(
     for _ in 0..128 {
         assert!(
             !evidence
-                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
                 .unwrap(),
             "family completed before exposing its first acknowledged owner page"
         );
@@ -11343,7 +11343,7 @@ fn semantic_announced_mutation_of_acknowledged_page_invalidates_old_epoch() {
     let mut complete = false;
     for _ in 0..256 {
         let done = evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
             .unwrap();
         let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
         let active: Option<i64> = db
@@ -11537,7 +11537,7 @@ fn cold_semantic_family_discovers_older_disconnected_native_key_collisions() {
     let mut complete = false;
     for _ in 0..128 {
         if evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
             .unwrap()
         {
             complete = true;
@@ -11713,7 +11713,7 @@ fn cold_codex_family_qualifies_pending_copilot_native_collision() {
     let mut staged = false;
     for _ in 0..128 {
         let done = evidence
-            .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
             .unwrap();
         let db = rusqlite::Connection::open(EventCache::path(&home.options.cache)).unwrap();
         staged |= db
@@ -11780,7 +11780,7 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
         let mut old_complete = false;
         for _ in 0..16 {
             if old_evidence
-                .refresh_catalog(&mut crate::viewer::lock(&old_evidence.work), NOW)
+                .refresh_catalog(&mut crate::viewer::lock(&old_evidence.storage.work), NOW)
                 .unwrap()
             {
                 old_complete = true;
@@ -11864,7 +11864,7 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
         let mut complete = false;
         for _ in 0..128 {
             if evidence
-                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
                 .unwrap()
             {
                 complete = true;
@@ -12071,7 +12071,7 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
         for _ in 0..128 {
             if evidence
-                .refresh_catalog(&mut crate::viewer::lock(&evidence.work), NOW)
+                .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
                 .unwrap()
             {
                 evidence.retire();

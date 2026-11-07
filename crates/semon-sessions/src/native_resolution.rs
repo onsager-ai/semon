@@ -39,6 +39,17 @@ pub fn session_catalog_resolve_native(
     native_id: &str,
     scope: CatalogReadScope,
 ) -> Result<CatalogNativeResolution, CatalogIdentityError> {
+    crate::storage::runtime::RuntimeStore::for_source(options, source_key)
+        .resolve_native(source_key, harness, native_id, scope)
+}
+
+pub(crate) fn sqlite_resolve_native(
+    options: &Options,
+    source_key: &str,
+    harness: &str,
+    native_id: &str,
+    scope: CatalogReadScope,
+) -> Result<CatalogNativeResolution, CatalogIdentityError> {
     if !valid_resolution_arguments(source_key, harness, native_id) {
         return Err(CatalogIdentityError::InvalidArguments);
     }
@@ -65,7 +76,7 @@ pub fn session_catalog_resolve_native(
     Ok(result)
 }
 
-fn valid_resolution_arguments(source_key: &str, harness: &str, native_id: &str) -> bool {
+pub(crate) fn valid_resolution_arguments(source_key: &str, harness: &str, native_id: &str) -> bool {
     !source_key.is_empty()
         && source_key.len() <= 4096
         && !native_id.is_empty()
@@ -184,6 +195,21 @@ pub(crate) fn page_with_gate(
     query: &str,
     before_read: impl FnOnce() -> Result<(), ViewerReply>,
 ) -> ViewerReply {
+    page_with_reader(key, query, before_read, |harness, native, scope| {
+        session_catalog_resolve_native(options, key, harness, native, scope)
+    })
+}
+
+pub(crate) fn page_with_reader(
+    key: &str,
+    query: &str,
+    before_read: impl FnOnce() -> Result<(), ViewerReply>,
+    read: impl FnOnce(
+        &str,
+        &str,
+        CatalogReadScope,
+    ) -> Result<CatalogNativeResolution, CatalogIdentityError>,
+) -> ViewerReply {
     use crate::viewer::{decoded, query_value};
     let value = |name| query_value(query, name).and_then(decoded);
     let scope = match value("scope").as_deref() {
@@ -210,7 +236,7 @@ pub(crate) fn page_with_gate(
     if let Err(reply) = before_read() {
         return reply;
     }
-    let reply = session_catalog_resolve_native(options, key, &harness, &native, scope);
+    let reply = read(&harness, &native, scope);
     match reply {
         Ok(resolution) => ViewerReply {
             status: 200,

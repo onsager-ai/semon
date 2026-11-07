@@ -1,11 +1,6 @@
 //! Native evidence ownership, independent of Viewer transport and refresh workers.
 //! Viewer, Catalog and Query share one complete source index per machine.
-use crate::{
-    Node, Options,
-    events::EventCache,
-    model::{self, Texts},
-    proc_start,
-};
+use crate::{Node, Options, events::EventCache, model, proc_start};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs, io,
@@ -26,7 +21,6 @@ pub(crate) struct NativeEvidence {
     /// database to it and refuses a database bound to another namespace.
     /// Only test constructions observe a database without a host namespace.
     pub(crate) storage: crate::storage::runtime::RuntimeStore,
-    pub(crate) work: Mutex<Work>,
     pub(crate) catalog_demand: AtomicBool,
     catalog_search: Mutex<CatalogSearchQueue>,
     query: RwLock<Option<Arc<QueryCache>>>,
@@ -303,7 +297,7 @@ impl SessionSources {
             view.close();
         }
         for (_, evidence) in &self.machines {
-            drop(lock(&evidence.work));
+            drop(lock(&evidence.storage.work));
         }
     }
 
@@ -479,7 +473,6 @@ impl NativeEvidence {
         Arc::new(Self {
             options,
             storage,
-            work: Mutex::default(),
             catalog_demand: AtomicBool::new(false),
             catalog_search: Mutex::default(),
             query: RwLock::default(),
@@ -1364,7 +1357,7 @@ impl NativeEvidence {
         }
         let mut inputs = BTreeSet::new();
         let cutoff = crate::model::scan_cutoff(&self.options, now);
-        let mut work = lock(&self.work);
+        let mut work = lock(&self.storage.work);
         if self.closed.load(Ordering::Acquire) {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -1446,7 +1439,11 @@ impl NativeEvidence {
                 .iter()
                 .find(|row| row.key == target)
                 .expect("selected owner exists");
-            crate::events::store::session_activity::publish_selected(&self.options, row)?;
+            crate::events::store::session_activity::publish_selected(
+                &self.options,
+                row,
+                self.storage.namespace(),
+            )?;
             cache.release_published_indexes();
             *write_lock(&self.query) = None;
             return Ok(Some(target));
@@ -1462,7 +1459,7 @@ impl NativeEvidence {
         let Some(inputs) = crate::overview_repair::local_query_inputs(&self.options, key)? else {
             return Ok(None);
         };
-        let mut work = lock(&self.work);
+        let mut work = lock(&self.storage.work);
         if self.closed.load(Ordering::Acquire) {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -1514,24 +1511,57 @@ impl NativeEvidence {
         if self.storage.is_postgres() {
             let mut before_build = before_build;
             before_build()?;
+            if work.postgres_discovery.is_none() && !work.postgres_draining {
+                work.postgres_discovery = Some(ColdCatalog::default());
+            }
+            if let Some(discovery) = &mut work.postgres_discovery {
+                let page = discovery.cursor.next(&self.options, 64, 512)?;
+                let inputs = page
+                    .inputs
+                    .into_iter()
+                    .filter(|input| input.path.ends_with(".jsonl"))
+                    .collect::<Vec<_>>();
+                self.storage
+                    .discover_sources(&inputs, !discovery.started, page.complete)?;
+                discovery.started = true;
+                for input in inputs {
+                    let modified = fs::metadata(input.full_path(&self.options))
+                        .and_then(|metadata| metadata.modified())
+                        .ok();
+                    discovery
+                        .newest
+                        .insert((std::cmp::Reverse(modified), input));
+                    if discovery.newest.len() > 64 {
+                        discovery.newest.pop_last();
+                    }
+                }
+                if !page.complete {
+                    return Ok(false);
+                }
+                work.postgres_pending = std::mem::take(&mut discovery.newest)
+                    .into_iter()
+                    .map(|(_, input)| input)
+                    .collect();
+                work.postgres_discovery = None;
+                work.postgres_draining = true;
+            }
+            if work.postgres_pending.is_empty() {
+                work.postgres_pending = self.storage.pending_sources()?;
+            }
             if !work.postgres_pending.is_empty() {
-                self.storage.publish_sources(&work.postgres_pending)?;
-                work.postgres_pending.clear();
+                let pending = std::mem::take(&mut work.postgres_pending);
+                if pending.iter().any(|input| {
+                    fs::symlink_metadata(input.full_path(&self.options))
+                        .is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+                }) {
+                    work.postgres_draining = false;
+                    return Ok(false);
+                }
+                self.storage.publish_discovered(&pending)?;
                 return Ok(false);
             }
-            let discovery = work.postgres_discovery.get_or_insert_with(Default::default);
-            let page = discovery.next(&self.options, 64, 512)?;
-            // Keep a refused cohort for retry: advancing discovery must never
-            // turn an unpublished source into an apparently completed scan.
-            work.postgres_pending.extend(page.inputs);
-            if !work.postgres_pending.is_empty() {
-                self.storage.publish_sources(&work.postgres_pending)?;
-                work.postgres_pending.clear();
-            }
-            if page.complete {
-                work.postgres_discovery = None;
-            }
-            return Ok(page.complete);
+            work.postgres_draining = false;
+            return Ok(true);
         }
         let complete = self.refresh_catalog_step(work, now, before_build)?;
         if complete {
@@ -1955,7 +1985,9 @@ impl NativeEvidence {
     pub(crate) fn catalog_continuation(&self, work: &Work) -> bool {
         #[cfg(feature = "postgres")]
         if self.storage.is_postgres() {
-            return work.postgres_discovery.is_some() || !work.postgres_pending.is_empty();
+            return work.postgres_discovery.is_some()
+                || work.postgres_draining
+                || !work.postgres_pending.is_empty();
         }
         work.tree_repair_pending
             || work.cold_catalog.is_some()
@@ -1984,7 +2016,7 @@ impl NativeEvidence {
         #[cfg(feature = "postgres")]
         if self.storage.is_postgres() {
             self.validate_configuration()?;
-            let _work = lock(&self.work);
+            let _work = lock(&self.storage.work);
             if self.closed.load(Ordering::Acquire) {
                 return Err(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -2013,7 +2045,7 @@ impl NativeEvidence {
         if let Some(query) = unchanged() {
             return Ok(query.data.clone());
         }
-        let mut work = lock(&self.work);
+        let mut work = lock(&self.storage.work);
         if let Some(data) = retained() {
             return data;
         }
@@ -2056,50 +2088,7 @@ fn write_lock<T>(value: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
     value.write().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// The single native source index and producer state shared by supported readers.
-#[derive(Default)]
-pub(crate) struct Work {
-    #[cfg(feature = "postgres")]
-    postgres_discovery: Option<crate::inputs::Discovery>,
-    #[cfg(feature = "postgres")]
-    postgres_pending: Vec<crate::Input>,
-    pub(crate) events: Option<EventCache>,
-    pub(crate) texts: Texts,
-    pub(crate) catalog_snapshot: Option<Snapshot>,
-    /// This owner's acknowledged shared publication, never a completeness proof.
-    observed_catalog_generation: Option<String>,
-    cold_catalog: Option<ColdCatalog>,
-    pending_sources: bool,
-    tree_repair_pending: bool,
-    audit: Option<CatalogAudit>,
-    audit_revision: u64,
-    /// When the last native preparation started.
-    pub(crate) built_at: Option<Instant>,
-}
-
-#[derive(Default)]
-struct CatalogAudit {
-    revision: u64,
-    cursor: crate::inputs::Discovery,
-    discovered: bool,
-    after: String,
-    checked: bool,
-    started: bool,
-    snapshot: Option<Snapshot>,
-}
-
-#[derive(Default)]
-struct ColdCatalog {
-    revision: u64,
-    cursor: crate::inputs::Discovery,
-    pids: BTreeSet<u32>,
-    snapshot: Option<Snapshot>,
-    started: bool,
-    newest: BTreeSet<(
-        std::cmp::Reverse<Option<std::time::SystemTime>>,
-        crate::inputs::Input,
-    )>,
-}
+pub(crate) use crate::storage::runtime::{CatalogAudit, ColdCatalog, Work};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Stamp {
@@ -2802,7 +2791,7 @@ mod catalog_owner_tests {
             let (root, evidence, core, db) = cold_search_reader();
             let selected = pending_search_source(&evidence, &db, "selected");
             db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/unrelated/first.jsonl',1,'changed',0)", []).unwrap();
-            let mut work = lock(&evidence.work);
+            let mut work = lock(&evidence.storage.work);
             if exact_first {
                 assert_eq!(
                     core.respond("GET", "/api/sessions", "q=selected&harness=codex", None)
@@ -2859,7 +2848,7 @@ mod catalog_owner_tests {
     #[test]
     fn cold_catalog_search_real_capacity_preserves_readable_http_page() {
         let (root, evidence, core, db) = cold_search_reader();
-        let work = lock(&evidence.work);
+        let work = lock(&evidence.storage.work);
         for index in 0..=CATALOG_SEARCH_CAPACITY {
             let id = format!("pending-{index}");
             pending_search_source(&evidence, &db, &id);
@@ -2924,7 +2913,7 @@ mod catalog_owner_tests {
                 db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0)", [path]).unwrap();
             }
         }
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         assert_eq!(
             core.respond("GET", "/api/sessions", "q=selected&harness=codex", None)
                 .status,
@@ -2986,7 +2975,7 @@ mod catalog_owner_tests {
             .unwrap();
         db.execute_batch("DROP INDEX catalog_search_header")
             .unwrap();
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         assert_eq!(
             core.respond("GET", "/api/sessions", "q=selected&harness=codex", None)
                 .status,
@@ -3067,7 +3056,7 @@ mod catalog_owner_tests {
         for index in 0..2 {
             pending_search_source(&evidence, &db, &format!("ordinary-{index}"));
         }
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         assert_eq!(
             core.respond("GET", "/api/sessions", "q=selected&harness=codex", None)
                 .status,
@@ -3132,7 +3121,7 @@ mod catalog_owner_tests {
                 .join(format!("aaa/{index}/selected.jsonl"));
             db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES(?1,1,'changed',0)", [path.to_string_lossy().as_ref()]).unwrap();
         }
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         assert_eq!(
             core.respond("GET", "/api/sessions", "q=selected&harness=codex", None)
                 .status,
@@ -3175,7 +3164,7 @@ mod catalog_owner_tests {
     fn cold_catalog_search_unicode_query_uses_fifo_and_keeps_unicode_metadata_semantics() {
         let (root, evidence, core, db) = cold_search_reader();
         pending_search_source(&evidence, &db, "ÄID");
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         assert_eq!(
             core.respond("GET", "/api/sessions", "q=%C3%A4id", None)
                 .status,
@@ -3202,7 +3191,7 @@ mod catalog_owner_tests {
         for index in 0..130 {
             pending_search_source(&evidence, &db, &format!("ordinary-{index:03}"));
         }
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         for index in 0..4 {
             let id = format!("selected-{index}");
             let path = pending_search_source(&evidence, &db, &id);
@@ -3247,7 +3236,7 @@ mod catalog_owner_tests {
         let (root, evidence, core, db) = cold_search_reader();
         let selected = pending_search_source(&evidence, &db, "selected");
         db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/unrelated/first.json',1,'changed',0)", []).unwrap();
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         assert_eq!(
             core.respond("GET", "/api/sessions", "q=selected&harness=codex", None)
                 .status,
@@ -3285,7 +3274,7 @@ mod catalog_owner_tests {
                 pending_search_source(&evidence, &db, &format!("ordinary-{index:03}"));
             }
             fs::write(&path, bytes).unwrap();
-            let mut work = lock(&evidence.work);
+            let mut work = lock(&evidence.storage.work);
             assert_eq!(
                 core.respond("GET", "/api/sessions", "q=selected&harness=codex", None)
                     .status,
@@ -3329,7 +3318,7 @@ mod catalog_owner_tests {
         for index in 0..130 {
             pending_search_source(&evidence, &db, &format!("ordinary-{index:03}"));
         }
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         assert_eq!(
             core.respond("GET", "/api/sessions", "q=selected&harness=codex", None)
                 .status,
@@ -3368,7 +3357,7 @@ mod catalog_owner_tests {
         let parent = pending_search_source(&evidence, &db, "selected-parent");
         let child = pending_search_source(&evidence, &db, "related-child");
         fs::write(&child, serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"related-child","parent_thread_id":"selected-parent","thread_source":"subagent","agent_path":"selected-parent/child"}}).to_string()+"\n").unwrap();
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         evidence
             .prepare_catalog(&mut work, model::now_ms())
             .unwrap();
@@ -3426,7 +3415,7 @@ mod catalog_owner_tests {
         let parent = pending_search_source(&evidence, &db, "selected-parent");
         let child = pending_search_source(&evidence, &db, "related-child");
         fs::write(&child, serde_json::json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"related-child","parent_thread_id":"selected-parent","thread_source":"subagent","agent_path":"selected-parent/child"}}).to_string()+"\n").unwrap();
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         evidence
             .prepare_catalog(&mut work, model::now_ms())
             .unwrap();
@@ -3591,7 +3580,7 @@ mod catalog_owner_tests {
     fn cold_catalog_search_deleted_source_rowless_publication_acknowledges_claim() {
         let (root, evidence, core, db) = cold_search_reader();
         db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/unrelated/first.jsonl',1,'changed',0)", []).unwrap();
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         let path = pending_search_source(&evidence, &db, "deleted");
         assert_eq!(
             core.respond("GET", "/api/sessions", "q=deleted&harness=codex", None)
@@ -3652,7 +3641,7 @@ mod catalog_owner_tests {
         for (id, bytes) in [("empty", ""), ("invalid", "{invalid}\n")] {
             let (root, evidence, core, db) = cold_search_reader();
             db.execute("INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/unrelated/first.jsonl',1,'changed',0)", []).unwrap();
-            let mut work = lock(&evidence.work);
+            let mut work = lock(&evidence.storage.work);
             let path = pending_search_source(&evidence, &db, id);
             fs::write(&path, bytes).unwrap();
             assert_eq!(
@@ -3720,7 +3709,7 @@ mod catalog_owner_tests {
             .complete(fs::metadata(&sidecar_path).unwrap().len())
             .unwrap();
         let evidence = NativeEvidence::new(options.clone());
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
         let sidecar_pending = || {
             db.query_row(
@@ -3789,7 +3778,7 @@ mod catalog_owner_tests {
     fn cold_catalog_search_newest_first_page_bypasses_unrelated_pending_paths() {
         let (root, options, input) = audit_fixture();
         let evidence = NativeEvidence::new(options.clone());
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         evidence.prepare_events(&mut work, model::now_ms()).unwrap();
         let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
         db.execute_batch("INSERT OR REPLACE INTO meta(key,value) VALUES('catalog_backfill_state','draining'); INSERT INTO session_catalog_invalidations(source_path,revision,reason,observed_at) VALUES('/outside/allowlist.jsonl',1,'changed',0);").unwrap();
@@ -3920,7 +3909,7 @@ mod catalog_owner_tests {
             .unwrap();
         let evidence = NativeEvidence::new(options.clone());
         evidence.note_catalog_search(Some(("selected", Some("codex"))));
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         assert!(
             evidence
                 .prepare_catalog(&mut work, model::now_ms())
@@ -4033,7 +4022,7 @@ mod catalog_owner_tests {
         }
         let evidence = NativeEvidence::new(options.clone());
         evidence.note_catalog_search(Some(("selected", Some("claude"))));
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         assert!(matches!(
             evidence
                 .prepare_catalog(&mut work, model::now_ms())
@@ -4102,7 +4091,7 @@ mod catalog_owner_tests {
         });
         let evidence = NativeEvidence::new(options.clone());
         evidence.note_catalog_search(Some(("audit", Some("codex"))));
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         let error = match evidence.prepare_catalog(&mut work, model::now_ms()) {
             Err(error) => error,
             Ok(_) => panic!("the changed claim must refuse publication"),
@@ -4267,7 +4256,7 @@ mod catalog_owner_tests {
     }
 
     fn drain_catalog(evidence: &NativeEvidence, builds: &std::cell::Cell<u64>) {
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         for _ in 0..16 {
             if evidence
                 .refresh_catalog_with(&mut work, model::now_ms(), || {
@@ -4303,7 +4292,7 @@ mod catalog_owner_tests {
         let evidence = NativeEvidence::new(options.clone());
         drain_catalog(&evidence, &std::cell::Cell::new(0));
         {
-            let mut work = lock(&evidence.work);
+            let mut work = lock(&evidence.storage.work);
             assert_eq!(
                 work.events
                     .as_mut()
@@ -4330,7 +4319,7 @@ mod catalog_owner_tests {
         let original = fs::read(&path).unwrap();
         let original_wal = fs::read(&wal).unwrap();
         for _ in 0..2 {
-            let mut work = lock(&evidence.work);
+            let mut work = lock(&evidence.storage.work);
             let error = evidence
                 .refresh_catalog(&mut work, model::now_ms())
                 .unwrap_err();
@@ -4375,13 +4364,17 @@ mod catalog_owner_tests {
         let builds = std::cell::Cell::new(0);
         drain_catalog(&first, &builds);
         drain_catalog(&second, &builds);
-        let initial = lock(&second.work).observed_catalog_generation.clone();
+        let initial = lock(&second.storage.work)
+            .observed_catalog_generation
+            .clone();
 
         append_audit_record(&options, &input);
         first.request_metadata_audit();
         second.request_metadata_audit();
         drain_catalog(&first, &builds);
-        let published = lock(&first.work).observed_catalog_generation.clone();
+        let published = lock(&first.storage.work)
+            .observed_catalog_generation
+            .clone();
         assert!(initial != published, "append did not advance publication");
         builds.set(0);
         let counts = || {
@@ -4394,7 +4387,7 @@ mod catalog_owner_tests {
         };
         let before = counts();
         {
-            let mut work = lock(&second.work);
+            let mut work = lock(&second.storage.work);
             let mut failed = false;
             for _ in 0..16 {
                 match second.refresh_catalog_with(&mut work, model::now_ms(), || {
@@ -4420,7 +4413,7 @@ mod catalog_owner_tests {
         assert_eq!(counts(), before, "peer observation rebuilt shared history");
         let log = input.full_path(&options);
         {
-            let work = lock(&second.work);
+            let work = lock(&second.storage.work);
             assert_eq!(work.observed_catalog_generation, published);
             assert!(!second.catalog_pending(&work));
             assert!(
@@ -4449,7 +4442,7 @@ mod catalog_owner_tests {
         builds.set(0);
         second.request_metadata_audit();
         {
-            let mut work = lock(&second.work);
+            let mut work = lock(&second.storage.work);
             assert!(
                 !second
                     .refresh_catalog_with(&mut work, model::now_ms(), || {
@@ -4462,7 +4455,7 @@ mod catalog_owner_tests {
         }
         append_audit_record(&options, &input);
         {
-            let mut work = lock(&second.work);
+            let mut work = lock(&second.storage.work);
             assert!(
                 !second
                     .refresh_catalog_with(&mut work, model::now_ms(), || {
@@ -4509,7 +4502,7 @@ mod catalog_owner_tests {
         builds.set(0);
         second.request_metadata_audit();
         {
-            let mut work = lock(&second.work);
+            let mut work = lock(&second.storage.work);
             assert!(
                 !second
                     .refresh_catalog_with(&mut work, model::now_ms(), || {
@@ -4533,11 +4526,12 @@ mod catalog_owner_tests {
                 append_audit_record(&peer_options, &peer_input);
                 peer.request_metadata_audit();
                 drain_catalog(&peer, &std::cell::Cell::new(0));
-                *published.borrow_mut() = lock(&peer.work).observed_catalog_generation.clone();
+                *published.borrow_mut() =
+                    lock(&peer.storage.work).observed_catalog_generation.clone();
             }));
         });
         {
-            let mut work = lock(&second.work);
+            let mut work = lock(&second.storage.work);
             assert!(
                 !second
                     .refresh_catalog_with(&mut work, model::now_ms(), || {
@@ -4564,7 +4558,7 @@ mod catalog_owner_tests {
         assert_eq!(builds.get(), 2, "intervening peer commit lost its notice");
         assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), parsed);
         assert_eq!(
-            lock(&second.work).observed_catalog_generation,
+            lock(&second.storage.work).observed_catalog_generation,
             *peer_generation.borrow()
         );
         second.request_metadata_audit();
@@ -4585,7 +4579,7 @@ mod catalog_owner_tests {
         drain_catalog(&peer, &std::cell::Cell::new(0));
         append_audit_record(&options, &input);
         {
-            let mut work = lock(&first.work);
+            let mut work = lock(&first.storage.work);
             assert_eq!(
                 work.events
                     .as_mut()
@@ -4628,7 +4622,7 @@ mod catalog_owner_tests {
                 let mut complete = false;
                 for _ in 0..128 {
                     if peer_in_hook
-                        .refresh_catalog(&mut lock(&peer_in_hook.work), model::now_ms())
+                        .refresh_catalog(&mut lock(&peer_in_hook.storage.work), model::now_ms())
                         .unwrap()
                     {
                         complete = true;
@@ -4636,8 +4630,9 @@ mod catalog_owner_tests {
                     }
                 }
                 assert!(complete, "peer metadata replay did not complete");
-                *foreign_in_hook.borrow_mut() =
-                    lock(&peer_in_hook.work).observed_catalog_generation.clone();
+                *foreign_in_hook.borrow_mut() = lock(&peer_in_hook.storage.work)
+                    .observed_catalog_generation
+                    .clone();
                 assert_ne!(
                     *committed_in_hook.borrow(),
                     *foreign_in_hook.borrow(),
@@ -4647,7 +4642,7 @@ mod catalog_owner_tests {
         });
         for _ in 0..128 {
             first
-                .refresh_catalog_with(&mut lock(&first.work), model::now_ms(), || {
+                .refresh_catalog_with(&mut lock(&first.storage.work), model::now_ms(), || {
                     builds.set(builds.get() + 1);
                     Ok(())
                 })
@@ -4661,7 +4656,7 @@ mod catalog_owner_tests {
             "staged publication did not invoke commit-gap hook"
         );
         {
-            let work = lock(&first.work);
+            let work = lock(&first.storage.work);
             assert_eq!(
                 &work.observed_catalog_generation,
                 &*committed.borrow(),
@@ -4697,7 +4692,7 @@ mod catalog_owner_tests {
             "peer notice republished source history"
         );
         assert_eq!(
-            lock(&first.work).observed_catalog_generation,
+            lock(&first.storage.work).observed_catalog_generation,
             *foreign.borrow()
         );
         let notified = builds.get();
@@ -4719,7 +4714,7 @@ mod catalog_owner_tests {
 
         let (root, options, input) = audit_fixture();
         let evidence = NativeEvidence::new(options.clone());
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         let mut complete = false;
         for _ in 0..16 {
             if evidence
@@ -4847,7 +4842,7 @@ mod catalog_owner_tests {
         fs::write(log, "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"owner\"}}\n").unwrap();
         let sources = SessionSources::with_machines(vec![(String::new(), options.clone())]);
         let evidence = &sources.machines[0].1;
-        let mut work = lock(&evidence.work);
+        let mut work = lock(&evidence.storage.work);
         let mut complete = false;
         for _ in 0..16 {
             if evidence

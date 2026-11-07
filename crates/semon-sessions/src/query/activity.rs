@@ -12,6 +12,7 @@ fn unavailable(_: impl fmt::Display) -> QueryError {
 
 pub(super) fn read(
     options: &Options,
+    namespace: Option<&crate::storage::Namespace>,
     key: &str,
     args: &Value,
     provider: Option<&dyn crate::SessionSourceReader>,
@@ -37,6 +38,9 @@ pub(super) fn read(
     db.busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let mut snapshot = db.transaction().map_err(unavailable)?;
+    if let Some(namespace) = namespace {
+        crate::storage::sqlite::qualify(&snapshot, namespace).map_err(unavailable)?;
+    }
     crate::events::store::require_current(&snapshot).map_err(unavailable)?;
     let text = snapshot.query_row(
         "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_activity_sources WHERE session_key=?1",
@@ -106,6 +110,9 @@ pub(super) fn read(
         .busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let current = current.transaction().map_err(unavailable)?;
+    if let Some(namespace) = namespace {
+        crate::storage::sqlite::qualify(&current, namespace).map_err(unavailable)?;
+    }
     let current_text = current
         .query_row(
             "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
