@@ -469,6 +469,16 @@ fn save_summary(
 }
 
 pub(super) fn refresh_summaries(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<()> {
+    // Isolated owners already carry their freshly derived compact summary.
+    // Only lineage needs the stored fold for separately published members.
+    let related: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 AND parent_key IS NOT NULL) OR EXISTS(SELECT 1 FROM session_catalog WHERE parent_key=?1)",
+        [key],
+        |row| row.get(0),
+    )?;
+    if !related {
+        return Ok(());
+    }
     refresh_at_price(tx, key, &crate::pricing::snapshot().fingerprint)
 }
 

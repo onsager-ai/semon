@@ -8254,16 +8254,22 @@ fn build_sources_inner(
     });
     // Derive once from the complete producer cohort. Cached descriptions do
     // not own analytics: exact copied ownership and relationships rebuild here.
-    let activity_projections: BTreeMap<_, _> =
-        if history_records.is_none() && builder.cache.has_activity_store() {
-            builder
-                .sessions
-                .iter()
-                .map(|session| Ok((session.key.clone(), builder.session_activity(session)?)))
-                .collect::<io::Result<_>>()?
-        } else {
-            BTreeMap::new()
-        };
+    let activity_projections: BTreeMap<_, _> = builder
+        .sessions
+        .iter()
+        .map(|session| {
+            // Claude usage is part of the qualified FileIndex even in a
+            // request-owned history read. Codex needs its accepted store facts.
+            let projection = if session.kind != SessKind::Codex
+                || (history_records.is_none() && builder.cache.has_activity_store())
+            {
+                builder.session_activity(session)?
+            } else {
+                None
+            };
+            Ok((session.key.clone(), projection))
+        })
+        .collect::<io::Result<_>>()?;
     let family_activity =
         events::session_activity::analytics::families(builder.sessions.iter().map(|session| {
             (

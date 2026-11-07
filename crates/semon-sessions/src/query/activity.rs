@@ -19,10 +19,7 @@ pub(super) fn read(
     now: i64,
 ) -> Result<Value, QueryError> {
     let requested = args["id"].as_str().expect("validated activity id");
-    let served = args["_machine_alias"]
-        .as_str()
-        .map_or_else(|| key.to_owned(), |alias| format!("{key}@{alias}"));
-    if requested != served {
+    if requested != key {
         return Err(QueryError::unknown_session(requested));
     }
     let cursor = args["cursor"].as_str();
@@ -146,7 +143,7 @@ pub(super) fn read(
     crate::selected_read::check().map_err(|error| selected_error(&error))?;
     Ok(json!({
         "now": now,
-        "session": {"id": served, "harness": row.harness, "native_ids": row.native_ids},
+        "session": {"id": key, "harness": row.harness, "native_ids": row.native_ids},
         "generation": page.generation,
         "kind": if facts { "facts" } else { "steps" },
         "items": page.items,
