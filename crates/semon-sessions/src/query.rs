@@ -280,10 +280,10 @@ fn retained_query_tools() -> Vec<QueryTool> {
                 "type":"object",
                 "properties": {
                     "id": id_property("The selected session's id."),
-                    "generation": {"type":"string","minLength":1,"maxLength":128},
-                    "kind": {"type":"string","enum":["steps","facts"],"default":"steps"},
-                    "cursor": {"type":"string","minLength":1,"maxLength":128},
-                    "limit": {"type":"integer","minimum":1,"maximum":256,"default":100}
+                    "generation": {"type":"string","minLength":1,"maxLength":128,"description":"Generation returned by the first page; required with cursor."},
+                    "kind": {"type":"string","enum":["steps","facts"],"default":"steps","description":"Read activity steps or typed change facts."},
+                    "cursor": {"type":"string","minLength":1,"maxLength":128,"description":"Opaque next_cursor returned by the preceding page."},
+                    "limit": {"type":"integer","minimum":1,"maximum":256,"default":100,"description":"Maximum items returned in this page."}
                 },
                 "required":["id"],
                 "additionalProperties":false
