@@ -600,3 +600,61 @@ fn codex_normalized_compaction_variants_remain_one_signal() {
     );
     assert_eq!(result.aggregate.compactions, 1);
 }
+
+#[test]
+fn step_waste_precedence_keeps_empty_search_and_exact_uncapped_waits() {
+    use classify::{LocatedObservation, WasteCategory, WasteKind};
+    let mut result = activity(
+        vec![
+            step("first", "s", 0, Some(0)),
+            step("next", "s", 100, Some(7_200_000)),
+        ],
+        vec![],
+    );
+    let mut observations = Vec::new();
+    for (offset, name, command, output, error) in [
+        (10, "Read", "", json!("body"), false),
+        (20, "Read", "", json!("body"), false),
+        (
+            30,
+            "Bash",
+            "cat absent",
+            json!("No such file or directory"),
+            true,
+        ),
+        (40, "Agent", "", json!("done"), false),
+    ] {
+        let input = if name == "Read" {
+            json!({"file_path":"file"})
+        } else {
+            json!({"command":command})
+        };
+        let mut observation =
+            classify::call(name, &input, Some(claude_id("first")), "call-hash".into());
+        classify::finish(
+            &mut observation,
+            &output,
+            error,
+            Some(0),
+            Some(7_200_000),
+            "result-hash".into(),
+        );
+        observation.empty_search = offset == 30;
+        observations.push(LocatedObservation {
+            position: position("s", offset),
+            timestamp: Some(7_200_000),
+            result_offset: Some(offset + 1),
+            observation,
+        });
+    }
+    apply_observations(&mut result, observations);
+    assert_eq!(result.steps[0].waste, Some(WasteKind::OrchestrationWait));
+    assert_eq!(
+        result.steps[0].waste_category,
+        Some(WasteCategory::Orchestration)
+    );
+    assert!(result.steps[0].empty_search);
+    assert_eq!(result.steps[0].elapsed_ms, Some(3_600_000));
+    assert_eq!(result.steps[0].waits[0].completed_at_ms, 7_200_000);
+    assert!(result.steps[1].waste.is_none());
+}

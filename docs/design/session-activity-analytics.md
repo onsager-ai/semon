@@ -38,9 +38,10 @@ thrash and retain those three step identities. Fewer than three steps cannot
 form a thrash window. Derive each physical session independently; interleaving
 parent and child steps must never create a family thrash window.
 
-Schema 35 stores a session activity header, ordered step rows keyed by
-`(session_key, generation, ordinal)`, and separate ordered compaction rows.
-Parser 30 retains the exact last Claude usage observation offset alongside the
+Schema 36 stores a session activity header, ordered step rows keyed by
+`(session_key, generation, ordinal)`, separate ordered compaction rows, and typed
+change facts keyed by session, generation and stable identity.
+Parser 31 retains the exact last Claude usage observation offset alongside the
 existing message ID and assistant UUIDs. The producer uses its established file
 merge order and copied-record ownership map; Codex reads only model-accepted
 facts whose normalized source receipt matches the selected consumed ledger.
@@ -64,7 +65,35 @@ mixed-price pages; the final batch advances the header fingerprint and activity
 generation. Unknown prices remain unknown. No activity arrays or aggregates are
 added to the cached description or served session model.
 
-Family roll-ups, waste rules, change facts, public reads and selecting distinct
+Rules version 2 classifies the first waste per step in this order: orchestration
+wait, explicit tool failure, refill after compaction, redundant read. Failures
+retain path-not-found and malformed-command (Tooling), rate/auth/network/server
+failure (External), or other failure (Unmapped). Empty search is an independent
+non-waste signal; other sleeps are Unmapped. Wait intervals retain their exact
+recorded endpoints independently of the capped step duration. Missing endpoints
+stay unknown. Compound failures need an identified diagnostic component; ambiguous
+failures remain Unmapped.
+
+The bounded classifier runs during the existing complete-line scan. Tool events
+retain only allowlisted command tags, read-selection hashes, call/result record
+digests, typed outcomes and sanitized change values. The file ledger binds these
+observations to the consumed source receipt. A source-local read repeat requires
+a completed prior read of the same selection and no intervening or overlapping
+unknown mutation; compaction changes a repeated read to Context refill. Unknown
+commands and mutating/agent calls break that proof. Decoding accepts recognized
+Codex result keys, text blocks and nested JSON strings, with a 256 KiB cumulative
+string budget, eight decoding levels and bounded block counts. Exit text in a
+successful result is not failure evidence.
+
+Change facts accept only recognized command/output pairs: commit branch/SHA,
+GitHub push destination plus successful ref updates, and a GitHub pull-request
+number from `gh pr create`. Fetch blocks and updates into `origin/*` are ignored.
+Facts retain a timestamp when recorded, source offset/digest, stable identity and
+an optional exact native step ID; source ordering never invents that identity.
+No command text, stdout/stderr or result body is persisted. Facts publish and
+advance pricing generations atomically with the step projection.
+
+Family roll-ups, public reads and selecting distinct
 retained-history cohorts remain separate work. The retained latest observation
 can only qualify against its own exact source vector; a different history cohort
 is unavailable. Preserve the source and custody contracts in

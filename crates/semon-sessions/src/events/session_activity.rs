@@ -15,7 +15,9 @@ use super::CodexNativeUsage;
 use super::{CodexUsageEvent, MessageUsage, ModelTokens, Signal, SignalKind};
 use crate::{claude_usage::Shared, pricing};
 
-pub(crate) const ACTIVITY_RULES_VERSION: u32 = 1;
+pub(crate) mod classify;
+
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 2;
 const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
@@ -139,6 +141,10 @@ pub(crate) struct ActivityStep {
     pub(crate) timestamp: Option<i64>,
     pub(crate) elapsed_ms: Option<u64>,
     pub(crate) compactions: u64,
+    pub(crate) waste: Option<classify::WasteKind>,
+    pub(crate) waste_category: Option<classify::WasteCategory>,
+    pub(crate) waits: Vec<classify::WaitInterval>,
+    pub(crate) empty_search: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +226,83 @@ pub(crate) struct SessionActivity {
     pub(crate) steps: Vec<ActivityStep>,
     pub(crate) compactions: Vec<Compaction>,
     pub(crate) aggregate: SessionActivityAggregate,
+    pub(crate) facts: Vec<classify::ChangeFact>,
+}
+
+/// Tool observations can join a step only through exact native identity or a
+/// same-source following usage observation (or the trailing prior one). Facts retain
+/// only exact identities, never the interval association used for step waste.
+pub(crate) fn apply_observations(
+    activity: &mut SessionActivity,
+    mut observations: Vec<classify::LocatedObservation>,
+) {
+    let compactions: Vec<_> = activity
+        .compactions
+        .iter()
+        .map(|compact| (compact.position.source.clone(), compact.position.offset))
+        .collect();
+    classify::classify_reads(&mut observations, &compactions);
+    let mut exact = BTreeMap::new();
+    let mut sources: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
+    for (index, step) in activity.steps.iter().enumerate() {
+        exact.insert(step.id.clone(), index);
+        sources
+            .entry(step.position.source.clone())
+            .or_default()
+            .push((step.position.offset, index));
+    }
+    for offsets in sources.values_mut() {
+        offsets.sort_unstable();
+    }
+    for row in observations {
+        activity.facts.extend(
+            row.observation
+                .changes
+                .iter()
+                .cloned()
+                .map(|change| classify::fact(&row, change)),
+        );
+        let owner = if let Some(id) = &row.observation.step_id {
+            exact.get(id).copied()
+        } else {
+            sources.get(&row.position.source).and_then(|offsets| {
+                let next = offsets.partition_point(|(offset, _)| *offset < row.position.offset);
+                // Response usage follows its calls. This association never
+                // becomes an exact response identity on a change fact.
+                offsets
+                    .get(next)
+                    .or_else(|| offsets.last())
+                    .map(|(_, index)| *index)
+            })
+        };
+        if let Some(owner) = owner {
+            let step = &mut activity.steps[owner];
+            step.empty_search |= row.observation.empty_search;
+            if let Some(wait) = row.observation.wait {
+                step.waits.push(wait);
+            }
+            if let Some(waste) = row.observation.waste {
+                let rank = |kind| match kind {
+                    classify::WasteKind::OrchestrationWait => 0,
+                    classify::WasteKind::PathNotFound
+                    | classify::WasteKind::MalformedCommand
+                    | classify::WasteKind::ExternalFailure
+                    | classify::WasteKind::OtherFailure
+                    | classify::WasteKind::Sleep => 1,
+                    classify::WasteKind::Refill => 2,
+                    classify::WasteKind::RedundantRead => 3,
+                };
+                if step.waste.is_none_or(|old| rank(waste) < rank(old)) {
+                    step.waste = Some(waste);
+                    step.waste_category = Some(waste.category());
+                }
+            }
+        }
+    }
+    activity
+        .facts
+        .sort_by(|a, b| (&a.position, &a.identity).cmp(&(&b.position, &b.identity)));
+    activity.facts.dedup_by(|a, b| a.identity == b.identity);
 }
 
 /// Use the model's existing Claude merge order: the last normalized row for a
@@ -290,6 +373,10 @@ pub(crate) fn derive(
                 timestamp,
                 elapsed_ms: None,
                 compactions: 0,
+                waste: None,
+                waste_category: None,
+                waits: Vec::new(),
+                empty_search: false,
             }
         })
         .collect();
@@ -390,6 +477,7 @@ pub(crate) fn derive(
         steps,
         compactions,
         aggregate,
+        facts: Vec::new(),
     }
 }
 

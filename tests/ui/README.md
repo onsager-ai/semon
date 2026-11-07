@@ -28,6 +28,15 @@ its completion witness is the native-publication success message in the CI log.
 
 ## Required coverage and historical reports
 
+- CI run 42241827416 for the activity classification branch (head `be8d47f2e`,
+  merge preview `331d05d8`) supplied visual artifact 13516273045 and transport
+  artifact 13516266871. Both proposals qualified fingerprint-only maintenance
+  with zero refusals: 155 visual and six transport records. The generated patches
+  change only candidate fingerprints to
+  `81d90a3f481e2618c52d7b8678f8e93651d08f4881a16d1c0c9140b01bf3ec62`.
+  Image/evidence digests, reference pins, review decisions and thresholds remain
+  unchanged; this maintenance establishes no new appearance approval.
+
 - The Sessions-default decision in `docs/design/ui-design-brief.md` supersedes
   Home navigation and inbox assertions. Root/title waits now require Sessions;
   ordering leaves the list through Analytics and returns to Sessions; pending
