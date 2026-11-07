@@ -206,7 +206,7 @@ pub(super) fn remove_mismatched(
 }
 
 pub(super) fn repairs(c: &Connection) -> rusqlite::Result<Vec<String>> {
-    let mut statement = c.prepare("SELECT s.source_path FROM session_catalog_sources s WHERE s.lifecycle='current' AND s.session_key IN (SELECT c.session_key FROM session_catalog c LEFT JOIN session_activity_projections a USING(session_key) WHERE c.lifecycle='current' AND c.harness IN ('claude','codex') AND (a.session_key IS NULL OR a.rules_version<>?1) LIMIT 64) LIMIT 64")?;
+    let mut statement = c.prepare("SELECT s.source_path FROM session_catalog_sources s WHERE s.lifecycle='current' AND s.session_key IN (SELECT c.session_key FROM session_catalog c LEFT JOIN session_activity_projections a USING(session_key) WHERE c.lifecycle='current' AND (c.harness='claude' OR (c.harness='codex' AND EXISTS(SELECT 1 FROM session_catalog_sources cs JOIN files f ON f.path=cs.source_path WHERE cs.session_key=c.session_key AND f.codex_native_usage IS NOT NULL))) AND (a.session_key IS NULL OR a.rules_version<>?1) LIMIT 64) LIMIT 64")?;
     statement
         .query_map([activity::ACTIVITY_RULES_VERSION], |r| r.get(0))?
         .collect()

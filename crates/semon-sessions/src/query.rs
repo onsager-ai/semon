@@ -1000,6 +1000,8 @@ impl Query {
     }
 
     fn execute_at(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
+        let _activity_scope =
+            (tool == "get_session_activity").then(crate::selected_read::Scope::ensure);
         if tool == "get_session_activity" && !self.embedded {
             for (_, evidence) in &self.sources.machines {
                 evidence
