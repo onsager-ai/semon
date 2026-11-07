@@ -89,6 +89,7 @@ enum Command {
     Commit,
     Push,
     PullRequest,
+    PrChecks,
     Watch,
     Sleep,
     Mutation,
@@ -245,11 +246,37 @@ fn command(words: &[String]) -> Command {
         };
     }
     let fingerprint = || digest(&serde_json::to_vec(words).expect("strings serialize"));
+    let mut gh = args.as_slice();
+    if gh.first() == Some(&"gh") {
+        gh = &gh[1..];
+        while matches!(gh.first(), Some(&"--repo" | &"-R")) {
+            let Some(rest) = gh.get(2..) else {
+                return Command::Unknown;
+            };
+            gh = rest;
+        }
+        match gh {
+            ["pr", "create", ..] => return Command::PullRequest,
+            ["pr", "checks", rest @ ..]
+                if !rest.iter().any(|arg| {
+                    matches!(*arg, "--template" | "--json" | "--jq" | "-q" | "-t")
+                        || arg.starts_with("--template=")
+                        || arg.starts_with("--json=")
+                        || arg.starts_with("--jq=")
+                }) =>
+            {
+                return if rest.contains(&"--watch") {
+                    Command::Watch
+                } else {
+                    Command::PrChecks
+                };
+            }
+            _ => {}
+        }
+    }
     match args.as_slice() {
         ["cd", path] if path.starts_with('/') => Command::Setup,
         ["gh", "run", "watch", ..] => Command::Watch,
-        ["gh", "pr", "checks", rest @ ..] if rest.contains(&"--watch") => Command::Watch,
-        ["gh", "pr", "create", ..] => Command::PullRequest,
         ["rg", ..]
             if !args
                 .iter()
@@ -358,10 +385,27 @@ fn literal_pr_body(text: &str) -> Option<(Cow<'_, str>, bool)> {
     if text.len() > MAX_BYTES {
         return None;
     }
-    let mut lines = text.split_inclusive('\n');
+    let heredoc_at = text.find("<<")?;
+    let header_at = text[..heredoc_at].rfind('\n').map_or(0, |at| at + 1);
+    let prefix = &text[..header_at];
+    if !prefix.trim().is_empty()
+        && !components(prefix)?
+            .iter()
+            .all(|words| command(words) == Command::Setup)
+    {
+        return None;
+    }
+    let mut lines = text[header_at..].split_inclusive('\n');
     let header = lines.next()?.trim_end_matches('\n');
     let (before, after) = header.split_once("<<")?;
-    let delimiter = after.trim().strip_prefix('\'')?.strip_suffix('\'')?;
+    let after = after.trim();
+    let substitution = before.contains("--body \"$(cat ");
+    let after = if substitution {
+        after.strip_suffix(')').unwrap_or(after).trim()
+    } else {
+        after
+    };
+    let delimiter = after.strip_prefix('\'')?.strip_suffix('\'')?;
     if !identifier(delimiter) || delimiter.contains('/') {
         return None;
     }
@@ -376,6 +420,24 @@ fn literal_pr_body(text: &str) -> Option<(Cow<'_, str>, bool)> {
         return None;
     }
     let rest = lines.collect::<String>();
+    if substitution {
+        // The only substitution accepted is cat over a quoted literal heredoc,
+        // passed directly as --body. No body bytes are executed or printed.
+        let rest = rest.trim();
+        if rest != "\")" && rest != ")\"" {
+            return None;
+        }
+        let before = before.strip_suffix("$(cat ")?.strip_suffix('"')?;
+        let normalized = format!("{prefix}{before}'literal-body'");
+        let words = components(&normalized)?;
+        if !words
+            .iter()
+            .all(|words| matches!(command(words), Command::Setup | Command::PullRequest))
+        {
+            return None;
+        }
+        return Some((Cow::Owned(normalized), false));
+    }
     // cat > literal-file <<'END' followed by a PR using that exact body file.
     if let Some(path) = before.trim().strip_prefix("cat >") {
         let path = components(path.trim())?;
@@ -387,21 +449,21 @@ fn literal_pr_body(text: &str) -> Option<(Cow<'_, str>, bool)> {
         };
         let commands = components(&rest)?;
         if !commands.iter().any(|words| {
-            words.starts_with(&["gh".into(), "pr".into(), "create".into()])
+            command(words) == Command::PullRequest
                 && words
                     .windows(2)
                     .any(|pair| pair[0] == "--body-file" && pair[1] == *path)
         }) {
             return None;
         }
-        return Some((Cow::Owned(rest), true));
+        return Some((Cow::Owned(format!("{prefix}{rest}")), true));
     }
     // gh pr create --body-file - <<'END' consumes the literal stdin body.
     let words = components(before.trim())?;
     let [words] = words.as_slice() else {
         return None;
     };
-    if !words.starts_with(&["gh".into(), "pr".into(), "create".into()])
+    if command(words) != Command::PullRequest
         || !words
             .windows(2)
             .any(|pair| pair[0] == "--body-file" && pair[1] == "-")
@@ -409,7 +471,7 @@ fn literal_pr_body(text: &str) -> Option<(Cow<'_, str>, bool)> {
     {
         return None;
     }
-    Some((Cow::Owned(before.trim().to_owned()), false))
+    Some((Cow::Owned(format!("{prefix}{}", before.trim())), false))
 }
 
 fn sed_selection(selection: &str) -> bool {
@@ -766,6 +828,7 @@ fn changes(commands: &[Command], text: &str) -> Vec<Change> {
                     | Command::Commit
                     | Command::Push
                     | Command::PullRequest
+                    | Command::PrChecks
             )
         })
         || [Command::Commit, Command::Push, Command::PullRequest]

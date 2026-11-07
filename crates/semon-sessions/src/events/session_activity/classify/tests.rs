@@ -945,8 +945,11 @@ fn native_output_projection_and_literal_pr_bodies_table() {
     let pr = "warning: synthetic\nCreating pull request for topic into main\nhttps://github.com/example/project/pull/42\n";
     for command in [
         "gh pr create --base main --title synthetic --body-file /synthetic/body",
+        "gh --repo example/project pr create --base main --title synthetic --body-file /synthetic/body; gh pr checks --repo example/project",
         "cd /synthetic && gh pr create --base main --title synthetic --body-file /synthetic/body",
         "gh pr create --title synthetic --body-file - <<'BODY'\nLiteral $value and `text`\nBODY\n",
+        "cd /synthetic\ngh pr create --title synthetic --body-file - <<'BODY'\nLiteral body\nBODY\n",
+        "gh pr create --title synthetic --body \"$(cat <<'BODY'\nLiteral $value\nBODY\n)\"",
         "cat > /synthetic/body <<'BODY'\nLiteral body\nBODY\ngh pr create --title synthetic --body-file /synthetic/body",
     ] {
         for projected in [false, true] {
