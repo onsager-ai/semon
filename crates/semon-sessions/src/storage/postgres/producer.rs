@@ -30,7 +30,7 @@ impl PgProjectionStore {
             {
                 return Err(backend("invalid discovery input"));
             }
-            tx.tx.execute("INSERT INTO semon_projection.discovery(namespace,root,path) VALUES($1,$2,$3) ON CONFLICT(namespace,root,path) DO UPDATE SET seen=true,pending=true", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
+            tx.tx.execute("INSERT INTO semon_projection.discovery(namespace,root,path) VALUES($1,$2,$3) ON CONFLICT(namespace,root,path) DO UPDATE SET seen=true,pending=true,refused=false", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
         }
         if complete {
             tx.tx.execute("UPDATE semon_projection.namespaces SET discovery_complete=true WHERE namespace=$1", &[&namespace.binding()]).await.map_err(backend)?;
@@ -219,7 +219,7 @@ impl PgProjectionStore {
                 // item. A later source audit re-admits it after discovery.
                 let tx = self.begin(namespace).await?;
                 for input in inputs {
-                    tx.tx.execute("UPDATE semon_projection.discovery SET pending=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
+                    tx.tx.execute("UPDATE semon_projection.discovery SET pending=false,refused=true WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
                 }
                 tx.commit(namespace).await?;
                 Err(error)
@@ -359,7 +359,7 @@ impl PgProjectionStore {
             let generation = expected.unwrap_or_else(|| "0".repeat(64));
             tx.tx.execute("INSERT INTO semon_projection.catalog_heads(namespace,generation) VALUES($1,$2) ON CONFLICT DO NOTHING", &[&namespace.binding(), &generation]).await.map_err(backend)?;
             for input in inputs {
-                tx.tx.execute("UPDATE semon_projection.discovery SET pending=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
+                tx.tx.execute("UPDATE semon_projection.discovery SET pending=false,refused=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
             }
             tx.commit(namespace).await?;
             return Ok(Some(generation));
@@ -439,7 +439,7 @@ impl PgProjectionStore {
             // publication transaction. A later Raw/Facts completion requeues
             // its work instead of losing it in a separate dequeue transaction.
             for input in inputs {
-                tx.tx.execute("UPDATE semon_projection.discovery SET pending=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
+                tx.tx.execute("UPDATE semon_projection.discovery SET pending=false,refused=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
             }
         }
         tx.commit(namespace).await?;

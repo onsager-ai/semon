@@ -391,6 +391,7 @@ pub(super) fn lifecycle(dsn: &str) {
             .publish_discovered(std::slice::from_ref(&input))
             .unwrap();
     }
+    let custody_work = evidence.storage.work.lock().unwrap();
     evidence
         .storage
         .discover_sources(std::slice::from_ref(&input), true, true)
@@ -423,6 +424,26 @@ pub(super) fn lifecycle(dsn: &str) {
         crate::source_projection_ready_in(&sources, "foreign-runtime", "codex", &input.path)
             .is_err()
     );
+    let relocation_input = crate::Input {
+        root: crate::InputRoot::Codex,
+        path: "archived_sessions/relocated-parser-cases.jsonl".into(),
+    };
+    let prefix = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(std::fs::read(&path).unwrap()))
+    };
+    let native_id = proof.source.native_id.clone();
+    let move_write = crate::SessionSourceRelocation::begin_in(
+        &sources, "injected-runtime", &input, &relocation_input, &native_id,
+        &"a".repeat(32), length, &prefix,
+    ).unwrap();
+    let relocated = relocation_input.full_path(&options);
+    std::fs::create_dir_all(relocated.parent().unwrap()).unwrap();
+    std::fs::copy(&path, &relocated).unwrap();
+    std::fs::File::open(&relocated).unwrap().sync_all().unwrap();
+    move_write.complete().unwrap();
+    assert!(evidence.storage.pending_sources().unwrap().contains(&relocation_input));
+    std::fs::remove_file(&relocated).unwrap();
     let empty_input = crate::Input {
         root: crate::InputRoot::Codex,
         path: "sessions/2026/09/24/empty.jsonl".into(),
@@ -446,6 +467,7 @@ pub(super) fn lifecycle(dsn: &str) {
     std::fs::remove_file(empty_input.full_path(&options)).unwrap();
     // Reconcile observed removal into retained custody and a valid empty page.
     std::fs::remove_file(&path).unwrap();
+    drop(custody_work);
     {
         let mut work = evidence.storage.work.lock().unwrap();
         while !evidence

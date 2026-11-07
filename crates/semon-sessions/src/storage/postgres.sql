@@ -30,6 +30,7 @@ CREATE TABLE semon_projection.discovery (
     path text NOT NULL,
     seen boolean NOT NULL DEFAULT true,
     pending boolean NOT NULL DEFAULT true,
+    refused boolean NOT NULL DEFAULT false,
     PRIMARY KEY(namespace,root,path)
 );
 ALTER TABLE semon_projection.discovery ENABLE ROW LEVEL SECURITY;
@@ -116,6 +117,7 @@ CREATE TABLE semon_projection.retained_indexes (
     namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
     path text NOT NULL,
     ledger text NOT NULL,
+    index_digest bytea NOT NULL CHECK (octet_length(index_digest) = 32),
     projection text NOT NULL CHECK (octet_length(projection) <= 1048576),
     PRIMARY KEY(namespace,path)
 );

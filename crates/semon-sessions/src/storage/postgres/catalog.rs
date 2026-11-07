@@ -585,14 +585,14 @@ impl PgProjectionTransaction<'_> {
             .map_err(backend)?;
         self.tx
             .execute(
-                "DELETE FROM semon_projection.files WHERE namespace=$1 AND path=$2",
+                "DELETE FROM semon_projection.files WHERE namespace=$1 AND path=$2 AND NOT EXISTS(SELECT 1 FROM semon_projection.retained_indexes WHERE namespace=$1 AND path=$2)",
                 &[&namespace.binding(), &path],
             )
             .await
             .map_err(backend)?;
         self.tx
             .execute(
-                "DELETE FROM semon_projection.ledgers WHERE namespace=$1 AND path=$2",
+                "DELETE FROM semon_projection.ledgers WHERE namespace=$1 AND path=$2 AND NOT EXISTS(SELECT 1 FROM semon_projection.retained_indexes WHERE namespace=$1 AND path=$2)",
                 &[&namespace.binding(), &path],
             )
             .await

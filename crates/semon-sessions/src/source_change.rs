@@ -390,12 +390,17 @@ impl SessionFactsWrite {
     }
     // The reference receiver journals facts, but its Raw transport does not
     // journal every mutation. Keep ordinary metadata discovery for that reader.
-    pub(crate) fn begin_observed(
-        options: &Options,
+    pub(crate) fn begin_observed_in(
+        sources: &crate::SessionSources,
         source_key: &str,
         wanted: &crate::Facts,
     ) -> io::Result<Self> {
-        Self::begin_with_source_journal(options, source_key, wanted, false)
+        let owner = sources.custody_source(source_key)?;
+        #[cfg(feature = "postgres")]
+        if owner.storage.is_postgres() {
+            return Self::begin_in(sources, source_key, wanted);
+        }
+        Self::begin_with_source_journal(&owner.options, source_key, wanted, false)
     }
     fn begin_with_source_journal(
         options: &Options,

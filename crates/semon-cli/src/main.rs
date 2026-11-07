@@ -835,9 +835,9 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
         ));
         return print_route(&mut core, "/api/tree", "the tree of these machines");
     }
+    let sources = semon_sessions::SessionSources::with_machines(vec![("".into(), args.options.clone())]);
     loop {
-        let nodes =
-            semon_sessions::collect(&args.options, "").map_err(|error| error.to_string())?;
+        let nodes = semon_sessions::collect_in(&sources, "").map_err(|error| error.to_string())?;
         if args.watch {
             print!("\x1b[2J\x1b[H");
         }

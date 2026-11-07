@@ -88,7 +88,7 @@ impl PgProjectionTransaction<'_> {
         ).await.map_err(backend)? == 1;
         if completed {
             if intent.path.ends_with(".jsonl") {
-                self.tx.execute("INSERT INTO semon_projection.discovery(namespace,root,path) VALUES($1,$2,$3) ON CONFLICT(namespace,root,path) DO UPDATE SET seen=true,pending=true", &[&namespace.binding(), &intent.root, &intent.path]).await.map_err(backend)?;
+                self.tx.execute("INSERT INTO semon_projection.discovery(namespace,root,path) VALUES($1,$2,$3) ON CONFLICT(namespace,root,path) DO UPDATE SET seen=true,pending=true,refused=false", &[&namespace.binding(), &intent.root, &intent.path]).await.map_err(backend)?;
             } else {
                 // A sidecar can change native ownership; a PID record changes
                 // runtime evidence. Revisit every known owner conservatively.

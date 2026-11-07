@@ -108,7 +108,7 @@ impl PgProjectionTransaction<'_> {
         }
         // A partial discovery cannot prove that every owning projection is here.
         let ready: bool = self.tx.query_one(
-            "SELECT discovery_complete AND NOT EXISTS(SELECT 1 FROM semon_projection.discovery WHERE namespace=$1 AND pending) FROM semon_projection.namespaces WHERE namespace=$1",
+            "SELECT discovery_complete AND NOT EXISTS(SELECT 1 FROM semon_projection.discovery WHERE namespace=$1 AND (pending OR refused)) FROM semon_projection.namespaces WHERE namespace=$1",
             &[&namespace.binding()],
         ).await.map_err(backend)?.get(0);
         if !ready {
@@ -235,9 +235,10 @@ impl PgProjectionTransaction<'_> {
             .ledger(namespace, name)
             .await?
             .ok_or_else(|| backend("retention ledger unavailable"))?;
+        let digest = index_digest(&ledger, &index)?;
         self.tx.execute(
-            "INSERT INTO semon_projection.retained_indexes(namespace,path,ledger,projection) VALUES($1,$2,$3,$4) ON CONFLICT(namespace,path) DO UPDATE SET ledger=excluded.ledger,projection=excluded.projection",
-            &[&namespace.binding(), &name, &serde_json::to_string(&ledger).map_err(backend)?, &serde_json::to_string(projection).map_err(backend)?],
+            "INSERT INTO semon_projection.retained_indexes(namespace,path,ledger,index_digest,projection) VALUES($1,$2,$3,$4,$5) ON CONFLICT(namespace,path) DO UPDATE SET ledger=excluded.ledger,index_digest=excluded.index_digest,projection=excluded.projection",
+            &[&namespace.binding(), &name, &serde_json::to_string(&ledger).map_err(backend)?, &&digest[..], &serde_json::to_string(projection).map_err(backend)?],
         ).await.map_err(backend)?;
         // Capture History before the host is allowed to withdraw its Raw.
         self.capture_source_history(namespace, name, tag).await
@@ -258,7 +259,7 @@ impl PgProjectionTransaction<'_> {
         let name = path
             .to_str()
             .ok_or_else(|| backend("invalid retention path"))?;
-        let saved = self.tx.query_opt("SELECT ledger,projection FROM semon_projection.retained_indexes WHERE namespace=$1 AND path=$2", &[&namespace.binding(), &name]).await.map_err(backend)?;
+        let saved = self.tx.query_opt("SELECT ledger,projection,index_digest FROM semon_projection.retained_indexes WHERE namespace=$1 AND path=$2", &[&namespace.binding(), &name]).await.map_err(backend)?;
         let Some(saved) = saved else {
             return Ok(false);
         };
@@ -267,15 +268,25 @@ impl PgProjectionTransaction<'_> {
         if ledger != proof_ledger(proof) || !crate::retention::same_projection(&ready, projection) {
             return Ok(false);
         }
-        Ok(self
-            .load_index(namespace, name)
-            .await?
-            .is_some_and(|(current, _)| current == ledger)
+        let Some((current, index)) = self.load_index(namespace, name).await? else { return Ok(false); };
+        Ok(current == ledger && index_digest(&current, &index)?.as_slice() == saved.get::<_, &[u8]>(2)
             && self
                 .projection_ready(namespace, options, &proof.source.root, &proof.source.path)
                 .await?
                 .is_some_and(|ready| crate::retention::same_projection(&ready, projection)))
     }
+}
+
+fn index_digest(ledger: &crate::events::Ledger, index: &crate::events::FileIndex) -> Result<[u8; 32], StorageError> {
+    use sha2::{Digest, Sha256};
+    let mut digest = Sha256::new();
+    digest.update(serde_json::to_vec(&(ledger, index)).map_err(backend)?);
+    for event in index.events.iter().chain(&index.extras) {
+        digest.update(serde_json::to_vec(&event.activity_observation).map_err(backend)?);
+    }
+    let chunks = index.source_chunks.as_ref().ok_or_else(|| backend("retained proof unavailable"))?;
+    digest.update(chunks.fingerprint());
+    Ok(digest.finalize().into())
 }
 
 fn input(root: &str, path: &str) -> Result<crate::Input, StorageError> {

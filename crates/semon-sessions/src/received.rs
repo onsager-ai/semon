@@ -225,6 +225,7 @@ impl ReceivedMachines {
         seen: &Seen,
         hosts: &[String],
         warned: &mut BTreeSet<String>,
+        sources: &crate::SessionSources,
     ) {
         let mut warn = |kind: &str, now: bool, message: &dyn Fn() -> String| {
             let key = format!("{kind}:{name}");
@@ -294,7 +295,7 @@ impl ReceivedMachines {
         // as hosted receivers, and retain dirty work if publication fails.
         let publish = || -> io::Result<()> {
             let intent =
-                crate::SessionFactsWrite::begin_observed(&self.options(name, seen), name, &facts)?;
+                crate::SessionFactsWrite::begin_observed_in(sources, name, &facts)?;
             crate::write_facts(&copy, &facts)?;
             intent.complete()
         };
