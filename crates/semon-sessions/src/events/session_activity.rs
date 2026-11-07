@@ -18,7 +18,7 @@ use crate::{claude_usage::Shared, pricing};
 pub(crate) mod analytics;
 pub(crate) mod classify;
 
-pub(crate) const ACTIVITY_RULES_VERSION: u32 = 2;
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 5;
 const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
@@ -255,7 +255,15 @@ pub(crate) fn apply_observations(
     for offsets in sources.values_mut() {
         offsets.sort_unstable();
     }
-    for row in observations {
+    for mut row in observations {
+        if row
+            .observation
+            .step_id
+            .as_ref()
+            .is_some_and(|id| !exact.contains_key(id))
+        {
+            row.observation.step_id = None;
+        }
         activity.facts.extend(
             row.observation
                 .changes

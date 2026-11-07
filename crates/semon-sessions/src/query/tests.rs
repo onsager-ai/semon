@@ -6389,6 +6389,46 @@ fn activity_family_rolls_up_without_child_step_duplication() {
 }
 
 #[test]
+fn activity_projection_rejects_a_different_storage_namespace() {
+    let home = activity_fixture();
+    let mut query = home.query();
+    call(&mut query, "get_session_activity", json!({"id":"activity"}));
+    let evidence = &query.sources.machines[0].1;
+    let wrong = crate::storage::Namespace::new("other-source").unwrap();
+    let args = json!({"id":"activity"});
+    assert!(
+        super::activity::read(
+            &evidence.options,
+            Some(&wrong),
+            "activity",
+            &args,
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            0,
+        )
+        .is_err()
+    );
+    let db = rusqlite::Connection::open(crate::events::EventCache::path(&evidence.options.cache))
+        .unwrap();
+    let metadata: String = db
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key='activity'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let row = serde_json::from_str(&metadata).unwrap();
+    assert!(
+        crate::events::store::session_activity::publish_selected(
+            &evidence.options,
+            &row,
+            Some(&wrong),
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn activity_pages_sort_bound_and_refuse_generation_mismatch() {
     let home = activity_fixture();
     let mut query = home.query();
@@ -6643,4 +6683,200 @@ fn activity_pages_keep_native_ids_global_across_machines() {
         ),
         "unknown_session"
     );
+}
+
+#[test]
+fn activity_root_and_child_pages_do_not_decode_family_sources() {
+    for harness in ["claude", "codex"] {
+        let home = Home::new("activity-family-selection");
+        if harness == "claude" {
+            home.top(
+                "root",
+                &[
+                    human("root", ts(1, 0), "Synthetic"),
+                    assistant("root", ts(1, 1), vec![text("Synthetic")]),
+                ],
+            );
+            for n in 0..80 {
+                let id = format!("child-{n:03}");
+                home.agent(
+                    "root",
+                    &id,
+                    &format!("call-{n}"),
+                    &[
+                        human(&id, ts(1, 0), "Synthetic"),
+                        assistant(&id, ts(1, 1), vec![text("Synthetic")]),
+                    ],
+                );
+            }
+        } else {
+            for n in 0..81 {
+                let id = if n == 0 {
+                    "root".to_owned()
+                } else {
+                    format!("child-{:03}", n - 1)
+                };
+                let mut meta = json!({"id":id,"cwd":"/synthetic"});
+                if n > 0 {
+                    meta["parent_thread_id"] = json!("root");
+                    meta["thread_source"] = json!("subagent");
+                }
+                home.lines(&format!("codex/sessions/rollout-{id}.jsonl"), &[
+                    codex_line(ts(1,0),"session_meta",meta),
+                    codex_line(ts(1,0),"turn_context",json!({"model":"gpt-test"})),
+                    codex_line(ts(1,1),"token_usage_record",json!({"thread_id":id,"session_id":id,"turn_id":"turn","response_id":"response","usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}})),
+                ]);
+            }
+        }
+        for id in ["root", "child-000"] {
+            let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let page = call(
+                &mut Query::new(home.options.clone()),
+                "get_session_activity",
+                json!({"id":id,"limit":5}),
+            );
+            let loaded = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+            assert_eq!(page["items"].as_array().unwrap().len(), 1, "{harness} {id}");
+            assert!(
+                loaded <= 2,
+                "{harness} {id} decoded family sources: {loaded}"
+            );
+        }
+    }
+}
+
+#[test]
+fn activity_cold_direct_call_does_not_prepare_unrelated_sources() {
+    for listed_first in [false, true] {
+        let mut home = Home::new("activity-selected-cold");
+        home.options.all = false;
+        for n in 0..192 {
+            let id = format!("session-{n:03}");
+            let mut records = vec![human(&id, ts(1, 0), "Synthetic prompt")];
+            for minute in 1..=8 {
+                records.push(assistant(
+                    &id,
+                    ts(1, minute),
+                    vec![text("Synthetic response")],
+                ));
+            }
+            home.top(&id, &records);
+        }
+        if listed_first {
+            call(
+                &mut Query::new(home.options.clone()),
+                "list_sessions",
+                json!({"limit":1000}),
+            );
+        }
+        crate::selected_read::take_accounting();
+        let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+        let control = crate::SelectedReadControl::default().with_limits(1000, 64 * 1024 * 1024);
+        let page = {
+            let _scope = crate::selected_read::Scope::enter(&control);
+            call(
+                &mut Query::new(home.options.clone()),
+                "get_session_activity",
+                json!({"id":"session-000","limit":5}),
+            )
+        };
+        let loaded = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+        let (charged, peak_rows, peak_bytes) = crate::selected_read::take_accounting();
+        eprintln!(
+            "selected activity listed_first={listed_first} sources=192 index_loads={loaded} charged_rows={charged} peak_rows={peak_rows} peak_bytes={peak_bytes}"
+        );
+        assert!(loaded <= 2, "unrelated native rows were decoded");
+        assert!(charged <= 1000);
+        assert_eq!(page["items"].as_array().unwrap().len(), 5);
+        let next = call(
+            &mut Query::new(home.options.clone()),
+            "get_session_activity",
+            json!({"id":"session-000","limit":5,"generation":page["generation"],"cursor":page["next_cursor"]}),
+        );
+        assert_eq!(next["items"].as_array().unwrap().len(), 3);
+        assert_eq!(next["generation"], page["generation"]);
+        let db = rusqlite::Connection::open(crate::events::EventCache::path(&home.options.cache))
+            .unwrap();
+        let projections: i64 = db
+            .query_row(
+                "SELECT count(*) FROM session_activity_projections",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projections, 1);
+    }
+}
+
+#[test]
+fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
+    // A fresh activity process must read only the selected projection from a
+    // listing-created index. Unrelated native preparation exceeds the smaller
+    // control, even though the selected twelve-step session fits comfortably.
+    let home = Home::new("activity-batches");
+    for n in 0..144 {
+        let sid = format!("session-{n:03}");
+        let mut records = vec![human(&sid, ts(1, 0), "Synthetic prompt")];
+        for minute in 1..=12 {
+            records.push(assistant(
+                &sid,
+                ts(1, minute),
+                vec![text("Synthetic response")],
+            ));
+        }
+        home.top(&sid, &records);
+    }
+    for (label, rows) in [("ordinary", 131_072), ("selected", 1000)] {
+        let mut options = home.options.clone();
+        options.cache = home.root.join(format!("{label}.json"));
+        let listed = call(
+            &mut Query::new(options.clone()),
+            "list_sessions",
+            json!({"limit":1000}),
+        );
+        assert_eq!(listed["total"], 144);
+        let control = crate::SelectedReadControl::default().with_limits(rows, 64 * 1024 * 1024);
+        crate::selected_read::take_accounting();
+        let started = std::time::Instant::now();
+        let page = {
+            let _scope = crate::selected_read::Scope::enter(&control);
+            call(
+                &mut Query::new(options.clone()),
+                "get_session_activity",
+                json!({"id":"session-000","limit":5}),
+            )
+        };
+        let elapsed = started.elapsed();
+        let (total, peak_rows, peak_bytes) = crate::selected_read::take_accounting();
+        println!(
+            "activity batches {label}: sessions=144 steps=1728 total_charged_rows={total} peak_attempt_rows={peak_rows} peak_attempt_bytes={peak_bytes} wall_ms={}",
+            elapsed.as_millis()
+        );
+        assert!(
+            total <= rows,
+            "unrelated sources consumed selected accounting"
+        );
+        assert!(
+            peak_rows <= rows + 1,
+            "each attempt must stop before allocating its overflow row"
+        );
+        assert_eq!(page["items"].as_array().unwrap().len(), 5);
+        assert!(page["generation"].is_string());
+        let db = rusqlite::Connection::open(options.cache.with_extension("sqlite3")).unwrap();
+        let current: i64 = db
+            .query_row(
+                "SELECT count(*) FROM session_activity_projections WHERE rules_version=?1",
+                [crate::events::session_activity::ACTIVITY_RULES_VERSION],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current, 1, "only the selected session may be published");
+        let next = call(
+            &mut Query::new(options),
+            "get_session_activity",
+            json!({"id":"session-000","generation":page["generation"],"cursor":page["next_cursor"],"limit":5}),
+        );
+        assert_eq!(next["items"].as_array().unwrap().len(), 5);
+        assert_eq!(next["generation"], page["generation"]);
+    }
 }

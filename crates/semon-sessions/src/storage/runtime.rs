@@ -125,7 +125,6 @@ impl RuntimeStore {
         })
     }
 
-    #[cfg(test)]
     pub(crate) fn namespace(&self) -> Option<&Namespace> {
         self.namespace.as_ref()
     }

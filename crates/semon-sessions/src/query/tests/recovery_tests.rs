@@ -962,3 +962,42 @@ fn recovery_selected_ledger_fence_precedes_complete_index_decode() {
     );
     assert_eq!(crate::events::FILE_READS.with(std::cell::Cell::get), before);
 }
+
+#[test]
+fn recovery_producer_batches_release_accounting_but_preserve_outer_control() {
+    for (rows, bytes) in [(1, 1024), (100, 128)] {
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let control = crate::SelectedReadControl::new(
+            std::time::Instant::now() + Duration::from_secs(20),
+            cancelled.clone(),
+        )
+        .with_limits(rows, bytes);
+        let _outer = crate::selected_read::Scope::enter(&control);
+        crate::selected_read::charge(64, 0).unwrap();
+        for _ in 0..3 {
+            let _batch = crate::selected_read::Scope::producer_batch().unwrap();
+            crate::selected_read::charge(64, 0).unwrap();
+        }
+        // Nested ordinary reads still share the original request's ceiling.
+        assert!(crate::selected_read::charge(65, 0).is_err());
+    }
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let control = crate::SelectedReadControl::new(
+        std::time::Instant::now() + Duration::from_secs(20),
+        cancelled.clone(),
+    );
+    let _outer = crate::selected_read::Scope::enter(&control);
+    {
+        let _batch = crate::selected_read::Scope::producer_batch().unwrap();
+        cancelled.store(true, Ordering::Release);
+        assert_eq!(
+            crate::selected_read::check().unwrap_err().kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
+    assert_eq!(
+        crate::selected_read::check().unwrap_err().kind(),
+        io::ErrorKind::Interrupted
+    );
+    assert!(crate::selected_read::Scope::producer_batch().is_err());
+}

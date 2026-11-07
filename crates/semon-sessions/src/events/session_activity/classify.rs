@@ -81,11 +81,15 @@ pub(crate) struct ChangeFact {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Command {
     Read(String, ReadTool),
-    Search(SearchTool),
+    Search(String, SearchTool),
+    Setup,
+    Stage,
+    BodyWrite,
     Inspect,
     Commit,
     Push,
     PullRequest,
+    PrChecks,
     Watch,
     Sleep,
     Mutation,
@@ -118,7 +122,9 @@ pub(crate) struct Observation {
     orchestration: bool,
     formatter: bool,
     envelopes: bool,
+    failure_results: bool,
     completed: bool,
+    settled: bool,
     background: bool,
     pub(crate) waste: Option<WasteKind>,
     pub(crate) wait: Option<WaitInterval>,
@@ -155,8 +161,17 @@ fn components(text: &str) -> Option<Vec<Vec<String>>> {
     let mut word_started = false;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '$' || c == '`' || c == '\\' {
+        // Single-quoted shell text is literal, including dollars/backticks.
+        if quote != Some('\'') && (c == '$' || c == '`') {
             return None;
+        }
+        if c == '\\' && quote != Some('\'') {
+            let next = chars.next()?;
+            if next != '\n' {
+                word.push(next);
+                word_started = true;
+            }
+            continue;
         }
         if let Some(q) = quote {
             if c == q {
@@ -221,32 +236,61 @@ fn command(words: &[String]) -> Command {
             rest = next;
         }
         return match rest.first().copied() {
+            Some("add") => Command::Stage,
             Some("commit") => Command::Commit,
             Some("push") => Command::Push,
             Some("status" | "diff" | "log" | "show" | "rev-parse") => Command::Inspect,
-            Some(
-                "add" | "checkout" | "switch" | "reset" | "restore" | "apply" | "merge" | "rebase",
-            ) => Command::Mutation,
+            Some("checkout" | "switch" | "reset" | "restore" | "apply" | "merge" | "rebase") => {
+                Command::Mutation
+            }
             _ => Command::Unknown,
         };
     }
+    let fingerprint = || digest(&serde_json::to_vec(words).expect("strings serialize"));
+    let mut gh = args.as_slice();
+    if gh.first() == Some(&"gh") {
+        gh = &gh[1..];
+        while matches!(gh.first(), Some(&"--repo" | &"-R")) {
+            let Some(rest) = gh.get(2..) else {
+                return Command::Unknown;
+            };
+            gh = rest;
+        }
+        match gh {
+            ["pr", "create", ..] => return Command::PullRequest,
+            ["pr", "checks", rest @ ..]
+                if !rest.iter().any(|arg| {
+                    matches!(*arg, "--template" | "--json" | "--jq" | "-q" | "-t")
+                        || arg.starts_with("--template=")
+                        || arg.starts_with("--json=")
+                        || arg.starts_with("--jq=")
+                }) =>
+            {
+                return if rest.contains(&"--watch") {
+                    Command::Watch
+                } else {
+                    Command::PrChecks
+                };
+            }
+            _ => {}
+        }
+    }
     match args.as_slice() {
+        ["cd", path] if path.starts_with('/') => Command::Setup,
         ["gh", "run", "watch", ..] => Command::Watch,
-        ["gh", "pr", "checks", rest @ ..] if rest.contains(&"--watch") => Command::Watch,
-        ["gh", "pr", "create", ..] => Command::PullRequest,
         ["rg", ..]
             if !args
                 .iter()
                 .any(|arg| *arg == "--pre" || arg.starts_with("--pre=")) =>
         {
-            Command::Search(SearchTool::Rg)
+            Command::Search(fingerprint(), SearchTool::Rg)
         }
-        ["grep", ..] => Command::Search(SearchTool::Grep),
+        ["grep", ..] => Command::Search(fingerprint(), SearchTool::Grep),
         ["cat", ..] => Command::Read(
             digest(&serde_json::to_vec(words).expect("strings serialize")),
             ReadTool::Cat,
         ),
-        ["head" | "tail", ..] => Command::Read(
+        ["head" | "tail" | "nl", ..] => Command::Read(
             digest(&serde_json::to_vec(words).expect("strings serialize")),
             ReadTool::Range,
         ),
@@ -260,6 +304,175 @@ fn command(words: &[String]) -> Command {
         ["rm" | "mv" | "cp" | "touch" | "mkdir" | "rmdir" | "tee", ..] => Command::Mutation,
         _ => Command::Unknown,
     }
+}
+
+/// Unwrap only literal shell invocations. A script remains subject to the same
+/// grammar and component/depth bounds; shell expansions never become evidence.
+fn shell_commands(text: &str, depth: usize) -> Option<Vec<Command>> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    let (normalized, body_write) = literal_pr_body(text)?;
+    let pipeline = normalized.split(" | ").collect::<Vec<_>>();
+    if pipeline.len() > 1 {
+        // Only read/search producers followed by bounded text selectors. No
+        // shell expansion, arbitrary filter or output-producing side command.
+        if pipeline.len() > MAX_COMPONENTS {
+            return None;
+        }
+        let mut first = shell_commands(pipeline[0], depth + 1)?;
+        if first.len() != 1 || !matches!(first[0], Command::Read(_, _) | Command::Search(_, _)) {
+            return None;
+        }
+        for stage in &pipeline[1..] {
+            let words = components(stage)?;
+            let [words] = words.as_slice() else {
+                return None;
+            };
+            let args = words.iter().map(String::as_str).collect::<Vec<_>>();
+            if !matches!(args.as_slice(), ["head" | "tail"] | ["nl", "-ba"])
+                && !matches!(args.as_slice(), ["head" | "tail", "-n", count] if count.bytes().all(|byte| byte.is_ascii_digit()) && !count.is_empty())
+                && !matches!(args.as_slice(), ["sed", "-n", selection] if sed_selection(selection))
+            {
+                return None;
+            }
+        }
+        let fingerprint = digest(normalized.as_bytes());
+        match &mut first[0] {
+            Command::Read(key, _) | Command::Search(key, _) => *key = fingerprint,
+            _ => unreachable!(),
+        }
+        return Some(first);
+    }
+    let parts = components(&normalized)?;
+    let mut commands = Vec::new();
+    if body_write {
+        commands.push(Command::BodyWrite);
+    }
+    let mut directories = Vec::new();
+    for words in parts {
+        let args: Vec<_> = words.iter().map(String::as_str).collect();
+        let mut kinds = match args.as_slice() {
+            [
+                "bash" | "/bin/bash" | "sh" | "/bin/sh",
+                "-c" | "-lc",
+                script,
+            ] => shell_commands(script, depth + 1)?,
+            ["cd", path] if path.starts_with('/') => {
+                directories.push((*path).to_owned());
+                vec![Command::Setup]
+            }
+            _ => vec![command(&words)],
+        };
+        for kind in &mut kinds {
+            if let Command::Read(fingerprint, _) | Command::Search(fingerprint, _) = kind {
+                *fingerprint = digest(&serde_json::to_vec(&(&*fingerprint, &directories)).ok()?);
+            }
+        }
+        commands.extend(kinds);
+        if commands.len() > MAX_COMPONENTS {
+            return None;
+        }
+    }
+    Some(commands)
+}
+
+/// Discard only a quoted literal heredoc used as a PR body. Its bytes cannot
+/// execute or print a forged change marker. Other redirections stay unknown.
+fn literal_pr_body(text: &str) -> Option<(Cow<'_, str>, bool)> {
+    if !text.contains("<<") {
+        return Some((Cow::Borrowed(text), false));
+    }
+    if text.len() > MAX_BYTES {
+        return None;
+    }
+    let heredoc_at = text.find("<<")?;
+    let header_at = text[..heredoc_at].rfind('\n').map_or(0, |at| at + 1);
+    let prefix = &text[..header_at];
+    if !prefix.trim().is_empty()
+        && !components(prefix)?
+            .iter()
+            .all(|words| command(words) == Command::Setup)
+    {
+        return None;
+    }
+    let mut lines = text[header_at..].split_inclusive('\n');
+    let header = lines.next()?.trim_end_matches('\n');
+    let (before, after) = header.split_once("<<")?;
+    let after = after.trim();
+    let substitution = before.contains("--body \"$(cat ");
+    let after = if substitution {
+        after.strip_suffix(')').unwrap_or(after).trim()
+    } else {
+        after
+    };
+    let delimiter = after.strip_prefix('\'')?.strip_suffix('\'')?;
+    if !identifier(delimiter) || delimiter.contains('/') {
+        return None;
+    }
+    let mut closed = false;
+    for line in lines.by_ref() {
+        if line.trim_end_matches(['\r', '\n']) == delimiter {
+            closed = true;
+            break;
+        }
+    }
+    if !closed {
+        return None;
+    }
+    let rest = lines.collect::<String>();
+    if substitution {
+        // The only substitution accepted is cat over a quoted literal heredoc,
+        // passed directly as --body. No body bytes are executed or printed.
+        let rest = rest.trim();
+        if rest != "\")" && rest != ")\"" {
+            return None;
+        }
+        let before = before.strip_suffix("$(cat ")?.strip_suffix('"')?;
+        let normalized = format!("{prefix}{before}'literal-body'");
+        let words = components(&normalized)?;
+        if !words
+            .iter()
+            .all(|words| matches!(command(words), Command::Setup | Command::PullRequest))
+        {
+            return None;
+        }
+        return Some((Cow::Owned(normalized), false));
+    }
+    // cat > literal-file <<'END' followed by a PR using that exact body file.
+    if let Some(path) = before.trim().strip_prefix("cat >") {
+        let path = components(path.trim())?;
+        let [path] = path.as_slice() else {
+            return None;
+        };
+        let [path] = path.as_slice() else {
+            return None;
+        };
+        let commands = components(&rest)?;
+        if !commands.iter().any(|words| {
+            command(words) == Command::PullRequest
+                && words
+                    .windows(2)
+                    .any(|pair| pair[0] == "--body-file" && pair[1] == *path)
+        }) {
+            return None;
+        }
+        return Some((Cow::Owned(format!("{prefix}{rest}")), true));
+    }
+    // gh pr create --body-file - <<'END' consumes the literal stdin body.
+    let words = components(before.trim())?;
+    let [words] = words.as_slice() else {
+        return None;
+    };
+    if command(words) != Command::PullRequest
+        || !words
+            .windows(2)
+            .any(|pair| pair[0] == "--body-file" && pair[1] == "-")
+        || !rest.trim().is_empty()
+    {
+        return None;
+    }
+    Some((Cow::Owned(format!("{prefix}{}", before.trim())), false))
 }
 
 fn sed_selection(selection: &str) -> bool {
@@ -290,6 +503,10 @@ pub(super) fn call(
     step_id: Option<ActivityStepId>,
     call_digest: String,
 ) -> Observation {
+    let name = name
+        .strip_prefix("functions.")
+        .or_else(|| name.strip_prefix("tools."))
+        .unwrap_or(name);
     let input = input_value(input).unwrap_or(Cow::Owned(Value::Null));
     let background = input.get("run_in_background").and_then(Value::as_bool) == Some(true);
     let mut commands = match name {
@@ -297,8 +514,7 @@ pub(super) fn call(
             .get("command")
             .or_else(|| input.get("cmd"))
             .and_then(Value::as_str)
-            .and_then(components)
-            .map(|parts| parts.iter().map(|words| command(words)).collect())
+            .and_then(|text| shell_commands(text, 0))
             .unwrap_or_else(|| vec![Command::Ambiguous]),
         "Read" | "read_file" => {
             let path = input
@@ -328,13 +544,16 @@ pub(super) fn call(
                 None => vec![Command::Unknown],
             }
         }
-        "Grep" | "Glob" => vec![Command::Search(SearchTool::Native)],
+        "Grep" | "Glob" => vec![Command::Search(
+            digest(&serde_json::to_vec(&(name, &*input)).expect("search selection serializes")),
+            SearchTool::Native,
+        )],
         "Write" | "Edit" | "apply_patch" => vec![Command::Mutation],
         "Agent" | "Task" | "wait_agent" => Vec::new(),
         _ => vec![Command::Unknown],
     };
     for command in &mut commands {
-        if let Command::Read(fingerprint, _) = command {
+        if let Command::Read(fingerprint, _) | Command::Search(fingerprint, _) = command {
             let workdir = input
                 .get("workdir")
                 .or_else(|| input.get("cwd"))
@@ -355,7 +574,9 @@ pub(super) fn call(
         orchestration,
         formatter: false,
         envelopes: false,
+        failure_results: false,
         completed: false,
+        settled: false,
         background,
         waste: orchestration.then_some(WasteKind::OrchestrationWait),
         wait: None,
@@ -564,7 +785,7 @@ fn failure(commands: &[Command], result: &ResultEvidence) -> Option<WasteKind> {
         .iter()
         .filter(|kind| match diagnostic {
             "cat" => matches!(kind, Command::Read(_, ReadTool::Cat)),
-            "rg" => matches!(kind, Command::Search(SearchTool::Rg)),
+            "rg" => matches!(kind, Command::Search(_, SearchTool::Rg)),
             _ => false,
         })
         .count();
@@ -597,8 +818,25 @@ fn repository(url: &str) -> Option<String> {
 fn changes(commands: &[Command], text: &str) -> Vec<Change> {
     let mut facts = Vec::new();
     let mut destination = None;
-    // Compound output cannot prove which command printed a commit/PR marker.
-    if commands.len() != 1 {
+    // Only setup and uniquely identified change commands may share output.
+    // Reads, inspection and unknown programs could print plausible markers.
+    if commands.is_empty()
+        || commands.iter().any(|command| {
+            !matches!(
+                command,
+                Command::Setup
+                    | Command::Stage
+                    | Command::BodyWrite
+                    | Command::Commit
+                    | Command::Push
+                    | Command::PullRequest
+                    | Command::PrChecks
+            )
+        })
+        || [Command::Commit, Command::Push, Command::PullRequest]
+            .iter()
+            .any(|kind| commands.iter().filter(|command| *command == kind).count() > 1)
+    {
         return facts;
     }
     for line in text.lines().take(4096) {
@@ -608,7 +846,14 @@ fn changes(commands: &[Command], text: &str) -> Vec<Change> {
                 .and_then(|line| line.split_once(']').map(|(header, _)| header))
         {
             let mut fields = header.split_whitespace();
-            if let (Some(branch), Some(sha), None) = (fields.next(), fields.next(), fields.next())
+            let branch = fields.next();
+            let second = fields.next();
+            let sha = if second == Some("(root-commit)") {
+                fields.next()
+            } else {
+                second
+            };
+            if let (Some(branch), Some(sha), None) = (branch, sha, fields.next())
                 && identifier(branch)
                 && (7..=64).contains(&sha.len())
                 && sha.bytes().all(|c| c.is_ascii_hexdigit())
@@ -707,10 +952,31 @@ pub(super) fn finish(
         }
         return;
     }
-    observation.completed = !observation.background
-        && !result.running
-        && !result.error
-        && result.exit.is_none_or(|code| code == 0);
+    // Multiple exactly printed exec results may report a failure without
+    // proving which individual command owns a read, change or native outcome.
+    let mut diagnostic_failure = None;
+    if observation.failure_results {
+        let mut budget = MAX_BYTES;
+        let parts = output
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(std::slice::from_ref(output));
+        for part in parts.iter().take(32) {
+            let mut diagnostic = ResultEvidence::default();
+            let part = part.get("text").unwrap_or(part);
+            if decode(part, 0, &mut budget, &mut diagnostic, true, true).is_some()
+                && let Some(waste) = failure(&[Command::Unknown], &diagnostic)
+            {
+                diagnostic_failure = Some(waste);
+                result.error = true;
+                result.text = diagnostic.text;
+                break;
+            }
+        }
+    }
+    observation.settled = !observation.background && !result.running;
+    observation.completed =
+        observation.settled && !result.error && result.exit.is_none_or(|code| code == 0);
     if result.is_wait {
         observation.orchestration = true;
     }
@@ -726,11 +992,22 @@ pub(super) fn finish(
                 })
         });
     } else {
-        observation.empty_search = matches!(observation.commands.as_slice(), [Command::Search(_)])
-            && result.exit == Some(1)
-            && result.text.trim().is_empty();
+        let mut substantive = observation
+            .commands
+            .iter()
+            .filter(|command| **command != Command::Setup);
+        let search = substantive.next();
+        observation.empty_search = substantive.next().is_none()
+            && (matches!(search, Some(Command::Search(_, _)))
+                && result.exit == Some(1)
+                && result.text.trim().is_empty()
+                || matches!(search, Some(Command::Search(_, SearchTool::Native)))
+                    && !result.error
+                    && result.exit.is_none_or(|code| code == 0)
+                    && matches!(result.text.trim(), "No matches found" | "No files found"));
         if !observation.empty_search {
-            observation.waste = failure(&observation.commands, &result);
+            observation.waste =
+                diagnostic_failure.or_else(|| failure(&observation.commands, &result));
         }
         if observation.waste.is_none() && observation.commands.contains(&Command::Sleep) {
             observation.waste = Some(WasteKind::Sleep);
@@ -752,6 +1029,11 @@ pub(crate) fn capture(
     let hash = digest(bytes);
     let time = record_time(record);
     if harness == "claude" {
+        // Request blobs contain copies of assistant tool blocks, without their
+        // native message ownership. They are not additional calls or mutations.
+        if !matches!(field(record, "type"), Some("assistant" | "user")) {
+            return;
+        }
         let Some(items) = record.pointer("/message/content").and_then(Value::as_array) else {
             return;
         };
@@ -816,10 +1098,13 @@ pub(crate) fn capture(
                     let input = if name == "exec" {
                         decoded_input = field(payload, "input")
                             .filter(|text| {
-                                text.len() <= MAX_BYTES && crate::events::result_source(text)
+                                text.len() <= MAX_BYTES
+                                    && (crate::events::result_source(text)
+                                        || crate::events::activity_output_source(text))
                             })
-                            .and_then(crate::events::script_command)
-                            .map(|command| serde_json::json!({"cmd": command}))
+                            .and_then(|script| crate::events::script_command(script).map(|command| {
+                                serde_json::json!({"cmd": command, "workdir": crate::events::script_workdir(script)})
+                            }))
                             .unwrap_or(Value::Null);
                         &decoded_input
                     } else {
@@ -828,13 +1113,24 @@ pub(crate) fn capture(
                     let mut observation = call(
                         if name == "exec" { "exec_command" } else { name },
                         input,
-                        None,
+                        codex_step(payload),
                         hash.clone(),
                     );
                     bind_source_context(&mut observation, index.cwd.as_deref());
                     observation.formatter = index.events[event].native_direct_call
-                        || (name == "exec" && !input.is_null());
-                    observation.envelopes = true;
+                        || (name == "exec"
+                            && field(payload, "input").is_some_and(crate::events::result_source));
+                    // An arbitrary script's printed JSON is opaque. It cannot
+                    // forge an exec outcome, nor leave a terminal script's
+                    // mutation barrier open just because its data is JSON.
+                    observation.failure_results = name == "exec"
+                        && field(payload, "input")
+                            .is_some_and(crate::events::activity_results_source);
+                    observation.envelopes = name != "exec"
+                        || field(payload, "input").is_some_and(|script| {
+                            crate::events::result_source(script)
+                                || crate::events::activity_wait_source(script)
+                        });
                     if name == "exec" && input.is_null() {
                         observation.commands = vec![Command::Unknown];
                     }
@@ -858,9 +1154,25 @@ pub(crate) fn capture(
     }
 }
 
+/// An explicit complete identity is evidence. A turn ID, item ID, ordinal or
+/// neighboring usage record alone cannot identify the model response.
+fn codex_step(payload: &Value) -> Option<ActivityStepId> {
+    let ids = ["thread_id", "session_id", "turn_id", "response_id"]
+        .map(|key| field(payload, key).filter(|id| !id.is_empty() && id.len() <= 4096));
+    let [Some(thread), Some(session), Some(turn), Some(response)] = ids else {
+        return None;
+    };
+    Some(ActivityStepId::Codex([
+        thread.into(),
+        session.into(),
+        turn.into(),
+        response.into(),
+    ]))
+}
+
 fn bind_source_context(observation: &mut Observation, cwd: Option<&str>) {
     for command in &mut observation.commands {
-        if let Command::Read(fingerprint, _) = command {
+        if let Command::Read(fingerprint, _) | Command::Search(fingerprint, _) = command {
             *fingerprint = digest(
                 &serde_json::to_vec(&(&*fingerprint, cwd.filter(|path| path.len() <= 4096)))
                     .expect("source read context serializes"),
@@ -922,13 +1234,25 @@ pub(crate) fn classify_reads(
                     .map(|index| offsets[index])
             });
         let observation = &mut row.observation;
-        // Agent calls and search tools can mutate arbitrary paths. An unfinished
-        // mutator also blocks reads that overlap it, even after another read.
+        if observation.commands.contains(&Command::Setup) {
+            // Bash may retain cwd between calls. Only selections explicitly
+            // established under this absolute directory prefix can survive;
+            // a bare relative selection from an earlier cwd cannot match.
+            reads.retain(|fingerprint, _| observation.completed && observation.commands.iter().any(|command| {
+                matches!(command, Command::Read(key, _) | Command::Search(key, _) if key == fingerprint)
+            }));
+        }
+        // Agent calls and unknown commands can mutate arbitrary paths. A
+        // terminal failed result ends the overlap barrier but never proves that
+        // earlier reads survived; unfinished mutators keep the barrier open.
         let mutation = observation.orchestration
+            || observation.commands.contains(&Command::Setup) && !observation.completed
             || observation.commands.iter().any(|command| {
                 matches!(
                     command,
                     Command::Mutation
+                        | Command::Stage
+                        | Command::BodyWrite
                         | Command::Ambiguous
                         | Command::Unknown
                         | Command::Commit
@@ -941,7 +1265,7 @@ pub(crate) fn classify_reads(
             let until = uncertain_until
                 .entry(row.position.source.clone())
                 .or_default();
-            *until = (*until).max(if observation.completed {
+            *until = (*until).max(if observation.settled {
                 row.result_offset.unwrap_or(u64::MAX)
             } else {
                 u64::MAX
@@ -954,7 +1278,7 @@ pub(crate) fn classify_reads(
             continue;
         }
         for command in &observation.commands {
-            if let Command::Read(fingerprint, _) = command {
+            if let Command::Read(fingerprint, _) | Command::Search(fingerprint, _) = command {
                 if let Some((previous_compact, previous_end)) = reads.get(fingerprint)
                     && *previous_end < row.position.offset
                     && observation.completed

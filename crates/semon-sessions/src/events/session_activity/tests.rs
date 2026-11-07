@@ -658,3 +658,67 @@ fn step_waste_precedence_keeps_empty_search_and_exact_uncapped_waits() {
     assert_eq!(result.steps[0].waits[0].completed_at_ms, 7_200_000);
     assert!(result.steps[1].waste.is_none());
 }
+
+#[test]
+fn fact_links_require_a_qualified_step_in_this_projection() {
+    use super::classify::{Change, LocatedObservation};
+    for exact in [false, true] {
+        let mut activity = derive(
+            "synthetic".into(),
+            [],
+            &Default::default(),
+            [],
+            crate::pricing::snapshot(),
+        );
+        let id = ActivityStepId::Claude("message".into());
+        if exact {
+            let used = MessageUsage {
+                model: Some("claude-sonnet-4-6".into()),
+                ..Default::default()
+            };
+            activity = derive(
+                "synthetic".into(),
+                [UsageStep::claude(
+                    "message".into(),
+                    SourcePosition {
+                        source: "synthetic".into(),
+                        offset: 10,
+                    },
+                    used,
+                )],
+                &Default::default(),
+                [],
+                crate::pricing::snapshot(),
+            );
+        }
+        let mut observation = classify::call(
+            "Bash",
+            &serde_json::json!({"command":"git commit -m synthetic"}),
+            Some(id.clone()),
+            "hash".into(),
+        );
+        classify::finish(
+            &mut observation,
+            &serde_json::json!("[topic abc1234] synthetic"),
+            false,
+            None,
+            None,
+            "result".into(),
+        );
+        apply_observations(
+            &mut activity,
+            vec![LocatedObservation {
+                position: SourcePosition {
+                    source: "synthetic".into(),
+                    offset: 11,
+                },
+                timestamp: None,
+                result_offset: Some(12),
+                observation,
+            }],
+        );
+        assert_eq!(activity.facts.len(), 1);
+        assert!(matches!(activity.facts[0].change, Change::Commit { .. }));
+        assert_eq!(activity.facts[0].step_id, exact.then_some(id));
+    }
+}

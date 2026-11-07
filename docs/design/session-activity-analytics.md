@@ -39,16 +39,19 @@ thrash and retain those three step identities. Fewer than three steps cannot
 form a thrash window. Derive each physical session independently; interleaving
 parent and child steps must never create a family thrash window.
 
-Schema 37 stores a session activity header, ordered step rows keyed by
+Schema 41 stores a session activity header, ordered step rows keyed by
 `(session_key, generation, ordinal)`, separate ordered compaction rows, compact summary metadata, and typed
 change facts keyed by session, generation and stable identity.
-Parser 31 retains the exact last Claude usage observation offset alongside the
+Parser 34 retains the exact last Claude usage observation offset alongside the
 existing message ID and assistant UUIDs. The producer uses its established file
 merge order and copied-record ownership map; Codex reads only model-accepted
 facts whose normalized source receipt matches the selected consumed ledger.
-Header and detail publication shares the Catalog transaction and its complete
-source membership, ledger, claim and generation checks. Metadata-only updates
-cannot retain activity for a different source cohort.
+Ordinary header and detail publication shares the Catalog transaction and its
+complete source membership, ledger, claim and generation checks. Focused activity
+publication checks the selected physical sources' exact committed ledgers and
+roles in its own transaction and saves the source recipe atomically with the
+activity generation. It does not publish Catalog ownership or family summaries.
+Metadata-only updates cannot retain activity for a different source cohort.
 
 The header binds the source-vector generation, activity rules version, pricing
 fingerprint and row counts. The internal reader returns at most 256 ordered
@@ -68,7 +71,7 @@ generation. Unknown prices remain unknown. Step arrays stay out of cached descri
 relationships rather than entering the stable description cache. Catalog version 7
 and the semantic recipe bind this output.
 
-Rules version 2 classifies the first waste per step in this order: orchestration
+Rules version 5 classifies the first waste per step in this order: orchestration
 wait, explicit tool failure, refill after compaction, redundant read. Failures
 retain path-not-found and malformed-command (Tooling), rate/auth/network/server
 failure (External), or other failure (Unmapped). Empty search is an independent
@@ -83,18 +86,72 @@ digests, typed outcomes and sanitized change values. The file ledger binds these
 observations to the consumed source receipt. A source-local read repeat requires
 a completed prior read of the same selection and no intervening or overlapping
 unknown mutation; compaction changes a repeated read to Context refill. Unknown
-commands and mutating/agent calls break that proof. Decoding accepts recognized
+commands and mutating/agent calls break that proof. A terminal failed call
+invalidates earlier reads but ends its overlap barrier at the recorded result;
+running, background and undecodable results keep that barrier open.
+Native Read selections,
+`cat`, bounded `sed -n`/`head`/`tail`, and successful `rg`/`grep` selections
+participate; working directories and literal absolute `cd` prefixes enter only their
+selection hashes. Directory changes discard unrelated relative selections;
+relative `cd` remains unknown. Literal `bash -c`/`bash -lc` and `sh` wrappers use the same
+bounded grammar. A single read/search piped only through bounded `head`, `tail`,
+`nl -ba`, or numeric `sed -n` selectors retains the complete pipeline fingerprint.
+Other pipelines, expansions, redirects and arbitrary scripts stay unknown.
+Native Grep/Glob no-match replies and exit-1 empty shell searches are independent
+empty-search signals. Claude request-blob copies do not create tool
+events: only assistant calls and user results own those observations.
+Decoding accepts recognized
 Codex result keys, text blocks and nested JSON strings, with a 256 KiB cumulative
-string budget, eight decoding levels and bounded block counts. Exit text in a
-successful result is not failure evidence.
+string budget, eight decoding levels and bounded block counts. Code-mode envelope
+ownership requires a literal call whose complete result is printed, or an exactly
+printed native wait result. One literal exec call followed by `text(result.output)`
+can supply activity output but cannot supply native process/session ownership.
+Arbitrary scripts' printed JSON remains opaque and a terminal unknown script
+ends its overlap barrier. A straight-line sequence of exactly printed literal
+exec results also supplies failure-only diagnostics; it grants no read, change or
+process ownership. Dynamic batches (`Promise.all`, `Promise.allSettled`) and
+transformed outputs remain unclassified. Exit text in a successful result is not
+failure evidence.
+
+Operator qualification of the same seven-day window observed failure counts
+before opaque-output handling, after that handling, and after literal-sequence
+recovery respectively: OtherFailure 482 / 245 / 321, PathNotFound 196 / 53 / 81,
+MalformedCommand 2 / 0 / 1, and ExternalFailure 4 / 0 / 0. These aggregate counts
+show the conservative dynamic-batch coverage limit; they are not a false-positive
+or recall estimate. The final recovery run covered 782 sessions and 56,069 steps;
+all 39 sampled physical sessions paged, including child continuations. RedundantRead
+and Refill each counted five, and empty search counted seven.
 
 Change facts accept only recognized command/output pairs: commit branch/SHA,
 GitHub push destination plus successful ref updates, and a GitHub pull-request
-number from `gh pr create`. Fetch blocks and updates into `origin/*` are ignored.
+number from `gh pr create`. Literal arguments and setup compounds (`cd`,
+`git add`, and at most one of each change command) are accepted. Literal quoted
+PR-body heredocs, body files and `gh pr checks` without output-rewriting flags
+also qualify; dynamic bodies and other output-producing commands remain ambiguous.
+Root-commit headers are
+recognized. Fetch blocks and updates into `origin/*` are ignored.
 Facts retain a timestamp when recorded, source offset/digest, stable identity and
 an optional exact native step ID; source ordering never invents that identity.
+Claude assistant message IDs and explicit complete Codex
+thread/session/turn/response tuples link only when that step survives qualified
+usage derivation. Codex turn-only metadata, item IDs, ordinals and adjacent usage
+records remain unlinked; multiple responses can belong to one turn.
 No command text, stdout/stderr or result body is persisted. Facts publish and
 advance pricing generations atomically with the step projection.
+
+Cold local activity preparation discovers native identities in bounded directory
+pages, then derives only the requested identity's sources and exact lineage
+references. Claude identities come from native paths; Codex reads at most 64 KiB
+of the first record. Parent and descendant event indexes are never decoded to
+page a physical session. The focused activity transaction verifies exact source
+ledgers and roles and publishes its source recipe with the existing activity
+generation; Catalog relationships and family summaries retain their own producer. A direct cold call needs no prior listing. The request's unchanged
+131,072-row/64 MiB accounting ceiling, deadline and cancellation cover the selected
+derivation and page. Oversized selected components still refuse: a single
+11,820-step source in operator qualification exceeds that unchanged budget, so
+its step detail remains unavailable even though its summary is readable. A terminal
+selected-read limit propagates without treating the durable Event Index as broken
+or falling back to an in-memory scoped producer.
 
 Query JSON and MCP expose the same `get_session_activity` tool. Select `kind`
 `steps` (default) or `facts`, with `limit` 1–256 (default 100). Responses contain

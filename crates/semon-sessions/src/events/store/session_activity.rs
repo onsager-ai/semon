@@ -15,6 +15,9 @@ CREATE TABLE IF NOT EXISTS session_activity_projections (
 ) STRICT;
 CREATE INDEX IF NOT EXISTS session_activity_rules ON session_activity_projections(rules_version,session_key);
 CREATE INDEX IF NOT EXISTS session_activity_pricing ON session_activity_projections(pricing_fingerprint,session_key);
+CREATE TABLE IF NOT EXISTS session_activity_sources (
+ session_key TEXT PRIMARY KEY, metadata TEXT NOT NULL
+) STRICT;
 CREATE TABLE IF NOT EXISTS session_activity_steps (
  session_key TEXT NOT NULL, generation TEXT NOT NULL, ordinal INTEGER NOT NULL,
  pricing_fingerprint TEXT NOT NULL, metadata TEXT NOT NULL,
@@ -108,6 +111,41 @@ pub(super) fn accepted_codex(
     Ok(steps)
 }
 
+/// A focused activity derivation publishes its own physical-source projection.
+/// It never replaces Catalog ownership, relationships or family summaries.
+pub(crate) fn publish_selected(
+    options: &crate::Options,
+    row: &crate::model::summary::CatalogRow,
+    namespace: Option<&crate::storage::Namespace>,
+) -> io::Result<()> {
+    let projection = row
+        .session_activity
+        .as_ref()
+        .ok_or_else(|| io::Error::other("Selected activity is unavailable"))?;
+    let mut db = Connection::open(crate::events::EventCache::path(&options.cache))
+        .map_err(io::Error::other)?;
+    let tx = db
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
+    if let Some(namespace) = namespace {
+        crate::storage::sqlite::bind_connection(&tx, namespace).map_err(io::Error::other)?;
+    }
+    if !current(&tx).map_err(io::Error::other)? {
+        return Err(io::Error::other("Selected activity index changed"));
+    }
+    if row.sources.is_empty()
+        || row.sources.len() > 64
+        || !super::selected_roles_current(&tx, &row.sources).map_err(io::Error::other)?
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Selected activity source generation changed",
+        ));
+    }
+    publish(&tx, row, projection).map_err(io::Error::other)?;
+    tx.commit().map_err(io::Error::other)
+}
+
 pub(super) fn publish(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
@@ -174,6 +212,7 @@ pub(super) fn publish(
     for fact in &activity.facts {
         put.execute(params![row.key, generation, fact.identity, json(fact)?])?;
     }
+    tx.execute("INSERT INTO session_activity_sources VALUES(?1,?2) ON CONFLICT(session_key) DO UPDATE SET metadata=excluded.metadata", params![row.key,json(row)?])?;
     tx.execute("INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,rules_version=excluded.rules_version,pricing_fingerprint=excluded.pricing_fingerprint,total=excluded.total,compactions=excluded.compactions,thrash=excluded.thrash,summary=excluded.summary",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint,activity.steps.len() as i64,activity.compactions.len() as i64,activity.aggregate.thrash,json(&activity::analytics::Analytics::of(activity))?])?;
     Ok(())
 }

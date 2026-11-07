@@ -76,6 +76,8 @@ type TestHook = (&'static str, usize, Box<dyn FnOnce()>);
 thread_local! {
     static ACTIVE: RefCell<Option<Rc<Budget>>> = const { RefCell::new(None) };
     #[cfg(test)]
+    static ACCOUNTING: Cell<(usize, usize, usize)> = const { Cell::new((0, 0, 0)) };
+    #[cfg(test)]
     static HOOK: RefCell<Option<TestHook>> = const { RefCell::new(None) };
 }
 
@@ -96,6 +98,29 @@ impl Scope {
             previous
         }))
     }
+    /// A producer slice releases all decoded indexes before the next slice.
+    /// Give that slice its own accounting ceiling, retaining the enclosing
+    /// request's deadline/cancellation and leaving its detail budget untouched.
+    pub(crate) fn producer_batch() -> io::Result<Self> {
+        check()?;
+        Ok(Self(ACTIVE.with(|active| {
+            let mut active = active.borrow_mut();
+            let previous = active.clone();
+            let control = previous
+                .as_ref()
+                .map_or_else(SelectedReadControl::default, |budget| {
+                    budget.control.clone()
+                });
+            *active = Some(Rc::new(Budget {
+                control,
+                rows: Cell::new(0),
+                bytes: Cell::new(0),
+                exhausted: Cell::new(false),
+            }));
+            previous
+        })))
+    }
+
     pub(crate) fn ensure() -> Option<Self> {
         ACTIVE
             .with(|active| active.borrow().is_none())
@@ -136,6 +161,17 @@ pub(crate) fn check() -> io::Result<()> {
             Ok(())
         }
         None => Ok(()),
+    })
+}
+
+/// Distinguish an accounting refusal from source conflicts and cancellation.
+/// Only a producer that discards its entire unpublished slice may retry smaller.
+pub(crate) fn accounting_exhausted() -> bool {
+    ACTIVE.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .is_some_and(|budget| budget.exhausted.get())
     })
 }
 
@@ -205,6 +241,11 @@ pub(crate) fn charge(fixed: usize, dynamic: usize) -> io::Result<()> {
         let bytes = fixed.saturating_add(dynamic.saturating_mul(8));
         let rows = budget.rows.get().saturating_add(1);
         let bytes = budget.bytes.get().saturating_add(bytes);
+        #[cfg(test)]
+        ACCOUNTING.with(|value| {
+            let (total, peak_rows, peak_bytes) = value.get();
+            value.set((total + 1, peak_rows.max(rows), peak_bytes.max(bytes)));
+        });
         if rows > budget.control.rows || bytes > budget.control.bytes {
             budget.exhausted.set(true);
             return Err(exhausted());
@@ -243,4 +284,9 @@ pub(crate) fn install(connection: &rusqlite::Connection) -> io::Result<()> {
 #[cfg(test)]
 pub(crate) fn set_hook(phase: &'static str, skip: usize, hook: impl FnOnce() + 'static) {
     HOOK.with(|value| *value.borrow_mut() = Some((phase, skip, Box::new(hook))));
+}
+
+#[cfg(test)]
+pub(crate) fn take_accounting() -> (usize, usize, usize) {
+    ACCOUNTING.with(|value| value.replace((0, 0, 0)))
 }
