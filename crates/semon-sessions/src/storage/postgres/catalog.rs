@@ -229,6 +229,13 @@ impl PgProjectionTransaction<'_> {
             }
         }
         for row in publication.rows {
+            self.tx.execute("DELETE FROM semon_projection.query_context WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &row.key]).await.map_err(backend)?;
+            if let Some(trace) = &row.trace {
+                self.tx.execute(
+                    "INSERT INTO semon_projection.query_context(namespace,session_key,source_generation,metadata) VALUES($1,$2,$3,$4)",
+                    &[&namespace.binding(), &row.key, &crate::retention::source_generation(&row.sources).map_err(backend)?, &trace.storage_context().to_string()],
+                ).await.map_err(backend)?;
+            }
             self.publish_search(namespace, row).await?;
             self.catalog_changed(namespace, &row.key).await?;
         }

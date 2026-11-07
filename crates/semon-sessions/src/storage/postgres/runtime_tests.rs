@@ -147,18 +147,11 @@ pub(super) fn lifecycle(dsn: &str) {
     let mut query = crate::Query::from_sources(sources.clone());
     let answer = query.call("list_sessions", &json!({"limit":100})).unwrap();
     assert!(!answer["sessions"].as_array().unwrap().is_empty());
-    assert_eq!(
-        query
-            .call_catalog(
-                "list_sessions",
-                &json!({}),
-                None,
-                crate::SessionSourceReadMode::ProviderOnly,
-            )
-            .unwrap_err()
-            .code,
-        "capability_unavailable"
-    );
+    let catalog = query.call_catalog("list_sessions", &json!({}), None,
+        crate::SessionSourceReadMode::LocalOrPinnedProvider).unwrap();
+    assert_eq!(catalog["sessions"], answer["sessions"]);
+    query.call_catalog("stalls", &json!({}), None,
+        crate::SessionSourceReadMode::LocalOrPinnedProvider).unwrap();
     for tool in ["get_session", "read_transcript"] {
         let args = if tool == "read_transcript" {
             json!({"id":key,"limit":10})

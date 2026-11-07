@@ -427,6 +427,42 @@ impl RuntimeStore {
         Ok(())
     }
 
+    pub(crate) fn catalog_query_part(&self, now: i64, bytes_left: &mut usize) -> Result<crate::query::catalog::Part, crate::QueryError> {
+        self.validate().map_err(|error| crate::QueryError::io(&error))?;
+        #[cfg(feature = "postgres")]
+        if let Some(postgres) = &self.postgres {
+            let mut postgres = postgres.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Postgres { runtime, store } = &mut *postgres;
+            let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+            return runtime.block_on(store.catalog_query_part(namespace, &self.options, now, bytes_left))
+                .map_err(|error| crate::QueryError::new("unavailable", error.to_string()));
+        }
+        crate::query::catalog::sqlite_read(&self.options, now, bytes_left)
+    }
+
+    pub(crate) fn recheck_catalog_query(&self, part: &crate::query::catalog::Part) -> Result<(), crate::QueryError> {
+        #[cfg(feature = "postgres")]
+        if let Some(postgres) = &self.postgres {
+            let mut postgres = postgres.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let Postgres { runtime, store } = &mut *postgres;
+            let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+            return runtime.block_on(async {
+                let tx = store.begin(namespace).await?;
+                if tx.catalog_generation(namespace).await?.as_deref() != Some(part.generation.as_str()) {
+                    return Err(StorageError::Backend("Catalog Query publication changed".into()));
+                }
+                for (key, expected) in &part.witnesses {
+                    let actual = tx.catalog_row(namespace, key, crate::CatalogReadScope::Current).await?;
+                    if actual.and_then(|row| row.query).map(|value| value.to_string()).as_deref() != Some(expected.as_str()) {
+                        return Err(StorageError::Backend("Catalog Query facts changed".into()));
+                    }
+                }
+                tx.commit(namespace).await
+            }).map_err(|error| crate::QueryError::new("unavailable", error.to_string()));
+        }
+        crate::query::catalog::sqlite_recheck(&self.options, part)
+    }
+
     pub(crate) fn with_selected_query<T>(
         &self,
         key: &str,

@@ -871,7 +871,7 @@ pub struct Query {
 }
 
 mod activity;
-mod catalog;
+pub(crate) mod catalog;
 mod search;
 mod transcript;
 

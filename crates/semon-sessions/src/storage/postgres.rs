@@ -35,7 +35,7 @@ fn backend(error: impl std::fmt::Display) -> StorageError {
 
 fn stamp() -> String {
     format!(
-        "semon-session-store/1 backend=postgres schema=6 parser={} projector={}",
+        "semon-session-store/1 backend=postgres schema=7 parser={} projector={}",
         crate::events::CACHE_VERSION,
         crate::model::summary::CATALOG_VERSION
     )
