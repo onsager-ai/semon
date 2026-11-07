@@ -280,7 +280,10 @@ impl SessionSources {
         if self.is_retired() || !self.inventory.valid() {
             return Err(io::Error::other("session sources are retired or invalid"));
         }
-        let index = self.inventory.index(source_key).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unknown custody source"))?;
+        let index = self
+            .inventory
+            .index(source_key)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unknown custody source"))?;
         let owner = &self.machines[index].1;
         if owner.closed.load(Ordering::Acquire) {
             return Err(io::Error::other("session source is closed"));

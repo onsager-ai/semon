@@ -6,6 +6,20 @@ use std::io;
 
 #[cfg(feature = "postgres")]
 impl RuntimeStore {
+    pub(crate) fn local_facts(&self) -> io::Result<crate::Facts> {
+        let mut postgres = self.postgres.as_ref().ok_or_else(|| io::Error::other("PostgreSQL backend required"))?.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let super::Postgres { runtime, store } = &mut *postgres;
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+        runtime.block_on(store.local_facts(namespace, &self.options)).map_err(io::Error::other)
+    }
+
+    pub(crate) fn collect(&self) -> io::Result<Vec<crate::Node>> {
+        let mut postgres = self.postgres.as_ref().ok_or_else(|| io::Error::other("PostgreSQL backend required"))?.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let super::Postgres { runtime, store } = &mut *postgres;
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+        runtime.block_on(store.collect(namespace, &self.options)).map_err(io::Error::other)
+    }
+
     pub(crate) fn begin_facts_write(&self, wanted: &crate::Facts) -> io::Result<u64> {
         let mut postgres = self.postgres.as_ref().ok_or_else(|| io::Error::other("PostgreSQL backend required"))?.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let super::Postgres { runtime, store } = &mut *postgres;

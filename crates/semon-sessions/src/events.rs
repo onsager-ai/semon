@@ -2425,7 +2425,7 @@ impl EventCache {
         cache
     }
 
-    fn set_reported_runs(&mut self, runs: Vec<crate::facts::ReportedRunSnapshot>) {
+    pub(crate) fn set_reported_runs(&mut self, runs: Vec<crate::facts::ReportedRunSnapshot>) {
         self.reported_runs.clear();
         for run in runs {
             self.reported_runs

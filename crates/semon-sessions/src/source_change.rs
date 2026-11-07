@@ -74,14 +74,23 @@ impl SessionSourceWrite {
         let owner = sources.custody_source(source_key)?;
         #[cfg(feature = "postgres")]
         if owner.storage.is_postgres() {
-            if generation.is_some_and(|value| value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())) {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid Raw generation"));
+            if generation.is_some_and(|value| {
+                value.len() != 32 || !value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "invalid Raw generation",
+                ));
             }
             if !crate::is_input_path(input.root.as_str(), &input.path) {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, "write intent outside native log allowlist"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "write intent outside native log allowlist",
+                ));
             }
             let namespace = crate::storage::Namespace::new(source_key).map_err(io::Error::other)?;
-            let source_lock = SourceLock::acquire(&owner.options, &lock_key(&owner.options, input), true)?;
+            let source_lock =
+                SourceLock::acquire(&owner.options, &lock_key(&owner.options, input), true)?;
             let before = Stat::of(&input.full_path(&owner.options)).ok();
             let intent = owner.storage.begin_raw_write(input)?;
             return Ok(Self {
@@ -174,15 +183,26 @@ impl SessionSourceWrite {
                 let mut buffer = [0u8; 64 * 1024];
                 loop {
                     let read = file.read(&mut buffer)?;
-                    if read == 0 { break; }
+                    if read == 0 {
+                        break;
+                    }
                     hash.update(&buffer[..read]);
                 }
                 if Stat::from_metadata(&file.metadata()?)? != before || Stat::of(&path)? != before {
                     return Err(io::Error::other("Raw changed during completion"));
                 }
                 let sha256: [u8; 32] = hash.finalize().into();
-                let generation = self.generation.unwrap_or_else(|| format!("{:x}", Sha256::digest(sha256))[..32].to_owned());
-                return owner.storage.complete_raw_write(intent, &crate::PgRawGeneration { generation, length: to, sha256 });
+                let generation = self
+                    .generation
+                    .unwrap_or_else(|| format!("{:x}", Sha256::digest(sha256))[..32].to_owned());
+                return owner.storage.complete_raw_write(
+                    intent,
+                    &crate::PgRawGeneration {
+                        generation,
+                        length: to,
+                        sha256,
+                    },
+                );
             }
         };
         let evidence = match (self.generation, self.before) {
@@ -313,7 +333,11 @@ pub struct SessionFactsWrite {
 impl SessionFactsWrite {
     /// Journal Facts through an admitted source's runtime backend. Complete
     /// after the host has durably published the exact wanted Facts file.
-    pub fn begin_in(sources: &crate::SessionSources, source_key: &str, wanted: &crate::Facts) -> io::Result<Self> {
+    pub fn begin_in(
+        sources: &crate::SessionSources,
+        source_key: &str,
+        wanted: &crate::Facts,
+    ) -> io::Result<Self> {
         let owner = sources.custody_source(source_key)?;
         #[cfg(feature = "postgres")]
         if owner.storage.is_postgres() {
@@ -375,9 +399,15 @@ impl SessionFactsWrite {
     pub fn complete(self) -> io::Result<()> {
         #[cfg(feature = "postgres")]
         if let Some((owner, revision)) = self.postgres {
-            let actual = self.options.facts.as_ref().ok_or_else(|| io::Error::other("reported Facts path required"))?;
+            let actual = self
+                .options
+                .facts
+                .as_ref()
+                .ok_or_else(|| io::Error::other("reported Facts path required"))?;
             if crate::read_facts(actual)? != self.wanted {
-                return Err(io::Error::other("published Facts differ from custody intent"));
+                return Err(io::Error::other(
+                    "published Facts differ from custody intent",
+                ));
             }
             return owner.storage.complete_facts_write(revision, &self.wanted);
         }
