@@ -176,14 +176,37 @@ async fn retained_prefix_pages(dsn: &str) {
     assert!(after["observation"]["source_bytes"].as_u64().unwrap() > 0);
     let mut raw = super::connect(dsn).await;
     let corrupt = raw.transaction().await.unwrap();
-    corrupt.query_one("SELECT set_config('semon.namespace',$1,true)", &[&namespace.binding()]).await.unwrap();
+    corrupt
+        .query_one(
+            "SELECT set_config('semon.namespace',$1,true)",
+            &[&namespace.binding()],
+        )
+        .await
+        .unwrap();
     let saved = corrupt.query("SELECT generation,digest FROM semon_projection.proof_blocks WHERE namespace=$1 AND ordinal=0", &[&namespace.binding()]).await.unwrap();
     corrupt.execute("UPDATE semon_projection.proof_blocks SET digest=decode(repeat('00',32),'hex') WHERE namespace=$1 AND ordinal=0", &[&namespace.binding()]).await.unwrap();
     corrupt.commit().await.unwrap();
-    let refused = store.transcript_query(&namespace, &options, "sid=prefix-page&after=0&limit=10", None).await.unwrap();
-    assert_eq!(refused.status, 409, "proof corruption must not become incomplete success");
+    let refused = store
+        .transcript_query(
+            &namespace,
+            &options,
+            "sid=prefix-page&after=0&limit=10",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        refused.status, 409,
+        "proof corruption must not become incomplete success"
+    );
     let repair = raw.transaction().await.unwrap();
-    repair.query_one("SELECT set_config('semon.namespace',$1,true)", &[&namespace.binding()]).await.unwrap();
+    repair
+        .query_one(
+            "SELECT set_config('semon.namespace',$1,true)",
+            &[&namespace.binding()],
+        )
+        .await
+        .unwrap();
     for row in saved {
         repair.execute("UPDATE semon_projection.proof_blocks SET digest=$3 WHERE namespace=$1 AND generation=$2 AND ordinal=0", &[&namespace.binding(), &row.get::<_, String>(0), &row.get::<_, Vec<u8>>(1)]).await.unwrap();
     }
