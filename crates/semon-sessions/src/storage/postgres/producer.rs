@@ -72,7 +72,7 @@ impl PgProjectionStore {
                 let header = crate::tx::parse_native_record(line.as_bytes()).map(|value|crate::native_header::CodexHeader::from_record(&value));
                 if let Some(header) = header {
                     identities.extend(header.native_id(&input.full_path(options)));
-                    identities.extend(header.metadata.parent_thread);
+                    identities.extend(serde_json::to_value(&header.metadata).map_err(backend)?["parent_thread"].as_str().map(str::to_owned));
                 }
             }
         }
