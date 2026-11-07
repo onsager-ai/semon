@@ -239,7 +239,12 @@ pub(super) fn lifecycle(dsn: &str) {
     let interrupted =
         crate::SessionSourceWrite::begin_in(&sources, "injected-runtime", &input, None, length)
             .unwrap();
-    assert!(evidence.storage.publish_discovered(std::slice::from_ref(&input)).is_err());
+    assert!(
+        evidence
+            .storage
+            .publish_discovered(std::slice::from_ref(&input))
+            .is_err()
+    );
     assert!(crate::collect_in(&sources, "injected-runtime").is_err());
     let pending = core.respond(
         "GET",

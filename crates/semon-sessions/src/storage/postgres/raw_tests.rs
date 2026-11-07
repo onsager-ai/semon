@@ -77,23 +77,47 @@ pub(super) async fn lifecycle(dsn: &str) {
     let tx = store.begin(&namespace).await.unwrap();
     assert!(tx.write_facts(&namespace, None, 1, &facts).await.unwrap());
     tx.commit(&namespace).await.unwrap();
-    let wanted = crate::Facts { hostname: "wanted-machine".into(), ..facts.clone() };
+    let wanted = crate::Facts {
+        hostname: "wanted-machine".into(),
+        ..facts.clone()
+    };
     let tx = store.begin(&namespace).await.unwrap();
     let stale_facts = tx.begin_facts_write(&namespace, &wanted).await.unwrap();
-    assert_eq!(tx.reported_facts(&namespace).await.unwrap().unwrap().1, facts);
+    assert_eq!(
+        tx.reported_facts(&namespace).await.unwrap().unwrap().1,
+        facts
+    );
     assert!(tx.facts_write_pending(&namespace).await.unwrap());
-    assert!(!tx.write_facts(&namespace, Some(stale_facts), stale_facts + 1, &facts).await.unwrap());
+    assert!(
+        !tx.write_facts(&namespace, Some(stale_facts), stale_facts + 1, &facts)
+            .await
+            .unwrap()
+    );
     tx.commit(&namespace).await.unwrap();
     drop(store);
-    let mut store = PgProjectionStore::new(super::connect(dsn).await, namespace.clone()).await.unwrap();
+    let mut store = PgProjectionStore::new(super::connect(dsn).await, namespace.clone())
+        .await
+        .unwrap();
     let tx = store.begin(&namespace).await.unwrap();
     assert!(tx.facts_write_pending(&namespace).await.unwrap());
-    assert_eq!(tx.reported_facts(&namespace).await.unwrap().unwrap().1, facts);
+    assert_eq!(
+        tx.reported_facts(&namespace).await.unwrap().unwrap().1,
+        facts
+    );
     let current_facts = tx.begin_facts_write(&namespace, &wanted).await.unwrap();
-    assert!(tx.complete_facts_write(&namespace, stale_facts, &wanted).await.is_err());
-    tx.complete_facts_write(&namespace, current_facts, &wanted).await.unwrap();
+    assert!(
+        tx.complete_facts_write(&namespace, stale_facts, &wanted)
+            .await
+            .is_err()
+    );
+    tx.complete_facts_write(&namespace, current_facts, &wanted)
+        .await
+        .unwrap();
     assert!(!tx.facts_write_pending(&namespace).await.unwrap());
-    assert_eq!(tx.reported_facts(&namespace).await.unwrap().unwrap().1, wanted);
+    assert_eq!(
+        tx.reported_facts(&namespace).await.unwrap().unwrap().1,
+        wanted
+    );
     tx.commit(&namespace).await.unwrap();
     let foreign = Namespace::new("foreign-raw-custody").unwrap();
     let mut other = PgProjectionStore::new(super::connect(dsn).await, foreign.clone())
