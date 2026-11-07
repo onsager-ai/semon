@@ -282,7 +282,7 @@ impl SessionSources {
         }
         let index = self
             .inventory
-            .index(source_key)
+            .index(if source_key.is_empty() { "local" } else { source_key })
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "unknown custody source"))?;
         let owner = &self.machines[index].1;
         if owner.closed.load(Ordering::Acquire) {
