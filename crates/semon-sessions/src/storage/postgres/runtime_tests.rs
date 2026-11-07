@@ -344,6 +344,12 @@ pub(super) fn lifecycle(dsn: &str) {
             .contains(&input.path)
     );
     assert!(crate::FactsSource::new_in(&sources, "foreign-runtime").is_err());
+    let empty_input = crate::Input { root: crate::InputRoot::Codex, path: "sessions/2026/09/24/empty.jsonl".into() };
+    std::fs::write(empty_input.full_path(&options), b"").unwrap();
+    evidence.storage.discover_sources(std::slice::from_ref(&empty_input), false, false).unwrap();
+    evidence.storage.publish_discovered(std::slice::from_ref(&empty_input)).unwrap();
+    assert!(!evidence.storage.pending_sources().unwrap().contains(&empty_input));
+    std::fs::remove_file(empty_input.full_path(&options)).unwrap();
     // Reconcile observed removal into retained custody and a valid empty page.
     std::fs::remove_file(&path).unwrap();
     {

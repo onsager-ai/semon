@@ -306,7 +306,19 @@ impl PgProjectionStore {
                 .map_err(backend)?;
         if prepared.rows.is_empty() {
             let tx = self.begin(namespace).await?;
+            tx.tx.query_one("SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE", &[&namespace.binding()]).await.map_err(backend)?;
+            if tx.catalog_generation(namespace).await? != expected {
+                return Ok(None);
+            }
+            for (path, epoch) in &prepared.claims {
+                if tx.ledger(namespace, path).await?.map(|tag| tag.epoch) != *epoch {
+                    return Ok(None);
+                }
+            }
             for input in inputs {
+                if tx.raw_write_pending(namespace, input).await? {
+                    return Ok(None);
+                }
                 let path = input.full_path(&options);
                 let name = path
                     .to_str()
@@ -322,6 +334,9 @@ impl PgProjectionStore {
             }
             let generation = expected.unwrap_or_else(|| "0".repeat(64));
             tx.tx.execute("INSERT INTO semon_projection.catalog_heads(namespace,generation) VALUES($1,$2) ON CONFLICT DO NOTHING", &[&namespace.binding(), &generation]).await.map_err(backend)?;
+            for input in inputs {
+                tx.tx.execute("UPDATE semon_projection.discovery SET pending=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
+            }
             tx.commit(namespace).await?;
             return Ok(Some(generation));
         }
