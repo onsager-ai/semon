@@ -954,6 +954,7 @@ pub(super) fn finish(
     }
     // Multiple exactly printed exec results may report a failure without
     // proving which individual command owns a read, change or native outcome.
+    let mut diagnostic_failure = None;
     if observation.failure_results {
         let mut budget = MAX_BYTES;
         let parts = output
@@ -964,8 +965,9 @@ pub(super) fn finish(
             let mut diagnostic = ResultEvidence::default();
             let part = part.get("text").unwrap_or(part);
             if decode(part, 0, &mut budget, &mut diagnostic, true, true).is_some()
-                && failure(&[Command::Unknown], &diagnostic).is_some()
+                && let Some(waste) = failure(&[Command::Unknown], &diagnostic)
             {
+                diagnostic_failure = Some(waste);
                 result.error = true;
                 result.text = diagnostic.text;
                 break;
@@ -1004,7 +1006,8 @@ pub(super) fn finish(
                     && result.exit.is_none_or(|code| code == 0)
                     && matches!(result.text.trim(), "No matches found" | "No files found"));
         if !observation.empty_search {
-            observation.waste = failure(&observation.commands, &result);
+            observation.waste =
+                diagnostic_failure.or_else(|| failure(&observation.commands, &result));
         }
         if observation.waste.is_none() && observation.commands.contains(&Command::Sleep) {
             observation.waste = Some(WasteKind::Sleep);

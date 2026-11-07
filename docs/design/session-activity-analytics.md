@@ -109,8 +109,18 @@ can supply activity output but cannot supply native process/session ownership.
 Arbitrary scripts' printed JSON remains opaque and a terminal unknown script
 ends its overlap barrier. A straight-line sequence of exactly printed literal
 exec results also supplies failure-only diagnostics; it grants no read, change or
-process ownership. Dynamic batches remain unknown. Exit text in a successful
-result is not failure evidence.
+process ownership. Dynamic batches (`Promise.all`, `Promise.allSettled`) and
+transformed outputs remain unclassified. Exit text in a successful result is not
+failure evidence.
+
+Operator qualification of the same seven-day window observed failure counts
+before opaque-output handling, after that handling, and after literal-sequence
+recovery respectively: OtherFailure 482 / 245 / 321, PathNotFound 196 / 53 / 81,
+MalformedCommand 2 / 0 / 1, and ExternalFailure 4 / 0 / 0. These aggregate counts
+show the conservative dynamic-batch coverage limit; they are not a false-positive
+or recall estimate. The final recovery run covered 782 sessions and 56,069 steps;
+all 39 sampled physical sessions paged, including child continuations. RedundantRead
+and Refill each counted five, and empty search counted seven.
 
 Change facts accept only recognized command/output pairs: commit branch/SHA,
 GitHub push destination plus successful ref updates, and a GitHub pull-request
