@@ -94,6 +94,7 @@ CREATE TABLE semon_projection.proofs (
     root bytea NOT NULL CHECK (octet_length(root) = 32),
     PRIMARY KEY (namespace,path,generation)
 );
+CREATE INDEX proof_prefix_generation ON semon_projection.proofs(namespace,path,consumed,prefix,tail,generation);
 CREATE TABLE semon_projection.proof_blocks (
     namespace text NOT NULL,
     path text NOT NULL,
