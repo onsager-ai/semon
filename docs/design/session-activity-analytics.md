@@ -83,7 +83,10 @@ digests, typed outcomes and sanitized change values. The file ledger binds these
 observations to the consumed source receipt. A source-local read repeat requires
 a completed prior read of the same selection and no intervening or overlapping
 unknown mutation; compaction changes a repeated read to Context refill. Unknown
-commands and mutating/agent calls break that proof. Native Read selections,
+commands and mutating/agent calls break that proof. A terminal failed call
+invalidates earlier reads but ends its overlap barrier at the recorded result;
+running, background and undecodable results keep that barrier open.
+Native Read selections,
 `cat`, bounded `sed -n`/`head`/`tail`, and successful `rg`/`grep` selections
 participate; working directories and literal `cd` prefixes enter only their
 selection hashes. Literal `bash -c`/`bash -lc` and `sh` wrappers use the same

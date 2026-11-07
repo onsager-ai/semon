@@ -908,3 +908,34 @@ fn repeated_or_conflicting_native_call_ids_still_refuse_attribution() {
         );
     }
 }
+
+#[test]
+fn terminal_failed_mutations_end_overlap_barriers_without_preserving_old_reads() {
+    for (output, error) in [
+        (json!({"exit_code":1,"output":"failure"}), false),
+        (json!("failure"), true),
+    ] {
+        let mut mutation = call(
+            "exec_command",
+            &json!({"cmd":"unknown-command"}),
+            None,
+            "hash".into(),
+        );
+        mutation.envelopes = true;
+        finish(&mut mutation, &output, error, None, None, "hash".into());
+        assert!(mutation.settled);
+        assert!(!mutation.completed);
+        let mut rows = vec![
+            located(10, observed("Bash", "cat file", json!("body"), false)),
+            located(20, mutation),
+            located(30, observed("Bash", "cat file", json!("body"), false)),
+            located(40, observed("Bash", "cat file", json!("body"), false)),
+        ];
+        classify_reads(&mut rows, &[]);
+        assert!(
+            rows[2].observation.waste.is_none(),
+            "failed mutation invalidates the earlier read"
+        );
+        assert_eq!(rows[3].observation.waste, Some(WasteKind::RedundantRead));
+    }
+}

@@ -121,6 +121,7 @@ pub(crate) struct Observation {
     formatter: bool,
     envelopes: bool,
     completed: bool,
+    settled: bool,
     background: bool,
     pub(crate) waste: Option<WasteKind>,
     pub(crate) wait: Option<WaitInterval>,
@@ -412,6 +413,7 @@ pub(super) fn call(
         formatter: false,
         envelopes: false,
         completed: false,
+        settled: false,
         background,
         waste: orchestration.then_some(WasteKind::OrchestrationWait),
         wait: None,
@@ -785,10 +787,9 @@ pub(super) fn finish(
         }
         return;
     }
-    observation.completed = !observation.background
-        && !result.running
-        && !result.error
-        && result.exit.is_none_or(|code| code == 0);
+    observation.settled = !observation.background && !result.running;
+    observation.completed =
+        observation.settled && !result.error && result.exit.is_none_or(|code| code == 0);
     if result.is_wait {
         observation.orchestration = true;
     }
@@ -1032,8 +1033,9 @@ pub(crate) fn classify_reads(
                     .map(|index| offsets[index])
             });
         let observation = &mut row.observation;
-        // Agent calls and search tools can mutate arbitrary paths. An unfinished
-        // mutator also blocks reads that overlap it, even after another read.
+        // Agent calls and unknown commands can mutate arbitrary paths. A
+        // terminal failed result ends the overlap barrier but never proves that
+        // earlier reads survived; unfinished mutators keep the barrier open.
         let mutation = observation.orchestration
             || observation.commands.iter().any(|command| {
                 matches!(
@@ -1052,7 +1054,7 @@ pub(crate) fn classify_reads(
             let until = uncertain_until
                 .entry(row.position.source.clone())
                 .or_default();
-            *until = (*until).max(if observation.completed {
+            *until = (*until).max(if observation.settled {
                 row.result_offset.unwrap_or(u64::MAX)
             } else {
                 u64::MAX
