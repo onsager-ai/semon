@@ -1,0 +1,58 @@
+name: PostgreSQL follow-up isolated SQLite timing
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  SEMON_PRICING_REFRESH: "off"
+  SEMON_BUILD_TIMING: "0"
+jobs:
+  timing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            target
+          key: pgsel-timing-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Compare isolated first pages on one runner
+        run: |
+          set -eu
+          selected=$(git rev-parse HEAD)
+          baseline=$(git rev-parse origin/main)
+          mkdir "$RUNNER_TEMP/pgsel-timing"
+          printf '%s\n' "$selected" > "$RUNNER_TEMP/pgsel-timing/selected-sha"
+          printf '%s\n' "$baseline" > "$RUNNER_TEMP/pgsel-timing/baseline-sha"
+          for revision in selected baseline; do
+            if test "$revision" = selected; then git checkout --detach "$selected"; else git checkout --detach "$baseline"; fi
+            cargo test --locked -p semon-sessions --lib initial_catalog_page_precedes_global_native_observation --no-run
+            for sample in 1 2 3 4 5; do
+              cargo test --locked -p semon-sessions --lib initial_catalog_page_precedes_global_native_observation -- --test-threads=1 --nocapture 2>&1 | tee "$RUNNER_TEMP/pgsel-timing/$revision-$sample.log"
+            done
+          done
+          python3 - "$RUNNER_TEMP/pgsel-timing" <<'PY'
+          import json, pathlib, re, statistics, sys
+          root = pathlib.Path(sys.argv[1])
+          samples = {}
+          for revision in ('selected', 'baseline'):
+              rows = {n: [] for n in (0, 256, 2048)}
+              for log in root.glob(f'{revision}-*.log'):
+                  for n, latency in re.findall(r'production-first-page unrelated=(\d+) latency_us=(\d+)', log.read_text()):
+                      rows[int(n)].append(int(latency))
+              assert all(len(values) == 5 for values in rows.values()), rows
+              samples[revision] = {n: statistics.median(values) for n, values in rows.items()}
+          result = {n: {'selected_us': samples['selected'][n], 'main_us': samples['baseline'][n], 'delta_percent': (samples['selected'][n]/samples['baseline'][n]-1)*100} for n in (0, 256, 2048)}
+          print(json.dumps(result, indent=2))
+          (root/'medians.json').write_text(json.dumps(result, indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: pgsel-isolated-timing
+          path: ${{ runner.temp }}/pgsel-timing/
