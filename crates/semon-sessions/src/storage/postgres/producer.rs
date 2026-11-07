@@ -45,14 +45,65 @@ impl PgProjectionStore {
     }
 
     pub(crate) async fn publish_discovered(&mut self, namespace: &Namespace, options: &Options, inputs: &[Input]) -> Result<(),StorageError> {
-        match self.publish_sources(namespace,options,inputs).await {
+        // Revisit already-published owners that share a native identity or an
+        // explicit parent with this cohort. The same 64-source bound applies.
+        let mut component: BTreeSet<Input> = inputs.iter().cloned().collect();
+        let tx = self.begin(namespace).await?;
+        let published = tx.tx.query("SELECT metadata FROM semon_projection.catalog WHERE namespace=$1 AND lifecycle='current' ORDER BY session_key", &[&namespace.binding()]).await.map_err(backend)?;
+        let mut owners = Vec::new();
+        let mut bytes = 0usize;
+        for item in published {
+            let text: &str = item.get(0);
+            bytes += text.len();
+            if bytes > 8*1024*1024 { return Err(backend("discovery relationship metadata budget")); }
+            owners.push(serde_json::from_str::<crate::model::summary::CatalogRow>(text).map_err(backend)?);
+        }
+        tx.commit(namespace).await?;
+        let mut identities = BTreeSet::new();
+        for input in inputs {
+            if input.root == crate::InputRoot::Claude {
+                if let Some(id) = input.full_path(options).file_stem().and_then(|name|name.to_str()) { identities.insert(id.to_owned()); }
+                if let Some(parent) = input.path.split("/subagents/").next().filter(|_|input.path.contains("/subagents/")).and_then(|prefix|prefix.rsplit('/').next()) { identities.insert(parent.to_owned()); }
+            } else if input.root == crate::InputRoot::Codex {
+                let file = crate::sealed::LogFile::open(&input.full_path(options)).map_err(backend)?;
+                let mut line = String::new();
+                use std::io::{BufRead, Read};
+                std::io::BufReader::new(file.take(32*1024*1024)).read_line(&mut line).map_err(backend)?;
+                let header = crate::tx::parse_native_record(line.as_bytes()).map(|value|crate::native_header::CodexHeader::from_record(&value));
+                if let Some(header) = header {
+                    identities.extend(header.native_id(&input.full_path(options)));
+                    identities.extend(header.metadata.parent_thread);
+                }
+            }
+        }
+        loop {
+            let before = component.len();
+            for row in &owners {
+                if row.native_ids.iter().any(|id|identities.contains(id)) || row.parent.as_ref().is_some_and(|id|identities.contains(id)) || row.sources.iter().any(|source|crate::native_evidence::catalog_input(&source.path,options).is_some_and(|input|component.contains(&input))) {
+                    identities.extend(row.native_ids.iter().cloned());
+                    identities.extend(row.parent.iter().cloned());
+                    component.extend(row.sources.iter().filter_map(|source|crate::native_evidence::catalog_input(&source.path,options)));
+                }
+            }
+            if component.len()>64 { return Err(backend("discovery relationship source bound")); }
+            if component.len()==before { break; }
+        }
+        let component: Vec<_> = component.into_iter().collect();
+        match self.publish_sources(namespace,options,&component).await {
             Ok(Some(_)) => {
                 let tx = self.begin(namespace).await?;
                 for input in inputs { tx.tx.execute("UPDATE semon_projection.discovery SET pending=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?; }
                 tx.commit(namespace).await
             }
             Ok(None) => Err(backend("native Catalog generation changed")),
-            Err(error) => Err(error),
+            Err(error) => {
+                // A refused cohort is durable unavailable work, not a hot queue
+                // item. A later source audit re-admits it after discovery.
+                let tx = self.begin(namespace).await?;
+                for input in inputs { tx.tx.execute("UPDATE semon_projection.discovery SET pending=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?; }
+                tx.commit(namespace).await?;
+                Err(error)
+            },
         }
     }
 
@@ -132,7 +183,19 @@ impl PgProjectionStore {
             crate::model::prepare_sources(&options, &mut cache, inputs, crate::model::now_ms())
                 .map_err(backend)?;
         if prepared.rows.is_empty() {
-            return Err(backend("native cohort has no qualified Catalog owners"));
+            let tx = self.begin(namespace).await?;
+            for input in inputs {
+                let path = input.full_path(&options);
+                let name = path.to_str().ok_or_else(|| backend("invalid empty source path"))?;
+                // An empty source can retire only its previously qualified
+                // observation; retained metadata and recipes remain in custody.
+                let owners = tx.tx.query("SELECT DISTINCT unit_key FROM semon_projection.units WHERE namespace=$1 AND path=$2", &[&namespace.binding(), &name]).await.map_err(backend)?;
+                if !owners.is_empty() { return Err(backend("empty replacement requires retained History handoff")); }
+            }
+            let generation = expected.unwrap_or_else(|| "0".repeat(64));
+            tx.tx.execute("INSERT INTO semon_projection.catalog_heads(namespace,generation) VALUES($1,$2) ON CONFLICT DO NOTHING", &[&namespace.binding(), &generation]).await.map_err(backend)?;
+            tx.commit(namespace).await?;
+            return Ok(Some(generation));
         }
         // Shared derivation qualifies byte generations before/after native I/O.
         // Fence a later Raw mutation too, before starting the publication CAS.

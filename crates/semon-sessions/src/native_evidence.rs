@@ -1425,8 +1425,8 @@ impl NativeEvidence {
                 work.postgres_pending = self.storage.pending_sources()?;
             }
             if !work.postgres_pending.is_empty() {
-                self.storage.publish_discovered(&work.postgres_pending)?;
-                work.postgres_pending.clear();
+                let pending = std::mem::take(&mut work.postgres_pending);
+                self.storage.publish_discovered(&pending)?;
                 return Ok(false);
             }
             work.postgres_draining = false;
