@@ -631,18 +631,20 @@ impl PgProjectionStore {
                 let proof_generation = tx.source_proof_generation(namespace, source).await?;
                 proofs.insert((input.root.as_str().into(), input.path), (source.clone(), proof_generation));
             }
-            let (sender, requests) = std::sync::mpsc::channel();
+            let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
             let reader = super::proof_reader::LocalProofReader::new(options, &row.sources, sender)?;
             let options = options.clone();
-            let rendering = tokio::task::spawn_blocking(move || {
+            let mut rendering = tokio::task::spawn_blocking(move || {
                 crate::transcript_range::render_postgres(&options, identity, session, &generation, total, first, slots, row.sources, &reader)
             });
-            while !rendering.is_finished() {
-                // Drive covering witnesses without leaving the selected snapshot.
-                super::proof_reader::serve(&tx, namespace, &requests, &proofs).await;
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            loop {
+                tokio::select! {
+                    reply = &mut rendering => break reply.map_err(backend)?,
+                    Some(request) = requests.recv() => {
+                        super::proof_reader::serve(&tx, namespace, request, &proofs).await;
+                    }
+                }
             }
-            rendering.await.map_err(backend)?
         };
         tx.commit(namespace).await?;
         Ok(reply)

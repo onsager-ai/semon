@@ -11,7 +11,7 @@ pub(super) struct ProofRequest {
 
 pub(super) struct LocalProofReader {
     sources: BTreeMap<(String, String), CatalogSource>,
-    sender: std::sync::mpsc::Sender<ProofRequest>,
+    sender: tokio::sync::mpsc::UnboundedSender<ProofRequest>,
     state: Mutex<State>,
 }
 #[derive(Default)]
@@ -22,7 +22,7 @@ struct State {
 }
 
 impl LocalProofReader {
-    pub(super) fn new(options: &crate::Options, sources: &[CatalogSource], sender: std::sync::mpsc::Sender<ProofRequest>) -> Result<Self, StorageError> {
+    pub(super) fn new(options: &crate::Options, sources: &[CatalogSource], sender: tokio::sync::mpsc::UnboundedSender<ProofRequest>) -> Result<Self, StorageError> {
         let mut captured = BTreeMap::new();
         for source in sources {
             let input = crate::native_evidence::catalog_input(&source.path, options).ok_or_else(|| backend("proof source outside configured roots"))?;
@@ -89,10 +89,9 @@ impl SessionSourceReader for LocalProofReader {
 
 pub(super) async fn serve(
     tx: &PgProjectionTransaction<'_>, namespace: &Namespace,
-    requests: &std::sync::mpsc::Receiver<ProofRequest>,
+    request: ProofRequest,
     proofs: &BTreeMap<(String, String), (CatalogSource, String)>,
 ) {
-    while let Ok(request) = requests.try_recv() {
         let result = async {
             let (source, generation) = proofs.get(&(request.source.root.clone(), request.source.path.clone())).ok_or_else(|| backend("unknown selected proof"))?;
             if source.native_id != request.source.native_id || source.offset != request.source.offset || source.prefix_sha256 != request.source.prefix_sha256 || source.tail_sha256 != request.source.tail_sha256 { return Err(backend("selected proof source changed")); }
@@ -100,5 +99,4 @@ pub(super) async fn serve(
                 .ok_or_else(|| backend("selected proof block absent"))
         }.await.map_err(io::Error::other);
         let _ = request.reply.send(result);
-    }
 }

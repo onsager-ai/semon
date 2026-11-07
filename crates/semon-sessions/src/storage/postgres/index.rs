@@ -334,7 +334,16 @@ impl PgProjectionTransaction<'_> {
                 "unsupported projector version".into(),
             ));
         }
-        self.proof_block_generation(namespace, path, &generation(tag), tag.offset, &tag.prefix_sha256, &tag.tail_sha256, ordinal).await
+        self.proof_block_generation(
+            namespace,
+            path,
+            &generation(tag),
+            tag.offset,
+            &tag.prefix_sha256,
+            &tag.tail_sha256,
+            ordinal,
+        )
+        .await
     }
 
     /// Resolve an immutable consumed-prefix proof in this selected snapshot.
@@ -344,7 +353,10 @@ impl PgProjectionTransaction<'_> {
         source: &crate::model::summary::CatalogSource,
     ) -> Result<String, StorageError> {
         ensure(&self.namespace, namespace)?;
-        let path = source.path.to_str().ok_or_else(|| backend("invalid proof path"))?;
+        let path = source
+            .path
+            .to_str()
+            .ok_or_else(|| backend("invalid proof path"))?;
         self.tx.query_opt(
             "SELECT generation FROM semon_projection.proofs WHERE namespace=$1 AND path=$2 AND consumed=$3 AND prefix=$4 AND tail=$5 ORDER BY generation LIMIT 1",
             &[&namespace.binding(), &path, &number(source.offset)?, &&source.prefix_sha256[..], &&source.tail_sha256[..]],

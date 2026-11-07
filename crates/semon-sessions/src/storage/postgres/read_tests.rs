@@ -111,32 +111,85 @@ async fn retained_prefix_pages(dsn: &str) {
     use std::io::Write;
     let root = crate::storage::conformance::root();
     let options = crate::storage::conformance::source(&root.0, "retained-prefix");
-    let path = crate::storage::conformance::native(&root.0, "prefix-page", "original selected prompt");
-    let input = crate::Input { root: crate::InputRoot::Claude, path: "projects/project/prefix-page.jsonl".into() };
+    let path =
+        crate::storage::conformance::native(&root.0, "prefix-page", "original selected prompt");
+    let input = crate::Input {
+        root: crate::InputRoot::Claude,
+        path: "projects/project/prefix-page.jsonl".into(),
+    };
     let namespace = Namespace::new("lazy-retained-prefix").unwrap();
     #[cfg(target_os = "linux")]
     let watch = super::producer_tests::SqliteOpenWatch::new(&options);
-    let mut store = PgProjectionStore::new(super::connect(dsn).await, namespace.clone()).await.unwrap();
-    store.publish_sources(&namespace, &options, std::slice::from_ref(&input)).await.unwrap().unwrap();
-    let before = store.transcript_query(&namespace, &options, "sid=prefix-page&after=0&limit=10", None).await.unwrap();
-    assert_eq!(before.status, 200, "{}", String::from_utf8_lossy(&before.body));
+    let mut store = PgProjectionStore::new(super::connect(dsn).await, namespace.clone())
+        .await
+        .unwrap();
+    store
+        .publish_sources(&namespace, &options, std::slice::from_ref(&input))
+        .await
+        .unwrap()
+        .unwrap();
+    let before = store
+        .transcript_query(
+            &namespace,
+            &options,
+            "sid=prefix-page&after=0&limit=10",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        before.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&before.body)
+    );
     let before: serde_json::Value = serde_json::from_slice(&before.body).unwrap();
-    let mut append = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    let mut append = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
     writeln!(append, "{}", serde_json::json!({"type":"user","sessionId":"prefix-page","uuid":"later","timestamp":"2026-10-01T00:01:00Z","message":{"role":"user","content":"later appended prompt"}})).unwrap();
     append.sync_all().unwrap();
-    store.index_source(&namespace, &path, "claude").await.unwrap();
+    store
+        .index_source(&namespace, &path, "claude")
+        .await
+        .unwrap();
     // Catalog still selects the old consumed prefix, while Index/proofs advanced.
-    let after = store.transcript_query(&namespace, &options, "sid=prefix-page&after=0&limit=10", None).await.unwrap();
-    assert_eq!(after.status, 200, "{}", String::from_utf8_lossy(&after.body));
+    let after = store
+        .transcript_query(
+            &namespace,
+            &options,
+            "sid=prefix-page&after=0&limit=10",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        after.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&after.body)
+    );
     let after: serde_json::Value = serde_json::from_slice(&after.body).unwrap();
     assert_eq!(before["entries"], after["entries"]);
     assert_eq!(before["generation"], after["generation"]);
     assert!(after["observation"]["source_bytes"].as_u64().unwrap() > 0);
     let mut changed = std::fs::read(&path).unwrap();
-    let at = changed.windows(b"original selected prompt".len()).position(|window| window == b"original selected prompt").unwrap();
+    let at = changed
+        .windows(b"original selected prompt".len())
+        .position(|window| window == b"original selected prompt")
+        .unwrap();
     changed[at] = b'X';
     std::fs::write(&path, changed).unwrap();
-    let refused = store.transcript_query(&namespace, &options, "sid=prefix-page&after=0&limit=10", None).await.unwrap();
+    let refused = store
+        .transcript_query(
+            &namespace,
+            &options,
+            "sid=prefix-page&after=0&limit=10",
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(refused.status, 409);
     #[cfg(target_os = "linux")]
     watch.assert_untouched(&options);
