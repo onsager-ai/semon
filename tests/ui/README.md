@@ -143,6 +143,17 @@ its completion witness is the native-publication success message in the CI log.
   `9c833b783901760998ecdc8cb31c61f14a14410d30984eff67b77609c5c2b789`; image and
   evidence digests, decisions, review provenance and reference pins are unchanged.
   This is binding maintenance only and grants no new appearance approval.
+- CI run 42313402722 for the #477 storage rebuild (Source `8410cf49`) supplies
+  visual artifact 13549354209 and transport artifact 13549079190. The supported
+  audit and proposal generator qualify 155 visual and six transport records as
+  fingerprint-only, with no refusals. Independent Manager review compared all 966
+  image/evidence digests (keyed by comparator, scope, kind and key) with the
+  existing bindings: zero mismatches. It inspected phone home and desktop
+  machines diffs, which show only the previously approved changes. The adopted
+  patches change only candidate fingerprints to
+  `f3273fec47d9d9f25df5d410a8d329d5fcaf164ce344849c80503b4592948881`; decisions,
+  review provenance and reference pins are unchanged. This is binding maintenance
+  only and grants no new appearance approval.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
