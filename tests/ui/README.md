@@ -28,6 +28,15 @@ its completion witness is the native-publication success message in the CI log.
 
 ## Required coverage and historical reports
 
+- CI run 42363227440 for session activity coverage (head `e4a0742a6`, merge
+  preview `c32a81da`) supplied visual artifact 13571121268 and transport artifact
+  13570671380. Both review proposals qualified fingerprint-only maintenance with
+  zero refusals: 155 visual and six transport records. Their generated patches
+  change only candidate fingerprints to
+  `256574cb595c9639a5509a5ed3a9a02ba378db89332ad2358cb23369fec8fbe0`.
+  Image/evidence digests, reference pins, review decisions and thresholds remain
+  unchanged; this maintenance establishes no new appearance approval.
+
 - CI run 42348328683 for qualified activity summary parity (head `e5490a24b`,
   merge preview `5348dc73`) supplied visual artifact 13564543219 and transport
   artifact 13564721665. Both review proposals qualified fingerprint-only
