@@ -2459,7 +2459,7 @@ fn native_owner_reuses_one_complete_index_across_query_tree_and_catalog_reads() 
     assert!(
         local.sources.machines[0]
             .1
-            .work
+            .storage.work
             .lock()
             .unwrap()
             .events
@@ -2608,7 +2608,7 @@ fn admitted_sources_share_the_index_with_a_later_viewer_and_drain_on_close() {
         },
     )]));
     let mut first = Query::from_sources(sources.clone());
-    assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+    assert!(sources.machines[0].1.storage.work.lock().unwrap().events.is_none());
     assert_eq!(
         first.call_at("unknown", &json!({}), NOW).unwrap_err().code,
         "unknown_tool"
@@ -2674,7 +2674,7 @@ fn retired_admitted_sources_refuse_cold_reads_and_new_catalog_demand() {
     )]));
     assert!(sources.invalidate("a"));
     assert!(!sources.invalidate("missing"));
-    assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+    assert!(sources.machines[0].1.storage.work.lock().unwrap().events.is_none());
     sources.close();
     assert!(!sources.invalidate("a"));
     assert!(
@@ -3168,7 +3168,7 @@ fn selected_query_uses_original_generations_without_workspace_preparation_or_res
             );
         }
         assert!(
-            sources.machines[0].1.work.lock().unwrap().events.is_none(),
+            sources.machines[0].1.storage.work.lock().unwrap().events.is_none(),
             "selected Query constructed a workspace producer"
         );
         assert!(!home.options.claude_home.join(&archive.source.path).exists());
@@ -3265,7 +3265,7 @@ fn selected_transcript_tail_scope_measurement() {
                 query.native.is_none(),
                 "tail read prepared a complete native cohort"
             );
-            assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+            assert!(sources.machines[0].1.storage.work.lock().unwrap().events.is_none());
             assert!(!home.options.claude_home.join(&archive.source.path).exists());
         }
         samples.sort_unstable();
@@ -4056,7 +4056,7 @@ fn unsent_query_uses_indexed_bookmark_evidence() {
             .unwrap(),
         expected
     );
-    assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+    assert!(sources.machines[0].1.storage.work.lock().unwrap().events.is_none());
 }
 
 #[test]
@@ -4139,7 +4139,7 @@ fn selected_native_query_closes_nested_parent_dependencies_without_unrelated_sou
             .unwrap(),
         expected
     );
-    assert!(sources.machines[0].1.work.lock().unwrap().events.is_none());
+    assert!(sources.machines[0].1.storage.work.lock().unwrap().events.is_none());
 }
 
 #[test]
@@ -4364,7 +4364,7 @@ fn ordinary_multi_machine_focused_query_reuses_published_ownership() {
                 assert!(
                     query.sources.machines[1]
                         .1
-                        .work
+                        .storage.work
                         .lock()
                         .unwrap()
                         .events
@@ -4725,7 +4725,7 @@ fn focused_query_preserves_whole_file_scan_window_and_skipped_parent_context() {
             assert!(
                 ordinary.sources.machines[0]
                     .1
-                    .work
+                    .storage.work
                     .lock()
                     .unwrap()
                     .events
@@ -4856,7 +4856,7 @@ fn ordinary_focused_query_resolves_native_ids_after_scan_window_namespace_change
         assert!(
             ordinary.sources.machines[0]
                 .1
-                .work
+                .storage.work
                 .lock()
                 .unwrap()
                 .events
@@ -4932,7 +4932,7 @@ fn ordinary_focused_query_keeps_omitted_resume_file_turns_truncated() {
         assert!(
             ordinary.sources.machines[0]
                 .1
-                .work
+                .storage.work
                 .lock()
                 .unwrap()
                 .events
@@ -5277,7 +5277,7 @@ fn published_catalog_search_matches_shared_five_tool_oracles() {
             assert!(
                 selected.sources.machines[0]
                     .1
-                    .work
+                    .storage.work
                     .lock()
                     .unwrap()
                     .events
@@ -5513,7 +5513,7 @@ fn catalog_search_selected_work_stays_fixed_as_unrelated_history_grows() {
                     assert!(
                         query.sources.machines[0]
                             .1
-                            .work
+                            .storage.work
                             .lock()
                             .unwrap()
                             .events
@@ -6032,7 +6032,7 @@ fn selected_late_search_scans_content_without_eager_index_or_slot_preparation() 
         assert!(
             query.sources.machines[0]
                 .1
-                .work
+                .storage.work
                 .lock()
                 .unwrap()
                 .events
