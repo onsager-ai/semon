@@ -7121,7 +7121,10 @@ mod tests {
         let initial = crate::native_evidence::NativeEvidence::new(options.clone());
         assert!((0..128).any(|_| {
             initial
-                .refresh_catalog(&mut crate::viewer::lock(&initial.storage.work), CATALOG_FIXTURE_NOW)
+                .refresh_catalog(
+                    &mut crate::viewer::lock(&initial.storage.work),
+                    CATALOG_FIXTURE_NOW,
+                )
                 .unwrap()
         }));
         drop(initial);

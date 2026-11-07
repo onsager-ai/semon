@@ -4156,13 +4156,17 @@ mod catalog_owner_tests {
         let builds = std::cell::Cell::new(0);
         drain_catalog(&first, &builds);
         drain_catalog(&second, &builds);
-        let initial = lock(&second.storage.work).observed_catalog_generation.clone();
+        let initial = lock(&second.storage.work)
+            .observed_catalog_generation
+            .clone();
 
         append_audit_record(&options, &input);
         first.request_metadata_audit();
         second.request_metadata_audit();
         drain_catalog(&first, &builds);
-        let published = lock(&first.storage.work).observed_catalog_generation.clone();
+        let published = lock(&first.storage.work)
+            .observed_catalog_generation
+            .clone();
         assert!(initial != published, "append did not advance publication");
         builds.set(0);
         let counts = || {
@@ -4418,8 +4422,9 @@ mod catalog_owner_tests {
                     }
                 }
                 assert!(complete, "peer metadata replay did not complete");
-                *foreign_in_hook.borrow_mut() =
-                    lock(&peer_in_hook.storage.work).observed_catalog_generation.clone();
+                *foreign_in_hook.borrow_mut() = lock(&peer_in_hook.storage.work)
+                    .observed_catalog_generation
+                    .clone();
                 assert_ne!(
                     *committed_in_hook.borrow(),
                     *foreign_in_hook.borrow(),
