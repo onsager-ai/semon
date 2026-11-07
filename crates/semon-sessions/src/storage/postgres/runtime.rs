@@ -623,19 +623,43 @@ impl PgProjectionStore {
             .recipe_page(namespace, &key, scope, Some(&generation), first, limit)
             .await?;
         let reply = if let Some(reader) = provider {
-            crate::transcript_range::render_postgres(options, identity, session, &generation, total, first, slots, row.sources, reader)
+            crate::transcript_range::render_postgres(
+                options,
+                identity,
+                session,
+                &generation,
+                total,
+                first,
+                slots,
+                row.sources,
+                reader,
+            )
         } else {
             let mut proofs = std::collections::BTreeMap::new();
             for source in &row.sources {
-                let input = crate::native_evidence::catalog_input(&source.path, options).ok_or_else(|| backend("invalid selected source"))?;
+                let input = crate::native_evidence::catalog_input(&source.path, options)
+                    .ok_or_else(|| backend("invalid selected source"))?;
                 let proof_generation = tx.source_proof_generation(namespace, source).await?;
-                proofs.insert((input.root.as_str().into(), input.path), (source.clone(), proof_generation));
+                proofs.insert(
+                    (input.root.as_str().into(), input.path),
+                    (source.clone(), proof_generation),
+                );
             }
             let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
             let reader = super::proof_reader::LocalProofReader::new(options, &row.sources, sender)?;
             let options = options.clone();
             let mut rendering = tokio::task::spawn_blocking(move || {
-                let reply = crate::transcript_range::render_postgres(&options, identity, session, &generation, total, first, slots, row.sources, &reader);
+                let reply = crate::transcript_range::render_postgres(
+                    &options,
+                    identity,
+                    session,
+                    &generation,
+                    total,
+                    first,
+                    slots,
+                    row.sources,
+                    &reader,
+                );
                 reader.verify().map(|()| reply)
             });
             loop {
