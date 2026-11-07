@@ -267,7 +267,12 @@ impl SourceLock {
     }
 
     #[cfg(unix)]
-    fn acquire_inner(options: &Options, path: &str, exclusive: bool, nonblocking: bool) -> io::Result<Self> {
+    fn acquire_inner(
+        options: &Options,
+        path: &str,
+        exclusive: bool,
+        nonblocking: bool,
+    ) -> io::Result<Self> {
         use sha2::{Digest, Sha256};
         use std::os::unix::{
             fs::{DirBuilderExt, OpenOptionsExt},
@@ -306,7 +311,12 @@ impl SourceLock {
         Ok(Self(file))
     }
     #[cfg(not(unix))]
-    fn acquire_inner(options: &Options, path: &str, exclusive: bool, nonblocking: bool) -> io::Result<Self> {
+    fn acquire_inner(
+        options: &Options,
+        path: &str,
+        exclusive: bool,
+        nonblocking: bool,
+    ) -> io::Result<Self> {
         let _ = (options, path, nonblocking);
         if exclusive {
             Err(io::Error::new(

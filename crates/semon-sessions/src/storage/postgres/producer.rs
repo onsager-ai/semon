@@ -255,7 +255,8 @@ impl PgProjectionStore {
         {
             return Err(backend("invalid native producer cohort"));
         }
-        let _facts_lock = crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?;
+        let _facts_lock =
+            crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?;
         let _source_locks = inputs
             .iter()
             .map(|input| {
