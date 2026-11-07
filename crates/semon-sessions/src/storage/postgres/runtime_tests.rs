@@ -230,14 +230,39 @@ pub(super) fn lifecycle(dsn: &str) {
     std::fs::remove_file(&path).unwrap();
     {
         let mut work = evidence.storage.work.lock().unwrap();
-        while !evidence.refresh_catalog(&mut work, crate::model::now_ms()).unwrap() {}
+        while !evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap()
+        {}
     }
-    let empty = evidence.storage.page("injected-runtime", &crate::catalog::Request::parse("limit=60").unwrap(), None);
-    assert_eq!(empty.status, 200, "{}", String::from_utf8_lossy(&empty.body));
+    let empty = evidence.storage.page(
+        "injected-runtime",
+        &crate::catalog::Request::parse("limit=60").unwrap(),
+        None,
+    );
+    assert_eq!(
+        empty.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&empty.body)
+    );
     let empty: Value = serde_json::from_slice(&empty.body).unwrap();
     assert!(empty["items"].as_array().unwrap().is_empty());
-    let history = evidence.storage.page("injected-runtime", &crate::catalog::Request::parse(&format!("sid={}&scope=retained_history", crate::viewer::percent_encode(key))).unwrap(), None);
-    assert_eq!(history.status,200,"{}",String::from_utf8_lossy(&history.body));
+    let history = evidence.storage.page(
+        "injected-runtime",
+        &crate::catalog::Request::parse(&format!(
+            "sid={}&scope=retained_history",
+            crate::viewer::percent_encode(key)
+        ))
+        .unwrap(),
+        None,
+    );
+    assert_eq!(
+        history.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&history.body)
+    );
     core.close();
     sources.close();
     #[cfg(target_os = "linux")]
