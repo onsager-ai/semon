@@ -23,6 +23,19 @@ CREATE TABLE semon_projection.namespaces (
     custody_epoch text NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text)
 );
 ALTER TABLE semon_projection.query_context ADD FOREIGN KEY(namespace) REFERENCES semon_projection.namespaces(namespace);
+CREATE TABLE semon_projection.discovery (
+    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
+    root text NOT NULL,
+    path text NOT NULL,
+    seen boolean NOT NULL DEFAULT true,
+    pending boolean NOT NULL DEFAULT true,
+    PRIMARY KEY(namespace,root,path)
+);
+ALTER TABLE semon_projection.discovery ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.discovery FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.discovery
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
 CREATE TABLE semon_projection.ledgers (
     namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
     path text NOT NULL,

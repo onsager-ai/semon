@@ -1403,24 +1403,34 @@ impl NativeEvidence {
         if self.storage.is_postgres() {
             let mut before_build = before_build;
             before_build()?;
+            if work.postgres_discovery.is_none() && !work.postgres_draining {
+                work.postgres_discovery = Some(ColdCatalog::default());
+            }
+            if let Some(discovery) = &mut work.postgres_discovery {
+                let page = discovery.cursor.next(&self.options, 64, 512)?;
+                let inputs = page.inputs.into_iter().filter(|input| input.path.ends_with(".jsonl")).collect::<Vec<_>>();
+                self.storage.discover_sources(&inputs, !discovery.started, page.complete)?;
+                discovery.started = true;
+                for input in inputs {
+                    let modified = fs::metadata(input.full_path(&self.options)).and_then(|metadata| metadata.modified()).ok();
+                    discovery.newest.insert((std::cmp::Reverse(modified), input));
+                    if discovery.newest.len() > 64 { discovery.newest.pop_last(); }
+                }
+                if !page.complete { return Ok(false); }
+                work.postgres_pending = std::mem::take(&mut discovery.newest).into_iter().map(|(_,input)|input).collect();
+                work.postgres_discovery = None;
+                work.postgres_draining = true;
+            }
+            if work.postgres_pending.is_empty() {
+                work.postgres_pending = self.storage.pending_sources()?;
+            }
             if !work.postgres_pending.is_empty() {
-                self.storage.publish_sources(&work.postgres_pending)?;
+                self.storage.publish_discovered(&work.postgres_pending)?;
                 work.postgres_pending.clear();
                 return Ok(false);
             }
-            let discovery = work.postgres_discovery.get_or_insert_with(Default::default);
-            let page = discovery.next(&self.options, 64, 512)?;
-            // Keep a refused cohort for retry: advancing discovery must never
-            // turn an unpublished source into an apparently completed scan.
-            work.postgres_pending.extend(page.inputs);
-            if !work.postgres_pending.is_empty() {
-                self.storage.publish_sources(&work.postgres_pending)?;
-                work.postgres_pending.clear();
-            }
-            if page.complete {
-                work.postgres_discovery = None;
-            }
-            return Ok(page.complete);
+            work.postgres_draining = false;
+            return Ok(true);
         }
         let complete = self.refresh_catalog_step(work, now, before_build)?;
         if complete {
@@ -1844,7 +1854,7 @@ impl NativeEvidence {
     pub(crate) fn catalog_continuation(&self, work: &Work) -> bool {
         #[cfg(feature = "postgres")]
         if self.storage.is_postgres() {
-            return work.postgres_discovery.is_some() || !work.postgres_pending.is_empty();
+            return work.postgres_discovery.is_some() || work.postgres_draining || !work.postgres_pending.is_empty();
         }
         work.tree_repair_pending
             || work.cold_catalog.is_some()

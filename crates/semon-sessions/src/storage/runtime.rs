@@ -9,9 +9,11 @@ use std::{collections::BTreeSet, time::Instant};
 #[derive(Default)]
 pub(crate) struct Work {
     #[cfg(feature = "postgres")]
-    pub(crate) postgres_discovery: Option<crate::inputs::Discovery>,
+    pub(crate) postgres_discovery: Option<ColdCatalog>,
     #[cfg(feature = "postgres")]
     pub(crate) postgres_pending: Vec<crate::Input>,
+    #[cfg(feature = "postgres")]
+    pub(crate) postgres_draining: bool,
     pub(crate) events: Option<EventCache>,
     pub(crate) texts: crate::model::Texts,
     pub(crate) catalog_snapshot: Option<crate::native_evidence::Snapshot>,
@@ -386,6 +388,30 @@ impl RuntimeStore {
         runtime
             .block_on(store.transcript_query(&namespace, &self.options, query, provider))
             .unwrap_or_else(|_| unavailable())
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn discover_sources(&self, inputs: &[crate::Input], start: bool, complete: bool) -> io::Result<()> {
+        let mut postgres = self.postgres.as_ref().expect("PostgreSQL store").lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Postgres { runtime, store } = &mut *postgres;
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+        runtime.block_on(store.discover_sources(namespace, &self.options, inputs, start, complete)).map_err(io::Error::other)
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn pending_sources(&self) -> io::Result<Vec<crate::Input>> {
+        let mut postgres = self.postgres.as_ref().expect("PostgreSQL store").lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Postgres { runtime, store } = &mut *postgres;
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+        runtime.block_on(store.pending_sources(namespace)).map_err(io::Error::other)
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn publish_discovered(&self, inputs: &[crate::Input]) -> io::Result<()> {
+        let mut postgres = self.postgres.as_ref().expect("PostgreSQL store").lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Postgres { runtime, store } = &mut *postgres;
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+        runtime.block_on(store.publish_discovered(namespace, &self.options, inputs)).map_err(io::Error::other)
     }
 
     #[cfg(feature = "postgres")]
