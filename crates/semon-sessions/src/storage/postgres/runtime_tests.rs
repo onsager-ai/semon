@@ -159,7 +159,7 @@ pub(super) fn lifecycle(dsn: &str) {
     query
         .call_catalog(
             "stalls",
-            &json!({}),
+            &json!({"idle_minutes":1}),
             None,
             crate::SessionSourceReadMode::LocalOrPinnedProvider,
         )
