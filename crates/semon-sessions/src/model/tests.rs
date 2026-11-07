@@ -11780,7 +11780,7 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
         let mut old_complete = false;
         for _ in 0..16 {
             if old_evidence
-                .refresh_catalog(&mut crate::viewer::lock(&old_evidence.work), NOW)
+                .refresh_catalog(&mut crate::viewer::lock(&old_evidence.storage.work), NOW)
                 .unwrap()
             {
                 old_complete = true;

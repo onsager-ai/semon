@@ -2473,7 +2473,7 @@ mod tests {
             // This exercises the original witness_claim failure chain, beyond
             // a successful small single-batch Catalog request.
             let staged = crate::native_evidence::NativeEvidence::new(fixture.options.clone());
-            let mut work = crate::viewer::lock(&staged.work);
+            let mut work = crate::viewer::lock(&staged.storage.work);
             staged
                 .prepare_events(&mut work, crate::model::now_ms())
                 .unwrap();
