@@ -51,17 +51,19 @@ impl PgProjectionStore {
         namespace: &Namespace,
         options: &Options,
     ) -> Result<crate::Facts, StorageError> {
+        if options.facts.is_some() {
+            return Err(backend("local Facts collection requires a local machine"));
+        }
         let _locks = collection_locks(options)?;
+        let tx = self.begin(namespace).await?;
+        let expected = tx.reported_facts(namespace).await?.map(|(revision, _)| revision);
+        tx.commit(namespace).await?;
         let mut cache = self.collection_index(namespace, options).await?;
         let mut dirty = false;
         cache.refresh_reported_runs(&options.claude_json, crate::model::now_ms(), &mut dirty);
         let facts =
             crate::facts::collect_facts(options, &mut cache, &mut dirty).map_err(backend)?;
         let tx = self.begin(namespace).await?;
-        let expected = tx
-            .reported_facts(namespace)
-            .await?
-            .map(|(revision, _)| revision);
         let revision = expected
             .unwrap_or(0)
             .checked_add(1)

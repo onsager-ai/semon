@@ -319,7 +319,11 @@ pub(super) fn lifecycle(dsn: &str) {
             .unwrap()
             .is_empty()
     );
-    let collected = crate::local_facts_in(&sources, "injected-runtime").unwrap();
+    assert!(crate::local_facts_in(&sources, "injected-runtime").is_err());
+    let local_options = crate::Options { facts: None, ..options.clone() };
+    let local_storage = RuntimeStore::postgres(&local_options, Namespace::new("local-collection").unwrap(), dsn).unwrap();
+    let local_sources = SessionSources::from_evidence(vec![("local-collection".into(), NativeEvidence::with_storage(local_options, local_storage))]);
+    let collected = crate::local_facts_in(&local_sources, "local-collection").unwrap();
     assert_eq!(collected.version, crate::FACTS_VERSION);
     assert!(
         collected
