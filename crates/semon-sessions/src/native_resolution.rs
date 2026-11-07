@@ -204,7 +204,11 @@ pub(crate) fn page_with_reader(
     key: &str,
     query: &str,
     before_read: impl FnOnce() -> Result<(), ViewerReply>,
-    read: impl FnOnce(&str, &str, CatalogReadScope) -> Result<CatalogNativeResolution, CatalogIdentityError>,
+    read: impl FnOnce(
+        &str,
+        &str,
+        CatalogReadScope,
+    ) -> Result<CatalogNativeResolution, CatalogIdentityError>,
 ) -> ViewerReply {
     use crate::viewer::{decoded, query_value};
     let value = |name| query_value(query, name).and_then(decoded);

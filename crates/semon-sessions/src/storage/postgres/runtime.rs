@@ -40,11 +40,16 @@ impl PgProjectionStore {
             [] => crate::CatalogNativeResolutionState::Pending,
             [key] => {
                 let key: &str = key.get(0);
-                let row = tx.catalog_row(namespace, key, scope).await?
+                let row = tx
+                    .catalog_row(namespace, key, scope)
+                    .await?
                     .ok_or_else(|| backend("native alias owner unavailable"))?;
-                if row.harness != harness || !row.sources.iter().any(|source| {
-                    source.native_id == native_id && crate::catalog::source_relative(options, harness, source).is_some()
-                }) {
+                if row.harness != harness
+                    || !row.sources.iter().any(|source| {
+                        source.native_id == native_id
+                            && crate::catalog::source_relative(options, harness, source).is_some()
+                    })
+                {
                     return Err(backend("native alias authority mismatch"));
                 }
                 result.catalog_key = Some(key.to_owned());

@@ -1,11 +1,6 @@
 //! Native evidence ownership, independent of Viewer transport and refresh workers.
 //! Viewer, Catalog and Query share one complete source index per machine.
-use crate::{
-    Node, Options,
-    events::EventCache,
-    model,
-    proc_start,
-};
+use crate::{Node, Options, events::EventCache, model, proc_start};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     fs, io,
@@ -4161,13 +4156,13 @@ mod catalog_owner_tests {
         let builds = std::cell::Cell::new(0);
         drain_catalog(&first, &builds);
         drain_catalog(&second, &builds);
-        let initial = lock(&second.work).observed_catalog_generation.clone();
+        let initial = lock(&second.storage.work).observed_catalog_generation.clone();
 
         append_audit_record(&options, &input);
         first.request_metadata_audit();
         second.request_metadata_audit();
         drain_catalog(&first, &builds);
-        let published = lock(&first.work).observed_catalog_generation.clone();
+        let published = lock(&first.storage.work).observed_catalog_generation.clone();
         assert!(initial != published, "append did not advance publication");
         builds.set(0);
         let counts = || {
@@ -4180,7 +4175,7 @@ mod catalog_owner_tests {
         };
         let before = counts();
         {
-            let mut work = lock(&second.work);
+            let mut work = lock(&second.storage.work);
             let mut failed = false;
             for _ in 0..16 {
                 match second.refresh_catalog_with(&mut work, model::now_ms(), || {
@@ -4206,7 +4201,7 @@ mod catalog_owner_tests {
         assert_eq!(counts(), before, "peer observation rebuilt shared history");
         let log = input.full_path(&options);
         {
-            let work = lock(&second.work);
+            let work = lock(&second.storage.work);
             assert_eq!(work.observed_catalog_generation, published);
             assert!(!second.catalog_pending(&work));
             assert!(
@@ -4235,7 +4230,7 @@ mod catalog_owner_tests {
         builds.set(0);
         second.request_metadata_audit();
         {
-            let mut work = lock(&second.work);
+            let mut work = lock(&second.storage.work);
             assert!(
                 !second
                     .refresh_catalog_with(&mut work, model::now_ms(), || {
@@ -4248,7 +4243,7 @@ mod catalog_owner_tests {
         }
         append_audit_record(&options, &input);
         {
-            let mut work = lock(&second.work);
+            let mut work = lock(&second.storage.work);
             assert!(
                 !second
                     .refresh_catalog_with(&mut work, model::now_ms(), || {
@@ -4295,7 +4290,7 @@ mod catalog_owner_tests {
         builds.set(0);
         second.request_metadata_audit();
         {
-            let mut work = lock(&second.work);
+            let mut work = lock(&second.storage.work);
             assert!(
                 !second
                     .refresh_catalog_with(&mut work, model::now_ms(), || {
@@ -4319,11 +4314,12 @@ mod catalog_owner_tests {
                 append_audit_record(&peer_options, &peer_input);
                 peer.request_metadata_audit();
                 drain_catalog(&peer, &std::cell::Cell::new(0));
-                *published.borrow_mut() = lock(&peer.storage.work).observed_catalog_generation.clone();
+                *published.borrow_mut() =
+                    lock(&peer.storage.work).observed_catalog_generation.clone();
             }));
         });
         {
-            let mut work = lock(&second.work);
+            let mut work = lock(&second.storage.work);
             assert!(
                 !second
                     .refresh_catalog_with(&mut work, model::now_ms(), || {
@@ -4350,7 +4346,7 @@ mod catalog_owner_tests {
         assert_eq!(builds.get(), 2, "intervening peer commit lost its notice");
         assert_eq!(crate::events::PARSED.with(std::cell::Cell::get), parsed);
         assert_eq!(
-            lock(&second.work).observed_catalog_generation,
+            lock(&second.storage.work).observed_catalog_generation,
             *peer_generation.borrow()
         );
         second.request_metadata_audit();
@@ -4371,7 +4367,7 @@ mod catalog_owner_tests {
         drain_catalog(&peer, &std::cell::Cell::new(0));
         append_audit_record(&options, &input);
         {
-            let mut work = lock(&first.work);
+            let mut work = lock(&first.storage.work);
             assert_eq!(
                 work.events
                     .as_mut()
@@ -4414,7 +4410,7 @@ mod catalog_owner_tests {
                 let mut complete = false;
                 for _ in 0..128 {
                     if peer_in_hook
-                        .refresh_catalog(&mut lock(&peer_in_hook.work), model::now_ms())
+                        .refresh_catalog(&mut lock(&peer_in_hook.storage.work), model::now_ms())
                         .unwrap()
                     {
                         complete = true;
@@ -4423,7 +4419,7 @@ mod catalog_owner_tests {
                 }
                 assert!(complete, "peer metadata replay did not complete");
                 *foreign_in_hook.borrow_mut() =
-                    lock(&peer_in_hook.work).observed_catalog_generation.clone();
+                    lock(&peer_in_hook.storage.work).observed_catalog_generation.clone();
                 assert_ne!(
                     *committed_in_hook.borrow(),
                     *foreign_in_hook.borrow(),
@@ -4433,7 +4429,7 @@ mod catalog_owner_tests {
         });
         for _ in 0..128 {
             first
-                .refresh_catalog_with(&mut lock(&first.work), model::now_ms(), || {
+                .refresh_catalog_with(&mut lock(&first.storage.work), model::now_ms(), || {
                     builds.set(builds.get() + 1);
                     Ok(())
                 })
@@ -4447,7 +4443,7 @@ mod catalog_owner_tests {
             "staged publication did not invoke commit-gap hook"
         );
         {
-            let work = lock(&first.work);
+            let work = lock(&first.storage.work);
             assert_eq!(
                 &work.observed_catalog_generation,
                 &*committed.borrow(),
@@ -4483,7 +4479,7 @@ mod catalog_owner_tests {
             "peer notice republished source history"
         );
         assert_eq!(
-            lock(&first.work).observed_catalog_generation,
+            lock(&first.storage.work).observed_catalog_generation,
             *foreign.borrow()
         );
         let notified = builds.get();

@@ -537,7 +537,7 @@ struct Cursor {
 }
 
 pub(crate) struct Request {
-    require_complete: bool,
+    pub(crate) require_complete: bool,
     scope: CatalogReadScope,
     limit: usize,
     sid: Option<String>,
