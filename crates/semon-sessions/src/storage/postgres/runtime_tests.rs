@@ -226,7 +226,6 @@ pub(super) fn lifecycle(dsn: &str) {
         .status,
         404
     );
-    core.close();
     // Reconcile observed removal into retained custody and a valid empty page.
     std::fs::remove_file(&path).unwrap();
     {
@@ -239,6 +238,7 @@ pub(super) fn lifecycle(dsn: &str) {
     assert!(empty["items"].as_array().unwrap().is_empty());
     let history = evidence.storage.page("injected-runtime", &crate::catalog::Request::parse(&format!("sid={}&scope=retained_history", crate::viewer::percent_encode(key))).unwrap(), None);
     assert_eq!(history.status,200,"{}",String::from_utf8_lossy(&history.body));
+    core.close();
     sources.close();
     #[cfg(target_os = "linux")]
     watch.assert_untouched(&options);

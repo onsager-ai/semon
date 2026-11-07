@@ -391,27 +391,53 @@ impl RuntimeStore {
     }
 
     #[cfg(feature = "postgres")]
-    pub(crate) fn discover_sources(&self, inputs: &[crate::Input], start: bool, complete: bool) -> io::Result<()> {
-        let mut postgres = self.postgres.as_ref().expect("PostgreSQL store").lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    pub(crate) fn discover_sources(
+        &self,
+        inputs: &[crate::Input],
+        start: bool,
+        complete: bool,
+    ) -> io::Result<()> {
+        let mut postgres = self
+            .postgres
+            .as_ref()
+            .expect("PostgreSQL store")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Postgres { runtime, store } = &mut *postgres;
         let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
-        runtime.block_on(store.discover_sources(namespace, &self.options, inputs, start, complete)).map_err(io::Error::other)
+        runtime
+            .block_on(store.discover_sources(namespace, &self.options, inputs, start, complete))
+            .map_err(io::Error::other)
     }
 
     #[cfg(feature = "postgres")]
     pub(crate) fn pending_sources(&self) -> io::Result<Vec<crate::Input>> {
-        let mut postgres = self.postgres.as_ref().expect("PostgreSQL store").lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut postgres = self
+            .postgres
+            .as_ref()
+            .expect("PostgreSQL store")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Postgres { runtime, store } = &mut *postgres;
         let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
-        runtime.block_on(store.pending_sources(namespace)).map_err(io::Error::other)
+        runtime
+            .block_on(store.pending_sources(namespace))
+            .map_err(io::Error::other)
     }
 
     #[cfg(feature = "postgres")]
     pub(crate) fn publish_discovered(&self, inputs: &[crate::Input]) -> io::Result<()> {
-        let mut postgres = self.postgres.as_ref().expect("PostgreSQL store").lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut postgres = self
+            .postgres
+            .as_ref()
+            .expect("PostgreSQL store")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Postgres { runtime, store } = &mut *postgres;
         let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
-        runtime.block_on(store.publish_discovered(namespace, &self.options, inputs)).map_err(io::Error::other)
+        runtime
+            .block_on(store.publish_discovered(namespace, &self.options, inputs))
+            .map_err(io::Error::other)
     }
 
     #[cfg(feature = "postgres")]
