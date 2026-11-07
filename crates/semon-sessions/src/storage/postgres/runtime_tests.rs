@@ -347,30 +347,82 @@ pub(super) fn lifecycle(dsn: &str) {
     // Sidecar and process-record intents use PostgreSQL and conservatively
     // fence every Current owner until completion, including across restart.
     for (relative, bytes) in [
-        ("projects/project/subagents/agent-runtime.meta.json", br#"{"agentType":"worker"}"#.as_slice()),
-        ("sessions/4242.json", br#"{"sessionId":"runtime","pid":4242}"#.as_slice()),
+        (
+            "projects/project/subagents/agent-runtime.meta.json",
+            br#"{"agentType":"worker"}"#.as_slice(),
+        ),
+        (
+            "sessions/4242.json",
+            br#"{"sessionId":"runtime","pid":4242}"#.as_slice(),
+        ),
     ] {
-        let runtime_input = crate::Input { root: crate::InputRoot::Claude, path: relative.into() };
-        let write = crate::SessionSourceWrite::begin_in(&sources, "injected-runtime", &runtime_input, None, 0).unwrap();
+        let runtime_input = crate::Input {
+            root: crate::InputRoot::Claude,
+            path: relative.into(),
+        };
+        let write = crate::SessionSourceWrite::begin_in(
+            &sources,
+            "injected-runtime",
+            &runtime_input,
+            None,
+            0,
+        )
+        .unwrap();
         assert!(crate::collect_in(&sources, "injected-runtime").is_err());
-        assert_eq!(evidence.storage.page("injected-runtime", &crate::catalog::Request::parse("limit=60").unwrap(), None).status, 503);
+        assert_eq!(
+            evidence
+                .storage
+                .page(
+                    "injected-runtime",
+                    &crate::catalog::Request::parse("limit=60").unwrap(),
+                    None
+                )
+                .status,
+            503
+        );
         let full = runtime_input.full_path(&options);
         std::fs::create_dir_all(full.parent().unwrap()).unwrap();
         std::fs::write(&full, bytes).unwrap();
         std::fs::File::open(&full).unwrap().sync_all().unwrap();
         write.complete(bytes.len() as u64).unwrap();
         assert!(evidence.storage.pending_sources().unwrap().contains(&input));
-        evidence.storage.publish_discovered(std::slice::from_ref(&input)).unwrap();
+        evidence
+            .storage
+            .publish_discovered(std::slice::from_ref(&input))
+            .unwrap();
     }
-    evidence.storage.discover_sources(std::slice::from_ref(&input), true, true).unwrap();
-    assert!(crate::source_projection_ready_in(&sources, "injected-runtime", "codex", &input.path).unwrap().is_none());
-    evidence.storage.publish_discovered(std::slice::from_ref(&input)).unwrap();
-    let proof = crate::session_source_proof_in(&sources, "injected-runtime", "codex", &input.path).unwrap().unwrap();
-    let ready = crate::source_projection_ready_in(&sources, "injected-runtime", "codex", &input.path).unwrap().unwrap();
+    evidence
+        .storage
+        .discover_sources(std::slice::from_ref(&input), true, true)
+        .unwrap();
+    assert!(
+        crate::source_projection_ready_in(&sources, "injected-runtime", "codex", &input.path)
+            .unwrap()
+            .is_none()
+    );
+    evidence
+        .storage
+        .publish_discovered(std::slice::from_ref(&input))
+        .unwrap();
+    let proof = crate::session_source_proof_in(&sources, "injected-runtime", "codex", &input.path)
+        .unwrap()
+        .unwrap();
+    let ready =
+        crate::source_projection_ready_in(&sources, "injected-runtime", "codex", &input.path)
+            .unwrap()
+            .unwrap();
     crate::retain_source_event_index_in(&sources, "injected-runtime", &proof, &ready).unwrap();
-    assert!(crate::source_event_index_retained_in(&sources, "injected-runtime", &proof, &ready).unwrap());
-    assert!(crate::session_source_proof_in(&sources, "foreign-runtime", "codex", &input.path).is_err());
-    assert!(crate::source_projection_ready_in(&sources, "foreign-runtime", "codex", &input.path).is_err());
+    assert!(
+        crate::source_event_index_retained_in(&sources, "injected-runtime", &proof, &ready)
+            .unwrap()
+    );
+    assert!(
+        crate::session_source_proof_in(&sources, "foreign-runtime", "codex", &input.path).is_err()
+    );
+    assert!(
+        crate::source_projection_ready_in(&sources, "foreign-runtime", "codex", &input.path)
+            .is_err()
+    );
     let empty_input = crate::Input {
         root: crate::InputRoot::Codex,
         path: "sessions/2026/09/24/empty.jsonl".into(),

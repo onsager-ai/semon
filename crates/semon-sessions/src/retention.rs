@@ -35,10 +35,15 @@ pub fn session_source_proof_in(
     root: &str,
     path: &str,
 ) -> Result<Option<SessionSourceProof>, CatalogIdentityError> {
-    let owner = sources.custody_source(source_key).map_err(|_| CatalogIdentityError::Unavailable)?;
+    let owner = sources
+        .custody_source(source_key)
+        .map_err(|_| CatalogIdentityError::Unavailable)?;
     #[cfg(feature = "postgres")]
     if owner.storage.is_postgres() {
-        return owner.storage.source_proof(root, path).map_err(|_| CatalogIdentityError::Unavailable);
+        return owner
+            .storage
+            .source_proof(root, path)
+            .map_err(|_| CatalogIdentityError::Unavailable);
     }
     crate::session_source_proof(&owner.options, source_key, root, path)
 }
@@ -50,10 +55,15 @@ pub fn source_projection_ready_in(
     root: &str,
     path: &str,
 ) -> Result<Option<SourceProjectionReady>, CatalogIdentityError> {
-    let owner = sources.custody_source(source_key).map_err(|_| CatalogIdentityError::Unavailable)?;
+    let owner = sources
+        .custody_source(source_key)
+        .map_err(|_| CatalogIdentityError::Unavailable)?;
     #[cfg(feature = "postgres")]
     if owner.storage.is_postgres() {
-        return owner.storage.projection_ready(root, path).map_err(|_| CatalogIdentityError::Unavailable);
+        return owner
+            .storage
+            .projection_ready(root, path)
+            .map_err(|_| CatalogIdentityError::Unavailable);
     }
     source_projection_ready(&owner.options, root, path)
 }
@@ -65,12 +75,20 @@ pub fn retain_source_event_index_in(
     proof: &SessionSourceProof,
     projection: &SourceProjectionReady,
 ) -> Result<(), CatalogIdentityError> {
-    let owner = sources.custody_source(source_key).map_err(|_| CatalogIdentityError::Unavailable)?;
+    let owner = sources
+        .custody_source(source_key)
+        .map_err(|_| CatalogIdentityError::Unavailable)?;
     #[cfg(feature = "postgres")]
     if owner.storage.is_postgres() {
-        return if owner.storage.retained_index(proof, projection, true).map_err(|_| CatalogIdentityError::Unavailable)? {
+        return if owner
+            .storage
+            .retained_index(proof, projection, true)
+            .map_err(|_| CatalogIdentityError::Unavailable)?
+        {
             Ok(())
-        } else { Err(CatalogIdentityError::ScopeChanged) };
+        } else {
+            Err(CatalogIdentityError::ScopeChanged)
+        };
     }
     retain_source_event_index(&owner.options, source_key, proof, projection)
 }
@@ -82,10 +100,15 @@ pub fn source_event_index_retained_in(
     proof: &SessionSourceProof,
     projection: &SourceProjectionReady,
 ) -> Result<bool, CatalogIdentityError> {
-    let owner = sources.custody_source(source_key).map_err(|_| CatalogIdentityError::Unavailable)?;
+    let owner = sources
+        .custody_source(source_key)
+        .map_err(|_| CatalogIdentityError::Unavailable)?;
     #[cfg(feature = "postgres")]
     if owner.storage.is_postgres() {
-        return owner.storage.retained_index(proof, projection, false).map_err(|_| CatalogIdentityError::Unavailable);
+        return owner
+            .storage
+            .retained_index(proof, projection, false)
+            .map_err(|_| CatalogIdentityError::Unavailable);
     }
     source_event_index_retained(&owner.options, proof, projection)
 }
