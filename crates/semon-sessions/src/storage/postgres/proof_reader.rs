@@ -124,7 +124,7 @@ impl SessionSourceReader for LocalProofReader {
                     let length = (source.offset - ordinal * size).min(size) as usize;
                     if state.bytes.saturating_add(length) > 1024 * 1024 {
                         return Err(io::Error::new(
-                            io::ErrorKind::WouldBlock,
+                            io::ErrorKind::InvalidData,
                             "selected prefix proof byte budget",
                         ));
                     }
@@ -203,6 +203,6 @@ pub(super) async fn serve(
         .ok_or_else(|| backend("selected proof block absent"))
     }
     .await
-    .map_err(io::Error::other);
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
     let _ = request.reply.send(result);
 }
