@@ -282,18 +282,34 @@ PostgreSQL session backend yet.
   sample at the preceding runtime checkpoint was 70.1 ms (run 42310636276).
   This measures real ViewerCore with private backend injection; it is not yet
   qualification or timing of selectable startup configuration.
-- Still required: explicit startup backend configuration; complete runtime
-  adoption by focused/Catalog Query, native resolution, union generation and
-  host custody callers (`SessionSourceWrite`, `SessionFactsWrite`, retention,
-  collect/FactsSource); the remaining direct readers; and complete discovery
-  reconciliation. `NativeEvidence::Work` still owns SQLite-specific EventCache
-  producer state, so the handle is an adoption step rather than a completed
-  backend-neutral runtime. No PostgreSQL startup option is exposed while these
-  paths require SQLite. Complete search coverage, composite Current/History
-  merging, selected details/causal context/fields/annotations, proof-generation
-  collection and bounded delta preparation remain pending. Full shared lifecycle
-  conformance and full-pipeline startup RLS/no-hidden-SQLite qualification remain
-  pending.
+- Follow-up runtime adoption (2026-11-07): `RuntimeStore` owns the producer
+  fence and work state, including SQLite's existing single `EventCache`. Native
+  resolution and the Catalog union generation read dispatch through the handle.
+  PostgreSQL native aliases remain explicitly provisional. Focused Query derives
+  from qualified PostgreSQL indexes with request-owned source readers, a bounded
+  relationship closure and a publication/runtime recheck after rendering. Catalog
+  Query listing and stalls use published exact summaries and source-bound
+  relationship context under forced RLS (PostgreSQL schema 8). The activity Query
+  tool remains explicitly unavailable on PostgreSQL.
+- Follow-up discovery: bounded traversal persists membership under RLS and keeps
+  only the newest 64 cold candidates in memory before first publication. Removed
+  inputs hand their published observation to retained custody; an observed empty
+  machine publishes an empty page. Published native parents/aliases can expand a
+  cohort within the existing 64-source bound; Codex header candidates are bounded.
+  Refused cohorts leave the hot queue and are re-admitted by a later audit.
+  Complete global lineage, empty replacement History handoff, composite History
+  and atomic discovery checkpoints still require qualification. The Catalog
+  continues to report partial completeness.
+- Still required: explicit startup backend configuration; host custody callers
+  (`SessionSourceWrite`, `SessionFactsWrite`, retention, collect/FactsSource);
+  remaining direct selected readers and full discovery reconciliation. No
+  PostgreSQL startup option is exposed while these paths require SQLite. Selected
+  activity, complete search coverage, composite Current/History merging, selected
+  details/causal context/fields/annotations, retained-prefix lazy proof reads,
+  proof-generation collection and bounded delta preparation remain pending. Full
+  shared lifecycle conformance and full-pipeline startup RLS/no-hidden-SQLite
+  qualification remain pending. Follow-up CI evidence is reported against its
+  pushed SHA; the earlier private-injection timings above do not qualify startup.
 
 Acceptance checks: the slice 1 and 2 conformance suites run against both
 engines; a real restricted-role PostgreSQL proves RLS; no SQLite file is

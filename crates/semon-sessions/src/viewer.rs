@@ -107,7 +107,7 @@ pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 /// - `live` is the view's refresh state, held for a few field reads, and
 ///   around it the refresh pool's queue lock for an insert or a removal.
 ///
-/// Viewer locks are taken in the order evidence.work, files, shown, live,
+/// Viewer locks are taken in the order evidence.storage.work, files, shown, live,
 /// and the refresh pool's last of all. Native query publication has its own
 /// short snapshot lock and never takes the Viewer locks or starts its workers.
 pub(crate) struct MachineView {
@@ -968,7 +968,7 @@ impl MachineView {
         {
             return Ok(tree);
         }
-        self.refresh_tree_locked(&mut lock(&self.evidence.work))
+        self.refresh_tree_locked(&mut lock(&self.evidence.storage.work))
     }
     /// The native tree snapshot a request answers from.
     fn served_tree(&self) -> io::Result<Arc<TreeCache>> {
@@ -1204,7 +1204,7 @@ impl MachineView {
     fn refresh_first(&self, kind: Kind) -> io::Result<()> {
         #[cfg(test)]
         self.hooks.refreshes_first.fetch_add(1, Ordering::SeqCst);
-        let mut work = lock(&self.evidence.work);
+        let mut work = lock(&self.evidence.storage.work);
         // Logs invalidated before this refresh starts, it sees.
         let invalidated = std::mem::take(&mut lock(&self.live.state).invalidated);
         let started = Instant::now();
@@ -1354,7 +1354,7 @@ impl MachineView {
     fn tick(&self, due: Instant) {
         let _timing = crate::native_timing::Phase::new(&self.evidence.options.cache, "worker_tick");
         let entered = crate::native_timing::enabled().then(Instant::now);
-        let mut work = lock(&self.evidence.work);
+        let mut work = lock(&self.evidence.storage.work);
         let started = Instant::now();
         if let Some(entered) = entered {
             let producer = crate::native_timing::id(&crate::events::EventCache::path(
@@ -1468,7 +1468,7 @@ impl MachineView {
         }
         drop(state);
         // A rebuild a read started has finished too.
-        drop(lock(&self.evidence.work));
+        drop(lock(&self.evidence.storage.work));
     }
 
     fn tree_json(&self) -> io::Result<String> {
@@ -1796,7 +1796,7 @@ mod tests {
             // without scheduling an unrelated producer between qualification
             // and the HTTP request. Busy-index behavior has its own held fixture.
             let view = viewer.core.machine_views().into_iter().next().unwrap();
-            let mut work = lock(&view.evidence.work);
+            let mut work = lock(&view.evidence.storage.work);
             eventually("HTTP session fixture publication", || {
                 view.refresh_catalog_locked(&mut work, model::now_ms())
                     .unwrap();
@@ -1823,7 +1823,7 @@ mod tests {
         let busy_view = hold_busy.then(|| viewer.core.machine_views().into_iter().next().unwrap());
         let _busy = busy_view
             .as_ref()
-            .map(|view| view.evidence.work.lock().unwrap());
+            .map(|view| view.evidence.storage.work.lock().unwrap());
         let request = request.replace("PORT", &port.to_string());
         let worker = thread::spawn(move || {
             viewer.handle(server.recv().unwrap());
@@ -1952,7 +1952,7 @@ mod tests {
         );
         let core = ViewerCore::new(fixture.options.clone());
         let view = core.machine_views().into_iter().next().unwrap();
-        let work = view.evidence.work.lock().unwrap();
+        let work = view.evidence.storage.work.lock().unwrap();
         let shell = core.respond("GET", "/session/local/readiness", "", None);
         assert_eq!(shell.status, 200);
         assert!(shell.content_type.starts_with("text/html"));
@@ -2007,7 +2007,7 @@ mod tests {
             crate::SessionSources::with_machines(vec![(String::new(), fixture.options.clone())]);
         let evidence = &sources.machines[0].1;
         let prepare = || {
-            let mut work = lock(&evidence.work);
+            let mut work = lock(&evidence.storage.work);
             for _ in 0..16 {
                 if evidence
                     .refresh_catalog(&mut work, model::now_ms())
@@ -2466,7 +2466,7 @@ mod tests {
         .unwrap();
         drop(file);
         let during = {
-            let mut work = lock(&viewer.evidence.work);
+            let mut work = lock(&viewer.evidence.storage.work);
             viewer.evidence.refresh_catalog(&mut work, model::now_ms())
         };
         if let Err(error) = during {
@@ -2950,7 +2950,7 @@ mod tests {
     }
 
     fn publish_native(view: &MachineView) -> Value {
-        let mut work = lock(&view.evidence.work);
+        let mut work = lock(&view.evidence.storage.work);
         while !view
             .refresh_catalog_locked(&mut work, model::now_ms())
             .unwrap()
@@ -3664,7 +3664,7 @@ mod tests {
             assert_eq!(body_of(&reply)["source_candidates"], count > 1);
             for view in core.machine_views() {
                 assert_eq!(view.hooks.builds(), 0);
-                assert!(lock(&view.evidence.work).events.is_none());
+                assert!(lock(&view.evidence.storage.work).events.is_none());
                 assert!(!view.evidence.catalog_demand.load(Ordering::Relaxed));
             }
             core.close();
@@ -4354,7 +4354,7 @@ mod tests {
                 ("second-key".into(), second.options.clone()),
             ]);
             for view in core.machine_views() {
-                let mut work = lock(&view.evidence.work);
+                let mut work = lock(&view.evidence.storage.work);
                 while !view
                     .evidence
                     .refresh_catalog(&mut work, model::now_ms())
@@ -4404,7 +4404,7 @@ mod tests {
             ("second-key".into(), second.options.clone()),
         ]);
         for view in core.machine_views() {
-            let mut work = lock(&view.evidence.work);
+            let mut work = lock(&view.evidence.storage.work);
             while !view
                 .evidence
                 .refresh_catalog(&mut work, model::now_ms())
@@ -6271,7 +6271,7 @@ mod tests {
     }
 
     fn native_snapshot(view: &MachineView) -> Option<BTreeMap<PathBuf, Option<Stamp>>> {
-        let work = match view.evidence.work.try_lock() {
+        let work = match view.evidence.storage.work.try_lock() {
             Ok(work) => work,
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return None,
@@ -6285,7 +6285,7 @@ mod tests {
     /// A busy work lock is not a publication identity, and changed watcher
     /// metadata alone does not prove that the replacement worker published.
     fn native_complete_publication(view: &MachineView) -> Option<String> {
-        let work = match view.evidence.work.try_lock() {
+        let work = match view.evidence.storage.work.try_lock() {
             Ok(work) => work,
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return None,
@@ -6444,7 +6444,7 @@ mod tests {
         }
         assert_eq!(view.hooks.builds(), 0);
         assert_eq!(pool.entries_for(&view), 0);
-        assert!(lock(&view.evidence.work).events.is_none());
+        assert!(lock(&view.evidence.storage.work).events.is_none());
         say(&fixture, "lane", 1, "after qualified interest");
         view.invalidate();
         eventually("a watched source changes after invalidation", || {
@@ -6534,9 +6534,11 @@ mod tests {
                         r#"{"toolUseId":"task-child","description":"Updated child inspection","model":"updated-model"}"#,
                     );
                 }
-                let mut work = Work::default();
-                work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
-                work.catalog_snapshot = Some(snapshot);
+                let mut work = Work {
+                    events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                    catalog_snapshot: Some(snapshot),
+                    ..Default::default()
+                };
                 let view = fixture.viewer();
                 let before = crate::events::FILE_READS.with(std::cell::Cell::get);
                 assert!(
@@ -6691,9 +6693,11 @@ mod tests {
             .unwrap();
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             fs::write(&child, record("child", Some("new-parent"))).unwrap();
-            let mut work = Work::default();
-            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
-            work.catalog_snapshot = Some(snapshot);
+            let mut work = Work {
+                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                catalog_snapshot: Some(snapshot),
+                ..Default::default()
+            };
             let view = fixture.viewer();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             assert!(
@@ -6779,9 +6783,11 @@ mod tests {
             .unwrap();
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             fixture.claude("new-isolated", &[json!({"type":"user","sessionId":"new-isolated","uuid":"new-isolated","origin":{"kind":"human"},"cwd":"/tmp/project","timestamp":"2026-10-02T00:00:00Z","message":{"role":"user","content":"new prompt"}})]);
-            let mut work = Work::default();
-            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
-            work.catalog_snapshot = Some(snapshot);
+            let mut work = Work {
+                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                catalog_snapshot: Some(snapshot),
+                ..Default::default()
+            };
             let view = fixture.viewer();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             assert!(
@@ -6837,9 +6843,11 @@ mod tests {
             .unwrap();
             let snapshot = Snapshot::capture_pids(&fixture.options, BTreeSet::new(), cache.paths());
             say(&fixture, "isolated-0000", 1, "one changed source");
-            let mut work = Work::default();
-            work.events = Some(EventCache::open_scoped(&fixture.options.cache).unwrap());
-            work.catalog_snapshot = Some(snapshot);
+            let mut work = Work {
+                events: Some(EventCache::open_scoped(&fixture.options.cache).unwrap()),
+                catalog_snapshot: Some(snapshot),
+                ..Default::default()
+            };
             let view = fixture.viewer();
             let before = crate::events::FILE_READS.with(std::cell::Cell::get);
             assert!(
@@ -7408,7 +7416,7 @@ mod tests {
         let view = fixture.viewer();
         view.set_refresh(Refresh::Background);
         let (starts, release) = view.hooks.hold();
-        let observing = lock(&view.evidence.work);
+        let observing = lock(&view.evidence.storage.work);
         let (wait_started_send, wait_started_receive) = mpsc::channel();
         let (first_send, first_receive) = mpsc::channel();
         let reader = view.clone();
@@ -7623,12 +7631,12 @@ mod tests {
         assert_eq!(crate::events::CACHE_READS.with(|reads| reads.get()), 0);
         for view in &views {
             assert_retired_routes_absent(view);
-            assert!(lock(&view.evidence.work).events.is_none());
+            assert!(lock(&view.evidence.storage.work).events.is_none());
             assert_eq!(refresh_counts(view), (0, 0, 0));
         }
         // Identity may be newly discovered by an in-flight native producer.
         // The shell answers at once and lets focused APIs await publication.
-        let observing = lock(&views[0].evidence.work);
+        let observing = lock(&views[0].evidence.storage.work);
         let during = {
             let core = core.clone();
             at_once("native permalink during observation", move || {

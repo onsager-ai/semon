@@ -90,7 +90,7 @@ fn native(root: &Path, id: &str, prompt: &str) -> PathBuf {
 /// The ordinary producer publishes the Catalog from Raw.
 fn publish(options: &Options) {
     let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
-    let mut work = crate::viewer::lock(&evidence.work);
+    let mut work = crate::viewer::lock(&evidence.storage.work);
     while !evidence
         .refresh_catalog(&mut work, crate::model::now_ms())
         .unwrap()
@@ -104,7 +104,7 @@ fn publish(options: &Options) {
 fn produce(namespace: &Namespace, options: &Options) -> std::io::Result<()> {
     let evidence =
         crate::native_evidence::NativeEvidence::for_source(namespace.clone(), options.clone());
-    let mut work = crate::viewer::lock(&evidence.work);
+    let mut work = crate::viewer::lock(&evidence.storage.work);
     let result = loop {
         match evidence.refresh_catalog(&mut work, crate::model::now_ms()) {
             Ok(true) => break Ok(()),
@@ -810,7 +810,7 @@ fn storage_withdrawal_during_a_failed_publication_keeps_history_in_custody() {
         .unwrap();
     let evidence = crate::native_evidence::NativeEvidence::for_source(na.clone(), a.clone());
     evidence.request_metadata_audit();
-    let mut work = crate::viewer::lock(&evidence.work);
+    let mut work = crate::viewer::lock(&evidence.storage.work);
     let failed = (0..64).any(|_| {
         evidence
             .refresh_catalog(&mut work, crate::model::now_ms())

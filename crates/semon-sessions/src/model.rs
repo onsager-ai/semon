@@ -7904,7 +7904,16 @@ fn prepare_history_inner(
     }
     build_sources_inner(
         options,
-        &mut EventCache::default(),
+        &mut {
+            #[cfg(feature = "postgres")]
+            if records.index_store_is_projection() {
+                EventCache::from_projection(Vec::new(), Vec::new())
+            } else {
+                EventCache::default()
+            }
+            #[cfg(not(feature = "postgres"))]
+            EventCache::default()
+        },
         &mut false,
         &mut Texts::default(),
         now,

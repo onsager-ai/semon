@@ -473,7 +473,7 @@ mod tests {
             // publication. Exercise the owning native producer before asserting
             // either its persisted rows or portable archive custody.
             let evidence = crate::native_evidence::NativeEvidence::new(self.options.clone());
-            let mut work = crate::viewer::lock(&evidence.work);
+            let mut work = crate::viewer::lock(&evidence.storage.work);
             while !evidence.refresh_catalog(&mut work, NOW).unwrap() {}
             drop(work);
             evidence.retire();

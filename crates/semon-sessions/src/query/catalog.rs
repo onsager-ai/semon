@@ -93,15 +93,15 @@ fn measured(metadata: usize, edges: usize, turns: usize, vm_steps: i32) {
     });
 }
 
-struct Part {
-    generation: String,
-    runtime: String,
-    rows: BTreeMap<String, Value>,
-    owners: BTreeMap<String, String>,
-    content: BTreeMap<String, String>,
-    witnesses: Vec<(String, String)>,
-    edges: BTreeSet<String>,
-    turns: BTreeSet<String>,
+pub(crate) struct Part {
+    pub(crate) generation: String,
+    pub(crate) runtime: String,
+    pub(crate) rows: BTreeMap<String, Value>,
+    pub(crate) owners: BTreeMap<String, String>,
+    pub(crate) content: BTreeMap<String, String>,
+    pub(crate) witnesses: Vec<(String, String)>,
+    pub(crate) edges: BTreeSet<String>,
+    pub(crate) turns: BTreeSet<String>,
 }
 fn unavailable(error: impl std::fmt::Display) -> QueryError {
     QueryError::new("unavailable", error.to_string())
@@ -125,7 +125,11 @@ fn open(options: &Options) -> Result<Connection, QueryError> {
         .map_err(unavailable)?;
     Ok(db)
 }
-fn read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, QueryError> {
+pub(crate) fn sqlite_read(
+    options: &Options,
+    now: i64,
+    bytes_left: &mut usize,
+) -> Result<Part, QueryError> {
     let db = open(options)?;
     db.execute_batch("BEGIN").map_err(unavailable)?;
     crate::events::store::require_current(&db).map_err(unavailable)?;
@@ -366,6 +370,21 @@ fn read(options: &Options, now: i64, bytes_left: &mut usize) -> Result<Part, Que
         turns,
     })
 }
+pub(crate) fn sqlite_recheck(options: &Options, part: &Part) -> Result<(), QueryError> {
+    let db = open(options)?;
+    if generation(&db)? != part.generation {
+        return Err(unavailable("Native Catalog changed during the query"));
+    }
+    for (key, expected) in &part.witnesses {
+        let actual:Option<String>=db.query_row("SELECT CASE WHEN h.session_key IS NOT NULL THEN json_extract(h.metadata,'$.query') ELSE json_extract(c.metadata,'$.query') END FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1",[key],|row|row.get(0)).optional().map_err(unavailable)?.flatten();
+        let actual = actual.and_then(|text| serde_json::from_str::<Value>(&text).ok());
+        if actual.as_ref().map(Value::to_string).as_deref() != Some(expected.as_str()) {
+            return Err(unavailable("Native Query facts changed during the query"));
+        }
+    }
+    Ok(())
+}
+
 fn spend(left: &mut usize, bytes: usize) -> Result<(), QueryError> {
     *left = left
         .checked_sub(bytes)
@@ -557,17 +576,6 @@ impl Query {
             })
             .max();
         let since = self.since(args, now)?;
-        if self
-            .sources
-            .machines
-            .iter()
-            .any(|(_, source)| source.storage.is_postgres())
-        {
-            return Err(QueryError::new(
-                "capability_unavailable",
-                "Catalog Query recipes are not yet available on PostgreSQL",
-            ));
-        }
         let identity_observations: Vec<_> = self
             .sources
             .machines
@@ -590,7 +598,7 @@ impl Query {
                     "Catalog summaries require a complete native output window",
                 ));
             }
-            let part = read(&source.options, now, &mut bytes_left)?;
+            let part = source.storage.catalog_query_part(now, &mut bytes_left)?;
             if part.runtime != identity_observations[index] {
                 return Err(unavailable(
                     "Native machine identity changed during the query",
@@ -695,6 +703,35 @@ impl Query {
             let (key, source) = &self.sources.machines[*index];
             let key = if key.is_empty() { "local" } else { key };
             let catalog_key = &parts[*index].owners[id];
+            if source.storage.is_postgres() {
+                let reader = provider
+                    .map(|provider| provider(key, catalog_key))
+                    .transpose()
+                    .map_err(|error| QueryError::io(&error))?;
+                let answer = source
+                    .storage
+                    .with_selected_query(catalog_key, reader.as_deref(), mode, now, |data| {
+                        let native =
+                            QueryRead::new(vec![(key.to_owned(), Arc::new(data))], usize::MAX);
+                        let view = View::native(
+                            &native,
+                            now,
+                            ReadShape::Summaries,
+                            reader.as_deref().map(|reader| (reader, mode)),
+                        )?;
+                        let session = view
+                            .sessions
+                            .iter()
+                            .find(|(key, _)| key == id)
+                            .map(|(_, value)| value)
+                            .ok_or_else(|| unavailable("Native question owner unavailable"))?;
+                        let summary = view.summary(id, session);
+                        Ok::<_, QueryError>(summary["open_question"]["text"].clone())
+                    })
+                    .map_err(|error| QueryError::io(&error))??;
+                row["open_question"]["text"] = answer;
+                continue;
+            }
             let version = parts[*index]
                 .content
                 .get(catalog_key)
@@ -726,21 +763,13 @@ impl Query {
         // Remote preview I/O does not hold a collection transaction. Recheck the
         // published generation and process observations before returning it.
         for ((_, source), part) in self.sources.machines.iter().zip(parts) {
-            let db = open(&source.options)?;
-            if generation(&db)? != part.generation
-                || crate::native_evidence::query_runtime_generation(&source.options)
-                    .map_err(|error| QueryError::io(&error))?
-                    != part.runtime
+            if crate::native_evidence::query_runtime_generation(&source.options)
+                .map_err(|error| QueryError::io(&error))?
+                != part.runtime
             {
                 return Err(unavailable("Native Catalog changed during the query"));
             }
-            for (key, expected) in part.witnesses {
-                let actual:Option<String>=db.query_row("SELECT CASE WHEN h.session_key IS NOT NULL THEN json_extract(h.metadata,'$.query') ELSE json_extract(c.metadata,'$.query') END FROM session_catalog c LEFT JOIN session_history_catalog h USING(session_key) WHERE c.session_key=?1",[&key],|row|row.get(0)).optional().map_err(unavailable)?.flatten();
-                let actual = actual.and_then(|text| serde_json::from_str::<Value>(&text).ok());
-                if actual.as_ref().map(Value::to_string).as_deref() != Some(expected.as_str()) {
-                    return Err(unavailable("Native Query facts changed during the query"));
-                }
-            }
+            source.storage.recheck_catalog_query(&part)?;
         }
         if self.sources.is_retired() {
             return Err(unavailable("Native sources are closed"));

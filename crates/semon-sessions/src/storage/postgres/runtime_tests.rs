@@ -71,6 +71,40 @@ pub(super) fn lifecycle(dsn: &str) {
             .all(|row| row["key"] != "foreign-session")
     );
     let key = body["items"][0]["key"].as_str().unwrap();
+    assert!(evidence.storage.work.lock().unwrap().events.is_none());
+    assert_eq!(
+        evidence.storage.generation().unwrap().as_deref(),
+        body["generation"].as_str()
+    );
+    let resolution = core.respond(
+        "GET",
+        "/api/session-resolve",
+        &format!(
+            "machine=injected-runtime&harness=codex&native_id={}",
+            crate::viewer::percent_encode(body["items"][0]["native_ids"][0].as_str().unwrap()),
+        ),
+        None,
+    );
+    assert_eq!(
+        resolution.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&resolution.body)
+    );
+    let resolution: Value = serde_json::from_slice(&resolution.body).unwrap();
+    assert_eq!(resolution["resolution"]["state"], "provisional");
+    assert_eq!(resolution["resolution"]["catalog_key"], key);
+    assert!(
+        evidence
+            .storage
+            .resolve_native(
+                "foreign-runtime",
+                "codex",
+                key,
+                crate::CatalogReadScope::Current
+            )
+            .is_err()
+    );
     let transcript = core.respond(
         "GET",
         "/api/session-transcript",
@@ -113,27 +147,50 @@ pub(super) fn lifecycle(dsn: &str) {
     let mut query = crate::Query::from_sources(sources.clone());
     let answer = query.call("list_sessions", &json!({"limit":100})).unwrap();
     assert!(!answer["sessions"].as_array().unwrap().is_empty());
-    assert_eq!(
-        query
-            .call_catalog(
-                "list_sessions",
-                &json!({}),
+    let catalog = query
+        .call_catalog(
+            "list_sessions",
+            &json!({}),
+            None,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+        )
+        .unwrap();
+    assert_eq!(catalog["sessions"], answer["sessions"]);
+    query
+        .call_catalog(
+            "stalls",
+            &json!({"idle_minutes":1}),
+            None,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+        )
+        .unwrap();
+    for tool in ["get_session", "read_transcript"] {
+        let args = if tool == "read_transcript" {
+            json!({"id":key,"limit":10})
+        } else {
+            json!({"id":key})
+        };
+        let selected = query
+            .call_selected(
+                "injected-runtime",
+                key,
+                tool,
+                &args,
                 None,
-                crate::SessionSourceReadMode::ProviderOnly,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
             )
-            .unwrap_err()
-            .code,
-        "capability_unavailable"
-    );
+            .unwrap();
+        assert!(selected.get("error").is_none(), "{selected}");
+    }
     assert_eq!(
         query
             .call_selected(
                 "injected-runtime",
                 key,
-                "get_session",
+                "get_session_activity",
                 &json!({"id":key}),
                 None,
-                crate::SessionSourceReadMode::ProviderOnly,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider
             )
             .unwrap_err()
             .code,
@@ -168,6 +225,43 @@ pub(super) fn lifecycle(dsn: &str) {
         )
         .status,
         404
+    );
+    // Reconcile observed removal into retained custody and a valid empty page.
+    std::fs::remove_file(&path).unwrap();
+    {
+        let mut work = evidence.storage.work.lock().unwrap();
+        while !evidence
+            .refresh_catalog(&mut work, crate::model::now_ms())
+            .unwrap()
+        {}
+    }
+    let empty = evidence.storage.page(
+        "injected-runtime",
+        &crate::catalog::Request::parse("limit=60").unwrap(),
+        None,
+    );
+    assert_eq!(
+        empty.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&empty.body)
+    );
+    let empty: Value = serde_json::from_slice(&empty.body).unwrap();
+    assert!(empty["items"].as_array().unwrap().is_empty());
+    let history = evidence.storage.page(
+        "injected-runtime",
+        &crate::catalog::Request::parse(&format!(
+            "sid={}&scope=retained_history",
+            crate::viewer::percent_encode(key)
+        ))
+        .unwrap(),
+        None,
+    );
+    assert_eq!(
+        history.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&history.body)
     );
     core.close();
     sources.close();

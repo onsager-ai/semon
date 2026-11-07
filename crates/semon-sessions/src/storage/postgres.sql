@@ -5,11 +5,37 @@ CREATE TABLE semon_projection.metadata (
     singleton boolean PRIMARY KEY CHECK (singleton),
     stamp text NOT NULL
 );
+CREATE TABLE semon_projection.query_context (
+    namespace text NOT NULL,
+    session_key text NOT NULL,
+    source_generation text NOT NULL,
+    metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576),
+    PRIMARY KEY(namespace,session_key)
+);
+ALTER TABLE semon_projection.query_context ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.query_context FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.query_context
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
 CREATE TABLE semon_projection.namespaces (
     namespace text PRIMARY KEY,
     epoch bigint NOT NULL DEFAULT 0 CHECK (epoch >= 0),
     custody_epoch text NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text)
 );
+ALTER TABLE semon_projection.query_context ADD FOREIGN KEY(namespace) REFERENCES semon_projection.namespaces(namespace);
+CREATE TABLE semon_projection.discovery (
+    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
+    root text NOT NULL,
+    path text NOT NULL,
+    seen boolean NOT NULL DEFAULT true,
+    pending boolean NOT NULL DEFAULT true,
+    PRIMARY KEY(namespace,root,path)
+);
+ALTER TABLE semon_projection.discovery ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.discovery FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.discovery
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
 CREATE TABLE semon_projection.ledgers (
     namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
     path text NOT NULL,

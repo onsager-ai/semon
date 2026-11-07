@@ -396,7 +396,7 @@ mod tests {
         for _ in 0..64 {
             if evidence
                 .refresh_catalog(
-                    &mut crate::viewer::lock(&evidence.work),
+                    &mut crate::viewer::lock(&evidence.storage.work),
                     crate::model::now_ms(),
                 )
                 .unwrap()
@@ -454,7 +454,7 @@ mod tests {
         for _ in 0..64 {
             if evidence
                 .refresh_catalog(
-                    &mut crate::viewer::lock(&evidence.work),
+                    &mut crate::viewer::lock(&evidence.storage.work),
                     crate::model::now_ms(),
                 )
                 .unwrap()
@@ -478,7 +478,7 @@ mod tests {
         for _ in 0..64 {
             evidence
                 .refresh_catalog(
-                    &mut crate::viewer::lock(&evidence.work),
+                    &mut crate::viewer::lock(&evidence.storage.work),
                     crate::model::now_ms(),
                 )
                 .unwrap();
