@@ -210,13 +210,7 @@ impl PgProjectionStore {
         }
         let component: Vec<_> = component.into_iter().collect();
         match self.publish_sources(namespace, options, &component).await {
-            Ok(Some(_)) => {
-                let tx = self.begin(namespace).await?;
-                for input in inputs {
-                    tx.tx.execute("UPDATE semon_projection.discovery SET pending=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
-                }
-                tx.commit(namespace).await
-            }
+            Ok(Some(_)) => Ok(()),
             Ok(None) => Err(backend("native Catalog generation changed")),
             Err(error) => {
                 // A refused cohort is durable unavailable work, not a hot queue
@@ -401,6 +395,14 @@ impl PgProjectionStore {
                 expected.as_deref(),
             )
             .await?;
+        if generation.is_some() {
+            // Checkpoint only the source generations qualified by this exact
+            // publication transaction. A later Raw/Facts completion requeues
+            // its work instead of losing it in a separate dequeue transaction.
+            for input in inputs {
+                tx.tx.execute("UPDATE semon_projection.discovery SET pending=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
+            }
+        }
         tx.commit(namespace).await?;
         Ok(generation)
     }
