@@ -609,6 +609,12 @@ impl SessionSourceRelocation {
         let owner = sources.custody_source(source_key)?;
         #[cfg(feature = "postgres")]
         if owner.storage.is_postgres() {
+            if from == to {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "relocation paths must differ",
+                ));
+            }
             let options = &owner.options;
             let mut keys = [lock_key(options, from), lock_key(options, to)];
             keys.sort();

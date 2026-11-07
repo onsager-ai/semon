@@ -433,6 +433,19 @@ pub(super) fn lifecycle(dsn: &str) {
         format!("{:x}", Sha256::digest(std::fs::read(&path).unwrap()))
     };
     let native_id = proof.source.native_id.clone();
+    assert!(
+        crate::SessionSourceRelocation::begin_in(
+            &sources,
+            "injected-runtime",
+            &input,
+            &input,
+            &native_id,
+            &"a".repeat(32),
+            length,
+            &prefix,
+        )
+        .is_err()
+    );
     let move_write = crate::SessionSourceRelocation::begin_in(
         &sources,
         "injected-runtime",
