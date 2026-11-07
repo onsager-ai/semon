@@ -254,6 +254,7 @@ pub(super) fn lifecycle(dsn: &str) {
     );
     assert_eq!(pending.status, 503);
     drop(interrupted);
+    let restart_work = evidence.storage.work.lock().unwrap();
     let reopened =
         RuntimeStore::postgres(&options, Namespace::new("injected-runtime").unwrap(), dsn).unwrap();
     assert_eq!(
@@ -267,6 +268,7 @@ pub(super) fn lifecycle(dsn: &str) {
         503
     );
     drop(reopened);
+    drop(restart_work);
     let write = crate::SessionSourceWrite::begin_in(
         &sources,
         "injected-runtime",
