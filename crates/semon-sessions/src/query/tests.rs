@@ -6625,7 +6625,7 @@ fn activity_cold_preparation_releases_each_batch_before_accounting_next() {
     assert_eq!(page["items"].as_array().unwrap().len(), 5);
     assert!(page["generation"].is_string());
     let db = rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
-    let current: u64 = db
+    let current: i64 = db
         .query_row(
             "SELECT count(*) FROM session_activity_projections WHERE rules_version=?1",
             [crate::events::session_activity::ACTIVITY_RULES_VERSION],
