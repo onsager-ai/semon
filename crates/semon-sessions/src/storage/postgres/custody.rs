@@ -4,6 +4,35 @@ use super::{Namespace, PgProjectionTransaction, StorageError, backend, ensure, n
 use crate::{CatalogChange, CatalogChangePage, CatalogReadScope, Facts};
 
 impl PgProjectionTransaction<'_> {
+    pub(crate) async fn begin_facts_write(&self, namespace: &Namespace, facts: &Facts) -> Result<u64, StorageError> {
+        ensure(&self.namespace, namespace)?;
+        self.tx.query_one("SELECT epoch FROM semon_projection.namespaces WHERE namespace=$1 FOR UPDATE", &[&namespace.binding()]).await.map_err(backend)?;
+        let expected = self.reported_facts(namespace).await?.map(|(revision, _)| revision);
+        let revision = expected.unwrap_or(0).checked_add(1).ok_or_else(|| backend("Facts revision exhausted"))?;
+        if !self.write_facts(namespace, expected, revision, facts).await? {
+            return Err(backend("Facts revision changed"));
+        }
+        self.tx.execute("UPDATE semon_projection.reported_facts SET pending=true WHERE namespace=$1", &[&namespace.binding()]).await.map_err(backend)?;
+        self.tx.execute("UPDATE semon_projection.namespaces SET epoch=epoch+1 WHERE namespace=$1", &[&namespace.binding()]).await.map_err(backend)?;
+        Ok(revision)
+    }
+
+    pub(crate) async fn complete_facts_write(&self, namespace: &Namespace, revision: u64, facts: &Facts) -> Result<(), StorageError> {
+        ensure(&self.namespace, namespace)?;
+        let metadata = serde_json::to_string(facts).map_err(backend)?;
+        if self.tx.execute("UPDATE semon_projection.reported_facts SET pending=false WHERE namespace=$1 AND revision=$2 AND metadata=$3 AND pending", &[&namespace.binding(), &number(revision)?, &metadata]).await.map_err(backend)? != 1 {
+            return Err(backend("Facts custody intent changed"));
+        }
+        self.tx.execute("UPDATE semon_projection.discovery SET pending=true WHERE namespace=$1 AND seen", &[&namespace.binding()]).await.map_err(backend)?;
+        self.tx.execute("UPDATE semon_projection.namespaces SET epoch=epoch+1 WHERE namespace=$1", &[&namespace.binding()]).await.map_err(backend)?;
+        Ok(())
+    }
+
+    pub(crate) async fn facts_write_pending(&self, namespace: &Namespace) -> Result<bool, StorageError> {
+        ensure(&self.namespace, namespace)?;
+        Ok(self.tx.query_opt("SELECT pending FROM semon_projection.reported_facts WHERE namespace=$1", &[&namespace.binding()]).await.map_err(backend)?.is_some_and(|row| row.get(0)))
+    }
+
     /// Store reported machine Facts under a monotonic host-supplied revision.
     /// A stale writer cannot replace a newer report, including after restart.
     pub(crate) async fn write_facts(

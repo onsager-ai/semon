@@ -267,6 +267,9 @@ impl PgProjectionStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(backend)?;
         let tx = self.begin(namespace).await?;
+        if tx.facts_write_pending(namespace).await? {
+            return Err(backend("Facts write is pending"));
+        }
         for input in inputs {
             if tx.raw_write_pending(namespace, input).await? {
                 return Err(backend("Raw write is pending"));
