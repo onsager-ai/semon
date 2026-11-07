@@ -222,6 +222,15 @@ its completion witness is the native-publication success message in the CI log.
   `f1175d62b07554e14b3057041790272c2718a90c5ed17ee668cc634f7e1b5932`;
   image and evidence digests, decisions, review provenance and reference pins
   remain unchanged. This binding maintenance grants no new appearance approval.
+- CI run 42378584681 for the #477 PostgreSQL runtime custody merged with main
+  (Source `e09eca43`) supplies the visual and transport artifacts. The
+  supported audit and proposal generator qualify 155 visual and six transport
+  records as fingerprint-only, with zero refusals. Independent Manager review
+  compared all 966 image/evidence digests with the existing bindings and found
+  zero mismatches. Both generated patches change only candidate fingerprints to
+  `e1deffa54a4cc3ca2bb18e5a0102ba84c70ecffe3d1731b93c1ed1b31b240536`;
+  decisions, review provenance and reference pins remain unchanged. This is
+  binding maintenance and grants no new appearance approval.
 - Every screenshot comparison keeps threshold 0.1 and maximum ratio 0.0001.
   Missing, duplicate, unknown or unmapped frames, selector failures, geometry
   changes, retired API requests, and execution errors fail independently. Raw
