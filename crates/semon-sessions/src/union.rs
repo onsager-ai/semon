@@ -845,8 +845,15 @@ impl ViewerCore {
                     self.view(name, options)
                 }
             };
-            if previous.get(name).and_then(Option::as_ref).is_none_or(|before| before.facts != seen.facts || before.stale != seen.stale) {
-                let sources = crate::SessionSources::from_evidence(vec![(name.clone(), view.evidence.clone())]);
+            if previous
+                .get(name)
+                .and_then(Option::as_ref)
+                .is_none_or(|before| before.facts != seen.facts || before.stale != seen.stale)
+            {
+                let sources = crate::SessionSources::from_evidence(vec![(
+                    name.clone(),
+                    view.evidence.clone(),
+                )]);
                 machines.copy_facts(name, seen, hosts, warned, &sources);
             }
             next.push((name.clone(), view));

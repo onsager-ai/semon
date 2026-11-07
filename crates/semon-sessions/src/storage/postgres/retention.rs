@@ -268,8 +268,11 @@ impl PgProjectionTransaction<'_> {
         if ledger != proof_ledger(proof) || !crate::retention::same_projection(&ready, projection) {
             return Ok(false);
         }
-        let Some((current, index)) = self.load_index(namespace, name).await? else { return Ok(false); };
-        Ok(current == ledger && index_digest(&current, &index)?.as_slice() == saved.get::<_, &[u8]>(2)
+        let Some((current, index)) = self.load_index(namespace, name).await? else {
+            return Ok(false);
+        };
+        Ok(current == ledger
+            && index_digest(&current, &index)?.as_slice() == saved.get::<_, &[u8]>(2)
             && self
                 .projection_ready(namespace, options, &proof.source.root, &proof.source.path)
                 .await?
@@ -277,14 +280,20 @@ impl PgProjectionTransaction<'_> {
     }
 }
 
-fn index_digest(ledger: &crate::events::Ledger, index: &crate::events::FileIndex) -> Result<[u8; 32], StorageError> {
+fn index_digest(
+    ledger: &crate::events::Ledger,
+    index: &crate::events::FileIndex,
+) -> Result<[u8; 32], StorageError> {
     use sha2::{Digest, Sha256};
     let mut digest = Sha256::new();
     digest.update(serde_json::to_vec(&(ledger, index)).map_err(backend)?);
     for event in index.events.iter().chain(&index.extras) {
         digest.update(serde_json::to_vec(&event.activity_observation).map_err(backend)?);
     }
-    let chunks = index.source_chunks.as_ref().ok_or_else(|| backend("retained proof unavailable"))?;
+    let chunks = index
+        .source_chunks
+        .as_ref()
+        .ok_or_else(|| backend("retained proof unavailable"))?;
     digest.update(chunks.fingerprint());
     Ok(digest.finalize().into())
 }
