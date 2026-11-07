@@ -610,6 +610,8 @@ pub(super) async fn lifecycle(dsn: &str) {
         "checkpoints",
         "changes",
         "change_heads",
+        "query_context",
+        "discovery",
     ] {
         let tx = raw.transaction().await.unwrap();
         tx.query_one(

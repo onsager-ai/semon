@@ -72,6 +72,18 @@ impl PgProjectionStore {
         ensure(&self.namespace, namespace)?;
         let tx = self.begin(namespace).await?;
         let runtime = crate::native_evidence::query_runtime_generation(options).map_err(backend)?;
+        let retained: bool = tx
+            .tx
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM semon_projection.history_catalog WHERE namespace=$1)",
+                &[&namespace.binding()],
+            )
+            .await
+            .map_err(backend)?
+            .get(0);
+        if retained {
+            return Err(backend("Catalog Query composite History is unavailable"));
+        }
         let observations = crate::native_evidence::RuntimeObservations::projection(options);
         let mut part = crate::query::catalog::Part {
             generation: tx
