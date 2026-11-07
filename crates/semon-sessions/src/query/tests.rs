@@ -6558,3 +6558,61 @@ fn sanitized_activity_query_matches_owned_golden() {
     let golden: Value = serde_json::from_str(include_str!("activity-golden.json")).unwrap();
     assert_eq!(actual, golden);
 }
+
+#[test]
+fn activity_pages_validate_the_selected_machine_alias() {
+    let home = activity_fixture();
+    let peer = Home::new("activity");
+    peer.top("peer", &[human("peer", ts(1, 0), "Synthetic peer")]);
+    let sources = Arc::new(SessionSources::with_machines(vec![
+        ("a".into(), home.options.clone()),
+        ("b".into(), peer.options.clone()),
+    ]));
+    let mut query = Query::from_sources(sources);
+    let listed = call(&mut query, "list_sessions", json!({}));
+    let id = listed["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| {
+            row["id"]
+                .as_str()
+                .is_some_and(|id| id.starts_with("activity@"))
+        })
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let page = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":id,"limit":1}),
+    );
+    assert_eq!(page["session"]["id"], id);
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    let selected = query
+        .call_selected_at(
+            "a",
+            "activity",
+            "get_session_activity",
+            &json!({"id":id,"limit":1}),
+            None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            NOW,
+        )
+        .unwrap();
+    assert_eq!(selected, page);
+    for invalid in ["activity", "activity@wrong-machine"] {
+        let error = query
+            .call_selected_at(
+                "a",
+                "activity",
+                "get_session_activity",
+                &json!({"id":invalid}),
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                NOW,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "unknown_session");
+    }
+}

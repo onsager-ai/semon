@@ -1480,10 +1480,14 @@ impl Query {
                 .iter()
                 .find(|(key, _)| part.served(key) == id)
             {
+                let mut focused_args = args.clone();
+                if self.sources.machines.len() > 1 {
+                    focused_args["_machine_alias"] = json!(self.source_labels()[index].1);
+                }
                 return activity::read(
                     &self.sources.machines[index].1.options,
                     key,
-                    args,
+                    &focused_args,
                     None,
                     crate::SessionSourceReadMode::LocalThenProvider,
                     now,
