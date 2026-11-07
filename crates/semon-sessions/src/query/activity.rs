@@ -38,15 +38,10 @@ pub(super) fn read(
         .map_err(unavailable)?;
     let mut snapshot = db.transaction().map_err(unavailable)?;
     crate::events::store::require_current(&snapshot).map_err(unavailable)?;
-    let history = crate::history_projection::catalog(&snapshot, key).map_err(unavailable)?;
-    let retained = history.is_some();
-    let text = match history {
-        Some(text) => text,
-        None => snapshot.query_row(
-            "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",
-            [key], |r| r.get::<_, Option<String>>(0),
-        ).optional().map_err(unavailable)?.flatten().ok_or_else(|| QueryError::unknown_session(key))?,
-    };
+    let text = snapshot.query_row(
+        "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_activity_sources WHERE session_key=?1",
+        [key], |r| r.get::<_, Option<String>>(0),
+    ).optional().map_err(unavailable)?.flatten().ok_or_else(|| QueryError::unknown_session(key))?;
     let row: CatalogRow = serde_json::from_str(&text).map_err(unavailable)?;
     if row.key != key
         || row.sources.is_empty()
@@ -111,18 +106,14 @@ pub(super) fn read(
         .busy_timeout(Duration::from_millis(100))
         .map_err(unavailable)?;
     let current = current.transaction().map_err(unavailable)?;
-    let current_text = if retained {
-        crate::history_projection::catalog(&current, key).map_err(unavailable)?
-    } else {
-        current
-            .query_row(
-                "SELECT metadata FROM session_catalog WHERE session_key=?1",
-                [key],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
-            .map_err(unavailable)?
-    };
+    let current_text = current
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
+            [key],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
     let current_generation: Option<String> = current
         .query_row(
             "SELECT generation FROM session_activity_projections WHERE session_key=?1",

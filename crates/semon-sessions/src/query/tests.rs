@@ -6586,9 +6586,70 @@ fn activity_pages_keep_native_ids_global_across_machines() {
 }
 
 #[test]
+fn activity_root_and_child_pages_do_not_decode_family_sources() {
+    for harness in ["claude", "codex"] {
+        let home = Home::new("activity-family-selection");
+        if harness == "claude" {
+            home.top(
+                "root",
+                &[
+                    human("root", ts(1, 0), "Synthetic"),
+                    assistant("root", ts(1, 1), vec![text("Synthetic")]),
+                ],
+            );
+            for n in 0..80 {
+                let id = format!("child-{n:03}");
+                home.agent(
+                    "root",
+                    &id,
+                    &format!("call-{n}"),
+                    &[
+                        human(&id, ts(1, 0), "Synthetic"),
+                        assistant(&id, ts(1, 1), vec![text("Synthetic")]),
+                    ],
+                );
+            }
+        } else {
+            for n in 0..81 {
+                let id = if n == 0 {
+                    "root".to_owned()
+                } else {
+                    format!("child-{:03}", n - 1)
+                };
+                let mut meta = json!({"id":id,"cwd":"/synthetic"});
+                if n > 0 {
+                    meta["parent_thread_id"] = json!("root");
+                    meta["thread_source"] = json!("subagent");
+                }
+                home.lines(&format!("codex/sessions/rollout-{id}.jsonl"), &[
+                    codex_line(ts(1,0),"session_meta",meta),
+                    codex_line(ts(1,0),"turn_context",json!({"model":"gpt-test"})),
+                    codex_line(ts(1,1),"token_usage_record",json!({"thread_id":id,"session_id":id,"turn_id":"turn","response_id":"response","usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38,"cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}})),
+                ]);
+            }
+        }
+        for id in ["root", "child-000"] {
+            let before = crate::events::FILE_READS.with(std::cell::Cell::get);
+            let page = call(
+                &mut Query::new(home.options.clone()),
+                "get_session_activity",
+                json!({"id":id,"limit":5}),
+            );
+            let loaded = crate::events::FILE_READS.with(std::cell::Cell::get) - before;
+            assert_eq!(page["items"].as_array().unwrap().len(), 1, "{harness} {id}");
+            assert!(
+                loaded <= 2,
+                "{harness} {id} decoded family sources: {loaded}"
+            );
+        }
+    }
+}
+
+#[test]
 fn activity_cold_direct_call_does_not_prepare_unrelated_sources() {
     for listed_first in [false, true] {
-        let home = Home::new("activity-selected-cold");
+        let mut home = Home::new("activity-selected-cold");
+        home.options.all = false;
         for n in 0..192 {
             let id = format!("session-{n:03}");
             let mut records = vec![human(&id, ts(1, 0), "Synthetic prompt")];

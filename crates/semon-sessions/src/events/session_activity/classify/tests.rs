@@ -1014,6 +1014,36 @@ fn native_output_projection_and_literal_pr_bodies_table() {
 }
 
 #[test]
+fn terminal_ambiguous_code_mode_does_not_suppress_all_later_reads() {
+    let mut index = FileIndex::default();
+    let records = [
+        json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"parallel","name":"exec","input":"const results = await Promise.all([tools.exec_command({cmd:'cat one'}),tools.exec_command({cmd:'cat two'})]); for (const result of results) text(JSON.stringify({output:result.output,exit_code:result.exit_code}));"}}),
+        json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"parallel","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":"{\"index\":0,\"exit_code\":0,\"output\":\"one\"}"},{"type":"input_text","text":"{\"index\":1,\"exit_code\":0,\"output\":\"two\"}"}]}}),
+    ];
+    for (n, record) in records.iter().enumerate() {
+        crate::events::codex(&mut index, record, n as u64 * 10);
+        capture(
+            &mut index,
+            "codex",
+            record,
+            n as u64 * 10,
+            &serde_json::to_vec(record).unwrap(),
+        );
+    }
+    let observation = index.events[0].activity_observation.clone().unwrap();
+    assert!(observation.settled);
+    assert!(observation.changes.is_empty());
+    let mut rows = vec![
+        located(10, observation),
+        located(30, observed("Bash", "cat file", json!("body"), false)),
+        located(50, observed("Bash", "cat file", json!("body"), false)),
+    ];
+    classify_reads(&mut rows, &[]);
+    assert!(rows[1].observation.waste.is_none());
+    assert_eq!(rows[2].observation.waste, Some(WasteKind::RedundantRead));
+}
+
+#[test]
 fn code_mode_printed_output_repeats_native_shell_reads() {
     for command in [
         "cat file",

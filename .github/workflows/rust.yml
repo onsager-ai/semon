@@ -70,6 +70,7 @@ jobs:
           cargo test --locked -p semon-sessions selected_accounting_refusal_ -- --nocapture
           cargo test --locked -p semon-sessions recovery_producer_batches_ -- --nocapture
           cargo test --locked -p semon-sessions activity_cold_ -- --test-threads=1 --nocapture
+          cargo test --locked -p semon-sessions activity_root_and_child_ -- --test-threads=1 --nocapture
 
       - name: Standalone session bootstrap HTTP regressions
         run: cargo test --locked -p semon-sessions http_session_bootstrap_is_consumed_before_routing -- --nocapture

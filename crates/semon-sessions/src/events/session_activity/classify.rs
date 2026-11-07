@@ -1095,9 +1095,11 @@ pub(crate) fn capture(
                     observation.formatter = index.events[event].native_direct_call
                         || (name == "exec"
                             && field(payload, "input").is_some_and(crate::events::result_source));
+                    // An arbitrary script's printed JSON is opaque. It cannot
+                    // forge an exec outcome, nor leave a terminal script's
+                    // mutation barrier open just because its data is JSON.
                     observation.envelopes = name != "exec"
-                        || field(payload, "input")
-                            .is_none_or(|script| !crate::events::activity_output_source(script));
+                        || field(payload, "input").is_some_and(crate::events::result_source);
                     if name == "exec" && input.is_null() {
                         observation.commands = vec![Command::Unknown];
                     }

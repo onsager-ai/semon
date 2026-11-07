@@ -39,7 +39,7 @@ thrash and retain those three step identities. Fewer than three steps cannot
 form a thrash window. Derive each physical session independently; interleaving
 parent and child steps must never create a family thrash window.
 
-Schema 40 stores a session activity header, ordered step rows keyed by
+Schema 41 stores a session activity header, ordered step rows keyed by
 `(session_key, generation, ordinal)`, separate ordered compaction rows, compact summary metadata, and typed
 change facts keyed by session, generation and stable identity.
 Parser 33 retains the exact last Claude usage observation offset alongside the
@@ -117,11 +117,11 @@ advance pricing generations atomically with the step projection.
 
 Cold local activity preparation discovers native identities in bounded directory
 pages, then derives only the requested identity's sources and exact lineage
-closure. Claude identities come from native paths; Codex reads at most 64 KiB of
-the first record. Unrelated event indexes are never decoded. The same focused
-Catalog producer publishes through the existing partial-publication claims,
-source-ledger and generation fences; this does not declare a complete global
-Catalog. A direct cold call needs no prior listing. The request's unchanged
+references. Claude identities come from native paths; Codex reads at most 64 KiB
+of the first record. Parent and descendant event indexes are never decoded to
+page a physical session. The focused activity transaction verifies exact source
+ledgers and roles and publishes its source recipe with the existing activity
+generation; Catalog relationships and family summaries retain their own producer. A direct cold call needs no prior listing. The request's unchanged
 131,072-row/64 MiB accounting ceiling, deadline and cancellation cover the selected
 derivation and page. Oversized selected components still refuse. A terminal
 selected-read limit propagates without treating the durable Event Index as broken

@@ -1363,6 +1363,7 @@ impl NativeEvidence {
             selectors.insert(id.to_owned());
         }
         let mut inputs = BTreeSet::new();
+        let cutoff = crate::model::scan_cutoff(&self.options, now);
         let mut work = lock(&self.work);
         if self.closed.load(Ordering::Acquire) {
             return Err(io::Error::new(
@@ -1379,17 +1380,24 @@ impl NativeEvidence {
                 crate::selected_read::check()?;
                 let page = discovery.next(&self.options, 64, 512)?;
                 for input in page.inputs {
+                    if cutoff.is_some_and(|cutoff| {
+                        fs::metadata(input.full_path(&self.options))
+                            .and_then(|metadata| metadata.modified())
+                            .ok()
+                            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                            .is_some_and(|time| {
+                                time.as_millis() < u128::try_from(cutoff).unwrap_or(0)
+                            })
+                    }) {
+                        continue;
+                    }
                     let Some((id, parent)) = activity_source_identity(&input, &self.options)?
                     else {
                         continue;
                     };
-                    if selectors.contains(&id)
-                        || parent
-                            .as_ref()
-                            .is_some_and(|parent| selectors.contains(parent))
-                    {
+                    if selectors.contains(&id) {
                         selectors.insert(id);
-                        selectors.extend(parent);
+                        let _ = parent;
                         inputs.insert(input);
                         if inputs.len() > 64 {
                             return Err(io::Error::new(
@@ -1409,25 +1417,20 @@ impl NativeEvidence {
             if (inputs.len(), selectors.len()) != before {
                 continue;
             }
-            let prepared = self
-                .prepare_catalog_component(cache, inputs.iter().cloned().collect(), now)?
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::WouldBlock,
-                        "Selected activity lineage is incomplete",
-                    )
-                })?;
+            let options = Options {
+                scan_window: false,
+                ..self.options.clone()
+            };
+            let prepared = model::prepare_sources(
+                &options,
+                cache,
+                &inputs.iter().cloned().collect::<Vec<_>>(),
+                now,
+            )?;
             for row in &prepared.rows {
                 selectors.insert(row.key.clone());
                 selectors.extend(row.native_ids.iter().cloned());
             }
-            selectors.extend(prepared.native_parents().into_iter().map(|(_, id)| id));
-            selectors.extend(
-                prepared
-                    .lineage_dependencies
-                    .iter()
-                    .map(|(_, id)| id.clone()),
-            );
             for row in &prepared.rows {
                 for source in &row.sources {
                     if let Some(input) = catalog_input(&source.path, &self.options) {
@@ -1454,13 +1457,12 @@ impl NativeEvidence {
             let Some(target) = target else {
                 return Ok(None);
             };
-            if cache.publish_partial_catalog_fenced(&prepared)?.0 != crate::events::Outcome::Written
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "Selected activity publication changed",
-                ));
-            }
+            let row = prepared
+                .rows
+                .iter()
+                .find(|row| row.key == target)
+                .expect("selected owner exists");
+            crate::events::store::session_activity::publish_selected(&self.options, row)?;
             cache.release_published_indexes();
             *write_lock(&self.query) = None;
             return Ok(Some(target));
