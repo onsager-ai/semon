@@ -345,7 +345,7 @@ impl PgProjectionStore {
         let _locks = unique
             .keys()
             .map(|path| {
-                crate::source_change::SourceLock::acquire(options, &path.to_string_lossy(), false)
+                crate::source_change::SourceLock::try_shared(options, &path.to_string_lossy())
             })
             .collect::<Result<Vec<_>, _>>()
             .map_err(backend)?;
@@ -449,10 +449,9 @@ impl PgProjectionStore {
             .iter()
             .filter(|input| input.path.ends_with(".jsonl"))
             .map(|input| {
-                crate::source_change::SourceLock::acquire(
+                crate::source_change::SourceLock::try_shared(
                     options,
                     &crate::source_change::lock_key(options, input),
-                    false,
                 )
             })
             .collect::<Result<Vec<_>, _>>()

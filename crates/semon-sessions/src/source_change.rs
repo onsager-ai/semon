@@ -255,8 +255,19 @@ pub(crate) fn lock_key(options: &Options, input: &Input) -> String {
 /// the OS lock, leaving its durable intent available for conservative replay.
 pub(crate) struct SourceLock(#[cfg(unix)] std::fs::File);
 impl SourceLock {
-    #[cfg(unix)]
     pub(crate) fn acquire(options: &Options, path: &str, exclusive: bool) -> io::Result<Self> {
+        Self::acquire_inner(options, path, exclusive, false)
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn try_shared(options: &Options, path: &str) -> io::Result<Self> {
+        // Never wait for a host writer while holding the runtime reactor mutex:
+        // its completion needs that same reactor. Refuse this producer attempt.
+        Self::acquire_inner(options, path, false, true)
+    }
+
+    #[cfg(unix)]
+    fn acquire_inner(options: &Options, path: &str, exclusive: bool, nonblocking: bool) -> io::Result<Self> {
         use sha2::{Digest, Sha256};
         use std::os::unix::{
             fs::{DirBuilderExt, OpenOptionsExt},
@@ -288,14 +299,15 @@ impl SourceLock {
         } else {
             libc::LOCK_SH
         };
+        let operation = operation | if nonblocking { libc::LOCK_NB } else { 0 };
         if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(Self(file))
     }
     #[cfg(not(unix))]
-    pub(crate) fn acquire(options: &Options, path: &str, exclusive: bool) -> io::Result<Self> {
-        let _ = (options, path);
+    fn acquire_inner(options: &Options, path: &str, exclusive: bool, nonblocking: bool) -> io::Result<Self> {
+        let _ = (options, path, nonblocking);
         if exclusive {
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,

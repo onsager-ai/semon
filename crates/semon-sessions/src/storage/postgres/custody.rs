@@ -25,19 +25,16 @@ impl PgProjectionTransaction<'_> {
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| backend("Facts revision exhausted"))?;
-        if !self
-            .write_facts(namespace, expected, revision, facts)
-            .await?
-        {
-            return Err(backend("Facts revision changed"));
+        if facts.version != crate::FACTS_VERSION {
+            return Err(backend("unsupported reported Facts"));
         }
-        self.tx
-            .execute(
-                "UPDATE semon_projection.reported_facts SET pending=true WHERE namespace=$1",
-                &[&namespace.binding()],
-            )
-            .await
-            .map_err(backend)?;
+        let wanted = serde_json::to_string(facts).map_err(backend)?;
+        if wanted.len() > 1024 * 1024 {
+            return Err(backend("reported Facts budget exceeded"));
+        }
+        // Keep the last completed Facts, including non-rebuildable usage,
+        // while an interrupted publication retains its separate wanted value.
+        self.tx.execute("INSERT INTO semon_projection.reported_facts(namespace,revision,pending,wanted_metadata,metadata) VALUES($1,$2,true,$3,$3) ON CONFLICT(namespace) DO UPDATE SET revision=excluded.revision,pending=true,wanted_metadata=excluded.wanted_metadata", &[&namespace.binding(), &number(revision)?, &wanted]).await.map_err(backend)?;
         self.tx
             .execute(
                 "UPDATE semon_projection.namespaces SET epoch=epoch+1 WHERE namespace=$1",
@@ -56,7 +53,7 @@ impl PgProjectionTransaction<'_> {
     ) -> Result<(), StorageError> {
         ensure(&self.namespace, namespace)?;
         let metadata = serde_json::to_string(facts).map_err(backend)?;
-        if self.tx.execute("UPDATE semon_projection.reported_facts SET pending=false WHERE namespace=$1 AND revision=$2 AND metadata=$3 AND pending", &[&namespace.binding(), &number(revision)?, &metadata]).await.map_err(backend)? != 1 {
+        if self.tx.execute("UPDATE semon_projection.reported_facts SET pending=false,metadata=wanted_metadata,wanted_metadata=NULL WHERE namespace=$1 AND revision=$2 AND wanted_metadata=$3 AND pending", &[&namespace.binding(), &number(revision)?, &metadata]).await.map_err(backend)? != 1 {
             return Err(backend("Facts custody intent changed"));
         }
         self.tx
@@ -127,7 +124,7 @@ impl PgProjectionTransaction<'_> {
             .await
             .map_err(backend)?
             .map(|row| row.get::<_, i64>(0));
-        if actual != expected {
+        if actual != expected || self.facts_write_pending(namespace).await? {
             return Ok(false);
         }
         self.tx.execute(

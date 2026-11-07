@@ -307,6 +307,11 @@ pub(super) fn lifecycle(dsn: &str) {
         .status,
         200
     );
+    assert!(!crate::collect_in(&sources, "injected-runtime").unwrap().is_empty());
+    let collected = crate::local_facts_in(&sources, "injected-runtime").unwrap();
+    assert_eq!(collected.version, crate::FACTS_VERSION);
+    assert!(collected.codex_rollouts.as_ref().unwrap().contains(&input.path));
+    assert!(crate::FactsSource::new_in(&sources, "foreign-runtime").is_err());
     // Reconcile observed removal into retained custody and a valid empty page.
     std::fs::remove_file(&path).unwrap();
     {

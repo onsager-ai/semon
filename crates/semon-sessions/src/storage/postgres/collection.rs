@@ -91,17 +91,16 @@ fn collection_locks(
     options: &Options,
 ) -> Result<Vec<crate::source_change::SourceLock>, StorageError> {
     let mut locks =
-        vec![crate::source_change::SourceLock::acquire(options, "facts", false).map_err(backend)?];
+        vec![crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?];
     for input in crate::inputs(options)
         .map_err(backend)?
         .iter()
         .filter(|input| input.path.ends_with(".jsonl"))
     {
         locks.push(
-            crate::source_change::SourceLock::acquire(
+            crate::source_change::SourceLock::try_shared(
                 options,
                 &crate::source_change::lock_key(options, input),
-                false,
             )
             .map_err(backend)?,
         );
