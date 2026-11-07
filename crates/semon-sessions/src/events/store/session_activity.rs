@@ -4,7 +4,7 @@ use super::*;
 use crate::events::session_activity::{
     self as activity, ActivityStep, SessionActivity, SourcePosition, Usage, UsageStep,
 };
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_activity_projections (

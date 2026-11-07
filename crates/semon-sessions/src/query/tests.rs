@@ -6396,7 +6396,9 @@ fn mcp_activity_request_returns_the_same_typed_page_and_refuses_stale_generation
     let home = activity_fixture();
     let mut query = home.query();
     let request = json!({"jsonrpc":"2.0","id":41,"method":"tools/call","params":{"name":"get_session_activity","arguments":{"id":"activity","limit":1}}});
-    let reply = crate::mcp::handle(&mut query, request.to_string().as_bytes()).unwrap();
+    let mut output = Vec::new();
+    crate::mcp::serve_mcp(&mut query, request.to_string().as_bytes(), &mut output).unwrap();
+    let reply: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(reply["result"]["isError"], false);
     let page: Value =
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -6404,9 +6406,66 @@ fn mcp_activity_request_returns_the_same_typed_page_and_refuses_stale_generation
     assert_eq!(page["items"].as_array().unwrap().len(), 1);
     assert_eq!(page["next_cursor"], "1");
     let request = json!({"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"get_session_activity","arguments":{"id":"activity","generation":"stale"}}});
-    let reply = crate::mcp::handle(&mut query, request.to_string().as_bytes()).unwrap();
+    let mut output = Vec::new();
+    crate::mcp::serve_mcp(&mut query, request.to_string().as_bytes(), &mut output).unwrap();
+    let reply: Value = serde_json::from_slice(&output).unwrap();
     assert_eq!(reply["result"]["isError"], true);
     let error: Value =
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(error["error"]["code"], "stale_projection");
+}
+
+#[test]
+fn activity_family_deduplicates_exact_shared_keys_without_inventing_ownership() {
+    use crate::events::session_activity::{self as activity, SourcePosition, UsageStep};
+    let usage = |session: &str| {
+        UsageStep::claude(
+            "same-message".into(),
+            SourcePosition {
+                source: session.into(),
+                offset: 0,
+            },
+            crate::events::MessageUsage::default(),
+        )
+    };
+    let copied = BTreeMap::from([("same-message".to_owned(), "exact-shared-key".to_owned())]);
+    let parent = activity::derive(
+        "parent".into(),
+        vec![usage("parent")],
+        &copied,
+        vec![],
+        crate::pricing::snapshot(),
+    );
+    let child = activity::derive(
+        "child".into(),
+        vec![usage("child")],
+        &copied,
+        vec![],
+        crate::pricing::snapshot(),
+    );
+    let families = activity::analytics::families(
+        [
+            ("parent", None, Some(&parent)),
+            ("child", Some("parent"), Some(&child)),
+        ]
+        .into_iter(),
+    );
+    let family = &families["parent"];
+    assert_eq!(family.counts.totals.observed.steps, 1);
+    assert_eq!(family.counts.totals.shared.steps, 1);
+    assert_eq!(family.counts.totals.exclusive.steps, 0);
+    assert!(!family.counts.exclusive_cost_complete);
+    assert_eq!(family.total_step_time_ms.unknown_steps, 2);
+    assert_eq!(parent.steps.len(), 1);
+    assert_eq!(child.steps.len(), 1);
+    assert!(
+        activity::analytics::families(
+            [
+                ("parent", Some("child"), Some(&parent)),
+                ("child", Some("parent"), Some(&child)),
+            ]
+            .into_iter()
+        )
+        .is_empty()
+    );
 }

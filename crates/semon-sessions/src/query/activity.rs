@@ -38,8 +38,9 @@ pub(super) fn read(
         .map_err(unavailable)?;
     let mut snapshot = db.transaction().map_err(unavailable)?;
     crate::events::store::require_current(&snapshot).map_err(unavailable)?;
-    let text = crate::history_projection::catalog(&snapshot, key).map_err(unavailable)?;
-    let text = match text {
+    let history = crate::history_projection::catalog(&snapshot, key).map_err(unavailable)?;
+    let retained = history.is_some();
+    let text = match history {
         Some(text) => text,
         None => snapshot.query_row(
             "SELECT CASE WHEN octet_length(metadata)<=1048576 THEN metadata ELSE NULL END FROM session_catalog WHERE session_key=?1",
@@ -58,6 +59,13 @@ pub(super) fn read(
         })
     {
         return Err(unavailable("Selected Catalog source mismatch"));
+    }
+    if options.scan_window
+        && !options.all
+        && !crate::overview_repair::query_window_context_current(&snapshot, options, key, now)
+            .map_err(unavailable)?
+    {
+        return Err(unavailable("Incomplete file-window activity cohort"));
     }
     let saved = row
         .query
@@ -98,6 +106,40 @@ pub(super) fn read(
         .verify_all()
         .map_err(|error| QueryError::io(&error))?;
     witness.finish().map_err(|error| QueryError::io(&error))?;
+    let mut current = Connection::open_with_flags(
+        EventCache::path(&options.cache),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(unavailable)?;
+    current
+        .busy_timeout(Duration::from_millis(100))
+        .map_err(unavailable)?;
+    let current = current.transaction().map_err(unavailable)?;
+    let current_text = if retained {
+        crate::history_projection::catalog(&current, key).map_err(unavailable)?
+    } else {
+        current
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key=?1",
+                [key],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(unavailable)?
+    };
+    let current_generation: Option<String> = current
+        .query_row(
+            "SELECT generation FROM session_activity_projections WHERE session_key=?1",
+            [key],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    if current_text.as_deref() != Some(&text)
+        || current_generation.as_deref() != Some(&page.generation)
+    {
+        return Err(unavailable("Activity publication changed"));
+    }
     crate::selected_read::check().map_err(|error| selected_error(&error))?;
     Ok(json!({
         "now": now,
