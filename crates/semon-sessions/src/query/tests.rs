@@ -6526,3 +6526,35 @@ fn activity_fact_pages_use_stable_identity_order_and_detect_source_refresh() {
         "stale_projection"
     );
 }
+
+#[test]
+fn sanitized_activity_query_matches_owned_golden() {
+    let home = activity_fixture();
+    let mut query = home.query();
+    let listed = call(&mut query, "list_sessions", json!({}));
+    let summary = &listed["sessions"][0]["activity_analytics"];
+    let page = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","limit":2}),
+    );
+    let actual = json!({
+        "summary": {
+            "observed_steps":summary["totals"]["observed"]["steps"],
+            "exclusive_steps":summary["totals"]["exclusive"]["steps"],
+            "shared_steps":summary["totals"]["shared"]["steps"],
+            "compactions":summary["compactions"],"thrash":summary["thrash"],
+            "empty_search_steps":summary["empty_search_steps"],
+            "change_facts":summary["change_facts"],
+            "elapsed_ms":summary["totals"]["observed"]["elapsed_ms"],
+            "family":summary["family"]
+        },
+        "page": {
+            "session":page["session"],"kind":page["kind"],
+            "items":page["items"].as_array().unwrap().iter().map(|item|json!({"id":item["id"],"timestamp":item["timestamp"]})).collect::<Vec<_>>(),
+            "next_cursor":page["next_cursor"]
+        }
+    });
+    let golden: Value = serde_json::from_str(include_str!("activity-golden.json")).unwrap();
+    assert_eq!(actual, golden);
+}

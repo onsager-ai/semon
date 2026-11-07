@@ -1,0 +1,27 @@
+{
+  "summary": {
+    "observed_steps": 3,
+    "exclusive_steps": 3,
+    "shared_steps": 0,
+    "compactions": 0,
+    "thrash": false,
+    "empty_search_steps": 0,
+    "change_facts": {
+      "commits": 1,
+      "pushes": 0,
+      "pull_requests": 0,
+      "without_exact_step": 0
+    },
+    "elapsed_ms": { "known": 120000, "unknown_steps": 1 },
+    "family": null
+  },
+  "page": {
+    "session": { "id": "activity", "harness": "claude", "native_ids": ["activity"] },
+    "kind": "steps",
+    "items": [
+      { "id": { "Claude": "m-activity-2026-09-24T01:01:00.000Z" }, "timestamp": 1790211660000 },
+      { "id": { "Claude": "m-activity-2026-09-24T01:02:00.000Z" }, "timestamp": 1790211720000 }
+    ],
+    "next_cursor": "2"
+  }
+}
