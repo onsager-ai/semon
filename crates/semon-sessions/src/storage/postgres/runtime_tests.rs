@@ -226,7 +226,16 @@ pub(super) fn lifecycle(dsn: &str) {
             .unwrap();
         assert!(selected.get("error").is_none(), "{selected}");
     }
-    let activity = query.call_selected("injected-runtime", key, "get_session_activity", &json!({"id":key}), None, crate::SessionSourceReadMode::LocalOrPinnedProvider).unwrap();
+    let activity = query
+        .call_selected(
+            "injected-runtime",
+            key,
+            "get_session_activity",
+            &json!({"id":key}),
+            None,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+        )
+        .unwrap();
     assert!(activity["items"].is_array());
     assert!(activity["generation"].is_string());
     // A foreign source key cannot use this app-owned capability, even if the
@@ -564,7 +573,14 @@ pub(super) fn lifecycle(dsn: &str) {
         "{}",
         String::from_utf8_lossy(&history.body)
     );
-    let retained_query = query.call_catalog("list_sessions", &json!({}), None, crate::SessionSourceReadMode::LocalOrPinnedProvider).unwrap();
+    let retained_query = query
+        .call_catalog(
+            "list_sessions",
+            &json!({}),
+            None,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+        )
+        .unwrap();
     assert!(!retained_query["sessions"].as_array().unwrap().is_empty());
     core.close();
     sources.close();
