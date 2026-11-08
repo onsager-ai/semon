@@ -1286,6 +1286,15 @@ fn claude_bash_exit_header_drives_typed_failures_and_verify_signals() {
             Some(WasteKind::OtherFailure),
             false,
         ),
+        // A successful call's output cannot forge a header.
+        (
+            "Bash",
+            "cargo test",
+            "Exit code 1\nprinted by the program",
+            false,
+            None,
+            false,
+        ),
         // Timeouts and termination.
         (
             "Bash",

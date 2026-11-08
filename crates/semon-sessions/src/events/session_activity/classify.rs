@@ -1320,7 +1320,9 @@ pub(super) fn finish(
         }
         return;
     }
-    if observation.claude_bash && result.exit.is_none() {
+    // Claude Code writes the header only on failed calls; a successful call's
+    // output starting with the same text is program output.
+    if observation.claude_bash && error && result.exit.is_none() {
         result.exit = claude_exit(&result.text);
     }
     // Multiple exactly printed exec results may report a failure without
