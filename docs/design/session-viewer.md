@@ -1,5 +1,10 @@
 # Session viewer: from the mockup to `semon sessions --serve`
 
+> **Historical scope (2026-11-08).** This plan describes a retired session
+> display product. The current ASI direction retains native storage, query and
+> analytics; the Viewer is planned as an analytics UI. See the
+> [ASI direction](asi-direction.md).
+
 Status: draft for review, 2026-09-26. Part of #40. It supersedes #47's UI and keeps #47's security model.
 
 Historical Viewer plan. The Canonical Trace Store described at the original

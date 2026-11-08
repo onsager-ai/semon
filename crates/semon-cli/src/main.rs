@@ -18,7 +18,6 @@ fn main() -> ExitCode {
 enum Command {
     Version,
     Sessions(SessionsArgs),
-    Control(Vec<String>),
     Push(PushArgs),
     Receive(ReceiveArgs),
     Query(QueryArgs),
@@ -121,7 +120,6 @@ struct SessionsArgs {
 fn parse_args() -> Result<Command, String> {
     let mut arguments = env::args().skip(1);
     match arguments.next().as_deref() {
-        Some("control") => Ok(Command::Control(arguments.collect())),
         Some("--version") if arguments.next().is_none() => Ok(Command::Version),
         Some("sessions") => parse_sessions_args(arguments).map(Command::Sessions),
         Some("push") => parse_push_args(arguments).map(Command::Push),
@@ -515,7 +513,6 @@ fn run(command: Command) -> Result<(), String> {
         semon_sessions::pricing::start_default_refresh();
     }
     match command {
-        Command::Control(args) => run_control(args),
         Command::Version => {
             println!("semon {}", env!("CARGO_PKG_VERSION"));
             Ok(())
@@ -712,99 +709,6 @@ fn machine_options(
         .collect()
 }
 
-fn run_control(args: Vec<String>) -> Result<(), String> {
-    semon_control::require_collection_control().map_err(|error| error.to_string())?;
-    let usage = "Usage: semon control codex --codex NATIVE_PACKAGE/bin/codex --workspace PATH --state NEW_PRIVATE_DIR [--config MODEL_CONFIG]
-       semon control observe --socket PATH --thread NATIVE_ID --codex-home PATH --journal PATH";
-    let mode = args.first().ok_or_else(|| usage.to_owned())?;
-    let mut values = std::collections::BTreeMap::new();
-    let mut rest = args[1..].iter();
-    while let Some(name) = rest.next() {
-        if ![
-            "--codex",
-            "--workspace",
-            "--state",
-            "--config",
-            "--socket",
-            "--thread",
-            "--codex-home",
-            "--journal",
-        ]
-        .contains(&name.as_str())
-            || values.contains_key(name)
-        {
-            return Err(usage.into());
-        }
-        values.insert(
-            name.clone(),
-            rest.next().ok_or_else(|| usage.to_owned())?.clone(),
-        );
-    }
-    let allowed: &[&str] = match mode.as_str() {
-        "codex" => &["--codex", "--workspace", "--state", "--config"],
-        "observe" => &["--socket", "--thread", "--codex-home", "--journal"],
-        _ => return Err(usage.into()),
-    };
-    if values.keys().any(|key| !allowed.contains(&key.as_str())) {
-        return Err(usage.into());
-    }
-    let value = |key: &str| values.get(key).cloned().ok_or_else(|| usage.to_owned());
-    let (driver, home, _session) = match mode.as_str() {
-        "codex" => {
-            let session = semon_control::local::LocalSession::launch(
-                Path::new(&value("--codex")?),
-                Path::new(&value("--workspace")?),
-                Path::new(&value("--state")?),
-                values.get("--config").map(Path::new),
-            )
-            .map_err(|e| e.to_string())?;
-            // Quote owner-selected paths in the printed terminal command.
-            let quote = |value: &str| format!("'{}'", value.replace('\'', "'\"'\"'"));
-            eprintln!(
-                "Codex thread {}. After the first message, attach a terminal: CODEX_HOME={} {} --remote {} resume {}",
-                session.driver.thread_id(),
-                quote(&session.home.to_string_lossy()),
-                quote(&value("--codex")?),
-                quote(&format!("unix://{}", session.socket.display())),
-                session.driver.thread_id()
-            );
-            (session.driver.clone(), session.home.clone(), Some(session))
-        }
-        "observe" => {
-            let store = std::sync::Arc::new(semon_control::RequestStore::new(
-                semon_control::Journal::open(Path::new(&value("--journal")?))
-                    .map_err(|e| e.to_string())?,
-            ));
-            let driver = semon_control::codex::Codex::observe(
-                Path::new(&value("--socket")?),
-                &value("--thread")?,
-                store,
-            )
-            .map_err(|e| e.to_string())?;
-            (driver, PathBuf::from(value("--codex-home")?), None)
-        }
-        _ => return Err(usage.into()),
-    };
-    let sessions = semon_sessions::Options {
-        codex_home: home.clone(),
-        claude_home: home.join("absent-claude"),
-        copilot_home: home.join("absent-copilot"),
-        cache: home.join("semon-index.json"),
-        all: true,
-        ..Default::default()
-    };
-    semon_sessions::serve_with_control(
-        semon_sessions::ServeOptions {
-            sessions,
-            machines: Vec::new(),
-            received: None,
-            listen: "127.0.0.1:0".into(),
-        },
-        driver,
-    )
-    .map_err(|e| e.to_string())
-}
-
 fn run_sessions(args: SessionsArgs) -> Result<(), String> {
     if let Some(dir) = args.received.clone() {
         if !args.serve {
@@ -957,16 +861,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn paused_delivery_refuses_stale_and_malformed_cli_calls_before_initialization() {
-        for arguments in [
-            vec![],
-            vec!["codex"],
-            vec!["observe", "--socket", "/missing/private.sock"],
-        ] {
-            let error =
-                run_control(arguments.into_iter().map(str::to_owned).collect()).unwrap_err();
-            assert!(error.starts_with("capability_unavailable:"), "{error}");
-        }
+    fn paused_find_refuses_stale_and_malformed_cli_calls_before_initialization() {
         for arguments in [
             vec!["find"],
             vec!["find", "text"],

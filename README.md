@@ -7,20 +7,21 @@ over harness-native agent sessions collected from your machines. Native source
 logs remain the source of truth; the incremental Session Event Index and Session
 Catalog are the foundation for the ASI store, CLI/MCP query and analytics. Session
 display and two-way harness control are not product goals; see the
-[ASI direction](docs/design/asi-direction.md). Until the retirements it lists land,
-the behavior documented below remains current.
+[ASI direction](docs/design/asi-direction.md).
 
-The core CLI lives in `semon-cli`; session discovery/parsing and focused reads live
-in `semon-sessions`, generic mirror synchronization in `semon-push`, retained SSH transport
-in `semon-ssh`. Retained optional runtime/control engines live in `semon-runtime`/`semon-control`.
+The core CLI lives in `semon-cli`; native session discovery, parsing and focused
+reads live in `semon-sessions`, and non-SSH Push/receive lives in `semon-push`.
+The Session Event Index and Catalog support native history, query and analytics.
 
 Encrypted Relay and Canonical Trace Store are retired pre-release experiments.
 The product does not ship their protocols, capture services or migration tools.
-Native source logs, the Session Event Index, generic Push, SSH and runtime
-observation remain supported. This code change does not remove user data,
-keys or installed services. See the [session foundation contract](docs/design/session-foundation-retirement.md).
-
-The collection configuration temporarily pauses two-way harness control, managed runtime delivery, broad full-text retrieval and all SSH capabilities. Collection, synchronization, monitoring, metadata navigation and readable native history remain active without model, compute or SSH credentials or SSH connectivity. Direct `find`, control and SSH calls return `capability_unavailable` before native discovery, controller/provider initialization or delivery. Passive questions, approvals, outcomes, lineage and handoffs remain visible. Native archive/unarchive, enrollment/revocation, collection configuration, authorization, export and explicit data administration remain in scope. Existing credentials, history, operation receipts and uncertain outcomes are preserved; this pause stops no installed harness and replays no unknown write. See the [temporary collection scope](docs/design/session-foundation-retirement.md#temporary-collection-scope).
+Control delivery, managed runtime and SSH are also retired, with their code and
+active entry points removed. Local collection, non-SSH Push/receive, native
+identity and lineage, passive questions and approvals from logs, archive and
+unarchive, enrollment, authorization, export, and passive runtime observation
+remain supported. Full-text `find` remains paused until the ASI query surface
+lands. Retirement does not delete user data, credentials, history or installed
+services. See the [session foundation contract](docs/design/session-foundation-retirement.md#collection-retirement-scope).
 
 ## Seeing your agent sessions
 
@@ -38,7 +39,7 @@ The CLI, Viewer and Query share the native Session Event Index (`sessions-index.
 
 `--serve` prints a token-bearing URL and starts a local viewer on a random `127.0.0.1` port. Open that URL on this machine; `--listen 127.0.0.1:PORT` chooses a port. The first request sets an `HttpOnly; SameSite=Strict` cookie, and subsequent pages use it without keeping the token in the address bar. Home, recent sessions and machine pages read native overview metadata. Session navigation uses the native Catalog; a selected session loads its own generation-fenced transcript and relationship context. Thinking and tool details start collapsed, live transcripts follow new entries, and native/no-JavaScript pages retain navigation and recorded history. Normal Viewer reads do not prepare a complete workspace model. Catalog discovery and complete reconciliation still depend on the configured history; a cold observation may be provisional while background preparation continues. The local viewer requires the token or cookie and an exact loopback Host header, and sends no-store, CSP, frame and referrer headers. It never writes agent homes.
 
-Native reads authorize a configured source key before resolving a session. `GET /api/session-catalog?machine=SOURCE` returns bounded metadata pages; its continuation cursor binds the published Catalog generation. `GET /api/session-transcript?machine=SOURCE&sid=KEY` reads a bounded selected transcript range, with `after` or `before` slot anchors and an optional expected `generation`. `GET /api/session-entry` expands a selected entry or recorded text field under the same source, session and generation checks. Current and retained history are explicit read scopes; neither grants runtime control authority. The reader contracts are documented in [docs/design/session-source-reader.md](docs/design/session-source-reader.md) and [docs/design/retained-native-projections.md](docs/design/retained-native-projections.md). Transcript data is placed in the page using text nodes so source HTML remains inert. The CLI `--json` tree schema is described below.
+Native reads authorize a configured source key before resolving a session. `GET /api/session-catalog?machine=SOURCE` returns bounded metadata pages; its continuation cursor binds the published Catalog generation. `GET /api/session-transcript?machine=SOURCE&sid=KEY` reads a bounded selected transcript range, with `after` or `before` slot anchors and an optional expected `generation`. `GET /api/session-entry` expands a selected entry or recorded text field under the same source, session and generation checks. Current and retained history are explicit read scopes; neither grants execution authority. The reader contracts are documented in [docs/design/session-source-reader.md](docs/design/session-source-reader.md) and [docs/design/retained-native-projections.md](docs/design/retained-native-projections.md). Transcript data is placed in the page using text nodes so source HTML remains inert. The CLI `--json` tree schema is described below.
 
 The Viewer is also a library API: `semon_sessions::ViewerCore` serves native pages, assets, Catalog, Transcript, Entry and focused relationship routes. The embedding server authenticates requests, supplies stable source keys, calls `respond` or `respond_with`, and sends the reply with `semon_sessions::SECURITY_HEADERS`. Run blocking native reads off an async runtime. The core supports concurrent callers through `Arc`, without a caller lock. Request-specific account menus belong in `Extras`. Native Catalog demand uses a shared `RefreshPool` in every mode. `Refresh::Background` observes source changes; a receiver can select `Refresh::OnInvalidate` and call `invalidate(key)` after a push. Catalog production does not construct a workspace Viewer model. `ViewerCore::with_machines` admits several native homes; `with_received` follows a receiver directory. Call `close` and drain active reads before changing source custody or removing files.
 
@@ -70,7 +71,7 @@ semon receive token list --dir ~/semon-mirror
 semon receive --dir ~/semon-mirror            # listens on 127.0.0.1:8735
 ```
 
-Put the token on that machine in a 0600 file, and point `semon push` at the receiver. For a receiver on this machine, plain `http` to loopback is allowed. Across machines, use an operator-provisioned TLS receiver with a publicly trusted certificate; SSH tunnels and SSH-mediated collection are paused:
+Put the token on that machine in a 0600 file, and point `semon push` at the receiver. For a receiver on this machine, plain `http` to loopback is allowed. Across machines, use an operator-provisioned TLS receiver with a publicly trusted certificate:
 
 ```sh
 semon push --to http://127.0.0.1:8735 --token-file ~/.config/semon/laptop.token --watch
@@ -106,7 +107,7 @@ Every session keeps its machine, each machine answers for its own transcripts, a
 
 DIR is only read. Nothing is written there, and no symbolic link is followed out of a machine's directory: a machine directory, a home (`claude/`, `codex/` or their `projects/` and `sessions/`), a `facts.json` or a log file that is a link is ignored. What the viewer keeps for each received machine (its metadata cache and the facts it serves) goes beside `--cache`, under `received/`.
 
-`--machines` changes nothing about who can reach the viewer: it listens only on `127.0.0.1`, and requires the token URL (then its cookie) and an exact local Host header. Open the printed URL on that machine. SSH tunneling is paused in the collection configuration; it is not an active remote-viewing setup route.
+`--machines` changes nothing about who can reach the viewer: it listens only on `127.0.0.1`, and requires the token URL (then its cookie) and an exact local Host header. Open the printed URL on that machine.
 
 ## For agents: `semon query` and `semon mcp`
 
@@ -184,8 +185,6 @@ Semon shows each harness's official icon to identify where a session came from. 
 repository's Apache-2.0 license.
 
 Third-party trademarks are the property of their respective owners. Semon is not affiliated with or endorsed by these companies.
-
-SSH onboarding, testing, installation/bootstrap/update, tunneling and SSH-mediated collection/execution are paused. Public transport calls refuse before credentials or network admission. [SSH bootstrap](docs/ssh-bootstrap.md) records the retained private transport and deferred qualification; existing credentials, installations and history are preserved.
 
 Model reference prices refresh automatically in long-running processes; see
 [runtime pricing](docs/runtime-pricing.md) for offline fallback and configuration.

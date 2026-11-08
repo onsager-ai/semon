@@ -1,7 +1,4 @@
 import { setGeometry, releaseGeometry } from './geometry';
-import { LocalControl } from './localControl';
-import { createPanelChrome, type PanelChrome } from './panel';
-import { unavailableControl, type ControlView } from './control';
 import type { RuntimeObservationView } from './runtimeObservation';
 import { commitApplicationView } from './application-view';
 import { Component, Fragment, render } from 'preact';
@@ -131,8 +128,6 @@ export interface FooterView {
   parent?: { id: string; turn?: string; name: string };
 }
 export interface SessionSnapshot {
-  composerTarget?: HTMLElement;
-  control?: ControlView;
   runtime?: RuntimeObservationView;
   id: string;
   name: string;
@@ -150,8 +145,6 @@ export interface SessionSnapshot {
 }
 export interface TranscriptHost extends SentenceHost {
   committed(): void;
-  composerOpened?(panel: { destroy(): void }): void;
-  composerClosed?(panel: { destroy(): void }): void;
   trace(id: string): void;
   toolAll(key: string, label: string): void;
   script(key: string): void;
@@ -161,9 +154,6 @@ export interface TranscriptHost extends SentenceHost {
   jump(): void;
 }
 interface SessionOwner {
-  composer: HTMLElement;
-  composerTrigger: HTMLElement;
-  composerPanel: PanelChrome | null;
   disposed: boolean;
   snapshot: SessionSnapshot;
   host: TranscriptHost;
@@ -181,110 +171,12 @@ interface SessionOwner {
   jumpCount: number;
   jumpBusy: boolean;
   paint(): void;
-  controls: (() => void) | null;
   runtime: (() => void) | null;
   pagers: Partial<Record<'before' | 'after', () => void>>;
   measure(): void;
   change(key: string): void;
 }
 const owners = new WeakMap<HTMLElement, SessionOwner>();
-/** The existing page tree owns this leaf; status never walks transcript blocks. */
-class SessionControls extends Component<{ owner: SessionOwner }> {
-  componentDidMount() {
-    this.props.owner.controls = () => this.forceUpdate();
-  }
-  componentWillUnmount() {
-    this.props.owner.controls = null;
-  }
-  render() {
-    const snapshot = this.props.owner.snapshot;
-    if (!snapshot.control) return null;
-    let view = snapshot.control;
-    const runtime = snapshot.runtime?.observation;
-    if (runtime?.freshness === 'current' && ['ended', 'failed'].includes(runtime.state)) {
-      const blocked = unavailableControl(
-        snapshot.id,
-        runtime.state === 'ended'
-          ? 'This session has ended.'
-          : runtime.state === 'failed'
-            ? 'This environment needs attention.'
-            : 'Current environment controls are unavailable.',
-      );
-      const retained = view;
-      view = {
-        ...view,
-        get draft() {
-          return retained.draft;
-        },
-        canReconnect: false,
-        snapshot: blocked.snapshot,
-        send: blocked.send,
-        interrupt: blocked.interrupt,
-        answer: blocked.answer,
-        reconnect: blocked.reconnect,
-      };
-    }
-    return <LocalControl view={view} runtimeObserved={!!snapshot.runtime} />;
-  }
-}
-
-/** The transcript owner retains the existing input root across panel dismissal. */
-function paintComposer(owner: SessionOwner) {
-  if (owner.disposed) return;
-  if (!owner.snapshot.control) {
-    owner.composerPanel?.destroy();
-    render(null, owner.composerTrigger);
-    return;
-  }
-  const pending =
-    owner.snapshot.control?.snapshot.requests.filter(
-      (request) => request.state.state === 'open' || request.state.state === 'claimed',
-    ).length ?? 0;
-  render(
-    <button
-      type="button"
-      class="btn sh-quiet session-composer-trigger"
-      aria-label={pending ? 'Composer; ' + pending + ' pending requests' : 'Open Composer'}
-      aria-haspopup="dialog"
-      aria-expanded={!!owner.composerPanel}
-      onClick={(event) => {
-        if (owner.disposed || !event.currentTarget.isConnected || owner.composerPanel) return;
-        const trigger = event.currentTarget;
-        const panel = createPanelChrome(
-          {
-            title: 'Composer',
-            label: 'Session Composer',
-            className: 'anchored session-composer-panel',
-          },
-          {
-            opened() {
-              owner.host.composerOpened?.(panel);
-              paintComposer(owner);
-              owner.composer
-                .querySelector<HTMLTextAreaElement>('textarea')
-                ?.focus({ preventScroll: true });
-            },
-            closed() {
-              owner.host.composerClosed?.(panel);
-              owner.composer.remove();
-              owner.composerPanel = null;
-              if (!owner.disposed) {
-                paintComposer(owner);
-                if (trigger.isConnected) trigger.focus({ preventScroll: true });
-              }
-            },
-          },
-        );
-        owner.composerPanel = panel;
-        panel.body.append(owner.composer);
-        panel.show();
-      }}
-    >
-      Composer{pending ? ' · ' + pending : ''}
-    </button>,
-    owner.composerTrigger,
-  );
-}
 /** Durable status stays observable even when no current native control identity exists. */
 class SessionRuntime extends Component<{ owner: SessionOwner }> {
   componentDidMount() {
@@ -911,9 +803,6 @@ export function renderSessionScreen(
   }
   if (!owner) {
     const state: SessionOwner = {
-      composer: document.createElement('div'),
-      composerTrigger: document.createElement('span'),
-      composerPanel: null,
       snapshot,
       host,
       disposed: false,
@@ -930,7 +819,6 @@ export function renderSessionScreen(
       jumpCount: 0,
       jumpBusy: false,
       paint() {},
-      controls: null,
       runtime: null,
       pagers: {},
       measure() {},
@@ -939,7 +827,6 @@ export function renderSessionScreen(
     };
     owner = state;
     owners.set(root, state);
-    render(<SessionControls owner={state} />, state.composer);
     state.measure = () => {
       if (state.disposed) return;
       let changed = false;
@@ -1018,10 +905,6 @@ export function renderSessionScreen(
       viewport?.removeEventListener('scroll', fitDock);
       dockObserver.disconnect();
       state.disposed = true;
-      state.composerPanel?.destroy();
-      render(null, state.composer);
-      render(null, state.composerTrigger);
-      state.composerTrigger.remove();
       releaseGeometry(root);
       state.disposed = true;
       state.observer.disconnect();
@@ -1037,10 +920,6 @@ export function renderSessionScreen(
   state.host = host;
   state.blocks = mergeBlocks(state.blocks, snapshot);
   state.snapshot = snapshot;
-  if (snapshot.composerTarget && state.composerTrigger.parentElement !== snapshot.composerTarget)
-    snapshot.composerTarget.replaceChildren(state.composerTrigger);
-  state.controls?.();
-  paintComposer(state);
   state.change = (key) => {
     for (const block of state.blocks)
       if (
@@ -1129,13 +1008,6 @@ export function renderSessionScreen(
               if (node && state.jump && state.jump.parentNode !== node) node.append(state.jump);
             }}
           />
-          {view.observation === 'Cached history' && view.control && (
-            <div class="local-control">
-              <div class="composer-unavailable" role="status" data-transcript-observation="">
-                <span>{view.observation}</span>
-              </div>
-            </div>
-          )}
         </div>
         {view.footer && (
           <div class="session-foot">
@@ -1200,19 +1072,6 @@ export function renderSessionScreen(
   host.committed();
 }
 
-/** Update only native controls; retain parsed blocks, keyed turns and input ownership. */
-export function updateSessionControl(root: HTMLElement, control: ControlView | undefined) {
-  const owner = owners.get(root);
-  if (!owner || owner.disposed) return;
-  owner.snapshot = { ...owner.snapshot, control };
-  if (
-    owner.snapshot.composerTarget &&
-    owner.composerTrigger.parentElement !== owner.snapshot.composerTarget
-  )
-    owner.snapshot.composerTarget.replaceChildren(owner.composerTrigger);
-  owner.controls?.();
-  paintComposer(owner);
-}
 export function updateSessionRuntime(
   root: HTMLElement,
   runtime: RuntimeObservationView | undefined,
@@ -1221,7 +1080,6 @@ export function updateSessionRuntime(
   if (!owner || owner.disposed) return;
   owner.snapshot = { ...owner.snapshot, runtime };
   owner.runtime?.();
-  owner.controls?.();
 }
 
 export function updateSessionPager(root: HTMLElement, view: PagerView) {
@@ -1302,9 +1160,4 @@ export function updateSessionName(root: HTMLElement, name: string) {
   owner.snapshot = { ...owner.snapshot, name };
   const heading = root.querySelector('.ph > h1');
   if (heading) heading.textContent = screenText(name);
-}
-
-/** Close the contextual controls when the reader leaves this session. */
-export function closeSessionComposer(root: HTMLElement) {
-  owners.get(root)?.composerPanel?.destroy();
 }

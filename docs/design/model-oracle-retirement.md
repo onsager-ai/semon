@@ -116,5 +116,6 @@ Codex/Claude conformance roadmaps remain outside this cleanup.
 visual, exact-pair and release qualification. This branch adds no shared public
 interface, UI behavior, bundle or Hub pin change. Local/source CI evidence must
 name the actual candidate; prior Source/Hub receipts do not qualify a new pair.
-Control delivery, broad full-text retrieval and SSH remain paused. No merge,
-image publication, staging/production deployment or live cleanup is performed.
+Control delivery and SSH have since been retired; broad full-text retrieval
+remains paused until the ASI query surface lands. No merge, image publication,
+staging/production deployment or live cleanup is performed.

@@ -55,7 +55,6 @@ export { createMeasuredLayout } from './layout';
 export {
   renderSessionScreen,
   updateSessionPager,
-  updateSessionControl,
   updateSessionJump,
   updateSessionClock,
 } from './transcript';

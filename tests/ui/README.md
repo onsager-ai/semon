@@ -100,5 +100,4 @@ to the same reader.
 The interaction lane also runs `ui/tests/catalog-served.mjs` and
 `ui/tests/overview-served.mjs` against the compiled producer and embedded bundle
 at 390px, 820px and 1280px in both themes. They check bounded ranges, native bytes,
-keyboard paging, focus, root Sessions/Analytics, causal navigation and paused-control
-refusal, and save actual served screenshots for review.
+keyboard paging, focus, root Sessions/Analytics, causal navigation, and save actual served screenshots for review.

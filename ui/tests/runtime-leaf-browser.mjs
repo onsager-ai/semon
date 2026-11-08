@@ -6,7 +6,7 @@ const { outputFiles } = await build({
   absWorkingDir: new URL('../', import.meta.url).pathname,
   stdin: {
     contents:
-      "export {renderSessionScreen,updateSessionRuntime,updateSessionControl,updateSessionPager} from './src/lib/transcript';",
+      "export {renderSessionScreen,updateSessionRuntime,updateSessionPager} from './src/lib/transcript';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -45,41 +45,13 @@ for (const width of [390, 1280])
             ],
           },
         ];
-        window.control = {
-          snapshot: {
-            thread: 'native',
-            generation: 'g',
-            activeTurn: null,
-            connected: true,
-            capabilities: {
-              input: true,
-              steer: false,
-              interrupt: false,
-              commandApproval: false,
-              fileApproval: false,
-              questions: false,
-            },
-            reason: null,
-            requests: [],
-            actions: {},
-          },
-          busy: false,
-          uncertain: false,
-          note: '',
-          send: async () => false,
-          interrupt() {},
-          answer() {},
-          reconnect() {},
-        };
         RuntimeLeaf.renderSessionScreen(
           root,
           {
-            composerTarget: document.querySelector('#topbar'),
             id: 'catalog',
             name: 'Session',
             blocks,
             order: [],
-            control,
             runtime: { observation: null, reason: null, delivery: 'updating' },
           },
           {
@@ -100,12 +72,7 @@ for (const width of [390, 1280])
           throw Error('Runtime update walked transcript blocks');
         };
       });
-      await page.getByRole('button', { name: 'Open Composer' }).click();
-      const draft = page.locator('textarea');
-      await draft.fill('Retained draft');
-      await draft.focus();
-      const input = await draft.elementHandle(),
-        body = await page.locator('[data-entry-key="source-entry"]').elementHandle();
+      const body = await page.locator('[data-entry-key="source-entry"]').elementHandle();
       await page.evaluate(() =>
         RuntimeLeaf.updateSessionRuntime(root, {
           observation: {
@@ -122,8 +89,6 @@ for (const width of [390, 1280])
         .getByRole('region', { name: 'Environment status' })
         .getByText('This session has ended.', { exact: true })
         .waitFor();
-      assert.equal(await draft.inputValue(), 'Retained draft');
-      assert.equal(await page.evaluate((node) => node === document.activeElement, input), true);
       assert.equal(
         await page.evaluate(
           (node) => node === document.querySelector('[data-entry-key="source-entry"]'),
@@ -160,7 +125,6 @@ for (const width of [390, 1280])
         ),
         true,
       );
-      assert.equal(await page.evaluate((node) => node === document.activeElement, input), true);
       await page.evaluate(() =>
         RuntimeLeaf.updateSessionRuntime(root, {
           observation: {
@@ -178,8 +142,6 @@ for (const width of [390, 1280])
         .getByRole('region', { name: 'Environment status' })
         .getByText('This session has ended.', { exact: true })
         .waitFor();
-      assert.equal(await draft.inputValue(), 'Retained draft');
-      assert.equal(await page.locator('button[type="submit"]').isEnabled(), false);
     } finally {
       await browser.close();
     }

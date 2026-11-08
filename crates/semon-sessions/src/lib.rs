@@ -150,9 +150,7 @@ pub use refresh::RefreshPool;
 pub use union::{
     AccountLink, AccountMenu, AccountWorkspace, AdminLink, Extras, LinkMethod, Refresh, ViewerCore,
 };
-pub use viewer::{
-    SECURITY_HEADERS, ServeOptions, ViewerReply, serve, serve_listener, serve_with_control,
-};
+pub use viewer::{SECURITY_HEADERS, ServeOptions, ViewerReply, serve, serve_listener};
 
 #[derive(Clone, Debug)]
 pub struct Options {

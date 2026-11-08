@@ -64,20 +64,6 @@ test(
           .map((value) => value.split(';')[0])
           .join('; '),
       };
-      // The real collection server rejects stale delivery before parsing its
-      // payload; no controller or synthetic product bypass is supplied here.
-      for (const body of [
-        JSON.stringify({ op: 'send', id: 'harbor', text: 'synthetic refused input' }),
-        'malformed control fixture request',
-      ]) {
-        const refused = await fetch(address[1] + '/api/control', {
-          method: 'POST',
-          headers: { ...headers, origin: address[1], 'content-type': 'application/json' },
-          body,
-        });
-        assert.equal(refused.status, 503, 'authenticated stale control is unavailable');
-        assert.equal((await refused.json()).error.code, 'capability_unavailable');
-      }
       let home;
       for (let attempt = 0; attempt < 120; attempt++) {
         const response = await fetch(address[1] + '/api/viewer/home', { headers });

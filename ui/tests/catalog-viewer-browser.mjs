@@ -1863,7 +1863,6 @@ for (const width of [390, 1280])
           };
           window.app = CatalogViewer.mountViewerApplication({
             machinesPath: '/machines',
-            catalogControlStream: '/catalog/status',
             navigation: {
               leading: [
                 {
