@@ -22,25 +22,25 @@ and credential encryption remains active. Independent VM recovery (#255) is
 future scope, not a prerequisite. Preserve writer exclusion and durable uncertain
 operation reconciliation without adding speculative recovery infrastructure.
 
-## Temporary collection scope
+## Collection retirement scope
 
-> **Superseded direction (2026-11-08).** The [ASI direction](asi-direction.md)
-> turns the pause of two-way control, managed runtime delivery and SSH into
-> retirement of `semon-control`, `semon-runtime` and `semon-ssh`. Full-text
-> retrieval returns as part of the ASI query surface rather than the paused
-> `find`. The refusal behavior below remains current until those changes land.
+> **Current scope (2026-11-08).** The [ASI direction](asi-direction.md) retires
+> control delivery, managed runtime and SSH. The `semon-control`, `semon-runtime`
+> and `semon-ssh` crates, their active CLI/HTTP/MCP/UI entry points, managed E2B
+> workflows and SSH qualification scripts are removed in step 2, landed in this
+> branch. Multi-machine collection uses non-SSH Push/receive over TLS.
 
-The October 15, 2026 recovery candidate from Source `c402e481dbe23bcf03841e47b5f7eccd14c0e426` prioritizes collection, synchronization, monitoring and readable history (Source #380/#437 and Hub #267). Source #421's later unfinished framework remains preserved separately; this recovery does not adopt it. Two-way harness control, managed runtime delivery, broad cross-session full-text retrieval and all SSH capabilities are paused, rather than retired or replaced.
+Broad full-text `find` remains paused until the ASI query surface lands. Retirement
+never deletes user data, credentials, native history or installed services, and
+performs no live operational cleanup.
 
-The active Source CLI, local HTTP API and shared collection reader offer no session creation/resume, send, approval/question answer, steering, interrupt or reconnect journey. `semon control`, `serve_with_control`, fresh managed guest and private SSH controller binaries refuse before input, listener, credential or controller initialization. Authenticated stale HTTP writes receive HTTP 503 with `capability_unavailable`; unauthenticated requests retain HTTP 403. The native control status endpoint returns no live authority without preparing a selected source. Default private E2B stdio workers refuse create/bootstrap/dispatch, mutable RPC and qualification delivery before SDK admission; inspect/inspect_bootstrap and existing RPC snapshot reconciliation remain available. The legacy guest launch entry refuses before executing its retained launcher. Hub owns the matching authorized product/API/MCP/provider boundaries.
-
-`find` is absent from CLI/MCP advertisement. Public Query (ordinary, selected and Catalog), CLI and MCP stale calls receive `capability_unavailable`, including malformed search arguments, before source discovery, body reads or provider admission. The existing metadata `q` index remains navigation by name/key/repository and recorded fields, not a full-text index. Deterministic paging, direct lookup, source/relationship indexes and generation-verified transcript/tool reads remain supported. Find data/tables are not deleted and no replacement search service/index is introduced. In-session navigation over already selected rendered text remains a reader function.
-
-Public SSH discovery, connection checks, all mirror/native bootstrap variants, controller install/observe/stop and execution transport refuse with `capability_unavailable` before validation, private credential files, sockets or SSH process admission. Execution capability flags are all false. Pure host-key/target validation and receipt/identity reconstruction/application remain available for accepted history; they grant no transport. There is no active Source SSH CLI/MCP/UI route. The fixture installer and SSH qualification scripts also refuse before reading private input, credentials or creating a fixture. The embedded Python transport bodies remain private retained implementation, not public product entry points. SSH onboarding, connection testing, remote installation/bootstrap/update, tunnels and SSH-mediated collection/execution are outside the active configuration. Ordinary local collection and non-SSH Push/receive retain their existing admission and custody checks.
-
-Collection startup needs no model/compute/SSH credentials or SSH connectivity. Passive questions/approvals, tool outcomes, native identity, lineage/handoffs, native Archive/Unarchive, collection setup/enrollment/revocation, authorization, export and explicit data administration remain in scope. Existing credentials, operations and uncertain-result reconciliation remain intact. No installed process is terminated and no unknown write is replayed.
-
-Retained optional control/runtime engines and search matchers keep their independent semantic/security fixtures. Private test-only Query helpers qualify the existing search oracle; they are unavailable to product callers. The `ssh-controller-qualification` example retains the controller fixture implementation, while the default binary's refusal is separately tested. Real-SSH OpenSSH/native-controller jobs and fixture commands are explicitly deferred under the October 15 SSH scope decision; their workflow definitions remain in Git history, not the active workflow; deferred jobs are not passing qualification. Offline transport error/cancellation/output limits, pure receipt semantics, supervisor isolation/lifetime and non-SSH checkpoint custody tests remain active. Reactivating real-SSH transport qualification requires a future scope decision and adaptation of the preserved oracles to an isolated fixture owner; no product bypass is provided. The paused native local product-control workflow is retired from the active tree; the probe scripts and historical receipts remain, and do not qualify the collection candidate. Candidate Rust, UI, browser and exact-pair evidence must be recorded separately from trusted-main, published-image, staging, PG and SSH release qualification. Existing approved visual references, security checks and thresholds remain unchanged.
+Local native collection, non-SSH Push/receive, Session Event Index and Catalog,
+focused Query reads, native identity/lineage/handoffs, passive questions and
+approvals recorded in logs, Archive/Unarchive, enrollment/authorization, export,
+and passive runtime observation (process and lock facts) remain supported.
+Metadata navigation and selected-text navigation remain available; full-text
+search is not currently exposed. See the [ASI direction](asi-direction.md) for
+sequencing and Hub follow-ups.
 
 ## Ownership
 
@@ -55,7 +55,7 @@ and readers never enter shared caches or persistent projections.
 
 The product binary belongs to `semon-cli`. Its normal/build dependency graph and
 the workspace exclude the retired Store, Relay, capture and exporter packages.
-Hub build owners, Docker, SSH, managed artifacts and CI use that binary owner.
+Hub build owners, Docker and CI use that binary owner.
 Hub's sole Semon pin is its submodule gitlink; verify the exact checked-out pair
 with `scripts/verify-source-pair.sh`. Do not add another source pin.
 
@@ -96,8 +96,9 @@ cannot be rebuilt, and old archive markers do not become new custody authority.
   current from retained history under generation fences. Unchanged sources reuse
   the existing Event Index without repeated full-history parsing.
 - Local/stdio and hosted MCP preserve list_sessions, get_session, read_transcript
-  and stalls through the shared native Query. Broad find is temporarily unavailable. Hosted requests admit native
-  sources without ViewerCore, warming or workspace-model preparation.
+  and stalls through the shared native Query. Broad full-text `find` remains paused
+  until the ASI query surface lands. Hosted requests admit native sources without
+  ViewerCore, warming or workspace-model preparation.
 - Focused history reads retrieve only selected sources/ranges and bounded
   relationship context, verify identity/generation/integrity, avoid tenant locks
   during remote I/O and unrelated restoration, coalesce duplicate reads and bound
@@ -106,9 +107,10 @@ cannot be rebuilt, and old archive markers do not become new custody authority.
   transcript expansion and embedded consumers retain their behavior. The
   server-rendered no-JavaScript session reader and its legacy URL aliases are retired. Full-workspace Model ownership/routes, transaction/delta/SSE, compat=1
   and warming are retired. Preserve structural and consumer regression evidence.
-- Preserve session names, selection/navigation, the paused control boundary, tool
-  rendering, collapsed Thinking, scroll/focus, responsive/accessibility behavior
-  and current/retained history. Preserve the approved visual references and tests.
+- Preserve session names, selection/navigation, native tool rendering, collapsed
+  Thinking, scroll/focus, responsive/accessibility behavior and current/retained
+  history. Control delivery, managed runtime and SSH are retired. Preserve the
+  approved visual references and applicable tests.
 - Measure baseline versus candidate on small/large unrelated histories, multiple
   machines, retained archives and concurrent refresh/read/cancellation/deletion.
   Report actual source/range reads, archive GETs/bytes, model builds, latency,

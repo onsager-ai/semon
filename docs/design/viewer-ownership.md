@@ -1,5 +1,12 @@
 # Canonical Viewer ownership
 
+> **Historical scope (2026-11-08).** This contract records the former session
+> Viewer, including control, composer, and live control/runtime observer owners.
+> Control delivery and session display are retired under the [ASI direction](asi-direction.md);
+> those feature-specific rules below are historical and do not define current
+> product scope. Future Viewer work is the analytics UI, with native query and
+> passive process/lock observations retained.
+
 The hosted Viewer has one bounded, source-scoped application. A document mounts
 `createCatalogViewer` through `mountViewerApplication`; replacement destroys the
 previous mount first. Analytics, Sessions, selected transcripts, Trace and
@@ -185,9 +192,9 @@ formatting and causal calculations remain where the canonical reader needs them.
 Qualified persisted reads can register update interest without cold preparation;
 missing evidence and invalidation still queue the same bounded native producer.
 
-## Temporary collection configuration
+## Former collection configuration
 
-The canonical collection reader supplies no control owner, live control stream, launch snapshot or Composer action. New Session navigation is removed. Passive session history also omits the disabled-control availability notice and its disclosure: paused two-way control is not a session error. Reading, Jump to Bottom, runtime observations and actual history errors retain their existing owners. Independent runtime observation and passive recorded asks/outcomes retain their existing owners. Shared optional control components and their direct fixtures retain drafts, unknown outcomes and lifecycle semantics; no optional fixture grants active collection authority. Broad full-text retrieval is paused; metadata navigation and selected-text navigation remain active. The retained control behavior described elsewhere in this contract applies only to those optional consumers. See the [temporary collection scope](session-foundation-retirement.md#temporary-collection-scope).
+This section records the collection configuration before the 2026-11-08 retirement. Control delivery, managed runtime and SSH are retired; full-text `find` remains paused until the ASI query surface lands. The former reader removed control actions and New Session navigation while retaining passive recorded asks/outcomes and process/lock observations. Metadata and selected-text navigation were available in that reader. These details, including the optional control components described elsewhere in this historical contract, do not define current product scope. See the [collection retirement scope](session-foundation-retirement.md#collection-retirement-scope).
 
 ## Refactoring contract
 

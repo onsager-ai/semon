@@ -102,9 +102,9 @@ correctness/durability or the 30 s budget. Expand diagnostics only for a specifi
 unresolved question.
 
 Physical/clipped query windows, alias/virtual/composite-history preparation,
-cold identity/uniqueness, received-copy/composer authority and final
-native/browser/PG/SSH/image qualification remain
-separate correctness and release questions. Passing this contract does not close
-them. Exact-pair results and remaining blockers belong in #380 and its integration
+cold identity/uniqueness and received-copy authority remain separate correctness
+and release questions. Native/browser/PG/image qualification is still separately
+gated; SSH qualification was retired with SSH capability code. Passing this contract
+does not close them. Exact-pair results and remaining blockers belong in #380 and its integration
 PRs. Identify production-representative measurements separately from synthetic
 debug fixtures and instrumented CI results.

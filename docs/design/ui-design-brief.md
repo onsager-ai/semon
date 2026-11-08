@@ -1,5 +1,11 @@
 # Semon UI design brief
 
+> **Historical scope (2026-11-08).** This source-derived brief describes the
+> former session Viewer, including transcript and composer details. Session
+> display and control delivery are retired under the [ASI direction](asi-direction.md);
+> these refinements do not define current UI scope. The Viewer is now an analytics
+> UI, with query results as its other planned surface.
+
 This source-derived brief retains applicable visual foundations and approved
 reader/composer refinements. Current task scope and settled product decisions
 supersede obsolete capability invitations and copy. The shared design contract,
@@ -9,8 +15,8 @@ Snapshot provenance: initial viewer `274f0b9bb43f65982863a22c177413c04d805740`;
 section-specific source revisions remain below. These are historical provenance,
 not the current checkout or a live product pin. Read [the design contract](design-contract.md)
 and [baseline scope and review](ai-design-workflow.md#baseline-scope-and-review)
-before applying this brief. Dormant composer variants do not authorize enabling
-paused session control, SSH or managed runtime delivery.
+before applying this brief. Dormant composer variants do not authorize restoring retired session control,
+SSH or managed runtime delivery.
 
 ## Foundation
 
@@ -166,14 +172,13 @@ Capability recovery restores input; readable history never grants send authority
 Drafts belong to source and session identity and clear only after confirmed
 acceptance of that exact draft. Unknown delivery remains blocked from replay.
 
-During the collection pause, the passive reader omits the routine “Native session
-controls are unavailable” notice and its disabled-input disclosure. This current
-presentation supersedes that part of the historical complete-application reference;
-it preserves saved history, Jump to Bottom and actionable reading errors. Optional
-control components retain the draft and uncertain-delivery rules above. This does
-not enable control delivery. The owner confirmed the notice removal during the
-2026-10-19 unified Hub application review; exact screenshot acceptance remains
-governed by the existing visual comparator.
+The former collection reader omitted the routine “Native session controls are
+unavailable” notice and its disabled-input disclosure. That historical presentation
+preserved saved history, Jump to Bottom and actionable reading errors. Its optional
+control components and draft/uncertain-delivery rules do not authorize restoring
+control delivery. The owner confirmed notice removal during the 2026-10-19 unified
+Hub application review; exact screenshot acceptance remains governed by the
+existing visual comparator.
 
 The written staging requirements are the implementation contract when the owner
 authenticated Site cannot be opened. This section changes the conversation reader

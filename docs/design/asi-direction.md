@@ -43,7 +43,7 @@ sequencing. Progress is tracked in the pinned roadmap issue, #549.
 | Analytics UI spec | Adopt the session activity viewer spec (semon#532) as the analytics UI direction. |
 | Consumers | Agents (MCP/SQL) and humans (dashboards) equally, over one shared schema. |
 | Viewer | Shrink to an analytics UI: keep the authenticated server, shell and security boundary; drop transcript-browsing polish. Pixel/visual comparison is removed from CI by semon#536/#537. New UI work is dashboards and query results. |
-| Control, runtime, SSH | Retire `semon-control`, `semon-runtime` and `semon-ssh` code. Push/receive over TLS covers multi-machine collection. Retirement deletes no user data, credentials, history or installed services. |
+| Control, runtime, SSH | Retired in step 2: `semon-control`, `semon-runtime` and `semon-ssh` code and active entry points are removed. Push/receive over TLS covers multi-machine collection. Retirement deletes no user data, credentials, history or installed services. |
 
 ## Architecture
 
@@ -97,8 +97,11 @@ details.
 ## Sequencing
 
 1. Adopt this direction in README.md and AGENTS.md; update
-   `session-foundation-retirement.md` so the temporary pauses become retirements.
-2. Retire control/runtime/SSH code and their CI jobs.
+   `session-foundation-retirement.md` so the temporary pauses become retirements
+   (landed in semon#541).
+2. Retire control/runtime/SSH code and their CI jobs (landed in semon#541).
+   The browser, design-document and Hub Session display/control/runtime follow-ups
+   remain in step 6.
 3. Specify the ASI storage schema by adopting methodology §1.1 in SQLite
    (normalized events and content, FTS5, retention beyond the current 60-day
    Analytics window, multi-machine keys, body opt-in and redaction). Start from
@@ -109,5 +112,5 @@ details.
    Pixel baselines and visual tooling are removed by semon#536/#537 (Source) and
    semon-hub#377 (Hub).
 6. Hub follow-ups: shrink browser suites that exercise display/control/runtime,
-   delete paused `ui/ssh.mjs` with the SSH retirement, and reconcile the
-   viewer/session redesign docs with this direction.
+   delete `ui/ssh.mjs` and reconcile viewer/session redesign docs with this
+   direction. These follow-ups remain separate from the landed Semon retirement.

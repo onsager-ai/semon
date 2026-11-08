@@ -1,5 +1,10 @@
 # #380 UI preservation evidence
 
+> **Historical scope (2026-11-08).** This document records a session Viewer
+> design and its visual evidence. Session display and control delivery have since
+> been retired under the [ASI direction](asi-direction.md). The recorded decisions
+> preserve their historical provenance and do not authorize restoring that product.
+
 ## Latest user decision — neutral Machine facet and retained Welcome
 
 After reviewing the [five-state follow-up Site](https://semon-380-stale-state-review.tikazyq.chatgpt.site/),

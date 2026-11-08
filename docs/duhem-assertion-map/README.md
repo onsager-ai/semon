@@ -1,5 +1,11 @@
 # Semon #501 assertion/state to owner migration map
 
+> **Historical inventory (2026-11-08).** This map was authored against an earlier
+> source and CI tree. Control delivery, managed runtime and SSH code and their
+> qualification jobs have since been retired and removed. Rows about those
+> capabilities are historical classification only; linked source paths may no
+> longer exist, and no prior CI disposition describes current checks.
+
 ## Purpose and scope
 
 This directory is Plan item 1 of [onsager-ai/semon#501](https://github.com/onsager-ai/semon/issues/501): the consumer-side map of Semon assertions and states to their proposed owner (Duhem VD, retained native, or deferred), as required by Duhem's migration contract.
@@ -72,6 +78,9 @@ Counted with a script over the 349 data rows of the assertion tables, reading th
 | other | 0 |
 | **Total** | **349** |
 
+These counts describe the map at its cited source and Duhem baselines, not the
+current Semon tree. Retired capability dispositions are historical.
+
 Per file (same method):
 
 | File | VD | native | deferred | n/a | other | active | internal | deferred-paused | disabled-boundary | historical | other |
@@ -106,9 +115,9 @@ Each decision follows the code and workflow at this ref: whether CI executes the
 - `catalog-journey.mjs`: resolved to `historical` (manual real-binary measurement harness, not CI coverage). Canonical is the [ui-served-scripts.md](ui-served-scripts.md) row (status corrected from active; disposition text kept), the two [ui-unit-and-checks.md](ui-unit-and-checks.md) rows are pointers. Evidence: the only invocation is `scripts/catalog-journey.py:160` (`ui/tests/catalog-journey.mjs` as default driver); `.github/workflows/ui.yml` has no match and `ui/package.json:8-19` lists no script for it. Its metrics are tagged M4 #582.
 - `overview-served.mjs` screenshots: resolved to `active` diagnostic evidence, native diagnostic artifact. Canonical is the [ui-served-scripts.md](ui-served-scripts.md) row; the unit row "historical; deferred visual comparator" is a pointer (a pixel comparator would be M3 #581 visual, and is not proposed). Evidence: the file runs in CI at `.github/workflows/ui.yml:240` (`node --test ui/tests/catalog-served.mjs ui/tests/overview-served.mjs`, with `SEMON_OVERVIEW_VISUAL_OUT` at `:238`); the screenshots carry no assertion, so only the artifact is diagnostic.
 - `code-scroll.mjs`, `jump-toolbar.mjs`, `continuity-refinement-browser.mjs`, `staging-viewer-browser.mjs`: resolved to `internal`, disposition native (retained; Duhem does not mock the web); canonical is the [ui-served-scripts.md](ui-served-scripts.md) row (status and disposition corrected from "active synthetic ... VD for DOM/geometry"), the unit rows are pointers. Evidence: CI-run at `.github/workflows/ui.yml:230`, but each test builds a component bundle with esbuild and serves it from a `page.route`-mocked `*.test` origin (`ui/tests/code-scroll.mjs:28`, `jump-toolbar.mjs:31`, `continuity-refinement-browser.mjs:39`, `staging-viewer-browser.mjs:78`), so they judge a UI-package component contract, not the served product.
-- `passive-reading-browser.mjs`: one canonical row in [ui-served-scripts.md](ui-served-scripts.md): `disabled-boundary` for the no-active-controls assertions (`:26-166`) plus `internal` for the Jump interaction (`:132-166`), native (retained; Duhem does not mock the web). The two unit rows are pointers. Evidence: CI-run at `.github/workflows/ui.yml:230`; origin is `page.route`-mocked (`passive-reading-browser.mjs:38`).
-- `runtime-leaf-browser.mjs` unlinked mirrored history (`:189`): resolved to `internal`, native; canonical is the [ui-served-scripts.md](ui-served-scripts.md) row, the unit "disabled-boundary" row is a pointer. Evidence: the test (`runtime-leaf-browser.mjs:189`, "unlinked mirrored history has no runtime warning block") asserts a saved-reading display contract on a `page.route`-mocked origin (`:23`), not the refusal of a held runtime feature; the first test in the file (`:19`) stays `deferred-paused` under the hold.
-- `catalog-viewer-browser.mjs`: ui-unit-and-checks.md stays canonical for three ranges the 24 rows in [ui-catalog-viewer-browser.md](ui-catalog-viewer-browser.md) do not cover. Row 60 is canonical for lines 1501-2140 (tests at `:1533` "Codex last-turn menu and tooltip" and `:1666` "catalog boot, selection and retained native ranges", umbrella level only, status corrected from `internal` to `active` to match the canonical rows; same full UI bundle on `http://catalog.test` routes, `:123`). Row 61 is canonical for `:2141-2336` ("temporary boot failure and pending projection recover", deferred-paused: it drives a synthetic runtime EventSource under the Hub #267/#270 hold). Row 62 is canonical for the screenshot/geometry artifacts (historical diagnostic, now tagged M3 #581 visual): `SEMON_UI_OUT` is set at `.github/workflows/ui.yml:172` and screenshots are written at `catalog-viewer-browser.mjs:484-490`, but no assertion judges them. The file runs at `.github/workflows/ui.yml:230`.
+- `passive-reading-browser.mjs`: one historical canonical row in [ui-served-scripts.md](ui-served-scripts.md) records the former pause-era no-controls boundary (`:26-166`); the Jump interaction (`:132-166`) is a separate retained component assertion. The two unit rows are pointers. The earlier CI and mocked-origin references describe the source snapshot only; the control-boundary assertion is not current product acceptance.
+- `runtime-leaf-browser.mjs` unlinked mirrored history (`:189`): the retained row in [ui-served-scripts.md](ui-served-scripts.md) records an internal saved-reading display assertion. The earlier runtime-leaf test and hold classification (`:19`) are historical after managed runtime retirement; they do not describe a current runtime check.
+- `catalog-viewer-browser.mjs`: ui-unit-and-checks.md stays canonical for three ranges the 24 rows in [ui-catalog-viewer-browser.md](ui-catalog-viewer-browser.md) do not cover. Row 60 is canonical for lines 1501-2140 (tests at `:1533` "Codex last-turn menu and tooltip" and `:1666` "catalog boot, selection and retained native ranges", umbrella level only, status corrected from `internal` to `active` to match the canonical rows; same full UI bundle on `http://catalog.test` routes, `:123`). Row 61 is canonical for `:2141-2336` ("temporary boot failure and pending projection recover"); this former synthetic runtime EventSource case is historical after retirement, not a current paused or qualified check. Row 62 is canonical for the screenshot/geometry artifacts (historical diagnostic, now tagged M3 #581 visual): `SEMON_UI_OUT` is set at `.github/workflows/ui.yml:172` and screenshots are written at `catalog-viewer-browser.mjs:484-490`, but no assertion judges them. The file runs at `.github/workflows/ui.yml:230`.
 - Source status `docs` on the README documentation row in [browser-visual-and-suite.md](browser-visual-and-suite.md): changed to `internal` (documentation row; not an assertion). It is not a fixture assertion, so no other status fits; the original value is recorded in the cell.
 
 ## Candidate M2 real-binary pilot checks
@@ -163,9 +172,14 @@ In priority order:
 - Clipboard read/write: native, kept for now. 3 rows (browser-navigation Copilot resume command, browser-shell-accessibility shell sheet, ui-served-scripts native shell confirmation).
 - Allowlist-filtered element census and scripted exhaustive walks: native, kept for now. 3 rows (browser-transcript md census, viewer phone census, extras injection walk).
 
-## Runtime hold
+## Retired capability classifications
 
-semon-runtime, E2B, SSH, managed or cloud runtime and control-delivery cases are classified `deferred-paused` or `disabled-boundary` only, under the hold from Hub #267 and Hub #270. No work is proposed for them, and classification does not imply that active-feature tests passed or should be run as acceptance. Disabled-boundary refusal checks stay required native. The rows are in rust-and-cli.md (runtime/E2B/SSH/control), ui-unit-and-checks.md (runtime observation, control stream), ui-served-scripts.md and the moved/kept browser-script rows.
+The earlier map classified runtime, E2B, SSH and control-delivery cases as
+`deferred-paused` or `disabled-boundary` under Hub #267/#270. Those classifications
+record the earlier decision only; the capabilities and their active entry points and CI jobs have since been retired. The row-level
+entries remain historical inventory, not current acceptance claims; previous
+refusal checks and CI owners are not current gates. See [rust-and-cli.md](rust-and-cli.md)
+and [ui-served-scripts.md](ui-served-scripts.md) for the affected historical rows. The separate full-text `find` boundary remains current until the ASI query surface lands.
 
 ## Findings to act on
 
@@ -182,11 +196,11 @@ Each file keeps its own "Uncertain classifications" section; the main items are 
 - Classification conflicts: all resolved above. Not decided: `catalog-viewer-browser.mjs` lines 1501-2140 are covered only by the umbrella row 60 in ui-unit-and-checks.md (tests at `:1533` and `:1666`); per-assertion rows were not authored, which needs a source read of about 600 lines.
 - Identity-boundary count: the review estimated about 50 rows; 40 rows now carry the retained-native phrase. The remaining rows are already native without gap wording or mix the item into other tags (for example mocked-route rows in ui-catalog-viewer-browser.md without gap text); say if they should be retagged.
 - Required-ness: whether the `viewer / <suite>` matrix legs and the `transport` job are branch-protection required status checks is not visible from the repository (browser-transcript.md; ui.yml aggregate job `browser` requires all suites).
-- [rust-and-cli.md](rust-and-cli.md): confirm the `semon-control` CI owner; spike scripts under `tests/spikes` are labelled historical unless a workflow calls them; `real-ssh-tests` is deferred-paused; grouped rows are module summaries, not one row per `#[test]`.
-- [browser-navigation.md](browser-navigation.md): the Copilot append/restart row is a local parser fixture, not M2 recovery evidence; local fixture process behavior is not a managed/cloud runtime claim.
+- [rust-and-cli.md](rust-and-cli.md): retired control/runtime/SSH paths and CI owners are historical; remaining spike scripts are classified by their cited source/CI baseline, and grouped rows are module summaries, not one row per `#[test]`.
+- [browser-navigation.md](browser-navigation.md): the Copilot append/restart row is a local parser fixture, not M2 recovery evidence; local fixture process behavior is not managed/cloud runtime qualification.
 - [browser-transcript.md](browser-transcript.md): `selectedFixture` rows are HYBRID (real source identity and routes, synthetic rows and recomputed generation), so whether a VD may call them "real" is a scope decision; the md waiting-card and attach embedding rows are conditional; headers in viewer/full/extras describe assertions no code makes (classified historical); viewer-backlog analytics/model rows may duplicate navigation-group checks (not verified).
 - [browser-shell-accessibility.md](browser-shell-accessibility.md): `tap-hit.test.mjs` and `text-audit.test.mjs` are internal measurement tests classified native.
 - [browser-interaction.md](browser-interaction.md): `embed` is classified internal (owner layer) although it runs in CI; screenshots there are diagnostic only.
 - [browser-live-performance-catalog.md](browser-live-performance-catalog.md): `live.mjs` is a wrapper, not a second assertion set; budget thresholds are report-only so "active" does not mean enforced; the first ten rows were verified only by spot checks; `perf-refresh.mjs` is inactive in the default run; `pushed-parity` default mode is VD only if Duhem owns the receiver and push processes.
 - [browser-visual-and-suite.md](browser-visual-and-suite.md): whether the pathname-audit and binding-proposal tools run in CI (finding 1); `gaps.mjs` is native (retained for now; Duhem adds a small `$runtime` set-equality helper if a VD needs it); region counts (162/20/24) and frame counts (113/12/15) were recomputed with jq, the acceptance registry only through bounded summaries.
-- [ui-catalog-viewer-browser.md](ui-catalog-viewer-browser.md), [ui-served-scripts.md](ui-served-scripts.md), [ui-unit-and-checks.md](ui-unit-and-checks.md): all `catalog.*` ids and `native` dispositions are proposals; `catalog-viewer-browser.mjs` rows 3410/3560 may be better retained-native diagnostics; `continuity-refinement-browser.mjs` `SEMON_REFINEMENT_BEFORE=1` has no visible CI configuration; `runtime-leaf-browser.mjs` is deferred-paused by the hold, not evidence of a real managed-runtime integration.
+- [ui-catalog-viewer-browser.md](ui-catalog-viewer-browser.md), [ui-served-scripts.md](ui-served-scripts.md), [ui-unit-and-checks.md](ui-unit-and-checks.md): all `catalog.*` ids and `native` dispositions are proposals; `catalog-viewer-browser.mjs` rows 3410/3560 may be better retained-native diagnostics; `continuity-refinement-browser.mjs` `SEMON_REFINEMENT_BEFORE=1` has no visible CI configuration. Runtime/control rows in those maps are historical after code retirement.

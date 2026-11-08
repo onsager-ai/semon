@@ -1,6 +1,6 @@
 # CLI evidence compatibility
 
-The collection product temporarily pauses `semon control` and broad `find` with explicit unavailability before initialization. The control and runtime native contracts below describe retained optional engines and historical evidence; they do not enable collection delivery. See the [temporary collection scope](design/session-foundation-retirement.md#temporary-collection-scope).
+Control delivery, managed runtime and SSH have been retired with their code and active entry points. Broad `find` remains paused until the ASI query surface lands. This document records native harness session, mirror, identity, transcript and usage evidence; retired control/runtime contracts are outside its current scope. See the [collection retirement scope](design/session-foundation-retirement.md#collection-retirement-scope).
 
 Tracking: #235, #236–242. Baseline audited at main
 `24e1932ef78238fdb13b5c1d11b61636695baf34` on 2026-10-03.
@@ -10,9 +10,10 @@ The delivery in #297/#298 was reconciled through main #294 and the landed #297
 on 2026-10-04. The bounded supported contract is documented below; issue
 acceptance and final check evidence are tracked in #235.
 
-Native session, control, mirror, namespace, transcript and usage contracts remain
-supported. Retired Canonical Trace Store capture and replay are outside this
-contract; see the [first-release product boundary](design/session-foundation-retirement.md).
+Native session, mirror, namespace, transcript and usage contracts remain
+supported. Control/runtime contracts, along with retired Canonical Trace Store
+capture and replay, are outside this document's current scope; see the
+[collection retirement scope](design/session-foundation-retirement.md#collection-retirement-scope).
 
 ## Evidence contract
 
