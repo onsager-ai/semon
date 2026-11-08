@@ -448,7 +448,10 @@ impl PgProjectionStore {
             }
         }
         if generation.is_some() {
-            for row in &prepared.rows { tx.derive_history_query(namespace, &options, &row.key).await?; }
+            for row in &prepared.rows {
+                tx.derive_history_query(namespace, &options, &row.key)
+                    .await?;
+            }
         }
         tx.commit(namespace).await?;
         Ok(generation)

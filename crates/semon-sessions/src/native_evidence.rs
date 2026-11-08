@@ -1374,7 +1374,9 @@ impl NativeEvidence {
             let mut work = lock(&self.storage.work);
             for _ in 0..256 {
                 crate::selected_read::check()?;
-                if self.refresh_catalog(&mut work, now)? { break; }
+                if self.refresh_catalog(&mut work, now)? {
+                    break;
+                }
             }
             drop(work);
             return self.storage.activity_target(requested, now);

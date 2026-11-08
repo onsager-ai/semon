@@ -100,7 +100,9 @@ impl PgProjectionStore {
             ));
         }
         let tx = self.begin(namespace).await?;
-        if expected.is_some_and(|tag| tag != ProjectionTag::of_ledger(&ledger, tag.epoch, tag.projector)) {
+        if expected
+            .is_some_and(|tag| tag != ProjectionTag::of_ledger(&ledger, tag.epoch, tag.projector))
+        {
             tx.retain_query_index(namespace, name).await?;
         }
         let tag = tx
@@ -262,8 +264,18 @@ impl PgProjectionTransaction<'_> {
                 serde_json::to_string(signal).map_err(backend)?,
             ));
         }
-        for (ordinal, observation) in index.native_usage_observations.as_deref().unwrap_or_default().iter().enumerate() {
-            records.push((3_i16, number(ordinal as u64)?, serde_json::to_string(observation).map_err(backend)?));
+        for (ordinal, observation) in index
+            .native_usage_observations
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            records.push((
+                3_i16,
+                number(ordinal as u64)?,
+                serde_json::to_string(observation).map_err(backend)?,
+            ));
         }
         let next = ProjectionTag::of_ledger(ledger, 0, crate::model::summary::CATALOG_VERSION);
         let Some(tag) = self
@@ -277,7 +289,16 @@ impl PgProjectionTransaction<'_> {
             "INSERT INTO semon_projection.files(namespace,path,ledger,metadata) VALUES($1,$2,$3,$4) ON CONFLICT(namespace,path) DO UPDATE SET ledger=excluded.ledger,metadata=excluded.metadata",
             &[&namespace.binding(), &path, &encoded_ledger, &metadata],
         ).await.map_err(backend)?;
-        let lengths = [index.events.len(), index.extras.len(), index.signals.len(), index.native_usage_observations.as_deref().unwrap_or_default().len()];
+        let lengths = [
+            index.events.len(),
+            index.extras.len(),
+            index.signals.len(),
+            index
+                .native_usage_observations
+                .as_deref()
+                .unwrap_or_default()
+                .len(),
+        ];
         self.tx.execute(
             "DELETE FROM semon_projection.records WHERE namespace=$1 AND path=$2 AND ordinal>=CASE kind WHEN 0 THEN $3::bigint WHEN 1 THEN $4::bigint WHEN 2 THEN $5::bigint ELSE $6::bigint END",
             &[&namespace.binding(), &path, &number(lengths[0] as u64)?, &number(lengths[1] as u64)?, &number(lengths[2] as u64)?, &number(lengths[3] as u64)?],

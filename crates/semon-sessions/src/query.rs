@@ -1282,12 +1282,34 @@ impl Query {
             let mut answer = {
                 #[cfg(feature = "postgres")]
                 if evidence.storage.is_postgres() {
-                    evidence.storage.activity_query(catalog_key, &focused_args, provider, mode, now)?
+                    evidence.storage.activity_query(
+                        catalog_key,
+                        &focused_args,
+                        provider,
+                        mode,
+                        now,
+                    )?
                 } else {
-                    activity::read(&evidence.options, evidence.storage.namespace(), catalog_key, &focused_args, provider, mode, now)?
+                    activity::read(
+                        &evidence.options,
+                        evidence.storage.namespace(),
+                        catalog_key,
+                        &focused_args,
+                        provider,
+                        mode,
+                        now,
+                    )?
                 }
                 #[cfg(not(feature = "postgres"))]
-                activity::read(&evidence.options, evidence.storage.namespace(), catalog_key, &focused_args, provider, mode, now)?
+                activity::read(
+                    &evidence.options,
+                    evidence.storage.namespace(),
+                    catalog_key,
+                    &focused_args,
+                    provider,
+                    mode,
+                    now,
+                )?
             };
             if self.sources.is_retired() {
                 return Err(QueryError::new("io", "native query source is closed"));

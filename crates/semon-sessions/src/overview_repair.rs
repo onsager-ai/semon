@@ -1483,23 +1483,42 @@ pub(crate) fn projected_query(
 /// Derive exact metadata over a qualified PostgreSQL cohort. Original source
 /// bytes remain request-owned; no SQLite index or projection is opened.
 #[cfg(feature = "postgres")]
-pub(crate) fn projected_history(options: &Options, rows: &[CatalogRow], files: Vec<(String, crate::events::Ledger, crate::events::FileIndex)>, now: i64) -> io::Result<crate::model::PreparedSources> {
-    let proofs = crate::query_source::Sources::capture(options, rows.iter().flat_map(|row| &row.sources).map(|source| {
-        let chunks = files.iter().find(|(path,_,_)| source.path.to_str() == Some(path.as_str())).and_then(|(_,_,index)| index.source_chunks.clone());
-        (source.clone(), chunks)
-    }))?;
+pub(crate) fn projected_history(
+    options: &Options,
+    rows: &[CatalogRow],
+    files: Vec<(String, crate::events::Ledger, crate::events::FileIndex)>,
+    now: i64,
+) -> io::Result<crate::model::PreparedSources> {
+    let proofs = crate::query_source::Sources::capture(
+        options,
+        rows.iter().flat_map(|row| &row.sources).map(|source| {
+            let chunks = files
+                .iter()
+                .find(|(path, _, _)| source.path.to_str() == Some(path.as_str()))
+                .and_then(|(_, _, index)| index.source_chunks.clone());
+            (source.clone(), chunks)
+        }),
+    )?;
     let records = proofs.reader();
     records.verify_all()?;
     let selected = EventCache::from_projection(files, Vec::new());
     let native = NativeRecords {
-        full: BTreeMap::new(), selected: Some(&selected),
-        read: Some(Box::new(|path, offset| records.derive(path, offset)?.ok_or_else(|| failure("Native history record unavailable")))),
+        full: BTreeMap::new(),
+        selected: Some(&selected),
+        read: Some(Box::new(|path, offset| {
+            records
+                .derive(path, offset)?
+                .ok_or_else(|| failure("Native history record unavailable"))
+        })),
         raw: None,
         evidence: Some(Box::new(|path, proof| records.evidence(path, proof))),
-        error: std::cell::RefCell::new(None), fields: BTreeMap::new(),
+        error: std::cell::RefCell::new(None),
+        fields: BTreeMap::new(),
     };
     let prepared = crate::model::prepare_history(options, rows, &native, now)?;
-    if let Some(error) = native.error.take() { return Err(error); }
+    if let Some(error) = native.error.take() {
+        return Err(error);
+    }
     records.finish()?;
     Ok(prepared)
 }

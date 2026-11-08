@@ -226,7 +226,14 @@ pub(super) fn lifecycle(dsn: &str) {
             .unwrap();
         assert!(selected.get("error").is_none(), "{selected}");
     }
-    let activity = query.call_selected("injected-runtime", key, "get_session_activity", &json!({"id":key}), None, crate::SessionSourceReadMode::LocalOrPinnedProvider);
+    let activity = query.call_selected(
+        "injected-runtime",
+        key,
+        "get_session_activity",
+        &json!({"id":key}),
+        None,
+        crate::SessionSourceReadMode::LocalOrPinnedProvider,
+    );
     // This fixture has no explicit per-response usage; absence remains honest.
     assert_eq!(activity.unwrap_err().code, "stale_projection");
     // A foreign source key cannot use this app-owned capability, even if the

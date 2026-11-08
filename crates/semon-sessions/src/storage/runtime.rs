@@ -566,14 +566,7 @@ impl RuntimeStore {
         let mut postgres = postgres.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let Postgres { runtime, store } = &mut *postgres;
         let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
-        runtime.block_on(async {
-            let tx = store.begin(namespace).await?;
-            let keys = tx.tx.query("SELECT session_key FROM semon_projection.catalog WHERE namespace=$1 AND lifecycle='current' AND (session_key=$2 OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(metadata::jsonb->'native_ids') id WHERE id=$2)) ORDER BY session_key LIMIT 2", &[&namespace.binding(), &requested]).await.map_err(|error| StorageError::Backend(error.to_string()))?;
-            if keys.len() > 1 { return Err(StorageError::Backend("ambiguous activity identity".into())); }
-            let key = keys.first().map(|row| row.get(0));
-            tx.commit(namespace).await?;
-            Ok(key)
-        }).map_err(io::Error::other)
+        runtime.block_on(store.activity_target(namespace, requested)).map_err(io::Error::other)
     }
 
     #[cfg(feature = "postgres")]

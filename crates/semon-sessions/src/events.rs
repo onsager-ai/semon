@@ -1519,10 +1519,15 @@ impl EventCache {
             .ok_or_else(|| io::Error::other("Invalid activity source path"))?;
         #[cfg(feature = "postgres")]
         if self.projection_only() {
-            let file = self.files.get(path).filter(|file| file.ledger == crate::source_carrier::ledger(source))
+            let file = self
+                .files
+                .get(path)
+                .filter(|file| file.ledger == crate::source_carrier::ledger(source))
                 .and_then(|file| file.index.as_ref())
                 .ok_or_else(|| io::Error::other("Activity source generation changed"))?;
-            let observations = file.native_usage_observations.as_deref()
+            let observations = file
+                .native_usage_observations
+                .as_deref()
                 .ok_or_else(|| io::Error::other("Accepted native usage facts unavailable"))?;
             return store::native_usage::Observation::accepted_steps(observations, path);
         }

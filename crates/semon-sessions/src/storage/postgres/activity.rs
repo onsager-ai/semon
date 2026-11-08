@@ -22,6 +22,14 @@ impl PgProjectionTransaction<'_> {
 }
 
 impl PgProjectionStore {
+    pub(crate) async fn activity_target(&mut self, namespace: &Namespace, requested: &str) -> Result<Option<String>, StorageError> {
+        let tx = self.begin(namespace).await?;
+        let keys = tx.tx.query("SELECT session_key FROM semon_projection.catalog WHERE namespace=$1 AND lifecycle='current' AND (session_key=$2 OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(metadata::jsonb->'native_ids') id WHERE id=$2)) ORDER BY session_key LIMIT 2", &[&namespace.binding(), &requested]).await.map_err(backend)?;
+        if keys.len() > 1 { return Err(backend("ambiguous activity identity")); }
+        let key = keys.first().map(|row| row.get(0));
+        tx.commit(namespace).await?;
+        Ok(key)
+    }
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn activity_query(&mut self, namespace: &Namespace, options: &Options, key: &str, args: &Value, provider: Option<&dyn SessionSourceReader>, mode: crate::SessionSourceReadMode, now: i64) -> Result<Value, StorageError> {
         if args["id"].as_str() != Some(key) { return Err(backend("activity identity mismatch")); }
