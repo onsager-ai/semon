@@ -547,17 +547,27 @@ impl PgProjectionStore {
             Some("script") => SelectedPart::Script,
             Some("output") => SelectedPart::Output,
             Some("attachment") => {
-                let Some(image) = argument("image").and_then(|value| value.parse::<usize>().ok()).filter(|image| *image < 64) else { return Ok(invalid()) };
+                let Some(image) = argument("image")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|image| *image < 64)
+                else {
+                    return Ok(invalid());
+                };
                 SelectedPart::Attachment(image)
             }
             _ => return Ok(invalid()),
         };
         let field_chunk = match argument("field_chunk") {
-            Some(value) => match value.parse::<usize>() { Ok(chunk) => Some(chunk), Err(_) => return Ok(invalid()) },
+            Some(value) => match value.parse::<usize>() {
+                Ok(chunk) => Some(chunk),
+                Err(_) => return Ok(invalid()),
+            },
             None => None,
         };
         if ((!matches!(part, SelectedPart::Transcript) || field_chunk.is_some())
-            && (argument("generation").is_none() || argument("after").is_none() || argument("limit").as_deref() != Some("1")))
+            && (argument("generation").is_none()
+                || argument("after").is_none()
+                || argument("limit").as_deref() != Some("1")))
             || (!matches!(part, SelectedPart::Transcript) && field_chunk.is_some())
         {
             return Ok(invalid());
@@ -621,8 +631,19 @@ impl PgProjectionStore {
                 true,
             ));
         }
-        if argument("errors_generation").is_some_and(|expected| expected != crate::transcript_range::error_generation(&crate::transcript_range::entry_generation(&generation), &session)) {
-            return Ok(crate::catalog::error(409, "stale_projection", "The selected error projection changed.", true));
+        if argument("errors_generation").is_some_and(|expected| {
+            expected
+                != crate::transcript_range::error_generation(
+                    &crate::transcript_range::entry_generation(&generation),
+                    &session,
+                )
+        }) {
+            return Ok(crate::catalog::error(
+                409,
+                "stale_projection",
+                "The selected error projection changed.",
+                true,
+            ));
         }
         let first = after.unwrap_or_else(|| total.saturating_sub(limit));
         if first > total {

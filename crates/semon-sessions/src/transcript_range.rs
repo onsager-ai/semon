@@ -859,7 +859,19 @@ pub(crate) fn render_postgres(
     sources: Vec<CatalogSource>,
     reader: &dyn SessionSourceReader,
 ) -> ViewerReply {
-    render_postgres_part(options, identity, session, stored_generation, total, first, slots, sources, reader, SelectedPart::Transcript, None)
+    render_postgres_part(
+        options,
+        identity,
+        session,
+        stored_generation,
+        total,
+        first,
+        slots,
+        sources,
+        reader,
+        SelectedPart::Transcript,
+        None,
+    )
 }
 
 #[cfg(feature = "postgres")]
@@ -879,7 +891,12 @@ pub(crate) fn render_postgres_part(
 ) -> ViewerReply {
     let end = first.saturating_add(slots.len()).min(total);
     if (!matches!(part, SelectedPart::Transcript) || field_chunk.is_some()) && end != first + 1 {
-        return catalog::error(400, "invalid_arguments", "Selected field reads require one slot.", false);
+        return catalog::error(
+            400,
+            "invalid_arguments",
+            "Selected field reads require one slot.",
+            false,
+        );
     }
     let mut identity = identity;
     identity.source_refs.retain(|observation| {
@@ -910,7 +927,13 @@ pub(crate) fn render_postgres_part(
         context: json!({"state":"incomplete","turns":[],"handoffs":[],"sessions":{},"previews":{}}),
     };
     if let Some(chunk) = field_chunk {
-        return render_field(options, selection, Some(reader), chunk, SessionSourceReadMode::ProviderOnly);
+        return render_field(
+            options,
+            selection,
+            Some(reader),
+            chunk,
+            SessionSourceReadMode::ProviderOnly,
+        );
     }
     render(
         options,
