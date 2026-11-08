@@ -49,8 +49,7 @@ impl PgProjectionTransaction<'_> {
         if let Some(prior) = prior {
             let prior: CatalogRow = serde_json::from_str(prior.get(0)).map_err(backend)?;
             if prior.harness != row.harness {
-                // As on SQLite, a reused viewer key cannot join harness identities.
-                return Ok(());
+                return Err(backend("retained harness identity changed"));
             }
             let prior_header = self.tx.query_one(
                 "SELECT source_generation,version,total FROM semon_projection.history_recipe_heads WHERE namespace=$1 AND session_key=$2",
