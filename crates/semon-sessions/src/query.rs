@@ -1261,7 +1261,7 @@ impl Query {
             });
         let result = crate::selected_read::check()
             .map_err(|error| selected_error(&error))
-            .and_then(|()| result);
+            .and(result);
         if tool == "get_session_activity" {
             result.map_err(QueryError::activity_refusal)
         } else {
