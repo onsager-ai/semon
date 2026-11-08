@@ -237,7 +237,15 @@ async fn replacement(dsn: &str) {
     );
     tx.commit(&namespace).await.unwrap();
     let options = crate::storage::conformance::source(&root.0, "catalog-history-reader");
-    let current_history = store.transcript_query(&namespace, &options, "sid=pg-catalog&scope=retained_history&after=0&limit=10", None).await.unwrap();
+    let current_history = store
+        .transcript_query(
+            &namespace,
+            &options,
+            "sid=pg-catalog&scope=retained_history&after=0&limit=10",
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(current_history.status, 200);
     let current_history: serde_json::Value = serde_json::from_slice(&current_history.body).unwrap();
     assert_eq!(current_history["range"]["end"], next_projection.slots.len());
@@ -245,8 +253,24 @@ async fn replacement(dsn: &str) {
     // Withdrawn SQL custody survives restart, while rewritten local bytes cannot
     // masquerade as the original consumed generation.
     drop(store);
-    let mut store = PgProjectionStore::new(crate::storage::conformance::postgres::connect(dsn).await, namespace.clone()).await.unwrap();
-    let original_history = store.transcript_query(&namespace, &options, &format!("sid=pg-catalog&scope=retained_history&after={}&limit=10", next_projection.slots.len()), None).await.unwrap();
+    let mut store = PgProjectionStore::new(
+        crate::storage::conformance::postgres::connect(dsn).await,
+        namespace.clone(),
+    )
+    .await
+    .unwrap();
+    let original_history = store
+        .transcript_query(
+            &namespace,
+            &options,
+            &format!(
+                "sid=pg-catalog&scope=retained_history&after={}&limit=10",
+                next_projection.slots.len()
+            ),
+            None,
+        )
+        .await
+        .unwrap();
     assert_eq!(original_history.status, 409);
 }
 

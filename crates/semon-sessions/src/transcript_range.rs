@@ -488,7 +488,7 @@ struct Selection {
 }
 
 #[derive(Clone, Copy)]
-enum SelectedPart {
+pub(crate) enum SelectedPart {
     Transcript,
     Script,
     Output,
@@ -859,7 +859,28 @@ pub(crate) fn render_postgres(
     sources: Vec<CatalogSource>,
     reader: &dyn SessionSourceReader,
 ) -> ViewerReply {
+    render_postgres_part(options, identity, session, stored_generation, total, first, slots, sources, reader, SelectedPart::Transcript, None)
+}
+
+#[cfg(feature = "postgres")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_postgres_part(
+    options: &Options,
+    identity: CatalogSessionIdentity,
+    session: Value,
+    stored_generation: &str,
+    total: usize,
+    first: usize,
+    slots: Vec<SavedSlot>,
+    sources: Vec<CatalogSource>,
+    reader: &dyn SessionSourceReader,
+    part: SelectedPart,
+    field_chunk: Option<usize>,
+) -> ViewerReply {
     let end = first.saturating_add(slots.len()).min(total);
+    if (!matches!(part, SelectedPart::Transcript) || field_chunk.is_some()) && end != first + 1 {
+        return catalog::error(400, "invalid_arguments", "Selected field reads require one slot.", false);
+    }
     let mut identity = identity;
     identity.source_refs.retain(|observation| {
         sources.iter().any(|source| {
@@ -888,12 +909,15 @@ pub(crate) fn render_postgres(
         history_incomplete: false,
         context: json!({"state":"incomplete","turns":[],"handoffs":[],"sessions":{},"previews":{}}),
     };
+    if let Some(chunk) = field_chunk {
+        return render_field(options, selection, Some(reader), chunk, SessionSourceReadMode::ProviderOnly);
+    }
     render(
         options,
         selection,
         Some(reader),
         SessionSourceReadMode::ProviderOnly,
-        SelectedPart::Transcript,
+        part,
     )
 }
 
