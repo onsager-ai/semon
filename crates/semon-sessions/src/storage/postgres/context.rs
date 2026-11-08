@@ -128,21 +128,20 @@ impl PgProjectionTransaction<'_> {
                     participants.insert(sid.to_owned());
                 }
             }
-            if let Some(target) = edge["to"].as_str() {
-                if let Some(target_context) = self
+            if let Some(target) = edge["to"].as_str()
+                && let Some(target_context) = self
                     .causal_context(namespace, options, target, None)
                     .await?
-                {
-                    let found: Vec<_> = target_context["turns"]
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter(|turn| turn["start"] == id)
-                        .take(2)
-                        .collect();
-                    if found.len() == 1 {
-                        edge["target_turn"] = found[0]["id"].clone();
-                    }
+            {
+                let found: Vec<_> = target_context["turns"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|turn| turn["start"] == id)
+                    .take(2)
+                    .collect();
+                if found.len() == 1 {
+                    edge["target_turn"] = found[0]["id"].clone();
                 }
             }
             edges.push(edge);
