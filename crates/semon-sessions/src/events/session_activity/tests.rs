@@ -673,13 +673,7 @@ fn analytics_unions_exact_wait_intervals_and_preserves_missing_coverage() {
     );
     result.steps[0].waste = Some(WasteKind::OrchestrationWait);
     result.steps[0].waste_category = Some(WasteCategory::Orchestration);
-    result.steps[0].waits = [
-        (0, 100),
-        (100, 200),
-        (250, 300),
-        (20, 50),
-        (0, 100),
-    ]
+    result.steps[0].waits = [(0, 100), (100, 200), (250, 300), (20, 50), (0, 100)]
     .into_iter()
     .map(|(started_at_ms, completed_at_ms)| WaitInterval {
         started_at_ms,
@@ -812,10 +806,13 @@ fn family_fold_sums_session_wait_unions_and_waste_costs() {
     child.steps[0].elapsed_ms = Some(15);
     child.steps[0].list_cost_usd = Some(0.3);
 
-    let family = analytics::families([
-        ("parent", None, Some(&parent)),
-        ("child", Some("parent"), Some(&child)),
-    ].into_iter())
+    let family = analytics::families(
+        [
+            ("parent", None, Some(&parent)),
+            ("child", Some("parent"), Some(&child)),
+        ]
+        .into_iter(),
+    )
     .remove("parent")
     .unwrap();
     assert_eq!(family.counts.wait_time_ms.observed.known, 50);
