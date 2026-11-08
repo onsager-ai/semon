@@ -1379,7 +1379,7 @@ impl NativeEvidence {
                 }
             }
             drop(work);
-            return self.storage.activity_target(requested, now);
+            return self.storage.activity_target(requested);
         }
         let mut selectors = BTreeSet::from([requested.to_owned()]);
         if let Some((harness, id)) = requested.trim_start_matches(':').split_once(':')

@@ -560,8 +560,7 @@ impl RuntimeStore {
     }
 
     #[cfg(feature = "postgres")]
-    pub(crate) fn activity_target(&self, requested: &str, now: i64) -> io::Result<Option<String>> {
-        let _ = now;
+    pub(crate) fn activity_target(&self, requested: &str) -> io::Result<Option<String>> {
         let postgres = self.postgres.as_ref().expect("PostgreSQL activity owner");
         let mut postgres = postgres
             .lock()

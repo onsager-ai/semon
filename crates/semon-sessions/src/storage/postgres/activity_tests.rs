@@ -64,7 +64,10 @@ pub(super) async fn lifecycle(dsn: &str) {
     assert!(first["items"][0].get("position").is_none());
     crate::storage::conformance::produce(&Namespace::new("sqlite-activity").unwrap(), &sqlite)
         .unwrap();
-    let sqlite_sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![("sqlite-activity".into(), sqlite.clone())]));
+    let sqlite_sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![(
+        "sqlite-activity".into(),
+        sqlite.clone(),
+    )]));
     let mut query = crate::Query::from_sources(sqlite_sources);
     let local = query
         .call("get_session_activity", &json!({"id":"native"}))
@@ -147,26 +150,51 @@ pub(super) async fn lifecycle(dsn: &str) {
         .get::<_, i64>(0),
         4
     );
-    for table in ["session_activity"] {
-        assert_eq!(tx.query_one(&format!("SELECT count(*) FROM semon_projection.{table} WHERE namespace='foreign-runtime'"), &[]).await.unwrap().get::<_,i64>(0), 0);
-    }
+    assert_eq!(tx.query_one("SELECT count(*) FROM semon_projection.session_activity WHERE namespace=$1", &[&namespace.binding()]).await.unwrap().get::<_,i64>(0), 1);
     tx.commit().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    tx.query_one("SELECT set_config('semon.namespace','foreign-activity',true)", &[]).await.unwrap();
+    assert_eq!(tx.query_one("SELECT count(*) FROM semon_projection.session_activity WHERE namespace=$1", &[&namespace.binding()]).await.unwrap().get::<_,i64>(0), 0);
+    assert!(tx.execute("INSERT INTO semon_projection.session_activity(namespace,session_key,source_generation,generation,metadata) VALUES($1,'forbidden','generation','generation','{}')", &[&namespace.binding()]).await.is_err());
+    tx.rollback().await.unwrap();
     drop(query);
     drop(store);
     let runtime_options = options.clone();
     let runtime_dsn = dsn.to_owned();
     let runtime_probe = std::thread::spawn(move || {
-        let storage = crate::storage::runtime::RuntimeStore::postgres(&runtime_options, namespace.clone(), &runtime_dsn).unwrap();
-        let evidence = crate::native_evidence::NativeEvidence::with_storage(runtime_options, storage);
-        let sources = std::sync::Arc::new(crate::native_evidence::SessionSources::from_evidence(vec![(namespace.to_string(), evidence)]));
+        let storage = crate::storage::runtime::RuntimeStore::postgres(
+            &runtime_options,
+            namespace.clone(),
+            &runtime_dsn,
+        )
+        .unwrap();
+        let evidence =
+            crate::native_evidence::NativeEvidence::with_storage(runtime_options, storage);
+        let sources =
+            std::sync::Arc::new(crate::native_evidence::SessionSources::from_evidence(vec![
+                (namespace.to_string(), evidence),
+            ]));
         let mut query = crate::Query::from_sources(sources.clone());
-        let routed = query.call("get_session_activity", &json!({"id":"native"})).unwrap();
+        let routed = query
+            .call("get_session_activity", &json!({"id":"native"}))
+            .unwrap();
         assert_eq!(routed["items"], appended["items"]);
-        let selected = query.call_selected(namespace.as_str(), "native", "get_session_activity", &json!({"id":"native"}), None, crate::SessionSourceReadMode::LocalOrPinnedProvider).unwrap();
+        let selected = query
+            .call_selected(
+                namespace.as_str(),
+                "native",
+                "get_session_activity",
+                &json!({"id":"native"}),
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider,
+            )
+            .unwrap();
         assert_eq!(selected["items"], routed["items"]);
         sources.retire();
     });
-    while !runtime_probe.is_finished() { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+    while !runtime_probe.is_finished() {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
     runtime_probe.join().unwrap();
     #[cfg(target_os = "linux")]
     watch.assert_untouched(&options);
