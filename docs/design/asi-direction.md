@@ -32,7 +32,7 @@ front end.
 | --- | --- |
 | Storage engine | Extend the SQLite Session Event Index first (event/content tables, FTS5). Design the schema so it can be exported to a columnar store (Parquet/DuckDB) once analytical volume calls for it. |
 | Consumers | Agents (MCP/SQL) and humans (dashboards) equally, over one shared schema. |
-| Viewer | Shrink to an analytics UI: keep the authenticated server, shell and security boundary; drop transcript-browsing polish and the pixel baselines that only cover it. New UI work is dashboards and query results. |
+| Viewer | Shrink to an analytics UI: keep the authenticated server, shell and security boundary; drop transcript-browsing polish. Pixel/visual comparison is removed from CI by semon#536/#537. New UI work is dashboards and query results. |
 | Control, runtime, SSH | Retire `semon-control`, `semon-runtime` and `semon-ssh` code. Push/receive over TLS covers multi-machine collection. Retirement deletes no user data, credentials, history or installed services. |
 
 ## Unchanged invariants
@@ -52,10 +52,9 @@ front end.
    retention beyond the current 60-day Analytics window, multi-machine keys).
 4. Ship the query surface: read-only SQL plus FTS through MCP/CLI, replacing the
    paused `find`.
-5. Rebuild Analytics on durable storage; shrink the Viewer into the analytics UI
-   and prune the obsolete baselines. Hub no longer imports
-   `tests/ui/pixel-diff.mjs` or `visual-contract.mjs` (semon-hub#377); drop them
-   if Source no longer uses them.
+5. Rebuild Analytics on durable storage; shrink the Viewer into the analytics UI.
+   Pixel baselines and visual tooling are removed by semon#536/#537 (Source) and
+   semon-hub#377 (Hub).
 6. Hub follow-ups: shrink browser suites that exercise display/control/runtime,
    delete paused `ui/ssh.mjs` with the SSH retirement, and reconcile the
    viewer/session redesign docs with this direction.
