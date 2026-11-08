@@ -2,9 +2,13 @@
 
 # Semon
 
-Semon collects, synchronizes, browses and queries harness-native agent sessions.
-Native source logs, the incremental Session Event Index, and Session Catalog form
-the foundation for Viewer, CLI, MCP, future Session Intelligence.
+Semon is Agent Session Intelligence (ASI): durable storage, query and analytics
+over harness-native agent sessions collected from your machines. Native source
+logs remain the source of truth; the incremental Session Event Index and Session
+Catalog are the foundation for the ASI store, CLI/MCP query and analytics. Session
+display and two-way harness control are not product goals; see the
+[ASI direction](docs/design/asi-direction.md). Until the retirements it lists land,
+the behavior documented below remains current.
 
 The core CLI lives in `semon-cli`; session discovery/parsing and focused reads live
 in `semon-sessions`, generic mirror synchronization in `semon-push`, retained SSH transport
