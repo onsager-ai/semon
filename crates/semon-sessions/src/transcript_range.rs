@@ -900,17 +900,6 @@ pub(crate) fn render_postgres_part(
             false,
         );
     }
-    let mut identity = identity;
-    identity.source_refs.retain(|observation| {
-        sources.iter().any(|source| {
-            catalog::source_relative(options, &identity.harness, source).as_deref()
-                == Some(observation.source.path.as_str())
-                && source.native_id == observation.source.native_id
-                && source.offset == observation.source.offset
-                && source.prefix_sha256 == observation.source.prefix_sha256
-                && source.tail_sha256 == observation.source.tail_sha256
-        })
-    });
     let selection = Selection {
         proof_db: None,
         identity,
@@ -1488,6 +1477,16 @@ fn invalid() -> io::Error {
     )
 }
 
+fn reference_in_selection(options: &Options, selection: &Selection, reference: &SessionSourceRef) -> bool {
+    selection.sources.values().any(|source| {
+        catalog::source_relative(options, &reference.root, source).as_deref() == Some(reference.path.as_str())
+            && source.native_id == reference.native_id
+            && source.offset == reference.offset
+            && source.prefix_sha256 == reference.prefix_sha256
+            && source.tail_sha256 == reference.tail_sha256
+    })
+}
+
 fn render(
     options: &Options,
     selection: Selection,
@@ -1503,6 +1502,7 @@ fn render(
         .identity
         .source_refs
         .iter()
+        .filter(|observation| reference_in_selection(options, &selection, &observation.source))
         .filter_map(|observation| {
             let reference = &observation.source;
             let root = match reference.root.as_str() {
@@ -2105,6 +2105,7 @@ fn render_field(
         .identity
         .source_refs
         .iter()
+        .filter(|observation| reference_in_selection(options, &selection, &observation.source))
         .filter_map(|observation| {
             let root = match observation.source.root.as_str() {
                 "claude" => &options.claude_home,
