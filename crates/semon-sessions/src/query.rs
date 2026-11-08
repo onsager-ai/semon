@@ -1266,12 +1266,11 @@ impl Query {
         if self.sources.is_retired() {
             return Err(QueryError::new("io", "native query source is closed"));
         }
-        #[cfg(feature = "postgres")]
         if evidence.storage.is_postgres() && tool == "get_session_activity" {
-            return evidence
-                .storage
-                .activity(catalog_key, args, now)
-                .map_err(|error| selected_error(&error));
+            return Err(QueryError::new(
+                "capability_unavailable",
+                "Selected activity is not yet available on PostgreSQL",
+            ));
         }
         let mut focused_args = args.clone();
         if self.sources.machines.len() > 1 {

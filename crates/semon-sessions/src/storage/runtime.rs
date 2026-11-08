@@ -392,26 +392,6 @@ impl RuntimeStore {
     }
 
     #[cfg(feature = "postgres")]
-    pub(crate) fn activity(
-        &self,
-        key: &str,
-        args: &serde_json::Value,
-        now: i64,
-    ) -> io::Result<serde_json::Value> {
-        let mut postgres = self
-            .postgres
-            .as_ref()
-            .expect("PostgreSQL store")
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Postgres { runtime, store } = &mut *postgres;
-        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
-        runtime
-            .block_on(store.activity(namespace, &self.options, key, args, now))
-            .map_err(io::Error::other)
-    }
-
-    #[cfg(feature = "postgres")]
     pub(crate) fn annotations(&self, query: &str) -> ViewerReply {
         let mut postgres = self
             .postgres

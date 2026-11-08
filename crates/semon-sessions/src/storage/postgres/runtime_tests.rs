@@ -226,21 +226,20 @@ pub(super) fn lifecycle(dsn: &str) {
             .unwrap();
         assert!(selected.get("error").is_none(), "{selected}");
     }
-    let activity = query
-        .call_selected(
-            "injected-runtime",
-            key,
-            "get_session_activity",
-            &json!({"id":key}),
-            None,
-            crate::SessionSourceReadMode::LocalOrPinnedProvider,
-        )
-        .unwrap();
-    assert!(activity["items"].is_array());
-    assert!(activity["generation"].is_string());
-    let facts = query.call_selected("injected-runtime", key, "get_session_activity", &json!({"id":key,"kind":"facts","limit":1}), None, crate::SessionSourceReadMode::LocalOrPinnedProvider).unwrap();
-    assert!(facts["items"].is_array());
-    assert!(query.call_selected("injected-runtime", key, "get_session_activity", &json!({"id":key,"generation":"stale"}), None, crate::SessionSourceReadMode::LocalOrPinnedProvider).is_err());
+    assert_eq!(
+        query
+            .call_selected(
+                "injected-runtime",
+                key,
+                "get_session_activity",
+                &json!({"id":key}),
+                None,
+                crate::SessionSourceReadMode::LocalOrPinnedProvider
+            )
+            .unwrap_err()
+            .code,
+        "capability_unavailable"
+    );
     // A foreign source key cannot use this app-owned capability, even if the
     // same native paths exist. Lower-level conformance proves forced-RLS SQL.
     let foreign = evidence.storage.page(

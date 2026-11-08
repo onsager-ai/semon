@@ -604,12 +604,6 @@ async fn pg_projection_rls_epochs_rollback_and_no_sqlite_files() {
     );
     assert!(tx.execute("INSERT INTO semon_projection.retained_indexes(namespace,path,ledger,index_digest,projection) VALUES('injected-runtime','foreign','{}',decode(repeat('00',32),'hex'),'{}')", &[]).await.is_err());
     tx.rollback().await.unwrap();
-    let tx = raw.transaction().await.unwrap();
-    tx.query_one("SELECT set_config('semon.namespace','foreign-activity',true)", &[]).await.unwrap();
-    assert_eq!(tx.query_one("SELECT count(*) FROM semon_projection.activity", &[]).await.unwrap().get::<_, i64>(0), 0);
-    assert_eq!(tx.execute("DELETE FROM semon_projection.activity WHERE namespace='injected-runtime'", &[]).await.unwrap(), 0);
-    assert!(tx.execute("INSERT INTO semon_projection.activity(namespace,session_key,source_generation,generation,rules,pricing,metadata) VALUES('injected-runtime','foreign','source','generation',5,'price','{}')", &[]).await.is_err());
-    tx.rollback().await.unwrap();
     admin.batch_execute("UPDATE semon_projection.units SET projector=0; UPDATE semon_projection.ledgers SET projector=0").await.unwrap();
     let tx = store_a.begin(&a).await.unwrap();
     assert_eq!(
