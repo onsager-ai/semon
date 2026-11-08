@@ -314,6 +314,41 @@ fn nested_wait_and_decoding_are_bounded_and_call_qualified() {
     );
 }
 
+#[test]
+fn unmatched_orchestration_result_keeps_indexed_call_and_reply_times() {
+    let pending = || call("wait_agent", &json!({}), None, "call-digest".into());
+    let mut observation = pending();
+    observation.fill_wait_from_reply(Some(1_000), Some(4_000));
+    assert_eq!(
+        observation.wait,
+        Some(WaitInterval {
+            started_at_ms: 1_000,
+            completed_at_ms: 4_000,
+        })
+    );
+    assert_eq!(observation.waste, Some(WasteKind::OrchestrationWait));
+    for (start, end) in [
+        (Some(1_000), None),
+        (None, Some(4_000)),
+        (Some(4_000), Some(1_000)),
+    ] {
+        let mut observation = pending();
+        observation.fill_wait_from_reply(start, end);
+        assert_eq!(observation.wait, None);
+    }
+    // A decoded interval is never replaced, and non-waits never gain one.
+    let mut observation = pending();
+    observation.wait = Some(WaitInterval {
+        started_at_ms: 10,
+        completed_at_ms: 20,
+    });
+    observation.fill_wait_from_reply(Some(1_000), Some(4_000));
+    assert_eq!(observation.wait.as_ref().unwrap().started_at_ms, 10);
+    let mut observation = call("Read", &json!({"file_path": "/f"}), None, "d".into());
+    observation.fill_wait_from_reply(Some(1_000), Some(4_000));
+    assert_eq!(observation.wait, None);
+}
+
 fn located(offset: u64, observation: Observation) -> LocatedObservation {
     LocatedObservation {
         position: SourcePosition {
@@ -1211,4 +1246,583 @@ fn directory_changes_cannot_reuse_bare_or_relative_read_selections() {
             "{commands:?}"
         );
     }
+}
+
+fn claude_result(name: &str, command: &str, content: Value, error: bool) -> Observation {
+    let mut observation = call(
+        name,
+        &json!({"command":command, "file_path":"/synthetic/file"}),
+        None,
+        "call-digest".into(),
+    );
+    observation.claude_bash = name == "Bash";
+    finish(
+        &mut observation,
+        &content,
+        error,
+        None,
+        None,
+        "result-digest".into(),
+    );
+    observation
+}
+
+#[test]
+fn claude_bash_exit_header_drives_typed_failures_and_verify_signals() {
+    // (tool, command, content, is_error, waste, verify_failure)
+    let cases = [
+        // gh pr checks: 8 is pending, 1 is a verification outcome.
+        (
+            "Bash",
+            "gh pr checks 12",
+            "Exit code 8\npending",
+            true,
+            Some(WasteKind::ChecksPending),
+            false,
+        ),
+        (
+            "Bash",
+            "gh pr checks 12",
+            "Exit code 1\nfailing",
+            true,
+            None,
+            true,
+        ),
+        // Only the header counts: later or bare body lines never set the exit.
+        (
+            "Bash",
+            "gh pr checks 12",
+            "Exit code 1\nExit code 8",
+            true,
+            None,
+            true,
+        ),
+        (
+            "Bash",
+            "gh pr checks 12",
+            "Exit code 1\nExit code 0\nbody",
+            true,
+            None,
+            true,
+        ),
+        (
+            "Bash",
+            "gh pr checks 12",
+            "boom\nExit code 8",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+        (
+            "Bash",
+            "gh pr checks 12",
+            "Exit code: 8\nboom",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+        // A successful call's output cannot forge a header.
+        (
+            "Bash",
+            "cargo test",
+            "Exit code 1\nprinted by the program",
+            false,
+            None,
+            false,
+        ),
+        // Timeouts and termination.
+        (
+            "Bash",
+            "timeout 5 tool",
+            "Exit code 124\n",
+            true,
+            Some(WasteKind::Timeout),
+            false,
+        ),
+        (
+            "Bash",
+            "tool",
+            "Exit code 143\n",
+            true,
+            Some(WasteKind::Timeout),
+            false,
+        ),
+        (
+            "Bash",
+            "cargo test",
+            "Exit code 143\n",
+            true,
+            Some(WasteKind::Timeout),
+            false,
+        ),
+        // Verification failures are signals, not waste.
+        (
+            "Bash",
+            "cargo test --locked",
+            "Exit code 101\nfailures",
+            true,
+            None,
+            true,
+        ),
+        (
+            "Bash",
+            "cargo clippy --all-targets",
+            "Exit code 101\nwarning",
+            true,
+            None,
+            true,
+        ),
+        (
+            "Bash",
+            "cargo fmt --all --check",
+            "Exit code 1\nDiff",
+            true,
+            None,
+            true,
+        ),
+        (
+            "Bash",
+            "cd /synthetic && cargo build 2>&1",
+            "Exit code 101\nerror",
+            true,
+            None,
+            true,
+        ),
+        (
+            "Bash",
+            "npm --prefix ui run typecheck",
+            "Exit code 2\nerror",
+            true,
+            None,
+            true,
+        ),
+        ("Bash", "npm test", "Exit code 1\nfail", true, None, true),
+        ("Bash", "pytest -q", "Exit code 1\nfail", true, None, true),
+        (
+            "Bash",
+            "go test ./...",
+            "Exit code 1\nfail",
+            true,
+            None,
+            true,
+        ),
+        (
+            "Bash",
+            "gh run view 5 --log-failed",
+            "Exit code 1\nlog",
+            true,
+            None,
+            true,
+        ),
+        // Not verification: cargo fmt without --check, a missing tool, an
+        // unrecognized wrapper, a compound with other work, a failed cd.
+        (
+            "Bash",
+            "cargo fmt --all",
+            "Exit code 1\nerror",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+        (
+            "Bash",
+            "cargo test",
+            "Exit code 127\ncommand not found",
+            true,
+            Some(WasteKind::MalformedCommand),
+            false,
+        ),
+        (
+            "Bash",
+            "git add . && cargo test",
+            "Exit code 1\nerror",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+        (
+            "Bash",
+            "cd /missing && cargo test",
+            "Exit code 1\ncd: /missing: No such file or directory",
+            true,
+            Some(WasteKind::PathNotFound),
+            false,
+        ),
+        // A pipeline's status belongs to its last stage.
+        (
+            "Bash",
+            "cargo test 2>&1 | tail -5",
+            "ok",
+            false,
+            None,
+            false,
+        ),
+        (
+            "Bash",
+            "cargo test 2>&1 | grep ok",
+            "Exit code 1\n",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+        // Harmless redirects keep single-command attribution.
+        (
+            "Bash",
+            "cat absent 2>&1",
+            "Exit code 1\ncat: absent: No such file or directory",
+            true,
+            Some(WasteKind::PathNotFound),
+            false,
+        ),
+        (
+            "Bash",
+            "cat absent 2> /dev/null",
+            "Exit code 1\ncat: absent: No such file or directory",
+            true,
+            Some(WasteKind::PathNotFound),
+            false,
+        ),
+        // Compound diagnostics: one allowlisted program that appears once.
+        (
+            "Bash",
+            "cat a | grep b",
+            "Exit code 1\ncat: a: No such file or directory",
+            true,
+            Some(WasteKind::PathNotFound),
+            false,
+        ),
+        (
+            "Bash",
+            "ls dir && git status",
+            "Exit code 2\nls: cannot access 'dir': No such file or directory",
+            true,
+            Some(WasteKind::PathNotFound),
+            false,
+        ),
+        (
+            "Bash",
+            "find . -name x | head -3",
+            "Exit code 1\nfind: 'dir': No such file or directory",
+            true,
+            Some(WasteKind::PathNotFound),
+            false,
+        ),
+        (
+            "Bash",
+            "cat a; ls b",
+            "Exit code 1\ncat: a: No such file or directory\nls: b: No such file or directory",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+        (
+            "Bash",
+            "cat a | cat b",
+            "Exit code 1\ncat: b: No such file or directory",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+        (
+            "Bash",
+            "tool | cat",
+            "Exit code 1\ntool: No such file or directory",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+        // Merge conflicts need a failing git integration command.
+        (
+            "Bash",
+            "git merge topic",
+            "Exit code 1\nCONFLICT (content): Merge conflict in f",
+            true,
+            Some(WasteKind::MergeConflict),
+            false,
+        ),
+        (
+            "Bash",
+            "git fetch && git rebase origin/main",
+            "Exit code 1\nCONFLICT (content): Merge conflict in f",
+            true,
+            Some(WasteKind::MergeConflict),
+            false,
+        ),
+        (
+            "Bash",
+            "git cherry-pick abc",
+            "Exit code 1\nCONFLICT (modify/delete): f",
+            true,
+            Some(WasteKind::MergeConflict),
+            false,
+        ),
+        (
+            "Bash",
+            "git pull",
+            "Exit code 1\nCONFLICT (content): f",
+            true,
+            Some(WasteKind::MergeConflict),
+            false,
+        ),
+        (
+            "Bash",
+            "git merge topic",
+            "Exit code 1\nerror: dirty tree",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+        (
+            "Bash",
+            "git merge topic",
+            "Already up to date.\nCONFLICT (content): printed only",
+            false,
+            None,
+            false,
+        ),
+        (
+            "Bash",
+            "git status",
+            "Exit code 1\nCONFLICT (content): f",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+        // Claude's native tool wrapper.
+        (
+            "Edit",
+            "",
+            "<tool_use_error>String to replace not found</tool_use_error>",
+            true,
+            Some(WasteKind::ToolInputRejected),
+            false,
+        ),
+        (
+            "Write",
+            "",
+            "<tool_use_error>File has not been read yet</tool_use_error>",
+            true,
+            Some(WasteKind::ToolInputRejected),
+            false,
+        ),
+        (
+            "MultiEdit",
+            "",
+            "<tool_use_error>bad edit</tool_use_error>",
+            true,
+            Some(WasteKind::ToolInputRejected),
+            false,
+        ),
+        (
+            "NotebookEdit",
+            "",
+            "<tool_use_error>bad cell</tool_use_error>",
+            true,
+            Some(WasteKind::ToolInputRejected),
+            false,
+        ),
+        (
+            "Read",
+            "",
+            "<tool_use_error>File does not exist.</tool_use_error>",
+            true,
+            Some(WasteKind::PathNotFound),
+            false,
+        ),
+        (
+            "Read",
+            "",
+            "<tool_use_error>File too large</tool_use_error>",
+            true,
+            Some(WasteKind::ToolInputRejected),
+            false,
+        ),
+        (
+            "Edit",
+            "",
+            "<tool_use_error>File does not exist.</tool_use_error>",
+            true,
+            Some(WasteKind::ToolInputRejected),
+            false,
+        ),
+        (
+            "Read",
+            "",
+            "plain failure",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+        (
+            "Bash",
+            "tool",
+            "<tool_use_error>nope</tool_use_error>",
+            true,
+            Some(WasteKind::OtherFailure),
+            false,
+        ),
+    ];
+    for (name, command, content, error, waste, verify) in cases {
+        let observation = claude_result(name, command, json!(content), error);
+        assert_eq!(observation.waste, waste, "{name} {command} {content}");
+        assert_eq!(
+            observation.verify_failure, verify,
+            "{name} {command} {content}"
+        );
+        assert!(!observation.silent_exit);
+    }
+    // Codex's colon form is not Claude's header, even for a Claude-named tool.
+    let observation = claude_result("Bash", "gh pr checks 1", json!("Exit code: 8"), true);
+    assert_eq!(observation.waste, Some(WasteKind::OtherFailure));
+    // Content blocks carry the same header.
+    let observation = claude_result(
+        "Bash",
+        "gh pr checks 1",
+        json!([{"type":"text","text":"Exit code 8\npending"}]),
+        true,
+    );
+    assert_eq!(observation.waste, Some(WasteKind::ChecksPending));
+    // The header is Claude-only: another harness's Bash-shaped tool is unchanged.
+    let mut other = call(
+        "bash",
+        &json!({"command":"gh pr checks 1"}),
+        None,
+        "call".into(),
+    );
+    finish(
+        &mut other,
+        &json!("Exit code 8\npending"),
+        true,
+        None,
+        None,
+        "result".into(),
+    );
+    assert_eq!(other.waste, Some(WasteKind::OtherFailure));
+}
+
+#[test]
+fn new_waste_kinds_have_their_categories() {
+    assert_eq!(
+        WasteKind::ChecksPending.category(),
+        WasteCategory::Orchestration
+    );
+    assert_eq!(WasteKind::Timeout.category(), WasteCategory::Tooling);
+    assert_eq!(
+        WasteKind::ToolInputRejected.category(),
+        WasteCategory::Tooling
+    );
+    assert_eq!(WasteKind::MergeConflict.category(), WasteCategory::Unmapped);
+}
+
+#[test]
+fn general_pipelines_and_redirects_stay_unproven_reads() {
+    // A redirect to a real file writes it: unattributed, never harmless.
+    for command in [
+        "echo hi > out.txt",
+        "cat a >> out.txt",
+        "cat a 2>err.txt",
+        "cat a >/dev/nullx",
+        "cat a > /dev/null extra > out.txt",
+        "cat a >&2",
+        "cat a &",
+        "cat a |& tee out",
+        "cat a | ",
+        "| cat a",
+        "cat < a",
+        "cat a 2>",
+    ] {
+        let observation = claude_result("Bash", command, json!(""), false);
+        assert_eq!(observation.commands, [Command::Ambiguous], "{command}");
+    }
+    // Harmless redirects and general pipelines supply failure evidence only.
+    for command in [
+        "cat a 2>&1",
+        "cat a >/dev/null",
+        "cat a 2>/dev/null",
+        "cat a &>/dev/null",
+        "cat a 1>&2",
+        "cat a > /dev/null",
+        "cat a | tr a b | wc -l",
+        "cat a | sort",
+    ] {
+        let observation = claude_result("Bash", command, json!(""), false);
+        assert_eq!(observation.commands, [Command::Unknown], "{command}");
+    }
+    // A quoted operator is a plain argument.
+    let observation = claude_result("Bash", "rg '>' file", json!(""), false);
+    assert!(matches!(observation.commands[..], [Command::Search(_, _)]));
+    // Expansions, subshells and heredocs remain unattributed.
+    for command in ["cat $(x) | head", "(cat a) | head", "cat a | { head; }"] {
+        let observation = claude_result("Bash", command, json!(""), false);
+        assert_eq!(observation.commands, [Command::Ambiguous], "{command}");
+    }
+    // The bounded read pipeline still proves a repeated read.
+    let mut rows = vec![
+        located(
+            10,
+            observed("Bash", "cat file | head -n 20", json!("a"), false),
+        ),
+        located(
+            30,
+            observed("Bash", "cat file | head -n 20", json!("a"), false),
+        ),
+        located(50, observed("Bash", "cat file 2>&1", json!("a"), false)),
+        located(70, observed("Bash", "cat file 2>&1", json!("a"), false)),
+    ];
+    classify_reads(&mut rows, &[]);
+    assert_eq!(rows[1].observation.waste, Some(WasteKind::RedundantRead));
+    // An unproven redirect or pipeline breaks read history instead.
+    assert!(rows[2].observation.waste.is_none());
+    assert!(rows[3].observation.waste.is_none());
+}
+
+#[test]
+fn unattributed_silent_exit_is_a_signal_not_waste() {
+    let parts = |first: Value| {
+        json!([
+            {"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},
+            {"type":"input_text","text":first.to_string()},
+            {"type":"input_text","text":json!({"exit_code":0,"output":"body"}).to_string()}
+        ])
+    };
+    let run = |command: Option<&str>, output: Value| {
+        let mut observation = match command {
+            Some(command) => call("exec_command", &json!({"cmd":command}), None, "hash".into()),
+            None => call("exec_command", &Value::Null, None, "hash".into()),
+        };
+        observation.failure_results = true;
+        finish(
+            &mut observation,
+            &output,
+            false,
+            None,
+            None,
+            "result".into(),
+        );
+        observation
+    };
+    let silent = run(None, parts(json!({"exit_code":1,"output":""})));
+    assert!(silent.silent_exit);
+    assert_eq!(silent.waste, None);
+    // Output, another exit code, or an attributed command is not silent.
+    let noisy = run(None, parts(json!({"exit_code":1,"output":"failure"})));
+    assert!(!noisy.silent_exit);
+    assert_eq!(noisy.waste, Some(WasteKind::OtherFailure));
+    let other = run(None, parts(json!({"exit_code":2,"output":""})));
+    assert!(!other.silent_exit);
+    assert_eq!(other.waste, Some(WasteKind::OtherFailure));
+    let attributed = run(Some("tool"), parts(json!({"exit_code":1,"output":""})));
+    assert!(!attributed.silent_exit);
+    assert_eq!(attributed.waste, Some(WasteKind::OtherFailure));
+    // A silent part never hides a real failure in the same batch.
+    let mixed = run(
+        None,
+        json!([
+            {"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},
+            {"type":"input_text","text":json!({"exit_code":1,"output":""}).to_string()},
+            {"type":"input_text","text":json!({"exit_code":1,"output":"HTTP 503"}).to_string()}
+        ]),
+    );
+    assert!(mixed.silent_exit);
+    assert_eq!(mixed.waste, Some(WasteKind::ExternalFailure));
 }

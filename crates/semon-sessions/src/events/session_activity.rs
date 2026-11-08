@@ -18,7 +18,7 @@ use crate::{claude_usage::Shared, pricing};
 pub(crate) mod analytics;
 pub(crate) mod classify;
 
-pub(crate) const ACTIVITY_RULES_VERSION: u32 = 5;
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 6;
 const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
@@ -146,6 +146,8 @@ pub(crate) struct ActivityStep {
     pub(crate) waste_category: Option<classify::WasteCategory>,
     pub(crate) waits: Vec<classify::WaitInterval>,
     pub(crate) empty_search: bool,
+    pub(crate) verify_failure: bool,
+    pub(crate) silent_exit: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -287,16 +289,23 @@ pub(crate) fn apply_observations(
         if let Some(owner) = owner {
             let step = &mut activity.steps[owner];
             step.empty_search |= row.observation.empty_search;
+            step.verify_failure |= row.observation.verify_failure;
+            step.silent_exit |= row.observation.silent_exit;
             if let Some(wait) = row.observation.wait {
                 step.waits.push(wait);
             }
             if let Some(waste) = row.observation.waste {
                 let rank = |kind| match kind {
-                    classify::WasteKind::OrchestrationWait => 0,
+                    classify::WasteKind::OrchestrationWait | classify::WasteKind::ChecksPending => {
+                        0
+                    }
                     classify::WasteKind::PathNotFound
                     | classify::WasteKind::MalformedCommand
+                    | classify::WasteKind::ToolInputRejected
+                    | classify::WasteKind::Timeout
                     | classify::WasteKind::ExternalFailure
                     | classify::WasteKind::OtherFailure
+                    | classify::WasteKind::MergeConflict
                     | classify::WasteKind::Sleep => 1,
                     classify::WasteKind::Refill => 2,
                     classify::WasteKind::RedundantRead => 3,
@@ -386,6 +395,8 @@ pub(crate) fn derive(
                 waste_category: None,
                 waits: Vec::new(),
                 empty_search: false,
+                verify_failure: false,
+                silent_exit: false,
             }
         })
         .collect();
