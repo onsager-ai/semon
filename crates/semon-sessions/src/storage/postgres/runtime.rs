@@ -105,6 +105,7 @@ impl PgProjectionStore {
             for mut row in page.rows {
                 let current: bool = tx.tx.query_one("SELECT lifecycle='current' FROM semon_projection.catalog WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &row.key]).await.map_err(backend)?.get(0);
                 row.lifecycle = if current {
+                    tx.catalog_row(namespace, &row.key, CatalogReadScope::Current).await?.ok_or_else(|| backend("Current Query owner unavailable"))?;
                     crate::model::summary::CatalogLifecycle::Current
                 } else {
                     crate::model::summary::CatalogLifecycle::Retained
