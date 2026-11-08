@@ -405,18 +405,52 @@ pub(super) async fn lifecycle(dsn: &str) {
     // Empty replacement hands off the last nonempty observation before
     // discovery acknowledges the new empty generation.
     std::fs::write(&path, b"").unwrap();
-    let empty = store.publish_sources(&namespace, &options, &inputs).await.unwrap().unwrap();
+    let empty = store
+        .publish_sources(&namespace, &options, &inputs)
+        .await
+        .unwrap()
+        .unwrap();
     assert_ne!(empty, next);
     let tx = store.begin(&namespace).await.unwrap();
-    assert!(tx.catalog_row(&namespace, &key, CatalogReadScope::Current).await.unwrap().is_none());
-    let (_, retained_total, retained_slots) = tx.recipe_page(&namespace, &key, CatalogReadScope::RetainedHistory, None, 0, 10).await.unwrap();
+    assert!(
+        tx.catalog_row(&namespace, &key, CatalogReadScope::Current)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let (_, retained_total, retained_slots) = tx
+        .recipe_page(
+            &namespace,
+            &key,
+            CatalogReadScope::RetainedHistory,
+            None,
+            0,
+            10,
+        )
+        .await
+        .unwrap();
     assert_eq!(retained_total, 2);
     assert_eq!(retained_slots.len(), 2);
     tx.commit(&namespace).await.unwrap();
     drop(store);
-    let mut store = PgProjectionStore::new(super::connect(dsn).await, namespace.clone()).await.unwrap();
+    let mut store = PgProjectionStore::new(super::connect(dsn).await, namespace.clone())
+        .await
+        .unwrap();
     let tx = store.begin(&namespace).await.unwrap();
-    assert_eq!(tx.recipe_page(&namespace, &key, CatalogReadScope::RetainedHistory, None, 0, 10).await.unwrap().1, 2);
+    assert_eq!(
+        tx.recipe_page(
+            &namespace,
+            &key,
+            CatalogReadScope::RetainedHistory,
+            None,
+            0,
+            10
+        )
+        .await
+        .unwrap()
+        .1,
+        2
+    );
     tx.commit(&namespace).await.unwrap();
     #[cfg(target_os = "linux")]
     sqlite_watch.assert_untouched(&options);
