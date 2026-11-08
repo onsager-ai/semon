@@ -91,7 +91,7 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v31: source-bound typed activity observations, without tool input/output.
 /// v32: assistant-only Claude tools and expanded typed activity classification.
 /// v33: literal PR bodies and code-mode printed-output activity observations.
-pub(crate) const CACHE_VERSION: u32 = 36;
+pub(crate) const CACHE_VERSION: u32 = 37;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -4714,10 +4714,20 @@ struct CallMatches {
 /// The first one or two source calls to `tool`, outside comments and string
 /// literals. The scanner only distinguishes zero, one and multiple calls.
 fn call_matches(script: &str, tool: &str) -> CallMatches {
-    if tool.is_empty() {
-        return CallMatches::default();
+    let opens = call_opens(script, tool, 2);
+    CallMatches {
+        first: opens.first().copied(),
+        multiple: opens.len() > 1,
     }
-    let mut found = CallMatches::default();
+}
+
+/// Where each of the first `limit` source calls to `tool` opens its arguments,
+/// outside comments and string literals.
+fn call_opens(script: &str, tool: &str, limit: usize) -> Vec<usize> {
+    let mut opens = Vec::new();
+    if tool.is_empty() {
+        return opens;
+    }
     let mut at = 0;
     while let Some(c) = script[at..].chars().next() {
         match c {
@@ -4743,11 +4753,10 @@ fn call_matches(script: &str, tool: &str) -> CallMatches {
                 at = end;
                 let rest = script[at..].trim_start();
                 if word == tool && rest.starts_with('(') {
-                    if found.first.is_some() {
-                        found.multiple = true;
-                        return found;
+                    opens.push(script.len() - rest.len() + 1);
+                    if opens.len() >= limit {
+                        return opens;
                     }
-                    found.first = Some(script.len() - rest.len() + 1);
                 }
                 continue;
             }
@@ -4755,7 +4764,7 @@ fn call_matches(script: &str, tool: &str) -> CallMatches {
         }
         at += c.len_utf8();
     }
-    found
+    opens
 }
 
 /// Where the source's first call to `tool` opens its arguments: `tool` as a
@@ -4769,10 +4778,14 @@ fn call_open(script: &str, tool: &str) -> Option<usize> {
 /// only for what the structured output doesn't carry: a yielded command's
 /// line before it completes, and the input a poll sends.
 pub(crate) fn script_arg(script: &str, tool: &str, key: &str) -> Option<ScriptArg> {
-    let open = call_open(script, tool)?;
+    Some(arg_at(script, call_open(script, tool)?, key))
+}
+
+/// What the call whose arguments open at `open` gives `key`.
+fn arg_at(script: &str, open: usize, key: &str) -> ScriptArg {
     let text = &script[open..];
     if !text.trim_start().starts_with('{') {
-        return Some(ScriptArg::Other);
+        return ScriptArg::Other;
     }
     // Depth 0 is the argument list, 1 the object literal.
     let mut depth = 0usize;
@@ -4786,7 +4799,7 @@ pub(crate) fn script_arg(script: &str, tool: &str, key: &str) -> Option<ScriptAr
                 let rest = text[at..].trim_start();
                 if depth == 1 && expect_key && rest.starts_with(':') {
                     if literal.as_deref() == Some(key) {
-                        return Some(script_value(text, text.len() - rest.len() + 1));
+                        return script_value(text, text.len() - rest.len() + 1);
                     }
                     expect_key = false;
                 }
@@ -4808,7 +4821,7 @@ pub(crate) fn script_arg(script: &str, tool: &str, key: &str) -> Option<ScriptAr
             }
             ')' | ']' | '}' => {
                 if depth == 0 {
-                    return Some(ScriptArg::Absent);
+                    return ScriptArg::Absent;
                 }
                 depth -= 1;
                 expect_key = false;
@@ -4822,12 +4835,12 @@ pub(crate) fn script_arg(script: &str, tool: &str, key: &str) -> Option<ScriptAr
                 at = end;
                 let rest = text[at..].trim_start();
                 if word == key {
-                    return Some(if rest.starts_with(':') {
+                    return if rest.starts_with(':') {
                         script_value(text, text.len() - rest.len() + 1)
                     } else {
                         // Shorthand `{chars}`: a variable.
                         ScriptArg::Other
-                    });
+                    };
                 }
                 expect_key = false;
                 continue;
@@ -4838,7 +4851,7 @@ pub(crate) fn script_arg(script: &str, tool: &str, key: &str) -> Option<ScriptAr
         at += c.len_utf8();
     }
     // The source ends inside the call: it can't be read.
-    Some(ScriptArg::Other)
+    ScriptArg::Other
 }
 
 /// The command line a code-mode script starts with `tools.exec_command`.
@@ -4847,6 +4860,29 @@ pub(crate) fn script_command(script: &str) -> Option<String> {
         ScriptArg::Literal(command) if !command.trim().is_empty() => Some(command),
         _ => None,
     }
+}
+
+/// Code-mode scripts rarely start more commands than this; a longer script
+/// is not decoded.
+const SCRIPT_COMMANDS_MAX: usize = 8;
+
+/// Every literal `cmd` of a script's `tools.exec_command` calls, in source
+/// order. Empty when there are none, more than `SCRIPT_COMMANDS_MAX`, any
+/// command is not a string literal, or the script also drives a session with
+/// `write_stdin`.
+pub(crate) fn script_literal_commands(script: &str) -> Vec<String> {
+    let opens = call_opens(script, "exec_command", SCRIPT_COMMANDS_MAX + 1);
+    if opens.len() > SCRIPT_COMMANDS_MAX || call_matches(script, "write_stdin").first.is_some() {
+        return Vec::new();
+    }
+    let mut commands = Vec::new();
+    for open in opens {
+        match arg_at(script, open, "cmd") {
+            ScriptArg::Literal(command) if !command.trim().is_empty() => commands.push(command),
+            _ => return Vec::new(),
+        }
+    }
+    commands
 }
 
 pub(crate) fn script_workdir(script: &str) -> Option<String> {

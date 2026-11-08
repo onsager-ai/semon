@@ -35,7 +35,7 @@ pub(crate) enum WasteKind {
 }
 
 /// What a step did, in first-matching precedence order (declaration order).
-/// `Recover` is not computed by rules version 7 and is never assigned.
+/// `Recover` is not computed by rules version 8 and is never assigned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum Activity {
     Coordinate,
@@ -148,6 +148,14 @@ enum Command {
     PrChecks,
     Watch,
     Sleep,
+    /// Blocks on a background process without sleeping. Label evidence only.
+    Wait,
+    /// Read-only CI status: `gh run view`, `gh run list`.
+    CiStatus,
+    /// Starts CI outside the repository: `gh run rerun`, `gh workflow run`.
+    CiStart,
+    /// A message to the user or Manager.
+    Report,
     /// A recognized verification command. Like any unknown program, it may
     /// write files, so it still breaks read proofs.
     Verify,
@@ -274,6 +282,9 @@ pub(crate) struct Observation {
     pub(crate) result_digest: Option<String>,
     pub(crate) step_id: Option<ActivityStepId>,
     commands: Vec<Command>,
+    /// Evidence for `activity()` alone: it is never read by state-change,
+    /// read, failure or retry proofs, so it cannot make a call look known.
+    label_commands: Vec<Command>,
     attribution: Attribution,
     orchestration: bool,
     /// Distinct from `orchestration`, which also marks blocking agent calls as
@@ -314,10 +325,13 @@ impl Observation {
             AgentCall::Coordinate => Activity::Coordinate,
             AgentCall::Wait => Activity::Wait,
         });
-        let commands = self.commands.iter().filter_map(|command| match command {
-            Command::Sleep | Command::Watch => Some(Activity::Wait),
+        let commands = self.commands.iter().chain(&self.label_commands);
+        let commands = commands.filter_map(|command| match command {
+            Command::Sleep | Command::Watch | Command::Wait => Some(Activity::Wait),
             Command::PrChecks if pending => Some(Activity::Wait),
-            Command::PrChecks | Command::Verify => Some(Activity::Verify),
+            Command::PrChecks | Command::Verify | Command::CiStatus | Command::CiStart => {
+                Some(Activity::Verify)
+            }
             Command::Commit
             | Command::Push
             | Command::PullRequest
@@ -326,6 +340,7 @@ impl Observation {
             Command::BodyWrite | Command::Mutation => Some(Activity::Implement),
             Command::Read(..) | Command::Search(..) | Command::Inspect => Some(Activity::Explore),
             Command::Setup => Some(Activity::Setup),
+            Command::Report => Some(Activity::Report),
             Command::Ambiguous | Command::Unknown => None,
         });
         agent.into_iter().chain(commands).min()
@@ -347,6 +362,7 @@ impl Observation {
                         | Command::Push
                         | Command::PullRequest
                         | Command::Verify
+                        | Command::CiStart
                         | Command::Merge
                 )
             })
@@ -574,8 +590,14 @@ fn command(words: &[String]) -> Command {
         }
         match gh {
             ["pr", "create", ..] => return Command::PullRequest,
+            ["run", "watch", ..] => return Command::Watch,
+            ["run", "rerun", ..] | ["workflow", "run", ..] => return Command::CiStart,
             ["run", "view", rest @ ..] if rest.contains(&"--log-failed") => {
                 return Command::Verify;
+            }
+            ["run", "view" | "list", ..] => return Command::CiStatus,
+            ["pr", "view" | "diff" | "list" | "status", ..] | ["issue", "view" | "list", ..] => {
+                return Command::Inspect;
             }
             ["pr", "checks", rest @ ..]
                 if !rest.iter().any(|arg| {
@@ -596,7 +618,6 @@ fn command(words: &[String]) -> Command {
     }
     match args.as_slice() {
         ["cd", path] if path.starts_with('/') => Command::Setup,
-        ["gh", "run", "watch", ..] => Command::Watch,
         ["rg", ..]
             if !args
                 .iter()
@@ -969,8 +990,18 @@ pub(super) fn call(
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "apply_patch" => {
             vec![Command::Mutation]
         }
-        "Agent" | "Task" | "wait_agent" => Vec::new(),
+        "Agent" | "Task" | "wait_agent" | "sleep" => Vec::new(),
+        "AskUserQuestion" | "SubagentHandback" => vec![Command::Report],
+        "WebFetch" | "WebSearch" | "web_search" | "_web_run" | "ToolSearch" | "Skill" => {
+            vec![Command::Inspect]
+        }
         _ => vec![Command::Unknown],
+    };
+    // Monitor runs a script, so it stays a state-change barrier. A native sleep
+    // changes nothing; neither proves what it waited for, so neither is waste.
+    let label_commands = match name {
+        "Monitor" | "sleep" => vec![Command::Wait],
+        _ => Vec::new(),
     };
     if attribution.components == 0 && commands != [Command::Ambiguous] {
         attribution.components = commands.len();
@@ -995,9 +1026,8 @@ pub(super) fn call(
     let orchestration =
         matches!(name, "Agent" | "Task" | "wait_agent") || commands.contains(&Command::Watch);
     let agent = match name {
-        "Agent" | "Task" | "SendMessage" | "spawn_agent" | "send_message" | "send_input" => {
-            Some(AgentCall::Coordinate)
-        }
+        "Agent" | "Task" | "SendMessage" | "spawn_agent" | "send_message" | "send_input"
+        | "followup_task" | "list_agents" | "interrupt_agent" => Some(AgentCall::Coordinate),
         "wait_agent" => Some(AgentCall::Wait),
         _ => None,
     };
@@ -1017,6 +1047,7 @@ pub(super) fn call(
         result_digest: None,
         step_id,
         commands,
+        label_commands,
         attribution,
         orchestration,
         agent,
@@ -1670,6 +1701,16 @@ pub(crate) fn capture(
                         });
                     if name == "exec" && input.is_null() {
                         observation.commands = vec![Command::Unknown];
+                        // The script stays an unattributed barrier; only its
+                        // label may come from literal commands it starts.
+                        observation.label_commands = field(payload, "input")
+                            .filter(|text| text.len() <= MAX_BYTES)
+                            .map(crate::events::script_literal_commands)
+                            .unwrap_or_default()
+                            .iter()
+                            .filter_map(|text| shell_commands(text, 0))
+                            .flat_map(|shell| shell.commands)
+                            .collect();
                     }
                     index
                         .event_mut(event)

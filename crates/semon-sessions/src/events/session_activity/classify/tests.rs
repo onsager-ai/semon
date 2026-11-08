@@ -1854,6 +1854,27 @@ fn activity_label_follows_first_matching_precedence() {
         ("touch file && cat file", Some(Activity::Implement)),
         ("cd /work && cat file", Some(Activity::Explore)),
         ("cat file && unrecognized command", Some(Activity::Explore)),
+        // Rules version 8: read-only and CI commands of the gh CLI.
+        ("gh run view 123", Some(Activity::Verify)),
+        ("gh run view 123 --log-failed", Some(Activity::Verify)),
+        ("gh run list --limit 5", Some(Activity::Verify)),
+        (
+            "gh --repo example/project run watch 123",
+            Some(Activity::Wait),
+        ),
+        ("gh run rerun 123", Some(Activity::Verify)),
+        (
+            "gh workflow run rust.yml --ref topic",
+            Some(Activity::Verify),
+        ),
+        ("gh pr view 12", Some(Activity::Explore)),
+        ("gh pr diff 12", Some(Activity::Explore)),
+        ("gh pr list", Some(Activity::Explore)),
+        ("gh pr status", Some(Activity::Explore)),
+        ("gh issue view 12", Some(Activity::Explore)),
+        ("gh issue list", Some(Activity::Explore)),
+        ("gh api repos/example/project", None),
+        ("gh workflow list", None),
     ] {
         assert_eq!(shell(command), expected, "{command}");
     }
@@ -1883,6 +1904,19 @@ fn activity_label_follows_first_matching_precedence() {
         ("spawn_agent", Some(Activity::Coordinate)),
         ("send_input", Some(Activity::Coordinate)),
         ("wait_agent", Some(Activity::Wait)),
+        ("followup_task", Some(Activity::Coordinate)),
+        ("list_agents", Some(Activity::Coordinate)),
+        ("interrupt_agent", Some(Activity::Coordinate)),
+        ("sleep", Some(Activity::Wait)),
+        ("Monitor", Some(Activity::Wait)),
+        ("WebFetch", Some(Activity::Explore)),
+        ("WebSearch", Some(Activity::Explore)),
+        ("web_search", Some(Activity::Explore)),
+        ("_web_run", Some(Activity::Explore)),
+        ("ToolSearch", Some(Activity::Explore)),
+        ("Skill", Some(Activity::Explore)),
+        ("AskUserQuestion", Some(Activity::Report)),
+        ("SubagentHandback", Some(Activity::Report)),
         ("UnlistedTool", None),
     ] {
         let input = json!({"file_path":"/f","pattern":"p"});
@@ -2017,4 +2051,97 @@ fn an_intervening_state_change_breaks_the_repeat_but_the_repeat_itself_does_not(
     finish(&mut edit, &json!("ok"), false, None, None, "r".into());
     let rows = repeat_rows(vec![failing_test(), edit, passing_test()]);
     assert_eq!(rows[2].observation.waste, None);
+}
+
+#[test]
+fn tool_and_gh_labels_keep_state_change_semantics() {
+    let tool = |name: &str| call(name, &json!({"query": "q"}), None, "d".into());
+    // Read-only tools and calls are no longer barriers.
+    for name in [
+        "WebFetch",
+        "WebSearch",
+        "web_search",
+        "_web_run",
+        "ToolSearch",
+        "Skill",
+        "AskUserQuestion",
+        "SubagentHandback",
+        "sleep",
+    ] {
+        assert!(!tool(name).changes_state(), "{name}");
+    }
+    // Tools that can start processes or act on other agents stay barriers.
+    for name in ["Monitor", "followup_task", "list_agents", "interrupt_agent"] {
+        assert!(tool(name).changes_state(), "{name}");
+    }
+    for (command, barrier) in [
+        ("gh run view 123", false),
+        ("gh run list", false),
+        ("gh pr view 12", false),
+        ("gh issue list", false),
+        ("gh run rerun 123", true),
+        ("gh workflow run rust.yml", true),
+    ] {
+        let shell = call("Bash", &json!({"command": command}), None, "d".into());
+        assert_eq!(shell.changes_state(), barrier, "{command}");
+    }
+    // Native sleep and Monitor are label-only waits, never Sleep waste.
+    assert_eq!(observed("sleep", "", json!("ok"), false).waste, None);
+    assert_eq!(observed("Monitor", "", json!("ok"), false).waste, None);
+}
+
+fn captured_exec(script: &str) -> Observation {
+    let mut index = FileIndex::default();
+    let records = [
+        json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"call","name":"exec","input":script}}),
+        json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"call","output":[{"type":"input_text","text":"Script completed\nWall time 0.1 seconds\nOutput:\n"},{"type":"input_text","text":"printed"}]}}),
+    ];
+    for (n, record) in records.iter().enumerate() {
+        crate::events::codex(&mut index, record, n as u64 * 100);
+        capture(
+            &mut index,
+            "codex",
+            record,
+            n as u64 * 100,
+            &serde_json::to_vec(record).unwrap(),
+        );
+    }
+    index.events[0].activity_observation.clone().unwrap()
+}
+
+#[test]
+fn code_mode_exec_literal_commands_label_without_proving() {
+    let labelled = captured_exec(
+        "await tools.exec_command({cmd:'cat file'}); await tools.exec_command({cmd:'cargo test'});",
+    );
+    assert_eq!(labelled.activity(), Some(Activity::Verify));
+    assert_eq!(labelled.commands, [Command::Unknown]);
+    assert!(labelled.changes_state());
+    // The retry fingerprint still ignores the undecoded script.
+    assert_eq!(labelled.fingerprint, None);
+    // A non-literal command, or a session write, leaves the script unlabelled.
+    for script in [
+        "await tools.exec_command({cmd:name}); await tools.exec_command({cmd:'cat file'});",
+        "await tools.exec_command({cmd:'cat file'}); await tools.exec_command({cmd:`cat ${x}`});",
+        "await tools.exec_command({cmd:'cat file'}); await tools.write_stdin({session_id:1});",
+        "for (const c of list) { await tools.exec_command({cmd:c}); }",
+    ] {
+        let unlabelled = captured_exec(script);
+        assert_eq!(unlabelled.activity(), None, "{script}");
+        assert!(unlabelled.label_commands.is_empty(), "{script}");
+    }
+    // Label evidence never feeds read proofs: a repeat of a read the script
+    // printed is not redundant, and the script still clears earlier reads.
+    let mut rows = vec![
+        located(10, observed("Bash", "cat file", json!("ok"), false)),
+        located(
+            30,
+            captured_exec(
+                "await tools.exec_command({cmd:'cat file'}); await tools.exec_command({cmd:'ls'});",
+            ),
+        ),
+        located(50, observed("Bash", "cat file", json!("ok"), false)),
+    ];
+    classify_reads(&mut rows, &[]);
+    assert!(rows.iter().all(|row| row.observation.waste.is_none()));
 }
