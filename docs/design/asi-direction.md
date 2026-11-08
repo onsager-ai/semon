@@ -14,7 +14,7 @@ front end.
 The method (data model, storage schema, measurement layers, labels, ledgers,
 evidence grades and interventions) is defined in the
 [ASI methodology](asi-methodology.md). This document owns product scope and
-sequencing.
+sequencing. Progress is tracked in the pinned roadmap issue, #549.
 
 ## Pillars
 
