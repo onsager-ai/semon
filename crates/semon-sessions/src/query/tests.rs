@@ -6392,13 +6392,10 @@ fn activity_family_rolls_up_without_child_step_duplication() {
         1
     );
     assert_eq!(parent["family"]["waits_without_interval"]["observed"], 1);
-    assert_eq!(
-        parent["family"]["waste_cost_by_kind"]
-            .as_object()
-            .unwrap()
-            .len(),
-        0
-    );
+    // The interval-less orchestration wait is the family's only waste step.
+    let waste_cost = &parent["family"]["waste_cost_by_kind"];
+    assert_eq!(waste_cost.as_object().unwrap().len(), 1);
+    assert_eq!(waste_cost["OrchestrationWait"]["steps"], 1);
     assert_eq!(
         parent["family"]["levers_not_computed"],
         json!(["TaskSpecification"])
