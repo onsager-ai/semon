@@ -374,8 +374,12 @@ the existing selected-source admission and request-owned reader. Cold local
 calls prepare the Catalog through its shared coordinator before reading pages.
 
 `get_session` and `list_sessions` add compact nullable `activity_analytics`, with
-exact parent-family totals and physical-session step-time. The design contract
-and all fields live in [session activity analytics](../../../../docs/design/session-activity-analytics.md).
+exact parent-family totals and physical-session step-time. Wait duration unions exact
+intervals within each physical session and exposes observed/exclusive/shared coverage;
+missing orchestration intervals remain unknown. Waste time and list cost group
+exclusive waste steps by kind and category. Family values sum member measurements;
+shared waste is excluded. The design contract and all fields live in
+[session activity analytics](../../../../docs/design/session-activity-analytics.md).
 `activity-golden.json` owns sanitized expectations for the new summary/page
 contract. Historical `contract-reference.json` remains byte-for-byte frozen;
 the legacy comparator projects away only `activity_analytics`, which dedicated
