@@ -31,6 +31,7 @@ front end.
 | Area | Decision |
 | --- | --- |
 | Storage engine | Extend the SQLite Session Event Index first (event/content tables, FTS5). Design the schema so it can be exported to a columnar store (Parquet/DuckDB) once analytical volume calls for it. |
+| PostgreSQL track (#477) | Paused. The merged code stays behind its feature flag with its CI workflow. The Raw-plus-projection-cache model, namespace-bound storage port and runtime custody owners carry over to the SQLite ASI store. |
 | Consumers | Agents (MCP/SQL) and humans (dashboards) equally, over one shared schema. |
 | Viewer | Shrink to an analytics UI: keep the authenticated server, shell and security boundary; drop transcript-browsing polish. Pixel/visual comparison is removed from CI by semon#536/#537. New UI work is dashboards and query results. |
 | Control, runtime, SSH | Retire `semon-control`, `semon-runtime` and `semon-ssh` code. Push/receive over TLS covers multi-machine collection. Retirement deletes no user data, credentials, history or installed services. |
