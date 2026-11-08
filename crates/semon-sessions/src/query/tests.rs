@@ -6389,8 +6389,9 @@ fn activity_family_rolls_up_without_child_step_duplication() {
     assert_eq!(parent["family"]["wait_time_ms"]["observed"]["known"], 0);
     assert_eq!(
         parent["family"]["wait_time_ms"]["observed"]["unknown_steps"],
-        0
+        1
     );
+    assert_eq!(parent["family"]["waits_without_interval"]["observed"], 1);
     assert_eq!(
         parent["family"]["waste_cost_by_kind"]
             .as_object()
