@@ -2470,10 +2470,8 @@ impl<'a> Builder<'a> {
             }
             observations.extend(file.summary.events.iter().filter_map(|event| {
                 event.activity_observation.clone().map(|mut observation| {
-                    observation.fill_wait_from_reply(
-                        event.t,
-                        event.r.as_ref().and_then(|reply| reply.t),
-                    );
+                    observation
+                        .fill_wait_from_reply(event.t, event.r.as_ref().and_then(|reply| reply.t));
                     events::session_activity::classify::LocatedObservation {
                         position: SourcePosition {
                             source: path.into(),
