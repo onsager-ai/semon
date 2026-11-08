@@ -6005,8 +6005,10 @@ fn focused_tail_does_not_load_growing_session_busy_metadata() {
         let fixed = serde_json::to_string(&catalog).unwrap();
         assert!(
             fixed.len() < 8192,
-            "Catalog metadata grew with selected history: {}",
-            fixed.len()
+            "Catalog metadata grew with selected history at prefix {prefix}: {} of {} ({})",
+            fixed.len(),
+            metadata.len(),
+            fixed
         );
         assert!(catalog["query"]["rows"]["lead"].get("busy").is_none());
         let busy: String = db
