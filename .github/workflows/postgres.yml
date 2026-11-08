@@ -1,9 +1,7 @@
 name: PostgreSQL projection conformance
+# Paused track (#539): run on demand only.
 on:
   workflow_dispatch:
-  pull_request:
-  push:
-    branches: [main, codex/477-rebuild-20261106, 'codex/477-rebuild-diagnostic-20261106-*', codex/477-pg-selectable-20261107, 'codex/477-pgsel-diagnostic-20261107-*', codex/477-pg-startup-20261107, 'codex/477-pgstart-diagnostic-20261107-*']
 permissions:
   contents: read
 env:
