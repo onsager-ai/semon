@@ -948,6 +948,48 @@ fn diag_program(words: &[String]) -> String {
     out
 }
 
+/// Diagnostic approximation of which shell_commands bailout fired.
+fn parse_reason(text: &str, depth: usize) -> &'static str {
+    if depth > MAX_DEPTH {
+        return "depth";
+    }
+    if text.len() > MAX_BYTES {
+        return "len";
+    }
+    let Some((normalized, _)) = literal_pr_body(text) else {
+        return "prbody";
+    };
+    let Some(pipelines) = script(&normalized) else {
+        return if normalized.contains("<<") {
+            "heredoc"
+        } else if normalized.contains("$(") {
+            "subst"
+        } else if normalized.contains('`') {
+            "backtick"
+        } else if normalized.contains('(') || normalized.contains('{') {
+            "subshell"
+        } else if normalized
+            .split_whitespace()
+            .any(|w| matches!(w, "if" | "for" | "while" | "until" | "case" | "then" | "do"))
+        {
+            "ctrl"
+        } else {
+            "tokenizer"
+        };
+    };
+    for pipeline in &pipelines {
+        if let [words] = pipeline.stages.as_slice()
+            && let [shell, flag, inner] = words.as_slice()
+            && matches!(shell.as_str(), "bash" | "/bin/bash" | "sh" | "/bin/sh")
+            && matches!(flag.as_str(), "-c" | "-lc")
+            && shell_commands(inner, depth + 1).is_none()
+        {
+            return "nested";
+        }
+    }
+    "components"
+}
+
 fn diag_signatures(name: &str, input: &Value, commands: &[Command]) -> Vec<String> {
     let unknown = |c: &Command| matches!(c, Command::Unknown | Command::Ambiguous);
     if !commands.iter().any(unknown) {
@@ -960,8 +1002,28 @@ fn diag_signatures(name: &str, input: &Value, commands: &[Command]) -> Vec<Strin
     } else {
         "other"
     };
+    let other;
+    let tool = if tool == "other"
+        && (1..=40).contains(&name.len())
+        && name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_.-".contains(&c))
+    {
+        other = format!("other:{name}");
+        other.as_str()
+    } else {
+        tool
+    };
     let mut sigs = Vec::new();
-    if matches!(name, "Bash" | "bash" | "shell" | "exec_command") {
+    let text = input
+        .get("command")
+        .or_else(|| input.get("cmd"))
+        .and_then(Value::as_str);
+    if matches!(name, "Bash" | "bash" | "shell" | "exec_command") && commands == [Command::Ambiguous]
+    {
+        let reason = text.map_or("no-text", |text| parse_reason(text, 0));
+        sigs.push(format!("{tool}|parse:{reason}"));
+    } else if matches!(name, "Bash" | "bash" | "shell" | "exec_command") {
         if let Some(pipelines) = input
             .get("command")
             .or_else(|| input.get("cmd"))
@@ -1751,6 +1813,30 @@ pub(crate) fn capture(
                         });
                     if name == "exec" && input.is_null() {
                         observation.commands = vec![Command::Unknown];
+                        let reason = match field(payload, "input") {
+                            Some(text)
+                                if text.len() <= MAX_BYTES
+                                    && (crate::events::result_source(text)
+                                        || crate::events::activity_output_source(text)) =>
+                            {
+                                let flags = crate::events::script_flags(text);
+                                if flags & crate::events::AMBIGUOUS_COMMANDS != 0 {
+                                    "script:multi"
+                                } else if flags & crate::events::EXEC_COMMAND == 0 {
+                                    "script:no-exec"
+                                } else {
+                                    "script:no-literal-cmd"
+                                }
+                            }
+                            _ => "script:filtered",
+                        };
+                        observation.diag = vec![format!("exec|{reason}")];
+                    } else if name == "exec" {
+                        for sig in &mut observation.diag {
+                            if let Some(rest) = sig.strip_prefix("exec_command|") {
+                                *sig = format!("exec|{rest}");
+                            }
+                        }
                     }
                     index
                         .event_mut(event)

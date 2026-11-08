@@ -3620,10 +3620,10 @@ pub(crate) const AGM_FINAL: u8 = 128;
 /// log doesn't say.
 pub(crate) const AGM_PROGRESS: u8 = 1;
 /// A code-mode script calls `tools.exec_command`.
-const EXEC_COMMAND: u8 = 16;
+pub(crate) const EXEC_COMMAND: u8 = 16;
 /// The source contains multiple or mixed command operations whose outputs
 /// have no exact nested call identity.
-const AMBIGUOUS_COMMANDS: u8 = 32;
+pub(crate) const AMBIGUOUS_COMMANDS: u8 = 32;
 /// A code-mode poll names its target with a literal session id.
 const LITERAL_SESSION: u8 = 64;
 
@@ -4866,7 +4866,7 @@ fn script_session_target(script: &str) -> Option<String> {
 
 /// Code-mode command operations visible in a script. Poll links require one
 /// literal `write_stdin` target; mixed or multiple operations stay unowned.
-fn script_flags(script: &str) -> u8 {
+pub(crate) fn script_flags(script: &str) -> u8 {
     let exec = call_matches(script, "exec_command");
     let stdin = call_matches(script, "write_stdin");
     let mut flags = 0;
