@@ -21,6 +21,8 @@ pub(crate) struct Counts {
     pub(crate) waste_by_kind: BTreeMap<WasteKind, u64>,
     pub(crate) waste_by_category: BTreeMap<WasteCategory, u64>,
     pub(crate) empty_search_steps: u64,
+    pub(crate) verify_failure_steps: u64,
+    pub(crate) silent_exit_steps: u64,
     pub(crate) change_facts: ChangeCounts,
     pub(crate) exclusive_cost_complete: bool,
 }
@@ -63,6 +65,8 @@ impl Counts {
                 *counts.waste_by_category.entry(category).or_default() += 1;
             }
             counts.empty_search_steps += u64::from(step.empty_search);
+            counts.verify_failure_steps += u64::from(step.verify_failure);
+            counts.silent_exit_steps += u64::from(step.silent_exit);
         }
         for fact in &activity.facts {
             match fact.change {
@@ -174,6 +178,8 @@ impl Fold {
             *self.counts.waste_by_category.entry(category).or_default() += n;
         }
         self.counts.empty_search_steps += child.counts.empty_search_steps;
+        self.counts.verify_failure_steps += child.counts.verify_failure_steps;
+        self.counts.silent_exit_steps += child.counts.silent_exit_steps;
         self.counts.change_facts.commits += child.counts.change_facts.commits;
         self.counts.change_facts.pushes += child.counts.change_facts.pushes;
         self.counts.change_facts.pull_requests += child.counts.change_facts.pull_requests;

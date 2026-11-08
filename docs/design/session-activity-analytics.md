@@ -42,7 +42,7 @@ parent and child steps must never create a family thrash window.
 Schema 41 stores a session activity header, ordered step rows keyed by
 `(session_key, generation, ordinal)`, separate ordered compaction rows, compact summary metadata, and typed
 change facts keyed by session, generation and stable identity.
-Parser 34 retains the exact last Claude usage observation offset alongside the
+Parser 35 retains the exact last Claude usage observation offset alongside the
 existing message ID and assistant UUIDs. The producer uses its established file
 merge order and copied-record ownership map; Codex reads only model-accepted
 facts whose normalized source receipt matches the selected consumed ledger.
@@ -71,14 +71,45 @@ generation. Unknown prices remain unknown. Step arrays stay out of cached descri
 relationships rather than entering the stable description cache. Catalog version 7
 and the semantic recipe bind this output.
 
-Rules version 5 classifies the first waste per step in this order: orchestration
-wait, explicit tool failure, refill after compaction, redundant read. Failures
-retain path-not-found and malformed-command (Tooling), rate/auth/network/server
-failure (External), or other failure (Unmapped). Empty search is an independent
-non-waste signal; other sleeps are Unmapped. Wait intervals retain their exact
-recorded endpoints independently of the capped step duration. Missing endpoints
-stay unknown. Compound failures need an identified diagnostic component; ambiguous
-failures remain Unmapped.
+Rules version 6 classifies the first waste per step in this order: orchestration
+wait or checks pending, explicit tool failure, refill after compaction, redundant
+read. Failures retain path-not-found, malformed-command, timeout and rejected
+tool input (Tooling), rate/auth/network/server failure (External), checks pending
+(Orchestration), merge conflict and other failure (Unmapped). Empty search,
+verify failure and silent exit are independent non-waste signals; other sleeps
+are Unmapped. Wait intervals retain their exact recorded endpoints independently
+of the capped step duration. Missing endpoints stay unknown. Compound failures
+need an identified diagnostic component; ambiguous failures remain Unmapped.
+
+Failure evidence is typed and separate from read fingerprints. A Claude `Bash`
+result carries its exit only as a first text line `Exit code N`; only that header
+sets the exit, never a later body line, and Codex keeps its structured exit
+field. Exit 124 or 143 is a timeout. `gh pr checks` (without `--watch`) exiting 8
+is checks pending. Claude native Edit, Write, MultiEdit, NotebookEdit and Read
+errors carrying the `<tool_use_error>` wrapper are rejected tool input; a native
+Read error saying the file does not exist is path-not-found instead. A failing
+`git merge`, `rebase`, `cherry-pick` or `pull` whose output has a `CONFLICT (`
+line is a merge conflict; a successful result that prints the text is not.
+A non-zero exit from a recognized verification command is no waste: it records
+the per-step `verify_failure` signal. The allowlist is `cargo test|check|build|
+clippy`, `cargo fmt --check`, `npm test`, `npm run test|typecheck|lint` (with an
+optional leading `--prefix <dir>`), `pytest`, `go test`, `gh pr checks` exiting 1
+and `gh run view --log-failed`. Exit 124, 126, 127 and 143, and a failed `cd`
+diagnostic, stay failures. The status owner is the one non-`cd` pipeline of the
+command, and a pipeline's status belongs to its last stage (no `pipefail`
+assumption). Within a Codex exec batch, a part that exited 1 with an empty body,
+with no individually attributed command, records the per-step `silent_exit`
+signal instead of waste.
+
+The failure grammar accepts general pipelines and the harmless redirects `2>&1`,
+`1>&2`, `>/dev/null`, `2>/dev/null` and `&>/dev/null`. A redirect to any other
+file, expansions, subshells, braces, heredocs and background jobs leave the
+command unattributed. Such pipelines and redirects supply failure evidence only:
+they never prove a read, so they break read history like any unknown command.
+A compound or pipeline failure takes a subtype only when its diagnostic lines name
+exactly one program of the allowlist `cat`, `rg`, `grep`, `ls`, `sed`, `head`,
+`tail`, `cd`, `git`, `find` and that program appears once among the components;
+otherwise it is other failure.
 
 The bounded classifier runs during the existing complete-line scan. Tool events
 retain only allowlisted command tags, read-selection hashes, call/result record
@@ -167,11 +198,13 @@ No source paths, offsets, commands, raw bytes or output bodies leave these pages
 `get_session` and `list_sessions` add nullable `activity_analytics`. A supported
 complete observation contains `rules_version`, `pricing_fingerprint`,
 `totals: {observed, exclusive, shared}`, `by_band`, `compactions`, `thrash`,
-`waste_by_kind`, `waste_by_category`, `empty_search_steps`, `change_facts` and
+`waste_by_kind`, `waste_by_category`, `empty_search_steps`,
+`verify_failure_steps`, `silent_exit_steps`, `change_facts` and
 `exclusive_cost_complete`. Each step total has `steps`, `list_cost_usd`,
 `carry_cost_usd` and `elapsed_ms`; measurements preserve `{known, unknown_steps}`.
 Absent native usage/projections remain null. No thrash-window/step arrays enter
-these summaries.
+these summaries. `get_session_activity` steps carry the matching booleans
+`empty_search`, `verify_failure` and `silent_exit`.
 
 A nullable `family` summarizes only the exact existing parent chain, using
 producer-side leaf reduction and bounded stored-summary refresh for independently

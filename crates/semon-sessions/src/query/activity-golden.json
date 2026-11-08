@@ -6,6 +6,8 @@
     "compactions": 0,
     "thrash": false,
     "empty_search_steps": 0,
+    "verify_failure_steps": 0,
+    "silent_exit_steps": 0,
     "change_facts": {
       "commits": 1,
       "pushes": 0,

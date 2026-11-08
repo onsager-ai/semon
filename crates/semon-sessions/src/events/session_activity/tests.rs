@@ -660,6 +660,62 @@ fn step_waste_precedence_keeps_empty_search_and_exact_uncapped_waits() {
 }
 
 #[test]
+fn failure_kinds_rank_and_signals_count_without_waste() {
+    use classify::{LocatedObservation, WasteKind};
+    let mut result = activity(
+        vec![
+            step("first", "s", 0, Some(0)),
+            step("second", "s", 100, Some(1)),
+            step("third", "s", 200, Some(2)),
+        ],
+        vec![],
+    );
+    let mut observations = Vec::new();
+    // (step, offset, waste, verify_failure, silent_exit)
+    for (id, offset, waste, verify, silent) in [
+        ("first", 10, Some(WasteKind::MergeConflict), false, false),
+        ("first", 20, Some(WasteKind::ChecksPending), false, false),
+        ("first", 30, Some(WasteKind::Timeout), false, false),
+        ("second", 40, None, true, false),
+        ("second", 50, None, true, true),
+        (
+            "third",
+            60,
+            Some(WasteKind::ToolInputRejected),
+            false,
+            false,
+        ),
+    ] {
+        let mut observation = classify::call(
+            "Agent",
+            &serde_json::Value::Null,
+            Some(claude_id(id)),
+            "call-hash".into(),
+        );
+        observation.waste = waste;
+        observation.verify_failure = verify;
+        observation.silent_exit = silent;
+        observations.push(LocatedObservation {
+            position: position("s", offset),
+            timestamp: None,
+            result_offset: Some(offset + 1),
+            observation,
+        });
+    }
+    apply_observations(&mut result, observations);
+    // Checks-pending ranks with orchestration waits, ahead of other failures.
+    assert_eq!(result.steps[0].waste, Some(WasteKind::ChecksPending));
+    assert_eq!(result.steps[1].waste, None);
+    assert!(result.steps[1].verify_failure && result.steps[1].silent_exit);
+    assert_eq!(result.steps[2].waste, Some(WasteKind::ToolInputRejected));
+    let counts = analytics::Analytics::of(&result).counts;
+    assert_eq!(counts.verify_failure_steps, 1);
+    assert_eq!(counts.silent_exit_steps, 1);
+    assert_eq!(counts.waste_by_kind[&WasteKind::ChecksPending], 1);
+    assert!(!counts.waste_by_kind.contains_key(&WasteKind::Timeout));
+}
+
+#[test]
 fn fact_links_require_a_qualified_step_in_this_projection() {
     use super::classify::{Change, LocatedObservation};
     for exact in [false, true] {

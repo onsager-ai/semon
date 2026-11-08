@@ -6645,6 +6645,8 @@ fn sanitized_activity_query_matches_owned_golden() {
             "shared_steps":summary["totals"]["shared"]["steps"],
             "compactions":summary["compactions"],"thrash":summary["thrash"],
             "empty_search_steps":summary["empty_search_steps"],
+            "verify_failure_steps":summary["verify_failure_steps"],
+            "silent_exit_steps":summary["silent_exit_steps"],
             "change_facts":summary["change_facts"],
             "elapsed_ms":summary["totals"]["observed"]["elapsed_ms"],
             "family":summary["family"]

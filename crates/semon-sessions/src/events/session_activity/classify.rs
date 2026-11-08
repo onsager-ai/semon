@@ -15,10 +15,14 @@ const MAX_COMPONENTS: usize = 32;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum WasteKind {
     OrchestrationWait,
+    ChecksPending,
     PathNotFound,
     MalformedCommand,
+    ToolInputRejected,
+    Timeout,
     ExternalFailure,
     OtherFailure,
+    MergeConflict,
     Refill,
     RedundantRead,
     Sleep,
@@ -36,11 +40,16 @@ pub(crate) enum WasteCategory {
 impl WasteKind {
     pub(crate) fn category(self) -> WasteCategory {
         match self {
-            Self::OrchestrationWait => WasteCategory::Orchestration,
-            Self::PathNotFound | Self::MalformedCommand => WasteCategory::Tooling,
+            Self::OrchestrationWait | Self::ChecksPending => WasteCategory::Orchestration,
+            Self::PathNotFound
+            | Self::MalformedCommand
+            | Self::ToolInputRejected
+            | Self::Timeout => WasteCategory::Tooling,
             Self::ExternalFailure => WasteCategory::External,
             Self::Refill => WasteCategory::Context,
-            Self::OtherFailure | Self::RedundantRead | Self::Sleep => WasteCategory::Unmapped,
+            Self::OtherFailure | Self::MergeConflict | Self::RedundantRead | Self::Sleep => {
+                WasteCategory::Unmapped
+            }
         }
     }
 }
@@ -92,9 +101,108 @@ enum Command {
     PrChecks,
     Watch,
     Sleep,
+    /// A recognized verification command. Like any unknown program, it may
+    /// write files, so it still breaks read proofs.
+    Verify,
+    /// git merge, rebase, cherry-pick or pull.
+    Merge,
     Mutation,
     Ambiguous,
     Unknown,
+}
+
+/// Allowlisted programs whose `name: ` diagnostic line may identify a failed
+/// component of a compound command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum Program {
+    Cat,
+    Rg,
+    Grep,
+    Ls,
+    Sed,
+    Head,
+    Tail,
+    Cd,
+    Git,
+    Find,
+}
+
+impl Program {
+    const ALL: [Self; 10] = [
+        Self::Cat,
+        Self::Rg,
+        Self::Grep,
+        Self::Ls,
+        Self::Sed,
+        Self::Head,
+        Self::Tail,
+        Self::Cd,
+        Self::Git,
+        Self::Find,
+    ];
+
+    fn of(words: &[String]) -> Option<Self> {
+        Some(match words.first()?.as_str() {
+            "cat" => Self::Cat,
+            "rg" => Self::Rg,
+            "grep" => Self::Grep,
+            "ls" => Self::Ls,
+            "sed" => Self::Sed,
+            "head" => Self::Head,
+            "tail" => Self::Tail,
+            "cd" => Self::Cd,
+            "git" => Self::Git,
+            "find" => Self::Find,
+            _ => return None,
+        })
+    }
+
+    fn diagnostic(self) -> &'static str {
+        match self {
+            Self::Cat => "cat: ",
+            Self::Rg => "rg: ",
+            Self::Grep => "grep: ",
+            Self::Ls => "ls: ",
+            Self::Sed => "sed: ",
+            Self::Head => "head: ",
+            Self::Tail => "tail: ",
+            Self::Cd => "cd: ",
+            Self::Git => "git: ",
+            Self::Find => "find: ",
+        }
+    }
+}
+
+/// The command whose exit status the result carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum Status {
+    Verify,
+    PrChecks,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum Native {
+    Read,
+    Edit,
+}
+
+/// Typed failure evidence, separate from the read/search fingerprints that
+/// prove redundant reads. Contains no command text.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Attribution {
+    /// Command components, counting each pipeline stage. Zero when unattributed.
+    components: usize,
+    programs: Vec<Program>,
+    merges: usize,
+    /// Set only when exactly one substantive pipeline owns the final status;
+    /// a pipeline's status belongs to its last stage.
+    status: Option<Status>,
+    native: Option<Native>,
+}
+
+struct Shell {
+    commands: Vec<Command>,
+    attribution: Attribution,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,7 +227,9 @@ pub(crate) struct Observation {
     pub(crate) result_digest: Option<String>,
     pub(crate) step_id: Option<ActivityStepId>,
     commands: Vec<Command>,
+    attribution: Attribution,
     orchestration: bool,
+    claude_bash: bool,
     formatter: bool,
     envelopes: bool,
     failure_results: bool,
@@ -129,6 +239,8 @@ pub(crate) struct Observation {
     pub(crate) waste: Option<WasteKind>,
     pub(crate) wait: Option<WaitInterval>,
     pub(crate) empty_search: bool,
+    pub(crate) verify_failure: bool,
+    pub(crate) silent_exit: bool,
     pub(crate) changes: Vec<Change>,
 }
 
@@ -148,17 +260,93 @@ fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
-/// A deliberately small shell grammar. Expansions, redirects, background jobs
-/// and unsupported syntax invalidate command attribution and mutation knowledge.
-fn components(text: &str) -> Option<Vec<Vec<String>>> {
+struct Pipeline {
+    stages: Vec<Vec<String>>,
+    /// A harmless redirect (`2>&1`, `>/dev/null`, ...) was dropped.
+    redirected: bool,
+}
+
+#[derive(Default)]
+struct Lexer {
+    pipelines: Vec<Pipeline>,
+    stages: Vec<Vec<String>>,
+    words: Vec<String>,
+    word: String,
+    started: bool,
+    /// The current word holds an unquoted `>`.
+    redirect: bool,
+    /// The previous word was a bare output operator awaiting `/dev/null`.
+    pending: bool,
+    redirected: bool,
+    total: usize,
+}
+
+impl Lexer {
+    fn end_word(&mut self) -> Option<()> {
+        if !self.started {
+            return Some(());
+        }
+        let word = std::mem::take(&mut self.word);
+        self.started = false;
+        let redirect = std::mem::take(&mut self.redirect);
+        if self.pending {
+            self.pending = false;
+            return (!redirect && word == "/dev/null").then_some(());
+        }
+        if redirect {
+            // Only these discard or merge output. A redirect to any other
+            // file writes it, so the whole command stays unattributed.
+            match word.as_str() {
+                "2>&1" | "1>&2" | ">/dev/null" | "2>/dev/null" | "&>/dev/null" => {}
+                ">" | "1>" | "2>" | "&>" => self.pending = true,
+                _ => return None,
+            }
+            self.redirected = true;
+        } else {
+            self.words.push(word);
+        }
+        Some(())
+    }
+
+    /// `piped` is true at a `|`, where an empty stage is a syntax error.
+    fn end_stage(&mut self, piped: bool) -> Option<()> {
+        self.end_word()?;
+        if self.pending {
+            return None;
+        }
+        if self.words.is_empty() {
+            return (!piped && self.stages.is_empty()).then_some(());
+        }
+        self.total += 1;
+        if self.total > MAX_COMPONENTS {
+            return None;
+        }
+        self.stages.push(std::mem::take(&mut self.words));
+        Some(())
+    }
+
+    fn end_pipeline(&mut self) -> Option<()> {
+        self.end_stage(false)?;
+        if !self.stages.is_empty() {
+            self.pipelines.push(Pipeline {
+                stages: std::mem::take(&mut self.stages),
+                redirected: std::mem::take(&mut self.redirected),
+            });
+        }
+        Some(())
+    }
+}
+
+/// A deliberately small shell grammar: sequences of pipelines whose stages are
+/// plain words, with only harmless output redirects. Expansions, subshells,
+/// braces, input redirects, heredocs and background jobs invalidate command
+/// attribution and mutation knowledge.
+fn script(text: &str) -> Option<Vec<Pipeline>> {
     if text.len() > MAX_BYTES {
         return None;
     }
-    let mut commands = Vec::new();
-    let mut words = Vec::new();
-    let mut word = String::new();
+    let mut lexer = Lexer::default();
     let mut quote = None;
-    let mut word_started = false;
     let mut chars = text.chars().peekable();
     while let Some(c) = chars.next() {
         // Single-quoted shell text is literal, including dollars/backticks.
@@ -168,8 +356,8 @@ fn components(text: &str) -> Option<Vec<Vec<String>>> {
         if c == '\\' && quote != Some('\'') {
             let next = chars.next()?;
             if next != '\n' {
-                word.push(next);
-                word_started = true;
+                lexer.word.push(next);
+                lexer.started = true;
             }
             continue;
         }
@@ -177,53 +365,60 @@ fn components(text: &str) -> Option<Vec<Vec<String>>> {
             if c == q {
                 quote = None;
             } else {
-                word.push(c);
+                lexer.word.push(c);
             }
-        } else {
-            match c {
-                '\'' | '"' => {
-                    quote = Some(c);
-                    word_started = true;
-                }
-                '<' | '>' | '(' | ')' | '{' | '}' => return None,
-                ';' | '\n' | '&' | '|' => {
-                    if (c == '&' || c == '|') && chars.next() != Some(c) {
-                        return None;
-                    }
-                    if word_started {
-                        words.push(std::mem::take(&mut word));
-                        word_started = false;
-                    }
-                    if !words.is_empty() {
-                        commands.push(std::mem::take(&mut words));
-                    }
-                    if commands.len() >= MAX_COMPONENTS {
-                        return None;
-                    }
-                }
-                c if c.is_whitespace() => {
-                    if word_started {
-                        words.push(std::mem::take(&mut word));
-                        word_started = false;
-                    }
-                }
-                _ => {
-                    word.push(c);
-                    word_started = true;
-                }
+            continue;
+        }
+        match c {
+            '\'' | '"' => {
+                quote = Some(c);
+                lexer.started = true;
+            }
+            '<' | '(' | ')' | '{' | '}' => return None,
+            '>' => {
+                lexer.word.push(c);
+                lexer.started = true;
+                lexer.redirect = true;
+            }
+            '&' if chars.next_if_eq(&'&').is_some() => lexer.end_pipeline()?,
+            // Only the `&` of `&>` and `>&`; anything else is a background job.
+            '&' if (!lexer.started && chars.peek() == Some(&'>'))
+                || (lexer.redirect && lexer.word.ends_with('>')) =>
+            {
+                lexer.word.push(c);
+                lexer.started = true;
+            }
+            '&' => return None,
+            '|' if chars.next_if_eq(&'|').is_some() => lexer.end_pipeline()?,
+            '|' => lexer.end_stage(true)?,
+            ';' | '\n' => lexer.end_pipeline()?,
+            c if c.is_whitespace() => lexer.end_word()?,
+            _ => {
+                lexer.word.push(c);
+                lexer.started = true;
             }
         }
     }
     if quote.is_some() {
         return None;
     }
-    if word_started {
-        words.push(word);
+    lexer.end_pipeline()?;
+    (!lexer.pipelines.is_empty()).then_some(lexer.pipelines)
+}
+
+/// Plain command sequences only: pipelines and redirects are not accepted.
+fn components(text: &str) -> Option<Vec<Vec<String>>> {
+    let mut commands = Vec::new();
+    for pipeline in script(text)? {
+        let [_] = pipeline.stages.as_slice() else {
+            return None;
+        };
+        if pipeline.redirected {
+            return None;
+        }
+        commands.extend(pipeline.stages);
     }
-    if !words.is_empty() {
-        commands.push(words);
-    }
-    (!commands.is_empty()).then_some(commands)
+    Some(commands)
 }
 
 fn command(words: &[String]) -> Command {
@@ -240,9 +435,8 @@ fn command(words: &[String]) -> Command {
             Some("commit") => Command::Commit,
             Some("push") => Command::Push,
             Some("status" | "diff" | "log" | "show" | "rev-parse") => Command::Inspect,
-            Some("checkout" | "switch" | "reset" | "restore" | "apply" | "merge" | "rebase") => {
-                Command::Mutation
-            }
+            Some("checkout" | "switch" | "reset" | "restore" | "apply") => Command::Mutation,
+            Some("merge" | "rebase" | "cherry-pick" | "pull") => Command::Merge,
             _ => Command::Unknown,
         };
     }
@@ -258,6 +452,9 @@ fn command(words: &[String]) -> Command {
         }
         match gh {
             ["pr", "create", ..] => return Command::PullRequest,
+            ["run", "view", rest @ ..] if rest.contains(&"--log-failed") => {
+                return Command::Verify;
+            }
             ["pr", "checks", rest @ ..]
                 if !rest.iter().any(|arg| {
                     matches!(*arg, "--template" | "--json" | "--jq" | "-q" | "-t")
@@ -300,69 +497,94 @@ fn command(words: &[String]) -> Command {
                 ReadTool::Range,
             )
         }
+        _ if verify(&args) => Command::Verify,
         ["sleep", ..] => Command::Sleep,
         ["rm" | "mv" | "cp" | "touch" | "mkdir" | "rmdir" | "tee", ..] => Command::Mutation,
         _ => Command::Unknown,
     }
 }
 
+/// A tight allowlist of verification commands whose non-zero exit reports the
+/// state of the checked work rather than a tooling failure.
+fn verify(args: &[&str]) -> bool {
+    match args {
+        ["cargo", "test" | "check" | "build" | "clippy", ..] => true,
+        ["cargo", "fmt", rest @ ..] => rest.contains(&"--check"),
+        ["pytest", ..] => true,
+        ["go", "test", ..] => true,
+        ["npm", rest @ ..] => {
+            let rest = match rest {
+                ["--prefix", _, rest @ ..] => rest,
+                rest => rest,
+            };
+            matches!(
+                rest,
+                ["test", ..] | ["run", "test" | "typecheck" | "lint", ..]
+            )
+        }
+        _ => false,
+    }
+}
+
 /// Unwrap only literal shell invocations. A script remains subject to the same
 /// grammar and component/depth bounds; shell expansions never become evidence.
-fn shell_commands(text: &str, depth: usize) -> Option<Vec<Command>> {
+fn shell_commands(text: &str, depth: usize) -> Option<Shell> {
     if depth > MAX_DEPTH {
         return None;
     }
     let (normalized, body_write) = literal_pr_body(text)?;
-    let pipeline = normalized.split(" | ").collect::<Vec<_>>();
-    if pipeline.len() > 1 {
-        // Only read/search producers followed by bounded text selectors. No
-        // shell expansion, arbitrary filter or output-producing side command.
-        if pipeline.len() > MAX_COMPONENTS {
-            return None;
-        }
-        let mut first = shell_commands(pipeline[0], depth + 1)?;
-        if first.len() != 1 || !matches!(first[0], Command::Read(_, _) | Command::Search(_, _)) {
-            return None;
-        }
-        for stage in &pipeline[1..] {
-            let words = components(stage)?;
-            let [words] = words.as_slice() else {
-                return None;
-            };
-            let args = words.iter().map(String::as_str).collect::<Vec<_>>();
-            if !matches!(args.as_slice(), ["head" | "tail"] | ["nl", "-ba"])
-                && !matches!(args.as_slice(), ["head" | "tail", "-n", count] if count.bytes().all(|byte| byte.is_ascii_digit()) && !count.is_empty())
-                && !matches!(args.as_slice(), ["sed", "-n", selection] if sed_selection(selection))
-            {
-                return None;
-            }
-        }
-        let fingerprint = digest(normalized.as_bytes());
-        match &mut first[0] {
-            Command::Read(key, _) | Command::Search(key, _) => *key = fingerprint,
-            _ => unreachable!(),
-        }
-        return Some(first);
+    if let Some(shell) = read_pipeline(&normalized, depth) {
+        return Some(shell);
     }
-    let parts = components(&normalized)?;
     let mut commands = Vec::new();
     if body_write {
         commands.push(Command::BodyWrite);
     }
+    let mut attribution = Attribution {
+        components: usize::from(body_write),
+        ..Attribution::default()
+    };
+    // The status of each pipeline that is not a literal `cd`.
+    let mut owners = Vec::new();
     let mut directories = Vec::new();
-    for words in parts {
+    for pipeline in script(&normalized)? {
+        // A general pipeline or redirect supplies failure evidence only. It
+        // never proves a read, so it breaks read history like any unknown.
+        if pipeline.stages.len() > 1 || pipeline.redirected {
+            for words in &pipeline.stages {
+                attribution.note(words, &command(words));
+            }
+            let last = command(pipeline.stages.last()?);
+            owners.push(Status::of(&last));
+            commands.push(Command::Unknown);
+            continue;
+        }
+        let words = &pipeline.stages[0];
         let args: Vec<_> = words.iter().map(String::as_str).collect();
         let mut kinds = match args.as_slice() {
             [
                 "bash" | "/bin/bash" | "sh" | "/bin/sh",
                 "-c" | "-lc",
                 script,
-            ] => shell_commands(script, depth + 1)?,
+            ] => {
+                let nested = shell_commands(script, depth + 1)?;
+                attribution.components += nested.attribution.components;
+                attribution.programs.extend(nested.attribution.programs);
+                attribution.merges += nested.attribution.merges;
+                owners.push(nested.attribution.status);
+                nested.commands
+            }
             ["cd", path] if path.starts_with('/') => {
                 directories.push((*path).to_owned());
+                attribution.note(words, &Command::Setup);
                 vec![Command::Setup]
             }
-            _ => vec![command(&words)],
+            _ => {
+                let kind = command(words);
+                attribution.note(words, &kind);
+                owners.push(Status::of(&kind));
+                vec![kind]
+            }
         };
         for kind in &mut kinds {
             if let Command::Read(fingerprint, _) | Command::Search(fingerprint, _) = kind {
@@ -374,7 +596,72 @@ fn shell_commands(text: &str, depth: usize) -> Option<Vec<Command>> {
             return None;
         }
     }
-    Some(commands)
+    if let [status] = owners.as_slice() {
+        attribution.status = *status;
+    }
+    Some(Shell {
+        commands,
+        attribution,
+    })
+}
+
+/// A single read/search piped only through bounded text selectors keeps one
+/// complete-pipeline fingerprint. No shell expansion, arbitrary filter or
+/// output-producing side command.
+fn read_pipeline(normalized: &str, depth: usize) -> Option<Shell> {
+    let pipeline = normalized.split(" | ").collect::<Vec<_>>();
+    if pipeline.len() < 2 || pipeline.len() > MAX_COMPONENTS {
+        return None;
+    }
+    let mut first = shell_commands(pipeline[0], depth + 1)?;
+    if first.commands.len() != 1
+        || !matches!(
+            first.commands[0],
+            Command::Read(_, _) | Command::Search(_, _)
+        )
+    {
+        return None;
+    }
+    for stage in &pipeline[1..] {
+        let words = components(stage)?;
+        let [words] = words.as_slice() else {
+            return None;
+        };
+        let args = words.iter().map(String::as_str).collect::<Vec<_>>();
+        if !matches!(args.as_slice(), ["head" | "tail"] | ["nl", "-ba"])
+            && !matches!(args.as_slice(), ["head" | "tail", "-n", count] if count.bytes().all(|byte| byte.is_ascii_digit()) && !count.is_empty())
+            && !matches!(args.as_slice(), ["sed", "-n", selection] if sed_selection(selection))
+        {
+            return None;
+        }
+        first.attribution.programs.extend(Program::of(words));
+    }
+    let fingerprint = digest(normalized.as_bytes());
+    match &mut first.commands[0] {
+        Command::Read(key, _) | Command::Search(key, _) => *key = fingerprint,
+        _ => unreachable!(),
+    }
+    // One read for failure purposes; the selectors never own a diagnostic.
+    first.attribution.status = None;
+    Some(first)
+}
+
+impl Attribution {
+    fn note(&mut self, words: &[String], command: &Command) {
+        self.components += 1;
+        self.programs.extend(Program::of(words));
+        self.merges += usize::from(*command == Command::Merge);
+    }
+}
+
+impl Status {
+    fn of(command: &Command) -> Option<Self> {
+        match command {
+            Command::Verify => Some(Self::Verify),
+            Command::PrChecks => Some(Self::PrChecks),
+            _ => None,
+        }
+    }
 }
 
 /// Discard only a quoted literal heredoc used as a PR body. Its bytes cannot
@@ -509,13 +796,22 @@ pub(super) fn call(
         .unwrap_or(name);
     let input = input_value(input).unwrap_or(Cow::Owned(Value::Null));
     let background = input.get("run_in_background").and_then(Value::as_bool) == Some(true);
+    let mut attribution = Attribution::default();
     let mut commands = match name {
-        "Bash" | "bash" | "shell" | "exec_command" => input
-            .get("command")
-            .or_else(|| input.get("cmd"))
-            .and_then(Value::as_str)
-            .and_then(|text| shell_commands(text, 0))
-            .unwrap_or_else(|| vec![Command::Ambiguous]),
+        "Bash" | "bash" | "shell" | "exec_command" => {
+            match input
+                .get("command")
+                .or_else(|| input.get("cmd"))
+                .and_then(Value::as_str)
+                .and_then(|text| shell_commands(text, 0))
+            {
+                Some(shell) => {
+                    attribution = shell.attribution;
+                    shell.commands
+                }
+                None => vec![Command::Ambiguous],
+            }
+        }
         "Read" | "read_file" => {
             let path = input
                 .get("file_path")
@@ -552,6 +848,14 @@ pub(super) fn call(
         "Agent" | "Task" | "wait_agent" => Vec::new(),
         _ => vec![Command::Unknown],
     };
+    if attribution.components == 0 && commands != [Command::Ambiguous] {
+        attribution.components = commands.len();
+    }
+    attribution.native = match name {
+        "Read" | "read_file" => Some(Native::Read),
+        "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => Some(Native::Edit),
+        _ => None,
+    };
     for command in &mut commands {
         if let Command::Read(fingerprint, _) | Command::Search(fingerprint, _) = command {
             let workdir = input
@@ -571,7 +875,9 @@ pub(super) fn call(
         result_digest: None,
         step_id,
         commands,
+        attribution,
         orchestration,
+        claude_bash: false,
         formatter: false,
         envelopes: false,
         failure_results: false,
@@ -581,6 +887,8 @@ pub(super) fn call(
         waste: orchestration.then_some(WasteKind::OrchestrationWait),
         wait: None,
         empty_search: false,
+        verify_failure: false,
+        silent_exit: false,
         changes: Vec::new(),
     }
 }
@@ -725,11 +1033,72 @@ fn decode(
     Some(())
 }
 
-fn failure(commands: &[Command], result: &ResultEvidence) -> Option<WasteKind> {
+/// Claude Code reports a failed Bash call's exit only as an `Exit code N`
+/// first line. Body lines never set it.
+fn claude_exit(text: &str) -> Option<i64> {
+    let code = text.lines().next()?.strip_prefix("Exit code ")?;
+    if code.len() <= 3 && code.bytes().all(|byte| byte.is_ascii_digit()) {
+        code.parse().ok()
+    } else {
+        None
+    }
+}
+
+/// A non-zero exit from a recognized verification command reports the state of
+/// the checked work. It is a signal, not waste, unless the command itself or
+/// its working directory could not run.
+fn verify_failure(attribution: &Attribution, result: &ResultEvidence) -> bool {
+    let Some(exit) = result
+        .exit
+        .filter(|code| ![0, 124, 126, 127, 143].contains(code))
+    else {
+        return false;
+    };
+    let cd_failed = result
+        .text
+        .lines()
+        .any(|line| line.starts_with("cd: ") || line.contains(": cd: "));
+    !cd_failed
+        && match attribution.status {
+            Some(Status::Verify) => true,
+            Some(Status::PrChecks) => exit == 1,
+            None => false,
+        }
+}
+
+fn failure(
+    commands: &[Command],
+    attribution: &Attribution,
+    result: &ResultEvidence,
+) -> Option<WasteKind> {
     if !result.error && !result.exit.is_some_and(|code| code != 0) {
         return None;
     }
     let text = result.text.to_ascii_lowercase();
+    if attribution.native.is_some() && text.contains("<tool_use_error>") {
+        return Some(
+            if attribution.native == Some(Native::Read) && text.contains("does not exist") {
+                WasteKind::PathNotFound
+            } else {
+                WasteKind::ToolInputRejected
+            },
+        );
+    }
+    match result.exit {
+        Some(124 | 143) => return Some(WasteKind::Timeout),
+        Some(8) if attribution.status == Some(Status::PrChecks) => {
+            return Some(WasteKind::ChecksPending);
+        }
+        _ => {}
+    }
+    if attribution.merges == 1
+        && result
+            .text
+            .lines()
+            .any(|line| line.starts_with("CONFLICT ("))
+    {
+        return Some(WasteKind::MergeConflict);
+    }
     let subtype = if text.contains("no such file or directory")
         || text.contains("path not found")
         || text.contains("file not found")
@@ -769,25 +1138,24 @@ fn failure(commands: &[Command], result: &ResultEvidence) -> Option<WasteKind> {
     if commands == [Command::Ambiguous] {
         return Some(WasteKind::OtherFailure);
     }
-    if commands.len() <= 1 {
+    if attribution.components <= 1 {
         return Some(subtype);
     }
     // A compound's final status alone does not identify the failed component.
-    // Accept only a single allowlisted diagnostic prefix and matching command.
-    let cat = result.text.lines().any(|line| line.starts_with("cat: "));
-    let rg = result.text.lines().any(|line| line.starts_with("rg: "));
-    let diagnostic = match (cat, rg) {
-        (true, false) => "cat",
-        (false, true) => "rg",
-        _ => return Some(WasteKind::OtherFailure),
+    // Accept only one allowlisted diagnostic prefix whose program appears once.
+    let mut named = Program::ALL.into_iter().filter(|program| {
+        result
+            .text
+            .lines()
+            .any(|line| line.starts_with(program.diagnostic()))
+    });
+    let (Some(program), None) = (named.next(), named.next()) else {
+        return Some(WasteKind::OtherFailure);
     };
-    let matching = commands
+    let matching = attribution
+        .programs
         .iter()
-        .filter(|kind| match diagnostic {
-            "cat" => matches!(kind, Command::Read(_, ReadTool::Cat)),
-            "rg" => matches!(kind, Command::Search(_, SearchTool::Rg)),
-            _ => false,
-        })
+        .filter(|candidate| **candidate == program)
         .count();
     Some(if matching == 1 {
         subtype
@@ -952,9 +1320,13 @@ pub(super) fn finish(
         }
         return;
     }
+    if observation.claude_bash && result.exit.is_none() {
+        result.exit = claude_exit(&result.text);
+    }
     // Multiple exactly printed exec results may report a failure without
     // proving which individual command owns a read, change or native outcome.
     let mut diagnostic_failure = None;
+    let mut silent = false;
     if observation.failure_results {
         let mut budget = MAX_BYTES;
         let parts = output
@@ -964,8 +1336,20 @@ pub(super) fn finish(
         for part in parts.iter().take(32) {
             let mut diagnostic = ResultEvidence::default();
             let part = part.get("text").unwrap_or(part);
-            if decode(part, 0, &mut budget, &mut diagnostic, true, true).is_some()
-                && let Some(waste) = failure(&[Command::Unknown], &diagnostic)
+            if decode(part, 0, &mut budget, &mut diagnostic, true, true).is_none() {
+                continue;
+            }
+            // An exit 1 with no output and no attributed command says nothing
+            // about its cause. It is a signal, not waste.
+            if observation.attribution.components == 0
+                && !diagnostic.error
+                && diagnostic.exit == Some(1)
+                && diagnostic.text.trim().is_empty()
+            {
+                silent = true;
+                continue;
+            }
+            if let Some(waste) = failure(&[Command::Unknown], &Attribution::default(), &diagnostic)
             {
                 diagnostic_failure = Some(waste);
                 result.error = true;
@@ -1005,9 +1389,14 @@ pub(super) fn finish(
                     && !result.error
                     && result.exit.is_none_or(|code| code == 0)
                     && matches!(result.text.trim(), "No matches found" | "No files found"));
+        observation.silent_exit = silent;
         if !observation.empty_search {
-            observation.waste =
-                diagnostic_failure.or_else(|| failure(&observation.commands, &result));
+            if diagnostic_failure.is_none() && verify_failure(&observation.attribution, &result) {
+                observation.verify_failure = true;
+            } else if diagnostic_failure.is_some() || !silent {
+                observation.waste = diagnostic_failure
+                    .or_else(|| failure(&observation.commands, &observation.attribution, &result));
+            }
         }
         if observation.waste.is_none() && observation.commands.contains(&Command::Sleep) {
             observation.waste = Some(WasteKind::Sleep);
@@ -1060,6 +1449,7 @@ pub(crate) fn capture(
                             hash.clone(),
                         );
                         bind_source_context(&mut observation, index.cwd.as_deref());
+                        observation.claude_bash = field(item, "name") == Some("Bash");
                         index
                             .event_mut(event)
                             .expect("located event")
@@ -1258,6 +1648,8 @@ pub(crate) fn classify_reads(
                         | Command::Commit
                         | Command::Push
                         | Command::PullRequest
+                        | Command::Verify
+                        | Command::Merge
                 )
             });
         if mutation {
