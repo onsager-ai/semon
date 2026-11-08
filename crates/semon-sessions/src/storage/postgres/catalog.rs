@@ -239,6 +239,7 @@ impl PgProjectionTransaction<'_> {
                     &[&namespace.binding(), &row.key, &crate::retention::source_generation(&row.sources).map_err(backend)?, &trace.storage_context().to_string()],
                 ).await.map_err(backend)?;
             }
+            self.publish_activity(namespace, row).await?;
             self.publish_search(namespace, row).await?;
             self.catalog_changed(namespace, &row.key).await?;
         }
