@@ -2085,11 +2085,8 @@ fn tool_and_gh_labels_keep_state_change_semantics() {
         let shell = call("Bash", &json!({"command": command}), None, "d".into());
         assert_eq!(shell.changes_state(), barrier, "{command}");
     }
-    // A Codex sleep is the same Sleep waste as a shell sleep; Monitor is not.
-    assert_eq!(
-        observed("sleep", "", json!("ok"), false).waste,
-        Some(WasteKind::Sleep)
-    );
+    // Native sleep and Monitor are label-only waits, never Sleep waste.
+    assert_eq!(observed("sleep", "", json!("ok"), false).waste, None);
     assert_eq!(observed("Monitor", "", json!("ok"), false).waste, None);
 }
 

@@ -990,19 +990,18 @@ pub(super) fn call(
         "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "apply_patch" => {
             vec![Command::Mutation]
         }
-        "Agent" | "Task" | "wait_agent" => Vec::new(),
-        "sleep" => vec![Command::Sleep],
+        "Agent" | "Task" | "wait_agent" | "sleep" => Vec::new(),
         "AskUserQuestion" | "SubagentHandback" => vec![Command::Report],
         "WebFetch" | "WebSearch" | "web_search" | "_web_run" | "ToolSearch" | "Skill" => {
             vec![Command::Inspect]
         }
         _ => vec![Command::Unknown],
     };
-    // Monitor runs a script, so it stays a state-change barrier.
-    let label_commands = if name == "Monitor" {
-        vec![Command::Wait]
-    } else {
-        Vec::new()
+    // Monitor runs a script, so it stays a state-change barrier. A native sleep
+    // changes nothing; neither proves what it waited for, so neither is waste.
+    let label_commands = match name {
+        "Monitor" | "sleep" => vec![Command::Wait],
+        _ => Vec::new(),
     };
     if attribution.components == 0 && commands != [Command::Ambiguous] {
         attribution.components = commands.len();
