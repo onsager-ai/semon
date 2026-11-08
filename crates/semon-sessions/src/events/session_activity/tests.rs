@@ -712,7 +712,7 @@ fn analytics_unions_exact_wait_intervals_and_preserves_missing_coverage() {
 
 #[test]
 fn interval_union_merges_overlap_containment_adjacency_and_duplicates() {
-    let mut intervals = vec![
+    let intervals = vec![
         (0, 100),
         (20, 50),
         (0, 100),
@@ -815,7 +815,7 @@ fn family_fold_sums_session_wait_unions_and_waste_costs() {
     let family = analytics::families([
         ("parent", None, Some(&parent)),
         ("child", Some("parent"), Some(&child)),
-    ])
+    ].into_iter())
     .remove("parent")
     .unwrap();
     assert_eq!(family.counts.wait_time_ms.observed.known, 50);
