@@ -1860,7 +1860,12 @@ fn activity_label_follows_first_matching_precedence() {
     // Ambiguous shell text proves nothing.
     assert_eq!(shell("echo $(date)"), None);
     // Checks that are still pending are waiting; settled checks verify.
-    let pending = claude_result("Bash", "gh pr checks 12", json!("Exit code 8\npending"), true);
+    let pending = claude_result(
+        "Bash",
+        "gh pr checks 12",
+        json!("Exit code 8\npending"),
+        true,
+    );
     assert_eq!(pending.activity(), Some(Activity::Wait));
     let failing = claude_result("Bash", "gh pr checks 12", json!("Exit code 1\nfail"), true);
     assert_eq!(failing.activity(), Some(Activity::Verify));
@@ -1881,7 +1886,11 @@ fn activity_label_follows_first_matching_precedence() {
         ("UnlistedTool", None),
     ] {
         let input = json!({"file_path":"/f","pattern":"p"});
-        assert_eq!(call(name, &input, None, "d".into()).activity(), expected, "{name}");
+        assert_eq!(
+            call(name, &input, None, "d".into()).activity(),
+            expected,
+            "{name}"
+        );
     }
     // Waiting on an agent is not coordination, though both are orchestration.
     let waited = call("wait_agent", &Value::Null, None, "d".into());
@@ -1946,7 +1955,11 @@ fn retry_follows_any_failed_call_and_its_category_is_unmapped() {
     assert_eq!(rows[1].observation.waste, Some(WasteKind::Retry));
     assert_eq!(WasteKind::Retry.category(), WasteCategory::Unmapped);
     // A failed repeat gives way to the repeat marker.
-    let rows = repeat_rows(vec![unknown_failure(), unknown_failure(), unknown_success()]);
+    let rows = repeat_rows(vec![
+        unknown_failure(),
+        unknown_failure(),
+        unknown_success(),
+    ]);
     assert_eq!(rows[1].observation.waste, Some(WasteKind::Retry));
     assert_eq!(rows[2].observation.waste, Some(WasteKind::Retry));
     // A repeat of a call that succeeded is not a retry.

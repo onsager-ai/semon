@@ -879,7 +879,10 @@ fn family_fold_sums_session_wait_unions_and_waste_costs() {
     assert_eq!(waiting.elapsed_ms.known, 25);
     assert_eq!(family.counts.by_trigger[&Trigger::Polling].steps, 2);
     assert_eq!(family.counts.unlabelled_activity_steps, 0);
-    assert_eq!(family.activities_not_computed, [classify::Activity::Recover]);
+    assert_eq!(
+        family.activities_not_computed,
+        [classify::Activity::Recover]
+    );
     assert_eq!(
         family.triggers_not_computed,
         [
@@ -975,7 +978,14 @@ fn observe(
         Some(claude_id(id)),
         "call-hash".into(),
     );
-    classify::finish(&mut observation, &output, error, None, None, "result".into());
+    classify::finish(
+        &mut observation,
+        &output,
+        error,
+        None,
+        None,
+        "result".into(),
+    );
     classify::LocatedObservation {
         position: position("s", offset),
         timestamp: None,
@@ -1018,20 +1028,35 @@ fn step_activity_trigger_retry_and_coverage_flow_through_analytics() {
     assert_eq!(activities, [None, None, Some(Activity::Integrate), None]);
     assert_eq!(result.steps[0].waste, Some(WasteKind::OtherFailure));
     assert_eq!(result.steps[1].waste, Some(WasteKind::Retry));
-    assert_eq!(result.steps[1].waste_category, Some(WasteCategory::Unmapped));
+    assert_eq!(
+        result.steps[1].waste_category,
+        Some(WasteCategory::Unmapped)
+    );
     let triggers: Vec<_> = result.steps.iter().map(|step| step.trigger).collect();
     assert_eq!(
         triggers,
-        [Some(Trigger::NoneVisible), Some(Trigger::ToolError), None, None]
+        [
+            Some(Trigger::NoneVisible),
+            Some(Trigger::ToolError),
+            None,
+            None
+        ]
     );
     let analytics = analytics::Analytics::of(&result);
     let counts = &analytics.counts;
     assert_eq!(counts.by_activity.len(), 1);
     assert_eq!(counts.by_activity[&Activity::Integrate].steps, 1);
-    assert_eq!(counts.by_activity[&Activity::Integrate].elapsed_ms.known, 1_000);
+    assert_eq!(
+        counts.by_activity[&Activity::Integrate].elapsed_ms.known,
+        1_000
+    );
     assert_eq!(counts.unlabelled_activity_steps, 3);
     assert_eq!(
-        counts.by_activity.values().map(|totals| totals.steps).sum::<u64>()
+        counts
+            .by_activity
+            .values()
+            .map(|totals| totals.steps)
+            .sum::<u64>()
             + counts.unlabelled_activity_steps,
         counts.totals.exclusive.steps
     );
@@ -1073,7 +1098,10 @@ fn trigger_follows_refill_then_the_nearest_preceding_step_in_lane() {
             Trigger::ExternalError,
         ),
         (|p| p.waste = Some(WasteKind::Sleep), Trigger::Polling),
-        (|p| p.waste = Some(WasteKind::ChecksPending), Trigger::Polling),
+        (
+            |p| p.waste = Some(WasteKind::ChecksPending),
+            Trigger::Polling,
+        ),
         (|p| p.activity = Some(Activity::Wait), Trigger::Polling),
         (
             |p| p.activity = Some(Activity::Coordinate),
