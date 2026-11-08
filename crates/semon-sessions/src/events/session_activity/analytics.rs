@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use super::*;
-use classify::{Change, WasteCategory, WasteKind};
+use classify::{Activity, Change, WasteCategory, WasteKind};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ChangeCounts {
@@ -39,6 +39,18 @@ pub(crate) enum LeverNotComputed {
     TaskSpecification,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) enum TriggerNotComputed {
+    InstructionChange,
+    MissingInput,
+}
+
+const ACTIVITIES_NOT_COMPUTED: [Activity; 1] = [Activity::Recover];
+const TRIGGERS_NOT_COMPUTED: [TriggerNotComputed; 2] = [
+    TriggerNotComputed::InstructionChange,
+    TriggerNotComputed::MissingInput,
+];
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Counts {
     pub(crate) totals: OwnershipTotals,
@@ -48,6 +60,13 @@ pub(crate) struct Counts {
     pub(crate) waste_by_category: BTreeMap<WasteCategory, u64>,
     pub(crate) waste_cost_by_kind: BTreeMap<WasteKind, WasteTotals>,
     pub(crate) waste_cost_by_category: BTreeMap<WasteCategory, WasteTotals>,
+    /// Exclusive labelled steps, like waste cost.
+    pub(crate) by_activity: BTreeMap<Activity, WasteTotals>,
+    /// Exclusive steps with waste or a verify failure, by their trigger.
+    pub(crate) by_trigger: BTreeMap<Trigger, WasteTotals>,
+    /// Exclusive steps with no activity label: `by_activity` steps plus this
+    /// equal the exclusive step total.
+    pub(crate) unlabelled_activity_steps: u64,
     pub(crate) wait_time_ms: OwnedMeasured,
     pub(crate) waits_without_interval: OwnedCounts,
     pub(crate) empty_search_steps: u64,
@@ -64,6 +83,8 @@ pub(crate) struct Analytics {
     #[serde(flatten)]
     pub(crate) counts: Counts,
     pub(crate) levers_not_computed: Vec<LeverNotComputed>,
+    pub(crate) activities_not_computed: Vec<Activity>,
+    pub(crate) triggers_not_computed: Vec<TriggerNotComputed>,
     pub(crate) thrash: bool,
     pub(crate) family: Option<Family>,
 }
@@ -75,6 +96,8 @@ pub(crate) struct Family {
     pub(crate) member_sessions: u64,
     pub(crate) thrashed_sessions: u64,
     pub(crate) levers_not_computed: Vec<LeverNotComputed>,
+    pub(crate) activities_not_computed: Vec<Activity>,
+    pub(crate) triggers_not_computed: Vec<TriggerNotComputed>,
     /// Sum of capped physical-session step durations, including shared
     /// observations. Overlapping sessions can exceed family wall-clock time.
     pub(crate) total_step_time_ms: Measured<u64>,
@@ -160,11 +183,18 @@ impl Counts {
                 }
                 wait_intervals[2].push((wait.started_at_ms, wait.completed_at_ms));
             }
-            if let Some(kind) = step.waste
-                && matches!(&step.ownership, Ownership::Exclusive)
-            {
-                add_waste(&mut counts.waste_cost_by_kind, kind, step);
-                add_waste(&mut counts.waste_cost_by_category, kind.category(), step);
+            if matches!(&step.ownership, Ownership::Exclusive) {
+                if let Some(kind) = step.waste {
+                    add_waste(&mut counts.waste_cost_by_kind, kind, step);
+                    add_waste(&mut counts.waste_cost_by_category, kind.category(), step);
+                }
+                match step.activity {
+                    Some(activity) => add_waste(&mut counts.by_activity, activity, step),
+                    None => counts.unlabelled_activity_steps += 1,
+                }
+                if let Some(trigger) = step.trigger {
+                    add_waste(&mut counts.by_trigger, trigger, step);
+                }
             }
             counts.empty_search_steps += u64::from(step.empty_search);
             counts.verify_failure_steps += u64::from(step.verify_failure);
@@ -192,6 +222,8 @@ impl Analytics {
             pricing_fingerprint: activity.pricing_fingerprint.clone(),
             counts: Counts::of(activity),
             levers_not_computed: vec![LeverNotComputed::TaskSpecification],
+            activities_not_computed: ACTIVITIES_NOT_COMPUTED.to_vec(),
+            triggers_not_computed: TRIGGERS_NOT_COMPUTED.to_vec(),
             thrash: activity.aggregate.thrash,
             family: None,
         }
@@ -311,6 +343,9 @@ impl Fold {
             &mut self.counts.waste_cost_by_category,
             child.counts.waste_cost_by_category,
         );
+        waste_map(&mut self.counts.by_activity, child.counts.by_activity);
+        waste_map(&mut self.counts.by_trigger, child.counts.by_trigger);
+        self.counts.unlabelled_activity_steps += child.counts.unlabelled_activity_steps;
         owned_measured(&mut self.counts.wait_time_ms, &child.counts.wait_time_ms);
         owned_counts(
             &mut self.counts.waits_without_interval,
@@ -342,6 +377,8 @@ impl Fold {
             member_sessions: self.members,
             thrashed_sessions: self.thrashed,
             levers_not_computed: vec![LeverNotComputed::TaskSpecification],
+            activities_not_computed: ACTIVITIES_NOT_COMPUTED.to_vec(),
+            triggers_not_computed: TRIGGERS_NOT_COMPUTED.to_vec(),
             total_step_time_ms: self.time.clone(),
         }
     }

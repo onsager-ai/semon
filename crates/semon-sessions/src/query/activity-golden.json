@@ -24,6 +24,11 @@
     "waste_cost_by_kind": {},
     "waste_cost_by_category": {},
     "levers_not_computed": ["TaskSpecification"],
+    "activities_not_computed": ["Recover"],
+    "triggers_not_computed": ["InstructionChange", "MissingInput"],
+    "by_activity_steps": { "Integrate": 1 },
+    "by_trigger": {},
+    "unlabelled_activity_steps": 2,
     "family": null
   },
   "page": {

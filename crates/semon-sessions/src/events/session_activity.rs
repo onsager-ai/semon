@@ -18,7 +18,7 @@ use crate::{claude_usage::Shared, pricing};
 pub(crate) mod analytics;
 pub(crate) mod classify;
 
-pub(crate) const ACTIVITY_RULES_VERSION: u32 = 6;
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 7;
 const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
@@ -148,6 +148,70 @@ pub(crate) struct ActivityStep {
     pub(crate) empty_search: bool,
     pub(crate) verify_failure: bool,
     pub(crate) silent_exit: bool,
+    /// None when no call proves an activity: unknown or ambiguous commands only,
+    /// or no tool call at all. Report and think are not derived, because the
+    /// step facts carry no assistant-text evidence.
+    pub(crate) activity: Option<classify::Activity>,
+    /// Set only for steps with waste or a verify failure.
+    pub(crate) trigger: Option<Trigger>,
+}
+
+/// What immediately preceded a wasteful or failing step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) enum Trigger {
+    ToolError,
+    EmptyResult,
+    TestOrCiFailure,
+    ExternalError,
+    Compaction,
+    Polling,
+    WorkerResult,
+    NoneVisible,
+}
+
+impl Trigger {
+    /// Refill follows a compaction. Otherwise the nearest preceding step of the
+    /// same native source (one agent's transcript) supplies the evidence, in order.
+    fn of(steps: &[ActivityStep], index: usize) -> Option<Self> {
+        use classify::{Activity, WasteKind};
+        let step = &steps[index];
+        if step.waste.is_none() && !step.verify_failure {
+            return None;
+        }
+        if step.waste == Some(WasteKind::Refill) {
+            return Some(Self::Compaction);
+        }
+        let Some(previous) = steps[..index]
+            .iter()
+            .rev()
+            .find(|previous| previous.position.source == step.position.source)
+        else {
+            return Some(Self::NoneVisible);
+        };
+        let waste = previous.waste;
+        let external = waste == Some(WasteKind::ExternalFailure);
+        let failed = waste.is_some_and(WasteKind::is_failure) && !external;
+        let trigger = if failed {
+            Self::ToolError
+        } else if previous.empty_search {
+            Self::EmptyResult
+        } else if previous.verify_failure {
+            Self::TestOrCiFailure
+        } else if external {
+            Self::ExternalError
+        } else if previous.activity == Some(Activity::Wait)
+            || matches!(waste, Some(WasteKind::ChecksPending | WasteKind::Sleep))
+        {
+            Self::Polling
+        } else if previous.activity == Some(Activity::Coordinate)
+            || waste == Some(WasteKind::OrchestrationWait)
+        {
+            Self::WorkerResult
+        } else {
+            Self::NoneVisible
+        };
+        Some(trigger)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,6 +309,7 @@ pub(crate) fn apply_observations(
         .map(|compact| (compact.position.source.clone(), compact.position.offset))
         .collect();
     classify::classify_reads(&mut observations, &compactions);
+    classify::classify_retries(&mut observations);
     let mut exact = BTreeMap::new();
     let mut sources: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
     for (index, step) in activity.steps.iter().enumerate() {
@@ -291,6 +356,11 @@ pub(crate) fn apply_observations(
             step.empty_search |= row.observation.empty_search;
             step.verify_failure |= row.observation.verify_failure;
             step.silent_exit |= row.observation.silent_exit;
+            step.activity = step
+                .activity
+                .into_iter()
+                .chain(row.observation.activity())
+                .min();
             if let Some(wait) = row.observation.wait {
                 step.waits.push(wait);
             }
@@ -306,6 +376,8 @@ pub(crate) fn apply_observations(
                     | classify::WasteKind::ExternalFailure
                     | classify::WasteKind::OtherFailure
                     | classify::WasteKind::MergeConflict
+                    | classify::WasteKind::Retry
+                    | classify::WasteKind::FlakyRerun
                     | classify::WasteKind::Sleep => 1,
                     classify::WasteKind::Refill => 2,
                     classify::WasteKind::RedundantRead => 3,
@@ -316,6 +388,12 @@ pub(crate) fn apply_observations(
                 }
             }
         }
+    }
+    let triggers: Vec<_> = (0..activity.steps.len())
+        .map(|index| Trigger::of(&activity.steps, index))
+        .collect();
+    for (step, trigger) in activity.steps.iter_mut().zip(triggers) {
+        step.trigger = trigger;
     }
     activity
         .facts
@@ -397,6 +475,8 @@ pub(crate) fn derive(
                 empty_search: false,
                 verify_failure: false,
                 silent_exit: false,
+                activity: None,
+                trigger: None,
             }
         })
         .collect();

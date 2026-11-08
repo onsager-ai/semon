@@ -26,6 +26,37 @@ pub(crate) enum WasteKind {
     Refill,
     RedundantRead,
     Sleep,
+    /// An identical call repeated after a failure, with no intervening state
+    /// change, that did not turn a verification failure into a success.
+    Retry,
+    /// An identical verification or PR-checks call that succeeded on repeat
+    /// after failing, with no intervening state change.
+    FlakyRerun,
+}
+
+/// What a step did, in first-matching precedence order (declaration order).
+/// `Recover` is not computed by rules version 7 and is never assigned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) enum Activity {
+    Coordinate,
+    Wait,
+    Integrate,
+    Verify,
+    Recover,
+    Implement,
+    Explore,
+    Setup,
+    Report,
+    Think,
+}
+
+/// Typed evidence that a call addressed another agent or session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+enum AgentCall {
+    /// Spawns, messages or steers another agent or session.
+    Coordinate,
+    /// Blocks on another agent's result.
+    Wait,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -45,12 +76,28 @@ impl WasteKind {
             | Self::MalformedCommand
             | Self::ToolInputRejected
             | Self::Timeout => WasteCategory::Tooling,
-            Self::ExternalFailure => WasteCategory::External,
+            Self::ExternalFailure | Self::FlakyRerun => WasteCategory::External,
             Self::Refill => WasteCategory::Context,
-            Self::OtherFailure | Self::MergeConflict | Self::RedundantRead | Self::Sleep => {
-                WasteCategory::Unmapped
-            }
+            Self::OtherFailure
+            | Self::MergeConflict
+            | Self::RedundantRead
+            | Self::Sleep
+            | Self::Retry => WasteCategory::Unmapped,
         }
+    }
+
+    /// A failed call, as opposed to waiting, context or repeat waste.
+    pub(crate) fn is_failure(self) -> bool {
+        matches!(
+            self,
+            Self::PathNotFound
+                | Self::MalformedCommand
+                | Self::ToolInputRejected
+                | Self::Timeout
+                | Self::ExternalFailure
+                | Self::OtherFailure
+                | Self::MergeConflict
+        )
     }
 }
 
@@ -229,6 +276,12 @@ pub(crate) struct Observation {
     commands: Vec<Command>,
     attribution: Attribution,
     orchestration: bool,
+    /// Distinct from `orchestration`, which also marks blocking agent calls as
+    /// waste: coordination and waiting are different activities.
+    agent: Option<AgentCall>,
+    /// SHA-256 of the tool name and exact input (the command and working
+    /// directory for shell tools). None when the input is not decoded.
+    fingerprint: Option<String>,
     claude_bash: bool,
     formatter: bool,
     envelopes: bool,
@@ -253,6 +306,56 @@ pub(crate) struct LocatedObservation {
 }
 
 impl Observation {
+    /// The activity of this call: the first match among its commands and agent
+    /// evidence. Unknown and ambiguous commands prove nothing.
+    pub(crate) fn activity(&self) -> Option<Activity> {
+        let pending = self.waste == Some(WasteKind::ChecksPending);
+        let agent = self.agent.map(|call| match call {
+            AgentCall::Coordinate => Activity::Coordinate,
+            AgentCall::Wait => Activity::Wait,
+        });
+        let commands = self.commands.iter().filter_map(|command| match command {
+            Command::Sleep | Command::Watch => Some(Activity::Wait),
+            Command::PrChecks if pending => Some(Activity::Wait),
+            Command::PrChecks | Command::Verify => Some(Activity::Verify),
+            Command::Commit
+            | Command::Push
+            | Command::PullRequest
+            | Command::Merge
+            | Command::Stage => Some(Activity::Integrate),
+            Command::BodyWrite | Command::Mutation => Some(Activity::Implement),
+            Command::Read(..) | Command::Search(..) | Command::Inspect => Some(Activity::Explore),
+            Command::Setup => Some(Activity::Setup),
+            Command::Ambiguous | Command::Unknown => None,
+        });
+        agent.into_iter().chain(commands).min()
+    }
+
+    /// Agent calls and unknown commands can mutate arbitrary paths.
+    fn changes_state(&self) -> bool {
+        self.orchestration
+            || self.commands.contains(&Command::Setup) && !self.completed
+            || self.commands.iter().any(|command| {
+                matches!(
+                    command,
+                    Command::Mutation
+                        | Command::Stage
+                        | Command::BodyWrite
+                        | Command::Ambiguous
+                        | Command::Unknown
+                        | Command::Commit
+                        | Command::Push
+                        | Command::PullRequest
+                        | Command::Verify
+                        | Command::Merge
+                )
+            })
+    }
+
+    fn failed(&self) -> bool {
+        self.verify_failure || self.waste.is_some_and(WasteKind::is_failure)
+    }
+
     /// An orchestration call whose result record was not decoded here (for
     /// example a Codex `wait_agent` completed through another native record)
     /// keeps the exact call and reply timestamps the Event Index already
@@ -863,7 +966,9 @@ pub(super) fn call(
             digest(&serde_json::to_vec(&(name, &*input)).expect("search selection serializes")),
             SearchTool::Native,
         )],
-        "Write" | "Edit" | "apply_patch" => vec![Command::Mutation],
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "apply_patch" => {
+            vec![Command::Mutation]
+        }
         "Agent" | "Task" | "wait_agent" => Vec::new(),
         _ => vec![Command::Unknown],
     };
@@ -889,6 +994,24 @@ pub(super) fn call(
     }
     let orchestration =
         matches!(name, "Agent" | "Task" | "wait_agent") || commands.contains(&Command::Watch);
+    let agent = match name {
+        "Agent" | "Task" | "SendMessage" | "spawn_agent" | "send_message" | "send_input" => {
+            Some(AgentCall::Coordinate)
+        }
+        "wait_agent" => Some(AgentCall::Wait),
+        _ => None,
+    };
+    let command = input
+        .get("command")
+        .or_else(|| input.get("cmd"))
+        .filter(|command| command.is_string());
+    let workdir = input.get("workdir").or_else(|| input.get("cwd"));
+    let identity = if matches!(name, "Bash" | "bash" | "shell" | "exec_command") {
+        command.map(|command| serde_json::to_vec(&(name, command, workdir)))
+    } else {
+        (!input.is_null()).then(|| serde_json::to_vec(&(name, &*input)))
+    };
+    let fingerprint = identity.map(|bytes| digest(&bytes.expect("call identity serializes")));
     Observation {
         call_digest,
         result_digest: None,
@@ -896,6 +1019,8 @@ pub(super) fn call(
         commands,
         attribution,
         orchestration,
+        agent,
+        fingerprint,
         claude_bash: false,
         formatter: false,
         envelopes: false,
@@ -1384,6 +1509,7 @@ pub(super) fn finish(
         observation.settled && !result.error && result.exit.is_none_or(|code| code == 0);
     if result.is_wait {
         observation.orchestration = true;
+        observation.agent.get_or_insert(AgentCall::Wait);
     }
     if observation.orchestration {
         observation.waste = Some(WasteKind::OrchestrationWait);
@@ -1582,11 +1708,16 @@ fn codex_step(payload: &Value) -> Option<ActivityStepId> {
 }
 
 fn bind_source_context(observation: &mut Observation, cwd: Option<&str>) {
+    let cwd = cwd.filter(|path| path.len() <= 4096);
+    if let Some(fingerprint) = &mut observation.fingerprint {
+        *fingerprint = digest(
+            &serde_json::to_vec(&(&*fingerprint, cwd)).expect("source call context serializes"),
+        );
+    }
     for command in &mut observation.commands {
         if let Command::Read(fingerprint, _) | Command::Search(fingerprint, _) = command {
             *fingerprint = digest(
-                &serde_json::to_vec(&(&*fingerprint, cwd.filter(|path| path.len() <= 4096)))
-                    .expect("source read context serializes"),
+                &serde_json::to_vec(&(&*fingerprint, cwd)).expect("source read context serializes"),
             );
         }
     }
@@ -1653,26 +1784,9 @@ pub(crate) fn classify_reads(
                 matches!(command, Command::Read(key, _) | Command::Search(key, _) if key == fingerprint)
             }));
         }
-        // Agent calls and unknown commands can mutate arbitrary paths. A
-        // terminal failed result ends the overlap barrier but never proves that
-        // earlier reads survived; unfinished mutators keep the barrier open.
-        let mutation = observation.orchestration
-            || observation.commands.contains(&Command::Setup) && !observation.completed
-            || observation.commands.iter().any(|command| {
-                matches!(
-                    command,
-                    Command::Mutation
-                        | Command::Stage
-                        | Command::BodyWrite
-                        | Command::Ambiguous
-                        | Command::Unknown
-                        | Command::Commit
-                        | Command::Push
-                        | Command::PullRequest
-                        | Command::Verify
-                        | Command::Merge
-                )
-            });
+        // A terminal failed result ends the overlap barrier but never proves
+        // that earlier reads survived; unfinished mutators keep it open.
+        let mutation = observation.changes_state();
         if mutation {
             reads.clear();
             let until = uncertain_until
@@ -1709,6 +1823,55 @@ pub(crate) fn classify_reads(
                     reads.insert(fingerprint.clone(), (latest, end));
                 }
             }
+        }
+    }
+}
+
+/// An earlier failed call whose identical repeat may be retry waste.
+struct Failed {
+    result_offset: u64,
+    verification: bool,
+}
+
+/// Source-local, like read history. A repeat is an identical call (same
+/// fingerprint) after a failed call with no state change strictly between the
+/// two calls; the repeat itself is not that change. A repeated verification
+/// or PR-checks failure that now succeeds is a flaky rerun; every other repeat
+/// is a retry. The repeat's own failure kind gives way to the repeat marker,
+/// but wait, context and sleep waste are kept.
+pub(crate) fn classify_retries(observations: &mut [LocatedObservation]) {
+    observations.sort_by(|a, b| a.position.cmp(&b.position));
+    let mut histories: BTreeMap<String, BTreeMap<String, Failed>> = BTreeMap::new();
+    for row in observations {
+        let history = histories.entry(row.position.source.clone()).or_default();
+        let observation = &mut row.observation;
+        let failed = observation.failed();
+        if let Some(fingerprint) = &observation.fingerprint
+            && let Some(earlier) = history.get(fingerprint)
+            && earlier.result_offset < row.position.offset
+            && observation.result_digest.is_some()
+            && observation.waste.is_none_or(WasteKind::is_failure)
+        {
+            observation.waste = Some(if earlier.verification && observation.completed {
+                WasteKind::FlakyRerun
+            } else {
+                WasteKind::Retry
+            });
+        }
+        if observation.changes_state() {
+            history.clear();
+        }
+        if failed
+            && let Some(fingerprint) = &observation.fingerprint
+            && let Some(result_offset) = row.result_offset
+        {
+            history.insert(
+                fingerprint.clone(),
+                Failed {
+                    result_offset,
+                    verification: observation.verify_failure,
+                },
+            );
         }
     }
 }
