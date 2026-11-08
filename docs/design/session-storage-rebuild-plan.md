@@ -346,12 +346,35 @@ PostgreSQL session backend yet.
   index decode or SQLite proof connection is used for this path. Append between
   Index and Catalog publication is covered independently from altered-prefix
   refusal. Provider-backed reads keep their independently authorized provider.
+- History/selected-reader follow-up (2026-11-08): PostgreSQL schema 12 stores
+  each retained recipe's exact source cohort and publication epochs. Replacement
+  merges Current with prior retained generations atomically; append deduplicates
+  only when the same physical source and ledger epoch cover the older consumed
+  prefix. A second outgoing withdrawal now succeeds without replacing earlier
+  custody. Empty replacement captures the outgoing nonempty observation before
+  retiring Current and acknowledging discovery. Selected windows stop at a
+  generation boundary and retain exact provider/local-proof provenance; rewritten
+  local bytes refuse the older generation. This bounded implementation refuses
+  custody components above 4096 recipes or 1 MiB, leaving the transaction intact.
+- Selected PostgreSQL reads now serve source-bound details on selected Catalog
+  and transcript responses, native string/script/output/attachment fields through
+  the pinned lazy-proof reader, bounded causal range context, and metadata-only
+  error/signal annotation pages. Catalog Query no longer refuses an entire
+  namespace merely because History exists; qualified retained exact observations
+  participate with live state removed. Composite History lacking exact aggregate
+  Query facts still refuses honestly; deriving and publishing those complete
+  facts remains required. Selected details/context for a composite cohort whose
+  original causal publication is unavailable remain explicitly incomplete.
+- Session activity remains unavailable: the Codex activity producer depends on
+  accepted native usage facts currently owned by the SQLite store. The attempted
+  PostgreSQL activity port was removed rather than treating missing facts as an
+  empty activity. This is a startup blocker alongside receiver Raw transport,
+  global discovery/search reconciliation and the remaining Viewer routes.
 - Still required: explicit startup backend configuration; complete receiver Raw
   custody adoption and relocation Index reuse; remaining direct selected readers
   and full discovery reconciliation. No PostgreSQL startup option is exposed while
   these paths require SQLite or refuse. Selected activity, complete search coverage,
-  composite Current/History merging, empty-replacement History handoff, Catalog
-  Query composite-History, selected details/causal context/fields/annotations,
+  exact composite-History Query derivation, complete selected Home/Trace routes,
   proof-generation collection and bounded delta preparation remain pending.
   Full shared lifecycle conformance and full-pipeline startup RLS/no-hidden-SQLite
   qualification remain pending; private-injection timings are not real startup.

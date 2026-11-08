@@ -72,18 +72,6 @@ impl PgProjectionStore {
         ensure(&self.namespace, namespace)?;
         let tx = self.begin(namespace).await?;
         let runtime = crate::native_evidence::query_runtime_generation(options).map_err(backend)?;
-        let retained: bool = tx
-            .tx
-            .query_one(
-                "SELECT EXISTS(SELECT 1 FROM semon_projection.history_catalog WHERE namespace=$1)",
-                &[&namespace.binding()],
-            )
-            .await
-            .map_err(backend)?
-            .get(0);
-        if retained {
-            return Err(backend("Catalog Query composite History is unavailable"));
-        }
         let observations = crate::native_evidence::RuntimeObservations::projection(options);
         let mut part = crate::query::catalog::Part {
             generation: tx
@@ -107,14 +95,23 @@ impl PgProjectionStore {
             let page = tx
                 .catalog_page(
                     namespace,
-                    CatalogReadScope::Current,
+                    CatalogReadScope::RetainedHistory,
                     after
                         .as_ref()
                         .map(|(last, key): &(i64, String)| (*last, key.as_str())),
                     100,
                 )
                 .await?;
-            for row in page.rows {
+            for mut row in page.rows {
+                let current: bool = tx.tx.query_one("SELECT lifecycle='current' FROM semon_projection.catalog WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &row.key]).await.map_err(backend)?.get(0);
+                row.lifecycle = if current {
+                    tx.catalog_row(namespace, &row.key, CatalogReadScope::Current)
+                        .await?
+                        .ok_or_else(|| backend("Current Query owner unavailable"))?;
+                    crate::model::summary::CatalogLifecycle::Current
+                } else {
+                    crate::model::summary::CatalogLifecycle::Retained
+                };
                 let bytes = serde_json::to_vec(&row).map_err(backend)?.len();
                 *bytes_left = bytes_left
                     .checked_sub(bytes)
@@ -234,7 +231,7 @@ impl PgProjectionStore {
             if !crate::model::summary::query_observation_matches(
                 saved,
                 &row.sources,
-                true,
+                row.lifecycle == crate::model::summary::CatalogLifecycle::Current,
                 observations.expected(&row).as_deref(),
             )
             .map_err(backend)?
@@ -251,7 +248,19 @@ impl PgProjectionStore {
                 if part.rows.get(id).is_some_and(|prior| prior != saved) {
                     return Err(backend("Catalog Query context disagrees"));
                 }
-                part.rows.insert(id.clone(), saved.clone());
+                let mut saved = saved.clone();
+                if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
+                    saved["summary"]["alive"] = serde_json::Value::Null;
+                    saved["summary"]["run"] = serde_json::Value::Null;
+                    if matches!(
+                        saved["summary"]["state"].as_str(),
+                        Some("working" | "waiting-question")
+                    ) {
+                        saved["summary"]["state"] = serde_json::json!("unknown");
+                        saved["summary"]["open_question"] = serde_json::Value::Null;
+                    }
+                }
+                part.rows.insert(id.clone(), saved);
                 part.owners.insert(id.clone(), row.key.clone());
             }
         }
@@ -526,6 +535,7 @@ impl PgProjectionStore {
             "errors_generation",
             "part",
             "field_chunk",
+            "image",
         ] {
             if query
                 .split('&')
@@ -540,16 +550,36 @@ impl PgProjectionStore {
         }
         let argument =
             |name| crate::viewer::query_value(query, name).and_then(crate::viewer::decoded);
-        if ["part", "field_chunk", "errors_generation"]
-            .into_iter()
-            .any(|name| argument(name).is_some())
+        use crate::transcript_range::SelectedPart;
+        let part = match argument("part").as_deref() {
+            None => SelectedPart::Transcript,
+            Some("script") => SelectedPart::Script,
+            Some("output") => SelectedPart::Output,
+            Some("attachment") => {
+                let Some(image) = argument("image")
+                    .and_then(|value| value.parse::<usize>().ok())
+                    .filter(|image| *image < 64)
+                else {
+                    return Ok(invalid());
+                };
+                SelectedPart::Attachment(image)
+            }
+            _ => return Ok(invalid()),
+        };
+        let field_chunk = match argument("field_chunk") {
+            Some(value) => match value.parse::<usize>() {
+                Ok(chunk) => Some(chunk),
+                Err(_) => return Ok(invalid()),
+            },
+            None => None,
+        };
+        if ((!matches!(part, SelectedPart::Transcript) || field_chunk.is_some())
+            && (argument("generation").is_none()
+                || argument("after").is_none()
+                || argument("limit").as_deref() != Some("1")))
+            || (!matches!(part, SelectedPart::Transcript) && field_chunk.is_some())
         {
-            return Ok(crate::catalog::error(
-                503,
-                "capability_unavailable",
-                "This selected operation is not yet available on PostgreSQL.",
-                false,
-            ));
+            return Ok(invalid());
         }
         let Some(key) = argument("sid").filter(|key| !key.is_empty() && key.len() <= 4096) else {
             return Ok(invalid());
@@ -610,6 +640,20 @@ impl PgProjectionStore {
                 true,
             ));
         }
+        if argument("errors_generation").is_some_and(|expected| {
+            expected
+                != crate::transcript_range::error_generation(
+                    &crate::transcript_range::entry_generation(&generation),
+                    &session,
+                )
+        }) {
+            return Ok(crate::catalog::error(
+                409,
+                "stale_projection",
+                "The selected error projection changed.",
+                true,
+            ));
+        }
         let first = after.unwrap_or_else(|| total.saturating_sub(limit));
         if first > total {
             return Ok(crate::catalog::error(
@@ -622,8 +666,15 @@ impl PgProjectionStore {
         let (_, _, slots) = tx
             .recipe_page(namespace, &key, scope, Some(&generation), first, limit)
             .await?;
+        let observations = tx
+            .recipe_observations(namespace, &key, scope, first, slots.len().max(1))
+            .await?;
+        let sources = observations.first().cloned().unwrap_or(row.sources);
+        let context = tx
+            .range_context(namespace, options, &key, &slots, &sources)
+            .await?;
         let reply = if let Some(reader) = provider {
-            crate::transcript_range::render_postgres(
+            crate::transcript_range::render_postgres_part(
                 options,
                 identity,
                 session,
@@ -631,12 +682,15 @@ impl PgProjectionStore {
                 total,
                 first,
                 slots,
-                row.sources,
+                sources,
                 reader,
+                part,
+                field_chunk,
+                context,
             )
         } else {
             let mut proofs = std::collections::BTreeMap::new();
-            for source in &row.sources {
+            for source in &sources {
                 let input = crate::native_evidence::catalog_input(&source.path, options)
                     .ok_or_else(|| backend("invalid selected source"))?;
                 let proof_generation = tx.source_proof_generation(namespace, source).await?;
@@ -646,10 +700,10 @@ impl PgProjectionStore {
                 );
             }
             let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
-            let reader = super::proof_reader::LocalProofReader::new(options, &row.sources, sender)?;
+            let reader = super::proof_reader::LocalProofReader::new(options, &sources, sender)?;
             let options = options.clone();
             let mut rendering = tokio::task::spawn_blocking(move || {
-                let reply = crate::transcript_range::render_postgres(
+                let reply = crate::transcript_range::render_postgres_part(
                     &options,
                     identity,
                     session,
@@ -657,8 +711,11 @@ impl PgProjectionStore {
                     total,
                     first,
                     slots,
-                    row.sources,
+                    sources,
                     &reader,
+                    part,
+                    field_chunk,
+                    context,
                 );
                 reader.verify().map(|()| reply)
             });

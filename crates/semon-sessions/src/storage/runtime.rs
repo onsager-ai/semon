@@ -392,6 +392,21 @@ impl RuntimeStore {
     }
 
     #[cfg(feature = "postgres")]
+    pub(crate) fn annotations(&self, query: &str) -> ViewerReply {
+        let mut postgres = self
+            .postgres
+            .as_ref()
+            .expect("PostgreSQL store")
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Postgres { runtime, store } = &mut *postgres;
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+        runtime
+            .block_on(store.annotations(namespace, &self.options, query))
+            .unwrap_or_else(|_| unavailable())
+    }
+
+    #[cfg(feature = "postgres")]
     pub(crate) fn discover_sources(
         &self,
         inputs: &[crate::Input],
@@ -524,7 +539,7 @@ impl RuntimeStore {
                     }
                     for (key, expected) in &part.witnesses {
                         let actual = tx
-                            .catalog_row(namespace, key, crate::CatalogReadScope::Current)
+                            .catalog_row(namespace, key, crate::CatalogReadScope::RetainedHistory)
                             .await?;
                         if actual
                             .and_then(|row| row.query)

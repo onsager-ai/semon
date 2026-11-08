@@ -1514,6 +1514,12 @@ pub(crate) async fn postgres_page(
     } else {
         None
     };
+    let details = if let Some(row) = selected.first().filter(|_| request.sid.is_some()) {
+        tx.selected_details(namespace, options, &row.key, request.scope)
+            .await?
+    } else {
+        None
+    };
     let runtime = crate::native_evidence::query_runtime_generation(options).ok();
     let runtime_observations = crate::native_evidence::RuntimeObservations::projection(options);
     let recorded = options
@@ -1532,7 +1538,7 @@ pub(crate) async fn postgres_page(
             completeness: "partial".into(),
             selected,
             next,
-            details: None,
+            details,
             transcript,
             partial_history: Default::default(),
             search_report,

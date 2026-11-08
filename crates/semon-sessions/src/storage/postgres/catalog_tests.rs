@@ -161,9 +161,9 @@ async fn replacement(dsn: &str) {
             .unwrap()
             .unwrap()
             .sources,
-        row.sources
+        [next.sources.clone(), row.sources.clone()].concat()
     );
-    assert_eq!(
+    assert!(
         tx.recipe_page(
             &namespace,
             &row.key,
@@ -173,27 +173,105 @@ async fn replacement(dsn: &str) {
             10
         )
         .await
-        .unwrap()
-        .2[0]
-            .offset,
-        projection.slots[0].offset
+        .is_err()
     );
-    // A second outgoing observation needs composite History. Until that port is
-    // implemented, refusal keeps both the original custody and Current intact.
+    let (history_generation, total, first_history) = tx
+        .recipe_page(
+            &namespace,
+            &row.key,
+            CatalogReadScope::RetainedHistory,
+            None,
+            0,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(total, next_projection.slots.len() + projection.slots.len());
+    assert_eq!(first_history[0].offset, next_projection.slots[0].offset);
+    let (_, _, original_history) = tx
+        .recipe_page(
+            &namespace,
+            &row.key,
+            CatalogReadScope::RetainedHistory,
+            Some(&history_generation),
+            next_projection.slots.len(),
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(original_history[0].offset, projection.slots[0].offset);
+    // A second outgoing observation succeeds and preserves both generations.
     assert!(
-        !tx.withdraw_source(&namespace, path.to_str().unwrap(), replaced)
+        tx.withdraw_source(&namespace, path.to_str().unwrap(), replaced)
             .await
             .unwrap()
     );
-    assert_eq!(
+    assert_ne!(
         tx.catalog_generation(&namespace).await.unwrap(),
         Some(next_generation)
     );
     assert_eq!(
         tx.ledger(&namespace, path.to_str().unwrap()).await.unwrap(),
-        Some(replaced)
+        None
+    );
+    let (retained_generation, retained_total, _) = tx
+        .recipe_page(
+            &namespace,
+            &row.key,
+            CatalogReadScope::RetainedHistory,
+            None,
+            0,
+            10,
+        )
+        .await
+        .unwrap();
+    assert_eq!(retained_generation, history_generation);
+    assert_eq!(retained_total, total);
+    assert_eq!(
+        tx.catalog_row(&namespace, &row.key, CatalogReadScope::RetainedHistory)
+            .await
+            .unwrap()
+            .unwrap()
+            .sources,
+        [next.sources.clone(), row.sources.clone()].concat()
     );
     tx.commit(&namespace).await.unwrap();
+    let options = crate::storage::conformance::source(&root.0, "catalog-history-reader");
+    let current_history = store
+        .transcript_query(
+            &namespace,
+            &options,
+            "sid=pg-catalog&scope=retained_history&after=0&limit=10",
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(current_history.status, 200);
+    let current_history: serde_json::Value = serde_json::from_slice(&current_history.body).unwrap();
+    assert_eq!(current_history["range"]["end"], next_projection.slots.len());
+    assert_eq!(current_history["entries"][0]["text"], "short replacement");
+    // Withdrawn SQL custody survives restart, while rewritten local bytes cannot
+    // masquerade as the original consumed generation.
+    drop(store);
+    let mut store = PgProjectionStore::new(
+        crate::storage::conformance::postgres::connect(dsn).await,
+        namespace.clone(),
+    )
+    .await
+    .unwrap();
+    let original_history = store
+        .transcript_query(
+            &namespace,
+            &options,
+            &format!(
+                "sid=pg-catalog&scope=retained_history&after={}&limit=10",
+                next_projection.slots.len()
+            ),
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(original_history.status, 409);
 }
 
 pub(super) async fn lifecycle(dsn: &str) {
