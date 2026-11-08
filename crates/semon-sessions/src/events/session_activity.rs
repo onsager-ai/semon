@@ -18,7 +18,7 @@ use crate::{claude_usage::Shared, pricing};
 pub(crate) mod analytics;
 pub(crate) mod classify;
 
-pub(crate) const ACTIVITY_RULES_VERSION: u32 = 5;
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 6;
 const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
@@ -293,13 +293,9 @@ pub(crate) fn apply_observations(
             if let Some(waste) = row.observation.waste {
                 let rank = |kind| match kind {
                     classify::WasteKind::OrchestrationWait => 0,
-                    classify::WasteKind::PathNotFound
-                    | classify::WasteKind::MalformedCommand
-                    | classify::WasteKind::ExternalFailure
-                    | classify::WasteKind::OtherFailure
-                    | classify::WasteKind::Sleep => 1,
                     classify::WasteKind::Refill => 2,
                     classify::WasteKind::RedundantRead => 3,
+                    _ => 1,
                 };
                 if step.waste.is_none_or(|old| rank(waste) < rank(old)) {
                     step.waste = Some(waste);

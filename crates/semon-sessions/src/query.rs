@@ -245,7 +245,8 @@ fn retained_query_tools() -> Vec<QueryTool> {
             name: "list_sessions",
             description: "Session summaries, most recently active first: id, harness, kind, name, model, repo, \
                 branch, machine, parent, children, state, start, last_activity (epoch ms), pid, alive, exit, \
-                open_question, tokens, run and turns_truncated. A field Semon can't know exactly is null.",
+                open_question, tokens, run and turns_truncated. activity_analytics includes measured wait time, \
+                exclusive waste time/cost, and known/unknown coverage. A field Semon can't know exactly is null.",
             positional: None,
             input_schema: json!({
                 "type": "object",
@@ -262,7 +263,7 @@ fn retained_query_tools() -> Vec<QueryTool> {
         },
         QueryTool {
             name: "get_session",
-            description: "One session: its summary, its busy intervals, its turns (each incoming message and how the \
+            description: "One session: its summary, including nullable activity_analytics with measured wait time and exclusive waste cost, its busy intervals, its turns (each incoming message and how the \
                 turn ended, with the handoffs it sent) and every handoff to or from it, as the session model has them.",
             positional: Some("id"),
             input_schema: json!({

@@ -26,6 +26,7 @@ const INVALID_PARAMS: i64 = -32602;
 
 const INSTRUCTIONS: &str = "Semon reads the local Claude Code and Codex session logs, read-only. \
     list_sessions and stalls give facts about sessions (state, last log line, process, parent and children); \
+    list_sessions and get_session include compact activity analytics with measured waits and exclusive waste costs; \
     get_session adds its turns and handoffs; get_session_activity pages typed activity steps and change facts; read_transcript reads what a selected session said. \
     Times are epoch milliseconds. A field Semon can't know exactly is null. \
     The tools read a window of recent logs (30 days unless the server was started with --since or --all); \

@@ -13,6 +13,15 @@
       "without_exact_step": 0
     },
     "elapsed_ms": { "known": 120000, "unknown_steps": 1 },
+    "wait_time_ms": {
+      "observed": { "known": 0, "unknown_steps": 0 },
+      "exclusive": { "known": 0, "unknown_steps": 0 },
+      "shared": { "known": 0, "unknown_steps": 0 }
+    },
+    "waits_without_interval": { "observed": 0, "exclusive": 0, "shared": 0 },
+    "waste_cost_by_kind": {},
+    "waste_cost_by_category": {},
+    "levers_not_computed": ["TaskSpecification"],
     "family": null
   },
   "page": {

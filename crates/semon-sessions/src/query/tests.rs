@@ -6348,6 +6348,12 @@ fn activity_analytics_is_additive_and_preserves_unknown_cost_and_duration() {
         1
     );
     assert_eq!(summary["change_facts"]["commits"], 1);
+    assert_eq!(summary["wait_time_ms"]["observed"]["known"], 0);
+    assert_eq!(summary["wait_time_ms"]["observed"]["unknown_steps"], 0);
+    assert_eq!(summary["waits_without_interval"]["observed"], 0);
+    assert_eq!(summary["waste_cost_by_kind"].as_object().unwrap().len(), 0);
+    assert_eq!(summary["waste_cost_by_category"].as_object().unwrap().len(), 0);
+    assert_eq!(summary["levers_not_computed"], json!(["TaskSpecification"]));
     let selected = call(&mut query, "get_session", json!({"id":"activity"}));
     assert_eq!(&selected["session"]["activity_analytics"], summary);
     assert!(summary.get("steps").is_none());
@@ -6377,6 +6383,10 @@ fn activity_family_rolls_up_without_child_step_duplication() {
     assert_eq!(parent["family"]["member_sessions"], 2);
     assert_eq!(parent["family"]["thrashed_sessions"], 0);
     assert_eq!(parent["family"]["total_step_time_ms"]["known"], 120000);
+    assert_eq!(parent["family"]["wait_time_ms"]["observed"]["known"], 0);
+    assert_eq!(parent["family"]["wait_time_ms"]["observed"]["unknown_steps"], 0);
+    assert_eq!(parent["family"]["waste_cost_by_kind"].as_object().unwrap().len(), 0);
+    assert_eq!(parent["family"]["levers_not_computed"], json!(["TaskSpecification"]));
     assert!(child["family"].is_null());
     let page = call(&mut query, "get_session_activity", json!({"id":"lead"}));
     assert_eq!(page["items"].as_array().unwrap().len(), 3);
@@ -6647,6 +6657,11 @@ fn sanitized_activity_query_matches_owned_golden() {
             "empty_search_steps":summary["empty_search_steps"],
             "change_facts":summary["change_facts"],
             "elapsed_ms":summary["totals"]["observed"]["elapsed_ms"],
+            "wait_time_ms":summary["wait_time_ms"],
+            "waits_without_interval":summary["waits_without_interval"],
+            "waste_cost_by_kind":summary["waste_cost_by_kind"],
+            "waste_cost_by_category":summary["waste_cost_by_category"],
+            "levers_not_computed":summary["levers_not_computed"],
             "family":summary["family"]
         },
         "page": {
