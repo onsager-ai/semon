@@ -6808,7 +6808,7 @@ fn sanitized_activity_query_matches_owned_golden() {
         "get_session_activity",
         json!({"id":"activity","limit":2}),
     );
-    let mut preview = call(
+    let preview = call(
         &mut query,
         "get_session_activity",
         json!({"id":"activity","kind":"preview"}),
