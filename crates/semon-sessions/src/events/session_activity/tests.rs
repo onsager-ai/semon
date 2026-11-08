@@ -674,12 +674,12 @@ fn analytics_unions_exact_wait_intervals_and_preserves_missing_coverage() {
     result.steps[0].waste = Some(WasteKind::OrchestrationWait);
     result.steps[0].waste_category = Some(WasteCategory::Orchestration);
     result.steps[0].waits = [(0, 100), (100, 200), (250, 300), (20, 50), (0, 100)]
-    .into_iter()
-    .map(|(started_at_ms, completed_at_ms)| WaitInterval {
-        started_at_ms,
-        completed_at_ms,
-    })
-    .collect();
+        .into_iter()
+        .map(|(started_at_ms, completed_at_ms)| WaitInterval {
+            started_at_ms,
+            completed_at_ms,
+        })
+        .collect();
     result.steps[1].ownership = Ownership::Shared("shared-observation".into());
     result.steps[1].waste = Some(WasteKind::OrchestrationWait);
     result.steps[1].waste_category = Some(WasteCategory::Orchestration);
@@ -706,13 +706,7 @@ fn analytics_unions_exact_wait_intervals_and_preserves_missing_coverage() {
 
 #[test]
 fn interval_union_merges_overlap_containment_adjacency_and_duplicates() {
-    let intervals = vec![
-        (0, 100),
-        (20, 50),
-        (0, 100),
-        (100, 150),
-        (160, 180),
-    ];
+    let intervals = vec![(0, 100), (20, 50), (0, 100), (100, 150), (160, 180)];
     assert_eq!(analytics::interval_union_ms(&intervals), 170);
 }
 
