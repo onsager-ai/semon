@@ -5990,11 +5990,23 @@ fn focused_tail_does_not_load_growing_session_busy_metadata() {
                 |r| r.get(0),
             )
             .unwrap();
-        let catalog: Value = serde_json::from_str(&metadata).unwrap();
+        let mut catalog: Value = serde_json::from_str(&metadata).unwrap();
+        // The timeline preview is bounded by 64 bins however long the history;
+        // everything else must stay under the fixed limit.
+        for pointer in [
+            "/activity_analytics",
+            "/query/rows/lead/summary/activity_analytics",
+        ] {
+            if let Some(analytics) = catalog.pointer_mut(pointer).and_then(Value::as_object_mut) {
+                let preview = analytics.remove("preview").unwrap();
+                assert!(preview["bins"].as_array().unwrap().len() <= 64);
+            }
+        }
+        let fixed = serde_json::to_string(&catalog).unwrap();
         assert!(
-            metadata.len() < 8192,
+            fixed.len() < 8192,
             "Catalog metadata grew with selected history: {}",
-            metadata.len()
+            fixed.len()
         );
         assert!(catalog["query"]["rows"]["lead"].get("busy").is_none());
         let busy: String = db
