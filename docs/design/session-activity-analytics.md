@@ -68,7 +68,7 @@ including retained observations with unavailable native bytes. Step stamps preve
 mixed-price pages; the final batch advances the header fingerprint and activity
 generation. Unknown prices remain unknown. Step arrays stay out of cached descriptions and session summaries. Compact
 `activity_analytics` is published with Catalog/query summaries; it rebuilds after
-relationships rather than entering the stable description cache. Catalog version 7
+relationships rather than entering the stable description cache. Catalog version 8
 and the semantic recipe bind this output.
 
 Rules version 6 classifies the first waste per step in this order: orchestration
@@ -78,8 +78,18 @@ tool input (Tooling), rate/auth/network/server failure (External), checks pendin
 (Orchestration), merge conflict and other failure (Unmapped). Empty search,
 verify failure and silent exit are independent non-waste signals; other sleeps
 are Unmapped. Wait intervals retain their exact recorded endpoints independently
-of the capped step duration. Missing endpoints stay unknown. Compound failures
-need an identified diagnostic component; ambiguous failures remain Unmapped.
+of the capped step duration. Session wait time
+is the union of these intervals, so overlap and duplicate observations count once;
+adjacent intervals join without changing the total. The summary exposes observed,
+exclusive and shared interval unions, plus observed/exclusive/shared counts of
+orchestration-wait steps without any exact interval. Missing endpoints stay unknown.
+Family wait values sum each physical session's union and can exceed family wall-clock
+time. Waste time and list cost sum capped step `elapsed_ms` and priced
+`list_cost_usd` for exclusive waste steps, grouped by waste kind and category;
+unpriced or untimed steps increase `unknown_steps`. Shared waste remains visible
+in the existing observed waste counts and general ownership totals, but is excluded
+from waste cost/time maps to avoid assigning duplicated observations. Compound
+failures need an identified diagnostic component; ambiguous failures remain Unmapped.
 
 Failure evidence is typed and separate from read fingerprints. A Claude `Bash`
 result carries its exit only as a first text line `Exit code N`; only that header
@@ -198,22 +208,30 @@ No source paths, offsets, commands, raw bytes or output bodies leave these pages
 `get_session` and `list_sessions` add nullable `activity_analytics`. A supported
 complete observation contains `rules_version`, `pricing_fingerprint`,
 `totals: {observed, exclusive, shared}`, `by_band`, `compactions`, `thrash`,
-`waste_by_kind`, `waste_by_category`, `empty_search_steps`,
+`waste_by_kind`, `waste_by_category`, `waste_cost_by_kind`,
+`waste_cost_by_category`, `wait_time_ms`, `waits_without_interval`,
+`levers_not_computed: ["TaskSpecification"]`, `empty_search_steps`,
 `verify_failure_steps`, `silent_exit_steps`, `change_facts` and
 `exclusive_cost_complete`. Each step total has `steps`, `list_cost_usd`,
 `carry_cost_usd` and `elapsed_ms`; measurements preserve `{known, unknown_steps}`.
-Absent native usage/projections remain null. No thrash-window/step arrays enter
-these summaries. `get_session_activity` steps carry the matching booleans
-`empty_search`, `verify_failure` and `silent_exit`.
+Each waste cost total has `steps`, `elapsed_ms` and `list_cost_usd` measurements;
+only exclusive steps contribute. Wait time and missing-interval counts contain
+`observed`, `exclusive` and `shared` values, following `OwnershipTotals`; intervals
+are unioned separately for each ownership view. Absent native usage/projections
+remain null. No thrash-window/step arrays enter these summaries. TaskSpecification
+is a known uncomputed lever in rules version 6. `get_session_activity` steps carry
+the matching booleans `empty_search`, `verify_failure` and `silent_exit`.
 
 A nullable `family` summarizes only the exact existing parent chain, using
 producer-side leaf reduction and bounded stored-summary refresh for independently
 published children. It deduplicates exact shared keys in ownership/context
 totals; exclusive ownership remains unresolved. Compactions, waste signals and
 change counts sum physical-session observations. `member_sessions` and
-`thrashed_sessions` report session counts. `total_step_time_ms` explicitly sums
-all capped physical-session step durations, including copied observations; it
-can exceed wall-clock time. No interleaved cross-session thrash is inferred.
+`thrashed_sessions` report session counts. Family wait values and missing-interval
+counts sum per-session ownership values; intervals are not unioned across physical
+sessions. `total_step_time_ms` explicitly sums all capped physical-session step
+durations, including copied observations; it can exceed wall-clock time. No
+interleaved cross-session thrash is inferred.
 The stored fold caps at 256 members, 4096 shared observations and 4 MiB metadata;
 incomplete, cyclic or oversized families stay null. Children retain their own
 steps and parents acquire no child rows.

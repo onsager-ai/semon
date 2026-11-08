@@ -716,6 +716,171 @@ fn failure_kinds_rank_and_signals_count_without_waste() {
 }
 
 #[test]
+fn analytics_unions_exact_wait_intervals_and_preserves_missing_coverage() {
+    use classify::{WaitInterval, WasteCategory, WasteKind};
+
+    let mut result = activity(
+        vec![
+            step("exclusive", "s", 0, Some(0)),
+            step("shared", "s", 10, Some(1_000)),
+            step("missing", "s", 20, Some(2_000)),
+        ],
+        vec![],
+    );
+    result.steps[0].waste = Some(WasteKind::OrchestrationWait);
+    result.steps[0].waste_category = Some(WasteCategory::Orchestration);
+    result.steps[0].waits = [(0, 100), (100, 200), (250, 300), (20, 50), (0, 100)]
+        .into_iter()
+        .map(|(started_at_ms, completed_at_ms)| WaitInterval {
+            started_at_ms,
+            completed_at_ms,
+        })
+        .collect();
+    result.steps[1].ownership = Ownership::Shared("shared-observation".into());
+    result.steps[1].waste = Some(WasteKind::OrchestrationWait);
+    result.steps[1].waste_category = Some(WasteCategory::Orchestration);
+    result.steps[1].waits = vec![WaitInterval {
+        started_at_ms: 200,
+        completed_at_ms: 250,
+    }];
+    result.steps[2].waste = Some(WasteKind::OrchestrationWait);
+    result.steps[2].waste_category = Some(WasteCategory::Orchestration);
+
+    let counts = analytics::Analytics::of(&result).counts;
+    assert_eq!(counts.waste_by_kind[&WasteKind::OrchestrationWait], 3);
+    assert_eq!(counts.waste_by_category[&WasteCategory::Orchestration], 3);
+    assert_eq!(counts.wait_time_ms.observed.known, 300);
+    assert_eq!(counts.wait_time_ms.exclusive.known, 250);
+    assert_eq!(counts.wait_time_ms.shared.known, 50);
+    assert_eq!(counts.wait_time_ms.observed.unknown_steps, 1);
+    assert_eq!(counts.wait_time_ms.exclusive.unknown_steps, 1);
+    assert_eq!(counts.wait_time_ms.shared.unknown_steps, 0);
+    assert_eq!(counts.waits_without_interval.observed, 1);
+    assert_eq!(counts.waits_without_interval.exclusive, 1);
+    assert_eq!(counts.waits_without_interval.shared, 0);
+}
+
+#[test]
+fn interval_union_merges_overlap_containment_adjacency_and_duplicates() {
+    let intervals = vec![(0, 100), (20, 50), (0, 100), (100, 150), (160, 180)];
+    assert_eq!(analytics::interval_union_ms(&intervals), 170);
+}
+
+#[test]
+fn waste_cost_keeps_unpriced_steps_unknown() {
+    use classify::{WasteCategory, WasteKind};
+
+    let mut result = derive(
+        "session".into(),
+        [
+            step("priced", "s", 0, Some(0)),
+            UsageStep::claude(
+                "unpriced".into(),
+                position("s", 10),
+                message(
+                    "unpriced-model",
+                    ModelTokens {
+                        input: 100,
+                        output: 10,
+                        ..Default::default()
+                    },
+                    Some(1_000),
+                ),
+            ),
+        ],
+        &Shared::new(),
+        [],
+        table(),
+    );
+    for step in &mut result.steps {
+        step.waste = Some(WasteKind::ExternalFailure);
+        step.waste_category = Some(WasteCategory::External);
+    }
+    let priced_cost = result.steps[0].list_cost_usd.unwrap();
+    let counts = analytics::Analytics::of(&result).counts;
+    let by_kind = &counts.waste_cost_by_kind[&WasteKind::ExternalFailure];
+    let by_category = &counts.waste_cost_by_category[&WasteCategory::External];
+    for totals in [by_kind, by_category] {
+        assert_eq!(totals.steps, 2);
+        assert_eq!(totals.list_cost_usd.known, priced_cost);
+        assert_eq!(totals.list_cost_usd.unknown_steps, 1);
+        assert_eq!(totals.elapsed_ms.known, 1_000);
+        assert_eq!(totals.elapsed_ms.unknown_steps, 1);
+    }
+    let shared = Shared::from([("unpriced".into(), "shared-unpriced".into())]);
+    let mut result = derive(
+        "shared-session".into(),
+        [UsageStep::claude(
+            "unpriced".into(),
+            position("s", 0),
+            message(
+                "unpriced-model",
+                ModelTokens {
+                    input: 100,
+                    output: 10,
+                    ..Default::default()
+                },
+                Some(0),
+            ),
+        )],
+        &shared,
+        [],
+        table(),
+    );
+    result.steps[0].waste = Some(WasteKind::ExternalFailure);
+    let counts = analytics::Analytics::of(&result).counts;
+    assert!(counts.waste_cost_by_kind.is_empty());
+    assert_eq!(counts.waste_by_kind[&WasteKind::ExternalFailure], 1);
+}
+
+#[test]
+fn family_fold_sums_session_wait_unions_and_waste_costs() {
+    use classify::{WaitInterval, WasteCategory, WasteKind};
+
+    let mut parent = activity(vec![step("parent", "p", 0, Some(0))], vec![]);
+    parent.steps[0].waste = Some(WasteKind::OrchestrationWait);
+    parent.steps[0].waste_category = Some(WasteCategory::Orchestration);
+    parent.steps[0].waits = vec![WaitInterval {
+        started_at_ms: 0,
+        completed_at_ms: 20,
+    }];
+    parent.steps[0].elapsed_ms = Some(10);
+    parent.steps[0].list_cost_usd = Some(0.2);
+    let mut child = activity(vec![step("child", "c", 0, Some(0))], vec![]);
+    child.steps[0].waste = Some(WasteKind::OrchestrationWait);
+    child.steps[0].waste_category = Some(WasteCategory::Orchestration);
+    child.steps[0].waits = vec![WaitInterval {
+        started_at_ms: 0,
+        completed_at_ms: 30,
+    }];
+    child.steps[0].elapsed_ms = Some(15);
+    child.steps[0].list_cost_usd = Some(0.3);
+
+    let family = analytics::families(
+        [
+            ("parent", None, Some(&parent)),
+            ("child", Some("parent"), Some(&child)),
+        ]
+        .into_iter(),
+    )
+    .remove("parent")
+    .unwrap();
+    assert_eq!(family.counts.wait_time_ms.observed.known, 50);
+    let waste_totals = &family.counts.waste_cost_by_kind[&WasteKind::OrchestrationWait];
+    assert_eq!(waste_totals.steps, 2);
+    assert_eq!(waste_totals.elapsed_ms.known, 25);
+    assert_eq!(waste_totals.list_cost_usd.known, 0.5);
+    assert_eq!(
+        family.levers_not_computed,
+        vec![analytics::LeverNotComputed::TaskSpecification]
+    );
+    assert_eq!(
+        family.counts.waste_cost_by_category[&WasteCategory::Orchestration].steps,
+        2
+    );
+}
+
+#[test]
 fn fact_links_require_a_qualified_step_in_this_projection() {
     use super::classify::{Change, LocatedObservation};
     for exact in [false, true] {

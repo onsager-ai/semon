@@ -191,7 +191,7 @@ pub(crate) struct CatalogSource {
     pub(crate) native_role: Option<Value>,
 }
 
-pub(crate) const CATALOG_VERSION: u32 = 7;
+pub(crate) const CATALOG_VERSION: u32 = 8;
 
 pub(super) fn source(file: &super::SourceFile) -> CatalogSource {
     let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;

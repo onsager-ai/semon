@@ -14,12 +14,42 @@ pub(crate) struct ChangeCounts {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct OwnedMeasured {
+    pub(crate) observed: Measured<u64>,
+    pub(crate) exclusive: Measured<u64>,
+    pub(crate) shared: Measured<u64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct OwnedCounts {
+    pub(crate) observed: u64,
+    pub(crate) exclusive: u64,
+    pub(crate) shared: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WasteTotals {
+    pub(crate) steps: u64,
+    pub(crate) elapsed_ms: Measured<u64>,
+    pub(crate) list_cost_usd: Measured<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub(crate) enum LeverNotComputed {
+    TaskSpecification,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Counts {
     pub(crate) totals: OwnershipTotals,
     pub(crate) by_band: BTreeMap<ContextBand, OwnershipTotals>,
     pub(crate) compactions: u64,
     pub(crate) waste_by_kind: BTreeMap<WasteKind, u64>,
     pub(crate) waste_by_category: BTreeMap<WasteCategory, u64>,
+    pub(crate) waste_cost_by_kind: BTreeMap<WasteKind, WasteTotals>,
+    pub(crate) waste_cost_by_category: BTreeMap<WasteCategory, WasteTotals>,
+    pub(crate) wait_time_ms: OwnedMeasured,
+    pub(crate) waits_without_interval: OwnedCounts,
     pub(crate) empty_search_steps: u64,
     pub(crate) verify_failure_steps: u64,
     pub(crate) silent_exit_steps: u64,
@@ -33,6 +63,7 @@ pub(crate) struct Analytics {
     pub(crate) pricing_fingerprint: String,
     #[serde(flatten)]
     pub(crate) counts: Counts,
+    pub(crate) levers_not_computed: Vec<LeverNotComputed>,
     pub(crate) thrash: bool,
     pub(crate) family: Option<Family>,
 }
@@ -43,9 +74,60 @@ pub(crate) struct Family {
     pub(crate) counts: Counts,
     pub(crate) member_sessions: u64,
     pub(crate) thrashed_sessions: u64,
+    pub(crate) levers_not_computed: Vec<LeverNotComputed>,
     /// Sum of capped physical-session step durations, including shared
     /// observations. Overlapping sessions can exceed family wall-clock time.
     pub(crate) total_step_time_ms: Measured<u64>,
+}
+
+pub(super) fn interval_union_ms(intervals: &[(i64, i64)]) -> u64 {
+    let mut intervals = intervals.to_vec();
+    intervals.sort_unstable();
+    let mut total = 0i128;
+    let mut current: Option<(i64, i64)> = None;
+    for (start, end) in intervals {
+        match current {
+            Some((current_start, current_end)) if start <= current_end => {
+                current = Some((current_start, current_end.max(end)));
+            }
+            Some((current_start, current_end)) => {
+                total += i128::from(current_end) - i128::from(current_start);
+                current = Some((start, end));
+            }
+            None => current = Some((start, end)),
+        }
+    }
+    if let Some((start, end)) = current {
+        total += i128::from(end) - i128::from(start);
+    }
+    u64::try_from(total).unwrap_or(u64::MAX)
+}
+
+fn add_waste<K: Ord>(map: &mut BTreeMap<K, WasteTotals>, key: K, step: &ActivityStep) {
+    let totals = map.entry(key).or_default();
+    totals.steps += 1;
+    totals.elapsed_ms.add(step.elapsed_ms);
+    totals.list_cost_usd.add(step.list_cost_usd);
+}
+
+impl OwnedCounts {
+    fn add(&mut self, ownership: &Ownership) {
+        self.observed += 1;
+        match ownership {
+            Ownership::Exclusive => self.exclusive += 1,
+            Ownership::Shared(_) => self.shared += 1,
+        }
+    }
+}
+
+impl OwnedMeasured {
+    fn add_missing(&mut self, ownership: &Ownership) {
+        self.observed.unknown_steps += 1;
+        match ownership {
+            Ownership::Exclusive => self.exclusive.unknown_steps += 1,
+            Ownership::Shared(_) => self.shared.unknown_steps += 1,
+        }
+    }
 }
 
 impl Counts {
@@ -57,17 +139,40 @@ impl Counts {
             exclusive_cost_complete: activity.aggregate.exclusive_cost_complete,
             ..Self::default()
         };
+        let mut wait_intervals: [Vec<(i64, i64)>; 3] = Default::default();
         for step in &activity.steps {
             if let Some(kind) = step.waste {
                 *counts.waste_by_kind.entry(kind).or_default() += 1;
+                *counts.waste_by_category.entry(kind.category()).or_default() += 1;
             }
-            if let Some(category) = step.waste_category {
-                *counts.waste_by_category.entry(category).or_default() += 1;
+            if step.waste == Some(WasteKind::OrchestrationWait) && step.waits.is_empty() {
+                counts.waits_without_interval.add(&step.ownership);
+                counts.wait_time_ms.add_missing(&step.ownership);
+            }
+            for wait in &step.waits {
+                match &step.ownership {
+                    Ownership::Exclusive => {
+                        wait_intervals[0].push((wait.started_at_ms, wait.completed_at_ms))
+                    }
+                    Ownership::Shared(_) => {
+                        wait_intervals[1].push((wait.started_at_ms, wait.completed_at_ms))
+                    }
+                }
+                wait_intervals[2].push((wait.started_at_ms, wait.completed_at_ms));
+            }
+            if let Some(kind) = step.waste
+                && matches!(&step.ownership, Ownership::Exclusive)
+            {
+                add_waste(&mut counts.waste_cost_by_kind, kind, step);
+                add_waste(&mut counts.waste_cost_by_category, kind.category(), step);
             }
             counts.empty_search_steps += u64::from(step.empty_search);
             counts.verify_failure_steps += u64::from(step.verify_failure);
             counts.silent_exit_steps += u64::from(step.silent_exit);
         }
+        counts.wait_time_ms.exclusive.known = interval_union_ms(&wait_intervals[0]);
+        counts.wait_time_ms.shared.known = interval_union_ms(&wait_intervals[1]);
+        counts.wait_time_ms.observed.known = interval_union_ms(&wait_intervals[2]);
         for fact in &activity.facts {
             match fact.change {
                 Change::Commit { .. } => counts.change_facts.commits += 1,
@@ -86,6 +191,7 @@ impl Analytics {
             rules_version: activity.rules_version,
             pricing_fingerprint: activity.pricing_fingerprint.clone(),
             counts: Counts::of(activity),
+            levers_not_computed: vec![LeverNotComputed::TaskSpecification],
             thrash: activity.aggregate.thrash,
             family: None,
         }
@@ -106,6 +212,26 @@ fn ownership(a: &mut OwnershipTotals, b: &OwnershipTotals) {
     totals(&mut a.observed, &b.observed);
     totals(&mut a.exclusive, &b.exclusive);
     totals(&mut a.shared, &b.shared);
+}
+fn owned_measured(a: &mut OwnedMeasured, b: &OwnedMeasured) {
+    measured(&mut a.observed, &b.observed);
+    measured(&mut a.exclusive, &b.exclusive);
+    measured(&mut a.shared, &b.shared);
+}
+fn owned_counts(a: &mut OwnedCounts, b: &OwnedCounts) {
+    a.observed += b.observed;
+    a.exclusive += b.exclusive;
+    a.shared += b.shared;
+}
+fn waste_totals(a: &mut WasteTotals, b: &WasteTotals) {
+    a.steps += b.steps;
+    measured(&mut a.elapsed_ms, &b.elapsed_ms);
+    measured(&mut a.list_cost_usd, &b.list_cost_usd);
+}
+fn waste_map<K: Ord>(a: &mut BTreeMap<K, WasteTotals>, b: BTreeMap<K, WasteTotals>) {
+    for (key, value) in b {
+        waste_totals(a.entry(key).or_default(), &value);
+    }
 }
 
 pub(crate) struct Fold {
@@ -177,6 +303,19 @@ impl Fold {
         for (category, n) in child.counts.waste_by_category {
             *self.counts.waste_by_category.entry(category).or_default() += n;
         }
+        waste_map(
+            &mut self.counts.waste_cost_by_kind,
+            child.counts.waste_cost_by_kind,
+        );
+        waste_map(
+            &mut self.counts.waste_cost_by_category,
+            child.counts.waste_cost_by_category,
+        );
+        owned_measured(&mut self.counts.wait_time_ms, &child.counts.wait_time_ms);
+        owned_counts(
+            &mut self.counts.waits_without_interval,
+            &child.counts.waits_without_interval,
+        );
         self.counts.empty_search_steps += child.counts.empty_search_steps;
         self.counts.verify_failure_steps += child.counts.verify_failure_steps;
         self.counts.silent_exit_steps += child.counts.silent_exit_steps;
@@ -202,6 +341,7 @@ impl Fold {
             counts,
             member_sessions: self.members,
             thrashed_sessions: self.thrashed,
+            levers_not_computed: vec![LeverNotComputed::TaskSpecification],
             total_step_time_ms: self.time.clone(),
         }
     }
