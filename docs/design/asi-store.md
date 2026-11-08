@@ -130,8 +130,17 @@ separate model and tool time, and the full billing inputs. The projector reads
 them from an explicit `StepFacts` input that `semon-sessions` provides next to
 `ActivityStep`, built from the same admitted native facts. These are facts,
 not rules: activity, waste and trigger stay owned by the session activity
-lane. Adding `StepFacts` is coordinated with that lane (see Alignment in
-#544).
+lane, which implements `StepFacts` (#556) after its in-flight activity API
+work. The projector (S4) depends on `StepFacts` as delivered by that lane.
+
+**Where path tokens are computed.** The activity projection stores no file
+paths, only unkeyed SHA-256 fingerprints of tool inputs. Those can be attacked
+with a dictionary of likely paths, so they are never written to an ASI file
+and never cross the wire. `StepFacts` carries each tool call's raw target path
+in memory only, never persisted in the ingest index or `asi.sqlite3`. The
+projector computes the keyed `pt1_` token from it ([Path tokens](#path-tokens))
+and drops the raw path. The activity lane's fingerprints stay internal to
+its projection.
 
 ## Versions, publication and re-derivation
 
