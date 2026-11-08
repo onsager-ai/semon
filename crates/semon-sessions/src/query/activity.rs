@@ -169,8 +169,7 @@ pub(super) fn read(
         )
         .optional()
         .map_err(unavailable)?;
-    if current_text.as_deref() != Some(&text)
-        || current_generation.as_deref() != Some(&generation)
+    if current_text.as_deref() != Some(&text) || current_generation.as_deref() != Some(&generation)
     {
         return Err(refusal("stale_generation"));
     }

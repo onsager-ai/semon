@@ -6399,11 +6399,13 @@ fn activity_analytics_is_additive_and_preserves_unknown_cost_and_duration() {
     let totals = &summary["totals"]["exclusive"];
     assert!(totals.get("carry_cost_usd").is_none());
     assert!(totals.get("output_usd").is_none());
-    assert!(summary["by_band"]
-        .as_object()
-        .unwrap()
-        .values()
-        .all(|band| band["exclusive"].get("output_usd").is_none()));
+    assert!(
+        summary["by_band"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|band| band["exclusive"].get("output_usd").is_none())
+    );
     let selected = call(&mut query, "get_session", json!({"id":"activity"}));
     assert_eq!(&selected["session"]["activity_analytics"], summary);
     assert!(summary.get("steps").is_none());
