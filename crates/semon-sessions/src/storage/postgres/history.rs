@@ -114,8 +114,8 @@ impl PgProjectionTransaction<'_> {
                 row.activity_analytics = None;
             }
         }
-        if row.sources.len() > 64 {
-            return Err(backend("retained source budget exceeded"));
+        if row.sources.len() > 64 || slots.len() > 4096 {
+            return Err(backend("retained source or recipe budget exceeded"));
         }
         row.lifecycle = CatalogLifecycle::Retained;
         row.native_ids = row
