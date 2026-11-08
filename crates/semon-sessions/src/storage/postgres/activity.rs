@@ -34,11 +34,17 @@ impl PgProjectionTransaction<'_> {
             Sha256::digest(serde_json::to_vec(&(&sources, activity)).map_err(backend)?)
         );
         self.tx.execute("INSERT INTO semon_projection.session_activity(namespace,session_key,source_generation,generation,metadata) VALUES($1,$2,$3,$4,$5)", &[&namespace.binding(), &row.key, &sources, &generation, &metadata]).await.map_err(backend)?;
-        let steps = activity.steps.iter().map(|step| {
-            let mut item = serde_json::to_value(step).map_err(backend)?;
-            item.as_object_mut().expect("typed activity step").remove("position");
-            Ok(item)
-        }).collect::<Result<Vec<_>, StorageError>>()?;
+        let steps = activity
+            .steps
+            .iter()
+            .map(|step| {
+                let mut item = serde_json::to_value(step).map_err(backend)?;
+                item.as_object_mut()
+                    .expect("typed activity step")
+                    .remove("position");
+                Ok(item)
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
         let mut facts = activity.facts.iter().collect::<Vec<_>>();
         facts.sort_by(|a, b| a.identity.cmp(&b.identity));
         let facts = facts.iter().map(|fact| json!({"identity":fact.identity,"timestamp":fact.timestamp,"step_id":fact.step_id,"change":fact.change})).collect::<Vec<_>>();
@@ -48,9 +54,18 @@ impl PgProjectionTransaction<'_> {
             let mut texts = Vec::new();
             for (position, item) in items.iter().enumerate() {
                 positions.push(super::number(position as u64)?);
-                identities.push(if kind == "facts" { item["identity"].as_str().ok_or_else(|| backend("activity fact identity unavailable"))?.to_owned() } else { position.to_string() });
+                identities.push(if kind == "facts" {
+                    item["identity"]
+                        .as_str()
+                        .ok_or_else(|| backend("activity fact identity unavailable"))?
+                        .to_owned()
+                } else {
+                    position.to_string()
+                });
                 let text = item.to_string();
-                if text.len() > 1048576 { return Err(backend("activity item budget exceeded")); }
+                if text.len() > 1048576 {
+                    return Err(backend("activity item budget exceeded"));
+                }
                 texts.push(text);
             }
             self.tx.execute("INSERT INTO semon_projection.activity_items(namespace,session_key,kind,position,identity,metadata) SELECT $1,$2,$3,r.* FROM unnest($4::bigint[],$5::text[],$6::text[]) r", &[&namespace.binding(), &row.key, &kind, &positions, &identities, &texts]).await.map_err(backend)?;
@@ -170,20 +185,38 @@ impl PgProjectionStore {
         let limit = args["limit"].as_u64().unwrap_or(100).min(256) as usize;
         let cursor = args["cursor"].as_str();
         let facts = args["kind"] == "facts";
-        if limit == 0 { return Err(backend("invalid activity limit")); }
+        if limit == 0 {
+            return Err(backend("invalid activity limit"));
+        }
         let records = if facts {
             tx.tx.query("SELECT identity,metadata FROM semon_projection.activity_items WHERE namespace=$1 AND session_key=$2 AND kind='facts' AND identity>$3 ORDER BY identity LIMIT $4", &[&namespace.binding(), &key, &cursor.unwrap_or(""), &super::number(limit as u64 + 1)?]).await.map_err(backend)?
         } else {
-            let start = cursor.map(str::parse::<u64>).transpose().map_err(backend)?.unwrap_or(0);
+            let start = cursor
+                .map(str::parse::<u64>)
+                .transpose()
+                .map_err(backend)?
+                .unwrap_or(0);
             let total: i64 = tx.tx.query_one("SELECT count(*) FROM semon_projection.activity_items WHERE namespace=$1 AND session_key=$2 AND kind='steps'", &[&namespace.binding(), &key]).await.map_err(backend)?.get(0);
-            if start > total as u64 { return Err(backend("activity cursor outside projection")); }
+            if start > total as u64 {
+                return Err(backend("activity cursor outside projection"));
+            }
             tx.tx.query("SELECT identity,metadata FROM semon_projection.activity_items WHERE namespace=$1 AND session_key=$2 AND kind='steps' AND position>=$3 ORDER BY position LIMIT $4", &[&namespace.binding(), &key, &super::number(start)?, &super::number(limit as u64 + 1)?]).await.map_err(backend)?
         };
-        let items = records.iter().take(limit).map(|record| serde_json::from_str::<Value>(record.get(1)).map_err(backend)).collect::<Result<Vec<_>,_>>()?;
+        let items = records
+            .iter()
+            .take(limit)
+            .map(|record| serde_json::from_str::<Value>(record.get(1)).map_err(backend))
+            .collect::<Result<Vec<_>, _>>()?;
         let next_cursor = if records.len() > limit {
-            let last: String = records[limit-1].get(0);
-            Some(if facts { last } else { (last.parse::<u64>().map_err(backend)? + 1).to_string() })
-        } else { None };
+            let last: String = records[limit - 1].get(0);
+            Some(if facts {
+                last
+            } else {
+                (last.parse::<u64>().map_err(backend)? + 1).to_string()
+            })
+        } else {
+            None
+        };
         reader.finish().map_err(backend)?;
         drop(reader);
         tx.commit(namespace).await?;

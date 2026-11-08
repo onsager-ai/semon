@@ -1541,6 +1541,10 @@ impl Query {
                 .iter()
                 .find(|(key, _)| part.served(key) == id)
             {
+                #[cfg(feature = "postgres")]
+                if self.sources.machines[index].1.storage.is_postgres() {
+                    return self.sources.machines[index].1.storage.activity_query(key, args, None, crate::SessionSourceReadMode::LocalThenProvider, now);
+                }
                 return activity::read(
                     &self.sources.machines[index].1.options,
                     self.sources.machines[index].1.storage.namespace(),
