@@ -145,7 +145,7 @@ pub(super) fn lifecycle(dsn: &str) {
     {
         let field = core.respond(
             "GET",
-            "/api/session-transcript",
+            "/api/session-entry",
             &format!(
                 "machine=injected-runtime&sid={}&after={}&limit=1&generation={}&field_chunk=0",
                 crate::viewer::percent_encode(key),
