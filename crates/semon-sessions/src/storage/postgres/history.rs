@@ -17,7 +17,9 @@ impl PgProjectionTransaction<'_> {
             "SELECT metadata FROM semon_projection.catalog WHERE namespace=$1 AND session_key=$2",
             &[&namespace.binding(), &key],
         ).await.map_err(backend)?;
-        let Some(current) = current else { return Ok(()) };
+        let Some(current) = current else {
+            return Ok(());
+        };
         let mut row: CatalogRow = serde_json::from_str(current.get(0)).map_err(backend)?;
         let current_sources = row.sources.clone();
         let header = self.tx.query_opt(
@@ -25,13 +27,18 @@ impl PgProjectionTransaction<'_> {
             &[&namespace.binding(), &key],
         ).await.map_err(backend)?.ok_or_else(|| backend("outgoing recipes unavailable"))?;
         if header.get::<_, i32>(2) != crate::slot_projection::VERSION as i32
-            || header.get::<_, String>(1) != crate::retention::source_generation(&row.sources).map_err(backend)?
+            || header.get::<_, String>(1)
+                != crate::retention::source_generation(&row.sources).map_err(backend)?
         {
             return Err(backend("outgoing recipe generation mismatch"));
         }
         let observation = serde_json::to_string(&row.sources).map_err(backend)?;
-        let mut slots = self.history_slots(namespace, key, false, header.get(3)).await?
-            .into_iter().map(|slot| (slot, observation.clone())).collect::<Vec<_>>();
+        let mut slots = self
+            .history_slots(namespace, key, false, header.get(3))
+            .await?
+            .into_iter()
+            .map(|slot| (slot, observation.clone()))
+            .collect::<Vec<_>>();
         let prior = self.tx.query_opt(
             "SELECT metadata FROM semon_projection.history_catalog WHERE namespace=$1 AND session_key=$2",
             &[&namespace.binding(), &key],
@@ -47,11 +54,14 @@ impl PgProjectionTransaction<'_> {
                 &[&namespace.binding(), &key],
             ).await.map_err(backend)?;
             if prior_header.get::<_, i32>(1) != crate::slot_projection::VERSION as i32
-                || prior_header.get::<_, String>(0) != crate::retention::source_generation(&prior.sources).map_err(backend)?
+                || prior_header.get::<_, String>(0)
+                    != crate::retention::source_generation(&prior.sources).map_err(backend)?
             {
                 return Err(backend("retained recipe generation mismatch"));
             }
-            let previous = self.history_slots(namespace, key, true, prior_header.get(2)).await?;
+            let previous = self
+                .history_slots(namespace, key, true, prior_header.get(2))
+                .await?;
             let observations = self.tx.query("SELECT observation FROM semon_projection.history_recipes WHERE namespace=$1 AND session_key=$2 ORDER BY slot", &[&namespace.binding(), &key]).await.map_err(backend)?;
             for source in prior.sources {
                 if !row.sources.contains(&source) {
@@ -61,11 +71,21 @@ impl PgProjectionTransaction<'_> {
             // Deduplicate only within the same consumed generation. Offsets and
             // native IDs can be reused after replacement at the very same path.
             let same_sources = row.sources == current_sources;
-            let mut identities: BTreeSet<_> = slots.iter().map(|(slot, observation)| (slot.identity(), observation.clone())).collect();
+            let mut identities: BTreeSet<_> = slots
+                .iter()
+                .map(|(slot, observation)| (slot.identity(), observation.clone()))
+                .collect();
             for (slot, record) in previous.into_iter().zip(observations) {
                 let observation: String = record.get(0);
                 if identities.insert((slot.identity(), observation.clone())) {
-                    let at = slot.t.and_then(|time| slots.iter().position(|(next, _)| next.t.is_some_and(|t| t > time))).unwrap_or(slots.len());
+                    let at = slot
+                        .t
+                        .and_then(|time| {
+                            slots
+                                .iter()
+                                .position(|(next, _)| next.t.is_some_and(|t| t > time))
+                        })
+                        .unwrap_or(slots.len());
                     slots.insert(at, (slot, observation));
                 }
             }
@@ -80,14 +100,28 @@ impl PgProjectionTransaction<'_> {
             return Err(backend("retained source budget exceeded"));
         }
         row.lifecycle = CatalogLifecycle::Retained;
-        row.native_ids = row.sources.iter().map(|source| source.native_id.clone()).collect::<BTreeSet<_>>().into_iter().collect();
-        let texts = slots.iter().map(|(slot, _)| serde_json::to_string(slot)).collect::<Result<Vec<_>, _>>().map_err(backend)?;
-        let observations: Vec<_> = slots.iter().map(|(_, observation)| observation.clone()).collect();
+        row.native_ids = row
+            .sources
+            .iter()
+            .map(|source| source.native_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        let texts = slots
+            .iter()
+            .map(|(slot, _)| serde_json::to_string(slot))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(backend)?;
+        let observations: Vec<_> = slots
+            .iter()
+            .map(|(_, observation)| observation.clone())
+            .collect();
         let metadata = serde_json::to_string(&row).map_err(backend)?;
         if metadata.len() + texts.iter().map(String::len).sum::<usize>() > 1024 * 1024 {
             return Err(backend("retained component byte budget exceeded"));
         }
-        let generation = crate::slot_projection::generation(&texts, &row.sources).map_err(backend)?;
+        let generation =
+            crate::slot_projection::generation(&texts, &row.sources).map_err(backend)?;
         self.tx.execute(
             "INSERT INTO semon_projection.history_catalog(namespace,session_key,lifecycle,last_ms,harness,repo,model,metadata) VALUES($1,$2,'retained',$3,$4,$5,$6,$7) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='retained',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,model=excluded.model,metadata=excluded.metadata",
             &[&namespace.binding(), &key, &row.last.unwrap_or(0), &row.harness, &row.repo.as_deref().unwrap_or(""), &row.model, &metadata],
@@ -97,7 +131,9 @@ impl PgProjectionTransaction<'_> {
             &[&namespace.binding(), &key, &generation, &crate::retention::source_generation(&row.sources).map_err(backend)?, &(crate::slot_projection::VERSION as i32), &number(texts.len() as u64)?],
         ).await.map_err(backend)?;
         self.tx.execute("DELETE FROM semon_projection.history_recipes WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &key]).await.map_err(backend)?;
-        let ordinals = (0..texts.len()).map(|at| number(at as u64)).collect::<Result<Vec<_>, _>>()?;
+        let ordinals = (0..texts.len())
+            .map(|at| number(at as u64))
+            .collect::<Result<Vec<_>, _>>()?;
         self.tx.execute(
             "INSERT INTO semon_projection.history_recipes(namespace,session_key,slot,metadata,observation) SELECT $1,$2,r.* FROM unnest($3::bigint[],$4::text[],$5::text[]) r",
             &[&namespace.binding(), &key, &ordinals, &texts, &observations],
@@ -118,17 +154,26 @@ impl PgProjectionTransaction<'_> {
             &[&namespace.binding(), &key],
         ).await.map_err(backend)?.is_some();
         if !history {
-            let row = self.catalog_row(namespace, key, scope).await?.ok_or_else(|| backend("selected owner unavailable"))?;
+            let row = self
+                .catalog_row(namespace, key, scope)
+                .await?
+                .ok_or_else(|| backend("selected owner unavailable"))?;
             return Ok(vec![row.sources; limit]);
         }
         let records = self.tx.query(
             "SELECT CASE WHEN sum(octet_length(observation)) OVER (ORDER BY slot)<=1048576 THEN observation END FROM semon_projection.history_recipes WHERE namespace=$1 AND session_key=$2 AND slot>=$3 AND slot<$4 ORDER BY slot",
             &[&namespace.binding(), &key, &number(after as u64)?, &number(after.saturating_add(limit) as u64)?],
         ).await.map_err(backend)?;
-        records.iter().map(|record| {
-            let text: Option<&str> = record.get(0);
-            serde_json::from_str(text.ok_or_else(|| backend("selected observation budget exceeded"))?).map_err(backend)
-        }).collect()
+        records
+            .iter()
+            .map(|record| {
+                let text: Option<&str> = record.get(0);
+                serde_json::from_str(
+                    text.ok_or_else(|| backend("selected observation budget exceeded"))?,
+                )
+                .map_err(backend)
+            })
+            .collect()
     }
 
     async fn history_slots(
@@ -138,7 +183,11 @@ impl PgProjectionTransaction<'_> {
         history: bool,
         total: i64,
     ) -> Result<Vec<SavedSlot>, StorageError> {
-        let table = if history { "history_recipes" } else { "recipes" };
+        let table = if history {
+            "history_recipes"
+        } else {
+            "recipes"
+        };
         let records = self.tx.query(
             &format!("SELECT slot,CASE WHEN sum(octet_length(metadata)) OVER (ORDER BY slot)<=1048576 THEN metadata END FROM semon_projection.{table} WHERE namespace=$1 AND session_key=$2 ORDER BY slot LIMIT 4097"),
             &[&namespace.binding(), &key],
@@ -146,12 +195,19 @@ impl PgProjectionTransaction<'_> {
         if total < 0 || records.len() > 4096 || records.len() as i64 != total {
             return Err(backend("retained recipe sequence or budget mismatch"));
         }
-        records.iter().enumerate().map(|(at, record)| {
-            if record.get::<_, i64>(0) != at as i64 {
-                return Err(backend("retained recipe sequence gap"));
-            }
-            let text: Option<&str> = record.get(1);
-            serde_json::from_str(text.ok_or_else(|| backend("retained recipe byte budget exceeded"))?).map_err(backend)
-        }).collect()
+        records
+            .iter()
+            .enumerate()
+            .map(|(at, record)| {
+                if record.get::<_, i64>(0) != at as i64 {
+                    return Err(backend("retained recipe sequence gap"));
+                }
+                let text: Option<&str> = record.get(1);
+                serde_json::from_str(
+                    text.ok_or_else(|| backend("retained recipe byte budget exceeded"))?,
+                )
+                .map_err(backend)
+            })
+            .collect()
     }
 }
