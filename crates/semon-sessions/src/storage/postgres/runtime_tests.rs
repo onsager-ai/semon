@@ -564,6 +564,8 @@ pub(super) fn lifecycle(dsn: &str) {
         "{}",
         String::from_utf8_lossy(&history.body)
     );
+    let retained_query = query.call_catalog("list_sessions", &json!({}), None, crate::SessionSourceReadMode::LocalOrPinnedProvider).unwrap();
+    assert!(!retained_query["sessions"].as_array().unwrap().is_empty());
     core.close();
     sources.close();
     #[cfg(target_os = "linux")]

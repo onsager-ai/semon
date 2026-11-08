@@ -1268,7 +1268,10 @@ impl Query {
         }
         #[cfg(feature = "postgres")]
         if evidence.storage.is_postgres() && tool == "get_session_activity" {
-            return evidence.storage.activity(catalog_key, args, now).map_err(|error| selected_error(&error));
+            return evidence
+                .storage
+                .activity(catalog_key, args, now)
+                .map_err(|error| selected_error(&error));
         }
         let mut focused_args = args.clone();
         if self.sources.machines.len() > 1 {

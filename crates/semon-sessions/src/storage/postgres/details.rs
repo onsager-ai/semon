@@ -38,7 +38,7 @@ impl PgProjectionTransaction<'_> {
         details["content_generation"] = context["session"]["content_generation"].clone();
         details["live_observation"] = json!(scope == CatalogReadScope::Current);
         let relatives = self.tx.query(
-            "WITH RECURSIVE family(session_key,depth) AS (SELECT session_key,0 FROM semon_projection.catalog WHERE namespace=$1 AND session_key=$2 UNION ALL SELECT c.session_key,f.depth+1 FROM semon_projection.catalog c JOIN family f ON c.metadata::jsonb->>'parent'=f.session_key WHERE c.namespace=$1 AND f.depth<32) SELECT session_key FROM family WHERE depth>0 ORDER BY depth,session_key LIMIT 100",
+            "WITH RECURSIVE family(session_key) AS (SELECT session_key FROM semon_projection.catalog WHERE namespace=$1 AND session_key=$2 UNION SELECT c.session_key FROM semon_projection.catalog c JOIN family f ON c.metadata::jsonb->>'parent'=f.session_key WHERE c.namespace=$1) SELECT session_key FROM family WHERE session_key<>$2 LIMIT 100",
             &[&namespace.binding(), &key],
         ).await.map_err(backend)?;
         let mut runs = Vec::new();
