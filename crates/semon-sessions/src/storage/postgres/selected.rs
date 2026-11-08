@@ -65,7 +65,9 @@ impl PgProjectionStore {
                 true,
             ));
         }
-        let observations = tx.recipe_observations(namespace, key, scope, after, slots.len().max(1)).await?;
+        let observations = tx
+            .recipe_observations(namespace, key, scope, after, slots.len().max(1))
+            .await?;
         let sources = observations.first().cloned().unwrap_or(row.sources);
         let reply = crate::transcript_range::render_postgres(
             options,

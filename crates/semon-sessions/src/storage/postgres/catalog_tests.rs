@@ -163,11 +163,42 @@ async fn replacement(dsn: &str) {
             .sources,
         [next.sources.clone(), row.sources.clone()].concat()
     );
-    assert!(tx.recipe_page(&namespace, &row.key, CatalogReadScope::RetainedHistory, Some(&recipes), 0, 10).await.is_err());
-    let (history_generation, total, first_history) = tx.recipe_page(&namespace, &row.key, CatalogReadScope::RetainedHistory, None, 0, 10).await.unwrap();
+    assert!(
+        tx.recipe_page(
+            &namespace,
+            &row.key,
+            CatalogReadScope::RetainedHistory,
+            Some(&recipes),
+            0,
+            10
+        )
+        .await
+        .is_err()
+    );
+    let (history_generation, total, first_history) = tx
+        .recipe_page(
+            &namespace,
+            &row.key,
+            CatalogReadScope::RetainedHistory,
+            None,
+            0,
+            10,
+        )
+        .await
+        .unwrap();
     assert_eq!(total, next_projection.slots.len() + projection.slots.len());
     assert_eq!(first_history[0].offset, next_projection.slots[0].offset);
-    let (_, _, original_history) = tx.recipe_page(&namespace, &row.key, CatalogReadScope::RetainedHistory, Some(&history_generation), next_projection.slots.len(), 10).await.unwrap();
+    let (_, _, original_history) = tx
+        .recipe_page(
+            &namespace,
+            &row.key,
+            CatalogReadScope::RetainedHistory,
+            Some(&history_generation),
+            next_projection.slots.len(),
+            10,
+        )
+        .await
+        .unwrap();
     assert_eq!(original_history[0].offset, projection.slots[0].offset);
     // A second outgoing observation succeeds and preserves both generations.
     assert!(
@@ -175,12 +206,35 @@ async fn replacement(dsn: &str) {
             .await
             .unwrap()
     );
-    assert_ne!(tx.catalog_generation(&namespace).await.unwrap(), Some(next_generation));
-    assert_eq!(tx.ledger(&namespace, path.to_str().unwrap()).await.unwrap(), None);
-    let (retained_generation, retained_total, _) = tx.recipe_page(&namespace, &row.key, CatalogReadScope::RetainedHistory, None, 0, 10).await.unwrap();
+    assert_ne!(
+        tx.catalog_generation(&namespace).await.unwrap(),
+        Some(next_generation)
+    );
+    assert_eq!(
+        tx.ledger(&namespace, path.to_str().unwrap()).await.unwrap(),
+        None
+    );
+    let (retained_generation, retained_total, _) = tx
+        .recipe_page(
+            &namespace,
+            &row.key,
+            CatalogReadScope::RetainedHistory,
+            None,
+            0,
+            10,
+        )
+        .await
+        .unwrap();
     assert_eq!(retained_generation, history_generation);
     assert_eq!(retained_total, total);
-    assert_eq!(tx.catalog_row(&namespace, &row.key, CatalogReadScope::RetainedHistory).await.unwrap().unwrap().sources, [next.sources.clone(), row.sources.clone()].concat());
+    assert_eq!(
+        tx.catalog_row(&namespace, &row.key, CatalogReadScope::RetainedHistory)
+            .await
+            .unwrap()
+            .unwrap()
+            .sources,
+        [next.sources.clone(), row.sources.clone()].concat()
+    );
     tx.commit(&namespace).await.unwrap();
 }
 

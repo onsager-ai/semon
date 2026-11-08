@@ -622,7 +622,9 @@ impl PgProjectionStore {
         let (_, _, slots) = tx
             .recipe_page(namespace, &key, scope, Some(&generation), first, limit)
             .await?;
-        let observations = tx.recipe_observations(namespace, &key, scope, first, slots.len().max(1)).await?;
+        let observations = tx
+            .recipe_observations(namespace, &key, scope, first, slots.len().max(1))
+            .await?;
         let sources = observations.first().cloned().unwrap_or(row.sources);
         let reply = if let Some(reader) = provider {
             crate::transcript_range::render_postgres(

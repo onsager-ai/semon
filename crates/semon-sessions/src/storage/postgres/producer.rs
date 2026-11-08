@@ -358,7 +358,10 @@ impl PgProjectionStore {
                 }
             }
             use sha2::{Digest, Sha256};
-            let generation = format!("{:x}", Sha256::digest(serde_json::to_vec(&(expected, &prepared.claims)).map_err(backend)?));
+            let generation = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&(expected, &prepared.claims)).map_err(backend)?)
+            );
             tx.tx.execute("INSERT INTO semon_projection.catalog_heads(namespace,generation) VALUES($1,$2) ON CONFLICT(namespace) DO UPDATE SET generation=excluded.generation", &[&namespace.binding(), &generation]).await.map_err(backend)?;
             for input in inputs {
                 tx.tx.execute("UPDATE semon_projection.discovery SET pending=false,refused=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;

@@ -444,12 +444,17 @@ impl PgProjectionTransaction<'_> {
             decoded.push(slot);
         }
         if history {
-            let observations = self.recipe_observations(namespace, key, scope, after, limit).await?;
+            let observations = self
+                .recipe_observations(namespace, key, scope, after, limit)
+                .await?;
             if observations.len() != decoded.len() {
                 return Err(backend("selected observation sequence gap"));
             }
             if let Some(first) = observations.first() {
-                let length = observations.iter().take_while(|observation| *observation == first).count();
+                let length = observations
+                    .iter()
+                    .take_while(|observation| *observation == first)
+                    .count();
                 decoded.truncate(length);
             }
         }

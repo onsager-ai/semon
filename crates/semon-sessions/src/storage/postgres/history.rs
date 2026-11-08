@@ -119,8 +119,7 @@ impl PgProjectionTransaction<'_> {
         ).await.map_err(backend)?.is_some();
         if !history {
             let row = self.catalog_row(namespace, key, scope).await?.ok_or_else(|| backend("selected owner unavailable"))?;
-            let (_, total, _) = self.recipe_page(namespace, key, scope, None, after, limit).await?;
-            return Ok(vec![row.sources; total.saturating_sub(after).min(limit)]);
+            return Ok(vec![row.sources; limit]);
         }
         let records = self.tx.query(
             "SELECT CASE WHEN sum(octet_length(observation)) OVER (ORDER BY slot)<=1048576 THEN observation END FROM semon_projection.history_recipes WHERE namespace=$1 AND session_key=$2 AND slot>=$3 AND slot<$4 ORDER BY slot",
