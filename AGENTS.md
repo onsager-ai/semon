@@ -1,7 +1,11 @@
 # Semon
 
-Harness-native session collection, synchronization, browsing, queries and runtime
-integration, forming the foundation for Session Intelligence. Encrypted Relay
+Agent Session Intelligence (ASI): durable storage, query and analytics over
+harness-native agent sessions, built on native collection, synchronization and the
+Session Event Index. Session display and two-way harness control are not product
+goals; do not invest in Viewer transcript polish or control features. Follow
+[the ASI direction](docs/design/asi-direction.md) for scope and sequencing.
+Encrypted Relay
 and Canonical Trace Store are retired pre-release experiments. Their historical
 migration/export compatibility is outside product scope. Code retirement never
 authorizes deletion of user data or live operational cleanup.
@@ -58,7 +62,7 @@ Use Node 22+ and the foundation lane's locked tooling: `npm --prefix ui ci
 `npm --prefix ui run check:bundle` and `npm --prefix ui run sizes`.
 The Rust and UI workflow files supply exact CI setup and aggregate semantics.
 
-The temporary collection configuration pauses control delivery, broad full-text `find` and all SSH capabilities. Public paused calls must refuse before credentials, sockets, process/provider admission or external writes. Preserve local collection, non-SSH Push/receive, history, identity and stored credentials. Real-SSH feature qualification is explicitly deferred after inactive-boundary checks; `.github/workflows/rust.yml` owns disabled-capability, offline-security and supervisor-lifetime checks; deferred real-SSH jobs are retained in Git history, not in the active workflow. Deferred qualification is not a pass. See [the temporary scope](docs/design/session-foundation-retirement.md#temporary-collection-scope); other applicable release gates remain required.
+Control delivery, managed runtime and all SSH capabilities are slated for retirement under the ASI direction; until that lands, the temporary collection configuration pauses them and broad full-text `find`. Public paused calls must refuse before credentials, sockets, process/provider admission or external writes. Preserve local collection, non-SSH Push/receive, history, identity and stored credentials. Real-SSH feature qualification is explicitly deferred after inactive-boundary checks; `.github/workflows/rust.yml` owns disabled-capability, offline-security and supervisor-lifetime checks; deferred real-SSH jobs are retained in Git history, not in the active workflow. Deferred qualification is not a pass. See [the temporary scope](docs/design/session-foundation-retirement.md#temporary-collection-scope); other applicable release gates remain required.
 
 ## Conditional reading and workflows
 

@@ -24,6 +24,12 @@ operation reconciliation without adding speculative recovery infrastructure.
 
 ## Temporary collection scope
 
+> **Superseded direction (2026-11-08).** The [ASI direction](asi-direction.md)
+> turns the pause of two-way control, managed runtime delivery and SSH into
+> retirement of `semon-control`, `semon-runtime` and `semon-ssh`. Full-text
+> retrieval returns as part of the ASI query surface rather than the paused
+> `find`. The refusal behavior below remains current until those changes land.
+
 The October 15, 2026 recovery candidate from Source `c402e481dbe23bcf03841e47b5f7eccd14c0e426` prioritizes collection, synchronization, monitoring and readable history (Source #380/#437 and Hub #267). Source #421's later unfinished framework remains preserved separately; this recovery does not adopt it. Two-way harness control, managed runtime delivery, broad cross-session full-text retrieval and all SSH capabilities are paused, rather than retired or replaced.
 
 The active Source CLI, local HTTP API and shared collection reader offer no session creation/resume, send, approval/question answer, steering, interrupt or reconnect journey. `semon control`, `serve_with_control`, fresh managed guest and private SSH controller binaries refuse before input, listener, credential or controller initialization. Authenticated stale HTTP writes receive HTTP 503 with `capability_unavailable`; unauthenticated requests retain HTTP 403. The native control status endpoint returns no live authority without preparing a selected source. Default private E2B stdio workers refuse create/bootstrap/dispatch, mutable RPC and qualification delivery before SDK admission; inspect/inspect_bootstrap and existing RPC snapshot reconciliation remain available. The legacy guest launch entry refuses before executing its retained launcher. Hub owns the matching authorized product/API/MCP/provider boundaries.
