@@ -66,7 +66,8 @@ impl PgProjectionStore {
         if args["cursor"].is_string() && !args["generation"].is_string() {
             return Err(backend("activity continuation requires generation"));
         }
-        let _facts_lock = crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?;
+        let _facts_lock =
+            crate::source_change::SourceLock::try_shared(options, "facts").map_err(backend)?;
         let tx = self.begin(namespace).await?;
         let row = tx
             .catalog_row(namespace, key, CatalogReadScope::Current)
@@ -81,7 +82,17 @@ impl PgProjectionStore {
         }) {
             return Err(backend("activity source authority or window changed"));
         }
-        let _source_locks = row.sources.iter().map(|source| crate::source_change::SourceLock::try_shared(options, &source.path.to_string_lossy())).collect::<Result<Vec<_>,_>>().map_err(backend)?;
+        let _source_locks = row
+            .sources
+            .iter()
+            .map(|source| {
+                crate::source_change::SourceLock::try_shared(
+                    options,
+                    &source.path.to_string_lossy(),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(backend)?;
         let record = tx.tx.query_opt("SELECT source_generation,generation,metadata FROM semon_projection.session_activity WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &key]).await.map_err(backend)?.ok_or_else(|| backend("activity projection unavailable"))?;
         let source_generation: String = record.get(0);
         let generation: String = record.get(1);
@@ -175,9 +186,20 @@ impl PgProjectionStore {
         drop(reader);
         tx.commit(namespace).await?;
         let check = self.begin(namespace).await?;
-        let current = check.catalog_row(namespace, key, CatalogReadScope::Current).await?.ok_or_else(|| backend("activity owner changed"))?;
+        let current = check
+            .catalog_row(namespace, key, CatalogReadScope::Current)
+            .await?
+            .ok_or_else(|| backend("activity owner changed"))?;
         let actual = check.tx.query_opt("SELECT generation FROM semon_projection.session_activity WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &key]).await.map_err(backend)?;
-        if current.sources != row.sources || actual.as_ref().map(|record| record.get::<_,String>(0)).as_deref() != Some(generation.as_str()) { return Err(backend("activity publication changed")); }
+        if current.sources != row.sources
+            || actual
+                .as_ref()
+                .map(|record| record.get::<_, String>(0))
+                .as_deref()
+                != Some(generation.as_str())
+        {
+            return Err(backend("activity publication changed"));
+        }
         check.commit(namespace).await?;
         Ok(
             json!({"now":now,"session":{"id":key,"harness":row.harness,"native_ids":row.native_ids},"generation":generation,"kind":if facts {"facts"} else {"steps"},"items":items,"next_cursor":next_cursor}),
