@@ -6385,9 +6385,8 @@ fn activity_analytics_is_additive_and_preserves_unknown_cost_and_duration() {
     assert_eq!(summary["coverage"]["timing"]["unknown_steps"], 1);
     // The timeline is served by kind preview, never inside the summary.
     assert!(summary.get("preview").is_none());
-    let exclusive = &summary["component_cost_usd"]["exclusive"];
-    assert!(summary["component_cost_usd"]["observed"].is_object());
-    assert!(summary["component_cost_usd"]["shared"].is_object());
+    // Exclusive steps only; never repeated per ownership view or band.
+    let exclusive = &summary["component_cost_usd"];
     for key in [
         "fresh_input_usd",
         "cache_read_usd",

@@ -20,8 +20,9 @@ pub(crate) struct OwnedMeasured {
     pub(crate) shared: Measured<u64>,
 }
 
-/// Each token component priced independently; `Counts::totals` carries the
-/// list cost these usually sum to. Not repeated per context band.
+/// Each token component of exclusive steps priced independently; the exclusive
+/// list cost in `Counts::totals` is what these usually sum to. Kept to the
+/// exclusive view and out of the context bands so Catalog rows stay small.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Components {
     pub(crate) fresh_input_usd: Measured<f64>,
@@ -43,29 +44,6 @@ impl Components {
         measured(&mut self.cache_read_usd, &other.cache_read_usd);
         measured(&mut self.cache_write_usd, &other.cache_write_usd);
         measured(&mut self.output_usd, &other.output_usd);
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-pub(crate) struct OwnedComponents {
-    pub(crate) observed: Components,
-    pub(crate) exclusive: Components,
-    pub(crate) shared: Components,
-}
-
-impl OwnedComponents {
-    fn add(&mut self, step: &ActivityStep) {
-        self.observed.add(step);
-        match &step.ownership {
-            Ownership::Exclusive => self.exclusive.add(step),
-            Ownership::Shared(_) => self.shared.add(step),
-        }
-    }
-
-    fn merge(&mut self, other: &Self) {
-        self.observed.merge(&other.observed);
-        self.exclusive.merge(&other.exclusive);
-        self.shared.merge(&other.shared);
     }
 }
 
@@ -200,7 +178,7 @@ const TRIGGERS_NOT_COMPUTED: [TriggerNotComputed; 2] = [
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Counts {
     pub(crate) totals: OwnershipTotals,
-    pub(crate) component_cost_usd: OwnedComponents,
+    pub(crate) component_cost_usd: Components,
     pub(crate) by_band: BTreeMap<ContextBand, OwnershipTotals>,
     pub(crate) compactions: u64,
     pub(crate) waste_by_kind: BTreeMap<WasteKind, u64>,
@@ -311,7 +289,6 @@ impl Counts {
         let mut wait_intervals: [Vec<(i64, i64)>; 3] = Default::default();
         for step in steps {
             counts.totals.add(step);
-            counts.component_cost_usd.add(step);
             counts.by_band.entry(step.band).or_default().add(step);
             if let Some(kind) = step.waste {
                 *counts.waste_by_kind.entry(kind).or_default() += 1;
@@ -345,6 +322,7 @@ impl Counts {
                     add_waste(&mut counts.by_trigger, trigger, step);
                 }
                 counts.coverage.add_exclusive(step);
+                counts.component_cost_usd.add(step);
             }
             counts.empty_search_steps += u64::from(step.empty_search);
             counts.verify_failure_steps += u64::from(step.verify_failure);
@@ -481,8 +459,6 @@ impl Fold {
         let mut counts = analytics.counts.clone();
         counts.totals.observed = counts.totals.exclusive.clone();
         counts.totals.shared = StepTotals::default();
-        counts.component_cost_usd.observed = counts.component_cost_usd.exclusive.clone();
-        counts.component_cost_usd.shared = Components::default();
         for band in counts.by_band.values_mut() {
             band.observed = band.exclusive.clone();
             band.shared = StepTotals::default();
@@ -507,7 +483,7 @@ impl Fold {
         let mut counts = Counts::of(activity);
         // Sum exclusive steps now; add each exact shared key once at the end.
         counts.totals = OwnershipTotals::default();
-        counts.component_cost_usd = OwnedComponents::default();
+        counts.component_cost_usd = Components::default();
         counts.by_band.clear();
         let mut shared = BTreeMap::new();
         for step in &activity.steps {
@@ -580,7 +556,6 @@ impl Fold {
         let mut counts = self.counts.clone();
         for step in self.shared.values() {
             counts.totals.add(step);
-            counts.component_cost_usd.add(step);
             counts.by_band.entry(step.band).or_default().add(step);
         }
         Family {

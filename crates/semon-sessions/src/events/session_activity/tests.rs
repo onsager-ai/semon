@@ -466,10 +466,7 @@ fn components_price_independently_and_list_cost_needs_all_of_them() {
             known_list.is_some()
         );
         let exclusive = &result.aggregate.totals.exclusive;
-        let components = analytics::Analytics::of(&result)
-            .counts
-            .component_cost_usd
-            .exclusive;
+        let components = analytics::Analytics::of(&result).counts.component_cost_usd;
         assert_eq!(
             exclusive.list_cost_usd.unknown_steps,
             u64::from(known_list.is_none())

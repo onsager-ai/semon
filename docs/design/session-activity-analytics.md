@@ -245,11 +245,11 @@ effective price table, shared with every step's cost),
 `waste_cost_by_category`, `wait_time_ms`, `waits_without_interval`, `by_activity`,
 `by_trigger`, `empty_search_steps`, `verify_failure_steps`, `silent_exit_steps`,
 `change_facts`, `exclusive_cost_complete`, `component_cost_usd` and `coverage`. Each
-step total has `steps`, `list_cost_usd` and `elapsed_ms`. `component_cost_usd:
-{observed, exclusive, shared}` holds the four component measurements
-`fresh_input_usd`, `cache_read_usd`, `cache_write_usd` and `output_usd` for each
-ownership view; they are not repeated per band, which keeps the Catalog row within
-its fixed size bound. Measurements preserve `{known, unknown_steps}`; a known component total stays
+step total has `steps`, `list_cost_usd` and `elapsed_ms`. `component_cost_usd` holds
+the four component measurements `fresh_input_usd`, `cache_read_usd`,
+`cache_write_usd` and `output_usd` over exclusive steps only; they are not repeated
+for the observed and shared views or per band, which keeps every Catalog row small.
+Measurements preserve `{known, unknown_steps}`; a known component total stays
 known when another component's price is missing.
 Each waste cost total has `steps`, `elapsed_ms` and `list_cost_usd` measurements;
 only exclusive steps contribute. `coverage` gathers what the other values did not measure, over exclusive steps:
