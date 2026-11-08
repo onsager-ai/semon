@@ -229,6 +229,9 @@ impl PgProjectionTransaction<'_> {
             }
         }
         for row in publication.rows {
+            if self.tx.query_opt("SELECT 1 FROM semon_projection.history_catalog WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &row.key]).await.map_err(backend)?.is_some() {
+                self.preserve_history(namespace, &row.key).await?;
+            }
             self.tx.execute("DELETE FROM semon_projection.query_context WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &row.key]).await.map_err(backend)?;
             if let Some(trace) = &row.trace {
                 self.tx.execute(
@@ -244,35 +247,6 @@ impl PgProjectionTransaction<'_> {
             &[&namespace.binding(), &generation],
         ).await.map_err(backend)?;
         Ok(Some(generation))
-    }
-
-    /// Capture outgoing History and its recipes in the same transaction as
-    /// replacement or withdrawal. History never checks a newer Raw ledger.
-    pub(super) async fn preserve_history(
-        &self,
-        namespace: &Namespace,
-        key: &str,
-    ) -> Result<(), StorageError> {
-        let conflicting: bool = self.tx.query_one(
-            "SELECT EXISTS(SELECT 1 FROM semon_projection.history_catalog h JOIN semon_projection.catalog c USING(namespace,session_key) WHERE h.namespace=$1 AND h.session_key=$2 AND h.metadata<>c.metadata)",
-            &[&namespace.binding(), &key],
-        ).await.map_err(backend)?.get(0);
-        if conflicting {
-            return Err(backend("composite History publication is unavailable"));
-        }
-        self.tx.execute(
-            "INSERT INTO semon_projection.history_catalog SELECT * FROM semon_projection.catalog WHERE namespace=$1 AND session_key=$2 ON CONFLICT(namespace,session_key) DO NOTHING",
-            &[&namespace.binding(), &key],
-        ).await.map_err(backend)?;
-        self.tx.execute(
-            "INSERT INTO semon_projection.history_recipe_heads SELECT * FROM semon_projection.recipe_heads WHERE namespace=$1 AND session_key=$2 ON CONFLICT(namespace,session_key) DO NOTHING",
-            &[&namespace.binding(), &key],
-        ).await.map_err(backend)?;
-        self.tx.execute(
-            "INSERT INTO semon_projection.history_recipes SELECT r.* FROM semon_projection.recipes r JOIN semon_projection.recipe_heads c USING(namespace,session_key) JOIN semon_projection.history_recipe_heads h USING(namespace,session_key) WHERE r.namespace=$1 AND r.session_key=$2 AND c.generation=h.generation ON CONFLICT(namespace,session_key,slot) DO NOTHING",
-            &[&namespace.binding(), &key],
-        ).await.map_err(backend)?;
-        Ok(())
     }
 
     pub(crate) async fn catalog_row(
@@ -469,6 +443,21 @@ impl PgProjectionTransaction<'_> {
             }
             decoded.push(slot);
         }
+        if history {
+            let observations = self
+                .recipe_observations(namespace, key, scope, after, limit)
+                .await?;
+            if observations.len() != decoded.len() {
+                return Err(backend("selected observation sequence gap"));
+            }
+            if let Some(first) = observations.first() {
+                let length = observations
+                    .iter()
+                    .take_while(|observation| *observation == first)
+                    .count();
+                decoded.truncate(length);
+            }
+        }
         Ok((generation, total, decoded))
     }
 
@@ -550,15 +539,6 @@ impl PgProjectionTransaction<'_> {
                 &[&namespace.binding(), &key, &number(total as u64)?],
             ).await.map_err(backend)?.get(0);
             if count != number(total as u64)? {
-                return Ok(false);
-            }
-            // Composite History needs a later merge implementation. Never
-            // overwrite an older custody owner or withdraw a newer uncaptured one.
-            let conflicting: bool = self.tx.query_one(
-                "SELECT EXISTS(SELECT 1 FROM semon_projection.history_recipe_heads h JOIN semon_projection.recipe_heads c USING(namespace,session_key) WHERE h.namespace=$1 AND h.session_key=$2 AND h.source_generation<>c.source_generation)",
-                &[&namespace.binding(), &key],
-            ).await.map_err(backend)?.get(0);
-            if conflicting {
                 return Ok(false);
             }
         }

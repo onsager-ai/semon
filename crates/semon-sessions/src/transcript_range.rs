@@ -488,7 +488,7 @@ struct Selection {
 }
 
 #[derive(Clone, Copy)]
-enum SelectedPart {
+pub(crate) enum SelectedPart {
     Transcript,
     Script,
     Output,
@@ -859,7 +859,47 @@ pub(crate) fn render_postgres(
     sources: Vec<CatalogSource>,
     reader: &dyn SessionSourceReader,
 ) -> ViewerReply {
+    render_postgres_part(
+        options,
+        identity,
+        session,
+        stored_generation,
+        total,
+        first,
+        slots,
+        sources,
+        reader,
+        SelectedPart::Transcript,
+        None,
+        json!({"state":"incomplete","turns":[],"handoffs":[],"sessions":{},"previews":{}}),
+    )
+}
+
+#[cfg(feature = "postgres")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_postgres_part(
+    options: &Options,
+    identity: CatalogSessionIdentity,
+    session: Value,
+    stored_generation: &str,
+    total: usize,
+    first: usize,
+    slots: Vec<SavedSlot>,
+    sources: Vec<CatalogSource>,
+    reader: &dyn SessionSourceReader,
+    part: SelectedPart,
+    field_chunk: Option<usize>,
+    context: Value,
+) -> ViewerReply {
     let end = first.saturating_add(slots.len()).min(total);
+    if (!matches!(part, SelectedPart::Transcript) || field_chunk.is_some()) && end != first + 1 {
+        return catalog::error(
+            400,
+            "invalid_arguments",
+            "Selected field reads require one slot.",
+            false,
+        );
+    }
     let selection = Selection {
         proof_db: None,
         identity,
@@ -875,14 +915,23 @@ pub(crate) fn render_postgres(
             .map(|source| (source.path.clone(), source))
             .collect(),
         history_incomplete: false,
-        context: json!({"state":"incomplete","turns":[],"handoffs":[],"sessions":{},"previews":{}}),
+        context,
     };
+    if let Some(chunk) = field_chunk {
+        return render_field(
+            options,
+            selection,
+            Some(reader),
+            chunk,
+            SessionSourceReadMode::ProviderOnly,
+        );
+    }
     render(
         options,
         selection,
         Some(reader),
         SessionSourceReadMode::ProviderOnly,
-        SelectedPart::Transcript,
+        part,
     )
 }
 
@@ -1428,6 +1477,21 @@ fn invalid() -> io::Error {
     )
 }
 
+fn reference_in_selection(
+    options: &Options,
+    selection: &Selection,
+    reference: &SessionSourceRef,
+) -> bool {
+    selection.sources.values().any(|source| {
+        catalog::source_relative(options, &reference.root, source).as_deref()
+            == Some(reference.path.as_str())
+            && source.native_id == reference.native_id
+            && source.offset == reference.offset
+            && source.prefix_sha256 == reference.prefix_sha256
+            && source.tail_sha256 == reference.tail_sha256
+    })
+}
+
 fn render(
     options: &Options,
     selection: Selection,
@@ -1443,6 +1507,7 @@ fn render(
         .identity
         .source_refs
         .iter()
+        .filter(|observation| reference_in_selection(options, &selection, &observation.source))
         .filter_map(|observation| {
             let reference = &observation.source;
             let root = match reference.root.as_str() {
@@ -2045,6 +2110,7 @@ fn render_field(
         .identity
         .source_refs
         .iter()
+        .filter(|observation| reference_in_selection(options, &selection, &observation.source))
         .filter_map(|observation| {
             let root = match observation.source.root.as_str() {
                 "claude" => &options.claude_home,

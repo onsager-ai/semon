@@ -350,14 +350,19 @@ impl PgProjectionStore {
                 // An empty source can retire only its previously qualified
                 // observation; retained metadata and recipes remain in custody.
                 let owners = tx.tx.query("SELECT DISTINCT unit_key FROM semon_projection.units WHERE namespace=$1 AND path=$2", &[&namespace.binding(), &name]).await.map_err(backend)?;
-                if !owners.is_empty() {
-                    return Err(backend(
-                        "empty replacement requires retained History handoff",
-                    ));
+                for owner in owners {
+                    let key: &str = owner.get(0);
+                    tx.preserve_history(namespace, key).await?;
+                    tx.tx.execute("UPDATE semon_projection.catalog SET lifecycle='retained' WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &key]).await.map_err(backend)?;
+                    tx.catalog_changed(namespace, key).await?;
                 }
             }
-            let generation = expected.unwrap_or_else(|| "0".repeat(64));
-            tx.tx.execute("INSERT INTO semon_projection.catalog_heads(namespace,generation) VALUES($1,$2) ON CONFLICT DO NOTHING", &[&namespace.binding(), &generation]).await.map_err(backend)?;
+            use sha2::{Digest, Sha256};
+            let generation = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&(expected, &prepared.claims)).map_err(backend)?)
+            );
+            tx.tx.execute("INSERT INTO semon_projection.catalog_heads(namespace,generation) VALUES($1,$2) ON CONFLICT(namespace) DO UPDATE SET generation=excluded.generation", &[&namespace.binding(), &generation]).await.map_err(backend)?;
             for input in inputs {
                 tx.tx.execute("UPDATE semon_projection.discovery SET pending=false,refused=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
             }

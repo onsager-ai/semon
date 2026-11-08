@@ -136,13 +136,57 @@ pub(super) fn lifecycle(dsn: &str) {
                     .is_some_and(|text| text.contains("direct"))
             })
     );
-    for route in [
-        "/api/tree",
-        "/api/viewer/home",
-        "/api/viewer/analytics",
-        "/api/session-annotations",
-    ] {
+    assert!(transcript["session"]["details"].is_object());
+    for entry in transcript["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["field"].is_object())
+    {
+        let field = core.respond(
+            "GET",
+            "/api/session-entry",
+            &format!(
+                "machine=injected-runtime&sid={}&after={}&limit=1&generation={}&field_chunk=0",
+                crate::viewer::percent_encode(key),
+                entry["slot"],
+                crate::viewer::percent_encode(
+                    transcript["projection"]["generation"].as_str().unwrap()
+                )
+            ),
+            None,
+        );
+        assert_eq!(
+            field.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&field.body)
+        );
+        let field: Value = serde_json::from_slice(&field.body).unwrap();
+        assert!(field["text"].is_string());
+    }
+    for route in ["/api/tree", "/api/viewer/home", "/api/viewer/analytics"] {
         assert_eq!(core.respond("GET", route, "", None).status, 503, "{route}");
+    }
+    for kind in ["errors", "signals"] {
+        let annotations = core.respond(
+            "GET",
+            "/api/session-annotations",
+            &format!(
+                "machine=injected-runtime&sid={}&scope=retained_history&kind={kind}",
+                crate::viewer::percent_encode(key)
+            ),
+            None,
+        );
+        assert_eq!(
+            annotations.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&annotations.body)
+        );
+        let annotations: Value = serde_json::from_slice(&annotations.body).unwrap();
+        assert!(annotations["total"].is_number());
+        assert!(annotations["entries"].is_array());
     }
     let mut query = crate::Query::from_sources(sources.clone());
     let answer = query.call("list_sessions", &json!({"limit":100})).unwrap();
@@ -531,6 +575,15 @@ pub(super) fn lifecycle(dsn: &str) {
         "{}",
         String::from_utf8_lossy(&history.body)
     );
+    let retained_query = query
+        .call_catalog(
+            "list_sessions",
+            &json!({}),
+            None,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+        )
+        .unwrap();
+    assert!(!retained_query["sessions"].as_array().unwrap().is_empty());
     core.close();
     sources.close();
     #[cfg(target_os = "linux")]

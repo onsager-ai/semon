@@ -106,7 +106,7 @@ impl Projection {
     }
     #[cfg(feature = "postgres")]
     pub(crate) fn storage_context(&self) -> Value {
-        json!({"turns":self.turns,"edges":self.edges,"bookmarks":self.bookmarks})
+        json!({"session":self.session,"turns":self.turns,"edges":self.edges,"bookmarks":self.bookmarks})
     }
     pub(crate) fn endpoints(&self) -> impl Iterator<Item = &str> {
         self.edges.iter().flat_map(|edge| {

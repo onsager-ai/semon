@@ -1109,7 +1109,11 @@ impl ViewerCore {
             && path.starts_with("/api/")
             && !matches!(
                 path,
-                "/api/sessions" | "/api/session-transcript" | "/api/session-resolve"
+                "/api/sessions"
+                    | "/api/session-transcript"
+                    | "/api/session-resolve"
+                    | "/api/session-annotations"
+                    | "/api/session-entry"
             )
         {
             return crate::catalog::error(
@@ -1471,7 +1475,10 @@ impl ViewerCore {
                         .storage
                         .page(key, &request.expect("Catalog request"), None)
                 }
-                "/api/session-transcript" => view.evidence.storage.transcript(key, query, None),
+                "/api/session-transcript" | "/api/session-entry" => {
+                    view.evidence.storage.transcript(key, query, None)
+                }
+                "/api/session-annotations" => view.evidence.storage.annotations(query),
                 "/api/session-resolve" => crate::native_resolution::page_with_reader(
                     key,
                     query,
