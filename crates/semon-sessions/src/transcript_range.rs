@@ -871,6 +871,7 @@ pub(crate) fn render_postgres(
         reader,
         SelectedPart::Transcript,
         None,
+        json!({"state":"incomplete","turns":[],"handoffs":[],"sessions":{},"previews":{}}),
     )
 }
 
@@ -888,6 +889,7 @@ pub(crate) fn render_postgres_part(
     reader: &dyn SessionSourceReader,
     part: SelectedPart,
     field_chunk: Option<usize>,
+    context: Value,
 ) -> ViewerReply {
     let end = first.saturating_add(slots.len()).min(total);
     if (!matches!(part, SelectedPart::Transcript) || field_chunk.is_some()) && end != first + 1 {
@@ -924,7 +926,7 @@ pub(crate) fn render_postgres_part(
             .map(|source| (source.path.clone(), source))
             .collect(),
         history_incomplete: false,
-        context: json!({"state":"incomplete","turns":[],"handoffs":[],"sessions":{},"previews":{}}),
+        context,
     };
     if let Some(chunk) = field_chunk {
         return render_field(

@@ -7,6 +7,7 @@ use tokio_postgres::{Client, IsolationLevel, Transaction};
 
 mod annotations;
 mod collection;
+mod context;
 mod details;
 mod history;
 mod index;
