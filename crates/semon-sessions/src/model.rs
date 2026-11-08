@@ -2469,7 +2469,11 @@ impl<'a> Builder<'a> {
                 usage.extend(self.cache.activity_codex_steps(&summary::source(file))?);
             }
             observations.extend(file.summary.events.iter().filter_map(|event| {
-                event.activity_observation.clone().map(|observation| {
+                event.activity_observation.clone().map(|mut observation| {
+                    observation.fill_wait_from_reply(
+                        event.t,
+                        event.r.as_ref().and_then(|reply| reply.t),
+                    );
                     events::session_activity::classify::LocatedObservation {
                         position: SourcePosition {
                             source: path.into(),

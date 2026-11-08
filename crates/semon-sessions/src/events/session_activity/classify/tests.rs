@@ -314,6 +314,41 @@ fn nested_wait_and_decoding_are_bounded_and_call_qualified() {
     );
 }
 
+#[test]
+fn unmatched_orchestration_result_keeps_indexed_call_and_reply_times() {
+    let pending = || call("wait_agent", &json!({}), None, "call-digest".into());
+    let mut observation = pending();
+    observation.fill_wait_from_reply(Some(1_000), Some(4_000));
+    assert_eq!(
+        observation.wait,
+        Some(WaitInterval {
+            started_at_ms: 1_000,
+            completed_at_ms: 4_000,
+        })
+    );
+    assert_eq!(observation.waste, Some(WasteKind::OrchestrationWait));
+    for (start, end) in [
+        (Some(1_000), None),
+        (None, Some(4_000)),
+        (Some(4_000), Some(1_000)),
+    ] {
+        let mut observation = pending();
+        observation.fill_wait_from_reply(start, end);
+        assert_eq!(observation.wait, None);
+    }
+    // A decoded interval is never replaced, and non-waits never gain one.
+    let mut observation = pending();
+    observation.wait = Some(WaitInterval {
+        started_at_ms: 10,
+        completed_at_ms: 20,
+    });
+    observation.fill_wait_from_reply(Some(1_000), Some(4_000));
+    assert_eq!(observation.wait.as_ref().unwrap().started_at_ms, 10);
+    let mut observation = call("Read", &json!({"file_path": "/f"}), None, "d".into());
+    observation.fill_wait_from_reply(Some(1_000), Some(4_000));
+    assert_eq!(observation.wait, None);
+}
+
 fn located(offset: u64, observation: Observation) -> LocatedObservation {
     LocatedObservation {
         position: SourcePosition {

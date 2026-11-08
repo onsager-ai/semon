@@ -82,7 +82,11 @@ of the capped step duration. Session wait time
 is the union of these intervals, so overlap and duplicate observations count once;
 adjacent intervals join without changing the total. The summary exposes observed,
 exclusive and shared interval unions, plus observed/exclusive/shared counts of
-orchestration-wait steps without any exact interval. Missing endpoints stay unknown.
+orchestration-wait steps without any exact interval. An orchestration call whose
+result record is not decoded by the classifier (for example a Codex `wait_agent`
+completed through another native record) takes the exact call and reply timestamps
+the Event Index recorded for that call, as the session wait edges do. Missing
+endpoints stay unknown.
 Family wait values sum each physical session's union and can exceed family wall-clock
 time. Waste time and list cost sum capped step `elapsed_ms` and priced
 `list_cost_usd` for exclusive waste steps, grouped by waste kind and category;

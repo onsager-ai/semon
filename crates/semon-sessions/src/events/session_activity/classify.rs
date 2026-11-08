@@ -252,6 +252,25 @@ pub(crate) struct LocatedObservation {
     pub(crate) observation: Observation,
 }
 
+impl Observation {
+    /// An orchestration call whose result record was not decoded here (for
+    /// example a Codex `wait_agent` completed through another native record)
+    /// keeps the exact call and reply timestamps the Event Index already
+    /// recorded for the same call. No interval is invented without both.
+    pub(crate) fn fill_wait_from_reply(&mut self, start: Option<i64>, end: Option<i64>) {
+        if self.orchestration
+            && self.wait.is_none()
+            && let Some((started_at_ms, completed_at_ms)) =
+                start.zip(end).filter(|(start, end)| end >= start)
+        {
+            self.wait = Some(WaitInterval {
+                started_at_ms,
+                completed_at_ms,
+            });
+        }
+    }
+}
+
 pub(crate) fn unknown_boundary(bytes: &[u8]) -> Observation {
     call("unknown", &Value::Null, None, digest(bytes))
 }
