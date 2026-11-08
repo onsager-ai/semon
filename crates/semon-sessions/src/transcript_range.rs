@@ -860,6 +860,14 @@ pub(crate) fn render_postgres(
     reader: &dyn SessionSourceReader,
 ) -> ViewerReply {
     let end = first.saturating_add(slots.len()).min(total);
+    let mut identity = identity;
+    identity.source_refs.retain(|observation| sources.iter().any(|source| {
+        catalog::source_relative(options, &identity.harness, source).as_deref() == Some(observation.source.path.as_str())
+            && source.native_id == observation.source.native_id
+            && source.offset == observation.source.offset
+            && source.prefix_sha256 == observation.source.prefix_sha256
+            && source.tail_sha256 == observation.source.tail_sha256
+    }));
     let selection = Selection {
         proof_db: None,
         identity,

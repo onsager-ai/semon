@@ -622,6 +622,8 @@ impl PgProjectionStore {
         let (_, _, slots) = tx
             .recipe_page(namespace, &key, scope, Some(&generation), first, limit)
             .await?;
+        let observations = tx.recipe_observations(namespace, &key, scope, first, slots.len().max(1)).await?;
+        let sources = observations.first().cloned().unwrap_or(row.sources);
         let reply = if let Some(reader) = provider {
             crate::transcript_range::render_postgres(
                 options,
@@ -631,12 +633,12 @@ impl PgProjectionStore {
                 total,
                 first,
                 slots,
-                row.sources,
+                sources,
                 reader,
             )
         } else {
             let mut proofs = std::collections::BTreeMap::new();
-            for source in &row.sources {
+            for source in &sources {
                 let input = crate::native_evidence::catalog_input(&source.path, options)
                     .ok_or_else(|| backend("invalid selected source"))?;
                 let proof_generation = tx.source_proof_generation(namespace, source).await?;
@@ -646,7 +648,7 @@ impl PgProjectionStore {
                 );
             }
             let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
-            let reader = super::proof_reader::LocalProofReader::new(options, &row.sources, sender)?;
+            let reader = super::proof_reader::LocalProofReader::new(options, &sources, sender)?;
             let options = options.clone();
             let mut rendering = tokio::task::spawn_blocking(move || {
                 let reply = crate::transcript_range::render_postgres(
@@ -657,7 +659,7 @@ impl PgProjectionStore {
                     total,
                     first,
                     slots,
-                    row.sources,
+                    sources,
                     &reader,
                 );
                 reader.verify().map(|()| reply)

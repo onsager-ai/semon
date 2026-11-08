@@ -245,6 +245,7 @@ CREATE TABLE semon_projection.recipes (
 CREATE TABLE semon_projection.history_catalog (LIKE semon_projection.catalog INCLUDING CONSTRAINTS INCLUDING INDEXES);
 CREATE TABLE semon_projection.history_recipe_heads (LIKE semon_projection.recipe_heads INCLUDING CONSTRAINTS INCLUDING INDEXES);
 CREATE TABLE semon_projection.history_recipes (LIKE semon_projection.recipes INCLUDING CONSTRAINTS INCLUDING INDEXES);
+ALTER TABLE semon_projection.history_recipes ADD COLUMN observation text NOT NULL;
 ALTER TABLE semon_projection.catalog_heads ENABLE ROW LEVEL SECURITY;
 ALTER TABLE semon_projection.catalog_heads FORCE ROW LEVEL SECURITY;
 CREATE POLICY namespace_isolation ON semon_projection.catalog_heads
