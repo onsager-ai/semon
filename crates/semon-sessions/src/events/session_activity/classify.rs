@@ -1027,15 +1027,8 @@ pub(super) fn call(
     let orchestration =
         matches!(name, "Agent" | "Task" | "wait_agent") || commands.contains(&Command::Watch);
     let agent = match name {
-        "Agent"
-        | "Task"
-        | "SendMessage"
-        | "spawn_agent"
-        | "send_message"
-        | "send_input"
-        | "followup_task"
-        | "list_agents"
-        | "interrupt_agent" => Some(AgentCall::Coordinate),
+        "Agent" | "Task" | "SendMessage" | "spawn_agent" | "send_message" | "send_input"
+        | "followup_task" | "list_agents" | "interrupt_agent" => Some(AgentCall::Coordinate),
         "wait_agent" => Some(AgentCall::Wait),
         _ => None,
     };

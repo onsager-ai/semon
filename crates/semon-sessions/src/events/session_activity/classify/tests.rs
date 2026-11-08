@@ -1858,9 +1858,15 @@ fn activity_label_follows_first_matching_precedence() {
         ("gh run view 123", Some(Activity::Verify)),
         ("gh run view 123 --log-failed", Some(Activity::Verify)),
         ("gh run list --limit 5", Some(Activity::Verify)),
-        ("gh --repo example/project run watch 123", Some(Activity::Wait)),
+        (
+            "gh --repo example/project run watch 123",
+            Some(Activity::Wait),
+        ),
         ("gh run rerun 123", Some(Activity::Verify)),
-        ("gh workflow run rust.yml --ref topic", Some(Activity::Verify)),
+        (
+            "gh workflow run rust.yml --ref topic",
+            Some(Activity::Verify),
+        ),
         ("gh pr view 12", Some(Activity::Explore)),
         ("gh pr diff 12", Some(Activity::Explore)),
         ("gh pr list", Some(Activity::Explore)),
@@ -2080,7 +2086,10 @@ fn tool_and_gh_labels_keep_state_change_semantics() {
         assert_eq!(shell.changes_state(), barrier, "{command}");
     }
     // A Codex sleep is the same Sleep waste as a shell sleep; Monitor is not.
-    assert_eq!(observed("sleep", "", json!("ok"), false).waste, Some(WasteKind::Sleep));
+    assert_eq!(
+        observed("sleep", "", json!("ok"), false).waste,
+        Some(WasteKind::Sleep)
+    );
     assert_eq!(observed("Monitor", "", json!("ok"), false).waste, None);
 }
 
