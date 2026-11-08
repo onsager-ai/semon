@@ -524,7 +524,7 @@ impl RuntimeStore {
                     }
                     for (key, expected) in &part.witnesses {
                         let actual = tx
-                            .catalog_row(namespace, key, crate::CatalogReadScope::Current)
+                            .catalog_row(namespace, key, crate::CatalogReadScope::RetainedHistory)
                             .await?;
                         if actual
                             .and_then(|row| row.query)

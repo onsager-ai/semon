@@ -136,6 +136,13 @@ pub(super) fn lifecycle(dsn: &str) {
                     .is_some_and(|text| text.contains("direct"))
             })
     );
+    assert!(transcript["session"]["details"].is_object());
+    for entry in transcript["entries"].as_array().unwrap().iter().filter(|entry| entry["field"].is_object()) {
+        let field = core.respond("GET", "/api/session-transcript", &format!("machine=injected-runtime&sid={}&after={}&limit=1&generation={}&field_chunk=0", crate::viewer::percent_encode(key), entry["slot"], crate::viewer::percent_encode(transcript["projection"]["generation"].as_str().unwrap())), None);
+        assert_eq!(field.status, 200, "{}", String::from_utf8_lossy(&field.body));
+        let field: Value = serde_json::from_slice(&field.body).unwrap();
+        assert!(field["text"].is_string());
+    }
     for route in [
         "/api/tree",
         "/api/viewer/home",

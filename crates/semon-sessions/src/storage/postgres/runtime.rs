@@ -72,18 +72,6 @@ impl PgProjectionStore {
         ensure(&self.namespace, namespace)?;
         let tx = self.begin(namespace).await?;
         let runtime = crate::native_evidence::query_runtime_generation(options).map_err(backend)?;
-        let retained: bool = tx
-            .tx
-            .query_one(
-                "SELECT EXISTS(SELECT 1 FROM semon_projection.history_catalog WHERE namespace=$1)",
-                &[&namespace.binding()],
-            )
-            .await
-            .map_err(backend)?
-            .get(0);
-        if retained {
-            return Err(backend("Catalog Query composite History is unavailable"));
-        }
         let observations = crate::native_evidence::RuntimeObservations::projection(options);
         let mut part = crate::query::catalog::Part {
             generation: tx
@@ -107,14 +95,16 @@ impl PgProjectionStore {
             let page = tx
                 .catalog_page(
                     namespace,
-                    CatalogReadScope::Current,
+                    CatalogReadScope::RetainedHistory,
                     after
                         .as_ref()
                         .map(|(last, key): &(i64, String)| (*last, key.as_str())),
                     100,
                 )
                 .await?;
-            for row in page.rows {
+            for mut row in page.rows {
+                let current: bool = tx.tx.query_one("SELECT lifecycle='current' FROM semon_projection.catalog WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &row.key]).await.map_err(backend)?.get(0);
+                row.lifecycle = if current { crate::model::summary::CatalogLifecycle::Current } else { crate::model::summary::CatalogLifecycle::Retained };
                 let bytes = serde_json::to_vec(&row).map_err(backend)?.len();
                 *bytes_left = bytes_left
                     .checked_sub(bytes)
@@ -234,7 +224,7 @@ impl PgProjectionStore {
             if !crate::model::summary::query_observation_matches(
                 saved,
                 &row.sources,
-                true,
+                row.lifecycle == crate::model::summary::CatalogLifecycle::Current,
                 observations.expected(&row).as_deref(),
             )
             .map_err(backend)?
@@ -251,7 +241,16 @@ impl PgProjectionStore {
                 if part.rows.get(id).is_some_and(|prior| prior != saved) {
                     return Err(backend("Catalog Query context disagrees"));
                 }
-                part.rows.insert(id.clone(), saved.clone());
+                let mut saved = saved.clone();
+                if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
+                    saved["summary"]["alive"] = serde_json::Value::Null;
+                    saved["summary"]["run"] = serde_json::Value::Null;
+                    if matches!(saved["summary"]["state"].as_str(), Some("working" | "waiting-question")) {
+                        saved["summary"]["state"] = serde_json::json!("unknown");
+                        saved["summary"]["open_question"] = serde_json::Value::Null;
+                    }
+                }
+                part.rows.insert(id.clone(), saved);
                 part.owners.insert(id.clone(), row.key.clone());
             }
         }
