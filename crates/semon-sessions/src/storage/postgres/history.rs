@@ -32,7 +32,8 @@ impl PgProjectionTransaction<'_> {
         {
             return Err(backend("outgoing recipe generation mismatch"));
         }
-        let observation = serde_json::to_string(&row.sources).map_err(backend)?;
+        let current_observation = self.current_observation(namespace, key, row.sources.clone()).await?;
+        let observation = serde_json::to_string(&current_observation).map_err(backend)?;
         let mut slots = self
             .history_slots(namespace, key, false, header.get(3))
             .await?
@@ -63,9 +64,15 @@ impl PgProjectionTransaction<'_> {
                 .history_slots(namespace, key, true, prior_header.get(2))
                 .await?;
             let observations = self.tx.query("SELECT observation FROM semon_projection.history_recipes WHERE namespace=$1 AND session_key=$2 ORDER BY slot", &[&namespace.binding(), &key]).await.map_err(backend)?;
-            for source in prior.sources {
-                if !row.sources.contains(&source) {
-                    row.sources.push(source);
+            let observations = observations.iter().map(|record| {
+                serde_json::from_str::<super::observation::Observation>(record.get(0)).map_err(backend)
+            }).collect::<Result<Vec<_>, _>>()?;
+            for retained in &observations {
+                if current_observation.covers(retained) { continue; }
+                for source in &retained.sources {
+                    if !row.sources.contains(source) {
+                        row.sources.push(source.clone());
+                    }
                 }
             }
             // Deduplicate only within the same consumed generation. Offsets and
@@ -75,8 +82,9 @@ impl PgProjectionTransaction<'_> {
                 .iter()
                 .map(|(slot, observation)| (slot.identity(), observation.clone()))
                 .collect();
-            for (slot, record) in previous.into_iter().zip(observations) {
-                let observation: String = record.get(0);
+            for (slot, retained) in previous.into_iter().zip(observations) {
+                if current_observation.covers(&retained) { continue; }
+                let observation = serde_json::to_string(&retained).map_err(backend)?;
                 if identities.insert((slot.identity(), observation.clone())) {
                     let at = slot
                         .t
@@ -117,7 +125,7 @@ impl PgProjectionTransaction<'_> {
             .map(|(_, observation)| observation.clone())
             .collect();
         let metadata = serde_json::to_string(&row).map_err(backend)?;
-        if metadata.len() + texts.iter().map(String::len).sum::<usize>() > 1024 * 1024 {
+        if metadata.len() + texts.iter().map(String::len).sum::<usize>() + observations.iter().map(String::len).sum::<usize>() > 1024 * 1024 {
             return Err(backend("retained component byte budget exceeded"));
         }
         let generation =
@@ -168,9 +176,10 @@ impl PgProjectionTransaction<'_> {
             .iter()
             .map(|record| {
                 let text: Option<&str> = record.get(0);
-                serde_json::from_str(
+                serde_json::from_str::<super::observation::Observation>(
                     text.ok_or_else(|| backend("selected observation budget exceeded"))?,
                 )
+                .map(|observation| observation.sources)
                 .map_err(backend)
             })
             .collect()
