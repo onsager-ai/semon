@@ -315,7 +315,8 @@ label only.
 
 **Tools.** The Codex `sleep` tool is label-only `Wait` with no waste: a bare
 sleep cannot prove what it waited for, and it is not a state change. (Counting it
-as Unmapped `Sleep` waste made Unmapped 61% of waste steps in a 7-day check.) Read-only tools (`WebFetch`, `WebSearch`, `web_search`, `_web_run`,
+as Unmapped `Sleep` waste made Unmapped 61% of waste steps in a 7-day check.)
+Read-only tools (`WebFetch`, `WebSearch`, `web_search`, `_web_run`,
 `ToolSearch`, `Skill`) are `Explore` and no longer break read or retry proofs;
 `AskUserQuestion` and `SubagentHandback` are `Report` and likewise not state
 changes. Claude `Monitor` is label-only `Wait` because it runs a script: it
