@@ -1109,7 +1109,7 @@ impl ViewerCore {
             && path.starts_with("/api/")
             && !matches!(
                 path,
-                "/api/sessions" | "/api/session-transcript" | "/api/session-resolve"
+                "/api/sessions" | "/api/session-transcript" | "/api/session-resolve" | "/api/session-annotations"
             )
         {
             return crate::catalog::error(
