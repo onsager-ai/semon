@@ -104,7 +104,11 @@ impl PgProjectionStore {
                 .await?;
             for mut row in page.rows {
                 let current: bool = tx.tx.query_one("SELECT lifecycle='current' FROM semon_projection.catalog WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &row.key]).await.map_err(backend)?.get(0);
-                row.lifecycle = if current { crate::model::summary::CatalogLifecycle::Current } else { crate::model::summary::CatalogLifecycle::Retained };
+                row.lifecycle = if current {
+                    crate::model::summary::CatalogLifecycle::Current
+                } else {
+                    crate::model::summary::CatalogLifecycle::Retained
+                };
                 let bytes = serde_json::to_vec(&row).map_err(backend)?.len();
                 *bytes_left = bytes_left
                     .checked_sub(bytes)
@@ -245,7 +249,10 @@ impl PgProjectionStore {
                 if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
                     saved["summary"]["alive"] = serde_json::Value::Null;
                     saved["summary"]["run"] = serde_json::Value::Null;
-                    if matches!(saved["summary"]["state"].as_str(), Some("working" | "waiting-question")) {
+                    if matches!(
+                        saved["summary"]["state"].as_str(),
+                        Some("working" | "waiting-question")
+                    ) {
                         saved["summary"]["state"] = serde_json::json!("unknown");
                         saved["summary"]["open_question"] = serde_json::Value::Null;
                     }
