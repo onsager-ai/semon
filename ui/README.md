@@ -226,7 +226,7 @@ selected values and all data/actions; no persistence or credential policy lives
 in this primitive. `ViewerHost.nativeNavigation` adds validated host-owned native
 links to the same shell, without extending the viewer router or poller.
 `tests/ui/compact-gallery.mjs` audits the new opt-in geometry and lifecycle;
-existing gallery baselines and thresholds are unchanged.
+existing gallery thresholds are unchanged.
 
 Compact composer pickers adopt the existing `createPanelChrome` and shared
 `createSelect` owners. The native-shell lifetime owns their enhancement and

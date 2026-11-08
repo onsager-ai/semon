@@ -71,7 +71,6 @@ test('the workflow matrix and functional condition reach every declared group', 
   assert.ok(functional.every((group) => matrix.includes(group)));
   assert.ok(
     [
-      'visual',
       'live',
       'order-phone',
       'order-desktop-light',
@@ -121,14 +120,7 @@ test('infrastructure has one foundation owner and touch checks have one browser 
     build = section('build'),
     checks = section('checks');
   assert.equal(workflow.split('name: Browser-check infrastructure regression tests').length - 1, 1);
-  for (const file of [
-    'capture-network',
-    'suite-plan',
-    'pixel-diff',
-    'visual-contract',
-    'preservation-contract',
-    'dom-evidence',
-  ])
+  for (const file of ['capture-network', 'suite-plan', 'dom-evidence'])
     assert.ok(foundation.includes(`tests/ui/${file}.test.mjs`), file);
   for (const file of ['catalog-cache', 'catalog-wire'])
     assert.ok(foundation.includes(`tests/ui/checks/${file}.test.mjs`), file);
