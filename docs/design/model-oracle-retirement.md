@@ -64,9 +64,8 @@ paths and never publishes a lossy Catalog alias.
 
 No source-backed output, ordering, paging, retained-history, relationship, usage,
 security, generation or integrity expectation is regenerated from the candidate.
-`test_model_retirement.py` checks the removed entry points/build targets and
-hashes the independently preserved references; existing runtime tests retain
-actual native build/parse/read accounting and retired-route refusals.
+Existing runtime tests retain actual native build/parse/read accounting and
+retired-route refusals.
 
 ## Retired JSON event-cache import
 

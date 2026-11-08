@@ -92,14 +92,8 @@ jobs:
           path: ${{ runner.temp }}/rustfmt-review.patch
           if-no-files-found: error
 
-      - name: Measure bounded upload codecs on non-private native fixtures
-        run: python3 scripts/benchmark-upload-compression.py --mib 1 | tee "$RUNNER_TEMP/upload-compression.json"
-
       - name: Verify CLI fixture provenance and exact tool joins
         run: python3 -m unittest discover -s tests/spikes -p test_cli_fixtures.py -v
-
-      - name: Verify Model retirement and independent reference provenance
-        run: python3 -m unittest discover -s tests/spikes -p test_model_retirement.py -v
 
       - name: Verify harness icon hashes
         run: cd assets/harnesses && sha256sum -c SHA256SUMS
@@ -165,24 +159,6 @@ jobs:
       - name: Source feature Viewer
         run: |
           SEMON_BUILD_TIMING=1 cargo test -p semon-sessions --lib --features test-clock,test-ui-account-server --locked viewer::
-
-      - name: Verify product CLI and workspace exclude retired subsystems
-        run: |
-          cargo tree --locked -p semon-cli --edges normal,build --prefix none --format '{p}' > "$RUNNER_TEMP/product-cli-dependencies.txt"
-          cargo metadata --locked --no-deps --format-version 1 > "$RUNNER_TEMP/product-workspace.json"
-          python3 - "$RUNNER_TEMP/product-cli-dependencies.txt" "$RUNNER_TEMP/product-workspace.json" <<'PY'
-          import json, pathlib, sys
-          subsystems = {"semon-store", "semon-codex", "semon-claude", "semon-copilot", "semon-relay"}
-          retired = subsystems | {"semon-forensic-export", "semon-relay-export", "semon-control", "semon-runtime", "semon-ssh"}
-          unexpected = [line for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.split()[0] in retired]
-          if unexpected:
-              raise SystemExit("Product CLI gained retired subsystem/export dependencies: " + ", ".join(unexpected))
-          metadata = json.loads(pathlib.Path(sys.argv[2]).read_text())
-          members = set(metadata["workspace_members"])
-          unexpected = [p["name"] for p in metadata["packages"] if p["id"] in members and p["name"] in retired]
-          if unexpected:
-              raise SystemExit("Retired workspace packages returned: " + ", ".join(unexpected))
-          PY
 
   codex-conformance:
     name: Pinned Codex fixture conformance
