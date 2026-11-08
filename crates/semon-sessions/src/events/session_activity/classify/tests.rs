@@ -1826,3 +1826,182 @@ fn unattributed_silent_exit_is_a_signal_not_waste() {
     assert!(mixed.silent_exit);
     assert_eq!(mixed.waste, Some(WasteKind::ExternalFailure));
 }
+
+#[test]
+fn activity_label_follows_first_matching_precedence() {
+    let shell = |command: &str| observed("Bash", command, json!("ok"), false).activity();
+    for (command, expected) in [
+        ("sleep 5", Some(Activity::Wait)),
+        ("gh run watch 123", Some(Activity::Wait)),
+        ("git add .", Some(Activity::Integrate)),
+        ("git commit -m synthetic", Some(Activity::Integrate)),
+        ("git push origin topic", Some(Activity::Integrate)),
+        ("git merge main", Some(Activity::Integrate)),
+        ("gh pr create --title t --body b", Some(Activity::Integrate)),
+        ("cargo test", Some(Activity::Verify)),
+        ("cd /work && cargo test", Some(Activity::Verify)),
+        ("gh pr checks 12", Some(Activity::Verify)),
+        ("touch file", Some(Activity::Implement)),
+        ("cat file", Some(Activity::Explore)),
+        ("rg needle", Some(Activity::Explore)),
+        ("git status", Some(Activity::Explore)),
+        ("cd /work", Some(Activity::Setup)),
+        ("unrecognized command", None),
+        // The earlier rule in precedence order wins within one call.
+        ("git add . && cargo test", Some(Activity::Integrate)),
+        ("sleep 1 && git commit -m synthetic", Some(Activity::Wait)),
+        ("cargo test && touch file", Some(Activity::Verify)),
+        ("touch file && cat file", Some(Activity::Implement)),
+        ("cd /work && cat file", Some(Activity::Explore)),
+        ("cat file && unrecognized command", Some(Activity::Explore)),
+    ] {
+        assert_eq!(shell(command), expected, "{command}");
+    }
+    // Ambiguous shell text proves nothing.
+    assert_eq!(shell("echo $(date)"), None);
+    // Checks that are still pending are waiting; settled checks verify.
+    let pending = claude_result("Bash", "gh pr checks 12", json!("Exit code 8\npending"), true);
+    assert_eq!(pending.activity(), Some(Activity::Wait));
+    let failing = claude_result("Bash", "gh pr checks 12", json!("Exit code 1\nfail"), true);
+    assert_eq!(failing.activity(), Some(Activity::Verify));
+    for (name, expected) in [
+        ("Edit", Some(Activity::Implement)),
+        ("Write", Some(Activity::Implement)),
+        ("MultiEdit", Some(Activity::Implement)),
+        ("NotebookEdit", Some(Activity::Implement)),
+        ("Read", Some(Activity::Explore)),
+        ("Grep", Some(Activity::Explore)),
+        ("Glob", Some(Activity::Explore)),
+        ("Agent", Some(Activity::Coordinate)),
+        ("Task", Some(Activity::Coordinate)),
+        ("SendMessage", Some(Activity::Coordinate)),
+        ("spawn_agent", Some(Activity::Coordinate)),
+        ("send_input", Some(Activity::Coordinate)),
+        ("wait_agent", Some(Activity::Wait)),
+        ("UnlistedTool", None),
+    ] {
+        let input = json!({"file_path":"/f","pattern":"p"});
+        assert_eq!(call(name, &input, None, "d".into()).activity(), expected, "{name}");
+    }
+    // Waiting on an agent is not coordination, though both are orchestration.
+    let waited = call("wait_agent", &Value::Null, None, "d".into());
+    let spawned = call("Agent", &Value::Null, None, "d".into());
+    assert!(waited.orchestration && spawned.orchestration);
+    assert_eq!(waited.agent, Some(AgentCall::Wait));
+    assert_eq!(spawned.agent, Some(AgentCall::Coordinate));
+}
+
+fn repeat_rows(calls: Vec<Observation>) -> Vec<LocatedObservation> {
+    let mut rows: Vec<_> = calls
+        .into_iter()
+        .enumerate()
+        .map(|(at, observation)| located(10 + 20 * at as u64, observation))
+        .collect();
+    classify_retries(&mut rows);
+    rows
+}
+
+fn failing_test() -> Observation {
+    claude_result("Bash", "cargo test", json!("Exit code 101\nfailed"), true)
+}
+
+fn passing_test() -> Observation {
+    claude_result("Bash", "cargo test", json!("ok"), false)
+}
+
+fn unknown_failure() -> Observation {
+    claude_result("Bash", "curl synthetic", json!("Exit code 2\nboom"), true)
+}
+
+fn unknown_success() -> Observation {
+    claude_result("Bash", "curl synthetic", json!("fine"), false)
+}
+
+#[test]
+fn flaky_rerun_needs_a_failed_verification_that_now_passes() {
+    let rows = repeat_rows(vec![failing_test(), passing_test()]);
+    assert!(rows[0].observation.verify_failure);
+    assert_eq!(rows[0].observation.waste, None);
+    assert_eq!(rows[1].observation.waste, Some(WasteKind::FlakyRerun));
+    assert_eq!(WasteKind::FlakyRerun.category(), WasteCategory::External);
+    // Read-only calls and sleeps between the two do not change state.
+    let rows = repeat_rows(vec![
+        failing_test(),
+        claude_result("Bash", "cat file", json!("body"), false),
+        claude_result("Bash", "sleep 30", json!("ok"), false),
+        passing_test(),
+    ]);
+    assert_eq!(rows[3].observation.waste, Some(WasteKind::FlakyRerun));
+    // A verification that fails again is a retry, not a flaky rerun.
+    let rows = repeat_rows(vec![failing_test(), failing_test(), passing_test()]);
+    assert_eq!(rows[1].observation.waste, Some(WasteKind::Retry));
+    assert!(rows[1].observation.verify_failure);
+    assert_eq!(rows[2].observation.waste, Some(WasteKind::FlakyRerun));
+}
+
+#[test]
+fn retry_follows_any_failed_call_and_its_category_is_unmapped() {
+    let rows = repeat_rows(vec![unknown_failure(), unknown_success()]);
+    assert_eq!(rows[0].observation.waste, Some(WasteKind::OtherFailure));
+    assert_eq!(rows[1].observation.waste, Some(WasteKind::Retry));
+    assert_eq!(WasteKind::Retry.category(), WasteCategory::Unmapped);
+    // A failed repeat gives way to the repeat marker.
+    let rows = repeat_rows(vec![unknown_failure(), unknown_failure(), unknown_success()]);
+    assert_eq!(rows[1].observation.waste, Some(WasteKind::Retry));
+    assert_eq!(rows[2].observation.waste, Some(WasteKind::Retry));
+    // A repeat of a call that succeeded is not a retry.
+    let rows = repeat_rows(vec![unknown_success(), unknown_success()]);
+    assert!(rows.iter().all(|row| row.observation.waste.is_none()));
+    // A different command or a different source is not a repeat.
+    let rows = repeat_rows(vec![
+        unknown_failure(),
+        claude_result("Bash", "curl other", json!("fine"), false),
+    ]);
+    assert!(rows[1].observation.waste.is_none());
+    let mut rows = vec![
+        located(10, unknown_failure()),
+        located(30, unknown_success()),
+    ];
+    rows[1].position.source = "z-other".into();
+    classify_retries(&mut rows);
+    assert!(rows[1].observation.waste.is_none());
+    // The repeat must start after the failed result is recorded.
+    let mut rows = vec![
+        located(10, unknown_failure()),
+        located(15, unknown_success()),
+    ];
+    rows[0].result_offset = Some(20);
+    classify_retries(&mut rows);
+    assert!(rows[1].observation.waste.is_none());
+}
+
+#[test]
+fn an_intervening_state_change_breaks_the_repeat_but_the_repeat_itself_does_not() {
+    for (between, expected) in [
+        ("touch file", None),
+        ("cargo clippy", None),
+        ("unrecognized command", None),
+        ("git commit -m synthetic", None),
+        ("git status", Some(WasteKind::FlakyRerun)),
+        ("rg needle", Some(WasteKind::FlakyRerun)),
+    ] {
+        let rows = repeat_rows(vec![
+            failing_test(),
+            claude_result("Bash", between, json!("ok"), false),
+            passing_test(),
+        ]);
+        assert_eq!(rows[2].observation.waste, expected, "{between}");
+    }
+    // The change must be between the calls: an earlier one does not matter.
+    let rows = repeat_rows(vec![
+        claude_result("Bash", "touch file", json!("ok"), false),
+        failing_test(),
+        passing_test(),
+    ]);
+    assert_eq!(rows[2].observation.waste, Some(WasteKind::FlakyRerun));
+    // A native edit between the calls changes state too.
+    let mut edit = call("Edit", &json!({"file_path":"/f"}), None, "d".into());
+    finish(&mut edit, &json!("ok"), false, None, None, "r".into());
+    let rows = repeat_rows(vec![failing_test(), edit, passing_test()]);
+    assert_eq!(rows[2].observation.waste, None);
+}

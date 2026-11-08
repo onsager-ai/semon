@@ -42,7 +42,7 @@ parent and child steps must never create a family thrash window.
 Schema 41 stores a session activity header, ordered step rows keyed by
 `(session_key, generation, ordinal)`, separate ordered compaction rows, compact summary metadata, and typed
 change facts keyed by session, generation and stable identity.
-Parser 35 retains the exact last Claude usage observation offset alongside the
+Parser 36 retains the exact last Claude usage observation offset alongside the
 existing message ID and assistant UUIDs. The producer uses its established file
 merge order and copied-record ownership map; Codex reads only model-accepted
 facts whose normalized source receipt matches the selected consumed ledger.
@@ -71,9 +71,9 @@ generation. Unknown prices remain unknown. Step arrays stay out of cached descri
 relationships rather than entering the stable description cache. Catalog version 8
 and the semantic recipe bind this output.
 
-Rules version 6 classifies the first waste per step in this order: orchestration
-wait or checks pending, explicit tool failure, refill after compaction, redundant
-read. Failures retain path-not-found, malformed-command, timeout and rejected
+Rules version 7 classifies the first waste per step in this order: orchestration
+wait or checks pending, explicit tool failure or repeat (retry, flaky rerun), refill
+after compaction, redundant read. Failures retain path-not-found, malformed-command, timeout and rejected
 tool input (Tooling), rate/auth/network/server failure (External), checks pending
 (Orchestration), merge conflict and other failure (Unmapped). Empty search,
 verify failure and silent exit are independent non-waste signals; other sleeps
@@ -214,17 +214,82 @@ complete observation contains `rules_version`, `pricing_fingerprint`,
 `totals: {observed, exclusive, shared}`, `by_band`, `compactions`, `thrash`,
 `waste_by_kind`, `waste_by_category`, `waste_cost_by_kind`,
 `waste_cost_by_category`, `wait_time_ms`, `waits_without_interval`,
-`levers_not_computed: ["TaskSpecification"]`, `empty_search_steps`,
-`verify_failure_steps`, `silent_exit_steps`, `change_facts` and
-`exclusive_cost_complete`. Each step total has `steps`, `list_cost_usd`,
+`levers_not_computed: ["TaskSpecification"]`, `activities_not_computed`,
+`triggers_not_computed`, `by_activity`, `by_trigger`, `unlabelled_activity_steps`,
+`empty_search_steps`, `verify_failure_steps`, `silent_exit_steps`, `change_facts`
+and `exclusive_cost_complete`. Each step total has `steps`, `list_cost_usd`,
 `carry_cost_usd` and `elapsed_ms`; measurements preserve `{known, unknown_steps}`.
 Each waste cost total has `steps`, `elapsed_ms` and `list_cost_usd` measurements;
 only exclusive steps contribute. Wait time and missing-interval counts contain
 `observed`, `exclusive` and `shared` values, following `OwnershipTotals`; intervals
 are unioned separately for each ownership view. Absent native usage/projections
 remain null. No thrash-window/step arrays enter these summaries. TaskSpecification
-is a known uncomputed lever in rules version 6. `get_session_activity` steps carry
-the matching booleans `empty_search`, `verify_failure` and `silent_exit`.
+is a known uncomputed lever in rules version 7. `get_session_activity` steps carry
+the matching booleans `empty_search`, `verify_failure` and `silent_exit`, plus the
+nullable `activity` and `trigger` labels described below.
+
+### Rules version 7: activity labels, repeats and triggers
+
+Version 7 adds a per-step `activity`, two repeat waste kinds and a per-step
+`trigger`. Nothing stores command text or paths: labels come from the existing
+allowlisted command tags, and repeats compare a SHA-256 call fingerprint.
+
+**Activity.** Each call yields the first matching label below; a step takes the
+first match over its calls. Order is precedence.
+
+| Activity | Evidence |
+| --- | --- |
+| `Coordinate` | An agent or session is spawned, messaged or steered: `Agent`, `Task`, `SendMessage`, `spawn_agent`, `send_message`, `send_input`. |
+| `Wait` | `sleep`, `gh run watch` or `gh pr checks --watch`, `gh pr checks` still pending (exit 8), `wait_agent` or a decoded native wait result. |
+| `Integrate` | `git commit`, `push`, `merge`/`rebase`/`cherry-pick`/`pull`, `git add`, `gh pr create`. |
+| `Verify` | A recognized verification command, or `gh pr checks` that is not pending. |
+| `Recover` | Not computed. Never assigned. |
+| `Implement` | Native `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `apply_patch`, a PR body file write, or a mutating command (`git checkout`, `rm`, `mv`, `touch`, ...). |
+| `Explore` | A read, search or `git status`/`diff`/`log`/`show`/`rev-parse`. |
+| `Setup` | A literal absolute `cd`. |
+| `Report`, `Think` | Not derived (see below). |
+
+Coordination and waiting are distinct typed evidence: the older orchestration
+flag still marks blocking agent calls as orchestration-wait waste, but a spawn or
+message is `Coordinate` while only a wait on an agent is `Wait`. Unknown and
+ambiguous commands prove nothing, so a step with only those, or with no tool
+call, has `activity: null`; there is no "other" value. `report` and `think` need
+to know whether a tool-free step emitted assistant text, and the step facts do
+not carry that evidence (a thinking-only response is not observable), so those
+steps stay unlabelled rather than guessed. The summary counts them in
+`unlabelled_activity_steps`, and `activities_not_computed` is `["Recover"]`.
+`by_activity` totals exclusive labelled steps (`steps`, `elapsed_ms`,
+`list_cost_usd` with the waste-total shape); labelled plus unlabelled steps equal
+the exclusive step total. Family values sum the same maps.
+
+**Retry and flaky rerun.** Each call has an optional SHA-256 fingerprint of its
+tool name and exact input (the command and working directory for shell tools,
+bound to the source's directory like read selections). Within one source, a call
+repeats an earlier failed call when the fingerprints match, the earlier result
+was recorded before the repeat, and no call strictly between them changes state.
+State changes are those that already break read proofs: mutations, unknown or
+ambiguous commands, commits, pushes, merges, pull requests and verification
+commands, plus agent calls. Read-only calls and sleeps do not. The repeat itself
+is never that intervening change, so a verification command repeated back to back
+qualifies. "Failed" means a failure waste kind (path-not-found, malformed command,
+rejected tool input, timeout, external failure, other failure, merge conflict) or a
+`verify_failure`. If the earlier call was a verification or PR-checks failure and
+the repeat completed successfully the repeat is `FlakyRerun` (External); every
+other repeat is `Retry` (Unmapped), including a repeat that fails again. The mark
+goes on the repeat's step, replaces the repeat's own failure kind and never
+replaces wait, sleep or context waste. Both kinds rank with the failure kinds in
+first-waste-per-step selection, so within a step the earliest of them wins.
+
+**Trigger.** Only steps with waste or a `verify_failure` carry a `trigger`:
+`Compaction` for a refill; otherwise the evidence of the nearest preceding step in
+the same ownership lane (exclusive, or shared), tested in order: failed-call waste
+(other than external) is `ToolError`, empty search `EmptyResult`, verify failure
+`TestOrCiFailure`, external failure `ExternalError`, a `Wait` activity or
+checks-pending/sleep waste `Polling`, a `Coordinate` activity or orchestration-wait
+waste `WorkerResult`, else `NoneVisible` (also when no preceding step exists).
+Repeat markers are not failures of the preceding call. `by_trigger` totals
+exclusive triggered steps with the waste-total shape. `triggers_not_computed` is
+`["InstructionChange", "MissingInput"]`.
 
 A nullable `family` summarizes only the exact existing parent chain, using
 producer-side leaf reduction and bounded stored-summary refresh for independently

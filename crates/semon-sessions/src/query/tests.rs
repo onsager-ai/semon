@@ -6677,6 +6677,13 @@ fn sanitized_activity_query_matches_owned_golden() {
             "waste_cost_by_kind":summary["waste_cost_by_kind"],
             "waste_cost_by_category":summary["waste_cost_by_category"],
             "levers_not_computed":summary["levers_not_computed"],
+            "activities_not_computed":summary["activities_not_computed"],
+            "triggers_not_computed":summary["triggers_not_computed"],
+            "by_activity_steps":summary["by_activity"].as_object().unwrap().iter()
+                .map(|(activity, totals)| (activity.clone(), totals["steps"].clone()))
+                .collect::<serde_json::Map<_, _>>(),
+            "by_trigger":summary["by_trigger"],
+            "unlabelled_activity_steps":summary["unlabelled_activity_steps"],
             "family":summary["family"]
         },
         "page": {

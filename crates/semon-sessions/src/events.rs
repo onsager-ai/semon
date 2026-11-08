@@ -91,7 +91,7 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v31: source-bound typed activity observations, without tool input/output.
 /// v32: assistant-only Claude tools and expanded typed activity classification.
 /// v33: literal PR bodies and code-mode printed-output activity observations.
-pub(crate) const CACHE_VERSION: u32 = 35;
+pub(crate) const CACHE_VERSION: u32 = 36;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

@@ -855,6 +855,10 @@ fn family_fold_sums_session_wait_unions_and_waste_costs() {
     }];
     child.steps[0].elapsed_ms = Some(15);
     child.steps[0].list_cost_usd = Some(0.3);
+    for member in [&mut parent, &mut child] {
+        member.steps[0].activity = Some(classify::Activity::Wait);
+        member.steps[0].trigger = Some(Trigger::Polling);
+    }
 
     let family = analytics::families(
         [
@@ -870,6 +874,19 @@ fn family_fold_sums_session_wait_unions_and_waste_costs() {
     assert_eq!(waste_totals.steps, 2);
     assert_eq!(waste_totals.elapsed_ms.known, 25);
     assert_eq!(waste_totals.list_cost_usd.known, 0.5);
+    let waiting = &family.counts.by_activity[&classify::Activity::Wait];
+    assert_eq!(waiting.steps, 2);
+    assert_eq!(waiting.elapsed_ms.known, 25);
+    assert_eq!(family.counts.by_trigger[&Trigger::Polling].steps, 2);
+    assert_eq!(family.counts.unlabelled_activity_steps, 0);
+    assert_eq!(family.activities_not_computed, [classify::Activity::Recover]);
+    assert_eq!(
+        family.triggers_not_computed,
+        [
+            analytics::TriggerNotComputed::InstructionChange,
+            analytics::TriggerNotComputed::MissingInput
+        ]
+    );
     assert_eq!(
         family.levers_not_computed,
         vec![analytics::LeverNotComputed::TaskSpecification]
@@ -942,4 +959,192 @@ fn fact_links_require_a_qualified_step_in_this_projection() {
         assert!(matches!(activity.facts[0].change, Change::Commit { .. }));
         assert_eq!(activity.facts[0].step_id, exact.then_some(id));
     }
+}
+
+fn observe(
+    id: &str,
+    offset: u64,
+    name: &str,
+    command: &str,
+    output: serde_json::Value,
+    error: bool,
+) -> classify::LocatedObservation {
+    let mut observation = classify::call(
+        name,
+        &json!({"command":command, "file_path":"file"}),
+        Some(claude_id(id)),
+        "call-hash".into(),
+    );
+    classify::finish(&mut observation, &output, error, None, None, "result".into());
+    classify::LocatedObservation {
+        position: position("s", offset),
+        timestamp: None,
+        result_offset: Some(offset + 1),
+        observation,
+    }
+}
+
+#[test]
+fn step_activity_trigger_retry_and_coverage_flow_through_analytics() {
+    use classify::{Activity, WasteCategory, WasteKind};
+    let mut result = activity(
+        vec![
+            step("s1", "s", 0, Some(0)),
+            step("s2", "s", 100, Some(1_000)),
+            step("s3", "s", 200, Some(2_000)),
+            step("s4", "s", 300, Some(3_000)),
+        ],
+        vec![],
+    );
+    apply_observations(
+        &mut result,
+        vec![
+            observe("s1", 10, "Bash", "curl synthetic", json!("boom"), true),
+            observe("s2", 110, "Bash", "curl synthetic", json!("fine"), false),
+            observe("s3", 210, "Read", "", json!("body"), false),
+            observe(
+                "s3",
+                220,
+                "Bash",
+                "git commit -m synthetic",
+                json!("[main abc1234] synthetic"),
+                false,
+            ),
+        ],
+    );
+    let activities: Vec<_> = result.steps.iter().map(|step| step.activity).collect();
+    // Unknown commands prove nothing; a step takes the first match among its
+    // calls; a step with no tool call has no label.
+    assert_eq!(activities, [None, None, Some(Activity::Integrate), None]);
+    assert_eq!(result.steps[0].waste, Some(WasteKind::OtherFailure));
+    assert_eq!(result.steps[1].waste, Some(WasteKind::Retry));
+    assert_eq!(result.steps[1].waste_category, Some(WasteCategory::Unmapped));
+    let triggers: Vec<_> = result.steps.iter().map(|step| step.trigger).collect();
+    assert_eq!(
+        triggers,
+        [Some(Trigger::NoneVisible), Some(Trigger::ToolError), None, None]
+    );
+    let analytics = analytics::Analytics::of(&result);
+    let counts = &analytics.counts;
+    assert_eq!(counts.by_activity.len(), 1);
+    assert_eq!(counts.by_activity[&Activity::Integrate].steps, 1);
+    assert_eq!(counts.by_activity[&Activity::Integrate].elapsed_ms.known, 1_000);
+    assert_eq!(counts.unlabelled_activity_steps, 3);
+    assert_eq!(
+        counts.by_activity.values().map(|totals| totals.steps).sum::<u64>()
+            + counts.unlabelled_activity_steps,
+        counts.totals.exclusive.steps
+    );
+    assert_eq!(counts.by_trigger[&Trigger::ToolError].steps, 1);
+    assert_eq!(counts.by_trigger[&Trigger::NoneVisible].steps, 1);
+    assert_eq!(counts.waste_by_kind[&WasteKind::Retry], 1);
+    assert_eq!(analytics.activities_not_computed, [Activity::Recover]);
+    assert_eq!(
+        analytics.triggers_not_computed,
+        [
+            analytics::TriggerNotComputed::InstructionChange,
+            analytics::TriggerNotComputed::MissingInput
+        ]
+    );
+}
+
+#[test]
+fn trigger_follows_refill_then_the_nearest_preceding_step_in_lane() {
+    use classify::{Activity, WasteKind};
+    let fresh = || {
+        activity(
+            (0..3)
+                .map(|n| step(&format!("s{n}"), "s", n * 100, Some(n as i64)))
+                .collect(),
+            vec![],
+        )
+        .steps
+    };
+    let cases: [(fn(&mut ActivityStep), Trigger); 17] = [
+        (
+            |p| p.waste = Some(WasteKind::PathNotFound),
+            Trigger::ToolError,
+        ),
+        (|p| p.waste = Some(WasteKind::Timeout), Trigger::ToolError),
+        (|p| p.empty_search = true, Trigger::EmptyResult),
+        (|p| p.verify_failure = true, Trigger::TestOrCiFailure),
+        (
+            |p| p.waste = Some(WasteKind::ExternalFailure),
+            Trigger::ExternalError,
+        ),
+        (|p| p.waste = Some(WasteKind::Sleep), Trigger::Polling),
+        (|p| p.waste = Some(WasteKind::ChecksPending), Trigger::Polling),
+        (|p| p.activity = Some(Activity::Wait), Trigger::Polling),
+        (
+            |p| p.activity = Some(Activity::Coordinate),
+            Trigger::WorkerResult,
+        ),
+        (
+            |p| p.waste = Some(WasteKind::OrchestrationWait),
+            Trigger::WorkerResult,
+        ),
+        (
+            |p| {
+                p.waste = Some(WasteKind::OrchestrationWait);
+                p.activity = Some(Activity::Wait);
+            },
+            Trigger::Polling,
+        ),
+        (|_| {}, Trigger::NoneVisible),
+        // Repeat markers are not failures of the preceding call.
+        (|p| p.waste = Some(WasteKind::Retry), Trigger::NoneVisible),
+        (
+            |p| {
+                p.waste = Some(WasteKind::PathNotFound);
+                p.verify_failure = true;
+            },
+            Trigger::ToolError,
+        ),
+        (
+            |p| {
+                p.empty_search = true;
+                p.verify_failure = true;
+            },
+            Trigger::EmptyResult,
+        ),
+        (
+            |p| {
+                p.verify_failure = true;
+                p.waste = Some(WasteKind::ExternalFailure);
+            },
+            Trigger::TestOrCiFailure,
+        ),
+        (
+            |p| {
+                p.waste = Some(WasteKind::ExternalFailure);
+                p.activity = Some(Activity::Wait);
+            },
+            Trigger::ExternalError,
+        ),
+    ];
+    for (index, (setup, expected)) in cases.into_iter().enumerate() {
+        let mut steps = fresh();
+        setup(&mut steps[0]);
+        steps[1].waste = Some(WasteKind::Timeout);
+        assert_eq!(Trigger::of(&steps, 1), Some(expected), "case {index}");
+    }
+    let mut steps = fresh();
+    steps[0].waste = Some(WasteKind::PathNotFound);
+    // Refill follows compaction whatever precedes it; no waste or verify
+    // failure means no trigger; the first step has nothing visible before it.
+    steps[1].waste = Some(WasteKind::Refill);
+    assert_eq!(Trigger::of(&steps, 1), Some(Trigger::Compaction));
+    assert_eq!(Trigger::of(&steps, 2), None);
+    steps[2].verify_failure = true;
+    assert_eq!(Trigger::of(&steps, 2), Some(Trigger::NoneVisible));
+    steps[0].verify_failure = true;
+    assert_eq!(Trigger::of(&steps, 0), Some(Trigger::NoneVisible));
+    // Only the same ownership lane supplies evidence.
+    let mut steps = fresh();
+    steps[0].waste = Some(WasteKind::PathNotFound);
+    steps[1].ownership = Ownership::Shared("key".into());
+    steps[1].waste = Some(WasteKind::Timeout);
+    steps[2].waste = Some(WasteKind::Timeout);
+    assert_eq!(Trigger::of(&steps, 1), Some(Trigger::NoneVisible));
+    assert_eq!(Trigger::of(&steps, 2), Some(Trigger::ToolError));
 }
