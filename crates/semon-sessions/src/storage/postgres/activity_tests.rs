@@ -64,7 +64,8 @@ pub(super) async fn lifecycle(dsn: &str) {
     assert!(first["items"][0].get("position").is_none());
     crate::storage::conformance::produce(&Namespace::new("sqlite-activity").unwrap(), &sqlite)
         .unwrap();
-    let mut query = crate::Query::new(sqlite.clone());
+    let sqlite_sources = std::sync::Arc::new(crate::SessionSources::with_machines(vec![("sqlite-activity".into(), sqlite.clone())]));
+    let mut query = crate::Query::from_sources(sqlite_sources);
     let local = query
         .call("get_session_activity", &json!({"id":"native"}))
         .unwrap();
@@ -150,6 +151,23 @@ pub(super) async fn lifecycle(dsn: &str) {
         assert_eq!(tx.query_one(&format!("SELECT count(*) FROM semon_projection.{table} WHERE namespace='foreign-runtime'"), &[]).await.unwrap().get::<_,i64>(0), 0);
     }
     tx.commit().await.unwrap();
+    drop(query);
+    drop(store);
+    let runtime_options = options.clone();
+    let runtime_dsn = dsn.to_owned();
+    let runtime_probe = std::thread::spawn(move || {
+        let storage = crate::storage::runtime::RuntimeStore::postgres(&runtime_options, namespace.clone(), &runtime_dsn).unwrap();
+        let evidence = crate::native_evidence::NativeEvidence::with_storage(runtime_options, storage);
+        let sources = std::sync::Arc::new(crate::native_evidence::SessionSources::from_evidence(vec![(namespace.to_string(), evidence)]));
+        let mut query = crate::Query::from_sources(sources.clone());
+        let routed = query.call("get_session_activity", &json!({"id":"native"})).unwrap();
+        assert_eq!(routed["items"], appended["items"]);
+        let selected = query.call_selected(namespace.as_str(), "native", "get_session_activity", &json!({"id":"native"}), None, crate::SessionSourceReadMode::LocalOrPinnedProvider).unwrap();
+        assert_eq!(selected["items"], routed["items"]);
+        sources.retire();
+    });
+    while !runtime_probe.is_finished() { tokio::time::sleep(std::time::Duration::from_millis(20)).await; }
+    runtime_probe.join().unwrap();
     #[cfg(target_os = "linux")]
     watch.assert_untouched(&options);
 }
