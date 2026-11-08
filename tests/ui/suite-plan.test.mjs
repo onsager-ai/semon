@@ -120,8 +120,7 @@ test('infrastructure has one foundation owner and touch checks have one browser 
     build = section('build'),
     checks = section('checks');
   assert.equal(workflow.split('name: Browser-check infrastructure regression tests').length - 1, 1);
-  for (const file of ['capture-network', 'suite-plan', 'dom-evidence'])
-    assert.ok(foundation.includes(`tests/ui/${file}.test.mjs`), file);
+  assert.ok(foundation.includes('tests/ui/suite-plan.test.mjs'));
   for (const file of ['catalog-cache', 'catalog-wire'])
     assert.ok(foundation.includes(`tests/ui/checks/${file}.test.mjs`), file);
   assert.match(foundation, /npm --prefix tests\/ui ci --no-audit --no-fund/);

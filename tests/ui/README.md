@@ -60,9 +60,8 @@ its completion witness is the native-publication success message in the CI log.
 
 Workflow dispatch exposes `exhaustive` for deeper touch audits.
 `refresh_diagnostics` also runs the candidate harness against pinned recovery baseline `c402e481dbe23bcf03841e47b5f7eccd14c0e426`. This comparison runs only on explicit manual dispatch. Both binaries use the same runner, locked browser, long fixture, viewports and 4× CPU throttle. The original three append samples and assertions remain; eight additional appends sweep 0/750/1500/2250 ms after naturally occurring selected-metadata requests twice. Each still appends ten records. `perf.json` and `refresh-baseline/perf.json` retain per-endpoint CDP admission/response/completion/failure/cancellation, observed JSON generation/refresh state, and marker DOM-commit/two-frame-visible times. These are browser observations, not server worker-admission or index-publication timestamps; returned generations bound when changed evidence first becomes observable. No extra product polling or timer changes are introduced. Timing remains report-only; missing markers, instrumentation and page errors fail as before.
-The infrastructure tests (capture network lifecycle, `suite-plan`, tap hit-testing,
-catalog cache, catalog wire validation and bounded DOM evidence) guard coverage
-selection and the capture machinery.
+The infrastructure tests (`suite-plan`, tap hit-testing, catalog cache and catalog
+wire validation) guard coverage selection and the shared browser helpers.
 
 The diagnostic comparison also enables the existing `SEMON_BUILD_TIMING` observer
 on both fixture servers. Each screen retains at most 20,000 sanitized phase,

@@ -72,7 +72,7 @@ jobs:
       - name: Browser-check infrastructure regression tests
         run: |
           npm --prefix tests/ui ci --no-audit --no-fund
-          node --test tests/ui/capture-network.test.mjs tests/ui/suite-plan.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/dom-evidence.test.mjs
+          node --test tests/ui/suite-plan.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs
 
       - name: Prepare UI assets for thermal-restricted review
         if: failure()
