@@ -5,6 +5,7 @@
 use super::{Namespace, ProjectionTag, StorageError, TagCheck, ensure};
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
+mod activity;
 mod annotations;
 mod collection;
 mod context;
@@ -14,6 +15,7 @@ mod index;
 mod observation;
 mod producer;
 mod proof_reader;
+mod query_history;
 mod raw;
 mod retention;
 mod runtime;
@@ -43,7 +45,7 @@ fn backend(error: impl std::fmt::Display) -> StorageError {
 
 fn stamp() -> String {
     format!(
-        "semon-session-store/1 backend=postgres schema=12 parser={} projector={}",
+        "semon-session-store/1 backend=postgres schema=13 parser={} projector={}",
         crate::events::CACHE_VERSION,
         crate::model::summary::CATALOG_VERSION
     )

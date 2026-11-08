@@ -89,6 +89,22 @@ impl Observation {
     pub(crate) fn identity(&self) -> &str {
         &self.identity
     }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn accepted_steps(observations: &[Self], path: &str) -> io::Result<Vec<crate::events::session_activity::UsageStep>> {
+        use crate::events::session_activity::{SourcePosition, UsageStep};
+        let mut seen = BTreeSet::new();
+        let mut steps = Vec::new();
+        for observation in observations {
+            let Some(model) = &observation.payload.model else { continue };
+            // The first model-qualified observation owns this exact identity,
+            // including when a later duplicate supplies conflicting counts.
+            if !seen.insert(&observation.identity) { continue; }
+            let identity = serde_json::from_str(&observation.identity).map_err(io::Error::other)?;
+            steps.push(UsageStep::normalized_codex(identity, SourcePosition { source: path.into(), offset: observation.record.offset }, CodexUsageEvent { model: model.clone(), tokens: observation.payload.model_tokens.clone(), timestamp: observation.payload.timestamp }));
+        }
+        Ok(steps)
+    }
 }
 
 #[derive(Serialize, Deserialize)]

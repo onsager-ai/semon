@@ -559,6 +559,32 @@ impl RuntimeStore {
         crate::query::catalog::sqlite_recheck(&self.options, part)
     }
 
+    #[cfg(feature = "postgres")]
+    pub(crate) fn activity_target(&self, requested: &str, now: i64) -> io::Result<Option<String>> {
+        let _ = now;
+        let postgres = self.postgres.as_ref().expect("PostgreSQL activity owner");
+        let mut postgres = postgres.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Postgres { runtime, store } = &mut *postgres;
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+        runtime.block_on(async {
+            let tx = store.begin(namespace).await?;
+            let keys = tx.tx.query("SELECT session_key FROM semon_projection.catalog WHERE namespace=$1 AND lifecycle='current' AND (session_key=$2 OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(metadata::jsonb->'native_ids') id WHERE id=$2)) ORDER BY session_key LIMIT 2", &[&namespace.binding(), &requested]).await.map_err(|error| StorageError::Backend(error.to_string()))?;
+            if keys.len() > 1 { return Err(StorageError::Backend("ambiguous activity identity".into())); }
+            let key = keys.first().map(|row| row.get(0));
+            tx.commit(namespace).await?;
+            Ok(key)
+        }).map_err(io::Error::other)
+    }
+
+    #[cfg(feature = "postgres")]
+    pub(crate) fn activity_query(&self, key: &str, args: &serde_json::Value, provider: Option<&dyn crate::SessionSourceReader>, mode: crate::SessionSourceReadMode, now: i64) -> Result<serde_json::Value, crate::QueryError> {
+        let postgres = self.postgres.as_ref().expect("PostgreSQL activity owner");
+        let mut postgres = postgres.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Postgres { runtime, store } = &mut *postgres;
+        let namespace = self.namespace.as_ref().expect("PostgreSQL namespace");
+        runtime.block_on(store.activity_query(namespace, &self.options, key, args, provider, mode, now)).map_err(|error| crate::QueryError::new("stale_projection", error.to_string()))
+    }
+
     pub(crate) fn with_selected_query<T>(
         &self,
         key: &str,

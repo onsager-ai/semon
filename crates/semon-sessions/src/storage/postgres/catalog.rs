@@ -185,6 +185,7 @@ impl PgProjectionTransaction<'_> {
         hash.update(serde_json::to_vec(&recipes).map_err(backend)?);
         let generation = format!("{:x}", hash.finalize());
         for (row, metadata) in publication.rows.iter().zip(&encoded) {
+            self.publish_activity(namespace, row).await?;
             self.tx.execute(
                 "INSERT INTO semon_projection.catalog(namespace,session_key,lifecycle,last_ms,harness,repo,model,metadata) VALUES($1,$2,'current',$3,$4,$5,$6,$7) ON CONFLICT(namespace,session_key) DO UPDATE SET lifecycle='current',last_ms=excluded.last_ms,harness=excluded.harness,repo=excluded.repo,model=excluded.model,metadata=excluded.metadata",
                 &[&namespace.binding(), &row.key, &row.last.unwrap_or(0), &row.harness, &row.repo.as_deref().unwrap_or(""), &row.model, metadata],

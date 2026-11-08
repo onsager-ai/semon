@@ -1005,12 +1005,6 @@ impl Query {
             .machines
             .iter()
             .any(|(_, source)| source.storage.is_postgres());
-        if postgres && tool == "get_session_activity" {
-            return Err(QueryError::new(
-                "capability_unavailable",
-                "Session activity is not yet available on PostgreSQL",
-            ));
-        }
         let _activity_scope =
             (tool == "get_session_activity").then(crate::selected_read::Scope::ensure);
         if tool == "get_session_activity" && !self.embedded && !self.sources.is_retired() {
@@ -1266,12 +1260,6 @@ impl Query {
         if self.sources.is_retired() {
             return Err(QueryError::new("io", "native query source is closed"));
         }
-        if evidence.storage.is_postgres() && tool == "get_session_activity" {
-            return Err(QueryError::new(
-                "capability_unavailable",
-                "Selected activity is not yet available on PostgreSQL",
-            ));
-        }
         let mut focused_args = args.clone();
         if self.sources.machines.len() > 1 {
             let labels = self.source_labels();
@@ -1291,15 +1279,16 @@ impl Query {
             .map(|reader| reader as &dyn crate::SessionSourceReader);
         let rendering = provider.map(|reader| (reader, mode));
         if tool == "get_session_activity" {
-            let mut answer = activity::read(
-                &evidence.options,
-                evidence.storage.namespace(),
-                catalog_key,
-                &focused_args,
-                provider,
-                mode,
-                now,
-            )?;
+            let mut answer = {
+                #[cfg(feature = "postgres")]
+                if evidence.storage.is_postgres() {
+                    evidence.storage.activity_query(catalog_key, &focused_args, provider, mode, now)?
+                } else {
+                    activity::read(&evidence.options, evidence.storage.namespace(), catalog_key, &focused_args, provider, mode, now)?
+                }
+                #[cfg(not(feature = "postgres"))]
+                activity::read(&evidence.options, evidence.storage.namespace(), catalog_key, &focused_args, provider, mode, now)?
+            };
             if self.sources.is_retired() {
                 return Err(QueryError::new("io", "native query source is closed"));
             }

@@ -1369,6 +1369,16 @@ impl NativeEvidence {
     /// then derive only its exact identity/lineage closure. Discovery retains
     /// one bounded page; unrelated native event rows are never decoded.
     pub(crate) fn activity_target(&self, requested: &str, now: i64) -> io::Result<Option<String>> {
+        #[cfg(feature = "postgres")]
+        if self.storage.is_postgres() {
+            let mut work = lock(&self.storage.work);
+            for _ in 0..256 {
+                crate::selected_read::check()?;
+                if self.refresh_catalog(&mut work, now)? { break; }
+            }
+            drop(work);
+            return self.storage.activity_target(requested, now);
+        }
         let mut selectors = BTreeSet::from([requested.to_owned()]);
         if let Some((harness, id)) = requested.trim_start_matches(':').split_once(':')
             && matches!(harness, "claude" | "codex" | "copilot")
