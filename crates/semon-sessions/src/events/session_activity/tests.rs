@@ -1074,7 +1074,7 @@ fn step_activity_trigger_retry_and_coverage_flow_through_analytics() {
 }
 
 #[test]
-fn trigger_follows_refill_then_the_nearest_preceding_step_in_lane() {
+fn trigger_follows_refill_then_the_nearest_preceding_step_in_source() {
     use classify::{Activity, WasteKind};
     let fresh = || {
         activity(
@@ -1085,7 +1085,8 @@ fn trigger_follows_refill_then_the_nearest_preceding_step_in_lane() {
         )
         .steps
     };
-    let cases: [(fn(&mut ActivityStep), Trigger); 17] = [
+    type Setup = fn(&mut ActivityStep);
+    let cases: [(Setup, Trigger); 17] = [
         (
             |p| p.waste = Some(WasteKind::PathNotFound),
             Trigger::ToolError,
@@ -1167,10 +1168,10 @@ fn trigger_follows_refill_then_the_nearest_preceding_step_in_lane() {
     assert_eq!(Trigger::of(&steps, 2), Some(Trigger::NoneVisible));
     steps[0].verify_failure = true;
     assert_eq!(Trigger::of(&steps, 0), Some(Trigger::NoneVisible));
-    // Only the same ownership lane supplies evidence.
+    // Only the same native source supplies evidence.
     let mut steps = fresh();
     steps[0].waste = Some(WasteKind::PathNotFound);
-    steps[1].ownership = Ownership::Shared("key".into());
+    steps[1].position.source = "other".into();
     steps[1].waste = Some(WasteKind::Timeout);
     steps[2].waste = Some(WasteKind::Timeout);
     assert_eq!(Trigger::of(&steps, 1), Some(Trigger::NoneVisible));

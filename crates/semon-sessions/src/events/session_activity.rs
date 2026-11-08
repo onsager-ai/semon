@@ -171,7 +171,7 @@ pub(crate) enum Trigger {
 
 impl Trigger {
     /// Refill follows a compaction. Otherwise the nearest preceding step of the
-    /// same ownership lane (exclusive, or shared) supplies the evidence, in order.
+    /// same native source (one agent's transcript) supplies the evidence, in order.
     fn of(steps: &[ActivityStep], index: usize) -> Option<Self> {
         use classify::{Activity, WasteKind};
         let step = &steps[index];
@@ -181,11 +181,10 @@ impl Trigger {
         if step.waste == Some(WasteKind::Refill) {
             return Some(Self::Compaction);
         }
-        let lane = |step: &ActivityStep| matches!(step.ownership, Ownership::Exclusive);
         let Some(previous) = steps[..index]
             .iter()
             .rev()
-            .find(|previous| lane(previous) == lane(step))
+            .find(|previous| previous.position.source == step.position.source)
         else {
             return Some(Self::NoneVisible);
         };

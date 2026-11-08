@@ -281,8 +281,8 @@ replaces wait, sleep or context waste. Both kinds rank with the failure kinds in
 first-waste-per-step selection, so within a step the earliest of them wins.
 
 **Trigger.** Only steps with waste or a `verify_failure` carry a `trigger`:
-`Compaction` for a refill; otherwise the evidence of the nearest preceding step in
-the same ownership lane (exclusive, or shared), tested in order: failed-call waste
+`Compaction` for a refill; otherwise the evidence of the nearest preceding step from
+the same native source (one agent's transcript), tested in order: failed-call waste
 (other than external) is `ToolError`, empty search `EmptyResult`, verify failure
 `TestOrCiFailure`, external failure `ExternalError`, a `Wait` activity or
 checks-pending/sleep waste `Polling`, a `Coordinate` activity or orchestration-wait
