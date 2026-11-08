@@ -4593,7 +4593,7 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT usage_ready FROM native_usage_sources LIMIT 0",
         "SELECT tree_root FROM native_tree_repairs LIMIT 0",
         "SELECT source_generation FROM session_slot_projections LIMIT 0",
-        "SELECT source_generation,generation,rules_version,pricing_fingerprint,total,summary FROM session_activity_projections LIMIT 0",
+        "SELECT source_generation,generation,rules_version,pricing_fingerprint,total,summary,preview FROM session_activity_projections LIMIT 0",
         "SELECT generation,ordinal,metadata,waste_kind,waste_category,empty_search FROM session_activity_steps LIMIT 0",
         "SELECT generation,identity,metadata FROM session_activity_facts LIMIT 0",
         "SELECT generation,ordinal,metadata FROM session_activity_compactions LIMIT 0",

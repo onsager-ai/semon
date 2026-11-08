@@ -466,16 +466,20 @@ fn components_price_independently_and_list_cost_needs_all_of_them() {
             known_list.is_some()
         );
         let exclusive = &result.aggregate.totals.exclusive;
+        let components = analytics::Analytics::of(&result)
+            .counts
+            .component_cost_usd
+            .exclusive;
         assert_eq!(
             exclusive.list_cost_usd.unknown_steps,
             u64::from(known_list.is_none())
         );
         // Each component total is its own measurement, known or unknown.
         for (total, expected) in [
-            (&exclusive.fresh_input_usd, known[0]),
-            (&exclusive.cache_read_usd, known[1]),
-            (&exclusive.cache_write_usd, known[2]),
-            (&exclusive.output_usd, known[3]),
+            (&components.fresh_input_usd, known[0]),
+            (&components.cache_read_usd, known[1]),
+            (&components.cache_write_usd, known[2]),
+            (&components.output_usd, known[3]),
         ] {
             assert_usd(Some(total.known), Some(expected.unwrap_or(0.0)));
             assert_eq!(total.unknown_steps, u64::from(expected.is_none()));
@@ -1225,8 +1229,7 @@ fn model_step(
 
 #[test]
 fn preview_bins_equal_step_counts_and_never_exceeds_64_bins() {
-    let empty = analytics::Analytics::of(&activity(vec![], vec![]));
-    assert_eq!(empty.preview, analytics::Preview::default());
+    assert_eq!(analytics::Preview::of(&[]), analytics::Preview::default());
     // (steps, steps per bin, bins): ceil(n / 64) steps per bin.
     for (count, per_bin, bins) in [
         (1, 1, 1),
@@ -1235,8 +1238,7 @@ fn preview_bins_equal_step_counts_and_never_exceeds_64_bins() {
         (65, 2, 33),
         (1000, 16, 63),
     ] {
-        let analytics = analytics::Analytics::of(&activity(priced_steps(count), vec![]));
-        let preview = &analytics.preview;
+        let preview = analytics::Preview::of(&activity(priced_steps(count), vec![]).steps);
         assert_eq!(preview.steps_total, count as u64);
         assert_eq!(preview.binned_steps, count as u64);
         assert_eq!(preview.bins.len(), bins, "{count} steps");
@@ -1280,8 +1282,7 @@ fn preview_bins_summarize_context_cost_waste_and_compactions_without_shared_step
     result.steps[1].waste = Some(WasteKind::Timeout);
     result.steps[1].compactions = 2;
     result.steps[2].compactions = 5;
-    let analytics = analytics::Analytics::of(&result);
-    let preview = &analytics.preview;
+    let preview = analytics::Preview::of(&result.steps);
     assert_eq!((preview.steps_total, preview.binned_steps), (70, 69));
     // 69 exclusive steps, two per bin; the shared step (ordinal 2) is skipped.
     assert_eq!(preview.bins.len(), 35);

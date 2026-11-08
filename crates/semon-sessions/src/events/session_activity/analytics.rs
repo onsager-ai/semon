@@ -20,6 +20,55 @@ pub(crate) struct OwnedMeasured {
     pub(crate) shared: Measured<u64>,
 }
 
+/// Each token component priced independently; `Counts::totals` carries the
+/// list cost these usually sum to. Not repeated per context band.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Components {
+    pub(crate) fresh_input_usd: Measured<f64>,
+    pub(crate) cache_read_usd: Measured<f64>,
+    pub(crate) cache_write_usd: Measured<f64>,
+    pub(crate) output_usd: Measured<f64>,
+}
+
+impl Components {
+    fn add(&mut self, step: &ActivityStep) {
+        self.fresh_input_usd.add(step.fresh_input_usd);
+        self.cache_read_usd.add(step.cache_read_usd);
+        self.cache_write_usd.add(step.cache_write_usd);
+        self.output_usd.add(step.output_usd);
+    }
+
+    fn merge(&mut self, other: &Self) {
+        measured(&mut self.fresh_input_usd, &other.fresh_input_usd);
+        measured(&mut self.cache_read_usd, &other.cache_read_usd);
+        measured(&mut self.cache_write_usd, &other.cache_write_usd);
+        measured(&mut self.output_usd, &other.output_usd);
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct OwnedComponents {
+    pub(crate) observed: Components,
+    pub(crate) exclusive: Components,
+    pub(crate) shared: Components,
+}
+
+impl OwnedComponents {
+    fn add(&mut self, step: &ActivityStep) {
+        self.observed.add(step);
+        match &step.ownership {
+            Ownership::Exclusive => self.exclusive.add(step),
+            Ownership::Shared(_) => self.shared.add(step),
+        }
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.observed.merge(&other.observed);
+        self.exclusive.merge(&other.exclusive);
+        self.shared.merge(&other.shared);
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OwnedCounts {
     pub(crate) observed: u64,
@@ -108,7 +157,7 @@ pub(crate) struct Preview {
 }
 
 impl Preview {
-    fn of(steps: &[ActivityStep]) -> Self {
+    pub(crate) fn of(steps: &[ActivityStep]) -> Self {
         let exclusive: Vec<_> = steps
             .iter()
             .enumerate()
@@ -151,6 +200,7 @@ const TRIGGERS_NOT_COMPUTED: [TriggerNotComputed; 2] = [
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Counts {
     pub(crate) totals: OwnershipTotals,
+    pub(crate) component_cost_usd: OwnedComponents,
     pub(crate) by_band: BTreeMap<ContextBand, OwnershipTotals>,
     pub(crate) compactions: u64,
     pub(crate) waste_by_kind: BTreeMap<WasteKind, u64>,
@@ -177,7 +227,6 @@ pub(crate) struct Analytics {
     #[serde(flatten)]
     pub(crate) counts: Counts,
     pub(crate) thrash: bool,
-    pub(crate) preview: Preview,
     pub(crate) family: Option<Family>,
 }
 
@@ -262,6 +311,7 @@ impl Counts {
         let mut wait_intervals: [Vec<(i64, i64)>; 3] = Default::default();
         for step in steps {
             counts.totals.add(step);
+            counts.component_cost_usd.add(step);
             counts.by_band.entry(step.band).or_default().add(step);
             if let Some(kind) = step.waste {
                 *counts.waste_by_kind.entry(kind).or_default() += 1;
@@ -369,7 +419,6 @@ impl Analytics {
             pricing_fingerprint: activity.pricing_fingerprint.clone(),
             counts: Counts::of(activity),
             thrash: activity.aggregate.thrash,
-            preview: Preview::of(&activity.steps),
             family: None,
         }
     }
@@ -382,7 +431,6 @@ impl Analytics {
             change_facts: self.counts.change_facts.clone(),
             ..Counts::of_steps(steps)
         };
-        self.preview = Preview::of(steps);
     }
 }
 
@@ -393,10 +441,6 @@ fn measured<T: std::ops::AddAssign + Copy>(a: &mut Measured<T>, b: &Measured<T>)
 fn totals(a: &mut StepTotals, b: &StepTotals) {
     a.steps += b.steps;
     measured(&mut a.list_cost_usd, &b.list_cost_usd);
-    measured(&mut a.fresh_input_usd, &b.fresh_input_usd);
-    measured(&mut a.cache_read_usd, &b.cache_read_usd);
-    measured(&mut a.cache_write_usd, &b.cache_write_usd);
-    measured(&mut a.output_usd, &b.output_usd);
     measured(&mut a.elapsed_ms, &b.elapsed_ms);
 }
 fn ownership(a: &mut OwnershipTotals, b: &OwnershipTotals) {
@@ -437,6 +481,8 @@ impl Fold {
         let mut counts = analytics.counts.clone();
         counts.totals.observed = counts.totals.exclusive.clone();
         counts.totals.shared = StepTotals::default();
+        counts.component_cost_usd.observed = counts.component_cost_usd.exclusive.clone();
+        counts.component_cost_usd.shared = Components::default();
         for band in counts.by_band.values_mut() {
             band.observed = band.exclusive.clone();
             band.shared = StepTotals::default();
@@ -461,12 +507,14 @@ impl Fold {
         let mut counts = Counts::of(activity);
         // Sum exclusive steps now; add each exact shared key once at the end.
         counts.totals = OwnershipTotals::default();
+        counts.component_cost_usd = OwnedComponents::default();
         counts.by_band.clear();
         let mut shared = BTreeMap::new();
         for step in &activity.steps {
             match &step.ownership {
                 Ownership::Exclusive => {
                     counts.totals.add(step);
+                    counts.component_cost_usd.add(step);
                     counts.by_band.entry(step.band).or_default().add(step);
                 }
                 Ownership::Shared(key) => {
@@ -484,6 +532,9 @@ impl Fold {
     }
     pub(crate) fn merge(&mut self, child: Self) {
         ownership(&mut self.counts.totals, &child.counts.totals);
+        self.counts
+            .component_cost_usd
+            .merge(&child.counts.component_cost_usd);
         for (band, values) in child.counts.by_band {
             ownership(self.counts.by_band.entry(band).or_default(), &values);
         }
@@ -529,6 +580,7 @@ impl Fold {
         let mut counts = self.counts.clone();
         for step in self.shared.values() {
             counts.totals.add(step);
+            counts.component_cost_usd.add(step);
             counts.by_band.entry(step.band).or_default().add(step);
         }
         Family {

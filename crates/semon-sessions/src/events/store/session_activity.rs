@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS session_activity_projections (
  session_key TEXT PRIMARY KEY, generation TEXT NOT NULL,
  source_generation TEXT NOT NULL, rules_version INTEGER NOT NULL,
  pricing_fingerprint TEXT NOT NULL, total INTEGER NOT NULL,
- compactions INTEGER NOT NULL, thrash INTEGER NOT NULL, summary TEXT NOT NULL
+ compactions INTEGER NOT NULL, thrash INTEGER NOT NULL, summary TEXT NOT NULL,
+ preview TEXT NOT NULL
 ) STRICT;
 CREATE INDEX IF NOT EXISTS session_activity_rules ON session_activity_projections(rules_version,session_key);
 CREATE INDEX IF NOT EXISTS session_activity_pricing ON session_activity_projections(pricing_fingerprint,session_key);
@@ -213,7 +214,7 @@ pub(super) fn publish(
         put.execute(params![row.key, generation, fact.identity, json(fact)?])?;
     }
     tx.execute("INSERT INTO session_activity_sources VALUES(?1,?2) ON CONFLICT(session_key) DO UPDATE SET metadata=excluded.metadata", params![row.key,json(row)?])?;
-    tx.execute("INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,rules_version=excluded.rules_version,pricing_fingerprint=excluded.pricing_fingerprint,total=excluded.total,compactions=excluded.compactions,thrash=excluded.thrash,summary=excluded.summary",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint,activity.steps.len() as i64,activity.compactions.len() as i64,activity.aggregate.thrash,json(&activity::analytics::Analytics::of(activity))?])?;
+    tx.execute("INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,rules_version=excluded.rules_version,pricing_fingerprint=excluded.pricing_fingerprint,total=excluded.total,compactions=excluded.compactions,thrash=excluded.thrash,summary=excluded.summary,preview=excluded.preview",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint,activity.steps.len() as i64,activity.compactions.len() as i64,activity.aggregate.thrash,json(&activity::analytics::Analytics::of(activity))?,json(&activity::analytics::Preview::of(&activity.steps))?])?;
     Ok(())
 }
 
@@ -307,6 +308,26 @@ pub(crate) fn page(
         total: total as u64,
         steps,
     }))
+}
+
+/// The bounded timeline stored with the projection, under the same source,
+/// rules, price and generation admission as the step pages.
+pub(crate) fn preview(
+    c: &Connection,
+    row: &crate::model::summary::CatalogRow,
+    expected: Option<&str>,
+    price: &str,
+) -> rusqlite::Result<Option<(String, activity::analytics::Preview)>> {
+    let sources = crate::retention::source_generation(&row.sources)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let stored: Option<(String, String)> = c.query_row("SELECT generation,preview FROM session_activity_projections WHERE session_key=?1 AND source_generation=?2 AND rules_version=?3 AND pricing_fingerprint=?4",params![row.key,sources,activity::ACTIVITY_RULES_VERSION,price],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+    let Some((generation, encoded)) = stored else {
+        return Ok(None);
+    };
+    if expected.is_some_and(|expected| expected != generation) {
+        return Ok(None);
+    }
+    Ok(Some((generation, from_json(1, &encoded)?)))
 }
 
 pub(crate) struct Items {
@@ -585,8 +606,8 @@ pub(super) fn reprice_step(
     }
     if changed < 128 {
         // The last batch has repriced every step. Price-dependent summary values
-        // (totals, waste and activity costs, coverage, preview) come from the
-        // stored steps; readers refuse the summary until the stamp advances.
+        // (totals, waste and activity costs, coverage) and the preview come from
+        // the stored steps; readers refuse the summary until the stamp advances.
         let encoded: String = tx.query_row(
             "SELECT summary FROM session_activity_projections WHERE session_key=?1",
             [&key],
@@ -600,6 +621,7 @@ pub(super) fn reprice_step(
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         summary.reprice(&steps);
+        let preview = activity::analytics::Preview::of(&steps);
         let next = format!(
             "{:x}",
             Sha256::digest(json(&(&generation, &table.fingerprint))?.as_bytes())
@@ -617,7 +639,7 @@ pub(super) fn reprice_step(
             params![key, next],
         )?;
         summary.pricing_fingerprint = table.fingerprint.clone();
-        tx.execute("UPDATE session_activity_projections SET pricing_fingerprint=?2,generation=?3,summary=?4 WHERE session_key=?1",params![key,table.fingerprint,next,json(&summary)?])?;
+        tx.execute("UPDATE session_activity_projections SET pricing_fingerprint=?2,generation=?3,summary=?4,preview=?5 WHERE session_key=?1",params![key,table.fingerprint,next,json(&summary)?,json(&preview)?])?;
         refresh_at_price(tx, &key, &table.fingerprint)?;
     }
     Ok(true)

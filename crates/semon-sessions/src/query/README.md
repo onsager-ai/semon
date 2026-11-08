@@ -382,7 +382,9 @@ intervals within each physical session and exposes observed/exclusive/shared cov
 missing orchestration intervals remain unknown. Waste time and list cost group
 exclusive waste steps by kind and category. Family values sum member measurements;
 shared waste is excluded. The summary adds `coverage` (pricing, timing and
-classifier gaps) and a bounded `preview` of at most 64 timeline bins. The design contract and all fields live in
+classifier gaps) and priced component totals. The bounded timeline (at most 64 bins)
+is not in the summary: `get_session_activity` with `kind: "preview"` serves it under
+the same generation and refusal rules. The design contract and all fields live in
 [session activity analytics](../../../../docs/design/session-activity-analytics.md).
 `activity-golden.json` owns sanitized expectations for the new summary/page
 contract. Historical `contract-reference.json` remains byte-for-byte frozen;

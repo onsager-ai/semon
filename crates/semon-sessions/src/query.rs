@@ -316,14 +316,14 @@ fn retained_query_tools() -> Vec<QueryTool> {
         },
         QueryTool {
             name: "get_session_activity",
-            description: "A bounded page of typed activity steps or change facts. Continue with the returned generation and next_cursor; stale generations are refused. A refusal's error.reason is no_activity, stale_generation, source_unavailable, limit_exceeded, interrupted or unsupported_storage. No native bodies or commands.",
+            description: "A bounded page of typed activity steps or change facts, or kind preview for the session's timeline of at most 64 bins (generation, steps_total, binned_steps, bins). Continue with the returned generation and next_cursor; stale generations are refused. A refusal's error.reason is no_activity, stale_generation, source_unavailable, limit_exceeded, interrupted or unsupported_storage. No native bodies or commands.",
             positional: Some("id"),
             input_schema: json!({
                 "type":"object",
                 "properties": {
                     "id": id_property("The selected session's id."),
                     "generation": {"type":"string","minLength":1,"maxLength":128,"description":"Generation returned by the first page; required with cursor."},
-                    "kind": {"type":"string","enum":["steps","facts"],"default":"steps","description":"Read activity steps or typed change facts."},
+                    "kind": {"type":"string","enum":["steps","facts","preview"],"default":"steps","description":"Read activity steps, typed change facts or the bounded timeline preview (no cursor)."},
                     "cursor": {"type":"string","minLength":1,"maxLength":128,"description":"Opaque next_cursor returned by the preceding page."},
                     "limit": {"type":"integer","minimum":1,"maximum":256,"default":100,"description":"Maximum items returned in this page."}
                 },

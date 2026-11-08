@@ -74,8 +74,8 @@ Each step saves typed pricing inputs without native bodies. The existing pricing
 producer reprices at most 128 activity rows per transaction across restart,
 including retained observations with unavailable native bytes. Step stamps prevent
 mixed-price pages; the final batch recomputes every price-dependent summary value
-(totals, band totals, waste, activity and trigger costs, pricing coverage and the
-preview) from the repriced stored steps, then advances the header fingerprint and
+(totals, component totals, band totals, waste, activity and trigger costs and pricing
+coverage) and the stored timeline preview from the repriced stored steps, then advances the header fingerprint and
 activity generation. Unknown prices remain unknown. Step arrays stay out of cached descriptions and session summaries. Compact
 `activity_analytics` is published with Catalog/query summaries; it rebuilds after
 relationships rather than entering the stable description cache. Catalog version 8
@@ -209,9 +209,12 @@ selected-read limit propagates without treating the durable Event Index as broke
 or falling back to an in-memory scoped producer.
 
 Query JSON and MCP expose the same `get_session_activity` tool. Select `kind`
-`steps` (default) or `facts`, with `limit` 1–256 (default 100). Responses contain
+`steps` (default), `facts` or `preview`, with `limit` 1–256 (default 100). A
+`preview` request takes no cursor and returns the timeline described below. Other
+responses contain
 `session: {id, harness, native_ids}`, `generation`, `kind`, `items`, and nullable
-`next_cursor`. Pass that opaque string cursor and the same generation on the next
+`next_cursor`. A preview response contains `session`, `generation`, `kind`,
+`steps_total`, `binned_steps` and `bins`. Pass that opaque string cursor and the same generation on the next
 request. Steps sort by producer ordinal (known timestamp, source position and
 exact identity); facts sort by stable identity with a keyset cursor. Selected
 Catalog source membership, rules, prices and generation qualify in one SQLite
@@ -241,11 +244,12 @@ effective price table, shared with every step's cost),
 `waste_by_kind`, `waste_by_category`, `waste_cost_by_kind`,
 `waste_cost_by_category`, `wait_time_ms`, `waits_without_interval`, `by_activity`,
 `by_trigger`, `empty_search_steps`, `verify_failure_steps`, `silent_exit_steps`,
-`change_facts`, `exclusive_cost_complete`, `coverage` and `preview`. Each step total
-has `steps`, `list_cost_usd`, the four component measurements `fresh_input_usd`,
-`cache_read_usd`, `cache_write_usd` and `output_usd`, and `elapsed_ms`; so
-`totals.exclusive` holds the exclusive component totals, and `by_band` the same per
-band. Measurements preserve `{known, unknown_steps}`; a known component total stays
+`change_facts`, `exclusive_cost_complete`, `component_cost_usd` and `coverage`. Each
+step total has `steps`, `list_cost_usd` and `elapsed_ms`. `component_cost_usd:
+{observed, exclusive, shared}` holds the four component measurements
+`fresh_input_usd`, `cache_read_usd`, `cache_write_usd` and `output_usd` for each
+ownership view; they are not repeated per band, which keeps the Catalog row within
+its fixed size bound. Measurements preserve `{known, unknown_steps}`; a known component total stays
 known when another component's price is missing.
 Each waste cost total has `steps`, `elapsed_ms` and `list_cost_usd` measurements;
 only exclusive steps contribute. `coverage` gathers what the other values did not measure, over exclusive steps:
@@ -261,8 +265,13 @@ no step pages, so no second wait field exists. Wait time and missing-interval co
 are unioned separately for each ownership view. Absent native usage/projections
 remain null.
 
-`preview` is a bounded timeline of the session's ordered exclusive steps, derived
-with the summary and stored in it, so reading it never fetches step rows. The
+The timeline preview is not part of `activity_analytics`, so Catalog rows and
+`list_sessions`/`get_session` payloads stay fixed-size. It is derived with the
+summary, stored beside it in the activity projection and served only by
+`get_session_activity` with `kind: "preview"`, under the same source, rules, price
+and generation admission and the same typed refusals as step pages (a continuation
+`generation` that no longer matches is `stale_generation`); reading it never fetches
+step rows. It is a bounded timeline of the session's ordered exclusive steps. The
 exclusive steps, in producer order, fall into equal-count bins of
 `ceil(n / 64)` steps (the last bin may be shorter), so there are at most 64 bins:
 none for no steps, one per step up to 64, 33 bins of two for 65. It contains
@@ -272,7 +281,7 @@ position `get_session_activity` pages by; a bin skips shared steps between them)
 `max_context_tokens`, `last_context_tokens`, `list_cost_usd: {known, unknown_steps}`,
 `waste_by_category` (steps per category in the bin) and `compactions` (compactions
 attached to its steps). Prices refresh the preview with the rest of the summary.
-Family summaries have no preview. No thrash-window/step arrays enter these summaries. TaskSpecification
+Families have no preview. No thrash-window/step arrays enter these summaries. TaskSpecification
 is a known uncomputed lever in rules version 8. `get_session_activity` steps carry
 the matching booleans `empty_search`, `verify_failure` and `silent_exit`, plus the
 nullable `activity` and `trigger` labels described below.

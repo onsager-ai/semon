@@ -251,10 +251,6 @@ impl<T: std::ops::AddAssign> Measured<T> {
 pub(crate) struct StepTotals {
     pub(crate) steps: u64,
     pub(crate) list_cost_usd: Measured<f64>,
-    pub(crate) fresh_input_usd: Measured<f64>,
-    pub(crate) cache_read_usd: Measured<f64>,
-    pub(crate) cache_write_usd: Measured<f64>,
-    pub(crate) output_usd: Measured<f64>,
     pub(crate) elapsed_ms: Measured<u64>,
 }
 
@@ -262,10 +258,6 @@ impl StepTotals {
     fn add(&mut self, step: &ActivityStep) {
         self.steps += 1;
         self.list_cost_usd.add(step.list_cost_usd);
-        self.fresh_input_usd.add(step.fresh_input_usd);
-        self.cache_read_usd.add(step.cache_read_usd);
-        self.cache_write_usd.add(step.cache_write_usd);
-        self.output_usd.add(step.output_usd);
         self.elapsed_ms.add(step.elapsed_ms);
     }
 }

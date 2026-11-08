@@ -6383,10 +6383,11 @@ fn activity_analytics_is_additive_and_preserves_unknown_cost_and_duration() {
     assert_eq!(priced, 3);
     assert_eq!(summary["coverage"]["timing"]["known_steps"], 2);
     assert_eq!(summary["coverage"]["timing"]["unknown_steps"], 1);
-    assert_eq!(summary["preview"]["steps_total"], 3);
-    assert_eq!(summary["preview"]["binned_steps"], 3);
-    assert_eq!(summary["preview"]["bins"].as_array().unwrap().len(), 3);
-    let exclusive = &summary["totals"]["exclusive"];
+    // The timeline is served by kind preview, never inside the summary.
+    assert!(summary.get("preview").is_none());
+    let exclusive = &summary["component_cost_usd"]["exclusive"];
+    assert!(summary["component_cost_usd"]["observed"].is_object());
+    assert!(summary["component_cost_usd"]["shared"].is_object());
     for key in [
         "fresh_input_usd",
         "cache_read_usd",
@@ -6395,7 +6396,14 @@ fn activity_analytics_is_additive_and_preserves_unknown_cost_and_duration() {
     ] {
         assert!(exclusive[key]["unknown_steps"].is_u64(), "{key}");
     }
-    assert!(exclusive.get("carry_cost_usd").is_none());
+    let totals = &summary["totals"]["exclusive"];
+    assert!(totals.get("carry_cost_usd").is_none());
+    assert!(totals.get("output_usd").is_none());
+    assert!(summary["by_band"]
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|band| band["exclusive"].get("output_usd").is_none()));
     let selected = call(&mut query, "get_session", json!({"id":"activity"}));
     assert_eq!(&selected["session"]["activity_analytics"], summary);
     assert!(summary.get("steps").is_none());
@@ -6585,6 +6593,42 @@ fn activity_pages_sort_bound_and_refuse_generation_mismatch() {
     assert!(facts["items"][0].get("position").is_none());
     assert!(facts["items"][0].get("record_digest").is_none());
     assert!(facts["next_cursor"].is_null());
+    let preview = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","kind":"preview"}),
+    );
+    assert_eq!(preview["kind"], "preview");
+    assert_eq!(preview["generation"], first["generation"]);
+    assert_eq!(preview["steps_total"], 3);
+    assert_eq!(preview["binned_steps"], 3);
+    assert_eq!(preview["bins"].as_array().unwrap().len(), 3);
+    assert!(preview.get("items").is_none() && preview.get("next_cursor").is_none());
+    let same = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","kind":"preview","generation":first["generation"]}),
+    );
+    assert_eq!(same, preview);
+    assert_eq!(
+        reason(
+            &mut query,
+            json!({"id":"activity","kind":"preview","generation":"stale"})
+        ),
+        Some("stale_generation")
+    );
+    assert_eq!(
+        reason(&mut query, json!({"id":"absent","kind":"preview"})),
+        Some("no_activity")
+    );
+    assert_eq!(
+        failure(
+            &mut query,
+            "get_session_activity",
+            json!({"id":"activity","kind":"preview","generation":first["generation"],"cursor":"1"})
+        ),
+        "invalid_arguments"
+    );
 }
 
 #[test]
@@ -6762,8 +6806,17 @@ fn sanitized_activity_query_matches_owned_golden() {
         "get_session_activity",
         json!({"id":"activity","limit":2}),
     );
+    let mut preview = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","kind":"preview"}),
+    );
     // Bin costs follow the live pricing table; everything else is fixed.
-    let mut preview = summary["preview"].clone();
+    let mut preview = json!({
+        "steps_total":preview["steps_total"],
+        "binned_steps":preview["binned_steps"],
+        "bins":preview["bins"]
+    });
     for bin in preview["bins"].as_array_mut().unwrap() {
         bin.as_object_mut().unwrap().remove("list_cost_usd");
     }

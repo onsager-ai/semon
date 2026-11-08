@@ -56,6 +56,8 @@ At 360px, retain 16px side gutters and safe-area insets, stack analysis sections
 | UI | Existing source | Boundary |
 | --- | --- | --- |
 | Summary and chips | `activity_analytics.totals.exclusive`, `waste_by_category`, `empty_search_steps`, `change_facts`, `exclusive_cost_complete` | Measurements carry `known` and `unknown_steps`; `activity_analytics` can be null. |
+| Anatomy bar | `activity_analytics.component_cost_usd.exclusive` (`fresh_input_usd`, `cache_read_usd`, `cache_write_usd`, `output_usd`) | Each is `{known, unknown_steps}`; a known component stays known beside an unknown one. Not available per band. |
+| Context sparkline | `get_session_activity` with `kind: "preview"`: `generation`, `steps_total`, `binned_steps`, `bins` (at most 64, each `first_step`, `last_step`, `max_context_tokens`, `last_context_tokens`, `list_cost_usd`, `waste_by_category`, `compactions`) | Fetched on demand, not in the summary; same generation and typed refusals as step pages. A refusal is the labeled unavailable preview. |
 | Bands and compactions | `by_band` exclusive totals, `compactions`, `thrash` | Respect producer band boundaries and physical-session thrash semantics. |
 | Timeline and inspector | `get_session_activity` with `kind: "steps"`; step `id`, `timestamp`, `context_tokens`, `band`, `tokens`, `list_cost_usd`, `fresh_input_usd`, `cache_read_usd`, `cache_write_usd`, `output_usd`, `elapsed_ms`, `compactions`, `ownership`, `waste_category`, `waste`, `waits`, `empty_search` | Pages are bounded to 256 items; pass the returned opaque cursor and same generation. Detail may refuse or become stale. |
 | Shipment | Summary `change_facts`; `get_session_activity` with `kind: "facts"`, including `identity`, `timestamp`, `step_id`, and typed `change` | Optional exact step IDs are not implied by timestamps; facts page independently. |
@@ -64,8 +66,8 @@ At 360px, retain 16px side gutters and safe-area insets, stack analysis sections
 Implementation needs the following additions, with explicit source/cohort and generation qualification:
 
 1. Per-step transcript anchors for the selected native session and source generation.
-2. Delivered: nullable fresh-input, cache-read, cache-write and output **dollar** components per step, measured component totals in `totals`/`by_band` and the pricing fingerprint. Independently known components stay known. See [the analytics contract](session-activity-analytics.md).
-3. Delivered in part: the summary `preview` is a bounded timeline of at most 64 bins, and `coverage` reports pricing, timing and classifier gaps. Bounded range/bucket reads for expanded heavy-tail sessions remain open.
+2. Delivered: nullable fresh-input, cache-read, cache-write and output **dollar** components per step, measured component totals in `component_cost_usd` (per ownership, not per band) and the pricing fingerprint. Independently known components stay known. See [the analytics contract](session-activity-analytics.md).
+3. Delivered in part: `get_session_activity` with `kind: "preview"` serves a bounded timeline of at most 64 bins (not in the summary), and `coverage` reports pricing, timing and classifier gaps. Bounded range/bucket reads for expanded heavy-tail sessions remain open.
 4. Delivered: `coverage` plus the typed `error.reason` of a refused `get_session_activity` (`no_activity`, `stale_generation`, `source_unavailable`, `limit_exceeded`, `interrupted`, `unsupported_storage`). The measured unique wait duration is the existing `wait_time_ms`, which survives when step pages refuse.
 5. Bounded cross-session aggregates for ranked top-N plus tail, scatter rows or declared density bins, and daily band mix, with cohort, shared ownership treatment, pricing and timing coverage.
 
