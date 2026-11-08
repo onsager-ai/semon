@@ -1,6 +1,6 @@
 # Agent Session Intelligence direction
 
-Status: accepted direction (2026-11-08). This document supersedes earlier product
+Status: accepted direction (2026-11-08; decisions extended the same day). This document supersedes earlier product
 focus statements wherever they conflict.
 
 ## Decision
@@ -10,6 +10,11 @@ query and analytics over harness-native agent sessions. Session display and
 two-way harness control are no longer product goals. T3 Code covers them, and
 Semon should be a backend that T3 Code and other agents query, not a competing
 front end.
+
+The method (data model, storage schema, measurement layers, labels, ledgers,
+evidence grades and interventions) is defined in the
+[ASI methodology](asi-methodology.md). This document owns product scope and
+sequencing. Progress is tracked in the pinned roadmap issue, #549.
 
 ## Pillars
 
@@ -32,6 +37,10 @@ front end.
 | --- | --- |
 | Storage engine | Extend the SQLite Session Event Index first (event/content tables, FTS5). Design the schema so it can be exported to a columnar store (Parquet/DuckDB) once analytical volume calls for it. |
 | PostgreSQL track (#477) | Paused. The merged code stays behind its feature flag with its CI workflow. The Raw-plus-projection-cache model, namespace-bound storage port and runtime custody owners carry over to the SQLite ASI store. |
+| Hub | Hub is hosted Semon only: multi-tenant tenancy, workspace authorization and hosted views over Semon. ASI logic, schema and analytics live in Semon. |
+| Session bodies off-machine | Opt-in per source. Without opt-in, only metadata and aggregates leave the machine. Opted-in bodies are redacted by default before they leave. |
+| Semantic labels (L1) | In v1. Labels follow methodology §3–§4 (rows with labeller, taxonomy version, confidence and evidence step IDs). Model classifiers read only bodies the source has made available under the policy above. |
+| Analytics UI spec | Adopt the session activity viewer spec (semon#532) as the analytics UI direction. |
 | Consumers | Agents (MCP/SQL) and humans (dashboards) equally, over one shared schema. |
 | Viewer | Shrink to an analytics UI: keep the authenticated server, shell and security boundary; drop transcript-browsing polish. Pixel/visual comparison is removed from CI by semon#536/#537. New UI work is dashboards and query results. |
 | Control, runtime, SSH | Retire `semon-control`, `semon-runtime` and `semon-ssh` code. Push/receive over TLS covers multi-machine collection. Retirement deletes no user data, credentials, history or installed services. |
@@ -49,8 +58,10 @@ front end.
 1. Adopt this direction in README.md and AGENTS.md; update
    `session-foundation-retirement.md` so the temporary pauses become retirements.
 2. Retire control/runtime/SSH code and their CI jobs.
-3. Specify the ASI storage schema (normalized events and content, FTS5,
-   retention beyond the current 60-day Analytics window, multi-machine keys).
+3. Specify the ASI storage schema by adopting methodology §1.1 in SQLite
+   (normalized events and content, FTS5, retention beyond the current 60-day
+   Analytics window, multi-machine keys, body opt-in and redaction). Start from
+   the #477 carry-over: https://github.com/onsager-ai/semon/issues/477#issuecomment-6719032404.
 4. Ship the query surface: read-only SQL plus FTS through MCP/CLI, replacing the
    paused `find`.
 5. Rebuild Analytics on durable storage; shrink the Viewer into the analytics UI.
