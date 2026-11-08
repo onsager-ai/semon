@@ -374,9 +374,9 @@ PostgreSQL session backend yet.
   with Catalog under forced RLS. Selected and ordinary Query activity dispatch
   through the runtime owner, with source custody fences, native byte qualification
   and a final publication recheck. Missing explicit usage refuses honestly.
-  The current implementation bounds one activity publication to 1 MiB and still
-  loads the selected normalized indexes for its proof witness; paged SQL activity
-  storage and lazy proof-only admission remain follow-up work. CI qualification
+  Activity steps and change facts use indexed SQL pages with bounded rows. The
+  current reader still loads the selected normalized indexes for its proof
+  witness; lazy proof-only admission remains follow-up work. CI qualification
   includes accepted/duplicate/conflicting Codex reports, restart, append, stale
   generations, SQLite parity and the inotify sentinel.
 - Still required: explicit startup backend configuration; complete receiver Raw

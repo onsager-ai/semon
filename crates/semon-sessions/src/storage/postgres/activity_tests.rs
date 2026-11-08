@@ -150,11 +150,34 @@ pub(super) async fn lifecycle(dsn: &str) {
         .get::<_, i64>(0),
         4
     );
-    assert_eq!(tx.query_one("SELECT count(*) FROM semon_projection.session_activity WHERE namespace=$1", &[&namespace.binding()]).await.unwrap().get::<_,i64>(0), 1);
+    assert_eq!(
+        tx.query_one(
+            "SELECT count(*) FROM semon_projection.session_activity WHERE namespace=$1",
+            &[&namespace.binding()]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        1
+    );
     tx.commit().await.unwrap();
     let tx = client.transaction().await.unwrap();
-    tx.query_one("SELECT set_config('semon.namespace','foreign-activity',true)", &[]).await.unwrap();
-    assert_eq!(tx.query_one("SELECT count(*) FROM semon_projection.session_activity WHERE namespace=$1", &[&namespace.binding()]).await.unwrap().get::<_,i64>(0), 0);
+    tx.query_one(
+        "SELECT set_config('semon.namespace','foreign-activity',true)",
+        &[],
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        tx.query_one(
+            "SELECT count(*) FROM semon_projection.session_activity WHERE namespace=$1",
+            &[&namespace.binding()]
+        )
+        .await
+        .unwrap()
+        .get::<_, i64>(0),
+        0
+    );
     assert!(tx.execute("INSERT INTO semon_projection.session_activity(namespace,session_key,source_generation,generation,metadata) VALUES($1,'forbidden','generation','generation','{}')", &[&namespace.binding()]).await.is_err());
     tx.rollback().await.unwrap();
     drop(query);

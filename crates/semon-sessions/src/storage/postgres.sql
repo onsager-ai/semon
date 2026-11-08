@@ -37,6 +37,22 @@ ALTER TABLE semon_projection.session_activity FORCE ROW LEVEL SECURITY;
 CREATE POLICY namespace_isolation ON semon_projection.session_activity
     USING (namespace = current_setting('semon.namespace',true))
     WITH CHECK (namespace = current_setting('semon.namespace',true));
+CREATE TABLE semon_projection.activity_items (
+    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
+    session_key text NOT NULL,
+    kind text NOT NULL CHECK (kind IN ('steps','facts')),
+    position bigint NOT NULL CHECK (position >= 0),
+    identity text NOT NULL,
+    metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576),
+    PRIMARY KEY(namespace,session_key,kind,position),
+    UNIQUE(namespace,session_key,kind,identity),
+    FOREIGN KEY(namespace,session_key) REFERENCES semon_projection.session_activity(namespace,session_key) ON DELETE CASCADE
+);
+ALTER TABLE semon_projection.activity_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.activity_items FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.activity_items
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
 CREATE TABLE semon_projection.discovery (
     namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
     root text NOT NULL,

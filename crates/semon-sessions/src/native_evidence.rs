@@ -1372,7 +1372,7 @@ impl NativeEvidence {
         #[cfg(feature = "postgres")]
         if self.storage.is_postgres() {
             let mut work = lock(&self.storage.work);
-            for _ in 0..256 {
+            loop {
                 crate::selected_read::check()?;
                 if self.refresh_catalog(&mut work, now)? {
                     break;
