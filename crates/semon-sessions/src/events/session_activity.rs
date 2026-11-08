@@ -154,6 +154,12 @@ pub(crate) struct ActivityStep {
     pub(crate) activity: Option<classify::Activity>,
     /// Set only for steps with waste or a verify failure.
     pub(crate) trigger: Option<Trigger>,
+    /// Diagnostic only: observations attached to this step.
+    #[serde(default)]
+    pub(crate) diag_obs: u32,
+    /// Diagnostic only: "<tool>|<program>" of unknown components.
+    #[serde(default)]
+    pub(crate) diag_sigs: Vec<String>,
 }
 
 /// What immediately preceded a wasteful or failing step.
@@ -353,6 +359,8 @@ pub(crate) fn apply_observations(
         };
         if let Some(owner) = owner {
             let step = &mut activity.steps[owner];
+            step.diag_obs += 1;
+            step.diag_sigs.extend(row.observation.diag.iter().cloned());
             step.empty_search |= row.observation.empty_search;
             step.verify_failure |= row.observation.verify_failure;
             step.silent_exit |= row.observation.silent_exit;
@@ -477,6 +485,8 @@ pub(crate) fn derive(
                 silent_exit: false,
                 activity: None,
                 trigger: None,
+                diag_obs: 0,
+                diag_sigs: Vec::new(),
             }
         })
         .collect();

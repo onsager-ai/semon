@@ -274,6 +274,8 @@ pub(crate) struct Observation {
     pub(crate) result_digest: Option<String>,
     pub(crate) step_id: Option<ActivityStepId>,
     commands: Vec<Command>,
+    /// Diagnostic only: "<tool>|<program>" per unknown or ambiguous component.
+    pub(crate) diag: Vec<String>,
     attribution: Attribution,
     orchestration: bool,
     /// Distinct from `orchestration`, which also marks blocking agent calls as
@@ -906,6 +908,83 @@ fn input_value(input: &Value) -> Option<Cow<'_, Value>> {
     }
 }
 
+const DIAG_TOOLS: [&str; 23] = [
+    "Bash", "bash", "shell", "exec_command", "local_shell", "apply_patch", "Write", "Edit",
+    "Read", "Grep", "Glob", "WebFetch", "WebSearch", "TodoWrite", "Task", "Agent", "SendMessage",
+    "spawn_agent", "send_input", "wait_agent", "update_plan", "view_image", "write_stdin",
+];
+const DIAG_SUBCOMMAND: [&str; 12] = [
+    "git", "gh", "cargo", "npm", "npx", "node", "python", "python3", "uv", "docker", "kubectl",
+    "make",
+];
+
+fn diag_program(words: &[String]) -> String {
+    let Some(first) = words.first() else {
+        return "?".into();
+    };
+    let base = first.rsplit('/').next().unwrap_or("");
+    let ok = !base.is_empty()
+        && base.len() <= 24
+        && base
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._+-".contains(&c));
+    if !ok {
+        return "?".into();
+    }
+    let mut out = base.to_owned();
+    if DIAG_SUBCOMMAND.contains(&base) || base == "just" {
+        if let Some(second) = words.get(1) {
+            let b = second.as_bytes();
+            if (1..=21).contains(&b.len())
+                && b[0].is_ascii_lowercase()
+                && b.iter()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+            {
+                out.push(':');
+                out.push_str(second);
+            }
+        }
+    }
+    out
+}
+
+fn diag_signatures(name: &str, input: &Value, commands: &[Command]) -> Vec<String> {
+    let unknown = |c: &Command| matches!(c, Command::Unknown | Command::Ambiguous);
+    if !commands.iter().any(unknown) {
+        return Vec::new();
+    }
+    let tool = if DIAG_TOOLS.contains(&name) {
+        name
+    } else if name.starts_with("mcp__") || name.contains("__") {
+        "mcp"
+    } else {
+        "other"
+    };
+    let mut sigs = Vec::new();
+    if matches!(name, "Bash" | "bash" | "shell" | "exec_command") {
+        if let Some(pipelines) = input
+            .get("command")
+            .or_else(|| input.get("cmd"))
+            .and_then(Value::as_str)
+            .and_then(script)
+        {
+            for words in pipelines.iter().flat_map(|p| p.stages.iter()) {
+                if unknown(&command(words)) {
+                    sigs.push(format!("{tool}|{}", diag_program(words)));
+                }
+            }
+        }
+        if sigs.is_empty() {
+            sigs.push(format!("{tool}|?"));
+        }
+    } else {
+        for _ in commands.iter().filter(|c| unknown(c)) {
+            sigs.push(format!("{tool}|-"));
+        }
+    }
+    sigs
+}
+
 pub(super) fn call(
     name: &str,
     input: &Value,
@@ -1012,11 +1091,13 @@ pub(super) fn call(
         (!input.is_null()).then(|| serde_json::to_vec(&(name, &*input)))
     };
     let fingerprint = identity.map(|bytes| digest(&bytes.expect("call identity serializes")));
+    let diag = diag_signatures(name, &input, &commands);
     Observation {
         call_digest,
         result_digest: None,
         step_id,
         commands,
+        diag,
         attribution,
         orchestration,
         agent,

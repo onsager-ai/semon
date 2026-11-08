@@ -67,6 +67,10 @@ pub(crate) struct Counts {
     /// Exclusive steps with no activity label: `by_activity` steps plus this
     /// equal the exclusive step total.
     pub(crate) unlabelled_activity_steps: u64,
+    #[serde(default)]
+    pub(crate) diag_unlabelled: BTreeMap<String, u64>,
+    #[serde(default)]
+    pub(crate) diag_unknown: BTreeMap<String, u64>,
     pub(crate) wait_time_ms: OwnedMeasured,
     pub(crate) waits_without_interval: OwnedCounts,
     pub(crate) empty_search_steps: u64,
@@ -190,7 +194,29 @@ impl Counts {
                 }
                 match step.activity {
                     Some(activity) => add_waste(&mut counts.by_activity, activity, step),
-                    None => counts.unlabelled_activity_steps += 1,
+                    None => {
+                        counts.unlabelled_activity_steps += 1;
+                        let harness = match step.id {
+                            ActivityStepId::Claude(_) => "claude",
+                            ActivityStepId::Codex(_) => "codex",
+                        };
+                        let reason = if step.diag_obs == 0 {
+                            "no_observation"
+                        } else {
+                            "unknown_only"
+                        };
+                        *counts.diag_unlabelled.entry(reason.to_owned()).or_default() += 1;
+                        *counts
+                            .diag_unlabelled
+                            .entry(format!("{harness}|{reason}"))
+                            .or_default() += 1;
+                        for sig in &step.diag_sigs {
+                            *counts
+                                .diag_unknown
+                                .entry(format!("{harness}|{sig}"))
+                                .or_default() += 1;
+                        }
+                    }
                 }
                 if let Some(trigger) = step.trigger {
                     add_waste(&mut counts.by_trigger, trigger, step);
@@ -346,6 +372,12 @@ impl Fold {
         waste_map(&mut self.counts.by_activity, child.counts.by_activity);
         waste_map(&mut self.counts.by_trigger, child.counts.by_trigger);
         self.counts.unlabelled_activity_steps += child.counts.unlabelled_activity_steps;
+        for (key, n) in child.counts.diag_unlabelled {
+            *self.counts.diag_unlabelled.entry(key).or_default() += n;
+        }
+        for (key, n) in child.counts.diag_unknown {
+            *self.counts.diag_unknown.entry(key).or_default() += n;
+        }
         owned_measured(&mut self.counts.wait_time_ms, &child.counts.wait_time_ms);
         owned_counts(
             &mut self.counts.waits_without_interval,
