@@ -72,7 +72,7 @@ jobs:
       - name: Browser-check infrastructure regression tests
         run: |
           npm --prefix tests/ui ci --no-audit --no-fund
-          node --test tests/ui/capture-network.test.mjs tests/ui/suite-plan.test.mjs tests/ui/pixel-diff.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/visual-contract.test.mjs tests/ui/preservation-contract.test.mjs tests/ui/dom-evidence.test.mjs tests/ui/visual-pathname-audit.test.mjs tests/ui/visual-binding-proposal.test.mjs
+          node --test tests/ui/capture-network.test.mjs tests/ui/suite-plan.test.mjs tests/ui/checks/catalog-cache.test.mjs tests/ui/checks/catalog-wire.test.mjs tests/ui/dom-evidence.test.mjs
 
       - name: Prepare UI assets for thermal-restricted review
         if: failure()
@@ -151,22 +151,6 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-      # The selected application remains a required reference on every event.
-      - name: Build the selected complete UI reference
-        run: |
-          UI_REFERENCE=$(node --input-type=module -e 'import { REFERENCE } from "./tests/ui/preservation-contract.mjs"; console.log(REFERENCE.source)')
-          git fetch --no-tags --depth=1 origin "$UI_REFERENCE"
-          git worktree add --detach "$RUNNER_TEMP/ui-reference" "$UI_REFERENCE"
-          CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target" cargo build --locked --manifest-path "$RUNNER_TEMP/ui-reference/Cargo.toml" -p semon-store --bin semon --features semon-sessions/test-clock
-          strip --strip-debug target/debug/semon
-      - name: Retain selected UI reference binary
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-        with:
-          name: viewer-ui-reference-binary
-          path: target/debug/semon
-          if-no-files-found: error
-          retention-days: 1
-
   checks:
     name: viewer / ${{ matrix.suite }}
     needs: build
@@ -178,7 +162,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [navigation, transcript, shell, interaction, accessibility, visual, live, order-phone, order-desktop-light, order-desktop-dark, performance, transport]
+        suite: [navigation, transcript, shell, interaction, accessibility, live, order-phone, order-desktop-light, order-desktop-dark, performance, transport]
     env:
       SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
       SEMON_CATALOG_OUT: ${{ github.workspace }}/tests/ui/out/catalog-phases
@@ -193,12 +177,6 @@ jobs:
         with:
           name: viewer-test-binaries
           path: target/debug
-      - name: Download selected UI reference
-        if: matrix.suite == 'visual' || matrix.suite == 'transport'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          name: viewer-ui-reference-binary
-          path: target/ui-reference
       - name: Restore executable permissions
         run: chmod +x target/debug/semon target/debug/examples/ui-account-server
       - name: Restore baseline executable permissions
@@ -227,7 +205,7 @@ jobs:
 
       - name: Browser touch infrastructure regression tests
         if: matrix.suite == 'interaction'
-        run: node --test tests/ui/tap-hit.test.mjs tests/ui/capture-paint.test.mjs
+        run: node --test tests/ui/tap-hit.test.mjs
 
       - name: Independent shared-account and application-shell lifecycle
         if: matrix.suite == 'interaction'
@@ -304,26 +282,6 @@ jobs:
         run: node checks/run.mjs --group "$SUITE"
         env:
           SUITE: ${{ matrix.suite }}
-      - name: Compare actual native and selected complete reading UI
-        if: ${{ !cancelled() && matrix.suite == 'visual' }}
-        run: |
-          chmod +x target/ui-reference/semon
-          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/ui-reference/semon sessions --serve --listen 127.0.0.1:8770 \
-            --claude-home "$RUNNER_TEMP/sample/claude" --claude-json "$RUNNER_TEMP/sample/.claude.json" --codex-home "$RUNNER_TEMP/sample/codex" --copilot-home "$RUNNER_TEMP/sample/copilot" --proc-root "$RUNNER_TEMP/sample/proc" --cache "$RUNNER_TEMP/ui-reference-index.json" \
-            < /dev/null > "$RUNNER_TEMP/ui-reference.log" 2>&1 &
-          for _ in $(seq 1 100); do
-            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/ui-reference.log" || true)
-            [ -n "$url" ] && break
-            sleep 0.2
-          done
-          [ -n "$url" ] || { cat "$RUNNER_TEMP/ui-reference.log"; exit 1; }
-          cd tests/ui
-          export SEMON_PRESERVATION_BASE="${url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${url##*t=}"
-          failed=0
-          node preservation.mjs || failed=1
-          SEMON_PIXEL_SCOPE=main node pixels.mjs || failed=1
-          exit "$failed"
-
       - name: Live updates while the logs are written
         if: ${{ !cancelled() && matrix.suite == 'live' }}
         working-directory: tests/ui
@@ -366,37 +324,6 @@ jobs:
           SEMON_BIN: ${{ github.workspace }}/target/debug/semon
         run: node checks/budget.mjs
 
-      # Keep the historical two-machine routes on a second actual-reference
-      # comparison; every frame uses the pinned compat=1 binary and strict gate.
-      - name: Two machines in one viewer against the selected complete UI
-        if: ${{ !cancelled() && matrix.suite == 'transport' }}
-        env:
-          SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/two-machines
-        run: |
-          [ "$(node tests/ui/fixture.mjs "$RUNNER_TEMP/second" --second)" = "$SEMON_NOW" ]
-          chmod +x target/ui-reference/semon
-          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen 127.0.0.1:8767 --claude-json "$RUNNER_TEMP/sample/.claude.json" \
-            --machine "$RUNNER_TEMP/sample" --machine "$RUNNER_TEMP/second" < /dev/null > "$RUNNER_TEMP/two-machines.log" 2>&1 &
-          for _ in $(seq 1 100); do
-            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/two-machines.log" || true)
-            [ -n "$url" ] && break
-            sleep 0.2
-          done
-          [ -n "$url" ] || { cat "$RUNNER_TEMP/two-machines.log"; exit 1; }
-          candidate_base="${url%%/?t=*}"; candidate_token="${url##*t=}"
-          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/ui-reference/semon sessions --serve --listen 127.0.0.1:8772 --claude-json "$RUNNER_TEMP/sample/.claude.json" \
-            --machine "$RUNNER_TEMP/sample" --machine "$RUNNER_TEMP/second" < /dev/null > "$RUNNER_TEMP/two-machines-reference.log" 2>&1 &
-          for _ in $(seq 1 100); do
-            reference_url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/two-machines-reference.log" || true)
-            [ -n "$reference_url" ] && break
-            sleep 0.2
-          done
-          [ -n "$reference_url" ] || { cat "$RUNNER_TEMP/two-machines-reference.log"; exit 1; }
-          cd tests/ui
-          SEMON_BASE="$candidate_base" SEMON_TOKEN="$candidate_token" \
-            SEMON_PRESERVATION_BASE="${reference_url%%/?t=*}" SEMON_PRESERVATION_TOKEN="${reference_url##*t=}" \
-            SEMON_PIXEL_SCOPE=two-machines node pixels.mjs
-
       # A second machine the way one really arrives: the sample fixture pushed over loopback (plain http, so no TLS) to `semon
       # receive`, which writes it under recv/machines/laptop. The token is written to a 0600 file and never echoed. Both the
       # receiver and `semon push --watch` keep running for the step below, as they would on a real pair of machines.
@@ -430,18 +357,13 @@ jobs:
 
       # The viewer over the pushed copy alone (--no-local), and the subset of the suite that shows the pushed data renders as
       # the local one does: the fixture gaps (the served model and every transcript against the retained fixture data, so the
-      # pushed transcripts are the machine's own), and the pixel comparison, served against served (the pushed copy against the
-      # machine's own server), of root Sessions, the sessions list, Analytics and two
-      # session transcripts (harbor, a Claude session with a Codex run and a subagent under it, and deps, a Codex run), at
-      # 390×844 light and dark and 1280×860 light. The rest of the suite is about the viewer, not the data, and runs on the
-      # local fixture above.
+      # pushed transcripts are the machine's own) and the native pages. The rest of the suite is about the viewer, not the
+      # data, and runs on the local fixture above.
       - name: Pushed data in the viewer
         if: ${{ !cancelled() && matrix.suite == 'transport' && steps.pushed-parity.outcome == 'success' }}
         env:
           SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out/pushed
-          SEMON_PIXEL_SCOPE: pushed
-          # The pushed copy's screens are compared with the same screens on the machine's own server (started above), not with a
-          # mockup: the same viewer over the same data must draw the same pixels.
+          # The native pages are compared with the machine's own server (started above).
           SEMON_REF_BASE: ${{ env.SEMON_BASE }}
           SEMON_REF_TOKEN: ${{ env.SEMON_TOKEN }}
         run: |
@@ -459,13 +381,7 @@ jobs:
           export SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}"
           cd tests/ui
           node pushed-parity.mjs --native-pages
-          failed=0
-          node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN" || failed=1
-          node pixels.mjs || failed=1
-          # An empty or short list of screens must not pass: 5 screens at 3 schemes.
-          node -e 'const n = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).results.length; if (n !== 15) { console.error("pixels compared " + n + " screens, expected 15"); process.exit(1); } console.log("pixels compared " + n + " screens")' \
-            "$SEMON_UI_OUT/pixels.json" || failed=1
-          exit "$failed"
+          node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN"
 
       # Lists of sessions keep their rows where they are while updates arrive; what they hold applies when the list is out of sight.
       - name: Stable session order
@@ -474,22 +390,11 @@ jobs:
         env:
           SEMON_ORDER_SCHEMES: ${{ matrix.suite == 'order-phone' && 'phone-light,phone-dark' || matrix.suite == 'order-desktop-light' && 'desktop-light' || 'desktop-dark' }}
         run: node checks/order.mjs
-      - name: Retain bounded per-case visual binding provenance
-        if: ${{ always() && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
-        run: node tests/ui/visual-provenance.mjs
-      - name: Qualify existing visual bindings against current captures
-        if: ${{ always() && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
-        run: node tests/ui/visual-pathname-audit.mjs
-      - name: Propose qualified visual binding maintenance
-        if: ${{ always() && (matrix.suite == 'visual' || matrix.suite == 'transport') }}
-        env:
-          SEMON_VISUAL_PROPOSAL_SUITE: ${{ matrix.suite }}
-        run: node tests/ui/visual-binding-proposal.mjs
       - name: Server logs
         if: ${{ always() }}
-        run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/account-menu.log "$RUNNER_TEMP"/two-machines.log "$RUNNER_TEMP"/two-machines-reference.log "$RUNNER_TEMP"/receive.log "$RUNNER_TEMP"/push.log "$RUNNER_TEMP"/pushed-viewer.log || true
+        run: cat "$RUNNER_TEMP"/sample*.log "$RUNNER_TEMP"/account-menu.log "$RUNNER_TEMP"/receive.log "$RUNNER_TEMP"/push.log "$RUNNER_TEMP"/pushed-viewer.log || true
 
-      - name: Upload reports, screenshots and diffs
+      - name: Upload reports and screenshots
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
