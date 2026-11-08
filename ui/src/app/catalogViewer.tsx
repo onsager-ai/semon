@@ -16,7 +16,6 @@ import { render } from 'preact';
 import { createOverviewPages } from './overviewPages';
 import { parseCausalTrace, renderCausalTrace, type CausalTrace } from './tracePresentation';
 import { reachableResultIds } from '../domain/trace';
-import type { ControlView } from '../lib/control';
 import type { ViewerApplication } from './viewer';
 import { object, text } from '../domain/validate';
 import type { ViewerHost, ViewerPage } from '../viewer-host';
@@ -47,8 +46,6 @@ import {
 import { createCatalogBrowser, type CatalogFilters } from './catalogBrowser';
 import {
   renderSessionScreen,
-  closeSessionComposer,
-  updateSessionControl,
   updateSessionClock,
   updateSessionName,
   updateSessionPager,
@@ -648,10 +645,6 @@ export function createCatalogViewer(
       overview.allRecent(key, false);
     },
   });
-  // Collection observes native history; optional controllers never enter this reader.
-  function controlFor(_view: SelectedView): ControlView | undefined {
-    return undefined;
-  }
   const runtimeObservation = createRuntimeObservation({
     scope,
     navigation,
@@ -667,7 +660,6 @@ export function createCatalogViewer(
   const removeRuntimeListener = runtimeObservation.subscribe(() => {
     if (!active) return;
     updateSessionRuntime(active.root, runtimeFor(active));
-    updateSessionControl(active.root, controlFor(active));
   });
   const overviewRequests = new Set<AbortController>();
   let causal: CausalTrace | null = null,
@@ -904,9 +896,6 @@ export function createCatalogViewer(
     causalExpanded.clear();
     if (active) {
       preserveScroll();
-      // Cached transcripts keep their bounded store and draft; their modal cannot
-      // survive a destination change.
-      closeSessionComposer(active.root);
     }
     if (!keepOverview) {
       overview.leave();
@@ -2678,7 +2667,6 @@ export function createCatalogViewer(
         {
           id: view.key,
           name: view.meta?.name ?? 'Session',
-          control: controlFor(view),
           runtime: runtimeFor(view),
           blocks: [],
           order: [],
@@ -2782,7 +2770,6 @@ export function createCatalogViewer(
       view.renderedFooter === footerKey
     ) {
       measureSessionScreen(view.root);
-      updateSessionControl(view.root, controlFor(view));
       updateSessionRuntime(view.root, runtimeFor(view));
       syncJump(view, changedProjection);
       if ((view.store.loadedRanges()[0]?.first ?? 0) > 0)
@@ -2815,7 +2802,6 @@ export function createCatalogViewer(
         id: view.key,
         name: view.meta?.name ?? 'Session',
         footer,
-        control: controlFor(view),
         runtime: runtimeFor(view),
         retry: view.recovery.stopped
           ? {
@@ -2944,12 +2930,6 @@ export function createCatalogViewer(
       },
       {
         committed() {},
-        composerOpened(panel) {
-          panelOpened(panel);
-        },
-        composerClosed(panel) {
-          panelClosed(panel);
-        },
         trace(turn) {
           const url = tracePath(view.sourceKey, view.key, turn) + '?' + sessionControls();
           history.pushState(null, '', url);
@@ -3569,7 +3549,6 @@ export function createCatalogViewer(
     const navigationFocus = document.activeElement;
     cancelCandidate();
     preserveScroll();
-    if (active) closeSessionComposer(active.root);
     if (!active && !sourcesOpen) listFocus = key;
     sourcesOpen = false;
     let view = selected.get(cacheKey(key));

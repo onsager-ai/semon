@@ -1919,6 +1919,9 @@ globalThis.__semonUIShared = __semonUIShared;
     };
   }
 
+  // src/lib/screens.tsx
+  var screenText = (text) => text.replace(/ · /g, "\u2009 \xB7 \u2009").replace(/^· /, "\xB7\u2009 ");
+
   // shared-preact:preact/hooks
   var useState = globalThis.__semonUIShared.hooks.useState;
   var useEffect = globalThis.__semonUIShared.hooks.useEffect;
@@ -1932,9 +1935,6 @@ globalThis.__semonUIShared = __semonUIShared;
   var useErrorBoundary = globalThis.__semonUIShared.hooks.useErrorBoundary;
   var useId = globalThis.__semonUIShared.hooks.useId;
   var useImperativeHandle = globalThis.__semonUIShared.hooks.useImperativeHandle;
-
-  // src/lib/screens.tsx
-  var screenText = (text) => text.replace(/ · /g, "\u2009 \xB7 \u2009").replace(/^· /, "\xB7\u2009 ");
 
   // src/lib/placeholder.tsx
   function createStatusNote(text, className, role = "status") {

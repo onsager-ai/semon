@@ -1,2 +1,0 @@
-# Disposable native qualification client only; not a Semon runtime dependency.
-websockets==16.0

@@ -237,11 +237,8 @@ const _: fn() = || {
 /// The loopback server around a [`ViewerCore`]: the per-run token and its
 /// cookie, the exact local Host check and GET only.
 struct Viewer {
-    control: Option<Mutex<Arc<semon_control::codex::Codex>>>,
-    bootstrap_used: Mutex<bool>,
     core: ViewerCore,
     token: String,
-    bootstrap: String,
     port: u16,
 }
 
@@ -376,25 +373,7 @@ pub fn serve_listener(options: ServeOptions, listener: std::net::TcpListener) ->
     serve_server(options, server)
 }
 
-/// Retained control entry point; unavailable in the collection configuration.
-/// Refuses before binding a listener or starting native observation.
-pub fn serve_with_control(
-    options: ServeOptions,
-    control: Arc<semon_control::codex::Codex>,
-) -> io::Result<()> {
-    semon_control::require_collection_control()?;
-    let address = listen_addr(&options.listen)?;
-    let server = Server::http(address).map_err(io::Error::other)?;
-    serve_server_control(options, server, Some(control))
-}
 fn serve_server(options: ServeOptions, server: Server) -> io::Result<()> {
-    serve_server_control(options, server, None)
-}
-fn serve_server_control(
-    options: ServeOptions,
-    server: Server,
-    control: Option<Arc<semon_control::codex::Codex>>,
-) -> io::Result<()> {
     let port = server
         .server_addr()
         .to_ip()
@@ -408,21 +387,9 @@ fn serve_server_control(
     // Reads answer from the last built model; a rebuild never holds one up.
     core.set_refresh(Refresh::Background);
     let token = random_token()?;
-    let bootstrap = if control.is_some() {
-        random_token()?
-    } else {
-        token.clone()
-    };
-    let viewer = Arc::new(Viewer {
-        core,
-        token,
-        bootstrap,
-        bootstrap_used: Mutex::new(false),
-        control: control.map(Mutex::new),
-        port,
-    });
+    let viewer = Arc::new(Viewer { core, token, port });
     let server = Arc::new(server);
-    println!("http://127.0.0.1:{port}/?t={}", viewer.bootstrap);
+    println!("http://127.0.0.1:{port}/?t={}", viewer.token);
     // A few requests at once, so a long transcript page doesn't hold up a
     // poll. recv blocks; between requests only the refresh pool runs, and
     // it checks a machine only until IDLE_AFTER its last read.
@@ -550,7 +517,7 @@ fn authorized(request: &Request, query: &str, token: &str, port: u16) -> Option<
     (cookie || query_token).then_some(query_token)
 }
 
-fn control_reply(status: u16, value: Value) -> ViewerReply {
+fn json_reply(status: u16, value: Value) -> ViewerReply {
     ViewerReply {
         status,
         content_type: "application/json; charset=utf-8",
@@ -558,7 +525,7 @@ fn control_reply(status: u16, value: Value) -> ViewerReply {
         etag: None,
     }
 }
-fn control_authorized(request: &Request, token: &str, port: u16) -> bool {
+fn post_authorized(request: &Request, token: &str, port: u16) -> bool {
     let headers = request.headers();
     if ["Host", "Origin", "Cookie", "Content-Type"]
         .iter()
@@ -585,18 +552,7 @@ impl Viewer {
     fn handle(&self, mut request: Request) {
         let url = request.url().to_owned();
         let (path, query) = url.split_once('?').unwrap_or((&url, ""));
-        if request.method() == &Method::Post && path == "/api/control" {
-            let authorized = control_authorized(&request, &self.token, self.port);
-            let reply = if authorized {
-                self.control_write(&mut request)
-            } else {
-                control_reply(403, serde_json::json!({"error":"Forbidden"}))
-            };
-            respond(request, reply, None);
-            return;
-        }
-        // Credentials are transport-only. Reject duplicate/invalid URL credentials
-        // even with a cookie, before spending a one-time control bootstrap nonce.
+        // Credentials are transport-only; reject duplicate or invalid URL tokens.
         let credentials: Vec<_> = query
             .split('&')
             .filter(|part| {
@@ -606,22 +562,17 @@ impl Viewer {
             .collect();
         if !credentials.is_empty()
             && (credentials.len() != 1
-                || credentials[0].strip_prefix("t=") != Some(self.bootstrap.as_str()))
+                || credentials[0].strip_prefix("t=") != Some(self.token.as_str()))
         {
             respond(
                 request,
-                control_reply(403, serde_json::json!({"error":"Forbidden"})),
+                json_reply(403, serde_json::json!({"error":"Forbidden"})),
                 None,
             );
             return;
         }
         let accepted = if request.method() == &Method::Post && path == "/api/viewer/home" {
-            control_authorized(&request, &self.token, self.port).then_some(false)
-        } else if self.control.is_some() {
-            // A spent URL nonce is not a cookie secret and never authorizes writes.
-            authorized(&request, "", &self.token, self.port).or_else(|| {
-                authorized(&request, query, &self.bootstrap, self.port).filter(|set| *set)
-            })
+            post_authorized(&request, &self.token, self.port).then_some(false)
         } else {
             authorized(&request, query, &self.token, self.port)
         };
@@ -635,24 +586,6 @@ impl Viewer {
             respond(request, forbidden, None);
             return;
         };
-        if set_cookie && self.control.is_some() {
-            let mut used = self
-                .bootstrap_used
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            if *used {
-                respond(
-                    request,
-                    control_reply(
-                        403,
-                        serde_json::json!({"error":"Control bootstrap URL already used"}),
-                    ),
-                    None,
-                );
-                return;
-            }
-            *used = true;
-        }
         let routing_query = query
             .split('&')
             .filter(|part| !part.starts_with("t="))
@@ -660,7 +593,7 @@ impl Viewer {
             .join("&");
         let query = routing_query.as_str();
         let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
-        let mut reply = if path == "/api/viewer/home" && request.method() == &Method::Post {
+        let reply = if path == "/api/viewer/home" && request.method() == &Method::Post {
             let mut bytes = Vec::new();
             let body = request
                 .as_reader()
@@ -675,7 +608,7 @@ impl Viewer {
                     .and_then(|value| value["seen"].as_array())
                     .is_none()
             {
-                control_reply(
+                json_reply(
                     400,
                     serde_json::json!({"error":"Invalid Home read arguments"}),
                 )
@@ -689,127 +622,11 @@ impl Viewer {
                 );
                 self.core.respond("GET", path, &joined, None)
             }
-        } else if path == "/api/session-control" && semon_control::COLLECTION_CONTROL_PAUSED {
-            control_reply(
-                200,
-                serde_json::json!({"control":null,"control_available":false,
-                "reason":"Two-way control is paused in the collection configuration"}),
-            )
-        } else if path == "/api/session-control" {
-            let identity = self
-                .core
-                .respond("GET", "/api/session-identity", query, None);
-            let selected = serde_json::from_slice::<Value>(&identity.body).unwrap_or(Value::Null);
-            let status = self
-                .control
-                .as_ref()
-                .map(|control| {
-                    control
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .snapshot()
-                })
-                .filter(|snapshot| {
-                    selected["identity"]["source_key"] == "local"
-                        && selected["identity"]["harness"] == "codex"
-                        && selected["identity"]["owner_qualification"] != "provisional"
-                        && selected["identity"]["native_id"]
-                            .as_str()
-                            .is_some_and(|id| snapshot["thread"].as_str() == Some(id))
-                });
-            control_reply(200, serde_json::json!({"control":status}))
         } else {
             self.core
                 .respond("GET", path, query, if_none_match.as_deref())
         };
-        if path == "/api/viewer/home"
-            && reply.status == 200
-            && self.control.is_some()
-            && !semon_control::COLLECTION_CONTROL_PAUSED
-        {
-            let mut body: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
-            if body.is_object() {
-                body["launch_control"] = self
-                    .control
-                    .as_ref()
-                    .and_then(|control| {
-                        control
-                            .lock()
-                            .unwrap_or_else(PoisonError::into_inner)
-                            .launch_snapshot()
-                    })
-                    .unwrap_or(Value::Null);
-                reply = control_reply(200, body);
-            }
-        }
         respond(request, reply, set_cookie.then_some(&self.token));
-    }
-    fn control_write(&self, request: &mut Request) -> ViewerReply {
-        if semon_control::COLLECTION_CONTROL_PAUSED {
-            return control_reply(
-                503,
-                serde_json::json!({"error":{"code":"capability_unavailable",
-                "message":"Two-way control is paused in the collection configuration"}}),
-            );
-        }
-        if request_header(request, "Content-Type") != Some("application/json")
-            || request.body_length().is_none_or(|n| n > 65536)
-        {
-            return control_reply(400, serde_json::json!({"error":"Invalid control body"}));
-        }
-        let mut bytes = Vec::new();
-        if request
-            .as_reader()
-            .take(65537)
-            .read_to_end(&mut bytes)
-            .is_err()
-            || bytes.len() > 65536
-        {
-            return control_reply(400, serde_json::json!({"error":"Invalid control body"}));
-        }
-        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
-            return control_reply(400, serde_json::json!({"error":"Invalid control JSON"}));
-        };
-        let owner = self.control.as_ref().unwrap();
-        let mut connection = owner.lock().unwrap_or_else(PoisonError::into_inner);
-        let driver = connection.clone();
-        if value["op"] == "reconnect" {
-            if value["generation"] != driver.snapshot()["generation"] {
-                return control_reply(409, serde_json::json!({"error":"Stale connection"}));
-            }
-            return match driver.reconnect() {
-                Ok(next) => {
-                    *connection = next;
-                    control_reply(200, serde_json::json!({"reconnected":true}))
-                }
-                Err(_) => control_reply(
-                    409,
-                    serde_json::json!({"error":"Native reconnect failed; no write replayed"}),
-                ),
-            };
-        }
-        drop(connection);
-        // HTTP has no Unix peer credentials. Zero means unknown, not root authority.
-        // Authority is the isolated executor plus exact authenticated browser transport.
-        let source = semon_control::Source {
-            window: "local-viewer".into(),
-            peer_pid: 0,
-            peer_uid: 0,
-        };
-        match driver.command(&value, source) {
-            Ok(mut receipt) => {
-                let id = value["id"].as_str().unwrap_or("");
-                // Confirm only this operation's native acceptance; the receipt
-                // grants no control identity or unrelated operation history.
-                let actions = driver
-                    .operation_receipt(id)
-                    .map(|action| serde_json::Map::from_iter([(id.to_owned(), action)]))
-                    .unwrap_or_default();
-                receipt["snapshot"] = serde_json::json!({"actions":actions});
-                control_reply(200, receipt)
-            }
-            Err(error) => control_reply(409, serde_json::json!({"error":error.to_string()})),
-        }
     }
 }
 /// When a background check is next due, after one that started at
@@ -1784,11 +1601,8 @@ mod tests {
         let server = Server::http("127.0.0.1:0").unwrap();
         let port = server.server_addr().to_ip().unwrap().port();
         let viewer = Viewer {
-            control: None,
-            bootstrap_used: Mutex::new(false),
             core: ViewerCore::new(fixture.options.clone()),
             token: "0123456789abcdef0123456789abcdef".into(),
-            bootstrap: "0123456789abcdef0123456789abcdef".into(),
             port,
         };
         if let Some(expected_session) = expected_session {
@@ -1838,43 +1652,6 @@ mod tests {
         drop(_busy);
         worker.join().unwrap();
         String::from_utf8_lossy(&response).into_owned()
-    }
-
-    #[test]
-    fn collection_control_refuses_authenticated_stale_and_malformed_writes_without_reads() {
-        let fixture = Fixture::new();
-        fixture.claude(
-            "private",
-            &[json!({"type":"user","sessionId":"private","message":{"content":"Do not read"}})],
-        );
-        for body in [
-            r#"{"op":"send","thread":"stale","text":"never deliver"}"#,
-            "malformed",
-        ] {
-            let response = http(
-                &fixture,
-                &format!(
-                    "POST /api/control HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nOrigin: http://127.0.0.1:PORT\r\nCookie: semon_session=0123456789abcdef0123456789abcdef\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                ),
-            );
-            assert!(response.starts_with("HTTP/1.1 503"), "{response}");
-            assert!(response.contains("capability_unavailable"), "{response}");
-        }
-        let forbidden = http(
-            &fixture,
-            "POST /api/control HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        );
-        assert!(forbidden.starts_with("HTTP/1.1 403"));
-        let status = http(
-            &fixture,
-            "GET /api/session-control?sid=stale&t=0123456789abcdef0123456789abcdef HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n",
-        );
-        assert!(status.starts_with("HTTP/1.1 200"), "{status}");
-        assert!(status.contains("\"control\":null"));
-        assert!(status.contains("\"control_available\":false"));
-        assert!(!fixture.options.cache.exists());
-        assert!(!crate::events::EventCache::path(&fixture.options.cache).exists());
     }
 
     #[test]
@@ -2766,10 +2543,6 @@ mod tests {
                 "{module} must be scanned"
             );
         }
-        assert!(
-            !js.contains("  // src/app/controlObservation.ts\n"),
-            "paused control observation must not enter the collection bundle"
-        );
         let injected = js.replacen(
             "  // src/lib/account.ts\n",
             "  // src/lib/account.ts\n  probe.innerHTML = hostile;\n",

@@ -8,7 +8,7 @@ const { outputFiles } = await build({
   absWorkingDir: new URL('../', import.meta.url).pathname,
   stdin: {
     contents:
-      "export {renderSessionScreen,updateSessionControl,updateSessionRuntime,updateSessionJump,updateSessionName} from './src/lib/transcript'; export {createLocalControl} from './src/app/localControl'; export {EffectScope} from './src/app/effects'; export {createPanelChrome} from './src/lib/panel';",
+      "export {renderSessionScreen,updateSessionRuntime,updateSessionJump,updateSessionName} from './src/lib/transcript'; export {createPanelChrome} from './src/lib/panel';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -105,37 +105,10 @@ for (const width of [390, 820, 1280])
             pager() {},
           };
           window.jumps = 0;
-          window.scope = new ViewerFixes.EffectScope();
-          window.control = ViewerFixes.createLocalControl(scope, () =>
-            ViewerFixes.updateSessionControl(
-              root,
-              control.view('native', 'source:native') ??
-                control.readOnly('native', 'source:native'),
-            ),
-          );
-          window.native = {
-            thread: 'native',
-            generation: 'g',
-            activeTurn: null,
-            connected: true,
-            capabilities: {
-              input: true,
-              steer: true,
-              interrupt: false,
-              commandApproval: false,
-              fileApproval: false,
-              questions: false,
-            },
-            reason: null,
-            requests: [],
-            actions: {},
-          };
           window.snapshot = {
-            composerTarget: document.querySelector('#topbar'),
             id: 'native',
             name: 'Initial session',
             order: [],
-            control: control.readOnly('native', 'source:native'),
             blocks: [
               {
                 kind: 'loose',
@@ -214,17 +187,6 @@ for (const width of [390, 820, 1280])
           target.className = 'jump-wrap';
           ViewerFixes.updateSessionJump(root, true, 2, false, target);
         });
-        await page.getByRole('button', { name: 'Open Composer' }).click();
-        const row = page.locator('.composer-unavailable'),
-          input = page.getByLabel('Message to Codex');
-        assert.equal(await row.isVisible(), true);
-        assert.equal(await input.isVisible(), false);
-        await row.press('Enter');
-        assert.equal(await row.getAttribute('aria-expanded'), 'true');
-        assert.equal(await input.getAttribute('readonly'), '');
-        await row.click();
-        assert.equal(await input.isVisible(), false);
-        await page.keyboard.press('Escape');
         assert.equal(
           await page.locator('.think-disclosure').getAttribute('aria-expanded'),
           'false',
@@ -262,80 +224,11 @@ for (const width of [390, 820, 1280])
         await page.locator('.tsum').click();
         await page.locator('.step > button').click();
         assert.match(await page.locator('.out').innerText(), /Full recorded failure information/);
-        await page.evaluate(() => {
-          control.adopt(native);
-          ViewerFixes.updateSessionControl(root, control.view('native', 'source:native'));
-        });
-        await page.getByRole('button', { name: 'Open Composer' }).click();
-        const compact = await input.boundingBox();
-        await input.focus();
-        await input.fill('Retained draft\nSecond line\nThird line');
-        await page.waitForTimeout(50);
-        const expanded = await input.boundingBox();
-        assert.ok(expanded.height > compact.height);
-        await page.evaluate(() => {
-          window.savedBody = document.querySelector('.turns');
-          window.savedInput = document.querySelector('textarea');
-          window.savedScroll = document.querySelector('#main').scrollTop;
-          ViewerFixes.updateSessionName(root, 'Renamed without transcript change');
-        });
-        assert.equal(
-          await page.evaluate(
-            () =>
-              document.querySelector('.turns') === savedBody &&
-              document.querySelector('textarea') === savedInput,
-          ),
-          true,
-        );
-        assert.equal(await input.inputValue(), 'Retained draft\nSecond line\nThird line');
-        await page.evaluate(() => {
-          control.adopt({
-            ...native,
-            connected: false,
-            capabilities: { ...native.capabilities, input: false, steer: false },
-            reason: 'The controller is disconnected.',
-          });
-          ViewerFixes.updateSessionControl(root, control.view('native', 'source:native'));
-        });
-        assert.equal(await input.isVisible(), true);
-        assert.equal(await input.getAttribute('readonly'), '');
-        await page.getByRole('button', { name: 'Close', exact: true }).focus();
-        await page.waitForTimeout(40);
-        assert.equal(await input.isVisible(), false);
-        assert.match(await row.innerText(), /controller is disconnected.*Draft saved/);
-        await row.click();
-        assert.equal(await input.inputValue(), 'Retained draft\nSecond line\nThird line');
-        await page.evaluate(() => {
-          control.adopt(native);
-          ViewerFixes.updateSessionControl(root, control.view('native', 'source:native'));
-        });
-        assert.equal(await input.isVisible(), true);
-        assert.equal(await input.getAttribute('readonly'), null);
-        await page.evaluate(() =>
-          ViewerFixes.updateSessionRuntime(root, {
-            observation: {
-              state: 'unavailable',
-              phase: null,
-              freshness: 'unavailable',
-              presence: 'unknown',
-            },
-            loading: false,
-            reason: 'Runtime observation unavailable',
-          }),
-        );
-        assert.equal(await input.getAttribute('readonly'), null);
-        assert.equal(await input.isVisible(), true);
-        assert.equal(await input.inputValue(), 'Retained draft\nSecond line\nThird line');
-        await input.focus();
-        await page.waitForTimeout(30);
         const geometry = await page.evaluate(() => {
           const b = document.querySelector('#jump-bottom').getBoundingClientRect(),
-            c = document.querySelector('dialog.session-composer-panel').getBoundingClientRect(),
             d = document.querySelector('.session-dock').getBoundingClientRect();
           return {
             readingEmpty: !document.querySelector('#page [aria-label="Conversation controls"]'),
-            trigger: !!document.querySelector('#topbar .session-composer-trigger'),
-            panelInside: c.top >= 0 && c.bottom <= innerHeight,
             center: Math.abs((b.left + b.right - d.left - d.right) / 2) < 1,
             inside: b.top >= 0 && b.bottom <= innerHeight,
             header: !!document.querySelector('#topbar #jump-bottom'),
@@ -344,8 +237,6 @@ for (const width of [390, 820, 1280])
         });
         assert.deepEqual(geometry, {
           readingEmpty: true,
-          trigger: true,
-          panelInside: true,
           center: true,
           inside: true,
           header: false,

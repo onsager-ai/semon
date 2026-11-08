@@ -164,14 +164,7 @@ Native administrative pages retain server content and forms while sharing chrome
 and compact Recent metadata. `ui/tests/application-lifecycle.mjs` exercises full,
 native and independently configured mounts with deliberately late responses.
 
-`ViewerHost.catalogControlStream` and `catalogRuntimeStream` supply independently
-authorized selected observations. Only current identity can grant native controls;
-retained content and recorded relationships never grant execution authority.
-Content retries use bounded requests and the existing reader cadence. Native
-readiness retains its independent deadline and lifetime. Status changes update
-existing control leaves without replacing the transcript or losing drafts.
-
-The collection reader temporarily supplies no `ControlView`, launch control or native control stream and removes New Session navigation. Shared Session components render Composer only when an optional consumer explicitly supplies a `ControlView`; their direct fixtures continue qualifying drafts, unknown outcomes and lifecycle without granting collection authority. Passive recorded asks/outcomes and the independent runtime observation remain visible. Metadata search and in-session selected-text navigation remain active; broad full-text find is not advertised. See the [temporary collection scope](../docs/design/session-foundation-retirement.md#temporary-collection-scope).
+`ViewerHost.catalogRuntimeStream` supplies a selected read-only observation. Passive recorded questions and outcomes remain visible. Metadata search and in-session selected-text navigation remain active.
 
 ## Formatting and local hooks
 
@@ -235,34 +228,6 @@ inside their original form, so settings and submitter overrides participate in
 native POST and FormData. A nested Select sheet owns its own scroll boundary.
 No-JS keeps styled native fields and details. Destroy restores host content and
 native fields before removing enhancement roots; remount cannot duplicate them.
-
-A host may provide `controlStream`, a same-origin SSE status resource separate
-from its content model. The Viewer sends `selected` (native session ID) and
-`machine` (projected presentation identity). Hosts resolve the authoritative
-source and recheck custody and access for every delivery. The `control` event
-contains `{selected, machine, revision, control}`; `control` uses the existing
-validated native snapshot contract or null. Additional fields may be passed to
-`modelNavigation`. Revisions identify complete status snapshots independently
-of content. Each new subscription starts with a snapshot; unchanged observations
-send `heartbeat` at least every 30 seconds. `unavailable` and transport errors
-trigger owned capped retries; `ended` clears the old authority. Absent or stale
-status disables native capabilities while retaining a current draft.
-
-With this option, content reads use `content=1`; content streams include their
-accepted `since` revision. Hosts must preserve conditional content reads while
-serving native status independently. The existing model/control transaction
-continues unchanged for hosts without this option.
-
-Catalog consumers may instead use `catalogControlStream` with the accepted
-`CatalogSelectionStore` port. Requests and snapshots carry exact
-`{source_key, catalog_key, native_id, harness}` identities. Canonical catalog
-routes and native session IDs remain distinct; the observer never derives
-native identity from a route, display hostname, or source-reference order.
-Missing or ambiguous native identity opens no status stream and grants no
-control authority. Hosts validate the selected catalog source and independently
-recheck runtime custody and authorization. Catalog selection does not fall back
-to workspace model resolution. The scoped observer retains the same snapshot,
-heartbeat, retry and teardown semantics described above.
 
 The catalog read consumers are separate from the complete workspace graph.
 `CatalogCapabilities` validates an explicit `catalog-v1` advertisement; unsupported

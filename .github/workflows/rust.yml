@@ -101,23 +101,6 @@ jobs:
       - name: Verify Model retirement and independent reference provenance
         run: python3 -m unittest discover -s tests/spikes -p test_model_retirement.py -v
 
-      - name: Verify separate native Codex control evidence and provenance
-        run: python3 -m unittest discover -s tests/spikes -p test_control_fixtures.py -v
-
-      - name: Verify attachment against the actual pinned E2B SDK without provider calls
-        run: |
-          python3 -m venv "$RUNNER_TEMP/e2b-sdk"
-          "$RUNNER_TEMP/e2b-sdk/bin/pip" install --require-hashes -r scripts/e2b-requirements.txt
-          "$RUNNER_TEMP/e2b-sdk/bin/python" scripts/test-e2b-attach.py
-      - name: Verify standalone native schema and execution evidence
-        run: python3 -m unittest discover -s tests/spikes -p test_standalone_fixtures.py -v
-
-      - name: Verify managed guest private SDK boundary without provider calls
-        run: python3 scripts/test-e2b-managed.py
-
-      - name: Verify bounded E2B inventory worker without provider calls
-        run: python3 -m unittest discover -s tests/spikes -p 'test_e2b_*.py' -v
-
       - name: Verify harness icon hashes
         run: cd assets/harnesses && sha256sum -c SHA256SUMS
 
@@ -142,16 +125,10 @@ jobs:
           cargo test -p semon-sessions --lib --locked events::store::reprice::tests::
           cargo test -p semon-sessions --lib --locked catalog_statement_journal_batch_probe_preserves_catalog_feed_and_transaction_rollback
 
-      - name: Collection pause boundaries before broad regressions
+      - name: Paused full-text find refuses before native reads
         run: |
-          python3 -m unittest discover -s tests/spikes -p test_collection_pause.py -v
-          python3 tests/ssh/test_controller_supervisor.py
           cargo test -p semon-sessions --lib --locked paused_find_ -- --nocapture
-          cargo test -p semon-sessions --lib --locked collection_control_refuses_ -- --nocapture
-          cargo test -p semon-cli --bin semon --locked paused_delivery_refuses_ -- --nocapture
-          cargo test -p semon-control --bins --locked collection_ -- --nocapture
-          cargo test -p semon-ssh --lib --locked collection_ssh_ -- --nocapture
-          cargo test -p semon-ssh --example controller-install --locked collection_controller_install_refuses -- --nocapture
+          cargo test -p semon-cli --bin semon --locked paused_find_ -- --nocapture
 
       - name: Recovery core journey and selected fallback diagnostics
         env:
@@ -196,7 +173,7 @@ jobs:
           python3 - "$RUNNER_TEMP/product-cli-dependencies.txt" "$RUNNER_TEMP/product-workspace.json" <<'PY'
           import json, pathlib, sys
           subsystems = {"semon-store", "semon-codex", "semon-claude", "semon-copilot", "semon-relay"}
-          retired = subsystems | {"semon-forensic-export", "semon-relay-export"}
+          retired = subsystems | {"semon-forensic-export", "semon-relay-export", "semon-control", "semon-runtime", "semon-ssh"}
           unexpected = [line for line in pathlib.Path(sys.argv[1]).read_text().splitlines() if line.split()[0] in retired]
           if unexpected:
               raise SystemExit("Product CLI gained retired subsystem/export dependencies: " + ", ".join(unexpected))
@@ -206,16 +183,6 @@ jobs:
           if unexpected:
               raise SystemExit("Retired workspace packages returned: " + ", ".join(unexpected))
           PY
-
-      - name: Codex private device-login process checks
-        run: |
-          cargo clippy -p semon-runtime --all-targets --features codex-process --locked -- --no-deps -D warnings
-          SEMON_TEST_COORDINATOR_SECRET=offline-fixture E2B_API_KEY=offline-fixture cargo test -p semon-runtime --features codex-process --locked
-
-      - name: E2B private inventory process checks
-        run: |
-          cargo clippy -p semon-runtime --all-targets --features e2b-process --locked -- --no-deps -D warnings
-          SEMON_TEST_COORDINATOR_SECRET=offline-fixture E2B_API_KEY=offline-fixture SEMON_TEST_NETWORK_GUARD=keep cargo test -p semon-runtime --features e2b-process --locked
 
   codex-conformance:
     name: Pinned Codex fixture conformance

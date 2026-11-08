@@ -41,7 +41,6 @@ export interface ViewerHost {
   catalogSources?: boolean;
   account?: unknown;
   /** Exact catalog/source status; identity comes from the accepted Viewer selection owner. */
-  catalogControlStream?: string;
   /** Readonly selected phase/status by source/catalog intent, independent of native identity. */
   catalogRuntimeStream?: string;
   initialMachines?: ViewerContent;

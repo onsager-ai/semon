@@ -25,7 +25,6 @@ import { selectedSessionState } from './sessionPresentation';
 import { ago, clock, dur, timeText, shortModel, liveUrl, previewLine } from '../domain/format';
 import { recentOrderSource, selectRecentChildren, selectRecentRoots } from '../domain/recent';
 import type { EffectScope } from './effects';
-import type { ControlView } from '../lib/control';
 import type { ViewerRoute } from '../lib/routes';
 
 interface Selection {
@@ -210,8 +209,6 @@ interface OverviewHost {
   navigationRoute(): Readonly<ViewerRoute>;
   selectedMachine(): string | null;
   admin(): { label: string; href: string } | null;
-  observeLaunchControl?(value: unknown): void;
-  launchControl?(): ControlView | undefined;
   machine(key: string): void;
   chrome(): void;
   panelOpened(panel: { destroy(): void }): void;
@@ -821,7 +818,6 @@ export function createOverviewPages(host: OverviewHost) {
       host.root,
       {
         observation: error ?? undefined,
-        control: host.launchControl?.(),
         waiting: home.totals.waiting - (home.inbox.length - inbox.length),
         working: home.totals.working,
         up: home.machines.filter((machine) => machine.up).length,
@@ -1489,7 +1485,6 @@ export function createOverviewPages(host: OverviewHost) {
             }
           }
         }
-        if (route === 'home') host.observeLaunchControl?.(object(value).launch_control ?? null);
         home = next;
         homeSource = route === 'machine' ? host.selectedMachine() : null;
         if (route !== 'machine') acceptWorkspace(next, publicationIncomplete);
