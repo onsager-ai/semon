@@ -10,6 +10,7 @@ This directory is Plan item 1 of [onsager-ai/semon#501](https://github.com/onsag
 - Capability facts used: `ui/assert-state` is removed in v0.7.0 (assert state markers with `ui/assert-element`); `api/poll`, `db/observe` and `ui/select` are kept; `duhem coverage` and `claim_scope` ship in v0.7.0. Duhem #531, #544, #546, #535, #567 and #574 are satisfied by M1 and v0.7.0 and are not blockers. Frame/iframe locators (Duhem #568) merged at e26c210 after v0.7.0: they are post-v0.7.0 (#568) and deferred until the next Duhem release, not a missing capability.
 - Citations: absolute draft paths were converted to repo-relative links to the Semon files at the source ref. Citations given without a directory (for example `checks/live.mjs:1-16`, relative to `tests/ui` per each file's intro) or inside compound spans stay plain text.
 - Nothing was run to produce the map (no cargo, node, Playwright, build or typecheck); it comes from reading the source tree and CI workflows.
+- Retired after the source ref: Semon #536 and its follow-up removed pixel/visual comparison from CI and deleted its harness (`pixels.mjs`, `preservation.mjs`, the acceptance registry, binding tools, `capture-paint`, `dom-evidence`, `session-trace-evidence` and the capture-readiness helpers in `lib.mjs`). Rows in [browser-visual-and-suite.md](browser-visual-and-suite.md) and every row tagged `M3 #581 visual` describe removed assertions and need no migration; they stay as the inventory at `893dd56`.
 
 ## Columns
 
