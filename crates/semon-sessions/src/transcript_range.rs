@@ -1477,9 +1477,14 @@ fn invalid() -> io::Error {
     )
 }
 
-fn reference_in_selection(options: &Options, selection: &Selection, reference: &SessionSourceRef) -> bool {
+fn reference_in_selection(
+    options: &Options,
+    selection: &Selection,
+    reference: &SessionSourceRef,
+) -> bool {
     selection.sources.values().any(|source| {
-        catalog::source_relative(options, &reference.root, source).as_deref() == Some(reference.path.as_str())
+        catalog::source_relative(options, &reference.root, source).as_deref()
+            == Some(reference.path.as_str())
             && source.native_id == reference.native_id
             && source.offset == reference.offset
             && source.prefix_sha256 == reference.prefix_sha256
