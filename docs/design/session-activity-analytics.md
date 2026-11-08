@@ -44,7 +44,7 @@ parent and child steps must never create a family thrash window.
 Schema 41 stores a session activity header, ordered step rows keyed by
 `(session_key, generation, ordinal)`, separate ordered compaction rows, compact summary metadata, and typed
 change facts keyed by session, generation and stable identity.
-Parser 36 retains the exact last Claude usage observation offset alongside the
+Parser 37 retains the exact last Claude usage observation offset alongside the
 existing message ID and assistant UUIDs. The producer uses its established file
 merge order and copied-record ownership map; Codex reads only model-accepted
 facts whose normalized source receipt matches the selected consumed ledger.
@@ -73,7 +73,7 @@ generation. Unknown prices remain unknown. Step arrays stay out of cached descri
 relationships rather than entering the stable description cache. Catalog version 8
 and the semantic recipe bind this output.
 
-Rules version 7 classifies the first waste per step in this order: orchestration
+Rules version 8 classifies the first waste per step in this order: orchestration
 wait or checks pending, explicit tool failure or repeat (retry, flaky rerun), refill
 after compaction, redundant read. Failures retain path-not-found, malformed-command, timeout and rejected
 tool input (Tooling), rate/auth/network/server failure (External), checks pending
@@ -226,13 +226,13 @@ only exclusive steps contribute. Wait time and missing-interval counts contain
 `observed`, `exclusive` and `shared` values, following `OwnershipTotals`; intervals
 are unioned separately for each ownership view. Absent native usage/projections
 remain null. No thrash-window/step arrays enter these summaries. TaskSpecification
-is a known uncomputed lever in rules version 7. `get_session_activity` steps carry
+is a known uncomputed lever in rules version 8. `get_session_activity` steps carry
 the matching booleans `empty_search`, `verify_failure` and `silent_exit`, plus the
 nullable `activity` and `trigger` labels described below.
 
 ### Rules version 7: activity labels, repeats and triggers
 
-Version 7 adds a per-step `activity`, two repeat waste kinds and a per-step
+Version 7 added a per-step `activity`, two repeat waste kinds and a per-step
 `trigger`. Nothing stores command text or paths: labels come from the existing
 allowlisted command tags, and repeats compare a SHA-256 call fingerprint.
 
@@ -241,24 +241,26 @@ first match over its calls. Order is precedence.
 
 | Activity | Evidence |
 | --- | --- |
-| `Coordinate` | An agent or session is spawned, messaged or steered: `Agent`, `Task`, `SendMessage`, `spawn_agent`, `send_message`, `send_input`. |
-| `Wait` | `sleep`, `gh run watch` or `gh pr checks --watch`, `gh pr checks` still pending (exit 8), `wait_agent` or a decoded native wait result. |
+| `Coordinate` | An agent or session is spawned, messaged, steered or listed: `Agent`, `Task`, `SendMessage`, `spawn_agent`, `send_message`, `send_input`, `followup_task`, `list_agents`, `interrupt_agent`. |
+| `Wait` | `sleep` (shell or the Codex `sleep` tool), Claude `Monitor`, `gh run watch` or `gh pr checks --watch`, `gh pr checks` still pending (exit 8), `wait_agent` or a decoded native wait result. |
 | `Integrate` | `git commit`, `push`, `merge`/`rebase`/`cherry-pick`/`pull`, `git add`, `gh pr create`. |
-| `Verify` | A recognized verification command, or `gh pr checks` that is not pending. |
+| `Verify` | A recognized verification command, `gh pr checks` that is not pending, or CI status and control through `gh run view`/`list`/`rerun` and `gh workflow run`. |
 | `Recover` | Not computed. Never assigned. |
 | `Implement` | Native `Edit`, `Write`, `MultiEdit`, `NotebookEdit`, `apply_patch`, a PR body file write, or a mutating command (`git checkout`, `rm`, `mv`, `touch`, ...). |
-| `Explore` | A read, search or `git status`/`diff`/`log`/`show`/`rev-parse`. |
+| `Explore` | A read, search, `git status`/`diff`/`log`/`show`/`rev-parse`, `gh pr view`/`diff`/`list`/`status`, `gh issue view`/`list`, or the read-only tools `WebFetch`, `WebSearch`, `web_search`, `_web_run`, `ToolSearch` and `Skill`. |
 | `Setup` | A literal absolute `cd`. |
-| `Report`, `Think` | Not derived (see below). |
+| `Report` | A message to the user or Manager: `AskUserQuestion`, `SubagentHandback`. |
+| `Think` | Not derived (see below). |
 
 Coordination and waiting are distinct typed evidence: the older orchestration
 flag still marks blocking agent calls as orchestration-wait waste, but a spawn or
 message is `Coordinate` while only a wait on an agent is `Wait`. Unknown and
 ambiguous commands prove nothing, so a step with only those, or with no tool
-call, has `activity: null`; there is no "other" value. `report` and `think` need
-to know whether a tool-free step emitted assistant text, and the step facts do
+call, has `activity: null`; there is no "other" value. A tool-free step's `think` or `report` would need to
+know whether it emitted assistant text, and the step facts do
 not carry that evidence (a thinking-only response is not observable), so those
-steps stay unlabelled rather than guessed. The summary counts them in
+steps stay unlabelled rather than guessed; `Report` is derived only from the
+tools above. The summary counts them in
 `unlabelled_activity_steps`, and `activities_not_computed` is `["Recover"]`.
 `by_activity` totals exclusive labelled steps (`steps`, `elapsed_ms`,
 `list_cost_usd` with the waste-total shape); labelled plus unlabelled steps equal
@@ -292,6 +294,42 @@ waste `WorkerResult`, else `NoneVisible` (also when no preceding step exists).
 Repeat markers are not failures of the preceding call. `by_trigger` totals
 exclusive triggered steps with the waste-total shape. `triggers_not_computed` is
 `["InstructionChange", "MissingInput"]`.
+
+### Rules version 8: label coverage
+
+Version 8 labels more steps without weakening any waste proof. On real data
+about 64% of steps had no label, mostly Codex code-mode scripts and tools or
+`gh` subcommands the classifier did not know.
+
+**Label-only evidence.** A Codex code-mode `exec` script that is not an accepted
+projection of one exec result stays an unattributed `Unknown` call: it is a
+state-change barrier, its output feeds no read, redundant-read, failure or retry
+proof, and its retry fingerprint is still absent. Only its activity label may
+use the script's source. When the script starts one to eight
+`tools.exec_command` calls, every `cmd` is a string literal, and it never calls
+`write_stdin`, each literal is parsed with the shell grammar and the recognized
+commands become label evidence, taking the first matching activity as usual.
+Any non-literal `cmd`, more than eight calls, or a session write decodes
+nothing and leaves the step unlabelled. Label evidence is read by the activity
+label only.
+
+**Tools.** The Codex `sleep` tool is a `Sleep` command: it is a `Wait` and has
+the same `Sleep` waste as a shell sleep (the Unmapped category), and it is not a
+state change. Read-only tools (`WebFetch`, `WebSearch`, `web_search`, `_web_run`,
+`ToolSearch`, `Skill`) are `Explore` and no longer break read or retry proofs;
+`AskUserQuestion` and `SubagentHandback` are `Report` and likewise not state
+changes. Claude `Monitor` is label-only `Wait` because it runs a script: it
+remains a state-change barrier and carries no sleep waste. `followup_task`,
+`list_agents` and `interrupt_agent` are `Coordinate` and remain barriers like
+the other agent calls.
+
+**gh.** `gh run view` and `gh run list` are `Verify` and read-only (`gh run view
+--log-failed` remains the existing verification command). `gh run watch`
+(including after `--repo`) is the existing blocking watch, `Wait`. `gh run
+rerun` and `gh workflow run` start CI: `Verify` and a state change, but not a
+verification outcome, so they never produce verify failures or flaky reruns.
+`gh pr view|diff|list|status` and `gh issue view|list` are read-only `Explore`.
+`gh api` and other subcommands stay unrecognized.
 
 A nullable `family` summarizes only the exact existing parent chain, using
 producer-side leaf reduction and bounded stored-summary refresh for independently
