@@ -62,13 +62,19 @@ part after `{namespace}/`), and each store prefixes the namespace.
 | `compaction_uid` | `{session_uid}/c/{id}` | Native record ID; else the record anchor of the compaction record |
 | `source_uid` | `{namespace}/{harness}` | One §1.1 source row per harness and machine |
 
-A **record anchor** `@{n}` is the zero-based ordinal of the record among the
-session's native records, in the session's canonical record order. It depends
-on neither paths nor the path key, so key rotation never changes it, and any
-store holding the session's Raw (an origin, or a receiver for opted-in
-sources) computes the same anchor. It is stable while the Raw prefix that
-holds the record is unchanged. A native rewrite can change it, and that
-publishes a new generation. Each table also stores the components as separate indexed
+A **record anchor** `@{source}:{n}` names a record by its native log and its
+position in that log. `source` is the native log's file stem, which the
+harness generates from native IDs (for example a Claude session or agent ID,
+or a Codex rollout name). It must match `^[A-Za-z0-9._\-]{1,128}$`, and a log
+whose stem does not is refused as unsupported. `n` is the zero-based ordinal
+of the record among that log's complete records. An anchor depends on neither
+paths nor the path key, so key rotation never changes it. It does not depend
+on how logs interleave in the session either, so an append to one log never
+shifts another log's anchors. Any store holding the Raw (an origin, or a
+receiver for opted-in sources, whose mirror keeps the stem and record
+boundaries) computes the same anchor. It is stable while the log's prefix is
+unchanged. A native rewrite can change it, and that publishes a new
+generation. Each table also stores the components as separate indexed
 columns. `idx` columns are ordinals for ordering only. A rebuild from the same
 admitted Raw yields identical UIDs, and a conformance test enforces this.
 
@@ -149,10 +155,12 @@ session.
 origin keeps each session's `high_water` in the durable file
 (`generation_mark`), which rebuilds never touch, so generations stay
 monotonic across rebuilds and clock regressions. Before pushing to a
-destination, the sender reads its status. If the destination already holds
-a generation at or above the local one (for example after a durable reset),
-the sender allocates a new generation above it, republishes locally and then
-pushes. Monotonicity is therefore per destination and never depends on an
+destination, the sender reads its status. Equal generation and equal digest
+means synchronized: nothing is sent unless the destination marked the session
+`repush`, in which case the identical snapshot is resent. Only a destination
+generation above the local one, or an equal generation with a different
+digest (for example after a durable reset), makes the sender allocate a new
+generation above it, republish locally and then push. Monotonicity is therefore per destination and never depends on an
 unreachable one. A receiver refuses a generation more than 24 hours in the
 future.
 
@@ -470,12 +478,14 @@ Proposed defaults, to be measured under #510:
 - Identity: rebuilding gives identical UIDs and rows; encoding round-trips
   components containing `/`, `:` and `%`; turns and compactions without native
   IDs use record anchors, which are unchanged by key rotation (existing labels
-  still resolve) and equal on origin and receiver; a receiver refuses a token
+  still resolve), unchanged by interleaved appends to another log of the same
+  session, and equal on origin and receiver; a receiver refuses a token
   named after itself or `local`.
 - Publication: append, rules bump and repricing queued together converge to
   the latest state; a ledger move during a job queues a follow-up;
   invalidation sets `stale`; generations stay monotonic after an origin
-  rebuild, a clock regression and a durable reset.
+  rebuild, a clock regression and a durable reset; repeated unchanged sweeps
+  over two destinations send nothing.
 - Version scans: a rules bump re-derives only rows with a stale
   `rules_version`; a price bump touches only cost columns and skips frozen
   rows; counts are asserted.
