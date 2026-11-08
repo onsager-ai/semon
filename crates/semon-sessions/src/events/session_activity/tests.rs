@@ -417,18 +417,30 @@ fn missing_times_ties_and_one_hour_cap_preserve_unknown_coverage() {
     assert_eq!(extreme.steps[0].elapsed_ms, Some(HOUR_MS));
 }
 
+fn assert_usd(actual: Option<f64>, expected: Option<f64>) {
+    match (actual, expected) {
+        (Some(actual), Some(expected)) => assert!((actual - expected).abs() < 1e-12),
+        (actual, expected) => assert_eq!(actual, expected),
+    }
+}
+
 #[test]
-fn prices_and_carry_use_one_snapshot_and_keep_partial_prices_unknown() {
+fn components_price_independently_and_list_cost_needs_all_of_them() {
     let tokens = ModelTokens {
         input: 100,
         output: 10,
         cache_read: 200,
         cache_write: 50,
     };
-    for (model, known_list, known_carry) in [
-        ("synthetic-model", Some(0.0002325), Some(0.00005)),
-        ("partial-model", None, Some(0.00005)),
-        ("unpriced-model", None, None),
+    // Components: fresh input, cache read, cache write, output.
+    for (model, known_list, known) in [
+        (
+            "synthetic-model",
+            Some(0.0002325),
+            [Some(1e-4), Some(5e-5), Some(6.25e-5), Some(2e-5)],
+        ),
+        ("partial-model", None, [Some(1e-4), Some(5e-5), None, None]),
+        ("unpriced-model", None, [None; 4]),
     ] {
         let result = activity(
             vec![UsageStep::claude(
@@ -439,25 +451,35 @@ fn prices_and_carry_use_one_snapshot_and_keep_partial_prices_unknown() {
             vec![],
         );
         let step = &result.steps[0];
-        match (step.list_cost_usd, known_list) {
-            (Some(actual), Some(expected)) => assert!((actual - expected).abs() < 1e-12),
-            (actual, expected) => assert_eq!(actual, expected),
+        assert_usd(step.list_cost_usd, known_list);
+        assert_usd(step.fresh_input_usd, known[0]);
+        assert_usd(step.cache_read_usd, known[1]);
+        assert_usd(step.cache_write_usd, known[2]);
+        assert_usd(step.output_usd, known[3]);
+        if known.iter().all(Option::is_some) {
+            let sum: f64 = known.iter().flatten().sum();
+            assert!((step.list_cost_usd.unwrap() - sum).abs() < 1e-12);
         }
-        assert_eq!(step.carry_cost_usd, known_carry);
         assert_eq!(result.pricing_fingerprint, "synthetic-prices-v1");
         assert_eq!(
             result.aggregate.exclusive_cost_complete,
             known_list.is_some()
         );
+        let exclusive = &result.aggregate.totals.exclusive;
         assert_eq!(
-            result
-                .aggregate
-                .totals
-                .exclusive
-                .list_cost_usd
-                .unknown_steps,
+            exclusive.list_cost_usd.unknown_steps,
             u64::from(known_list.is_none())
         );
+        // Each component total is its own measurement, known or unknown.
+        for (total, expected) in [
+            (&exclusive.fresh_input_usd, known[0]),
+            (&exclusive.cache_read_usd, known[1]),
+            (&exclusive.cache_write_usd, known[2]),
+            (&exclusive.output_usd, known[3]),
+        ] {
+            assert_usd(Some(total.known), Some(expected.unwrap_or(0.0)));
+            assert_eq!(total.unknown_steps, u64::from(expected.is_none()));
+        }
     }
     let no_cache = activity(
         vec![UsageStep::claude(
@@ -474,8 +496,13 @@ fn prices_and_carry_use_one_snapshot_and_keep_partial_prices_unknown() {
         )],
         vec![],
     );
-    assert_eq!(no_cache.steps[0].list_cost_usd, None);
-    assert_eq!(no_cache.steps[0].carry_cost_usd, Some(0.0));
+    let step = &no_cache.steps[0];
+    assert_eq!(step.list_cost_usd, None);
+    assert_eq!(step.fresh_input_usd, None);
+    // No tokens is a known zero, not an unpriced component.
+    assert_eq!(step.cache_read_usd, Some(0.0));
+    assert_eq!(step.cache_write_usd, Some(0.0));
+    assert_eq!(step.output_usd, Some(0.0));
 }
 
 #[test]
@@ -878,22 +905,14 @@ fn family_fold_sums_session_wait_unions_and_waste_costs() {
     assert_eq!(waiting.steps, 2);
     assert_eq!(waiting.elapsed_ms.known, 25);
     assert_eq!(family.counts.by_trigger[&Trigger::Polling].steps, 2);
-    assert_eq!(family.counts.unlabelled_activity_steps, 0);
+    let classifier = &family.counts.coverage.classifier;
+    assert_eq!(classifier.unlabelled_activity_steps, 0);
     assert_eq!(
-        family.activities_not_computed,
+        classifier.activities_not_computed,
         [classify::Activity::Recover]
     );
-    assert_eq!(
-        family.triggers_not_computed,
-        [
-            analytics::TriggerNotComputed::InstructionChange,
-            analytics::TriggerNotComputed::MissingInput
-        ]
-    );
-    assert_eq!(
-        family.levers_not_computed,
-        vec![analytics::LeverNotComputed::TaskSpecification]
-    );
+    let timing = &family.counts.coverage.timing;
+    assert_eq!(timing.known_steps + timing.unknown_steps, 2);
     assert_eq!(
         family.counts.waste_cost_by_category[&WasteCategory::Orchestration].steps,
         2
@@ -1050,26 +1069,32 @@ fn step_activity_trigger_retry_and_coverage_flow_through_analytics() {
         counts.by_activity[&Activity::Integrate].elapsed_ms.known,
         1_000
     );
-    assert_eq!(counts.unlabelled_activity_steps, 3);
+    assert_eq!(counts.coverage.classifier.unlabelled_activity_steps, 3);
     assert_eq!(
         counts
             .by_activity
             .values()
             .map(|totals| totals.steps)
             .sum::<u64>()
-            + counts.unlabelled_activity_steps,
+            + counts.coverage.classifier.unlabelled_activity_steps,
         counts.totals.exclusive.steps
     );
     assert_eq!(counts.by_trigger[&Trigger::ToolError].steps, 1);
     assert_eq!(counts.by_trigger[&Trigger::NoneVisible].steps, 1);
     assert_eq!(counts.waste_by_kind[&WasteKind::Retry], 1);
-    assert_eq!(analytics.activities_not_computed, [Activity::Recover]);
+    let classifier = &counts.coverage.classifier;
+    assert_eq!(classifier.rules_version, ACTIVITY_RULES_VERSION);
+    assert_eq!(classifier.activities_not_computed, [Activity::Recover]);
     assert_eq!(
-        analytics.triggers_not_computed,
+        classifier.triggers_not_computed,
         [
             analytics::TriggerNotComputed::InstructionChange,
             analytics::TriggerNotComputed::MissingInput
         ]
+    );
+    assert_eq!(
+        classifier.levers_not_computed,
+        [analytics::LeverNotComputed::TaskSpecification]
     );
 }
 
@@ -1176,4 +1201,141 @@ fn trigger_follows_refill_then_the_nearest_preceding_step_in_source() {
     steps[2].waste = Some(WasteKind::Timeout);
     assert_eq!(Trigger::of(&steps, 1), Some(Trigger::NoneVisible));
     assert_eq!(Trigger::of(&steps, 2), Some(Trigger::ToolError));
+}
+
+fn priced_steps(count: usize) -> Vec<UsageStep> {
+    (0..count)
+        .map(|i| step(&format!("s{i:04}"), "s", i as u64, Some(i as i64 * 10)))
+        .collect()
+}
+
+fn model_step(
+    id: &str,
+    offset: u64,
+    model: &str,
+    tokens: ModelTokens,
+    at: Option<i64>,
+) -> UsageStep {
+    UsageStep::claude(
+        id.into(),
+        position("source", offset),
+        message(model, tokens, at),
+    )
+}
+
+#[test]
+fn preview_bins_equal_step_counts_and_never_exceeds_64_bins() {
+    let empty = analytics::Analytics::of(&activity(vec![], vec![]));
+    assert_eq!(empty.preview, analytics::Preview::default());
+    // (steps, steps per bin, bins): ceil(n / 64) steps per bin.
+    for (count, per_bin, bins) in [
+        (1, 1, 1),
+        (63, 1, 63),
+        (64, 1, 64),
+        (65, 2, 33),
+        (1000, 16, 63),
+    ] {
+        let analytics = analytics::Analytics::of(&activity(priced_steps(count), vec![]));
+        let preview = &analytics.preview;
+        assert_eq!(preview.steps_total, count as u64);
+        assert_eq!(preview.binned_steps, count as u64);
+        assert_eq!(preview.bins.len(), bins, "{count} steps");
+        for (index, bin) in preview.bins.iter().enumerate() {
+            let first = index * per_bin;
+            let last = ((index + 1) * per_bin).min(count) - 1;
+            let span = (bin.first_step, bin.last_step);
+            assert_eq!(span, (first as u64, last as u64));
+            assert_eq!(bin.list_cost_usd.unknown_steps, 0);
+            assert_eq!(bin.max_context_tokens, 100);
+        }
+    }
+}
+
+#[test]
+fn preview_bins_summarize_context_cost_waste_and_compactions_without_shared_steps() {
+    use classify::{WasteCategory, WasteKind};
+    let mut usage = Vec::new();
+    for i in 0..70u64 {
+        let model = if i == 3 {
+            "unpriced-model"
+        } else {
+            "synthetic-model"
+        };
+        let tokens = ModelTokens {
+            input: i * 100,
+            output: 1,
+            ..Default::default()
+        };
+        usage.push(model_step(
+            &format!("s{i:02}"),
+            i,
+            model,
+            tokens,
+            Some(i as i64 * 10),
+        ));
+    }
+    let shared = Shared::from([("s02".into(), "shared-key".into())]);
+    let mut result = derive("session".into(), usage, &shared, vec![], table());
+    result.steps[0].waste = Some(WasteKind::Retry);
+    result.steps[1].waste = Some(WasteKind::Timeout);
+    result.steps[1].compactions = 2;
+    result.steps[2].compactions = 5;
+    let analytics = analytics::Analytics::of(&result);
+    let preview = &analytics.preview;
+    assert_eq!((preview.steps_total, preview.binned_steps), (70, 69));
+    // 69 exclusive steps, two per bin; the shared step (ordinal 2) is skipped.
+    assert_eq!(preview.bins.len(), 35);
+    let first = &preview.bins[0];
+    assert_eq!((first.first_step, first.last_step), (0, 1));
+    assert_eq!(first.max_context_tokens, 100);
+    assert_eq!(first.last_context_tokens, 100);
+    assert_eq!(first.waste_by_category.len(), 2);
+    assert_eq!(first.waste_by_category[&WasteCategory::Unmapped], 1);
+    assert_eq!(first.waste_by_category[&WasteCategory::Tooling], 1);
+    assert_eq!(first.compactions, 2);
+    let second = &preview.bins[1];
+    assert_eq!((second.first_step, second.last_step), (3, 4));
+    assert_eq!(second.max_context_tokens, 400);
+    assert_eq!(second.last_context_tokens, 400);
+    // The unpriced step 3 stays unknown beside the priced step 4.
+    assert_eq!(second.list_cost_usd.unknown_steps, 1);
+    assert!((second.list_cost_usd.known - 0.000402).abs() < 1e-12);
+    assert!(second.waste_by_category.is_empty());
+    assert_eq!(second.compactions, 0);
+}
+
+#[test]
+fn coverage_counts_exclusive_pricing_timing_and_classifier_gaps() {
+    let with_input = |input| ModelTokens {
+        input,
+        output: 10,
+        ..Default::default()
+    };
+    let zero = ModelTokens::default();
+    let shared = Shared::from([("d-shared".into(), "shared-key".into())]);
+    let result = derive(
+        "session".into(),
+        [
+            model_step("a-full", 0, "synthetic-model", with_input(100), Some(0)),
+            // The output rate is missing: input priced, output not.
+            model_step("b-partial", 1, "partial-model", with_input(100), Some(10)),
+            model_step("c-unpriced", 2, "unpriced-model", with_input(100), None),
+            // Shared steps are outside exclusive coverage.
+            model_step("d-shared", 3, "unpriced-model", with_input(100), None),
+            // No tokens: no component is missing a price.
+            model_step("e-empty", 4, "unpriced-model", zero, None),
+        ],
+        &shared,
+        [],
+        table(),
+    );
+    let coverage = analytics::Analytics::of(&result).counts.coverage;
+    assert_eq!(coverage.pricing.full_steps, 2);
+    assert_eq!(coverage.pricing.partial_steps, 1);
+    assert_eq!(coverage.pricing.unpriced_steps, 1);
+    // Only the first step has a successor timestamp.
+    assert_eq!(coverage.timing.known_steps, 1);
+    assert_eq!(coverage.timing.unknown_steps, 3);
+    assert_eq!(coverage.classifier.unlabelled_activity_steps, 4);
+    assert_eq!(coverage.classifier.rules_version, ACTIVITY_RULES_VERSION);
 }

@@ -127,7 +127,29 @@ pub struct QueryError {
     pub local_revision_reason: Option<&'static str>,
     /// Closed proof/read failure phase, never an original provider error.
     pub stage: Option<&'static str>,
+    /// With a `get_session_activity` refusal: why the page is unavailable, one
+    /// of [`ACTIVITY_REFUSAL_REASONS`]. Absent for argument and id errors and
+    /// for every other tool.
+    pub reason: Option<&'static str>,
 }
+
+/// The closed `reason` values of a refused `get_session_activity`:
+/// `no_activity` (no current activity for the session: unknown or outside the
+/// window, or not published for the current rules and prices), `stale_generation`
+/// (the continuation's generation or cursor no longer matches, or the
+/// publication changed during the read), `source_unavailable` (the selected
+/// native sources changed, are missing, or the index or query source is closed),
+/// `limit_exceeded` (the request's row or byte budget is exhausted),
+/// `interrupted` (cancelled or past its deadline) and `unsupported_storage`
+/// (activity is not available on PostgreSQL).
+pub const ACTIVITY_REFUSAL_REASONS: [&str; 6] = [
+    "no_activity",
+    "stale_generation",
+    "source_unavailable",
+    "limit_exceeded",
+    "interrupted",
+    "unsupported_storage",
+];
 
 impl QueryError {
     pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
@@ -137,7 +159,23 @@ impl QueryError {
             window_start: None,
             local_revision_reason: None,
             stage: None,
+            reason: None,
         }
+    }
+
+    /// Names the refusal of a `get_session_activity` call that has no explicit
+    /// reason, from its closed `code` and the request's accounting state.
+    fn activity_refusal(mut self) -> Self {
+        let exhausted = crate::selected_read::accounting_exhausted();
+        self.reason = self.reason.or(match self.code {
+            "io" | "unavailable" if exhausted => Some("limit_exceeded"),
+            "unavailable" => Some("interrupted"),
+            "io" | "stale_projection" => Some("source_unavailable"),
+            "unknown_session" => Some("no_activity"),
+            "capability_unavailable" => Some("unsupported_storage"),
+            _ => None,
+        });
+        self
     }
 
     fn invalid(message: impl Into<String>) -> Self {
@@ -186,6 +224,9 @@ impl QueryError {
         let mut error = json!({"code": self.code, "message": self.message});
         if let Some(start) = self.window_start {
             error["window_start"] = json!(start);
+        }
+        if let Some(reason) = self.reason {
+            error["reason"] = json!(reason);
         }
         let mut value = json!({ "error": error });
         if let Some(stage) = self.stage {
@@ -275,7 +316,7 @@ fn retained_query_tools() -> Vec<QueryTool> {
         },
         QueryTool {
             name: "get_session_activity",
-            description: "A bounded page of typed activity steps or change facts. Continue with the returned generation and next_cursor; stale generations are refused. No native bodies or commands.",
+            description: "A bounded page of typed activity steps or change facts. Continue with the returned generation and next_cursor; stale generations are refused. A refusal's error.reason is no_activity, stale_generation, source_unavailable, limit_exceeded, interrupted or unsupported_storage. No native bodies or commands.",
             positional: Some("id"),
             input_schema: json!({
                 "type":"object",
@@ -1001,6 +1042,18 @@ impl Query {
     }
 
     fn execute_at(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
+        // The scope outlives the call, so a refusal sees its accounting state.
+        let _activity_scope =
+            (tool == "get_session_activity").then(crate::selected_read::Scope::ensure);
+        let result = self.execute_tool(tool, args, now);
+        if tool == "get_session_activity" {
+            result.map_err(QueryError::activity_refusal)
+        } else {
+            result
+        }
+    }
+
+    fn execute_tool(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
         let postgres = self
             .sources
             .machines
@@ -1012,8 +1065,6 @@ impl Query {
                 "Session activity is not yet available on PostgreSQL",
             ));
         }
-        let _activity_scope =
-            (tool == "get_session_activity").then(crate::selected_read::Scope::ensure);
         if tool == "get_session_activity" && !self.embedded && !self.sources.is_retired() {
             let id = args["id"].as_str().expect("validated activity id");
             let mut selected = None;
@@ -1195,18 +1246,27 @@ impl Query {
         // Paused tools refuse before cancellation/admission, including stale callers.
         validate_query_call(tool, args)?;
         let _scope = crate::selected_read::Scope::enter(control);
-        crate::selected_read::check().map_err(|error| selected_error(&error))?;
-        let result = self.call_selected_at(
-            source_key,
-            catalog_key,
-            tool,
-            args,
-            provider,
-            mode,
-            now_ms(),
-        );
-        crate::selected_read::check().map_err(|error| selected_error(&error))?;
-        result
+        let result = crate::selected_read::check()
+            .map_err(|error| selected_error(&error))
+            .and_then(|()| {
+                self.call_selected_at(
+                    source_key,
+                    catalog_key,
+                    tool,
+                    args,
+                    provider,
+                    mode,
+                    now_ms(),
+                )
+            });
+        let result = crate::selected_read::check()
+            .map_err(|error| selected_error(&error))
+            .and_then(|()| result);
+        if tool == "get_session_activity" {
+            result.map_err(QueryError::activity_refusal)
+        } else {
+            result
+        }
     }
 
     #[doc(hidden)]
@@ -1255,7 +1315,28 @@ impl Query {
         mode: crate::SessionSourceReadMode,
         now: i64,
     ) -> Result<Value, QueryError> {
+        // The scope outlives the call, so a refusal sees its accounting state.
         let _scope = crate::selected_read::Scope::ensure();
+        let result =
+            self.execute_selected(source_key, catalog_key, tool, args, provider, mode, now);
+        if tool == "get_session_activity" {
+            result.map_err(QueryError::activity_refusal)
+        } else {
+            result
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn execute_selected(
+        &mut self,
+        source_key: &str,
+        catalog_key: &str,
+        tool: &str,
+        args: &Value,
+        provider: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+        now: i64,
+    ) -> Result<Value, QueryError> {
         crate::selected_read::check().map_err(|error| selected_error(&error))?;
         let evidence = self
             .sources

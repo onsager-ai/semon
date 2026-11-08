@@ -372,13 +372,17 @@ use producer ordinal order; facts use keyset paging by stable identity. Native
 bodies, commands, outputs and source positions are excluded. Hosted callers use
 the existing selected-source admission and request-owned reader. Cold local
 calls prepare the Catalog through its shared coordinator before reading pages.
+A refused call names a closed `error.reason` beside its code (`no_activity`,
+`stale_generation`, `source_unavailable`, `limit_exceeded`, `interrupted` or
+`unsupported_storage`); argument errors carry none.
 
 `get_session` and `list_sessions` add compact nullable `activity_analytics`, with
 exact parent-family totals and physical-session step-time. Wait duration unions exact
 intervals within each physical session and exposes observed/exclusive/shared coverage;
 missing orchestration intervals remain unknown. Waste time and list cost group
 exclusive waste steps by kind and category. Family values sum member measurements;
-shared waste is excluded. The design contract and all fields live in
+shared waste is excluded. The summary adds `coverage` (pricing, timing and
+classifier gaps) and a bounded `preview` of at most 64 timeline bins. The design contract and all fields live in
 [session activity analytics](../../../../docs/design/session-activity-analytics.md).
 `activity-golden.json` owns sanitized expectations for the new summary/page
 contract. Historical `contract-reference.json` remains byte-for-byte frozen;

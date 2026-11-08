@@ -19,10 +19,16 @@ qualified by the caller; the pure function does not grant source authority.
 
 Context is input plus cache read plus cache write. Bands are below 50,000,
 50,000 through 150,000 inclusive, and above 150,000. One immutable pricing
-snapshot supplies both list cost and the priced cache-read component (carry
-cost). The rules version and pricing fingerprint remain independent. Missing
-rates stay unknown, including when another component of that step is priced.
-Zero cache-read tokens have a known zero carry cost.
+snapshot prices each step. Every step carries four nullable dollar components,
+`fresh_input_usd`, `cache_read_usd`, `cache_write_usd` (5-minute plus 1-hour
+writes) and `output_usd`, each priced independently from the effective table. A
+missing rate leaves only its own component unknown, so a known component stays
+known beside an unknown one, and a component with no tokens is a known zero. Tokens
+without a price never produce a component. `list_cost_usd` is the sum of the four
+components plus any web-search charge; it is known only when every priced category
+is, so it is null whenever one component with tokens is null. The cache-read
+component is the step's carry cost: there is no separate `carry_cost_usd`. The rules
+version and pricing fingerprint remain independent.
 
 Steps sort by timestamp, then stable source identity and offset, then native
 step identity. Missing timestamps sort last in source order. The elapsed value
@@ -44,7 +50,7 @@ parent and child steps must never create a family thrash window.
 Schema 41 stores a session activity header, ordered step rows keyed by
 `(session_key, generation, ordinal)`, separate ordered compaction rows, compact summary metadata, and typed
 change facts keyed by session, generation and stable identity.
-Parser 37 retains the exact last Claude usage observation offset alongside the
+Parser 38 retains the exact last Claude usage observation offset alongside the
 existing message ID and assistant UUIDs. The producer uses its established file
 merge order and copied-record ownership map; Codex reads only model-accepted
 facts whose normalized source receipt matches the selected consumed ledger.
@@ -67,8 +73,10 @@ refusal/rebuild policy; there is no migration or old-store reader.
 Each step saves typed pricing inputs without native bodies. The existing pricing
 producer reprices at most 128 activity rows per transaction across restart,
 including retained observations with unavailable native bytes. Step stamps prevent
-mixed-price pages; the final batch advances the header fingerprint and activity
-generation. Unknown prices remain unknown. Step arrays stay out of cached descriptions and session summaries. Compact
+mixed-price pages; the final batch recomputes every price-dependent summary value
+(totals, band totals, waste, activity and trigger costs, pricing coverage and the
+preview) from the repriced stored steps, then advances the header fingerprint and
+activity generation. Unknown prices remain unknown. Step arrays stay out of cached descriptions and session summaries. Compact
 `activity_analytics` is published with Catalog/query summaries; it rebuilds after
 relationships rather than entering the stable description cache. Catalog version 8
 and the semantic recipe bind this output.
@@ -211,21 +219,60 @@ snapshot, with request-owned source witnesses. Mismatches return
 `stale_projection`; unknown sessions and invalid arguments refuse explicitly.
 No source paths, offsets, commands, raw bytes or output bodies leave these pages.
 
+A refused `get_session_activity` names why in `error.reason`, beside the existing
+`error.code`, in both Query JSON and MCP. The closed values are `no_activity` (no
+current activity for the session: unknown or outside the window, or none published
+for the current source cohort, rules and prices), `stale_generation` (the
+continuation's generation or cursor no longer matches, or the publication changed
+while the page was read; ask again without a continuation), `source_unavailable`
+(the selected native sources changed, are missing or unreadable, or the index or
+query source is closed), `limit_exceeded` (the request's row or byte budget is
+exhausted; narrow the source or window), `interrupted` (cancelled or past its
+deadline) and `unsupported_storage` (PostgreSQL has no activity pages). Argument
+errors (`invalid_arguments`) and ambiguous ids (`id_conflict`) carry no reason, and
+no other tool sets one. Each step in a `steps` page carries `fresh_input_usd`,
+`cache_read_usd`, `cache_write_usd` and `output_usd` beside `list_cost_usd`; each is
+null when its rate is missing.
+
 `get_session` and `list_sessions` add nullable `activity_analytics`. A supported
-complete observation contains `rules_version`, `pricing_fingerprint`,
+complete observation contains `pricing_fingerprint` (the identity of the one
+effective price table, shared with every step's cost),
 `totals: {observed, exclusive, shared}`, `by_band`, `compactions`, `thrash`,
 `waste_by_kind`, `waste_by_category`, `waste_cost_by_kind`,
-`waste_cost_by_category`, `wait_time_ms`, `waits_without_interval`,
-`levers_not_computed: ["TaskSpecification"]`, `activities_not_computed`,
-`triggers_not_computed`, `by_activity`, `by_trigger`, `unlabelled_activity_steps`,
-`empty_search_steps`, `verify_failure_steps`, `silent_exit_steps`, `change_facts`
-and `exclusive_cost_complete`. Each step total has `steps`, `list_cost_usd`,
-`carry_cost_usd` and `elapsed_ms`; measurements preserve `{known, unknown_steps}`.
+`waste_cost_by_category`, `wait_time_ms`, `waits_without_interval`, `by_activity`,
+`by_trigger`, `empty_search_steps`, `verify_failure_steps`, `silent_exit_steps`,
+`change_facts`, `exclusive_cost_complete`, `coverage` and `preview`. Each step total
+has `steps`, `list_cost_usd`, the four component measurements `fresh_input_usd`,
+`cache_read_usd`, `cache_write_usd` and `output_usd`, and `elapsed_ms`; so
+`totals.exclusive` holds the exclusive component totals, and `by_band` the same per
+band. Measurements preserve `{known, unknown_steps}`; a known component total stays
+known when another component's price is missing.
 Each waste cost total has `steps`, `elapsed_ms` and `list_cost_usd` measurements;
-only exclusive steps contribute. Wait time and missing-interval counts contain
+only exclusive steps contribute. `coverage` gathers what the other values did not measure, over exclusive steps:
+`pricing: {full_steps, partial_steps, unpriced_steps}` (counting only components
+that carry tokens: all priced, some priced, none priced; a step with no tokens is
+full), `timing: {known_steps, unknown_steps}` (whether `elapsed_ms` is known) and
+`classifier: {rules_version, levers_not_computed: ["TaskSpecification"],
+activities_not_computed, triggers_not_computed, unlabelled_activity_steps}`. The
+lists, the rules version and the unlabelled count moved here; they are not repeated at
+the top level. Measured wait time already lives in `wait_time_ms`, whose unions need
+no step pages, so no second wait field exists. Wait time and missing-interval counts contain
 `observed`, `exclusive` and `shared` values, following `OwnershipTotals`; intervals
 are unioned separately for each ownership view. Absent native usage/projections
-remain null. No thrash-window/step arrays enter these summaries. TaskSpecification
+remain null.
+
+`preview` is a bounded timeline of the session's ordered exclusive steps, derived
+with the summary and stored in it, so reading it never fetches step rows. The
+exclusive steps, in producer order, fall into equal-count bins of
+`ceil(n / 64)` steps (the last bin may be shorter), so there are at most 64 bins:
+none for no steps, one per step up to 64, 33 bins of two for 65. It contains
+`steps_total` (all steps, including shared), `binned_steps` (exclusive steps, `n`)
+and `bins`. Each bin has `first_step` and `last_step` (producer ordinals, the
+position `get_session_activity` pages by; a bin skips shared steps between them),
+`max_context_tokens`, `last_context_tokens`, `list_cost_usd: {known, unknown_steps}`,
+`waste_by_category` (steps per category in the bin) and `compactions` (compactions
+attached to its steps). Prices refresh the preview with the rest of the summary.
+Family summaries have no preview. No thrash-window/step arrays enter these summaries. TaskSpecification
 is a known uncomputed lever in rules version 8. `get_session_activity` steps carry
 the matching booleans `empty_search`, `verify_failure` and `silent_exit`, plus the
 nullable `activity` and `trigger` labels described below.
@@ -261,7 +308,8 @@ know whether it emitted assistant text, and the step facts do
 not carry that evidence (a thinking-only response is not observable), so those
 steps stay unlabelled rather than guessed; `Report` is derived only from the
 tools above. The summary counts them in
-`unlabelled_activity_steps`, and `activities_not_computed` is `["Recover"]`.
+`coverage.classifier.unlabelled_activity_steps`, and
+`coverage.classifier.activities_not_computed` is `["Recover"]`.
 `by_activity` totals exclusive labelled steps (`steps`, `elapsed_ms`,
 `list_cost_usd` with the waste-total shape); labelled plus unlabelled steps equal
 the exclusive step total. Family values sum the same maps.
@@ -292,7 +340,7 @@ the same native source (one agent's transcript), tested in order: failed-call wa
 checks-pending/sleep waste `Polling`, a `Coordinate` activity or orchestration-wait
 waste `WorkerResult`, else `NoneVisible` (also when no preceding step exists).
 Repeat markers are not failures of the preceding call. `by_trigger` totals
-exclusive triggered steps with the waste-total shape. `triggers_not_computed` is
+exclusive triggered steps with the waste-total shape. `coverage.classifier.triggers_not_computed` is
 `["InstructionChange", "MissingInput"]`.
 
 ### Rules version 8: label coverage
@@ -336,7 +384,9 @@ A nullable `family` summarizes only the exact existing parent chain, using
 producer-side leaf reduction and bounded stored-summary refresh for independently
 published children. It deduplicates exact shared keys in ownership/context
 totals; exclusive ownership remains unresolved. Compactions, waste signals and
-change counts sum physical-session observations. `member_sessions` and
+change counts sum physical-session observations. Family `coverage` sums
+the members' pricing, timing and unlabelled-step counts and repeats the constant
+classifier fields. `member_sessions` and
 `thrashed_sessions` report session counts. Family wait values and missing-interval
 counts sum per-session ownership values; intervals are not unioned across physical
 sessions. `total_step_time_ms` explicitly sums all capped physical-session step

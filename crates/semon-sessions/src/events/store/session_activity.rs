@@ -565,40 +565,41 @@ pub(super) fn reprice_step(
     };
     let mut statement = tx.prepare("SELECT ordinal,metadata FROM session_activity_steps WHERE session_key=?1 AND generation=?2 AND pricing_fingerprint<>?3 ORDER BY ordinal LIMIT 128")?;
     let mut rows = statement.query(params![key, generation, table.fingerprint])?;
-    let encoded: String = tx.query_row(
-        "SELECT summary FROM session_activity_projections WHERE session_key=?1",
-        [&key],
-        |r| r.get(0),
-    )?;
-    let mut summary: activity::analytics::Analytics = from_json(0, &encoded)?;
     let mut changed = 0;
     while let Some(row) = rows.next()? {
         let ordinal: i64 = row.get(0)?;
         let mut saved: SavedStep = from_json(1, &row.get::<_, String>(1)?)?;
-        let before = saved.step.clone();
         let mut cost = crate::pricing::CostBuild::with_table(table.clone());
         match &saved.usage {
             Usage::Claude(usage) => cost.message(usage),
             Usage::Codex(event) => cost.codex(event),
         }
-        (saved.step.list_cost_usd, saved.step.carry_cost_usd) =
-            cost.finish_step(saved.step.tokens.cache_read);
-        reprice_totals(&mut summary.counts.totals, &before, &saved.step);
-        reprice_totals(
-            summary.counts.by_band.entry(saved.step.band).or_default(),
-            &before,
-            &saved.step,
-        );
+        let cost = cost.finish_step();
+        saved.step.list_cost_usd = cost.list;
+        saved.step.fresh_input_usd = cost.fresh_input;
+        saved.step.cache_read_usd = cost.cache_read;
+        saved.step.cache_write_usd = cost.cache_write;
+        saved.step.output_usd = cost.output;
         tx.execute("UPDATE session_activity_steps SET pricing_fingerprint=?4,metadata=?5 WHERE session_key=?1 AND generation=?2 AND ordinal=?3",params![key,generation,ordinal,table.fingerprint,json(&saved)?])?;
         changed += 1;
     }
-    summary.counts.exclusive_cost_complete = summary.counts.totals.shared.steps == 0
-        && summary.counts.totals.exclusive.list_cost_usd.unknown_steps == 0;
-    tx.execute(
-        "UPDATE session_activity_projections SET summary=?2 WHERE session_key=?1",
-        params![key, json(&summary)?],
-    )?;
     if changed < 128 {
+        // The last batch has repriced every step. Price-dependent summary values
+        // (totals, waste and activity costs, coverage, preview) come from the
+        // stored steps; readers refuse the summary until the stamp advances.
+        let encoded: String = tx.query_row(
+            "SELECT summary FROM session_activity_projections WHERE session_key=?1",
+            [&key],
+            |r| r.get(0),
+        )?;
+        let mut summary: activity::analytics::Analytics = from_json(0, &encoded)?;
+        let mut statement = tx.prepare("SELECT metadata FROM session_activity_steps WHERE session_key=?1 AND generation=?2 ORDER BY ordinal")?;
+        let steps = statement
+            .query_map(params![key, generation], |row| {
+                Ok(from_json::<SavedStep>(0, &row.get::<_, String>(0)?)?.step)
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        summary.reprice(&steps);
         let next = format!(
             "{:x}",
             Sha256::digest(json(&(&generation, &table.fingerprint))?.as_bytes())
@@ -620,43 +621,6 @@ pub(super) fn reprice_step(
         refresh_at_price(tx, &key, &table.fingerprint)?;
     }
     Ok(true)
-}
-
-fn reprice_totals(
-    totals: &mut activity::OwnershipTotals,
-    before: &ActivityStep,
-    after: &ActivityStep,
-) {
-    fn update(total: &mut activity::StepTotals, before: &ActivityStep, after: &ActivityStep) {
-        for (sum, old, new) in [
-            (
-                &mut total.list_cost_usd,
-                before.list_cost_usd,
-                after.list_cost_usd,
-            ),
-            (
-                &mut total.carry_cost_usd,
-                before.carry_cost_usd,
-                after.carry_cost_usd,
-            ),
-        ] {
-            if let Some(old) = old {
-                sum.known -= old;
-            } else {
-                sum.unknown_steps -= 1;
-            }
-            if let Some(new) = new {
-                sum.known += new;
-            } else {
-                sum.unknown_steps += 1;
-            }
-        }
-    }
-    update(&mut totals.observed, before, after);
-    match after.ownership {
-        activity::Ownership::Exclusive => update(&mut totals.exclusive, before, after),
-        activity::Ownership::Shared(_) => update(&mut totals.shared, before, after),
-    }
 }
 
 #[cfg(test)]

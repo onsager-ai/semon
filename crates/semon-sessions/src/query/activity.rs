@@ -10,6 +10,14 @@ fn unavailable(_: impl fmt::Display) -> QueryError {
     )
 }
 
+/// A refusal carries its closed `reason` beside the stale-projection code.
+fn refusal(reason: &'static str) -> QueryError {
+    QueryError {
+        reason: Some(reason),
+        ..unavailable("")
+    }
+}
+
 pub(super) fn read(
     options: &Options,
     namespace: Option<&crate::storage::Namespace>,
@@ -89,7 +97,14 @@ pub(super) fn read(
         limit,
     )
     .map_err(unavailable)?
-    .ok_or_else(|| unavailable("Activity generation mismatch"))?;
+    .ok_or_else(|| {
+        // A continuation names a generation; a first page has none to be stale.
+        refusal(if expected.is_some() {
+            "stale_generation"
+        } else {
+            "no_activity"
+        })
+    })?;
     // Hand the pinned selection snapshot to the existing request-owned source
     // witness. No native body or provenance path is returned by this tool.
     snapshot.set_drop_behavior(rusqlite::DropBehavior::Ignore);
@@ -132,7 +147,7 @@ pub(super) fn read(
     if current_text.as_deref() != Some(&text)
         || current_generation.as_deref() != Some(&page.generation)
     {
-        return Err(unavailable("Activity publication changed"));
+        return Err(refusal("stale_generation"));
     }
     crate::selected_read::check().map_err(|error| selected_error(&error))?;
     Ok(json!({
