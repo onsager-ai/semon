@@ -20,6 +20,7 @@ CREATE POLICY namespace_isolation ON semon_projection.query_context
 CREATE TABLE semon_projection.namespaces (
     namespace text PRIMARY KEY,
     epoch bigint NOT NULL DEFAULT 0 CHECK (epoch >= 0),
+    discovery_complete boolean NOT NULL DEFAULT false,
     custody_epoch text NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text)
 );
 ALTER TABLE semon_projection.query_context ADD FOREIGN KEY(namespace) REFERENCES semon_projection.namespaces(namespace);
@@ -29,6 +30,7 @@ CREATE TABLE semon_projection.discovery (
     path text NOT NULL,
     seen boolean NOT NULL DEFAULT true,
     pending boolean NOT NULL DEFAULT true,
+    refused boolean NOT NULL DEFAULT false,
     PRIMARY KEY(namespace,root,path)
 );
 ALTER TABLE semon_projection.discovery ENABLE ROW LEVEL SECURITY;
@@ -92,6 +94,7 @@ CREATE TABLE semon_projection.proofs (
     root bytea NOT NULL CHECK (octet_length(root) = 32),
     PRIMARY KEY (namespace,path,generation)
 );
+CREATE INDEX proof_prefix_generation ON semon_projection.proofs(namespace,path,consumed,prefix,tail,generation);
 CREATE TABLE semon_projection.proof_blocks (
     namespace text NOT NULL,
     path text NOT NULL,
@@ -111,6 +114,19 @@ CREATE TABLE semon_projection.proof_nodes (
     PRIMARY KEY (namespace,path,generation,level,ordinal),
     FOREIGN KEY (namespace,path,generation) REFERENCES semon_projection.proofs(namespace,path,generation) ON DELETE CASCADE
 );
+CREATE TABLE semon_projection.retained_indexes (
+    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
+    path text NOT NULL,
+    ledger text NOT NULL,
+    index_digest bytea NOT NULL CHECK (octet_length(index_digest) = 32),
+    projection text NOT NULL CHECK (octet_length(projection) <= 1048576),
+    PRIMARY KEY(namespace,path)
+);
+ALTER TABLE semon_projection.retained_indexes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.retained_indexes FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.retained_indexes
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
 CREATE TABLE semon_projection.reported_facts (
     namespace text PRIMARY KEY REFERENCES semon_projection.namespaces(namespace),
     revision bigint NOT NULL CHECK (revision >= 0),

@@ -28,6 +28,91 @@ pub(crate) fn source_generation(sources: &[CatalogSource]) -> Result<String, ser
     ))
 }
 
+/// Resolve a source's metadata through its admitted runtime backend.
+pub fn session_source_proof_in(
+    sources: &crate::SessionSources,
+    source_key: &str,
+    root: &str,
+    path: &str,
+) -> Result<Option<SessionSourceProof>, CatalogIdentityError> {
+    let owner = sources
+        .custody_source(source_key)
+        .map_err(|_| CatalogIdentityError::Unavailable)?;
+    #[cfg(feature = "postgres")]
+    if owner.storage.is_postgres() {
+        return owner
+            .storage
+            .source_proof(root, path)
+            .map_err(|_| CatalogIdentityError::Unavailable);
+    }
+    crate::session_source_proof(&owner.options, source_key, root, path)
+}
+
+/// Readiness belongs to the source owner and never opens another backend.
+pub fn source_projection_ready_in(
+    sources: &crate::SessionSources,
+    source_key: &str,
+    root: &str,
+    path: &str,
+) -> Result<Option<SourceProjectionReady>, CatalogIdentityError> {
+    let owner = sources
+        .custody_source(source_key)
+        .map_err(|_| CatalogIdentityError::Unavailable)?;
+    #[cfg(feature = "postgres")]
+    if owner.storage.is_postgres() {
+        return owner
+            .storage
+            .projection_ready(root, path)
+            .map_err(|_| CatalogIdentityError::Unavailable);
+    }
+    source_projection_ready(&owner.options, root, path)
+}
+
+/// Retain only an exactly qualified projection, before authorized Raw withdrawal.
+pub fn retain_source_event_index_in(
+    sources: &crate::SessionSources,
+    source_key: &str,
+    proof: &SessionSourceProof,
+    projection: &SourceProjectionReady,
+) -> Result<(), CatalogIdentityError> {
+    let owner = sources
+        .custody_source(source_key)
+        .map_err(|_| CatalogIdentityError::Unavailable)?;
+    #[cfg(feature = "postgres")]
+    if owner.storage.is_postgres() {
+        return if owner
+            .storage
+            .retained_index(proof, projection, true)
+            .map_err(|_| CatalogIdentityError::Unavailable)?
+        {
+            Ok(())
+        } else {
+            Err(CatalogIdentityError::ScopeChanged)
+        };
+    }
+    retain_source_event_index(&owner.options, source_key, proof, projection)
+}
+
+/// Recheck custody through the same admitted runtime owner.
+pub fn source_event_index_retained_in(
+    sources: &crate::SessionSources,
+    source_key: &str,
+    proof: &SessionSourceProof,
+    projection: &SourceProjectionReady,
+) -> Result<bool, CatalogIdentityError> {
+    let owner = sources
+        .custody_source(source_key)
+        .map_err(|_| CatalogIdentityError::Unavailable)?;
+    #[cfg(feature = "postgres")]
+    if owner.storage.is_postgres() {
+        return owner
+            .storage
+            .retained_index(proof, projection, false)
+            .map_err(|_| CatalogIdentityError::Unavailable);
+    }
+    source_event_index_retained(&owner.options, proof, projection)
+}
+
 /// Looks up an exact allowlisted source path without initializing any index.
 /// The host supplies authorized options, verifies the registered archive and
 /// actual physical bytes against this consumed-prefix reference, and rechecks
@@ -218,7 +303,7 @@ fn projection_ready(
     Ok(None)
 }
 
-fn same_projection(left: &SourceProjectionReady, right: &SourceProjectionReady) -> bool {
+pub(crate) fn same_projection(left: &SourceProjectionReady, right: &SourceProjectionReady) -> bool {
     left.source == right.source
         && left.projection_version == right.projection_version
         && left.projection_generation == right.projection_generation

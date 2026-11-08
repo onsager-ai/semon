@@ -248,7 +248,11 @@ impl PgProjectionTransaction<'_> {
 
     /// Capture outgoing History and its recipes in the same transaction as
     /// replacement or withdrawal. History never checks a newer Raw ledger.
-    async fn preserve_history(&self, namespace: &Namespace, key: &str) -> Result<(), StorageError> {
+    pub(super) async fn preserve_history(
+        &self,
+        namespace: &Namespace,
+        key: &str,
+    ) -> Result<(), StorageError> {
         let conflicting: bool = self.tx.query_one(
             "SELECT EXISTS(SELECT 1 FROM semon_projection.history_catalog h JOIN semon_projection.catalog c USING(namespace,session_key) WHERE h.namespace=$1 AND h.session_key=$2 AND h.metadata<>c.metadata)",
             &[&namespace.binding(), &key],
@@ -326,8 +330,10 @@ impl PgProjectionTransaction<'_> {
         namespace: &Namespace,
         row: &CatalogRow,
     ) -> Result<(), StorageError> {
-        if self.facts_write_pending(namespace).await? {
-            return Err(backend("Facts write is pending"));
+        if self.facts_write_pending(namespace).await?
+            || self.runtime_write_pending(namespace).await?
+        {
+            return Err(backend("Facts or runtime input write is pending"));
         }
         for source in &row.sources {
             let path = source
@@ -466,6 +472,26 @@ impl PgProjectionTransaction<'_> {
         Ok((generation, total, decoded))
     }
 
+    pub(super) async fn capture_source_history(
+        &self,
+        namespace: &Namespace,
+        path: &str,
+        expected: ProjectionTag,
+    ) -> Result<bool, StorageError> {
+        ensure(&self.namespace, namespace)?;
+        if self.ledger(namespace, path).await? != Some(expected) {
+            return Ok(false);
+        }
+        let owners = self.tx.query("SELECT DISTINCT unit_key FROM semon_projection.units WHERE namespace=$1 AND path=$2 ORDER BY unit_key LIMIT 65", &[&namespace.binding(), &path]).await.map_err(backend)?;
+        if owners.is_empty() || owners.len() > 64 {
+            return Ok(false);
+        }
+        for owner in owners {
+            self.preserve_history(namespace, owner.get(0)).await?;
+        }
+        Ok(true)
+    }
+
     /// A host must commit this handoff before withdrawing Raw. It does not
     /// delete bytes or grant permission to do so. An incomplete/unknown owner
     /// refuses rather than turning unavailable History into an empty success.
@@ -559,14 +585,14 @@ impl PgProjectionTransaction<'_> {
             .map_err(backend)?;
         self.tx
             .execute(
-                "DELETE FROM semon_projection.files WHERE namespace=$1 AND path=$2",
+                "DELETE FROM semon_projection.files WHERE namespace=$1 AND path=$2 AND NOT EXISTS(SELECT 1 FROM semon_projection.retained_indexes WHERE namespace=$1 AND path=$2)",
                 &[&namespace.binding(), &path],
             )
             .await
             .map_err(backend)?;
         self.tx
             .execute(
-                "DELETE FROM semon_projection.ledgers WHERE namespace=$1 AND path=$2",
+                "DELETE FROM semon_projection.ledgers WHERE namespace=$1 AND path=$2 AND NOT EXISTS(SELECT 1 FROM semon_projection.retained_indexes WHERE namespace=$1 AND path=$2)",
                 &[&namespace.binding(), &path],
             )
             .await
