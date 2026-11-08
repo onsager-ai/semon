@@ -24,6 +24,35 @@ CREATE TABLE semon_projection.namespaces (
     custody_epoch text NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text)
 );
 ALTER TABLE semon_projection.query_context ADD FOREIGN KEY(namespace) REFERENCES semon_projection.namespaces(namespace);
+CREATE TABLE semon_projection.session_activity (
+    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
+    session_key text NOT NULL,
+    source_generation text NOT NULL,
+    generation text NOT NULL,
+    metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576),
+    PRIMARY KEY(namespace,session_key)
+);
+ALTER TABLE semon_projection.session_activity ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.session_activity FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.session_activity
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
+CREATE TABLE semon_projection.activity_items (
+    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
+    session_key text NOT NULL,
+    kind text NOT NULL CHECK (kind IN ('steps','facts')),
+    position bigint NOT NULL CHECK (position >= 0),
+    identity text NOT NULL,
+    metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576),
+    PRIMARY KEY(namespace,session_key,kind,position),
+    UNIQUE(namespace,session_key,kind,identity),
+    FOREIGN KEY(namespace,session_key) REFERENCES semon_projection.session_activity(namespace,session_key) ON DELETE CASCADE
+);
+ALTER TABLE semon_projection.activity_items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE semon_projection.activity_items FORCE ROW LEVEL SECURITY;
+CREATE POLICY namespace_isolation ON semon_projection.activity_items
+    USING (namespace = current_setting('semon.namespace',true))
+    WITH CHECK (namespace = current_setting('semon.namespace',true));
 CREATE TABLE semon_projection.discovery (
     namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
     root text NOT NULL,
@@ -76,7 +105,7 @@ CREATE TABLE semon_projection.files (
 CREATE TABLE semon_projection.records (
     namespace text NOT NULL,
     path text NOT NULL,
-    kind smallint NOT NULL CHECK (kind BETWEEN 0 AND 2),
+    kind smallint NOT NULL CHECK (kind BETWEEN 0 AND 3),
     ordinal bigint NOT NULL CHECK (ordinal >= 0),
     record text NOT NULL,
     PRIMARY KEY (namespace,path,kind,ordinal),

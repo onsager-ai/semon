@@ -131,6 +131,9 @@ impl PgProjectionTransaction<'_> {
         };
         let ledger: Ledger = serde_json::from_str(row.get(0)).map_err(backend)?;
         let mut index: FileIndex = serde_json::from_str(row.get(1)).map_err(backend)?;
+        if index.codex_header.is_some() {
+            index.native_usage_observations = Some(Vec::new());
+        }
         let tag = self
             .ledger(namespace, path)
             .await?
@@ -163,6 +166,12 @@ impl PgProjectionTransaction<'_> {
                     index
                         .signals
                         .push(serde_json::from_str(text).map_err(backend)?);
+                    len
+                }
+                3 => {
+                    let observations = index.native_usage_observations.get_or_insert_with(Vec::new);
+                    let len = observations.len();
+                    observations.push(serde_json::from_str(text).map_err(backend)?);
                     len
                 }
                 _ => {
@@ -253,6 +262,19 @@ impl PgProjectionTransaction<'_> {
                 serde_json::to_string(signal).map_err(backend)?,
             ));
         }
+        for (ordinal, observation) in index
+            .native_usage_observations
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .enumerate()
+        {
+            records.push((
+                3_i16,
+                number(ordinal as u64)?,
+                serde_json::to_string(observation).map_err(backend)?,
+            ));
+        }
         let next = ProjectionTag::of_ledger(ledger, 0, crate::model::summary::CATALOG_VERSION);
         let Some(tag) = self
             .write_ledger(namespace, path, expected, next, append)
@@ -265,10 +287,19 @@ impl PgProjectionTransaction<'_> {
             "INSERT INTO semon_projection.files(namespace,path,ledger,metadata) VALUES($1,$2,$3,$4) ON CONFLICT(namespace,path) DO UPDATE SET ledger=excluded.ledger,metadata=excluded.metadata",
             &[&namespace.binding(), &path, &encoded_ledger, &metadata],
         ).await.map_err(backend)?;
-        let lengths = [index.events.len(), index.extras.len(), index.signals.len()];
+        let lengths = [
+            index.events.len(),
+            index.extras.len(),
+            index.signals.len(),
+            index
+                .native_usage_observations
+                .as_deref()
+                .unwrap_or_default()
+                .len(),
+        ];
         self.tx.execute(
-            "DELETE FROM semon_projection.records WHERE namespace=$1 AND path=$2 AND ordinal>=CASE kind WHEN 0 THEN $3::bigint WHEN 1 THEN $4::bigint ELSE $5::bigint END",
-            &[&namespace.binding(), &path, &number(lengths[0] as u64)?, &number(lengths[1] as u64)?, &number(lengths[2] as u64)?],
+            "DELETE FROM semon_projection.records WHERE namespace=$1 AND path=$2 AND ordinal>=CASE kind WHEN 0 THEN $3::bigint WHEN 1 THEN $4::bigint WHEN 2 THEN $5::bigint ELSE $6::bigint END",
+            &[&namespace.binding(), &path, &number(lengths[0] as u64)?, &number(lengths[1] as u64)?, &number(lengths[2] as u64)?, &number(lengths[3] as u64)?],
         ).await.map_err(backend)?;
         let mut kinds = Vec::with_capacity(records.len());
         let mut ordinals = Vec::with_capacity(records.len());

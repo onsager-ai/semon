@@ -365,15 +365,24 @@ PostgreSQL session backend yet.
   Query facts still refuses honestly; deriving and publishing those complete
   facts remains required. Selected details/context for a composite cohort whose
   original causal publication is unavailable remain explicitly incomplete.
-- Session activity remains unavailable: the Codex activity producer depends on
-  accepted native usage facts currently owned by the SQLite store. The attempted
-  PostgreSQL activity port was removed rather than treating missing facts as an
-  empty activity. This is a startup blocker alongside receiver Raw transport,
-  global discovery/search reconciliation and the remaining Viewer routes.
+- Session activity follow-up (2026-11-08): schema 13 retains typed native Codex
+  usage observations in PostgreSQL's normalized index, including exact identity,
+  model, unsigned counts and source offsets. The first model-qualified report
+  owns each identity; duplicates and conflicts remain observations and cannot
+  inflate activity. Append/restart reuses those facts through the existing native
+  activity derivation. Source/rules/pricing-bound activity publication commits
+  with Catalog under forced RLS. Selected and ordinary Query activity dispatch
+  through the runtime owner, with source custody fences, native byte qualification
+  and a final publication recheck. Missing explicit usage refuses honestly.
+  Activity steps and change facts use indexed SQL pages with bounded rows. The
+  current reader still loads the selected normalized indexes for its proof
+  witness; lazy proof-only admission remains follow-up work. CI qualification
+  includes accepted/duplicate/conflicting Codex reports, restart, append, stale
+  generations, SQLite parity and the inotify sentinel.
 - Still required: explicit startup backend configuration; complete receiver Raw
   custody adoption and relocation Index reuse; remaining direct selected readers
   and full discovery reconciliation. No PostgreSQL startup option is exposed while
-  these paths require SQLite or refuse. Selected activity, complete search coverage,
+  these paths require SQLite or refuse. Complete search coverage,
   exact composite-History Query derivation, complete selected Home/Trace routes,
   proof-generation collection and bounded delta preparation remain pending.
   Full shared lifecycle conformance and full-pipeline startup RLS/no-hidden-SQLite
