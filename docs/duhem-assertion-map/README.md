@@ -25,7 +25,7 @@ Every assertion row records the eight fields required by the Duhem "Consumer ass
 | Field | What it records |
 |---|---|
 | Legacy owner | Old case/assertion/state identifier, source path, and responsible team or owner |
-| Source status | Active, deferred/paused, disabled-boundary, internal, or historical; if an old case is retired, the owner and reason |
+| Source status | Active, deferred/paused, disabled-boundary, internal, or historical; if an old case is retired, the historical owner and reason |
 | VD mapping | Stable criterion, check ID, parameter instance, input/fixture, and required starting state |
 | Disposition | `VD` (migrated), `native` (retained at its current layer), or `deferred` (with the missing capability or scope decision) |
 | Claim scope | What the result claims, including real versus synthetic inputs, services, authentication, browser, and any deliberate boundary |
@@ -187,7 +187,7 @@ and [ui-served-scripts.md](ui-served-scripts.md) for the affected historical row
 2. `ui/tests/catalog-journey.mjs` is invoked only through `/scripts/catalog-journey.py`; neither `.github/workflows/ui.yml` nor [`ui/package.json:8-19`](../../ui/package.json#L8-L19) runs it, so it is not CI coverage. Resolved to historical (see Resolved classification conflicts); its canonical row is in [ui-served-scripts.md](ui-served-scripts.md).
 3. CI pins Playwright 1.63.0 ([`tests/ui/package.json:17`](../../tests/ui/package.json#L17)) and installs Chromium with `npx playwright install --with-deps chromium` ([`.github/workflows/ui.yml:209-213`](../../.github/workflows/ui.yml#L209-L213)), but pins no explicit Chromium revision, OS image or font digest for the measurement claims.
 4. The visual acceptance registry (`tests/ui/visual-acceptance.json`) has 62 preservation records (`preservation/required/frame 62`) against 68 required states; the 6 states without a record are unwaived and unverified (the slice presumed them within threshold but did not check each). See [browser-visual-and-suite.md](browser-visual-and-suite.md).
-5. The pushed visual scope has no acceptance records ([`tests/ui/visual-coverage.json:14-18`](../../tests/ui/visual-coverage.json#L14-L18), [`.github/workflows/ui.yml:420-460`](../../.github/workflows/ui.yml#L420-L460); registry scope counts main 93, required 62, two-machines 6, pushed 0), and it compares the served pushed copy against the same machine's own viewer rather than a reviewed reference.
+5. The earlier pushed visual scope had no acceptance records (`tests/ui/visual-coverage.json:14-18`, file removed in the visual-CI retirement; earlier workflow range `.github/workflows/ui.yml:420-460`, registry scope counts main 93, required 62, two-machines 6, pushed 0), and it compared the served pushed copy against the same machine's own viewer rather than a reviewed reference.
 
 ## Open questions
 

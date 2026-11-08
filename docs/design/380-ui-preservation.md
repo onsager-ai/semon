@@ -21,9 +21,10 @@ context. The one-option field does not add a machine subset, a transport query o
 new capability. Metadata-only search, native source identity, paging, keyboard,
 focus and exceptional notices retain their owners and behavior.
 
-The six earlier intentional-difference bindings are archived in
-[the superseded exact registry](evidence/380-compact-filter-acceptance-superseded-20261018.json),
-also retained in Source `bd30f088e5a8a9a5f8ec1c4889be8d54d4962ed1`.
+The six earlier intentional-difference bindings were recorded in the superseded
+exact registry `evidence/380-compact-filter-acceptance-superseded-20261018.json`
+in Source `bd30f088e5a8a9a5f8ec1c4889be8d54d4962ed1`; the registry file is no
+longer in the active tree. Its past bindings do not define the current visual gate.
 The active registry is empty because the restored compact Filter must compare
 normally against the original reference in all six viewport/theme states. No
 PNG-equivalence/carry-forward change, threshold/mask relaxation, reference
