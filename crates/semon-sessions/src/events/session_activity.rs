@@ -309,7 +309,6 @@ pub(crate) fn apply_observations(
                     | classify::WasteKind::Sleep => 1,
                     classify::WasteKind::Refill => 2,
                     classify::WasteKind::RedundantRead => 3,
-                    _ => 1,
                 };
                 if step.waste.is_none_or(|old| rank(waste) < rank(old)) {
                     step.waste = Some(waste);
