@@ -24,29 +24,6 @@ CREATE TABLE semon_projection.namespaces (
     custody_epoch text NOT NULL DEFAULT md5(random()::text || clock_timestamp()::text)
 );
 ALTER TABLE semon_projection.query_context ADD FOREIGN KEY(namespace) REFERENCES semon_projection.namespaces(namespace);
-CREATE TABLE semon_projection.history_indexes (
-    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
-    source_generation text NOT NULL,
-    metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576),
-    PRIMARY KEY(namespace,source_generation)
-);
-ALTER TABLE semon_projection.history_indexes ENABLE ROW LEVEL SECURITY;
-ALTER TABLE semon_projection.history_indexes FORCE ROW LEVEL SECURITY;
-CREATE POLICY namespace_isolation ON semon_projection.history_indexes
-    USING (namespace = current_setting('semon.namespace',true))
-    WITH CHECK (namespace = current_setting('semon.namespace',true));
-CREATE TABLE semon_projection.history_query_context (
-    namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
-    session_key text NOT NULL,
-    source_generation text NOT NULL,
-    metadata text NOT NULL CHECK (octet_length(metadata) <= 1048576),
-    PRIMARY KEY(namespace,session_key)
-);
-ALTER TABLE semon_projection.history_query_context ENABLE ROW LEVEL SECURITY;
-ALTER TABLE semon_projection.history_query_context FORCE ROW LEVEL SECURITY;
-CREATE POLICY namespace_isolation ON semon_projection.history_query_context
-    USING (namespace = current_setting('semon.namespace',true))
-    WITH CHECK (namespace = current_setting('semon.namespace',true));
 CREATE TABLE semon_projection.session_activity (
     namespace text NOT NULL REFERENCES semon_projection.namespaces(namespace),
     session_key text NOT NULL,

@@ -15,7 +15,6 @@ mod index;
 mod observation;
 mod producer;
 mod proof_reader;
-mod query_history;
 mod raw;
 mod retention;
 mod runtime;

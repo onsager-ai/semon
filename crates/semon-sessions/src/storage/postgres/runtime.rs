@@ -116,7 +116,7 @@ impl PgProjectionStore {
                 *bytes_left = bytes_left
                     .checked_sub(bytes)
                     .ok_or_else(|| backend("Catalog Query metadata budget"))?;
-                let context = tx.tx.query_opt("SELECT metadata,source_generation FROM semon_projection.history_query_context WHERE namespace=$1 AND session_key=$2 AND source_generation=$3 UNION ALL SELECT metadata,source_generation FROM semon_projection.query_context WHERE namespace=$1 AND session_key=$2 AND source_generation=$3 LIMIT 1", &[&namespace.binding(), &row.key, &crate::retention::source_generation(&row.sources).map_err(backend)?]).await.map_err(backend)?.ok_or_else(|| backend("Catalog Query context unavailable"))?;
+                let context = tx.tx.query_opt("SELECT metadata,source_generation FROM semon_projection.query_context WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &row.key]).await.map_err(backend)?.ok_or_else(|| backend("Catalog Query context unavailable"))?;
                 let text: &str = context.get(0);
                 *bytes_left = bytes_left
                     .checked_sub(text.len())

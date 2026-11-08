@@ -458,4 +458,5 @@ pub(super) async fn lifecycle(dsn: &str) {
     assert!(!options.cache.with_extension("sqlite3-wal").exists());
     assert!(!options.cache.with_extension("sqlite3-shm").exists());
     semantic_parity(dsn).await;
+    super::activity_tests::lifecycle(dsn).await;
 }

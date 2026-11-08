@@ -1,3 +1,5 @@
+#[path = "postgres/activity_tests.rs"]
+mod activity_tests;
 #[path = "postgres/catalog_tests.rs"]
 mod catalog_tests;
 #[path = "postgres/producer_tests.rs"]

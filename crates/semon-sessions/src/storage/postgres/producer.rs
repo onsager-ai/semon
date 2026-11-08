@@ -447,12 +447,6 @@ impl PgProjectionStore {
                 tx.tx.execute("UPDATE semon_projection.discovery SET pending=false,refused=false WHERE namespace=$1 AND root=$2 AND path=$3", &[&namespace.binding(), &input.root.as_str(), &input.path]).await.map_err(backend)?;
             }
         }
-        if generation.is_some() {
-            for row in &prepared.rows {
-                tx.derive_history_query(namespace, &options, &row.key)
-                    .await?;
-            }
-        }
         tx.commit(namespace).await?;
         Ok(generation)
     }

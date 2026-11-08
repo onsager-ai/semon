@@ -9,7 +9,7 @@ use std::{path::Path, sync::Arc};
 
 /// `Event::activity_observation` is `serde(skip)` in the native index, so the
 /// normalized record carries it explicitly under its own key.
-pub(super) fn encode_event(event: &crate::events::Event) -> Result<String, StorageError> {
+fn encode_event(event: &crate::events::Event) -> Result<String, StorageError> {
     let mut record = serde_json::to_value(event).map_err(backend)?;
     if let Some(observation) = &event.activity_observation {
         let object = record
@@ -23,7 +23,7 @@ pub(super) fn encode_event(event: &crate::events::Event) -> Result<String, Stora
     serde_json::to_string(&record).map_err(backend)
 }
 
-pub(super) fn decode_event(text: &str) -> Result<crate::events::Event, StorageError> {
+fn decode_event(text: &str) -> Result<crate::events::Event, StorageError> {
     let mut record: serde_json::Value = serde_json::from_str(text).map_err(backend)?;
     let observation = record
         .as_object_mut()
@@ -100,11 +100,6 @@ impl PgProjectionStore {
             ));
         }
         let tx = self.begin(namespace).await?;
-        if expected
-            .is_some_and(|tag| tag != ProjectionTag::of_ledger(&ledger, tag.epoch, tag.projector))
-        {
-            tx.retain_query_index(namespace, name).await?;
-        }
         let tag = tx
             .write_index(namespace, name, expected, &ledger, &index, append)
             .await?
@@ -136,6 +131,9 @@ impl PgProjectionTransaction<'_> {
         };
         let ledger: Ledger = serde_json::from_str(row.get(0)).map_err(backend)?;
         let mut index: FileIndex = serde_json::from_str(row.get(1)).map_err(backend)?;
+        if index.codex_header.is_some() {
+            index.native_usage_observations = Some(Vec::new());
+        }
         let tag = self
             .ledger(namespace, path)
             .await?
