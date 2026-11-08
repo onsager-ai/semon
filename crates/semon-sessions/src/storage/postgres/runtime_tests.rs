@@ -147,9 +147,15 @@ pub(super) fn lifecycle(dsn: &str) {
         "/api/tree",
         "/api/viewer/home",
         "/api/viewer/analytics",
-        "/api/session-annotations",
     ] {
         assert_eq!(core.respond("GET", route, "", None).status, 503, "{route}");
+    }
+    for kind in ["errors", "signals"] {
+        let annotations = core.respond("GET", "/api/session-annotations", &format!("machine=injected-runtime&sid={}&scope=retained_history&kind={kind}", crate::viewer::percent_encode(key)), None);
+        assert_eq!(annotations.status, 200, "{}", String::from_utf8_lossy(&annotations.body));
+        let annotations: Value = serde_json::from_slice(&annotations.body).unwrap();
+        assert!(annotations["total"].is_number());
+        assert!(annotations["entries"].is_array());
     }
     let mut query = crate::Query::from_sources(sources.clone());
     let answer = query.call("list_sessions", &json!({"limit":100})).unwrap();

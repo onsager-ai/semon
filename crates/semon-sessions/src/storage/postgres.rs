@@ -5,6 +5,7 @@
 use super::{Namespace, ProjectionTag, StorageError, TagCheck, ensure};
 use tokio_postgres::{Client, IsolationLevel, Transaction};
 
+mod annotations;
 mod collection;
 mod details;
 mod history;
