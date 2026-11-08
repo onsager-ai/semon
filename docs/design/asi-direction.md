@@ -53,4 +53,9 @@ front end.
 4. Ship the query surface: read-only SQL plus FTS through MCP/CLI, replacing the
    paused `find`.
 5. Rebuild Analytics on durable storage; shrink the Viewer into the analytics UI
-   and prune the obsolete baselines.
+   and prune the obsolete baselines. Hub no longer imports
+   `tests/ui/pixel-diff.mjs` or `visual-contract.mjs` (semon-hub#377); drop them
+   if Source no longer uses them.
+6. Hub follow-ups: shrink browser suites that exercise display/control/runtime,
+   delete paused `ui/ssh.mjs` with the SSH retirement, and reconcile the
+   viewer/session redesign docs with this direction.
