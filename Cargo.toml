@@ -20,7 +20,8 @@ libc = "0.2.189"
 # Held at 0.39: its libsqlite3-sys ^0.37 must fit the embedding server's sqlx 0.9 (<0.38); both link sqlite3.
 rusqlite = { version = "0.39.0", default-features = false, features = ["bundled"] }
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls"] }
-serde_json = { version = "1.0.150", features = ["preserve_order", "raw_value"] }
+# float_roundtrip: exact float parsing; cost and token sums depend on it.
+serde_json = { version = "1.0.150", features = ["float_roundtrip", "preserve_order", "raw_value"] }
 sha2 = "0.10.9"
 tiny_http = { version = "=0.12.0", features = ["ssl-rustls"] }
 # Seekable zstd segments for sealed logs (the reference C library, built by
