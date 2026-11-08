@@ -24,7 +24,7 @@ jobs:
       - name: Compare isolated first pages on one runner
         run: |
           set -euo pipefail
-          selected=96e720d186cecb19fe69b4da33f13af74318dba8
+          selected=2fd25ef3e7e75892d6fa6ebceb0ad33bd9cdfb4f
           baseline=272a7994339965a63d52d11a6ee3f668e5d0a99d
           mkdir "$RUNNER_TEMP/pgsel-timing"
           printf '%s\n' "$selected" > "$RUNNER_TEMP/pgsel-timing/selected-sha"
