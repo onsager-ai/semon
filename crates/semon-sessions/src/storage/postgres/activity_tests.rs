@@ -91,6 +91,13 @@ pub(super) async fn lifecycle(dsn: &str) {
         .unwrap();
     assert_eq!(first["generation"], restarted["generation"]);
     assert_eq!(first["items"], restarted["items"]);
+    let tx = store.begin(&namespace).await.unwrap();
+    let pending = tx.begin_raw_write(&namespace, &input).await.unwrap();
+    tx.commit(&namespace).await.unwrap();
+    assert!(store.activity_query(&namespace, &options, "native", &json!({"id":"native"}), None, crate::SessionSourceReadMode::LocalOrPinnedProvider, crate::model::now_ms()).await.is_err());
+    let tx = store.begin(&namespace).await.unwrap();
+    assert!(tx.complete_raw_write(&namespace, pending, &crate::PgRawGeneration { generation: "a".repeat(32), length: std::fs::metadata(&path).unwrap().len(), sha256: [7;32] }).await.unwrap());
+    tx.commit(&namespace).await.unwrap();
     writeln!(
         std::fs::OpenOptions::new()
             .append(true)

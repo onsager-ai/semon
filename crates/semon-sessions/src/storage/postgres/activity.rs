@@ -163,6 +163,11 @@ impl PgProjectionStore {
         }
         let mut proofs = Vec::new();
         for source in &row.sources {
+            let input = crate::native_evidence::catalog_input(&source.path, options)
+                .ok_or_else(|| backend("invalid activity source"))?;
+            if tx.raw_write_pending(namespace, &input).await? {
+                return Err(backend("activity Raw write is pending"));
+            }
             let (ledger, index) = tx
                 .load_index(
                     namespace,
@@ -225,6 +230,13 @@ impl PgProjectionStore {
             .catalog_row(namespace, key, CatalogReadScope::Current)
             .await?
             .ok_or_else(|| backend("activity owner changed"))?;
+        for source in &row.sources {
+            let input = crate::native_evidence::catalog_input(&source.path, options)
+                .ok_or_else(|| backend("invalid activity source"))?;
+            if check.raw_write_pending(namespace, &input).await? {
+                return Err(backend("activity Raw write is pending"));
+            }
+        }
         let actual = check.tx.query_opt("SELECT generation FROM semon_projection.session_activity WHERE namespace=$1 AND session_key=$2", &[&namespace.binding(), &key]).await.map_err(backend)?;
         if current.sources != row.sources
             || actual
