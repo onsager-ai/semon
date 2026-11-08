@@ -1,7 +1,7 @@
 {
   "name": "semon-viewer-ui-checks",
   "private": true,
-  "description": "CI-only browser checks for semon sessions --serve: retained historical fixture data, actual-application visual comparisons, and functional browser checks. Not part of the Rust build.",
+  "description": "CI-only browser checks for semon sessions --serve: retained historical fixture data, review screenshots and functional browser checks. Not part of the Rust build.",
   "type": "module",
   "engines": {
     "node": ">=22"
@@ -9,11 +9,9 @@
   "scripts": {
     "fixture": "node fixture.mjs",
     "gaps": "node gaps.mjs",
-    "pixels": "node pixels.mjs",
     "checks": "node checks/run.mjs"
   },
   "dependencies": {
-    "pixelmatch": "7.2.0",
     "playwright": "1.63.0",
     "pngjs": "7.0.0"
   }

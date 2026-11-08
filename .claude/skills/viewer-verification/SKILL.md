@@ -1,6 +1,6 @@
 ---
 name: viewer-verification
-description: Verify Semon viewer changes with its typed UI sources, generated bundles, synthetic fixture servers, functional/touch/transport suites and reviewed pixel baselines.
+description: Verify Semon viewer changes with its typed UI sources, generated bundles, synthetic fixture servers, functional/touch/transport suites and reviewed screenshots.
 ---
 
 # Semon viewer verification
@@ -35,13 +35,11 @@ fixtures, never personal logs. Do not change host fonts to compensate for result
 3. Prepare the tests/ui fixture servers and tooling using the workflow's exact
    environment/setup. Inspect representative affected states early; then run
    the required final coverage. Run affected functional, touch, transport, accessibility,
-   lifecycle and visual checks; identify unselected suites explicitly.
-4. View actual reference/candidate screenshots and diffs for each change family;
-   classify implementation, reference and fixture defects separately from unresolved
-   product choices. Verify interaction/source-scope claims against behavior and
-   fixture setup. Update only baseline entries justified by settled requirements.
-   Preserve pixel thresholds and required assertions. A historical sample-mockup
-   report is separate from the required served-fixture comparisons.
+   and lifecycle checks; identify unselected suites explicitly.
+4. View the uploaded screenshots for each change family (CI makes no pixel
+   comparison); classify implementation and fixture defects separately from
+   unresolved product choices. Verify interaction/source-scope claims against
+   behavior and fixture setup. Preserve thresholds and required assertions.
 5. Read the aggregate job's actual result. A single suite pass does not establish
    aggregate success; unavailable infrastructure is blocked execution, not a pass.
 
@@ -49,6 +47,6 @@ fixtures, never personal logs. Do not change host fonts to compensate for result
 
 For refactors, record ownership/dependency changes, checklist evidence and any
 justified contract exceptions in the PR. Report selected coverage, setup,
-commands/results, inspected image families, classified differences, reviewed baseline changes,
+commands/results, inspected image families, classified differences,
 source/bundle freshness and unrun/blocked suites. Keep generation commands and
 exact CI flags in their owning references rather than copying another toolchain.

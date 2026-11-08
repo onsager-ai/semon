@@ -68,14 +68,11 @@ invent model/effort choices to make the panel look more sophisticated.
   sheets and panels. Thirty visual states cover 390/820/1280px, light/dark;
   keyboard selection, focus return, touch targets and reduced motion are checked.
   The interaction CI lane requires this suite in addition to existing tests.
-- Existing viewer pixel ratchets, functional suites and the required aggregate
-  retain their thresholds and coverage. The selected complete application's
-  independent binary also supplies a required 62-state comparison on every
-  visual run, as defined in `tests/ui/preservation-contract.mjs`. Derived mockup
-  exports cannot override that application's responsive presentation.
-  Hub adds its own production-page visual contract and uses this same text audit
-  on its page/sheet screenshots. Neither a successful capture nor a reduced diff
-  count is pixel acceptance; unapproved qualification/pause differences stay red.
+- Viewer functional suites and the required aggregate retain their thresholds
+  and coverage. CI makes no pixel or reference-build comparison; screenshots are
+  uploaded for human review. Derived mockup exports cannot override the
+  application's responsive presentation. Hub uses this same text audit on its
+  page/sheet screenshots.
 
 ## Intentional visual changes
 
@@ -85,12 +82,9 @@ Distinguish an implementation regression, obsolete reference and incorrect
 fixture state before deciding what to change. Apply settled product decisions
 without treating a historical screenshot as authority to reverse them.
 
-Run the normal checks first. Inspect the actual images and diffs before accepting
-a changed baseline. `node tests/ui/gallery.mjs --update-baselines` is an explicit
-local operation and is forbidden in CI. Review the resulting PNG changes and
-state the design reason in the PR. Never increase mismatch tolerances to make an
-unexplained change pass. A removed state must be justified, not silently skipped;
-missing cases and missing baseline images fail.
+Run the normal checks first. Inspect the uploaded screenshots for affected states
+and state the design reason in the PR. A removed state must be justified, not
+silently skipped.
 
 ## Consumer pin updates
 

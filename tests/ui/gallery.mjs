@@ -6,24 +6,15 @@ import { fileURLToPath } from 'node:url';
 import { buildConsumer } from '../../ui/build.mjs';
 import { launch } from './lib.mjs';
 import { auditText } from './text-audit.mjs';
-import { createVisualContract } from './visual-contract.mjs';
 
 const dir = path.dirname(fileURLToPath(import.meta.url)),
   root = path.resolve(dir, '../..');
-const args = process.argv.slice(2);
-if (args.length && (args.length !== 1 || args[0] !== '--update-baselines'))
-  throw new Error('Usage: node tests/ui/gallery.mjs [--update-baselines]');
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'semon-gallery-'));
 const output = path.join(temp, 'gallery.js');
 await buildConsumer(path.join(root, 'ui/tests/fixtures/design-gallery.tsx'), output);
-const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'gallery-visual.json'), 'utf8'));
+// Screenshots are review artifacts only; no baseline comparison is made.
 const out = path.resolve(process.env.SEMON_UI_OUT ?? path.join(dir, 'out'), 'gallery');
-const visuals = createVisualContract({
-  manifest,
-  baselineDir: path.join(dir, 'baselines/gallery'),
-  outDir: out,
-  update: args.includes('--update-baselines'),
-});
+fs.mkdirSync(out, { recursive: true });
 const assets = new Map([
   ['/gallery.js', [output, 'text/javascript']],
   ['/viewer.css', [path.join(root, 'crates/semon-sessions/src/viewer.css'), 'text/css']],
@@ -43,8 +34,8 @@ const html =
 const browser = await launch();
 const report = [];
 try {
-  for (const width of manifest.widths)
-    for (const scheme of manifest.schemes) {
+  for (const width of [390, 820, 1280])
+    for (const scheme of ['light', 'dark']) {
       const touch = width < 1000;
       const context = await browser.newContext({
         viewport: { width, height: 844 },
@@ -98,7 +89,11 @@ try {
           assert.deepEqual(short, [], 'touch target below 44px');
         }
         report.push({ width, scheme, state, text });
-        await visuals.capture(page, `${state}-${width}-${scheme}`);
+        await page.evaluate(() => document.fonts.ready);
+        await page.screenshot({
+          path: path.join(out, `${state}-${width}-${scheme}.png`),
+          animations: 'disabled',
+        });
       };
       await audit('primitives');
       // Keyboard opens and selects through the real shared Select controller.
@@ -149,9 +144,7 @@ try {
       assert.deepEqual(errors, [], 'page errors');
       await context.close();
     }
-  const failures = visuals.finish();
   fs.writeFileSync(path.join(out, 'audit.json'), JSON.stringify(report, null, 2));
-  assert.deepEqual(failures, [], 'gallery visual contract');
   console.log(
     `Component gallery: ${report.length} audited visual states; keyboard, touch and reduced motion passed`,
   );

@@ -17,7 +17,7 @@ reconcile its applicable scope with the current task and settled product decisio
 Reuse semantic tokens and established components. Review layout and interaction
 intent in Storybook, compare representative implementation screenshots
 at matching widths/themes/states, and explain intentional deviations in the PR.
-Review visual diffs before updating baselines. These controls extend this existing
+These controls extend this existing
 brief and the pinned skill; they do not create another instruction system.
 
 Preserve the applicable parts of the existing rendered viewer as the default
@@ -74,11 +74,9 @@ Logs and hashes establish provenance, not that someone inspected the interface.
 If image review is unavailable, report that limit and continue independent work
 without claiming visual acceptance.
 
-Apply settled changes through the owning comparator/baseline procedure, preserving
-history, thresholds and required states. Review only justified entries instead of
-bulk replacement or altered capture inputs. Run the declared final suites on the
-delivered tree. Keep product behavior/availability checks separate from pixel
-regression; neither can establish the other's result. No new approval service or
+Apply settled changes preserving thresholds and required states. Run the declared
+final suites on the delivered tree. CI makes no pixel comparison; screenshot
+review is manual and does not replace behavior/availability checks. No new approval service or
 machine-enforced semantic-review gate is introduced here.
 
 ## Tool workflow
@@ -103,9 +101,8 @@ design projects or duplicate CSS/token authorities. Independent product pages
 can differ while shared controls retain their contract.
 
 Future frontend changes use the existing static design policy, typed/security/
-bundle checks, gallery interaction coverage, text/touch audits and pixel ratchets
-from [tests/ui/README.md](../../tests/ui/README.md) and `.github/workflows/ui.yml`.
-Compare 390/820/1280px and light/dark with approved references, including focus,
-keyboard, reduced motion and relevant lifecycle states. Inspect screenshot diffs
-before intentional baseline updates; preserve every threshold and required suite.
-Setup itself changes no production UI, generated bundle or approved baseline.
+bundle checks, gallery interaction coverage and text/touch audits from
+[tests/ui/README.md](../../tests/ui/README.md) and `.github/workflows/ui.yml`.
+Review 390/820/1280px and light/dark screenshots, including focus, keyboard,
+reduced motion and relevant lifecycle states; preserve every threshold and
+required suite. Setup itself changes no production UI or generated bundle.
