@@ -178,7 +178,7 @@ PostgreSQL session backend yet.
   All tables have forced RLS; the adapter refuses superuser, BYPASSRLS and table
   owner application clients. Namespace context is transaction-local. This module
   opens no local database and reads no credentials.
-- CI: `postgres.yml` uses a free PostgreSQL 16 service container and a restricted
+- CI: `postgres.yml` (on demand only while the track is paused) uses a free PostgreSQL 16 service container and a restricted
   non-owner application role. The storage conformance module exercises SQLite
   and the PostgreSQL transaction subset, direct SQL foreign-row read/write
   refusals, context reuse, ledger conflicts/rollback and unchanged local files.
