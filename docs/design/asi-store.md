@@ -25,7 +25,7 @@ native Raw ─┬─▶ ingest index (per namespace, internal) ──▶ ASI pro
 | --- | --- | --- | --- |
 | ingest index (`sessions-index.sqlite3`, one per namespace) | Today's Session Event Index | Yes, from Raw (`SCHEMA_VERSION`) | `semon-sessions` |
 | `asi.sqlite3` | Public §1.1 tables for every namespace the store holds | Own rows: from Raw or the archive. Received rows: by re-push. Frozen rows: no. | ASI projector (own namespace), push ingest (other namespaces) |
-| `asi-durable.sqlite3` | Labels, adjudications, links, lanes, work items, changes, outcomes, interventions, assignments | No | Append-only APIs in `semon-asi` |
+| `asi-durable.sqlite3` | Labels, adjudications, links, lanes, work items, changes, outcomes, interventions, assignments; the origin's `generation_mark` | No | Append-only APIs in `semon-asi` |
 | `asi-search.sqlite3` | Body tables and their FTS5 index | Yes, from Raw | Body indexer, only where bodies are in custody |
 
 All ASI files sit in Semon's state directory (`$XDG_STATE_HOME/semon/`, else
@@ -57,14 +57,18 @@ part after `{namespace}/`), and each store prefixes the namespace.
 | Key | Components | Native source, in order of preference |
 | --- | --- | --- |
 | `session_uid` | `{namespace}/{harness}/{native_session_id}` | Harness session ID |
-| `turn_uid` | `{session_uid}/t/{turn_id}` | Codex `turn_id`; Claude initiating record `uuid`; the handoff ID; else the source anchor `{source_token}@{offset}` of the turn's first record |
+| `turn_uid` | `{session_uid}/t/{turn_id}` | Codex `turn_id`; Claude initiating record `uuid`; the handoff ID; else the record anchor `@{n}` of the turn's first record |
 | `step_uid` | `{session_uid}/s/claude/{message_id}` or `{session_uid}/s/codex/{thread}/{session}/{turn}/{response}` | `ActivityStepId` components, each encoded separately |
-| `compaction_uid` | `{session_uid}/c/{id}` | Native record ID; else the source anchor of the compaction record |
+| `compaction_uid` | `{session_uid}/c/{id}` | Native record ID; else the record anchor of the compaction record |
 | `source_uid` | `{namespace}/{harness}` | One §1.1 source row per harness and machine |
 
-Source anchors are stable while the Raw prefix that holds them is unchanged.
-A native rewrite (a new ledger epoch) can change them, and that publishes a
-new generation. Each table also stores the components as separate indexed
+A **record anchor** `@{n}` is the zero-based ordinal of the record among the
+session's native records, in the session's canonical record order. It depends
+on neither paths nor the path key, so key rotation never changes it, and any
+store holding the session's Raw (an origin, or a receiver for opted-in
+sources) computes the same anchor. It is stable while the Raw prefix that
+holds the record is unchanged. A native rewrite can change it, and that
+publishes a new generation. Each table also stores the components as separate indexed
 columns. `idx` columns are ordinals for ordering only. A rebuild from the same
 admitted Raw yields identical UIDs, and a conformance test enforces this.
 
@@ -141,21 +145,27 @@ Every derived row (`session`, `session_source`, `turn`, `step`, `step_call`,
 ingest index. The unit of projection, publication and re-derivation is a
 session.
 
-**Generation.** A session's generation is `max(previous + 1, now_ms)`, where
-`previous` is the larger of the generation stored locally and the one the
-receiver reports in status. It is monotonic across local rebuilds without a
-persisted counter. A receiver refuses a generation more than 24 hours in the
+**Generation.** A session's generation is `max(high_water + 1, now_ms)`. The
+origin keeps each session's `high_water` in the durable file
+(`generation_mark`), which rebuilds never touch, so generations stay
+monotonic across rebuilds and clock regressions. Before pushing to a
+destination, the sender reads its status. If the destination already holds
+a generation at or above the local one (for example after a durable reset),
+the sender allocates a new generation above it, republishes locally and then
+pushes. Monotonicity is therefore per destination and never depends on an
+unreachable one. A receiver refuses a generation more than 24 hours in the
 future.
 
-**Single projector queue.** One projector task per store serializes all work
-for its own namespace: appends, rules and projector bumps, repricing, key
-rotation and freezing. It captures a **witness** inside the ingest read
-transaction (the `ProjectionTag` of every contributing source, plus the
-activity projection's source generation). It then publishes the session in one
-`asi.sqlite3` transaction, only if the stored witness is not newer (same or
-older ledger epoch and offset for every source). Otherwise it discards the
-result and re-queues. A delayed or concurrent result therefore never replaces a
-newer one.
+**Single projector queue.** One projector task per store is the only writer
+of its own namespace's rows. It serializes all work: appends, rules and
+projector bumps, repricing, key rotation and freezing. Each job reads the
+session in one ingest read transaction and publishes it in one `asi.sqlite3`
+transaction. Jobs never overlap, so an older result cannot overwrite a newer
+one, and no cross-database ordering of offsets or epochs is needed. The job
+records the **witness** it read (each contributing source's `ProjectionTag`)
+in `session_source`. If the ingest ledger moved during the job, the job
+publishes anyway and queues a follow-up, so the next publication catches
+up.
 
 **Triggers:**
 
@@ -205,25 +215,37 @@ recreated implicitly.
 ## Raw archive
 
 Whoever holds body custody keeps the archive: the origin for its own
-sessions, a receiver for opted-in sources. On a receiver, the existing mirror
-store already retains deleted files and seals them, and serves as the
-archive. On an origin, the archive is new:
+sessions, a receiver for opted-in sources. On a receiver, the mirror store
+serves as the archive. It already retains deleted files and seals them, but
+today a `replace` append overwrites earlier bytes
+(`crates/semon-push/src/mirror.rs`). The receiver therefore moves the replaced
+content into an immutable chain, using the same object, manifest and index
+format, before it accepts the replacement. On both, the archive works as
+follows:
 
-- **Objects.** `archive/{source_token}/{epoch}/{start}-{end}.zst` holds
-  immutable copies of the byte range `[start, end)` of one Raw ledger epoch, in
-  the zstd seekable format that `sealed` already writes and reads. It does not
+- **Identities.** Archive names never use ingest counters or path tokens. On
+  first archiving, each native source gets a random `archive_source_id`, and
+  each content chain (the initial content, then every native rewrite) gets a
+  random `chain_id`. `archive/index.json` maps a native source (its local
+  path, plus the SHA-256 of its first line) to its `archive_source_id`. The
+  index is non-rebuildable custody: ingest rebuilds and key rotation leave it
+  untouched, and a rebuilt ingest index finds archived sources through it.
+- **Objects.** `archive/{archive_source_id}/{chain_id}/{start}-{end}.zst`
+  holds immutable copies of the byte range `[start, end)` of one chain, in the
+  zstd seekable format that `sealed` already writes and reads. It does not
   punch holes in or otherwise modify native files.
-- **Manifest.** `archive/{source_token}/manifest.json` lists each epoch's
-  segments, contiguous from 0, each ending on a line boundary, with the
-  SHA-256 of the plain bytes and the `prefix_sha256` at each segment end.
-  Segments are written to a temporary name, fsynced and renamed, and then the
-  manifest is replaced by fsync and rename. On startup, files not named by the
-  manifest are removed. A crash leaves the last published manifest.
+- **Manifest.** `archive/{archive_source_id}/manifest.json` lists each chain
+  in order, with its segments contiguous from 0, each ending on a line
+  boundary, the SHA-256 of the plain bytes, and the `prefix_sha256` at each
+  segment end. Segments are written to a temporary name, fsynced and renamed,
+  and then the manifest is replaced by fsync and rename. On startup, files not
+  named by the manifest are removed. A crash leaves the last published
+  manifest.
 - **Admission.** The archiver copies only the prefix the ingest index has
   admitted (the same consumed offset and digest as the `ProjectionTag`), so
   the archive and the projection agree on bytes.
-- **Rewrites.** A new ledger epoch starts a new segment chain. Earlier epochs
-  are kept, so generations already projected stay reproducible.
+- **Rewrites.** A native rewrite starts a new chain. Earlier chains are kept,
+  so generations already projected stay reproducible.
 - **Reads.** When native Raw is gone, the ingest index reads the source from
   the archive by verifying segment hashes against the manifest. A hash mismatch
   is `archive_corrupt`: the source is unavailable and rows stay as they are
@@ -316,7 +338,7 @@ in UID order, each column in schema order).
   - `name` columns: at most 256 bytes, no control characters, and must not look
     like an absolute or home path (leading `/`, `~` or `\`, a drive letter, or
     a `..` segment). Tool names must match `^[A-Za-z0-9_.:\-]{1,128}$`, and
-    `repo_id` must match `^[a-z0-9.\-]+(/[A-Za-z0-9._\-]+)+$`.
+    `repo_id` must match `^[a-z0-9.\-]+(:[0-9]{1,5})?(/[A-Za-z0-9._\-]+)+$`.
   - `token` columns match their pattern (`^pt1_[A-Za-z0-9_-]{22}$` for paths),
     and `path_key_id` is required whenever path tokens are present.
   - Every row belongs to the snapshot's session.
@@ -382,15 +404,18 @@ rework overlap still join across sessions and machines.
 - **Rotation.** Importing a new key changes `path_key_id`, re-projects
   non-frozen sessions and re-pushes them. Frozen rows keep their old key ID.
 
-`session_source.source_token` and archive directory names use the same
-tokenization.
+`session_source.source_token` uses the same tokenization. Identities (UIDs,
+record anchors, archive names) never depend on a path token.
 
 ### Repo identity
 
 `repo` stays the existing display name (`repo_of`: the checkout's basename).
 `repo_id` is the stable identity: the `origin` remote URL with scheme,
-credentials, port and a trailing `.git` removed, and the host lowercased:
-`github.com/onsager-ai/semon`. Linked worktrees resolve to the main checkout's
+credentials and a trailing `.git` removed, and the host lowercased:
+`github.com/onsager-ai/semon`. scp-style remotes (`git@host:owner/repo`)
+normalize to the same form. A port is dropped only when it is the scheme's
+default (443 for HTTPS, 22 for SSH). Any other port stays, as in
+`host:8443/team/app`, so distinct endpoints never merge. Linked worktrees resolve to the main checkout's
 remote. A repository without a remote has `repo_id` `null`, and its paths use
 the absolute form, so unrelated repositories that share a basename never share
 tokens.
@@ -444,17 +469,21 @@ Proposed defaults, to be measured under #510:
   covering every §1.1 column the fixtures exercise.
 - Identity: rebuilding gives identical UIDs and rows; encoding round-trips
   components containing `/`, `:` and `%`; turns and compactions without native
-  IDs use source anchors; UIDs are equal on origin and receiver; a receiver
-  refuses a token named after itself or `local`.
-- Publication: a delayed projector result never replaces a newer witness;
-  concurrent append, rules bump and repricing converge; invalidation sets
-  `stale`.
+  IDs use record anchors, which are unchanged by key rotation (existing labels
+  still resolve) and equal on origin and receiver; a receiver refuses a token
+  named after itself or `local`.
+- Publication: append, rules bump and repricing queued together converge to
+  the latest state; a ledger move during a job queues a follow-up;
+  invalidation sets `stale`; generations stay monotonic after an origin
+  rebuild, a clock regression and a durable reset.
 - Version scans: a rules bump re-derives only rows with a stale
   `rules_version`; a price bump touches only cost columns and skips frozen
   rows; counts are asserted.
 - Archive: pruning native Raw leaves rows re-derivable; a rewrite keeps the
-  earlier epoch; a crash mid-copy leaves the last manifest; corruption is
-  `archive_corrupt`, not frozen.
+  earlier chain; rebuilding the ingest index after a rewrite and a key rotation
+  still finds every chain; a crash mid-copy leaves the last manifest;
+  corruption is `archive_corrupt`, not frozen; a receiver `replace` preserves
+  the replaced bytes.
 - Freeze and schema change: withdrawing the archive freezes rows; a schema
   bump with frozen rows refuses on origin and receiver; export then reset
   proceeds; without frozen rows, a receiver recreates and origins re-push.
@@ -465,7 +494,7 @@ Proposed defaults, to be measured under #510:
   a `repush` resend converge; a conflicting snapshot is refused; stale
   generation; generation stays monotonic after an origin rebuild.
 - Privacy: path-token known-answer vectors; same-name unrelated repositories
-  never share tokens; worktrees and renamed clones of one remote do share
+  and same-host repositories on different ports never share tokens; worktrees and renamed clones of one remote do share
   them; a full outbound-exchange scan of a metadata-only push finds no path,
   message, command or output text.
 - Namespace conformance cases from `storage/conformance.rs` keep passing.

@@ -147,10 +147,11 @@ and a malformed query gives `invalid_query`), optional `repo`, `harness`,
 `part`, `since` and `until` (filtered through `asi.sqlite3`), and `limit`
 (default 20, maximum 200).
 
-Output: hits ordered by bm25, each with `step_uid`, `session_uid`, `part`,
-`ts` and `snippet`. The snippet is at most 300 characters around the match,
+Output: hits ordered by bm25, each with `body_uid`, `session_uid`, `turn_uid`,
+`step_uid` (`null` for parts no step owns), `part`, `ts` and `snippet`. The snippet is at most 300 characters around the match,
 wrapped as `{"untrusted_text": "…"}`. The total response is capped at 1 MiB.
-Step UIDs join `sql` results.
+Session, turn and step UIDs join `sql` results, and any of them, or the
+`body_uid`, can be passed to `view`.
 
 ## `view`
 
@@ -158,7 +159,8 @@ A focused read of body text by UID (decided 2026-11-08: bodies are reachable
 through `search` and `view`, never `sql`). Input: `uid` and an optional
 `part`. The UID is one of:
 
-- a `step_uid` or `turn_uid`: its parts from `asi-search.sqlite3`, in order;
+- a `body_uid`, `step_uid` or `turn_uid`: that part, or the step's or turn's
+  parts, from `asi-search.sqlite3`, in order;
 - a durable row (`label/{id}`, `adjudication/{id}`, `lane/{id}`,
   `intervention/{id}`): its `body` columns from the durable file.
 
