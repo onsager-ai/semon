@@ -2481,7 +2481,7 @@ impl<'a> Builder<'a> {
                     .summary
                     .events
                     .iter()
-                    .filter(|event| event.k == events::Kind::U)
+                    .filter(|event| matches!(event.k, events::Kind::U | events::Kind::Ask))
                     .map(|event| (event.o, event.u.clone()))
                     .collect();
                 turns.sort_by_key(|(offset, _)| *offset);
