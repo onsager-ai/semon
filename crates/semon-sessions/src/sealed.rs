@@ -878,15 +878,13 @@ pub fn seal(log: &Path, min_new: u64, max_new: u64) -> io::Result<Sealed> {
     Ok(done)
 }
 
-/// Removes what an interrupted seal left in `log`'s seal directory: its
-/// temporary files and, when the manifest reads, segment files it doesn't
-/// name. Retires a manifest recorded from another file whose bytes the log
-/// no longer holds (a replace interrupted before its cleanup). Returns how
-/// many files went. Never touches the log, nor a segment while the
-/// manifest can't be read.
+/// Removes interrupted temporary writes and retires a replaced generation
+/// only while its named segments have verified archive custody. Unnamed
+/// segments are retained as evidence, even when a newer manifest exists.
+/// Returns how many files went. Never touches the log.
 pub fn tidy(log: &Path) -> io::Result<usize> {
     let dir = seal_dir(log);
-    let mut removed = remove_temporaries(&dir)?;
+    let removed = remove_temporaries(&dir)?;
     let Some(manifest) = read_manifest(&dir)? else {
         return Ok(removed);
     };
@@ -897,19 +895,7 @@ pub fn tidy(log: &Path) -> io::Result<usize> {
             return Ok(removed + manifest.segments.len() + 1);
         }
     }
-    let named: Vec<String> = manifest
-        .segments
-        .iter()
-        .map(|segment| segment.file_name(&manifest.generation))
-        .collect();
-    for entry in fs::read_dir(&dir)? {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.ends_with(".zst") && !named.contains(&name) && entry.file_type()?.is_file() {
-            fs::remove_file(entry.path())?;
-            removed += 1;
-        }
-    }
+    // Unnamed segments may be the last evidence of a lost manifest.
     Ok(removed)
 }
 
@@ -923,7 +909,7 @@ pub fn tidy(log: &Path) -> io::Result<usize> {
 pub fn forget(log: &Path) -> io::Result<()> {
     let dir = seal_dir(log);
     if let Some(manifest) = read_manifest(&dir)? {
-        require_chain(&dir, &manifest)?;
+        retire(&dir, &manifest)?;
     } else {
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
@@ -939,15 +925,14 @@ pub fn forget(log: &Path) -> io::Result<()> {
             }
         }
     }
-    match fs::remove_file(dir.join(MANIFEST)) {
-        Ok(()) => sync_dir(&dir)?,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    // Never recursively remove evidence outside the verified generation.
+    if fs::read_dir(&dir)?.next().is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unverified files remain in the seal directory",
+        ));
     }
-    match fs::remove_dir_all(&dir) {
-        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
-        _ => Ok(()),
-    }
+    fs::remove_dir(&dir)
 }
 
 /// What the archive reports back to a seal directory: a chain holds the
@@ -956,7 +941,9 @@ pub fn forget(log: &Path) -> io::Result<()> {
 #[derive(Serialize, Deserialize)]
 struct Custody {
     generation: String,
-    covered: u64,
+    archive: PathBuf,
+    source: String,
+    chain: crate::archive::Chain,
 }
 
 fn read_custody(dir: &Path) -> io::Result<Option<Custody>> {
@@ -981,7 +968,13 @@ fn read_custody(dir: &Path) -> io::Result<Option<Custody>> {
 /// behind by other content (the log was replaced from outside) holds bytes
 /// the chain does not, so nothing is recorded and `false` is returned; its
 /// segments stay. `true` when the log has no seal, or its seal is covered.
-pub fn record_custody(log: &Path, covered: u64) -> io::Result<bool> {
+pub fn record_custody(
+    log: &Path,
+    archive: &crate::archive::Archive,
+    source: &str,
+    chain: &crate::archive::Chain,
+) -> io::Result<bool> {
+    let covered = chain.length;
     let dir = seal_dir(log);
     let Some(manifest) = read_manifest(&dir)? else {
         return Ok(true);
@@ -996,16 +989,15 @@ pub fn record_custody(log: &Path, covered: u64) -> io::Result<bool> {
     {
         return Ok(false);
     }
-    if let Some(held) = read_custody(&dir)?
-        && held.generation == manifest.generation
-        && held.covered >= covered
-    {
-        return Ok(true);
-    }
+    archive.with_verified_chain(source, chain, |bytes| {
+        compare_segments(&dir, &manifest, bytes)
+    })?;
     let temporary = dir.join(format!("{CUSTODY}.tmp"));
     let bytes = serde_json::to_vec(&Custody {
         generation: manifest.generation,
-        covered,
+        archive: archive.directory()?,
+        source: source.to_owned(),
+        chain: chain.clone(),
     })
     .map_err(io::Error::other)?;
     let mut file = fs::File::create(&temporary)?;
@@ -1017,20 +1009,21 @@ pub fn record_custody(log: &Path, covered: u64) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Errors unless a chain holds every sealed byte of `manifest`.
-fn require_chain(dir: &Path, manifest: &Manifest) -> io::Result<()> {
-    let held = match read_custody(dir)? {
-        Some(held) => held.generation == manifest.generation && held.covered >= manifest.end(),
-        None => false,
-    };
-    if manifest.end() == 0 || held {
-        Ok(())
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "sealed bytes that no archive chain holds are not removed",
-        ))
+/// Compare the current segment bytes directly with the verified chain,
+/// bypassing frame caches. A certificate alone never authorizes deletion.
+fn compare_segments(dir: &Path, manifest: &Manifest, chain: &mut dyn Read) -> io::Result<()> {
+    for segment in &manifest.segments {
+        let open = open_segment(dir, &manifest.generation, segment)?;
+        for index in 0..open.table.frames.len() {
+            let sealed = decompress(&open, index)?;
+            let mut archived = vec![0; sealed.len()];
+            chain.read_exact(&mut archived)?;
+            if archived != sealed {
+                return Err(invalid("sealed bytes differ from their custody chain"));
+            }
+        }
     }
+    Ok(())
 }
 
 fn remove_temporaries(dir: &Path) -> io::Result<usize> {
@@ -1053,17 +1046,29 @@ fn remove_temporaries(dir: &Path) -> io::Result<usize> {
 /// Removes a manifest and then its segments, once a chain holds their bytes
 /// ([`record_custody`]); otherwise nothing is removed.
 fn retire(dir: &Path, manifest: &Manifest) -> io::Result<()> {
-    require_chain(dir, manifest)?;
-    fs::remove_file(dir.join(MANIFEST))?;
-    sync_dir(dir)?;
-    for segment in &manifest.segments {
-        if let Err(error) = fs::remove_file(dir.join(segment.file_name(&manifest.generation)))
-            && error.kind() != io::ErrorKind::NotFound
-        {
-            return Err(error);
-        }
-    }
-    Ok(())
+    let held = read_custody(dir)?
+        .filter(|held| {
+            held.generation == manifest.generation && held.chain.length >= manifest.end()
+        })
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "sealed bytes without a verified custody chain are not removed",
+            )
+        })?;
+    let archive = crate::archive::Archive::new(&held.archive);
+    archive
+        .with_verified_chain(&held.source, &held.chain, |bytes| {
+            compare_segments(dir, manifest, bytes)?;
+            fs::remove_file(dir.join(MANIFEST))?;
+            sync_dir(dir)?;
+            for segment in &manifest.segments {
+                fs::remove_file(dir.join(segment.file_name(&manifest.generation)))?;
+            }
+            fs::remove_file(dir.join(CUSTODY))?;
+            sync_dir(dir)
+        })
+        .map_err(|error| io::Error::new(io::ErrorKind::PermissionDenied, error))
 }
 
 /// Whether the manifest describes the log's bytes: `true` when the plain

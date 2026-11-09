@@ -554,11 +554,11 @@ impl Receiver {
         version: &str,
     ) -> Result<(), Refusal> {
         let mut log = LogFile::open(target)?;
-        let covered = log.metadata()?.len();
         let raw = Archive::new(self.machine_dir(machine).join(archive::DIR));
-        raw.preserve(key, &mut log, version)?;
-        // A seal left by other content is not certified, and keeps its segments.
-        record_custody(target, covered)?;
+        if let Some(chain) = raw.preserve(key, &mut log, version)? {
+            // A seal left by other content is not certified, and keeps its segments.
+            record_custody(target, &raw, key, &chain)?;
+        }
         Ok(())
     }
 

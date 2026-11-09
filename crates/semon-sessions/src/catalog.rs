@@ -7795,6 +7795,68 @@ mod tests {
     }
 
     #[test]
+    fn unchanged_catalog_scans_repair_damaged_or_deleted_archive_chains() {
+        use std::io::Read;
+        for remove in [false, true] {
+            let fixture = Fixture::new();
+            let path = fixture.source("one");
+            let mut options = fixture.options.clone();
+            options.facts = None;
+            let inputs = [crate::inputs::Input {
+                root: crate::inputs::InputRoot::Claude,
+                path: "projects/project/one.jsonl".into(),
+            }];
+            let dir = crate::archive::standalone_dir(&options.cache);
+            let archive = crate::archive::Archive::new(&dir);
+            let key = path.to_string_lossy().into_owned();
+            let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+            let prepare = |cache: &mut EventCache| {
+                crate::model::prepare_sources(&options, cache, &inputs, crate::model::now_ms())
+                    .unwrap();
+            };
+            prepare(&mut cache);
+            let original = archive.chains(&key).unwrap().remove(0);
+            let file = fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .path()
+                        .join(format!("{}.zst", original.chain_id))
+                })
+                .find(|path| path.is_file())
+                .unwrap();
+            let mut damaged = fs::read(&file).unwrap();
+            if remove {
+                fs::remove_file(&file).unwrap();
+            } else {
+                let middle = damaged.len() / 2;
+                damaged[middle] ^= 0xff;
+                fs::write(&file, &damaged).unwrap();
+            }
+            // The source and its consumed prefix remain exactly unchanged.
+            prepare(&mut cache);
+            let chains = archive.chains(&key).unwrap();
+            assert_eq!(chains.len(), 2);
+            assert_eq!(chains[0], original);
+            let mut recovered = Vec::new();
+            archive
+                .open_chain(&key, &chains[1])
+                .unwrap()
+                .read_to_end(&mut recovered)
+                .unwrap();
+            assert_eq!(recovered, fs::read(&path).unwrap());
+            if remove {
+                assert!(!file.exists());
+            } else {
+                assert_eq!(fs::read(&file).unwrap(), damaged);
+            }
+            prepare(&mut cache);
+            assert_eq!(archive.chains(&key).unwrap().len(), 2);
+        }
+    }
+
+    #[test]
     fn bounded_native_scans_reuse_archive_verification() {
         use sha2::{Digest, Sha256};
         let fixture = Fixture::new();

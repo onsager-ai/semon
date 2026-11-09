@@ -58,10 +58,9 @@ fn chain(root: &Path, log: &Path) -> bool {
     let archive = crate::archive::Archive::new(root.join("archive"));
     let mut reader = LogFile::open(log).unwrap();
     let key = log.to_string_lossy();
-    archive.preserve(&key, &mut reader, "1").unwrap().unwrap();
+    let chain = archive.preserve(&key, &mut reader, "1").unwrap().unwrap();
     archive.verify(&key).unwrap();
-    let length = reader.metadata().unwrap().len();
-    record_custody(log, length).unwrap()
+    record_custody(log, &archive, &key, &chain).unwrap()
 }
 
 fn read_all(path: &Path) -> Vec<u8> {
@@ -269,7 +268,8 @@ fn an_interrupted_seal_is_ignored_then_cleaned_up_and_finished() {
     // A leftover from yet another crash, and a segment no manifest names.
     fs::write(dir.join("x.zst.tmp"), b"junk").unwrap();
     fs::write(dir.join("9-00000000000000000000.zst"), b"junk").unwrap();
-    assert_eq!(tidy(&log).unwrap(), 2);
+    assert_eq!(tidy(&log).unwrap(), 1);
+    assert!(dir.join("9-00000000000000000000.zst").exists());
     let finished = seal(&log, u64::MAX, u64::MAX).unwrap();
     assert!(finished.added.is_none() && finished.punched);
     assert!(!status(&log).unwrap().needs_punch);
@@ -488,15 +488,18 @@ fn custody_is_for_the_bytes_that_were_archived() {
     fs::write(&log, jsonl(100_000, 22)).unwrap();
     seal(&log, 1, u64::MAX).unwrap();
     // The log is not the length that was archived.
-    let length = fs::metadata(&log).unwrap().len();
+    let archive = crate::archive::Archive::new(root.join("archive"));
+    let held = archive
+        .preserve("source", &mut LogFile::open(&log).unwrap(), "1")
+        .unwrap()
+        .unwrap();
     append(&log, b"{}\n");
-    assert!(record_custody(&log, length).is_err());
+    assert!(record_custody(&log, &archive, "source", &held).is_err());
     assert!(forget(&log).is_err(), "nothing was certified");
     // A log with no seal needs no certificate.
     let plain = root.join("b.jsonl");
     fs::write(&plain, jsonl(1_000, 23)).unwrap();
-    let length = fs::metadata(&plain).unwrap().len();
-    assert!(record_custody(&plain, length).unwrap());
+    assert!(record_custody(&plain, &archive, "source", &held).unwrap());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -548,5 +551,104 @@ fn an_unreadable_manifest_fails_the_read() {
     let mut out = Vec::new();
     assert!(LogFile::open(&log).unwrap().read_to_end(&mut out).is_err());
     assert!(status(&log).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn retirement_keeps_segments_after_the_custody_chain_is_damaged_or_deleted() {
+    for remove in [false, true] {
+        for operation in ["seal", "tidy", "forget"] {
+            let root = scratch(&format!("lost-chain-{remove}-{operation}"));
+            let log = root.join("a.jsonl");
+            fs::write(&log, jsonl(100_000, 26)).unwrap();
+            seal(&log, 1, u64::MAX).unwrap();
+            assert!(chain(&root, &log));
+            let dir = seal_dir(&log);
+            let manifest = read_manifest(&dir).unwrap().unwrap();
+            let segments: Vec<_> = manifest
+                .segments
+                .iter()
+                .map(|segment| {
+                    let path = dir.join(segment.file_name(&manifest.generation));
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect();
+            let held = read_custody(&dir).unwrap().unwrap();
+            let archived = fs::read_dir(&held.archive)
+                .unwrap()
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .path()
+                        .join(format!("{}.zst", held.chain.chain_id))
+                })
+                .find(|path| path.is_file())
+                .unwrap();
+            if remove {
+                fs::remove_file(&archived).unwrap();
+            } else {
+                let mut bytes = fs::read(&archived).unwrap();
+                let middle = bytes.len() / 2;
+                bytes[middle] ^= 0xff;
+                fs::write(&archived, bytes).unwrap();
+            }
+            let replacement = root.join("replacement");
+            fs::write(&replacement, jsonl(100_000, 27)).unwrap();
+            fs::rename(replacement, &log).unwrap();
+            let result = match operation {
+                "seal" => seal(&log, 1, u64::MAX).map(|_| ()),
+                "tidy" => tidy(&log).map(|_| ()),
+                "forget" => forget(&log),
+                _ => unreachable!(),
+            };
+            assert!(result.is_err(), "{operation} accepted lost custody");
+            assert!(dir.join(MANIFEST).exists());
+            for (path, bytes) in segments {
+                assert_eq!(fs::read(path).unwrap(), bytes);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn orphan_segments_survive_a_new_generation_and_its_retirement() {
+    let root = scratch("orphan-new-generation");
+    let log = root.join("a.jsonl");
+    fs::write(&log, jsonl(100_000, 28)).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    let dir = seal_dir(&log);
+    let old = read_manifest(&dir).unwrap().unwrap();
+    let segments: Vec<_> = old
+        .segments
+        .iter()
+        .map(|segment| {
+            let path = dir.join(segment.file_name(&old.generation));
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    fs::remove_file(dir.join(MANIFEST)).unwrap();
+    let replacement = root.join("replacement");
+    fs::write(&replacement, jsonl(100_000, 29)).unwrap();
+    fs::rename(replacement, &log).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    assert_ne!(
+        read_manifest(&dir).unwrap().unwrap().generation,
+        old.generation
+    );
+    assert!(chain(&root, &log));
+    assert_eq!(tidy(&log).unwrap(), 0);
+    assert_eq!(
+        forget(&log).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(dir.exists());
+    for (path, bytes) in segments {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
     fs::remove_dir_all(root).unwrap();
 }

@@ -1374,8 +1374,6 @@ pub(crate) struct EventCache {
     unpersisted: BTreeSet<String>,
     /// Native custody and its verification cache live across bounded scans.
     archive: Option<Archive>,
-    /// The offset and digest last copied to the standalone archive, per log.
-    archived: BTreeMap<String, (u64, [u8; 32])>,
 }
 
 /// How often an index without its store tries to open it again.
@@ -2172,8 +2170,8 @@ impl EventCache {
         self.busy = false;
     }
 
-    /// Copies the consumed prefix of each scanned native log that changed
-    /// since the last call into the standalone archive. A failure is
+    /// Admits every scanned native prefix, including unchanged ones so lost
+    /// custody is repaired. Intact chains use the verification cache. A failure is
     /// reported and retried by the next full scan; it does not stop the read.
     pub(crate) fn archive_consumed(&mut self, cache: &Path, seen: &BTreeSet<String>) {
         let archive = self
@@ -2184,18 +2182,10 @@ impl EventCache {
                 continue;
             };
             let consumed = (file.ledger.offset, file.ledger.prefix);
-            if self.archived.get(key) == Some(&consumed) {
-                continue;
-            }
             let admitted = LogFile::open(Path::new(key))
                 .and_then(|mut log| archive.admit(key, &mut log, consumed.0, &consumed.1));
             match admitted {
-                // Not admitted (the log changed since the index read it): tried
-                // again at the next scan, not remembered as done.
-                Ok(true) => {
-                    self.archived.insert(key.clone(), consumed);
-                }
-                Ok(false) => {}
+                Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => eprintln!("semon: native log archive: {key}: {error}"),
             }
@@ -10496,13 +10486,11 @@ mod archive_tests {
         let seen = BTreeSet::from([key.clone()]);
         cache.archive_consumed(&root.join("index.json"), &seen);
         assert!(archive.chains(&key).unwrap().is_empty());
-        assert!(cache.archived.is_empty(), "a refusal is not remembered");
 
         // The log holds the consumed bytes again: the next scan admits it.
         fs::write(&path, consumed).unwrap();
         cache.archive_consumed(&root.join("index.json"), &seen);
         assert_eq!(archive.chains(&key).unwrap().len(), 1);
-        assert_eq!(cache.archived.len(), 1);
         fs::remove_dir_all(root).unwrap();
     }
 }

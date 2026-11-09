@@ -179,6 +179,35 @@ impl Archive {
         Ok(())
     }
 
+    pub(crate) fn directory(&self) -> io::Result<PathBuf> {
+        fs::canonicalize(&self.dir)
+    }
+
+    /// Verify this exact retained chain and keep writers excluded until the
+    /// custody-dependent operation completes. File changes invalidate trust.
+    pub(crate) fn with_verified_chain<T>(
+        &self,
+        source: &str,
+        expected: &Chain,
+        operation: impl FnOnce(&mut dyn Read) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let _guard = self.lock(false)?;
+        let id = self
+            .lookup_locked(source)?
+            .ok_or_else(|| invalid("a missing custody source"))?;
+        let dir = self.dir.join(id);
+        let manifest = read_manifest(&dir)?;
+        let chain = manifest
+            .chains
+            .iter()
+            .find(|chain| *chain == expected)
+            .ok_or_else(|| invalid("a custody chain that differs from its manifest"))?;
+        if manifest.source != source || !self.trusted(&dir, chain) {
+            return Err(invalid("an unverified custody chain"));
+        }
+        operation(&mut open_chain(&dir, chain)?)
+    }
+
     /// Writes everything `reader` yields as a new, immutable chain of
     /// `source`, durably, and returns it. Bytes that an earlier chain holds
     /// intact (same length, SHA-256 and version) are not written again:
