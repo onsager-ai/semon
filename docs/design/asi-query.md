@@ -1,19 +1,24 @@
 # ASI query
 
-Status: proposed spec for #545 (revised 2026-11-09 for DuckDB analytics). Store:
+Status: accepted architecture/spec for #545 (revised 2026-11-09 for federation
+D1–D8 and DuckDB analytics); implementation remains delivery work. Store:
 [ASI store](asi-store.md) (#544). Direction:
-[ASI direction](asi-direction.md#architecture).
+[ASI direction](asi-direction.md#architecture). Remote policy/channel contract:
+[ASI federation](asi-federation.md).
 
-Four tools over one store:
+Four tools over local and admitted federated data:
 
 - `sql`: read-only DuckDB SQL over analytics.
 - `schema`: the generated reference.
-- `search`: FTS5 over index bodies.
-- `view`: a focused body read.
+- `search`: local FTS5 over index bodies.
+- `view`: a focused local or authorized remote typed body read.
 
 They are exposed through MCP and the CLI, through the authenticated Viewer
 server for its own store, and through Hub per tenant (`sql` and `schema`
-only). There is no network SQL endpoint. These tools replace the paused
+only). Receiver access requires per-user, machine and namespace authorization and
+audit; these are requirements, not verified shipped safeguards. Remote reads use
+outbound-only read verbs, with no control, runtime, SSH or Encrypted Relay.
+There is no network SQL endpoint. These tools replace the paused
 `find`. The public dialect is DuckDB SQL.
 
 ## `sql`
@@ -86,6 +91,15 @@ server, the Viewer or Hub. Hub runs workers per tenant.
 }
 ```
 
+Results also identify the admitted per-origin heads, freshness and version
+coverage, including unavailable, frozen and `source_missing` contributors.
+They must not present a partial multi-source aggregate as complete. Every
+multi-source derivative and coverage disclosure obeys the intersection of all
+contributor policies. SQL reads body-free analytics only and never fetches bodies.
+Origin-recorded cost and pricing coverage are retained; the receiver does not
+reprice. Any later central valuation must be separately named and never silently
+mixed with recorded costs.
+
 Integers outside the JavaScript safe range, decimals, and nested types are
 serialized as strings or JSON with their DuckDB type. Blobs are refused
 (`unsupported_value`); analytics has none.
@@ -113,8 +127,10 @@ Bodies are appended with the ingest tail in the same transaction, so
 indexing work grows with new text and not with session length. A source
 rewrite deletes and reinserts that source's bodies.
 
-A store searches its own namespaces. A receiver searches every machine that
-pushes Raw to it.
+Search covers origin-local authorized index bodies. The receiver's search surface
+returns `capability_unavailable` before body I/O until federated coverage and audit
+exist, including when a replica or cache happens to hold bodies. It must not expose
+an incomplete cached/replica corpus as complete search. Hub has no search.
 
 - **Input:** `query` (FTS5 syntax; a malformed query is `invalid_query`), and
   optionally `repo`, `harness`, `part`, `since`, `until` and `limit` (default
@@ -129,21 +145,46 @@ pushes Raw to it.
 
 ## `view`
 
-A focused body read (decided 2026-11-08: bodies are reachable only through
-`search` and `view`, never through `sql`). `uid` may be:
+Local view reads a focused body by `body_uid`, `step_uid` or `turn_uid`, or
+reads body columns of an authorized durable row (`label/{id}`,
+`adjudication/{id}`, `lane/{id}` or `intervention/{id}`). Bodies and arbitrary
+free text are never analytics columns. Typed names and paths in operator receiver
+analytics are plain. **PM interpretation of D7, open to user correction:** this
+plain-field choice applies origin→operator receiver; the settled Hub export rule
+still tokenizes paths, and Hub never receives bodies.
 
-- a `body_uid`, `step_uid` or `turn_uid`, read from index;
-- a durable row (`label/{id}`, `adjudication/{id}`, `lane/{id}` or
-  `intervention/{id}`), returning its `body` columns.
+Remote view is an origin-rendered, bounded **typed** transcript page or field,
+not HTML or native bytes. The origin pins the native Catalog and slot recipes and
+original-byte proofs, resolves the exact generation-qualified anchor, then redacts
+fields and attaches an export-view generation and native-to-redacted mapping.
+Source, activity and transcript generations remain distinct. A withheld target or
+stale generation refuses exact navigation; an ordinal, time or nearby record alone
+is not a match. The receiver never tests masked bytes against original-byte proofs.
+Every contributor policy applies to the returned field and its mapping.
+Responses carry untrusted text as data and are capped at 256 KiB; native range
+reads inside the origin are bounded to 128 KiB, with a deadline covering the whole
+operation including authorization, audit, resolution, redaction and transfer.
 
-Output: `{"uid", "parts": [{"part", "ord", "untrusted_text"}], "truncated"}`,
-capped at 256 KiB. On Hub: `capability_unavailable`.
+Every remote read, including a cache hit, requires online origin authorization and
+origin audit, as well as receiver per-user, machine and namespace authorization and
+audit. Failure to authorize or audit prevents disclosure. There are no offline
+grants. An unavailable origin is reported honestly; Hub and other stores are not
+body fallbacks.
+
+The receiver may cache only encrypted typed pages, with a 256 MiB global cap,
+64 MiB per source and a 15-minute absolute, non-sliding TTL. Limits include staged
+writes and metadata. Stream-through is opt-in; it does not write a body to disk.
+Revocation, expiry, source rewrite and generation changes prevent stale reuse.
+Cache is not archive custody and its limits do not change origin retention. Hub
+returns `capability_unavailable` for view, runs no L1 inference and has no body
+proxy or body cache; categorical L1 facts remain valid analytics inputs.
 
 ## Errors
 
 MCP returns `isError: true` with `{"error":{"code","message","detail"}}`. The
-CLI prints the same object with `--json` and exits non-zero. Refusals happen
-before execution and have no side effects.
+CLI prints the same object with `--json` and exits non-zero. Admission refusals
+occur before body disclosure or query execution. They may append sanitized audit
+records; cancellation/source changes during a read publish no invalid partial page.
 
 | Code | When |
 | --- | --- |
@@ -156,9 +197,11 @@ before execution and have no side effects.
 | `store_busy` | Concurrency limit reached (retryable) |
 | `unsupported_value` | A blob in the result |
 | `schema_mismatch` | The store's and the engine's `asi_schema_version` differ |
-| `store_unavailable` | Analytics missing, or refused (for example the `source_missing` refusal) |
+| `store_unavailable` | Analytics missing or unavailable; frozen retained facts and coverage remain visible where admitted |
 | `invalid_query` | Malformed FTS5 query |
-| `capability_unavailable` | `search` or `view` where no bodies are held |
+| `capability_unavailable` | Remote search before federated coverage/audit, or search/view on Hub |
+| `body_unavailable` | Remote view cannot supply evidence; closed reason distinguishes retryable `origin_offline` from permanent `source_missing` |
+| `stale_generation` | Requested source, activity, transcript or export-view generation no longer matches |
 | `not_found` | Unknown UID in `view` |
 
 ## Prompt-injection safety
@@ -178,7 +221,7 @@ before execution and have no side effects.
 | `sql` | `query` (required), `params` (positional; string, number or null), `limit`, `timeout_ms` |
 | `schema` | `table` |
 | `search` | `query` (required), `repo`, `harness`, `part`, `since`, `until`, `limit` |
-| `view` | `uid` (required), `part` |
+| `view` | `uid` (required), `part`; remote exact navigation also requires the origin and generation-qualified anchor |
 
 - **MCP** advertises these beside the existing focused tools. `find`, with
   its retained schema, tests and pause notes, is removed.
@@ -186,8 +229,12 @@ before execution and have no side effects.
   tool schemas as today. Output is JSON by default, and `sql --format tsv` is
   available.
 - **Viewer:** `POST /api/asi/sql`, `POST /api/asi/search`,
-  `GET /api/asi/schema` and `GET /api/asi/view`, behind the existing
-  authentication and Origin checks.
+  `GET /api/asi/schema` and `POST /api/asi/view`, behind authentication,
+  Origin/Host/CSRF checks and per-user/machine/namespace grants. Bodies, search
+  strings, paths and credentials never enter URLs or access logs. Body replies use
+  `Cache-Control: no-store`, restrictive referrers and no shared/CDN/service-worker
+  storage. Only opaque identities appear in navigation links. This directly changes
+  the Semon-owned route contract; no retained GET alias.
 - **Hub:** the same engine over each tenant's analytics. Hub's routes live in the
   Hub repository.
 
@@ -209,9 +256,18 @@ before execution and have no side effects.
   manifest generation, and garbage collection doesn't remove its files.
 - Schema: generated files match; every view, column and allowlisted function
   appears.
-- Search: fixture hits; rank fusion across namespaces; snippets wrapped and
-  capped; Hub refusal before I/O; a rewrite leaves no stale body.
-- View: body, step, turn and durable UIDs; durable `body` columns are never in
-  analytics.
+- Search: local fixture hits and rank fusion, wrapped and capped snippets,
+  rewrite invalidation, and remote-search and Hub refusal before body I/O.
+- View: local body, step, turn and durable UIDs; remote exact anchors, typed
+  pages, native-to-redacted mapping and stale/withheld refusal. Original-byte
+  proofs are never applied to redacted bytes. Enforce both size bounds and
+  whole-operation deadlines, including cancellation.
+- Every remote read and cache hit requires both origin and receiver authorization
+  and audit; cross-user, machine and namespace reads refuse. Offline, revocation,
+  expiry and rewrite cannot disclose cached pages. Verify encrypted cache limits,
+  absolute TTL, staged bytes, restart and stream-through behavior.
+- Results expose admitted heads and freshness/version coverage. Multi-source
+  policy intersections never disclose restricted contributions or label a
+  fragment complete; SQL never fetches bodies.
 - MCP: `tools/list` has the four tools and no `find`.
 - Performance budgets from [ASI store](asi-store.md#performance-from-day-1).
