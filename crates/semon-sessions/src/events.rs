@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{Tokens, attachments, field, sealed::LogFile};
+use crate::{Tokens, archive::Archive, attachments, field, sealed::LogFile};
 
 pub(crate) mod session_activity;
 pub(crate) mod store;
@@ -1372,6 +1372,8 @@ pub(crate) struct EventCache {
     /// processes kept moving them on): read again at the next scan, which
     /// writes them through.
     unpersisted: BTreeSet<String>,
+    /// The offset and digest last copied to the standalone archive, per log.
+    archived: BTreeMap<String, (u64, [u8; 32])>,
 }
 
 /// How often an index without its store tries to open it again.
@@ -2166,6 +2168,30 @@ impl EventCache {
     /// Ends a scan, and with it the refresh: the store gets its writes again.
     pub(crate) fn end_scan(&mut self) {
         self.busy = false;
+    }
+
+    /// Copies the consumed prefix of each scanned native log that changed
+    /// since the last call into the standalone archive. A failure is
+    /// reported and retried by the next full scan; it does not stop the read.
+    pub(crate) fn archive_consumed(&mut self, archive: &Archive, seen: &BTreeSet<String>) {
+        for key in seen {
+            let Some(file) = self.files.get(key) else {
+                continue;
+            };
+            let consumed = (file.ledger.offset, file.ledger.prefix);
+            if self.archived.get(key) == Some(&consumed) {
+                continue;
+            }
+            let admitted = LogFile::open(Path::new(key))
+                .and_then(|mut log| archive.admit(key, &mut log, consumed.0, &consumed.1));
+            match admitted {
+                Ok(_) => {
+                    self.archived.insert(key.clone(), consumed);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => eprintln!("semon: native log archive: {key}: {error}"),
+            }
+        }
     }
 
     /// Drop only durably committed producer payloads after Catalog publication.

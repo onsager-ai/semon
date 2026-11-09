@@ -1507,6 +1507,12 @@ fn scan(
     } else {
         cache.retain(&seen, dirty);
     }
+    // This machine's own logs, once the index has consumed them: custody
+    // before anything can rewrite them.
+    if selected.is_none() && options.facts.is_none() {
+        let archive = crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache));
+        cache.archive_consumed(&archive, &seen);
+    }
     cache.end_scan();
     texts
         .prompt_caches

@@ -7,7 +7,13 @@
 //!
 //! - `DIR/machines/<name>/claude/…` and `DIR/machines/<name>/codex/…`: the
 //!   copies of the input files, at their paths under each root;
-//! - `DIR/machines/<name>/facts.json`: the machine's last facts.
+//! - `DIR/machines/<name>/facts.json`: the machine's last facts;
+//! - `DIR/machines/<name>/archive/`: the raw archive ([`Archive`]). Before a
+//!   replace is acknowledged, the bytes it replaces (sealed or plain) are
+//!   copied into an immutable zstd chain there, with the redactor version
+//!   they were appended under (`redactor-versions/`; `unknown` for bytes
+//!   stored before that was recorded). The archive and that record are not
+//!   counted toward the cap.
 //!
 //! Every answer of 200 is durable: the file's data is on disk (fsync) before
 //! it is given. An append that fails partway is cut back off, so the copy is
@@ -31,7 +37,12 @@ use std::{
     },
 };
 
-use semon_sessions::{Facts, is_input_path, is_machine_name};
+use semon_sessions::{
+    Facts,
+    archive::{self, Archive},
+    is_input_path, is_machine_name,
+    sealed::{LogFile, record_custody},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -44,6 +55,9 @@ use crate::wire::{
 pub const MACHINES_DIR: &str = "machines";
 /// A machine's facts, in its directory.
 pub const FACTS_FILE: &str = "facts.json";
+/// Beside each machine's copy: what each mirrored file's bytes were
+/// redacted with, one small file per mirrored file.
+const VERSIONS_DIR: &str = "redactor-versions";
 /// The largest request body accepted: one append's 4 MiB of file bytes is
 /// 5.34 MiB as base64, plus the JSON around it, rounded up to 6 MiB.
 pub const MAX_BODY_BYTES: usize = 6 * 1024 * 1024;
@@ -408,6 +422,31 @@ impl Receiver {
             return Ok(conflict());
         }
 
+        // Provenance and custody come before anything is changed: a refused
+        // or failed preservation leaves the copy as it was.
+        let versions = self.versions_directory(machine)?;
+        let version_path = versions.join(&marker_name);
+        let stored = read_redactor_version(&version_path)?;
+        let incoming = request.redactor_version.to_string();
+        let held = match (length > 0, &stored) {
+            (false, _) => None,
+            (true, Some(version)) => Some(version.clone()),
+            (true, None) => Some(archive::UNKNOWN_REDACTOR.to_owned()),
+        };
+        // Until a replace lands, the file may hold either version's bytes.
+        let interim = match &held {
+            Some(held) if *held != incoming => archive::MIXED_REDACTOR.to_owned(),
+            _ => incoming.clone(),
+        };
+        if request.replace && length > 0 {
+            let key = format!("{}/{}", request.root, request.path);
+            let version = held.as_deref().unwrap_or(archive::UNKNOWN_REDACTOR);
+            self.preserve(machine, &target, &key, version)?;
+        }
+        if stored.as_deref() != Some(interim.as_str()) {
+            write_redactor_version(&versions, &marker_name, &interim)?;
+        }
+
         let new_length = bytes.len() as u64 + if request.replace { 0 } else { request.offset };
         let old_marker = fs::symlink_metadata(&marker_path).map_or(0, |m| m.len());
         let old_total = length.saturating_add(old_marker);
@@ -469,6 +508,9 @@ impl Receiver {
         };
         self.release(machine, release);
         outcome?;
+        if interim != incoming {
+            write_redactor_version(&versions, &marker_name, &incoming)?;
+        }
         Ok(Reply::new(
             200,
             serde_json::to_value(crate::wire::Length {
@@ -478,6 +520,44 @@ impl Receiver {
             })
             .expect("length serializes"),
         ))
+    }
+
+    /// Copies the logical bytes of `target`, as [`LogFile`] reads them
+    /// (plain or sealed), into a new chain of `key`, and tells its seal that
+    /// a chain now holds them, so that retiring the seal can remove its
+    /// segments. `version` is the redactor version of those bytes.
+    fn preserve(
+        &self,
+        machine: &str,
+        target: &Path,
+        key: &str,
+        version: &str,
+    ) -> Result<(), Refusal> {
+        let mut log = LogFile::open(target)?;
+        let covered = log.metadata()?.len();
+        let raw = Archive::new(self.machine_dir(machine).join(archive::DIR));
+        raw.preserve(key, &mut log, version)?;
+        record_custody(target, covered)?;
+        Ok(())
+    }
+
+    /// `DIR/machines/<machine>/redactor-versions`, made if it is new.
+    fn versions_directory(&self, machine: &str) -> Result<PathBuf, Refusal> {
+        let machine_dir = self.machine_dir(machine);
+        let dir = machine_dir.join(VERSIONS_DIR);
+        match fs::symlink_metadata(&dir) {
+            Ok(meta) => check_directory(&meta, VERSIONS_DIR)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                if let Err(error) = create_dir(&dir)
+                    && error.kind() != io::ErrorKind::AlreadyExists
+                {
+                    return Err(error.into());
+                }
+                sync_dir_now(&machine_dir)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        Ok(dir)
     }
 
     /// Stores partial observations separately. Returned confirmed targets have
@@ -740,6 +820,49 @@ fn read_control<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>
         .map_err(|_| Refusal::Invalid("stored observation unavailable".into()))?;
     Ok(Some(decoded))
 }
+
+/// What a mirrored file's bytes were redacted with: a version, `unknown`,
+/// or `mixed`. `None` when nothing was recorded.
+#[derive(Serialize, Deserialize)]
+struct StoredVersion {
+    redactor_version: String,
+}
+
+fn read_redactor_version(path: &Path) -> Result<Option<String>, Refusal> {
+    let Some(file) = open_existing(path)? else {
+        return Ok(None);
+    };
+    let mut bytes = Vec::new();
+    file.take(4096).read_to_end(&mut bytes)?;
+    let version = match serde_json::from_slice::<StoredVersion>(&bytes) {
+        Ok(stored) => stored.redactor_version,
+        Err(_) => archive::UNKNOWN_REDACTOR.to_owned(),
+    };
+    Ok(Some(version))
+}
+
+/// Durably replaces the record in `dir`. Plain file operations: the fault
+/// injection of the data writes does not apply to this record.
+fn write_redactor_version(dir: &Path, name: &str, version: &str) -> Result<(), Refusal> {
+    let temporary = dir.join(format!(".{name}.tmp"));
+    let bytes = serde_json::to_vec(&StoredVersion {
+        redactor_version: version.to_owned(),
+    })
+    .map_err(|e| Refusal::Invalid(e.to_string()))?;
+    if let Err(error) = fs::remove_file(&temporary)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        return Err(error.into());
+    }
+    let mut file = create_new(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temporary, dir.join(name))?;
+    sync_dir_now(dir)?;
+    Ok(())
+}
+
 fn read_generation(path: &Path) -> Result<Option<Generation>, Refusal> {
     let Some(file) = open_existing(path)? else {
         return Ok(None);
@@ -1639,6 +1762,122 @@ mod tests {
             receiver.locks.map().is_empty(),
             "no lock outlives its writers"
         );
+    }
+
+    /// `laptop`'s chains of `key`, verified, each with its bytes.
+    fn chains(receiver: &Receiver, key: &str) -> Vec<(archive::Chain, Vec<u8>)> {
+        let raw = Archive::new(receiver.machine_dir("laptop").join(archive::DIR));
+        raw.verify(key).unwrap();
+        let mut held = Vec::new();
+        for chain in raw.chains(key).unwrap() {
+            let mut bytes = Vec::new();
+            let mut reader = raw.open_chain(key, &chain).unwrap();
+            reader.read_to_end(&mut bytes).unwrap();
+            held.push((chain, bytes));
+        }
+        held
+    }
+
+    fn replaced(version: u32, bytes: &[u8]) -> Append {
+        let mut request = append(LOG, b"", 0, bytes, true);
+        request.redactor_version = version;
+        request
+    }
+
+    #[test]
+    fn a_replace_keeps_the_bytes_it_replaces_in_a_chain() {
+        let (_dir, receiver) = receiver();
+        let key = format!("claude/{LOG}");
+        let (first, second) = (b"{\"a\":1}\n", b"{\"b\":2}\n");
+        receiver.append("laptop", &append(LOG, b"", 0, first, false));
+        let at = first.len() as u64;
+        receiver.append("laptop", &append(LOG, first, at, second, false));
+        let whole = [&first[..], &second[..]].concat();
+        assert!(chains(&receiver, &key).is_empty(), "appends keep nothing");
+
+        let reply = receiver.append("laptop", &replaced(1, b"{}\n"));
+        assert_eq!(reply.status, 200);
+        assert_eq!(copy(&receiver, "laptop", &key), b"{}\n");
+        let held = chains(&receiver, &key);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].1, whole);
+        assert_eq!(held[0].0.sha256, sha256_hex(&whole));
+
+        // The next replace adds a chain; the first stays.
+        receiver.append("laptop", &replaced(1, b"{\"c\":3}\n"));
+        let held = chains(&receiver, &key);
+        assert_eq!(held.len(), 2);
+        assert_eq!(held[0].1, whole);
+        assert_eq!(held[1].1, b"{}\n");
+        // A replace of an empty or missing file has nothing to keep.
+        receiver.append("laptop", &replaced(1, b""));
+        receiver.append("laptop", &replaced(1, b"x\n"));
+        assert_eq!(chains(&receiver, &key).len(), 3);
+        let other = "projects/-work/new.jsonl";
+        receiver.append("laptop", &append(other, b"", 0, b"first\n", true));
+        assert!(chains(&receiver, &format!("claude/{other}")).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_replace_keeps_the_bytes_of_a_sealed_log_and_lets_its_seal_retire() {
+        let (_dir, receiver) = receiver();
+        let key = format!("claude/{LOG}");
+        let mut log = Vec::new();
+        for line in 0..4000 {
+            let text = format!("{{\"line\":{line},\"pad\":\"{:040}\"}}\n", 0);
+            log.extend_from_slice(text.as_bytes());
+        }
+        assert_eq!(
+            receiver
+                .append("laptop", &append(LOG, b"", 0, &log, false))
+                .status,
+            200
+        );
+        let path = receiver.machine_dir("laptop").join(&key);
+        let sealed = semon_sessions::sealed::seal(&path, 1, u64::MAX).unwrap();
+        assert!(sealed.punched, "the plain file holds a hole");
+        assert_ne!(fs::read(&path).unwrap(), log);
+
+        assert_eq!(receiver.append("laptop", &replaced(1, b"{}\n")).status, 200);
+        let held = chains(&receiver, &key);
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].1, log, "read through the seal");
+
+        // The old seal belongs to bytes a chain holds: it retires.
+        let sealed = semon_sessions::sealed::seal(&path, 1, u64::MAX).unwrap();
+        assert!(sealed.retired);
+        assert_eq!(chains(&receiver, &key)[0].1, log);
+    }
+
+    #[test]
+    fn a_chain_records_the_version_the_replaced_bytes_were_appended_under() {
+        let (_dir, receiver) = receiver();
+        let key = format!("claude/{LOG}");
+        receiver.append("laptop", &append(LOG, b"", 0, b"one\n", false));
+        // The replacement was redacted by version 2; the chain holds the
+        // bytes of version 1.
+        receiver.append("laptop", &replaced(2, b"two\n"));
+        receiver.append("laptop", &replaced(3, b"three\n"));
+        // Appends of another version make the file's bytes a mix.
+        let mixed = append(LOG, b"three\n", 6, b"more\n", false);
+        assert_eq!(receiver.append("laptop", &mixed).status, 200);
+        receiver.append("laptop", &replaced(4, b"four\n"));
+        let versions: Vec<_> = chains(&receiver, &key)
+            .into_iter()
+            .map(|(chain, _)| chain.redactor_version)
+            .collect();
+        assert_eq!(versions, ["1", "2", "mixed"]);
+
+        // Bytes stored with no recorded version are unknown.
+        let path = receiver.machine_dir("laptop").join("claude/projects/-work/old.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"old\n").unwrap();
+        let request = append("projects/-work/old.jsonl", b"", 0, b"new\n", true);
+        assert_eq!(receiver.append("laptop", &request).status, 200);
+        let held = chains(&receiver, "claude/projects/-work/old.jsonl");
+        assert_eq!(held[0].0.redactor_version, "unknown");
+        assert_eq!(held[0].1, b"old\n");
     }
 }
 

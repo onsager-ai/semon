@@ -38,6 +38,7 @@ for the bounded archive reader, coexistence/restart rules and upload experiment.
 - `bytes` holds the file bytes, as standard base64 with padding. One request carries at most 4 MiB of file bytes.
 - `offset` is where `bytes` go. Without `replace`, the receiver appends only when `offset` equals its copy's current length; a missing file has length 0.
 - `replace: true` means: empty the copy, then write `bytes` from offset 0. `offset` is then 0.
+- Before a `replace` of a non-empty copy is acknowledged, the reference receiver copies the bytes being replaced, read through `sealed::LogFile` so plain and sealed copies alike, into an immutable zstd chain under `machines/<name>/archive/` (see [Raw custody](#raw-custody)). A failure to keep them refuses the replace and leaves the copy as it was.
 - `head_sha256` is the lowercase hex SHA-256 of the first `min(4096, offset + len(bytes))` bytes of the file as it will be once this request is applied. The receiver checks it against its own copy plus `bytes`. A mismatch means the two copies have diverged.
 
 Answers:
@@ -74,7 +75,7 @@ The answer is 200 when it is stored. A receiver that hasn't had facts for a whil
 
 ## Sealed copies on the receiver
 
-A receiver may seal an idle copy to save space (`semon_sessions::sealed`). Its bytes up to its last complete line go into zstd segments in `<file>.seal/`, and that range is punched out of the copy as a hole. The copy keeps its path, inode, length and modified time, so every offset, length and `head_sha256` in this protocol stays what it was. Anything that reads a copy's bytes, the receiver's own 409 hash included, reads them through `sealed::LogFile`. Appends land after the sealed range as plain bytes, and a later seal adds a segment. A `replace` renames a fresh file over the copy, and the next seal retires the old segments.
+A receiver may seal an idle copy to save space (`semon_sessions::sealed`). Its bytes up to its last complete line go into zstd segments in `<file>.seal/`, and that range is punched out of the copy as a hole. The copy keeps its path, inode, length and modified time, so every offset, length and `head_sha256` in this protocol stays what it was. Anything that reads a copy's bytes, the receiver's own 409 hash included, reads them through `sealed::LogFile`. Appends land after the sealed range as plain bytes, and a later seal adds a segment. A `replace` renames a fresh file over the copy, and the next seal retires the old segments, but only once a chain holds their bytes (see [Raw custody](#raw-custody)); until then they stay.
 
 ## Optional partial sync observations (status v1)
 
@@ -134,3 +135,16 @@ Each scheduling turn transfers one complete-line/redaction batch or one whole JS
 File identity, size and raw head are revalidated between slices; equal-length modifications trigger replacement. Every completed redaction batch and whole-file acknowledgement saves the private cursor atomically. Split-line pieces cannot persist intermediate offsets. A failed or cancelled slice leaves the preceding checkpoint and the receiver's retained bytes available for safe 409 reconciliation. Upload and facts/status workers share the existing stop and lock lifetime; a stopped worker may retain the lock until its outstanding operation ends. Full facts commits only after a completed frozen pass, using its exact selected Codex paths; rediscovery removes paths that disappeared or moved before committing the inventory. Local failures leave the previous authoritative inventory intact.
 
 Full `/facts` requests optionally carry paired `mirror_observation_id` and `mirror_sequence` fields from that same allocator. Orphan markers are invalid; local/runtime facts omit both. The sender prepares the fence only after synchronizing targets to the exact completed sweep. A receiver serializes full facts and status observations together, records the full-facts fence, clears provisional proof on full inventory commit and rejects any later-arriving status at or below that sequence in the same observation. A higher-sequence fresh status may prove subsequent source changes without replacing the committed inventory. Legacy full facts remain accepted and clear provisional proof conservatively. Receiver status and generation metadata count against the machine quota and are included on restart; admitted growth reserves bounded metadata space before invalidating an old generation proof. Refused growth retains the previous accepted proof.
+
+## Raw custody
+
+`machines/<name>/archive/` is the receiver's raw archive (`semon_sessions::archive`):
+
+- `index.json` maps each mirrored file (`<root>/<path>`) to a random `archive_source_id`.
+- `<archive_source_id>/manifest.json` lists that file's chains in order. Each entry has a random `chain_id`, the plain `length`, the `sha256` of the plain bytes, the stored size and the `redactor_version`. A manifest is published by writing a temporary file, syncing it, renaming it over the old one and syncing the directory, so a failure before the rename leaves the last manifest intact.
+- `<archive_source_id>/<chain_id>.zst` is one immutable chain: the logical bytes of the file as they were just before a `replace`.
+- Before a replace, the receiver records in the copy's `.seal/` directory that a chain holds its bytes. A seal's segments are never removed (`seal`, `tidy`, `forget`) unless that record covers the sealed range.
+
+The `redactor_version` of a chain is the version recorded when its bytes were appended (`redactor-versions/` beside the copy), not the version of the replacement. A file appended to under different versions is `mixed`; bytes stored before the version was recorded are `unknown`. The archive and the version records are not counted toward the receiver's cap. A whole-file input (`*.json`) is replaced on every change, so each change keeps a chain; chains of identical bytes are stored once.
+
+A standalone machine keeps the same archive for its own native logs under its state directory (`archive/`, beside the index cache). After a full scan, each log's prefix that the index consumed (its offset and SHA-256) is appended to the log's current chain, only when the log still hashes to that digest. A log whose earlier bytes changed starts a new chain and the old chain stays. Reading a source back from the archive when its native log is gone is not implemented yet.

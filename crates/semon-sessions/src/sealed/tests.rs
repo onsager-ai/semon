@@ -280,6 +280,9 @@ fn a_replaced_log_reads_its_new_bytes_and_retires_the_old_generation() {
     let log = root.join("a.jsonl");
     fs::write(&log, jsonl(200_000, 8)).unwrap();
     seal(&log, 1, u64::MAX).unwrap();
+    // A chain holds the old bytes, as a receiver's archive does before a
+    // replace.
+    record_custody(&log, fs::metadata(&log).unwrap().len()).unwrap();
     let old = read_manifest(&seal_dir(&log)).unwrap().unwrap();
 
     // As a receiver replaces a file: a new one renamed over it.
@@ -391,9 +394,44 @@ fn a_new_file_on_a_reused_inode_number_is_not_bound() {
     write_manifest(&seal_dir(&log), &manifest).unwrap();
     assert!(!status(&log).unwrap().bound, "another birth time doesn't");
     assert_eq!(read_all(&log), bytes);
+    record_custody(&log, fs::metadata(&old).unwrap().len()).unwrap();
     let sealed = seal(&log, 1, u64::MAX).unwrap();
     assert!(sealed.retired && sealed.added.is_some());
     assert_eq!(read_all(&log), bytes);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_seal_is_not_retired_while_no_chain_holds_its_bytes() {
+    let root = scratch("unchained");
+    let log = root.join("a.jsonl");
+    let old = jsonl(200_000, 20);
+    fs::write(&log, &old).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    let manifest = read_manifest(&seal_dir(&log)).unwrap().unwrap();
+    let segment = seal_dir(&log).join(manifest.segments[0].file_name(&manifest.generation));
+
+    // The log is replaced: only the segments hold the old bytes now.
+    let next = root.join("a.jsonl.replace.tmp");
+    fs::write(&next, jsonl(150_000, 21)).unwrap();
+    fs::rename(&next, &log).unwrap();
+    let refused = io::ErrorKind::PermissionDenied;
+    assert_eq!(seal(&log, 1, u64::MAX).unwrap_err().kind(), refused);
+    assert_eq!(tidy(&log).unwrap_err().kind(), refused);
+    assert_eq!(forget(&log).unwrap_err().kind(), refused);
+    assert!(segment.exists());
+    assert!(read_manifest(&seal_dir(&log)).unwrap().is_some());
+
+    // A chain that holds only part of them is not enough.
+    record_custody(&log, manifest.end() - 1).unwrap();
+    assert_eq!(seal(&log, 1, u64::MAX).unwrap_err().kind(), refused);
+    assert!(segment.exists());
+
+    // Once a chain holds all of them, the seal retires.
+    record_custody(&log, old.len() as u64).unwrap();
+    assert!(seal(&log, 1, u64::MAX).unwrap().retired);
+    assert!(!segment.exists());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -404,6 +442,7 @@ fn forget_removes_a_seal_before_a_replace() {
     let log = root.join("a.jsonl");
     fs::write(&log, jsonl(100_000, 15)).unwrap();
     seal(&log, 1, u64::MAX).unwrap();
+    record_custody(&log, fs::metadata(&log).unwrap().len()).unwrap();
     forget(&log).unwrap();
     assert!(!seal_dir(&log).exists());
     forget(&log).unwrap();
