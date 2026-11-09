@@ -1,7 +1,7 @@
 # ASI store
 
 Status: proposed spec for #544 (revised 2026-11-09 for central derivation and
-DuckDB gold). Direction: [ASI direction](asi-direction.md#architecture).
+DuckDB analytics). Direction: [ASI direction](asi-direction.md#architecture).
 Method: [ASI methodology §1.1](asi-methodology.md#11-storage-schema). The
 query surface is specified in [ASI query](asi-query.md) (#545).
 
@@ -10,25 +10,25 @@ query surface is specified in [ASI query](asi-query.md) (#545).
 ```
 machine A ─┐  redacted Raw (existing semon push mirror path)
 machine B ─┼──────────────▶ receiver (or a single machine, standalone)
-           │                 bronze   immutable Raw chains + redaction provenance
-           │                 silver   ingest index per machine (exists today) + activity + StepFacts
-           │                 gold     Parquet generations (facts + dimensions) ─ DuckDB ── sql
+           │                 raw   immutable Raw chains + redaction provenance
+           │                 index   ingest index per machine (exists today) + activity + StepFacts
+           │                 analytics     Parquet generations (facts + dimensions) ─ DuckDB ── sql
            │                 durable  asi-durable.sqlite3 (labels, links, work items)
-           │                 FTS5     body index in silver ─────────────────────────────── search / view
+           │                 FTS5     body index in index ─────────────────────────────── search / view
            │
-           └─ Hub (per tenant) ◀── gold generations only: no bodies, paths as HMAC tokens
+           └─ Hub (per tenant) ◀── analytics generations only: no bodies, paths as HMAC tokens
 ```
 
 Each source has one **authoritative store**: the receiver it pushes to, or the
 machine itself if it pushes nowhere. Only the authoritative store exports to
-Hub. A machine that pushes may also keep local gold for offline queries; that
+Hub. A machine that pushes may also keep local analytics for offline queries; that
 copy is never merged or exported.
 
 | Data | Location | Rebuildable from | Engine |
 | --- | --- | --- | --- |
-| Bronze | Native logs plus `archive/`; on a receiver, the mirror store | — (custody) | Files |
-| Silver | `sessions-index.sqlite3`, one per namespace | Bronze | SQLite |
-| Gold | `gold/` immutable Parquet generation files plus `gold/manifest.json` | Silver | DuckDB (read) |
+| Raw | Native logs plus `archive/`; on a receiver, the mirror store | — (custody) | Files |
+| Index | `sessions-index.sqlite3`, one per namespace | Raw | SQLite |
+| Analytics | `analytics/` immutable Parquet generation files plus `analytics/manifest.json` | Index | DuckDB (read) |
 | Durable | `asi-durable.sqlite3` | — (custody) | SQLite |
 
 ## Identity
@@ -56,12 +56,12 @@ IDs, so labels survive every rebuild.
   ordinal within that log. It is independent of paths, keys and how logs
   interleave, and stable while the log's prefix is unchanged.
 
-## Bronze
+## Raw
 
-Bronze custody is in phase 1: gold is only as durable as the bronze it can be
+Raw custody is in phase 1: analytics is only as durable as the raw logs it can be
 rebuilt from.
 
-- **Receiver.** The mirror store is bronze. Before acknowledging a `replace`
+- **Receiver.** The mirror store is raw. Before acknowledging a `replace`
   append, the receiver moves the replaced logical bytes (read through `sealed`,
   whether plain or sealed) into an immutable chain:
   `archive/{archive_source_id}/{chain_id}.zst`, with random IDs and a manifest
@@ -72,15 +72,15 @@ rebuilt from.
   policy. Each chain records it, together with the digest of the redacted bytes
   it holds.
 - **Standalone machine.** The archiver keeps an append-only zstd copy of each
-  native log under `archive/`, admitting only the prefix silver has consumed.
-  A native rewrite starts a new chain and keeps the old one. Silver reads a
+  native log under `archive/`, admitting only the prefix index has consumed.
+  A native rewrite starts a new chain and keeps the old one. Index reads a
   source from the archive when the native log is gone.
-- **Retention.** Bronze is kept indefinitely by default (decided 2026-11-08),
+- **Retention.** Raw is kept indefinitely by default (decided 2026-11-08),
   with an optional `archive.retention_days`. Nothing deletes native logs.
 
-## Silver
+## Index
 
-Silver is today's ingest index and activity projection, run per namespace
+Index is today's ingest index and activity projection, run per namespace
 (receivers already do this for mirrored machines, in `received.rs`). It gains:
 
 - **`StepFacts`** (#556, owned by the session activity lane): turn ID, tool
@@ -92,20 +92,20 @@ Silver is today's ingest index and activity projection, run per namespace
   session's derived state query-ready: activity publication, a `StepFacts`
   change, or a rewrite or removal. Ingest commits that are not yet query-ready
   write nothing. `seq` is monotonic within an index **incarnation**, a random
-  ID created whenever the index is created or rebuilt. Gold reads the changes
+  ID created whenever the index is created or rebuilt. The analytics writer reads the changes
   and the session rows in one SQLite read transaction. A new incarnation
-  makes gold re-read that namespace in full.
+  makes the analytics writer re-read that namespace in full.
 - **Repository identity.** Sender facts gain, per repository root, a
-  sanitized `repo_id`, or `unknown` (see [Gold model](#gold-model)). This
+  sanitized `repo_id`, or `unknown` (see [Analytics model](#analytics-model)). This
   changes the mirror facts contract directly.
 - **Bodies for FTS5** (phase 2): see [ASI query](asi-query.md#search).
 
-## Gold model
+## Analytics model
 
 Kimball facts at explicit grains, plus conformed dimensions. Columns are
 typed, timestamps are UTC milliseconds, and enums are closed sets. Every
 column declares a class: `key`, `enum`, `number`, `time`, `name`, `path` or
-`body`. The class drives the Hub export and the query reference. Gold has no
+`body`. The class drives the Hub export and the query reference. Analytics has no
 `body` columns.
 
 | Fact | Grain | Main columns |
@@ -136,24 +136,24 @@ assertion per target and field, with human adjudication taking precedence).
 
 ## Generations, publication and versions
 
-Gold is published as immutable files, plus a map of which file holds each
+Analytics is published as immutable files, plus a map of which file holds each
 session's current rows. This is the merge-on-read pattern used by lakehouse
 tables.
 
-- **Writer.** The first Semon process that needs gold takes `gold.lock` and
+- **Writer.** The first Semon process that needs analytics takes `analytics.lock` and
   becomes the store's single writer: `semon receive`, `semon push`, the Viewer
-  server or `semon mcp` (so MCP-only users get fresh gold). Other processes
+  server or `semon mcp` (so MCP-only users get fresh analytics). Other processes
   only read.
-- **Cycle.** At most every 2 s, the writer reads the silver change log and
+- **Cycle.** At most every 2 s, the writer reads the index change log and
   recomputes every touched session **whole**. It doesn't patch tails: a
   following step can change an earlier step's duration, and a late record can
   change older rows. Per-cycle work is proportional to the touched sessions'
   size, which is milliseconds even for sessions of thousands of steps.
-  - It writes one new file per table, `gold/{table}/g{generation}.parquet`,
+  - It writes one new file per table, `analytics/{table}/g{generation}.parquet`,
     holding the full rows of those sessions with a `_gen` column. Dimensions
-    are rewritten whole, as `gold/dim_x/g{generation}.parquet`.
+    are rewritten whole, as `analytics/dim_x/g{generation}.parquet`.
   - It writes the live map, `session_uid → _gen` with removed sessions
-    dropped, as a typed Parquet file `gold/live/g{generation}.parquet`, so the
+    dropped, as a typed Parquet file `analytics/live/g{generation}.parquet`, so the
     manifest stays small at any number of sessions.
   - It fsyncs those files, then writes `manifest.json`: the generation, file
     lists with their compaction level, versions, each namespace's incarnation
@@ -173,14 +173,14 @@ tables.
 - **Retirement.** A file leaves the store 10 minutes after the first
   published generation that no longer names it. Queries hold a snapshot for at
   most their deadline plus fetch time, well under that.
-- **Full refresh.** The same transform rebuilds all of gold from silver. CI
+- **Full refresh.** The same transform rebuilds all of analytics from index. CI
   asserts that incremental and full-refresh live rows are identical.
 - **Version bumps.** Sessions whose rows carry a stale `transform_version`,
   `rules_version` or `price_version` are queued in bounded batches, like
   touched sessions.
-- **Missing bronze.** Sessions whose sources are gone keep their rows and
-  versions and are listed as `source_missing` in the manifest. A gold schema
-  change (`asi_schema_version`) rebuilds gold, except that a store with
+- **Missing raw.** Sessions whose sources are gone keep their rows and
+  versions and are listed as `source_missing` in the manifest. An analytics schema
+  change (`asi_schema_version`) rebuilds analytics, except that a store with
   `source_missing` sessions refuses (decided 2026-11-08): the operator runs
   `semon asi export` and then `semon asi reset`.
 
@@ -196,9 +196,9 @@ tables.
   mismatch it refuses, and the operator exports and then resets.
 - **Body columns** (`label.mechanism_text`, `adjudication.reason`,
   `lane.title` and the intervention text) are classed `body`. They never reach
-  gold or Hub, and are readable only through `view` ([ASI query](asi-query.md)).
+  analytics or Hub, and are readable only through `view` ([ASI query](asi-query.md)).
 - **Export.** Every write increments a `revision` counter in the same
-  transaction. The gold manifest checkpoints the last exported revision, so a
+  transaction. The analytics manifest checkpoints the last exported revision, so a
   crash can't lose a label. Each cycle exports the label and adjudication rows
   above the checkpoint (categorical columns only) to `fact_label` generation
   files. Labels are append-only, so `fact_label` isn't filtered by the session
@@ -249,16 +249,16 @@ publishers collapse in the views. Export is coherent and idempotent:
 
 `semon-asi` is a library with no dependency on `semon-sessions`. It holds:
 
-- gold schema definitions (columns, classes and docs, from which the
+- analytics schema definitions (columns, classes and docs, from which the
   generated reference is built);
-- transforms over a silver input trait;
+- transforms over a index input trait;
 - the partition writer, manifest and garbage collection;
 - the durable store;
 - Hub export and import validation;
 - the DuckDB query engine ([ASI query](asi-query.md)).
 
-`semon-sessions` implements the silver input trait and keeps parsing, the
-ingest index, the activity projection, `StepFacts` and bronze. Hub depends on
+`semon-sessions` implements the index input trait and keeps parsing, the
+ingest index, the activity projection, `StepFacts` and raw. Hub depends on
 `semon-asi` only.
 
 DuckDB comes from the `duckdb` crate, at a pinned version, with the
@@ -273,12 +273,12 @@ data (1M rows per PR, 10M nightly, 100M weekly) plus the sanitized fixtures:
 
 | Path | Budget |
 | --- | --- |
-| Raw → silver ingest | ≥ 10 MB/s |
-| Freshness (append to gold visible) | p95 ≤ 5 s without backlog, including sustained appends to a 10,000-step session while queries run |
+| Raw → index ingest | ≥ 10 MB/s |
+| Freshness (append to analytics visible) | p95 ≤ 5 s without backlog, including sustained appends to a 10,000-step session while queries run |
 | Dashboard views | p95 ≤ 500 ms |
 | Ad-hoc group-by over `fact_step` | p95 ≤ 2 s at 10M rows, ≤ 5 s at 100M |
 | FTS top 20 | p95 ≤ 500 ms |
-| Gold size and files | Recorded per 1M steps (Parquet, ZSTD); file count stays bounded under 100M-row sustained ingest |
+| Analytics size and files | Recorded per 1M steps (Parquet, ZSTD); file count stays bounded under 100M-row sustained ingest |
 | Query setup (snapshot, live map, views) | ≤ 300 ms cold with 1M sessions |
 
 Runs record throughput, CPU, RSS, disk and spill. A run that misses a budget
@@ -287,22 +287,22 @@ today is about 466 MB of logs in 2.5 months.
 
 ## Phases
 
-1. **Bronze custody, gold and SQL.**
+1. **Raw custody, analytics and SQL.**
    - Receiver replace preservation, `redactor_version`, and the standalone
      archive.
-   - The silver change log and `repo_id` facts.
-   - `semon-asi`: the gold model, generations, transforms, and the DuckDB
+   - The index change log and `repo_id` facts.
+   - `semon-asi`: the analytics model, generations, transforms, and the DuckDB
      engine with `sql` and `schema`.
    - The CI performance harness.
 
    This works standalone and on receivers.
 2. **Labels and search.** The durable store and `fact_label`, FTS5 with
    `search` and `view`, and Viewer routes.
-3. **Hub.** Path keys, gold export and Hub import validation.
+3. **Hub.** Path keys, analytics export and Hub import validation.
 
 ## Tests (CI only)
 
-- Golden gold rows for the sanitized fixtures, and incremental output equal
+- Golden analytics rows for the sanitized fixtures, and incremental output equal
   to full refresh.
 - Identity: UIDs equal across rebuilds; the encoding round-trips; record
   anchors are stable under interleaved appends.
@@ -315,7 +315,7 @@ today is about 466 MB of logs in 2.5 months.
   live rows identical; a version bump queues only stale sessions.
 - Spend: copied usage is not double-counted; the step-to-tool-call view
   doesn't multiply tokens.
-- Bronze: a receiver `replace` preserves bytes; a standalone archive survives
+- Raw: a receiver `replace` preserves bytes; a standalone archive survives
   pruning and rewrites; `source_missing` refusal, then export and reset.
 - Durable: bytes unchanged across rebuilds; label updates raise.
 - Hub export: no `body` column ever exported; `path` columns and local
