@@ -171,7 +171,7 @@ fn derive_facts(
                 .filter_map(|call| call.tool_ms)
                 .reduce(u64::saturating_add);
             let turn_id = turn_ids.get(&step.id).cloned().flatten();
-            let usage_owner = match step.ownership {
+            let usage_owner = match &step.ownership {
                 activity::Ownership::Exclusive => activity::UsageOwner::Exclusive,
                 activity::Ownership::Shared(_) => activity::UsageOwner::Copied,
             };
@@ -586,7 +586,10 @@ pub(crate) fn step_facts(
         let saved: SavedStep = from_json(1, &record.get::<_, String>(1)?)?;
         facts.push((ordinal, saved.step.id, saved.facts));
     }
-    (facts.len() as u64 == admitted.total).then_some(facts).ok_or(rusqlite::Error::InvalidQuery).map(Some)
+    if facts.len() as u64 != admitted.total {
+        return Ok(None);
+    }
+    Ok(Some(facts))
 }
 
 /// Read one persisted step and its native usage under the page admission fence.
