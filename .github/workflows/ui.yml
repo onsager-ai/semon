@@ -29,8 +29,30 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  classify:
+    name: classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      run_expensive: ${{ steps.classify.outputs.run_expensive }}
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: classify
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/scripts/should-run-expensive-ci.py
+      - name: Test change classifier
+        run: python3 .github/scripts/test-should-run-expensive-ci.py
+
   foundation:
     name: UI types and generated assets
+    needs: classify
+    if: needs.classify.outputs.run_expensive == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -394,13 +416,21 @@ jobs:
   browser:
     name: viewer browser checks
     if: ${{ always() }}
-    needs: [foundation, build, checks]
+    needs: [classify, foundation, build, checks]
     runs-on: ubuntu-latest
     steps:
       - name: Require the selected workflow path to pass
         env:
+          CLASSIFIER_RESULT: ${{ needs.classify.result }}
+          RUN_EXPENSIVE: ${{ needs.classify.outputs.run_expensive }}
           FOUNDATION_RESULT: ${{ needs.foundation.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           CHECKS_RESULT: ${{ needs.checks.result }}
         run: |
-          test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
+          test "$CLASSIFIER_RESULT" = success
+          if [ "$RUN_EXPENSIVE" = true ]; then
+            test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
+          else
+            test "$RUN_EXPENSIVE" = false
+            test "$FOUNDATION_RESULT" = skipped && test "$BUILD_RESULT" = skipped && test "$CHECKS_RESULT" = skipped
+          fi

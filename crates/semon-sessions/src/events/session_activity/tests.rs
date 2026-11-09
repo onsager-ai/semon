@@ -296,7 +296,9 @@ fn codex_call_provenance_requires_exact_identity() {
     let observation = |offset, id| classify::LocatedObservation {
         position: position("s", offset),
         timestamp: None,
+        result_timestamp: None,
         result_offset: None,
+        tool: None,
         observation: classify::call(
             "exec_command",
             &json!({"cmd":"true"}),
@@ -706,7 +708,9 @@ fn step_waste_precedence_keeps_empty_search_and_exact_uncapped_waits() {
         observations.push(LocatedObservation {
             position: position("s", offset),
             timestamp: Some(7_200_000),
+            result_timestamp: Some(7_200_000),
             result_offset: Some(offset + 1),
+            tool: None,
             observation,
         });
     }
@@ -761,7 +765,9 @@ fn failure_kinds_rank_and_signals_count_without_waste() {
         observations.push(LocatedObservation {
             position: position("s", offset),
             timestamp: None,
+            result_timestamp: None,
             result_offset: Some(offset + 1),
+            tool: None,
             observation,
         });
     }
@@ -1009,7 +1015,9 @@ fn fact_links_require_a_qualified_step_in_this_projection() {
                     offset: 11,
                 },
                 timestamp: None,
+                result_timestamp: None,
                 result_offset: Some(12),
+                tool: None,
                 observation,
             }],
         );
@@ -1044,7 +1052,9 @@ fn observe(
     classify::LocatedObservation {
         position: position("s", offset),
         timestamp: None,
+        result_timestamp: None,
         result_offset: Some(offset + 1),
+        tool: None,
         observation,
     }
 }

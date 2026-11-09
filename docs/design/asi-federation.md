@@ -626,23 +626,24 @@ policy, audit receipts and the integrity/availability of analytics history.
 
 This table is a proposed plan for the PM after approval, not a command to a lane.
 Issue/PR descriptions were read on 2026-11-09; CI and review states are volatile.
-Before publication, base `ff619417` includes merged #577, #584 and #586; their rows
-below describe preserved design scope, not pending merge requests. Costs are
-qualitative design estimates, not delivery promises.
+Final base `50c5255` includes merged #571, #572 (closes #558), #583 (closes #556),
+#577, #584, #586 and #589 (docs-only CI). Their rows describe preserved delivered
+scope, not pending implementation or merge requests. Costs are qualitative design
+estimates, not delivery promises.
 
 | Slice | Disposition | Effect and proposed approval boundary |
 | --- | --- | --- |
 | #544 / #545 | Change specs | Direction/store/query are reconciled in this PR; PM updates issue criteria after merge approval. |
 | #559 / #571 | Keep | Transactional query-ready change log, incarnation and repo identity work at origin unchanged. Export field policy is separate. Near-zero rework. |
-| #558 / #572 local archive | Keep | Essential origin custody across prune/rewrite. No permission to delete native data. |
-| #558 / #572 receiver custody | Change placement; keep for supported mirror/opt-in replica | Not part of pull-cache implementation. Storage Manager recommends merging intact while mirror remains supported; earlier PM candidate suggested dropping receiver half. D6 preserves supported mirror correctness and optional replica custody. User merge decision stays separate. |
+| #558 / #572 local archive (merged) | Keep delivered foundation | Essential origin custody across prune/rewrite. No permission to delete native data. |
+| #558 / #572 receiver custody (merged) | Keep delivered supported mirror/opt-in replica custody | D6 preserves both halves of the landed change. No removal or rescoping of #572; new pull-cache work is separate. |
 | #575 | Keep, change policy scope | Archive-backed reads become critical at origin. Separate origin/replica retention from cache TTL; freeze coverage after authorized source loss. No automatic historical deletion. Low rework. |
 | #554 / #577 schema | Keep foundation; extend export contract | Typed body-free model and billing inputs survive. Add version/coverage and field-policy definitions in a focused subsequent schema slice; internal `path` is not export permission. |
 | #554 / #578 publication | Keep | Atomic generation/live-map writer remains local to each publisher. Add remote staging/namespace heads at the boundary, not inside local atomicity. |
 | #554 / #579 publication tests | Keep, extend later | Crash consistency and source-missing preservation still required; add federation replay/epoch/partial-cohort cases with transport. |
 | #554 / #580 compaction/retirement | Keep | Operates on admitted analytics files; never collect the only imported frozen facts as “rebuildable.” Cache eviction is independent. |
 | #554 / #581 DuckDB and build cache | Keep | Same query/storage engine and CI cache gate. No federation dependency. |
-| #556 / #583 StepFacts | Keep | Sole activity model, complete billing inputs and usage ownership remain origin-local. Do not export raw StepFacts. Federation/L1 are outside this slice. |
+| #556 / #583 StepFacts (merged) | Keep delivered foundation | Sole activity model, complete billing inputs and usage ownership remain origin-local. Do not export raw StepFacts. Federation/L1 are follow-up work, not scope changes to landed #583. |
 | #557 transforms | Change execution/publication | Execute at origin, project the one admitted SQLite generation, add mixed-version/frozen coverage and exported-head ownership. D4 keeps origin recorded costs; central valuation is later work. Low relocation cost; material semantics. |
 | #570 performance | Change measured path | Preserve local budgets; add connected origin→receiver freshness, cache/range/cancel budgets and bounded origin resources. Separate unavailable coverage from latency success. Fleet FTS cannot inherit a 500 ms local promise. |
 | #576 / #584 CI flake | Keep | Independent CI correctness work; no threshold relaxation. |
@@ -682,10 +683,10 @@ approval; new issue titles are concrete proposals, not already-created issues.
 | Retitle/update #544 | “ASI store: origin derivation, governed publication and optional replica custody”; replace default receiver derivation acceptance with this architecture and link new transport/governance slices below. |
 | Retitle/update #545 | “ASI query: body-free SQL, local search and online remote view”; add availability/version coverage and explicit receiver search refusal. |
 | Keep #559/#571 and #585 | #571 landed during final integration; preserve its typed identity/change-log contract. Storage lane proceeds with #585; no federation protocol is added to this slice. Plain typed repo/path fields remain allowed to operator receiver. |
-| Keep #558/#572; clarify title/body | “Raw custody: origin archive and supported receiver mirror”; retain both halves and existing correctness fixes. Add no cache implementation. User merge approval remains separate. |
+| Keep landed #558/#572 | #572 merged as `50c5255`; #558 is complete. Preserve origin archive and supported receiver mirror custody. No retitle, reopen, removal or follow-up merge is needed; new cache/enrollment work gets separate issues. |
 | Retitle #575 | “Origin archive-backed reads and explicit archive retention”; implement prune/rewrite reads first, preserve default origin retention, distinguish explicit replica retention from TTL. |
 | Keep #554 stack #578–#581 | Finish publication/compaction/DuckDB layers following merged #577; no re-splitting or transport scope expansion. Follow-up provenance/export fields belong with transport integration. |
-| Keep #556/#583 and #582 | Activity lane finishes StepFacts and complete-generation preservation under existing ownership. No L1/channel work added to StepFacts; #582 must precede claiming complete federated updates. |
+| Keep landed #556/#583; assign #582 | #583 merged as `5f379b7`; #556 is complete. PM assigns the remaining complete-generation preservation in #582 before claiming complete federated updates. Do not reopen StepFacts or wake the settled activity lane implicitly. |
 | Retitle/update #557 | “Origin analytics projection, version coverage and reconnect refresh”; use the single SQLite model, origin recorded pricing and admitted cohorts. Wire local consumers first, then the publication slice; do not recompute costs in DuckDB. |
 | Keep #564/#565/#566 | Query lane implements sandbox/schema/MCP/CLI with coverage envelopes and exact-format refusal; SQL never fetches bodies. No current PR scope expansion beyond those contracts. |
 | Split/update #567 | Retitle “Origin-local FTS and focused view”; implement local search and view contracts. Move receiver fan-out into a new deferred issue; do not reopen closed #563. |
@@ -694,7 +695,7 @@ approval; new issue titles are concrete proposals, not already-created issues.
 | Update #560/#546 | Durable author ownership/category export for #560; origin L1 inference, consent and exact evidence mapping for #546. Free text stays bodies. |
 | Update #570 | Keep local performance gates; add controlled connected origin→receiver freshness, bounded online view/cancel/cache resource cases. Defer fleet-search latency acceptance to its issue. |
 | Leave closed; link successors | #561/#562 remain historical closed issues; their metadata-default intent returns in the new publication issue. #563 remains closed as duplicate of #567. No issue closure is newly required. |
-| Leave completed work alone | Merged #577/#584/#586 and #576's resolution retain their scope. #547 references online/offline evidence states; no presentation redesign is authorized here. |
+| Leave completed work alone | Merged #571/#572/#583/#577/#584/#586/#589 and their closed issues retain their scope. #589's docs-only CI selection is preserved. #547 references online/offline evidence states; no presentation redesign is authorized here. |
 | Open “ASI governance: origin policy, classification and export profiles” | Versioned policy, multi-source intersection, secret/PII scan status, provider consent, plain receiver name/path profile and tokenized Hub profile. Own test fixtures for body leakage and withheld coverage. |
 | Open “ASI publication: origin-to-receiver objects, heads and reconnect” | Shared #555 mechanism, namespace enrollment/epochs, typed allowlist validation, complete-source provenance, idempotent staging, mixed-version coverage and frozen-data export. Dependencies: #557, governance, complete-generation preservation. |
 | Open “ASI online body channel: origin-rendered pages and exact evidence” | Outbound-only read capability, identity assertions, origin recipes/proofs, redacted field mappings, bounded append subscriptions, cancellation and per-read origin audit. No generic RPC or remote execution. |
@@ -815,7 +816,9 @@ Publication base refreshed on 2026-11-09 to
 `ff6194172dbf3a58a4cfd031a9dc4b5beafd698b`, including #577, #584 and #586;
 the changed Viewer direction was reconciled with this contract. Final integration
 also incorporates `45fbcc17baeded7aca0311e3b14d23ea2d91dec1` (#571), preserving
-its typed repository-identity amendment in the store spec.
+its typed repository-identity amendment in the store spec, then base `50c5255`
+with landed #572 custody, #583 StepFacts and #589 docs-only CI. These final status
+updates do not change the independently reviewed architecture.
 Relevant native contracts: [source readers](session-source-reader.md) and
 [retained projections](retained-native-projections.md). Their generation, custody
 and authorization invariants are reused; historical hosted-body activation text

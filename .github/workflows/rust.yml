@@ -20,8 +20,30 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  classify:
+    name: classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      run_expensive: ${{ steps.classify.outputs.run_expensive }}
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: classify
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/scripts/should-run-expensive-ci.py
+      - name: Test change classifier
+        run: python3 .github/scripts/test-should-run-expensive-ci.py
+
   test:
-    name: fmt, clippy, test
+    name: Rust checks
+    needs: classify
+    if: needs.classify.outputs.run_expensive == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -172,6 +194,26 @@ jobs:
       - name: Source feature Viewer
         run: |
           SEMON_BUILD_TIMING=1 cargo test -p semon-sessions --lib --features test-clock,test-ui-account-server --locked viewer:: -- --skip initial_catalog_page_precedes_global_native_observation
+
+  aggregate:
+    name: fmt, clippy, test
+    if: always()
+    needs: [classify, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require the selected Rust workflow path to pass
+        env:
+          CLASSIFIER_RESULT: ${{ needs.classify.result }}
+          RUN_EXPENSIVE: ${{ needs.classify.outputs.run_expensive }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: |
+          test "$CLASSIFIER_RESULT" = success
+          if [ "$RUN_EXPENSIVE" = true ]; then
+            test "$TEST_RESULT" = success
+          else
+            test "$RUN_EXPENSIVE" = false
+            test "$TEST_RESULT" = skipped
+          fi
 
   codex-conformance:
     name: Pinned Codex fixture conformance

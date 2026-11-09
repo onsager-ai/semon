@@ -7750,6 +7750,166 @@ mod tests {
     }
 
     #[test]
+    fn standalone_catalog_ingestion_archives_each_generation_of_a_source() {
+        use std::io::Read;
+        let fixture = Fixture::new();
+        let path = fixture.source("one");
+        let mut options = fixture.options.clone();
+        options.facts = None;
+        let inputs = [crate::inputs::Input {
+            root: crate::inputs::InputRoot::Claude,
+            path: "projects/project/one.jsonl".into(),
+        }];
+        let dir = crate::archive::standalone_dir(&options.cache);
+        let archive = crate::archive::Archive::new(dir);
+        let key = path.to_string_lossy().into_owned();
+        let read = |chain: &crate::archive::Chain| {
+            let mut bytes = Vec::new();
+            let mut reader = archive.open_chain(&key, chain).unwrap();
+            reader.read_to_end(&mut bytes).unwrap();
+            bytes
+        };
+        let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+        let prepare = |cache: &mut EventCache| {
+            let now = crate::model::now_ms();
+            crate::model::prepare_sources(&options, cache, &inputs, now).unwrap();
+        };
+
+        // The normal bounded producer consumed the source: it is archived.
+        let first = fs::read(&path).unwrap();
+        prepare(&mut cache);
+        let chains = archive.chains(&key).unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(read(&chains[0]), first);
+
+        // The source is rewritten, and ingested again: both generations stay.
+        let record = json!({"type":"user","sessionId":"one","uuid":"one","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"a different and longer synthetic prompt"}});
+        let rewritten = format!("{record}\n");
+        fs::write(&path, &rewritten).unwrap();
+        prepare(&mut cache);
+        let chains = archive.chains(&key).unwrap();
+        assert_eq!(chains.len(), 2);
+        assert_eq!(read(&chains[0]), first);
+        assert_eq!(read(&chains[1]), rewritten.as_bytes());
+        archive.verify(&key).unwrap();
+    }
+
+    #[test]
+    fn unchanged_catalog_scans_repair_damaged_or_deleted_archive_chains() {
+        use std::io::Read;
+        for remove in [false, true] {
+            let fixture = Fixture::new();
+            let path = fixture.source("one");
+            let mut options = fixture.options.clone();
+            options.facts = None;
+            let inputs = [crate::inputs::Input {
+                root: crate::inputs::InputRoot::Claude,
+                path: "projects/project/one.jsonl".into(),
+            }];
+            let dir = crate::archive::standalone_dir(&options.cache);
+            let archive = crate::archive::Archive::new(&dir);
+            let key = path.to_string_lossy().into_owned();
+            let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+            let prepare = |cache: &mut EventCache| {
+                crate::model::prepare_sources(&options, cache, &inputs, crate::model::now_ms())
+                    .unwrap();
+            };
+            prepare(&mut cache);
+            let original = archive.chains(&key).unwrap().remove(0);
+            let file = fs::read_dir(&dir)
+                .unwrap()
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .path()
+                        .join(format!("{}.zst", original.chain_id))
+                })
+                .find(|path| path.is_file())
+                .unwrap();
+            let mut damaged = fs::read(&file).unwrap();
+            if remove {
+                fs::remove_file(&file).unwrap();
+            } else {
+                let middle = damaged.len() / 2;
+                damaged[middle] ^= 0xff;
+                fs::write(&file, &damaged).unwrap();
+            }
+            // The source and its consumed prefix remain exactly unchanged.
+            prepare(&mut cache);
+            let chains = archive.chains(&key).unwrap();
+            assert_eq!(chains.len(), 2);
+            assert_eq!(chains[0], original);
+            let mut recovered = Vec::new();
+            archive
+                .open_chain(&key, &chains[1])
+                .unwrap()
+                .read_to_end(&mut recovered)
+                .unwrap();
+            assert_eq!(recovered, fs::read(&path).unwrap());
+            if remove {
+                assert!(!file.exists());
+            } else {
+                assert_eq!(fs::read(&file).unwrap(), damaged);
+            }
+            prepare(&mut cache);
+            assert_eq!(archive.chains(&key).unwrap().len(), 2);
+        }
+    }
+
+    #[test]
+    fn bounded_native_scans_reuse_archive_verification() {
+        use sha2::{Digest, Sha256};
+        let fixture = Fixture::new();
+        let path = fixture.source("one");
+        let mut options = fixture.options.clone();
+        options.facts = None;
+        let inputs = [crate::inputs::Input {
+            root: crate::inputs::InputRoot::Claude,
+            path: "projects/project/one.jsonl".into(),
+        }];
+        let mut bytes = Vec::new();
+        let mut first_line = 0;
+        for n in 0..100 {
+            let record = json!({"type":"user","sessionId":"one","uuid":format!("u{n}"),"parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"a synthetic prompt"}});
+            bytes.extend_from_slice(format!("{record}\n").as_bytes());
+            if n == 0 {
+                first_line = bytes.len();
+            }
+        }
+        fs::write(&path, &bytes).unwrap();
+        let key = path.to_string_lossy().into_owned();
+        let archive = crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache));
+        // An earlier process left a prefix: the producer must verify it once.
+        archive
+            .admit(
+                &key,
+                &mut std::io::Cursor::new(&bytes),
+                first_line as u64,
+                &Sha256::digest(&bytes[..first_line]).into(),
+            )
+            .unwrap();
+        let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+        cache.scan_byte_budget = Some(4096);
+        let before = crate::archive::VERIFIED_BYTES.with(std::cell::Cell::get);
+        let mut previous = first_line as u64;
+        for _ in 0..4 {
+            crate::model::prepare_sources(&options, &mut cache, &inputs, crate::model::now_ms())
+                .unwrap();
+            let chains = archive.chains(&key).unwrap();
+            assert_eq!(chains.len(), 1);
+            let length = chains[0].length;
+            assert!(length > previous && length < bytes.len() as u64);
+            previous = length;
+            assert_eq!(
+                crate::archive::VERIFIED_BYTES.with(std::cell::Cell::get) - before,
+                first_line as u64,
+                "unchanged archived prefixes were reread between bounded scans"
+            );
+        }
+        archive.verify(&key).unwrap();
+    }
+
+    #[test]
     fn scoped_publication_rejects_newer_dirty_claim_and_keeps_unrelated_work() {
         let fixture = Fixture::new();
         fixture.source("selected");

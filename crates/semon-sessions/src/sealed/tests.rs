@@ -52,6 +52,17 @@ fn read_range(path: &Path, at: u64, len: u64) -> Vec<u8> {
     out
 }
 
+/// Archives `log`'s bytes into a real chain, as a receiver does before a
+/// replace, and asks for its seal to be certified: whether it was.
+fn chain(root: &Path, log: &Path) -> bool {
+    let archive = crate::archive::Archive::new(root.join("archive"));
+    let mut reader = LogFile::open(log).unwrap();
+    let key = log.to_string_lossy();
+    let chain = archive.preserve(&key, &mut reader, "1").unwrap().unwrap();
+    archive.verify(&key).unwrap();
+    record_custody(log, &archive, &key, &chain).unwrap()
+}
+
 fn read_all(path: &Path) -> Vec<u8> {
     read_range(path, 0, u64::MAX)
 }
@@ -257,7 +268,8 @@ fn an_interrupted_seal_is_ignored_then_cleaned_up_and_finished() {
     // A leftover from yet another crash, and a segment no manifest names.
     fs::write(dir.join("x.zst.tmp"), b"junk").unwrap();
     fs::write(dir.join("9-00000000000000000000.zst"), b"junk").unwrap();
-    assert_eq!(tidy(&log).unwrap(), 2);
+    assert_eq!(tidy(&log).unwrap(), 1);
+    assert!(dir.join("9-00000000000000000000.zst").exists());
     let finished = seal(&log, u64::MAX, u64::MAX).unwrap();
     assert!(finished.added.is_none() && finished.punched);
     assert!(!status(&log).unwrap().needs_punch);
@@ -280,6 +292,9 @@ fn a_replaced_log_reads_its_new_bytes_and_retires_the_old_generation() {
     let log = root.join("a.jsonl");
     fs::write(&log, jsonl(200_000, 8)).unwrap();
     seal(&log, 1, u64::MAX).unwrap();
+    // A chain holds the old bytes, as a receiver's archive does before a
+    // replace.
+    assert!(chain(&root, &log));
     let old = read_manifest(&seal_dir(&log)).unwrap().unwrap();
 
     // As a receiver replaces a file: a new one renamed over it.
@@ -373,6 +388,7 @@ fn a_new_file_on_a_reused_inode_number_is_not_bound() {
     let old = root.join("old.jsonl");
     fs::write(&old, jsonl(200_000, 13)).unwrap();
     seal(&old, 1, u64::MAX).unwrap();
+    assert!(chain(&root, &old));
     let log = root.join("a.jsonl");
     let bytes = jsonl(250_000, 14);
     fs::write(&log, &bytes).unwrap();
@@ -399,11 +415,102 @@ fn a_new_file_on_a_reused_inode_number_is_not_bound() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn a_seal_is_not_retired_while_no_chain_holds_its_bytes() {
+    let root = scratch("unchained");
+    let log = root.join("a.jsonl");
+    let old = jsonl(200_000, 20);
+    fs::write(&log, &old).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    let manifest = read_manifest(&seal_dir(&log)).unwrap().unwrap();
+    let segment = seal_dir(&log).join(manifest.segments[0].file_name(&manifest.generation));
+
+    // The log is replaced from outside by a file of the same length: only
+    // the segments hold the old bytes now.
+    let next = root.join("a.jsonl.replace.tmp");
+    let mut other = jsonl(old.len(), 21);
+    other.truncate(old.len());
+    fs::write(&next, other).unwrap();
+    fs::rename(&next, &log).unwrap();
+    let refused = io::ErrorKind::PermissionDenied;
+    assert_eq!(seal(&log, 1, u64::MAX).unwrap_err().kind(), refused);
+    assert_eq!(tidy(&log).unwrap_err().kind(), refused);
+    assert_eq!(forget(&log).unwrap_err().kind(), refused);
+
+    // A chain of the new file's bytes does not certify the old seal.
+    assert!(!chain(&root, &log), "an unrelated seal is not certified");
+    assert_eq!(seal(&log, 1, u64::MAX).unwrap_err().kind(), refused);
+    assert_eq!(tidy(&log).unwrap_err().kind(), refused);
+    assert!(segment.exists());
+    assert!(read_manifest(&seal_dir(&log)).unwrap().is_some());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn forget_keeps_every_segment_when_the_manifest_is_missing() {
+    let root = scratch("missing-manifest");
+    let log = root.join("a.jsonl");
+    fs::write(&log, jsonl(100_000, 24)).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    append(&log, &jsonl(100_000, 25));
+    seal(&log, 1, u64::MAX).unwrap();
+    assert!(chain(&root, &log));
+    let dir = seal_dir(&log);
+    let manifest = read_manifest(&dir).unwrap().unwrap();
+    assert!(manifest.segments.len() >= 2);
+    let segments: Vec<_> = manifest
+        .segments
+        .iter()
+        .map(|segment| {
+            let path = dir.join(segment.file_name(&manifest.generation));
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    fs::remove_file(dir.join(MANIFEST)).unwrap();
+
+    assert_eq!(
+        forget(&log).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(dir.is_dir());
+    for (path, bytes) in segments {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn custody_is_for_the_bytes_that_were_archived() {
+    let root = scratch("custody");
+    let log = root.join("a.jsonl");
+    fs::write(&log, jsonl(100_000, 22)).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    // The log is not the length that was archived.
+    let archive = crate::archive::Archive::new(root.join("archive"));
+    let held = archive
+        .preserve("source", &mut LogFile::open(&log).unwrap(), "1")
+        .unwrap()
+        .unwrap();
+    append(&log, b"{}\n");
+    assert!(record_custody(&log, &archive, "source", &held).is_err());
+    assert!(forget(&log).is_err(), "nothing was certified");
+    // A log with no seal needs no certificate.
+    let plain = root.join("b.jsonl");
+    fs::write(&plain, jsonl(1_000, 23)).unwrap();
+    assert!(record_custody(&plain, &archive, "source", &held).unwrap());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn forget_removes_a_seal_before_a_replace() {
     let root = scratch("forget");
     let log = root.join("a.jsonl");
     fs::write(&log, jsonl(100_000, 15)).unwrap();
     seal(&log, 1, u64::MAX).unwrap();
+    assert!(chain(&root, &log));
     forget(&log).unwrap();
     assert!(!seal_dir(&log).exists());
     forget(&log).unwrap();
@@ -444,5 +551,121 @@ fn an_unreadable_manifest_fails_the_read() {
     let mut out = Vec::new();
     assert!(LogFile::open(&log).unwrap().read_to_end(&mut out).is_err());
     assert!(status(&log).is_err());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn retirement_keeps_segments_after_the_custody_chain_is_damaged_or_deleted() {
+    for remove in [false, true] {
+        for operation in ["seal", "tidy", "forget"] {
+            let root = scratch(&format!("lost-chain-{remove}-{operation}"));
+            let log = root.join("a.jsonl");
+            fs::write(&log, jsonl(100_000, 26)).unwrap();
+            seal(&log, 1, u64::MAX).unwrap();
+            assert!(chain(&root, &log));
+            let dir = seal_dir(&log);
+            let manifest = read_manifest(&dir).unwrap().unwrap();
+            let segments: Vec<_> = manifest
+                .segments
+                .iter()
+                .map(|segment| {
+                    let path = dir.join(segment.file_name(&manifest.generation));
+                    let bytes = fs::read(&path).unwrap();
+                    (path, bytes)
+                })
+                .collect();
+            let held = read_custody(&dir).unwrap().unwrap();
+            let archived = fs::read_dir(&held.archive)
+                .unwrap()
+                .map(|entry| {
+                    entry
+                        .unwrap()
+                        .path()
+                        .join(format!("{}.zst", held.chain.chain_id))
+                })
+                .find(|path| path.is_file())
+                .unwrap();
+            if remove {
+                fs::remove_file(&archived).unwrap();
+            } else {
+                let mut bytes = fs::read(&archived).unwrap();
+                let middle = bytes.len() / 2;
+                bytes[middle] ^= 0xff;
+                fs::write(&archived, bytes).unwrap();
+            }
+            let replacement = root.join("replacement");
+            fs::write(&replacement, jsonl(100_000, 27)).unwrap();
+            fs::rename(replacement, &log).unwrap();
+            let result = match operation {
+                "seal" => seal(&log, 1, u64::MAX).map(|_| ()),
+                "tidy" => tidy(&log).map(|_| ()),
+                "forget" => forget(&log),
+                _ => unreachable!(),
+            };
+            assert!(result.is_err(), "{operation} accepted lost custody");
+            assert!(dir.join(MANIFEST).exists());
+            for (path, bytes) in segments {
+                assert_eq!(fs::read(path).unwrap(), bytes);
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn orphan_segments_survive_a_new_generation_and_its_retirement() {
+    let root = scratch("orphan-new-generation");
+    let log = root.join("a.jsonl");
+    fs::write(&log, jsonl(100_000, 28)).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    let dir = seal_dir(&log);
+    let old = read_manifest(&dir).unwrap().unwrap();
+    let segments: Vec<_> = old
+        .segments
+        .iter()
+        .map(|segment| {
+            let path = dir.join(segment.file_name(&old.generation));
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    fs::remove_file(dir.join(MANIFEST)).unwrap();
+    let replacement = root.join("replacement");
+    fs::write(&replacement, jsonl(100_000, 29)).unwrap();
+    fs::rename(replacement, &log).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    assert_ne!(
+        read_manifest(&dir).unwrap().unwrap().generation,
+        old.generation
+    );
+    assert!(chain(&root, &log));
+    assert_eq!(tidy(&log).unwrap(), 0);
+    assert_eq!(
+        forget(&log).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(dir.exists());
+    for (path, bytes) in segments {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn planted_seal_temporary_symlinks_never_truncate_the_target() {
+    use std::os::unix::fs::symlink;
+    let root = scratch("temp-symlink");
+    let target = root.join("evidence.zst");
+    fs::write(&target, b"keep evidence").unwrap();
+    for name in ["manifest.json.tmp", "custody.json.tmp", "segment.zst.tmp"] {
+        let planted = root.join(name);
+        symlink(&target, &planted).unwrap();
+        assert!(create_temporary(&planted).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"keep evidence");
+    }
+    assert_eq!(remove_temporaries(&root).unwrap(), 0);
     fs::remove_dir_all(root).unwrap();
 }

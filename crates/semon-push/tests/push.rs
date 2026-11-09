@@ -2258,7 +2258,7 @@ fn descriptor_invalid_reference_generation_forces_actual_client_replacement() {
     home.write(LOG, &text);
     let mirror = home.root.join("reference");
     fs::create_dir_all(&mirror).unwrap();
-    let reference = Arc::new(semon_push::mirror::Receiver::new(&mirror));
+    let reference = Arc::new(semon_push::mirror::Receiver::new(&mirror).unwrap());
     let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
     let listener = Arc::clone(&server);
     let sink = Arc::clone(&reference);
