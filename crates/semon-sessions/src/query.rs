@@ -1355,6 +1355,12 @@ impl Query {
                 "Selected activity is not yet available on PostgreSQL",
             ));
         }
+        if evidence.storage.is_postgres() && tool == "read_transcript" && !args["step"].is_null() {
+            return Err(QueryError::new(
+                "capability_unavailable",
+                "Activity anchors are not available on PostgreSQL",
+            ));
+        }
         let mut focused_args = args.clone();
         if self.sources.machines.len() > 1 {
             let labels = self.source_labels();

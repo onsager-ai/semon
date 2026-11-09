@@ -127,15 +127,24 @@ fn activity_anchor_admits_only_current_exact_records() {
         ordinal: 0,
         id: page.steps[0].id.clone(),
     };
-    let resolved = crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap();
+    let resolved =
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap();
     assert_eq!(resolved["available"], true);
     assert_eq!(resolved["basis"], "native_record_id");
     let mut stale = anchor.clone();
     stale.generation = "stale".into();
-    assert_eq!(crate::transcript_range::resolve_step_slot(&store.connection, row, false, &stale).unwrap()["reason"], "stale_activity");
+    assert_eq!(
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &stale).unwrap()
+            ["reason"],
+        "stale_activity"
+    );
     let mut changed = row.clone();
     changed.sources[0].offset += 1;
-    assert_eq!(crate::transcript_range::resolve_step_slot(&store.connection, &changed, false, &anchor).unwrap()["reason"], "source_generation_mismatch");
+    assert_eq!(
+        crate::transcript_range::resolve_step_slot(&store.connection, &changed, false, &anchor)
+            .unwrap()["reason"],
+        "source_generation_mismatch"
+    );
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }

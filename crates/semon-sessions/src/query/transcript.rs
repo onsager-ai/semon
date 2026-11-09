@@ -288,7 +288,9 @@ fn virtual_read(
     now: i64,
 ) -> Result<Option<Value>, QueryError> {
     if !args["step"].is_null() {
-        return Err(unavailable("Activity anchor requires a physical projection"));
+        return Err(unavailable(
+            "Activity anchor requires a physical projection",
+        ));
     }
     let requested = args["id"].as_str().expect("validated focused id");
     let served = args["_machine_alias"]
@@ -520,7 +522,11 @@ fn virtual_read(
             tx::Anchor::Last => (false, total),
             tx::Anchor::Before(before) => (false, before.min(total)),
             tx::Anchor::After(after) => (true, after.min(total)),
-            tx::Anchor::Step(_) => return Err(unavailable("Activity anchor requires a physical projection")),
+            tx::Anchor::Step(_) => {
+                return Err(unavailable(
+                    "Activity anchor requires a physical projection",
+                ));
+            }
             tx::Anchor::Turn(turn) => {
                 return Err(QueryError::new(
                     "unknown_turn",
@@ -774,22 +780,36 @@ fn read_inner(
         tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
             .ok_or_else(|| QueryError::invalid("before, after, turn and step are exclusive"))?
     } else {
-        if position("before").is_some() || position("after").is_some() || string(args, "turn").is_some() {
-            return Err(QueryError::invalid("before, after, turn and step are exclusive"));
+        if position("before").is_some()
+            || position("after").is_some()
+            || string(args, "turn").is_some()
+        {
+            return Err(QueryError::invalid(
+                "before, after, turn and step are exclusive",
+            ));
         }
-        tx::Anchor::Step(serde_json::from_value(args["step"].clone()).map_err(|_| QueryError::invalid("Invalid activity step anchor"))?)
+        tx::Anchor::Step(
+            serde_json::from_value(args["step"].clone())
+                .map_err(|_| QueryError::invalid("Invalid activity step anchor"))?,
+        )
     };
     let (forward, from) = match &anchor {
         tx::Anchor::Last => (false, total),
         tx::Anchor::Before(before) => (false, (*before).min(total)),
         tx::Anchor::After(after) => (true, (*after).min(total)),
         tx::Anchor::Step(step) => {
-            let result = crate::transcript_range::resolve_step_slot(&tx, &row, history.is_some(), step)
-                .map_err(unavailable)?;
-            let slot = result["slot"].as_u64().ok_or_else(|| QueryError::new(
-                "stale_projection",
-                format!("Activity anchor unavailable: {}", result["reason"].as_str().unwrap_or("stale_transcript")),
-            ))?;
+            let result =
+                crate::transcript_range::resolve_step_slot(&tx, &row, history.is_some(), step)
+                    .map_err(unavailable)?;
+            let slot = result["slot"].as_u64().ok_or_else(|| {
+                QueryError::new(
+                    "stale_projection",
+                    format!(
+                        "Activity anchor unavailable: {}",
+                        result["reason"].as_str().unwrap_or("stale_transcript")
+                    ),
+                )
+            })?;
             (true, usize::try_from(slot).map_err(unavailable)?)
         }
         tx::Anchor::Turn(turn) => {
@@ -1360,7 +1380,10 @@ fn read_inner(
             "Native transcript observation changed during this read",
         ));
     }
-    answer["transcript_generation"] = json!(crate::transcript_range::entry_generation(&slot_generation));
+    if matches!(anchor, tx::Anchor::Step(_)) {
+        answer["transcript_generation"] =
+            json!(crate::transcript_range::entry_generation(&slot_generation));
+    }
     Ok(Some(answer))
 }
 

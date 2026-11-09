@@ -237,37 +237,116 @@ pub(crate) fn session_activity_anchor_with_gate(
     before_read: impl FnOnce() -> Result<(), ViewerReply>,
 ) -> ViewerReply {
     let read = || -> Result<ViewerReply, Box<dyn std::error::Error>> {
-        let invalid = || catalog::error(400, "invalid_arguments", "Supply a session and activity step.", false);
+        let invalid = || {
+            catalog::error(
+                400,
+                "invalid_arguments",
+                "Supply a session and activity step.",
+                false,
+            )
+        };
         for name in ["sid", "scope", "generation", "ordinal", "step", "machine"] {
-            if query.split('&').filter(|part| part.split('=').next() == Some(name)).count() > 1 {
+            if query
+                .split('&')
+                .filter(|part| part.split('=').next() == Some(name))
+                .count()
+                > 1
+            {
                 return Ok(invalid());
             }
         }
-        let Some(key) = query_value(query, "sid").and_then(decoded).filter(|s| !s.is_empty() && s.len() <= 4096) else { return Ok(invalid()) };
-        let Some(generation) = query_value(query, "generation").and_then(decoded).filter(|s| !s.is_empty() && s.len() <= 4096) else { return Ok(invalid()) };
-        let Some(ordinal) = query_value(query, "ordinal").and_then(decoded).and_then(|s| s.parse().ok()) else { return Ok(invalid()) };
-        let Some(id) = query_value(query, "step").and_then(decoded).and_then(|s| serde_json::from_str(&s).ok()) else { return Ok(invalid()) };
-        if query_value(query, "scope").is_some_and(|scope| scope != "retained_history") { return Ok(invalid()); }
-        if let Err(response) = before_read() { return Ok(response); }
-        let mut db = crate::storage::runtime::RuntimeStore::for_source(options, source_key).selected_connection(source_key)?;
+        let Some(key) = query_value(query, "sid")
+            .and_then(decoded)
+            .filter(|s| !s.is_empty() && s.len() <= 4096)
+        else {
+            return Ok(invalid());
+        };
+        let Some(generation) = query_value(query, "generation")
+            .and_then(decoded)
+            .filter(|s| !s.is_empty() && s.len() <= 4096)
+        else {
+            return Ok(invalid());
+        };
+        let Some(ordinal) = query_value(query, "ordinal")
+            .and_then(decoded)
+            .and_then(|s| s.parse().ok())
+        else {
+            return Ok(invalid());
+        };
+        let Some(id) = query_value(query, "step")
+            .and_then(decoded)
+            .and_then(|s| serde_json::from_str(&s).ok())
+        else {
+            return Ok(invalid());
+        };
+        if query_value(query, "scope").is_some_and(|scope| scope != "retained_history") {
+            return Ok(invalid());
+        }
+        if let Err(response) = before_read() {
+            return Ok(response);
+        }
+        let mut db = crate::storage::runtime::RuntimeStore::for_source(options, source_key)
+            .selected_connection(source_key)?;
         let tx = db.transaction()?;
-        let identity = match catalog::catalog_selection_in_snapshot(options, source_key, &key, crate::CatalogReadScope::RetainedHistory, &tx) {
+        let identity = match catalog::catalog_selection_in_snapshot(
+            options,
+            source_key,
+            &key,
+            crate::CatalogReadScope::RetainedHistory,
+            &tx,
+        ) {
             Ok(Some((identity, _))) => identity,
-            Ok(None) => return Ok(catalog::error(404, "session_not_found", "Recorded session unavailable.", false)),
+            Ok(None) => {
+                return Ok(catalog::error(
+                    404,
+                    "session_not_found",
+                    "Recorded session unavailable.",
+                    false,
+                ));
+            }
             Err(_) => return Ok(unavailable()),
         };
-        let current: Option<String> = tx.query_row("SELECT value FROM meta WHERE key='slot_projection_catalog_generation'", [], |record| record.get(0)).optional()?;
+        let current: Option<String> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key='slot_projection_catalog_generation'",
+                [],
+                |record| record.get(0),
+            )
+            .optional()?;
         if current.as_deref() != Some(identity.generation.as_str()) {
-            return Ok(reply(200, json!({"available":false,"reason":"stale_transcript"})));
+            return Ok(reply(
+                200,
+                json!({"available":false,"reason":"stale_transcript"}),
+            ));
         }
         let history = crate::history_projection::catalog(&tx, &key)?;
         let text: Option<String> = match history.as_ref() {
             Some(text) => Some(text.clone()),
-            None => tx.query_row("SELECT metadata FROM session_catalog WHERE session_key=?1", [&key], |record| record.get(0)).optional()?,
+            None => tx
+                .query_row(
+                    "SELECT metadata FROM session_catalog WHERE session_key=?1",
+                    [&key],
+                    |record| record.get(0),
+                )
+                .optional()?,
         };
-        let Some(text) = text else { return Ok(reply(200, json!({"available":false,"reason":"stale_transcript"}))) };
+        let Some(text) = text else {
+            return Ok(reply(
+                200,
+                json!({"available":false,"reason":"stale_transcript"}),
+            ));
+        };
         let row = serde_json::from_str(&text)?;
-        let result = resolve_step_slot(&tx, &row, history.is_some(), &StepAnchor { generation, ordinal, id })?;
+        let result = resolve_step_slot(
+            &tx,
+            &row,
+            history.is_some(),
+            &StepAnchor {
+                generation,
+                ordinal,
+                id,
+            },
+        )?;
         Ok(reply(200, result))
     };
     read().unwrap_or_else(|_| unavailable())
@@ -291,16 +370,26 @@ pub(crate) fn resolve_step_slot(
     let missing = |reason| json!({"available": false, "reason": reason});
     let sources = crate::retention::source_generation(&row.sources)
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let activity_source: Option<String> = tx.query_row(
-        "SELECT source_generation FROM session_activity_projections WHERE session_key=?1",
-        [&row.key], |record| record.get(0),
-    ).optional()?;
-    if activity_source.as_deref().is_some_and(|source| source != sources) {
+    let activity_source: Option<String> = tx
+        .query_row(
+            "SELECT source_generation FROM session_activity_projections WHERE session_key=?1",
+            [&row.key],
+            |record| record.get(0),
+        )
+        .optional()?;
+    if activity_source
+        .as_deref()
+        .is_some_and(|source| source != sources)
+    {
         return Ok(missing("source_generation_mismatch"));
     }
     let Some((step, usage)) = crate::events::store::session_activity::step_at(
-        tx, row, &requested.generation, requested.ordinal,
-    )? else {
+        tx,
+        row,
+        &requested.generation,
+        requested.ordinal,
+    )?
+    else {
         return Ok(missing("stale_activity"));
     };
     if step.id != requested.id {
@@ -311,20 +400,28 @@ pub(crate) fn resolve_step_slot(
     } else {
         ("session_slot_projections", "session_slots")
     };
-    let projection: Option<(String, u32, Option<String>)> = tx.query_row(
-        &format!("SELECT generation,version,source_generation FROM {header} WHERE session_key=?1"),
-        [&row.key], |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?)),
-    ).optional()?;
+    let projection: Option<(String, u32, Option<String>)> = tx
+        .query_row(
+            &format!(
+                "SELECT generation,version,source_generation FROM {header} WHERE session_key=?1"
+            ),
+            [&row.key],
+            |record| Ok((record.get(0)?, record.get(1)?, record.get(2)?)),
+        )
+        .optional()?;
     let Some((generation, VERSION, source_generation)) = projection else {
         return Ok(missing("stale_transcript"));
     };
     if source_generation.as_deref() != Some(&sources) {
         return Ok(missing("source_generation_mismatch"));
     }
-    if history && tx.query_row(
-        "SELECT incomplete FROM session_history_projections WHERE session_key=?1",
-        [&row.key], |record| record.get::<_, bool>(0),
-    )? {
+    if history
+        && tx.query_row(
+            "SELECT incomplete FROM session_history_projections WHERE session_key=?1",
+            [&row.key],
+            |record| record.get::<_, bool>(0),
+        )?
+    {
         return Ok(missing("history_incomplete"));
     }
     let ids = match &usage {
@@ -348,21 +445,44 @@ pub(crate) fn resolve_step_slot(
         }
         has_native_ids |= slot.native_event_id.is_some();
         use crate::slot_projection::Recipe;
-        if !matches!(slot.recipe, Recipe::A | Recipe::Think | Recipe::Tool { .. } | Recipe::Yielded { .. } | Recipe::Sent { .. } | Recipe::Operation { .. }) {
+        if !matches!(
+            slot.recipe,
+            Recipe::A
+                | Recipe::Think
+                | Recipe::Tool { .. }
+                | Recipe::Yielded { .. }
+                | Recipe::Sent { .. }
+                | Recipe::Operation { .. }
+        ) {
             continue;
         }
-        let index = u64::try_from(record.get::<_, i64>(0)?)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let index =
+            u64::try_from(record.get::<_, i64>(0)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
         let basis = match (&step.id, ids) {
-            (ActivityStepId::Claude(_), Some(ids)) if slot.native_event_id.as_ref().is_some_and(|id| ids.contains(id)) => Some("native_record_id"),
-            (ActivityStepId::Claude(_), _) if file.path == Path::new(&step.position.source) && slot.offset == step.position.offset => {
+            (ActivityStepId::Claude(_), Some(ids))
+                if slot
+                    .native_event_id
+                    .as_ref()
+                    .is_some_and(|id| ids.contains(id)) =>
+            {
+                Some("native_record_id")
+            }
+            (ActivityStepId::Claude(_), _)
+                if file.path == Path::new(&step.position.source)
+                    && slot.offset == step.position.offset =>
+            {
                 fallback.get_or_insert(index);
                 None
             }
             (ActivityStepId::Codex(_), _) => step.call_position.as_ref().and_then(|call| {
-                if file.path != Path::new(&call.source) { return None; }
+                if file.path != Path::new(&call.source) {
+                    return None;
+                }
                 match slot.recipe {
-                    Recipe::Operation { script_offset: Some(offset), .. } if offset == call.offset => Some("operation_parent"),
+                    Recipe::Operation {
+                        script_offset: Some(offset),
+                        ..
+                    } if offset == call.offset => Some("operation_parent"),
                     _ if slot.offset == call.offset => Some("call_identity"),
                     _ => None,
                 }
@@ -370,11 +490,15 @@ pub(crate) fn resolve_step_slot(
             _ => None,
         };
         if let Some(basis) = basis {
-            return Ok(json!({"available":true,"activity_generation":requested.generation,"step":{"ordinal":requested.ordinal,"id":requested.id},"source_generation":sources,"transcript_generation":entry_generation(&generation),"slot":index,"basis":basis}));
+            return Ok(
+                json!({"available":true,"activity_generation":requested.generation,"step":{"ordinal":requested.ordinal,"id":requested.id},"source_generation":sources,"transcript_generation":entry_generation(&generation),"slot":index,"basis":basis}),
+            );
         }
     }
     if !has_native_ids && let Some(index) = fallback {
-        return Ok(json!({"available":true,"activity_generation":requested.generation,"step":{"ordinal":requested.ordinal,"id":requested.id},"source_generation":sources,"transcript_generation":entry_generation(&generation),"slot":index,"basis":"usage_record"}));
+        return Ok(
+            json!({"available":true,"activity_generation":requested.generation,"step":{"ordinal":requested.ordinal,"id":requested.id},"source_generation":sources,"transcript_generation":entry_generation(&generation),"slot":index,"basis":"usage_record"}),
+        );
     }
     Ok(missing("no_exact_record"))
 }

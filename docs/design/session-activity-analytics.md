@@ -297,7 +297,7 @@ position `get_session_activity` pages by; a bin skips shared steps between them)
 `waste_by_category` (steps per category in the bin) and `compactions` (compactions
 attached to its steps). Prices refresh the preview with the rest of the summary.
 Families have no preview. No thrash-window/step arrays enter these summaries. TaskSpecification
-is a known uncomputed lever in rules version 8. `get_session_activity` steps carry
+is a known uncomputed lever in rules version 9. `get_session_activity` steps carry
 the matching booleans `empty_search`, `verify_failure` and `silent_exit`, plus the
 nullable `activity` and `trigger` labels described below.
 

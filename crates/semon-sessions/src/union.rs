@@ -1535,11 +1535,16 @@ impl ViewerCore {
                 })
             }
             "/api/session-activity-anchor" => {
-                crate::transcript_range::session_activity_anchor_with_gate(view.options(), key, query, || {
-                    refresh_error =
-                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
-                    Ok(())
-                })
+                crate::transcript_range::session_activity_anchor_with_gate(
+                    view.options(),
+                    key,
+                    query,
+                    || {
+                        refresh_error =
+                            Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                        Ok(())
+                    },
+                )
             }
             "/api/session-annotations" => {
                 crate::session_annotations_with_gate(view.options(), key, query, || {

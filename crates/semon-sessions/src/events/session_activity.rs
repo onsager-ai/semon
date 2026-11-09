@@ -362,7 +362,10 @@ pub(crate) fn apply_observations(
             let step = &mut activity.steps[owner];
             if matches!(step.id, ActivityStepId::Codex(_))
                 && row.observation.step_id.as_ref() == Some(&step.id)
-                && step.call_position.as_ref().is_none_or(|old| row.position < *old)
+                && step
+                    .call_position
+                    .as_ref()
+                    .is_none_or(|old| row.position < *old)
             {
                 step.call_position = Some(row.position.clone());
             }
