@@ -2195,9 +2195,6 @@ impl EventCache {
                 Err(error) => eprintln!("semon: native log archive: {key}: {error}"),
             }
         }
-        if let Err(error) = archive.flush() {
-            eprintln!("semon: native log archive index: {error}");
-        }
     }
 
     /// Drop only durably committed producer payloads after Catalog publication.

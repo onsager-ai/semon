@@ -99,14 +99,15 @@ fn a_preserved_chain_holds_the_bytes_and_the_redactor_version() {
     assert_eq!(chains[1].redactor_version, "8");
     // Sources have their own random ids.
     preserve(&archive, "claude/b.jsonl", &other, "8").unwrap();
-    let index: Index = read_json(&archive.dir.join(INDEX)).unwrap();
-    assert_eq!(index.sources.len(), 2);
-    assert!(index.sources.values().all(|id| is_id(id)));
-    let (a, b) = (
-        &index.sources["claude/a.jsonl"],
-        &index.sources["claude/b.jsonl"],
-    );
+    let a = archive.lookup("claude/a.jsonl").unwrap().unwrap();
+    let b = archive.lookup("claude/b.jsonl").unwrap().unwrap();
+    assert!(is_id(&a) && is_id(&b));
     assert_ne!(a, b);
+    let log = fs::read_to_string(archive.dir.join(SOURCES)).unwrap();
+    assert_eq!(log.lines().count(), 2);
+    // Each directory names its source.
+    let manifest = read_manifest(&archive.dir.join(&a)).unwrap();
+    assert_eq!(manifest.source, "claude/a.jsonl");
 }
 
 #[test]
@@ -171,14 +172,13 @@ fn admit_extends_one_chain_with_the_consumed_prefix() {
     }
     let chain = archive.chains("native").unwrap().remove(0);
     assert_eq!(read_chain(&archive, "native", &chain), log);
-    // Another instance finds the source once the index is flushed.
-    archive.flush().unwrap();
+    // Another instance finds the source at once.
     let other = Archive::new(archive.dir.clone());
     assert_eq!(
         other.chains("native").unwrap(),
         std::slice::from_ref(&chain)
     );
-    // The index may be behind the archive (it was rebuilt): nothing changes.
+    // The log holds less than the chain: nothing changes.
     assert!(admit(&archive, &log, 5_000));
     assert_eq!(archive.chains("native").unwrap(), [chain]);
 }
@@ -335,10 +335,178 @@ fn a_manifest_that_names_a_path_outside_the_archive_is_refused() {
 
     // A continuation state past the chain's end is refused too.
     manifest.chains[0].chain_id = "a".repeat(32);
-    manifest.chains[0].resume = None;
     publish(path.parent().unwrap(), MANIFEST, &manifest).unwrap();
     assert!(archive.chains("native").is_ok());
+    let mut past = manifest.chains[0].resume.clone().unwrap();
+    past.at = manifest.chains[0].length.div_ceil(64) * 64 + 64;
+    manifest.chains[0].resume = Some(past);
+    publish(path.parent().unwrap(), MANIFEST, &manifest).unwrap();
+    assert!(archive.chains("native").is_err());
+    // As is a chain of no bytes.
+    manifest.chains[0].resume = None;
     manifest.chains[0].length = 0;
     publish(path.parent().unwrap(), MANIFEST, &manifest).unwrap();
     assert!(archive.chains("native").is_err());
+}
+
+fn chain_file(archive: &Archive, source: &str, chain: &Chain) -> PathBuf {
+    let id = archive.lookup(source).unwrap().unwrap();
+    archive.dir.join(id).join(format!("{}.zst", chain.chain_id))
+}
+
+#[test]
+fn two_instances_admitting_one_source_share_its_directory() {
+    let (_scratch, first) = archive();
+    let second = Archive::new(first.dir.clone());
+    let log = lines(20_000, 1);
+    assert!(admit(&first, &log, 8_000));
+    // The second instance has not seen the source; it finds its id.
+    assert!(admit(&second, &log, 20_000));
+    assert!(admit(&first, &log, 20_000));
+    for archive in [&first, &second] {
+        let chains = archive.chains("native").unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(read_chain(archive, "native", &chains[0]), log);
+    }
+    let ids = fs::read_to_string(first.dir.join(SOURCES)).unwrap();
+    assert_eq!(ids.lines().count(), 1, "one id for one source");
+    let directories = fs::read_dir(&first.dir)
+        .unwrap()
+        .filter(|entry| entry.as_ref().unwrap().path().is_dir())
+        .count();
+    assert_eq!(directories, 1);
+}
+
+#[test]
+fn a_restart_after_the_chain_is_published_finds_it() {
+    let (_scratch, archive) = archive();
+    let log = lines(20_000, 1);
+    assert!(admit(&archive, &log, 20_000));
+    let chain = archive.chains("native").unwrap().remove(0);
+    // A new process: nothing is remembered, the directory is attributed.
+    let restarted = Archive::new(archive.dir.clone());
+    assert_eq!(restarted.chains("native").unwrap(), [chain.clone()]);
+    assert!(admit(&restarted, &log, 20_000));
+    assert_eq!(restarted.chains("native").unwrap(), [chain]);
+    let id = restarted.lookup("native").unwrap().unwrap();
+    let manifest = read_manifest(&restarted.dir.join(id)).unwrap();
+    assert_eq!(manifest.source, "native");
+}
+
+#[test]
+fn a_registration_failure_leaves_nothing_and_is_retried() {
+    let (_scratch, archive) = archive();
+    let log = lines(20_000, 1);
+    FAIL_REGISTER.with(|fail| fail.set(true));
+    let prefix = digest(&log);
+    let mut cursor = Cursor::new(&log);
+    assert!(
+        archive
+            .admit("native", &mut cursor, 20_000, &prefix)
+            .is_err()
+    );
+    let fresh = Archive::new(archive.dir.clone());
+    assert!(fresh.chains("native").unwrap().is_empty());
+
+    // Storage is back: the same, unchanged source is archived and found.
+    assert!(admit(&archive, &log, 20_000));
+    let fresh = Archive::new(archive.dir.clone());
+    assert_eq!(fresh.chains("native").unwrap().len(), 1);
+    fresh.verify("native").unwrap();
+}
+
+#[test]
+fn a_torn_final_log_line_is_ignored_and_cut_off() {
+    let (_scratch, archive) = archive();
+    let log = lines(20_000, 1);
+    assert!(admit(&archive, &log, 20_000));
+    let path = archive.dir.join(SOURCES);
+    let whole = fs::read(&path).unwrap();
+    // A crash in the middle of recording another source.
+    let mut torn = whole.clone();
+    torn.extend_from_slice(b"{\"source\":\"other\",\"id\":\"0123");
+    fs::write(&path, &torn).unwrap();
+
+    let restarted = Archive::new(archive.dir.clone());
+    assert_eq!(restarted.chains("native").unwrap().len(), 1);
+    assert!(restarted.chains("other").unwrap().is_empty());
+    // The next new source is appended after the last whole line.
+    preserve(&restarted, "other", &lines(1_000, 2), "1").unwrap();
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with(&String::from_utf8(whole).unwrap()));
+    assert_eq!(text.lines().count(), 2);
+    let again = Archive::new(archive.dir.clone());
+    assert_eq!(again.chains("other").unwrap().len(), 1);
+    assert_eq!(again.chains("native").unwrap().len(), 1);
+}
+
+#[test]
+fn a_missing_chain_is_kept_listed_and_a_new_one_is_written() {
+    let (_scratch, archive) = archive();
+    let log = lines(40_000, 1);
+    assert!(admit(&archive, &log, 20_000));
+    let lost = archive.chains("native").unwrap().remove(0);
+    fs::remove_file(chain_file(&archive, "native", &lost)).unwrap();
+
+    // The same prefix again (the equal-offset case) and then growth.
+    let restarted = Archive::new(archive.dir.clone());
+    assert!(admit(&restarted, &log, 20_000));
+    assert!(admit(&restarted, &log, 40_000));
+    let chains = restarted.chains("native").unwrap();
+    assert_eq!(chains.len(), 2);
+    assert_eq!(chains[0], lost, "the damaged entry stays");
+    assert_eq!(read_chain(&restarted, "native", &chains[1]), log);
+    assert!(
+        restarted.verify("native").is_err(),
+        "the loss stays visible"
+    );
+}
+
+#[test]
+fn a_chain_corrupted_at_the_same_size_is_not_trusted_or_extended() {
+    let (_scratch, archive) = archive();
+    let log = lines(40_000, 1);
+    assert!(admit(&archive, &log, 20_000));
+    let bad = archive.chains("native").unwrap().remove(0);
+    let file = chain_file(&archive, "native", &bad);
+    let mut bytes = fs::read(&file).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0xff;
+    fs::write(&file, &bytes).unwrap();
+
+    let restarted = Archive::new(archive.dir.clone());
+    // Equal offset and digest: the damaged chain is not taken on trust.
+    assert!(admit(&restarted, &log, 20_000));
+    let chains = restarted.chains("native").unwrap();
+    assert_eq!(chains.len(), 2);
+    assert_eq!(read_chain(&restarted, "native", &chains[1]), &log[..20_000]);
+    // Growth extends the new, verified chain, never the damaged one.
+    assert!(admit(&restarted, &log, 40_000));
+    let chains = restarted.chains("native").unwrap();
+    assert_eq!(chains.len(), 2);
+    assert_eq!(chains[0], bad);
+    assert_eq!(read_chain(&restarted, "native", &chains[1]), log);
+    assert_eq!(fs::read(&file).unwrap(), bytes, "kept as found");
+}
+
+#[test]
+fn growth_after_corruption_does_not_extend_the_damaged_chain() {
+    let (_scratch, archive) = archive();
+    let log = lines(40_000, 1);
+    assert!(admit(&archive, &log, 20_000));
+    let bad = archive.chains("native").unwrap().remove(0);
+    let file = chain_file(&archive, "native", &bad);
+    let mut bytes = fs::read(&file).unwrap();
+    let middle = bytes.len() / 2;
+    bytes[middle] ^= 0xff;
+    fs::write(&file, &bytes).unwrap();
+
+    // Growth is the first thing the restarted instance sees.
+    let restarted = Archive::new(archive.dir.clone());
+    assert!(admit(&restarted, &log, 40_000));
+    let chains = restarted.chains("native").unwrap();
+    assert_eq!(chains.len(), 2);
+    assert_eq!(chains[0], bad, "the manifest entry is unchanged");
+    assert_eq!(fs::read(&file).unwrap(), bytes, "no bytes appended");
+    assert_eq!(read_chain(&restarted, "native", &chains[1]), log);
 }

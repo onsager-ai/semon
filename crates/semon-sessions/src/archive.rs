@@ -2,17 +2,18 @@
 //! rewriting, replacing or pruning a log never loses what it held.
 //!
 //! An [`Archive`] is a directory:
-//! - `index.json` maps each source (a caller-chosen key) to its random
-//!   `archive_source_id`;
-//! - `<archive_source_id>/manifest.json` lists the source's chains in order:
-//!   each chain's length, the SHA-256 of its plain bytes, its
-//!   `redactor_version` and the stored size;
+//! - `sources.log` maps each source (a caller-chosen key) to its random
+//!   `archive_source_id`, one JSON record per line, appended and synced
+//!   under the archive lock before anything is written for the new id;
+//! - `<archive_source_id>/manifest.json` names its source and lists the
+//!   source's chains in order: each chain's length, the SHA-256 of its plain
+//!   bytes, its `redactor_version` and the stored size;
 //! - `<archive_source_id>/<chain_id>.zst` is one chain, the plain bytes
 //!   compressed as zstd frames (plain `zstd -d` reads it back).
 //!
-//! Both kinds of metadata are published by writing a temporary file, syncing
-//! it and renaming it over the old one, then syncing the directory, so a
-//! failure before the rename leaves the last manifest as it was. A chain
+//! A manifest is published by writing a temporary file, syncing it and
+//! renaming it over the old one, then syncing the directory, so a failure
+//! before the rename leaves the last manifest as it was. A chain
 //! file is renamed into place and synced before the manifest that names it,
 //! so a manifest never names a chain that is not durable.
 //!
@@ -27,12 +28,11 @@
 //! The archive only copies: it never touches, shortens or removes a log.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard, PoisonError},
-    time::SystemTime,
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -50,7 +50,7 @@ pub const MIXED_REDACTOR: &str = "mixed";
 /// Recorded for native bytes, which nothing redacted.
 pub const NATIVE_REDACTOR: &str = "none";
 
-const INDEX: &str = "index.json";
+const SOURCES: &str = "sources.log";
 const MANIFEST: &str = "manifest.json";
 const LOCK: &str = ".lock";
 const LEVEL: i32 = 3;
@@ -87,12 +87,17 @@ pub struct Chain {
 
 #[derive(Default, Serialize, Deserialize)]
 struct Manifest {
+    /// The source key this directory belongs to, so a directory can always
+    /// be attributed, whatever happens to `sources.log`.
+    source: String,
     chains: Vec<Chain>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-struct Index {
-    sources: BTreeMap<String, String>,
+/// One line of `sources.log`.
+#[derive(Serialize, Deserialize)]
+struct Record {
+    source: String,
+    id: String,
 }
 
 /// An archive directory. Cheap to create; nothing is made on disk until a
@@ -102,19 +107,17 @@ pub struct Archive {
     known: Mutex<Known>,
 }
 
-/// What this instance knows of `index.json`. An id never changes once
-/// assigned, so a hit is always right; a miss reads the file again only if
-/// it changed since it was last read.
+/// What this instance knows of the archive. An id never changes once
+/// assigned, so a hit is always right; a miss reads the new tail of
+/// `sources.log`.
 #[derive(Default)]
 struct Known {
     sources: BTreeMap<String, String>,
-    /// Length and modified time of `index.json` when it was last read or
-    /// written; `None` if it did not exist.
-    stamp: Option<(u64, SystemTime)>,
-    loaded: bool,
-    /// Sources given an id by [`Archive::admit`] that `index.json` does not
-    /// list yet; [`Archive::flush`] lists them.
-    unpublished: BTreeSet<String>,
+    /// Bytes of `sources.log` read: up to the end of its last whole line.
+    read: u64,
+    /// Chains read back whole in this process, by id, with the stored size
+    /// they had then; one that changed size is read back again.
+    verified: BTreeMap<String, u64>,
 }
 
 /// Holds the archive's advisory lock until dropped.
@@ -126,14 +129,6 @@ impl Archive {
             dir: dir.into(),
             known: Mutex::default(),
         }
-    }
-
-    /// Lists the sources that [`Archive::admit`] gave ids in `index.json`,
-    /// in one write. Call it once after a batch of admissions: a source
-    /// that is not listed yet is found again only by this instance.
-    pub fn flush(&self) -> io::Result<()> {
-        let _guard = self.lock()?;
-        self.publish_index()
     }
 
     /// The source's chains, oldest first; none for a source never written.
@@ -177,7 +172,7 @@ impl Archive {
         redactor_version: &str,
     ) -> io::Result<Option<Chain>> {
         let _guard = self.lock()?;
-        let (dir, mut manifest) = self.open_source(source, true)?;
+        let (dir, mut manifest) = self.open_source(source)?;
         let chain_id = random_id()?;
         let temporary = dir.join(format!("{chain_id}.zst.tmp"));
         let written = (|| -> io::Result<(u64, Hasher, u64)> {
@@ -259,8 +254,13 @@ impl Archive {
             return Ok(true);
         }
         let _guard = self.lock()?;
-        let (dir, mut manifest) = self.open_source(source, false)?;
-        if let Some(held) = manifest.chains.last().cloned() {
+        let (dir, mut manifest) = self.open_source(source)?;
+        // Only a chain that reads back whole is trusted or extended. A
+        // missing or damaged one stays as evidence and the log's consumed
+        // prefix starts a new chain beside it.
+        if let Some(held) = manifest.chains.last().cloned()
+            && self.trusted(&dir, &held)
+        {
             if held.length == offset && held.sha256 == hex(prefix) {
                 return Ok(true);
             }
@@ -281,7 +281,13 @@ impl Archive {
                 let checked = copy_range(log, resume, held.length, offset, &mut io::sink());
                 match checked {
                     Ok((hasher, mark)) if hasher.digest() == *prefix && agrees(&held, mark) => {
-                        return extend(&dir, &mut manifest, &held, resume, log, offset, prefix);
+                        let extended =
+                            extend(&dir, &mut manifest, &held, resume, log, offset, prefix)?;
+                        if extended {
+                            let stored = manifest.chains.last().map(|c| c.stored_bytes);
+                            self.verified(&held.chain_id, stored);
+                        }
+                        return Ok(extended);
                     }
                     Ok(_) => {}
                     Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
@@ -289,29 +295,69 @@ impl Archive {
                 }
             }
         }
-        begin(&dir, &mut manifest, log, offset, prefix)
+        let begun = begin(&dir, &mut manifest, log, offset, prefix)?;
+        if begun && let Some(chain) = manifest.chains.last() {
+            self.verified(&chain.chain_id, Some(chain.stored_bytes));
+        }
+        Ok(begun)
+    }
+
+    /// Whether `chain` reads back whole: checked once per process for each
+    /// stored size it has.
+    fn trusted(&self, dir: &Path, chain: &Chain) -> bool {
+        if self.known().verified.get(&chain.chain_id) == Some(&chain.stored_bytes) {
+            return true;
+        }
+        let sound = check_chain(dir, chain).is_ok();
+        self.verified(&chain.chain_id, sound.then_some(chain.stored_bytes));
+        sound
+    }
+
+    fn verified(&self, chain_id: &str, stored: Option<u64>) {
+        let mut known = self.known();
+        match stored {
+            Some(stored) => known.verified.insert(chain_id.to_owned(), stored),
+            None => known.verified.remove(chain_id),
+        };
     }
 
     fn known(&self) -> MutexGuard<'_, Known> {
         self.known.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Reads `index.json` into `known` unless it is as it was last read.
+    /// Reads what was appended to `sources.log` since it was last read.
+    /// A torn final line (a crash mid-append) is ignored.
     fn refresh(&self, known: &mut Known) -> io::Result<()> {
-        let path = self.dir.join(INDEX);
-        let stamp = fs::metadata(&path)
-            .ok()
-            .and_then(|meta| Some((meta.len(), meta.modified().ok()?)));
-        if known.loaded && known.stamp == stamp {
-            return Ok(());
+        let mut file = match crate::open_input(&self.dir.join(SOURCES)) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        if file.metadata()?.len() < known.read {
+            *known = Known::default();
         }
-        let disk: Index = read_json(&path)?;
-        for (source, id) in disk.sources {
-            known.unpublished.remove(&source);
-            known.sources.insert(source, id);
+        file.seek(SeekFrom::Start(known.read))?;
+        let mut bytes = Vec::new();
+        file.take(METADATA_MAX + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > METADATA_MAX {
+            return Err(invalid("an oversized archive source log"));
         }
-        known.stamp = stamp;
-        known.loaded = true;
+        let whole = bytes
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |at| at + 1);
+        for line in bytes[..whole]
+            .split(|byte| *byte == b'\n')
+            .filter(|l| !l.is_empty())
+        {
+            let record: Record = serde_json::from_slice(line)
+                .map_err(|_| invalid("an unreadable archive source log"))?;
+            if !is_id(&record.id) {
+                return Err(invalid("an archive source id that is not an id"));
+            }
+            known.sources.entry(record.source).or_insert(record.id);
+        }
+        known.read += whole as u64;
         Ok(())
     }
 
@@ -321,63 +367,69 @@ impl Archive {
         if !known.sources.contains_key(source) {
             self.refresh(&mut known)?;
         }
-        let Some(id) = known.sources.get(source) else {
-            return Ok(None);
-        };
-        if !is_id(id) {
-            return Err(invalid("an archive source id that is not an id"));
-        }
-        Ok(Some(id.clone()))
+        Ok(known.sources.get(source).cloned())
     }
 
-    /// The source's directory and manifest, made if they are new (and then
-    /// listed in `index.json` at once when `list` is set, else by
-    /// [`Archive::flush`]). Holds the archive lock.
-    fn open_source(&self, source: &str, list: bool) -> io::Result<(PathBuf, Manifest)> {
+    /// The source's directory and manifest. A new source is recorded in
+    /// `sources.log`, durably, before its directory is made, so nothing is
+    /// ever written under an id that is not recorded. Holds the archive lock,
+    /// so another instance's allocation is found and reused.
+    fn open_source(&self, source: &str) -> io::Result<(PathBuf, Manifest)> {
         let id = match self.lookup(source)? {
             Some(id) => id,
-            None => {
-                let id = random_id()?;
-                make_dir(&self.dir.join(&id))?;
-                let mut known = self.known();
-                known.sources.insert(source.to_owned(), id.clone());
-                known.unpublished.insert(source.to_owned());
-                drop(known);
-                if list {
-                    self.publish_index()?;
-                }
-                id
-            }
+            None => self.register(source)?,
         };
         let dir = self.dir.join(id);
-        let manifest = read_manifest(&dir)?;
+        let mut manifest = read_manifest(&dir)?;
+        if manifest.source.is_empty() {
+            // A new directory, or one a crash left before its manifest.
+            make_dir(&dir)?;
+            sync_dir(&self.dir)?;
+            manifest.source = source.to_owned();
+            publish(&dir, MANIFEST, &manifest)?;
+        } else if manifest.source != source {
+            return Err(invalid(
+                "an archive directory that belongs to another source",
+            ));
+        }
         Ok((dir, manifest))
     }
 
-    /// Writes the unlisted sources into `index.json`, merged with what is
-    /// there. Holds the archive lock.
-    fn publish_index(&self) -> io::Result<()> {
+    /// Appends a new id for `source` to `sources.log` and syncs it.
+    fn register(&self, source: &str) -> io::Result<String> {
+        #[cfg(test)]
+        if FAIL_REGISTER.with(std::cell::Cell::take) {
+            return Err(io::Error::other("an injected registration failure"));
+        }
+        let id = random_id()?;
+        let mut line = serde_json::to_vec(&Record {
+            source: source.to_owned(),
+            id: id.clone(),
+        })
+        .map_err(io::Error::other)?;
+        line.push(b'\n');
+        let path = self.dir.join(SOURCES);
+        let created = !path.exists();
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&path)?;
         let mut known = self.known();
-        if known.unpublished.is_empty() {
-            return Ok(());
+        // Cut off a torn final line, then append.
+        file.set_len(known.read)?;
+        file.seek(SeekFrom::Start(known.read))?;
+        file.write_all(&line)?;
+        file.sync_data()?;
+        if created {
+            sync_dir(&self.dir)?;
         }
-        let mut index: Index = read_json(&self.dir.join(INDEX))?;
-        for source in &known.unpublished {
-            if let Some(id) = known.sources.get(source) {
-                index
-                    .sources
-                    .entry(source.clone())
-                    .or_insert_with(|| id.clone());
-            }
-        }
-        publish(&self.dir, INDEX, &index)?;
-        known.stamp = fs::metadata(self.dir.join(INDEX))
-            .ok()
-            .and_then(|meta| Some((meta.len(), meta.modified().ok()?)));
-        known.sources = index.sources;
-        known.unpublished.clear();
-        known.loaded = true;
-        Ok(())
+        known.read += line.len() as u64;
+        known.sources.insert(source.to_owned(), id.clone());
+        Ok(id)
     }
 
     /// Takes the archive's advisory lock, making the directory if needed.
@@ -604,6 +656,9 @@ fn read_some(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
 /// writes, so a damaged or hostile manifest cannot name another path.
 fn read_manifest(dir: &Path) -> io::Result<Manifest> {
     let manifest: Manifest = read_json(&dir.join(MANIFEST))?;
+    if manifest.source.is_empty() && !manifest.chains.is_empty() {
+        return Err(invalid("an archive manifest that is not what was written"));
+    }
     let mut seen = std::collections::BTreeSet::new();
     for chain in &manifest.chains {
         let sound = is_id(&chain.chain_id)
@@ -703,6 +758,8 @@ fn publish(dir: &Path, name: &str, value: &impl Serialize) -> io::Result<()> {
 
 #[cfg(test)]
 thread_local! {
+    /// Fails the next [`Archive::register`] before it writes.
+    static FAIL_REGISTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Fails the next [`publish`] after its temporary file is synced and
     /// before the rename, as a crash there would.
     static FAIL_BEFORE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
