@@ -624,7 +624,7 @@ fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{DIM_REPO, FACT_LABEL, FACT_SESSION, FACT_STEP};
+    use crate::schema::{DIM_PRICE, DIM_REPO, FACT_LABEL, FACT_SESSION, FACT_STEP};
     use crate::testutil::{
         FACT_TABLES, TestClock, all_rows, live_steps, replace_column, rows_of, sample, update,
         update_all,
@@ -644,6 +644,27 @@ mod tests {
             files.push((table.to_owned(), fs::read(path).unwrap()));
         }
         files
+    }
+
+    #[test]
+    fn rejects_invalid_enum_before_writing_generation() {
+        for (table, column, invalid) in [
+            (&FACT_SESSION, "usage_owner", "Exclusive"),
+            (&DIM_PRICE, "unit", "token"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = open(dir.path(), &TestClock::new(0));
+            let batch = sample(table, &[(S1, 1)], "a", 0);
+            let batch = replace_column(&batch, column, Arc::new(StringArray::from(vec![invalid])));
+            let update = Update {
+                tables: vec![TableBatch { table, batch }],
+                touched_sessions: vec![S1.to_owned()],
+                ..Update::default()
+            };
+            assert!(store.publish(&update).is_err());
+            assert_eq!(store.manifest().generation, 0);
+            assert!(!store.analytics_dir().join(table.name).exists());
+        }
     }
 
     #[test]

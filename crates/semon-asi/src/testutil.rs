@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use arrow::array::{
-    ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
+    Array, ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
 };
 use arrow::record_batch::RecordBatch;
 
@@ -73,9 +73,13 @@ pub(crate) fn sample(
                 Type::Float => Arc::new(Float64Array::from(vec![1.5; rows.len()])),
                 Type::Boolean => Arc::new(BooleanArray::from(vec![true; rows.len()])),
                 Type::Timestamp => Arc::new(
-                    TimestampMillisecondArray::from_iter_values(
-                        rows.iter().map(|(_, row)| ts_base + *row as i64),
-                    )
+                    TimestampMillisecondArray::from_iter(rows.iter().map(|(_, row)| {
+                        if column.nullable && row % 2 == 0 {
+                            None
+                        } else {
+                            Some(ts_base + *row as i64)
+                        }
+                    }))
                     .with_timezone("UTC"),
                 ),
             }
@@ -182,6 +186,7 @@ pub(crate) fn rows_of(
                 for column in batch.columns() {
                     // Formatting a time zone needs chrono-tz; the raw milliseconds do.
                     match column.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                        Some(times) if times.is_null(row) => text.push_str("<null>"),
                         Some(times) => text.push_str(&times.value(row).to_string()),
                         None => text.push_str(&array_value_to_string(column, row).unwrap()),
                     }
