@@ -27,11 +27,12 @@
 //! The archive only copies: it never touches, shortens or removes a log.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
-    sync::{Mutex, PoisonError},
+    sync::{Mutex, MutexGuard, PoisonError},
+    time::SystemTime,
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -98,9 +99,22 @@ struct Index {
 /// chain is written.
 pub struct Archive {
     dir: PathBuf,
-    /// Source ids read from `index.json` so far. An id never changes once
-    /// assigned, so a hit is always right; a miss reads the file again.
-    known: Mutex<BTreeMap<String, String>>,
+    known: Mutex<Known>,
+}
+
+/// What this instance knows of `index.json`. An id never changes once
+/// assigned, so a hit is always right; a miss reads the file again only if
+/// it changed since it was last read.
+#[derive(Default)]
+struct Known {
+    sources: BTreeMap<String, String>,
+    /// Length and modified time of `index.json` when it was last read or
+    /// written; `None` if it did not exist.
+    stamp: Option<(u64, SystemTime)>,
+    loaded: bool,
+    /// Sources given an id by [`Archive::admit`] that `index.json` does not
+    /// list yet; [`Archive::flush`] lists them.
+    unpublished: BTreeSet<String>,
 }
 
 /// Holds the archive's advisory lock until dropped.
@@ -112,6 +126,14 @@ impl Archive {
             dir: dir.into(),
             known: Mutex::default(),
         }
+    }
+
+    /// Lists the sources that [`Archive::admit`] gave ids in `index.json`,
+    /// in one write. Call it once after a batch of admissions: a source
+    /// that is not listed yet is found again only by this instance.
+    pub fn flush(&self) -> io::Result<()> {
+        let _guard = self.lock()?;
+        self.publish_index()
     }
 
     /// The source's chains, oldest first; none for a source never written.
@@ -155,7 +177,7 @@ impl Archive {
         redactor_version: &str,
     ) -> io::Result<Option<Chain>> {
         let _guard = self.lock()?;
-        let (dir, mut manifest) = self.open_source(source)?;
+        let (dir, mut manifest) = self.open_source(source, true)?;
         let chain_id = random_id()?;
         let temporary = dir.join(format!("{chain_id}.zst.tmp"));
         let written = (|| -> io::Result<(u64, Hasher, u64)> {
@@ -237,7 +259,7 @@ impl Archive {
             return Ok(true);
         }
         let _guard = self.lock()?;
-        let (dir, mut manifest) = self.open_source(source)?;
+        let (dir, mut manifest) = self.open_source(source, false)?;
         if let Some(held) = manifest.chains.last().cloned() {
             if held.length == offset && held.sha256 == hex(prefix) {
                 return Ok(true);
@@ -270,13 +292,36 @@ impl Archive {
         begin(&dir, &mut manifest, log, offset, prefix)
     }
 
+    fn known(&self) -> MutexGuard<'_, Known> {
+        self.known.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Reads `index.json` into `known` unless it is as it was last read.
+    fn refresh(&self, known: &mut Known) -> io::Result<()> {
+        let path = self.dir.join(INDEX);
+        let stamp = fs::metadata(&path)
+            .ok()
+            .and_then(|meta| Some((meta.len(), meta.modified().ok()?)));
+        if known.loaded && known.stamp == stamp {
+            return Ok(());
+        }
+        let disk: Index = read_json(&path)?;
+        for (source, id) in disk.sources {
+            known.unpublished.remove(&source);
+            known.sources.insert(source, id);
+        }
+        known.stamp = stamp;
+        known.loaded = true;
+        Ok(())
+    }
+
     /// The source's archive id, if it has one.
     fn lookup(&self, source: &str) -> io::Result<Option<String>> {
-        let mut known = self.known.lock().unwrap_or_else(PoisonError::into_inner);
-        if !known.contains_key(source) {
-            *known = read_json::<Index>(&self.dir.join(INDEX))?.sources;
+        let mut known = self.known();
+        if !known.sources.contains_key(source) {
+            self.refresh(&mut known)?;
         }
-        let Some(id) = known.get(source) else {
+        let Some(id) = known.sources.get(source) else {
             return Ok(None);
         };
         if !is_id(id) {
@@ -285,25 +330,54 @@ impl Archive {
         Ok(Some(id.clone()))
     }
 
-    /// The source's directory and manifest, made if they are new. Holds the
-    /// archive lock.
-    fn open_source(&self, source: &str) -> io::Result<(PathBuf, Manifest)> {
+    /// The source's directory and manifest, made if they are new (and then
+    /// listed in `index.json` at once when `list` is set, else by
+    /// [`Archive::flush`]). Holds the archive lock.
+    fn open_source(&self, source: &str, list: bool) -> io::Result<(PathBuf, Manifest)> {
         let id = match self.lookup(source)? {
             Some(id) => id,
             None => {
                 let id = random_id()?;
                 make_dir(&self.dir.join(&id))?;
-                sync_dir(&self.dir)?;
-                let mut index: Index = read_json(&self.dir.join(INDEX))?;
-                index.sources.insert(source.to_owned(), id.clone());
-                publish(&self.dir, INDEX, &index)?;
-                *self.known.lock().unwrap_or_else(PoisonError::into_inner) = index.sources;
+                let mut known = self.known();
+                known.sources.insert(source.to_owned(), id.clone());
+                known.unpublished.insert(source.to_owned());
+                drop(known);
+                if list {
+                    self.publish_index()?;
+                }
                 id
             }
         };
         let dir = self.dir.join(id);
         let manifest = read_manifest(&dir)?;
         Ok((dir, manifest))
+    }
+
+    /// Writes the unlisted sources into `index.json`, merged with what is
+    /// there. Holds the archive lock.
+    fn publish_index(&self) -> io::Result<()> {
+        let mut known = self.known();
+        if known.unpublished.is_empty() {
+            return Ok(());
+        }
+        let mut index: Index = read_json(&self.dir.join(INDEX))?;
+        for source in &known.unpublished {
+            if let Some(id) = known.sources.get(source) {
+                index
+                    .sources
+                    .entry(source.clone())
+                    .or_insert_with(|| id.clone());
+            }
+        }
+        publish(&self.dir, INDEX, &index)?;
+        known.stamp = fs::metadata(self.dir.join(INDEX))
+            .ok()
+            .and_then(|meta| Some((meta.len(), meta.modified().ok()?)));
+        known.sources = index.sources;
+        known.unpublished.clear();
+        known.loaded = true;
+        Ok(())
     }
 
     /// Takes the archive's advisory lock, making the directory if needed.

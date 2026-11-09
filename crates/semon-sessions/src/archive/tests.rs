@@ -171,6 +171,13 @@ fn admit_extends_one_chain_with_the_consumed_prefix() {
     }
     let chain = archive.chains("native").unwrap().remove(0);
     assert_eq!(read_chain(&archive, "native", &chain), log);
+    // Another instance finds the source once the index is flushed.
+    archive.flush().unwrap();
+    let other = Archive::new(archive.dir.clone());
+    assert_eq!(
+        other.chains("native").unwrap(),
+        std::slice::from_ref(&chain)
+    );
     // The index may be behind the archive (it was rebuilt): nothing changes.
     assert!(admit(&archive, &log, 5_000));
     assert_eq!(archive.chains("native").unwrap(), [chain]);
