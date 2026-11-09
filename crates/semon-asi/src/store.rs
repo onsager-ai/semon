@@ -546,10 +546,13 @@ fn read_live_map_file(path: &Path) -> Result<HashMap<String, i64>> {
 }
 
 fn create_durable_dir(path: &Path) -> Result<()> {
-    if let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    {
+    if let Some(parent) = path.parent() {
+        // A relative single-component path lives in the working directory.
+        let parent = if parent.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            parent
+        };
         if !parent.exists() {
             create_durable_dir(parent)?;
         }
@@ -603,6 +606,7 @@ fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
+        let mut removed = false;
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name();
@@ -612,7 +616,13 @@ fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
                 .is_some_and(|generation| generation > committed)
             {
                 fs::remove_file(entry.path())?;
+                removed = true;
             }
+        }
+        // The removals must be durable before this generation number is reused,
+        // or a crash could bring back a file that then looks committed.
+        if removed {
+            sync_dir(&analytics.join(dir))?;
         }
     }
     Ok(())
