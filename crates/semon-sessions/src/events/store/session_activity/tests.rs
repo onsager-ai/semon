@@ -2,7 +2,9 @@ use super::super::tests::{
     catalog_fixture_projection, catalog_native_fixture, catalog_write, opened, scratch,
 };
 use super::*;
-use crate::events::session_activity::{ActivityStepId, Ownership, TimedInput, UsageOwner};
+use crate::events::session_activity::{
+    classify::Change, ActivityStepId, Ownership, TimedInput, UsageOwner,
+};
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
     page(
@@ -149,19 +151,23 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     let missing_source = missing_path.to_string_lossy().into_owned();
     {
         let projection = rows[row_index].session_activity.as_mut().unwrap();
-        let missing_step = projection
-            .activity
-            .steps
-            .iter()
-            .find(|step| step.position.source == missing_source)
-            .expect("the cleared file contributes its own usage step");
-        let missing_step_id = missing_step.id.clone();
-        let missing_offset = missing_step.position.offset;
+        assert!(
+            projection
+                .activity
+                .steps
+                .iter()
+                .any(|step| step.position.source == missing_source),
+            "the cleared file contributes its own usage step"
+        );
         assert!(!projection.activity.compactions.is_empty());
+        // Change facts point to their tool result record, not the usage step.
         assert!(projection.activity.facts.iter().any(|fact| {
             fact.position.source == missing_source
-                && fact.step_id.as_ref() == Some(&missing_step_id)
-                && fact.position.offset == missing_offset
+                && matches!(
+                    &fact.change,
+                    Change::Commit { branch, sha }
+                        if branch == "main" && sha == "abc1234"
+                )
         }));
     }
 
