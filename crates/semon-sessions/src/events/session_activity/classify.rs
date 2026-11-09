@@ -972,7 +972,7 @@ fn input_value(input: &Value) -> Option<Cow<'_, Value>> {
     }
 }
 
-pub(super) fn tool_evidence(name: &str, input: &Value) -> ToolCallEvidence {
+pub(crate) fn tool_evidence(name: &str, input: &Value) -> ToolCallEvidence {
     let tool = name
         .strip_prefix("functions.")
         .or_else(|| name.strip_prefix("tools."))
