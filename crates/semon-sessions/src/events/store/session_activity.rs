@@ -57,6 +57,29 @@ impl Projection {
         input_events: Vec<activity::TimedInput>,
         table: Arc<crate::pricing::EffectiveTable>,
     ) -> Self {
+        Self::derive_with_copied(
+            key,
+            usage,
+            shared,
+            signals,
+            observations,
+            input_events,
+            &BTreeSet::new(),
+            table,
+        )
+    }
+
+    pub(crate) fn derive_with_copied(
+        key: String,
+        usage: Vec<UsageStep>,
+        shared: &crate::claude_usage::Shared,
+        signals: Vec<(String, Signal)>,
+        observations: Vec<activity::classify::LocatedObservation>,
+        input_events: Vec<activity::TimedInput>,
+        // Native event positions that Builder resolved as continued-in copies.
+        copied_observations: &BTreeSet<(String, u64)>,
+        table: Arc<crate::pricing::EffectiveTable>,
+    ) -> Self {
         let mut inputs = BTreeMap::new();
         let mut turn_ids = BTreeMap::new();
         for row in &usage {
@@ -77,7 +100,14 @@ impl Projection {
         }
         let mut activity = activity::derive(key, usage, shared, signals, table);
         let observations = activity::apply_observations(&mut activity, observations);
-        let facts = derive_facts(&activity, &inputs, &turn_ids, &observations, &input_events);
+        let facts = derive_facts(
+            &activity,
+            &inputs,
+            &turn_ids,
+            &observations,
+            &input_events,
+            copied_observations,
+        );
         Self {
             activity,
             inputs,
@@ -114,14 +144,19 @@ fn model_ms(
     step: &ActivityStep,
     observations: &[activity::classify::LocatedObservation],
     input_events: &[activity::TimedInput],
+    copied_observations: &BTreeSet<(String, u64)>,
 ) -> Option<u64> {
     observations
         .iter()
         .filter(|row| {
-            row.position.source == step.position.source
+            !copied_observations.contains(&(row.position.source.clone(), row.position.offset))
+                && row.position.source == step.position.source
                 && row.position.offset < step.position.offset
         })
-        .filter_map(|row| row.result_timestamp)
+        .filter_map(|row| match row.result_offset {
+            Some(offset) if offset < step.position.offset => row.result_timestamp,
+            _ => None,
+        })
         .chain(
             input_events
                 .iter()
@@ -142,6 +177,7 @@ fn derive_facts(
     turn_ids: &BTreeMap<ActivityStepId, Option<String>>,
     observations: &[activity::classify::LocatedObservation],
     input_events: &[activity::TimedInput],
+    copied_observations: &BTreeSet<(String, u64)>,
 ) -> BTreeMap<ActivityStepId, activity::StepFacts> {
     let mut exact = BTreeMap::new();
     let mut sources: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
@@ -157,6 +193,9 @@ fn derive_facts(
     }
     let mut calls: Vec<Vec<activity::ToolCallFact>> = vec![Vec::new(); activity.steps.len()];
     for row in observations {
+        if copied_observations.contains(&(row.position.source.clone(), row.position.offset)) {
+            continue;
+        }
         let Some(tool) = &row.tool else {
             continue;
         };
@@ -199,7 +238,7 @@ fn derive_facts(
                     turn_id,
                     usage_owner,
                     billing: billing(usage),
-                    model_ms: model_ms(step, observations, input_events),
+                    model_ms: model_ms(step, observations, input_events, copied_observations),
                     tool_ms,
                     tool_calls: std::mem::take(&mut calls[index]),
                 },
@@ -580,7 +619,10 @@ pub(crate) fn page(
 /// Read all persisted StepFacts under the same source, rules, price and
 /// generation admission as activity pages. This crate-internal reader is for
 /// the analytics writer; public query and mirror surfaces must use `items`.
-#[expect(dead_code, reason = "kept crate-internal for the analytics writer")]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "kept crate-internal for the analytics writer")
+)]
 pub(crate) fn step_facts(
     c: &Connection,
     row: &crate::model::summary::CatalogRow,
@@ -591,12 +633,15 @@ pub(crate) fn step_facts(
         return Ok(None);
     };
     let mut statement = c.prepare(
-        "SELECT ordinal,metadata FROM session_activity_steps WHERE session_key=?1 AND generation=?2 ORDER BY ordinal",
+        "SELECT ordinal,metadata,pricing_fingerprint FROM session_activity_steps WHERE session_key=?1 AND generation=?2 ORDER BY ordinal",
     )?;
     let mut records = statement.query(params![row.key, generation])?;
     let mut facts = Vec::new();
     while let Some(record) = records.next()? {
         crate::selected_read::row(record, 256)?;
+        if record.get::<_, String>(2)? != price.fingerprint {
+            return Ok(None);
+        }
         let ordinal =
             u64::try_from(record.get::<_, i64>(0)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
         if ordinal != facts.len() as u64 {

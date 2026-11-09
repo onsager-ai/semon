@@ -135,6 +135,60 @@ fn activity_exact_copied_claude_records_remain_shared_observations() {
 }
 
 #[test]
+fn activity_copy_resume_tool_calls_are_counted_once_in_step_facts() {
+    let home = Home::new();
+    let history = [
+        uuid(human("old", ts(0, 0), "synthetic prompt"), "prompt-record"),
+        uuid(
+            assistant(
+                "old",
+                ts(0, 1),
+                vec![tool("copied-call", "Bash", json!({"command":"git status"}))],
+            ),
+            "tool-record",
+        ),
+        uuid(
+            result(
+                "old",
+                ts(0, 2),
+                "copied-call",
+                "synthetic output",
+                false,
+                json!({"exit_code":0,"output":"synthetic output"}),
+            ),
+            "result-record",
+        ),
+    ];
+    let mut original = history.to_vec();
+    original.push(json!({
+        "type":"continued-in",
+        "continuedInSessionId":"new",
+        "sessionId":"old",
+        "timestamp":ts(0, 3)
+    }));
+    home.top("old", &original);
+    let mut resumed = history.to_vec();
+    resumed.push(uuid(human("new", ts(0, 4), "after resume"), "next-prompt"));
+    home.top("new", &resumed);
+    home.build_query();
+
+    let (_, rows) = read_catalog(&home);
+    let row = rows
+        .iter()
+        .find(|row| row.harness == "claude" && row.sources.len() == 2)
+        .unwrap();
+    let page = activity(&home, &row.key);
+    assert_eq!(page.total, 1);
+    let c = rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let facts = session_activity::step_facts(&c, row, &page.generation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].2.tool_calls.len(), 1);
+    assert_eq!(facts[0].2.tool_ms, Some(60_000));
+}
+
+#[test]
 fn activity_codex_uses_only_accepted_native_response_facts_across_restart() {
     let home = Home::new();
     let payload = json!({"thread_id":"native","session_id":"native","turn_id":"turn","response_id":"response","usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38,"cached_input_tokens":3,"cache_write_input_tokens":2,"reasoning_output_tokens":0}});

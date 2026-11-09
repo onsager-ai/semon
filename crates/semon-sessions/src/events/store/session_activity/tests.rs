@@ -113,6 +113,16 @@ fn activity_pages_require_exact_sources_generation_rules_and_prices() {
         Outcome::Written
     );
     assert_eq!(read(&store.connection, row), initial);
+    store
+        .connection
+        .execute(
+            "UPDATE session_activity_steps SET pricing_fingerprint='mixed-price' WHERE session_key=?1 AND generation=?2 AND ordinal=0",
+            params![row.key, initial.generation],
+        )
+        .unwrap();
+    assert!(step_facts(&store.connection, row, &initial.generation)
+        .unwrap()
+        .is_none());
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
@@ -405,6 +415,22 @@ fn step_facts_keep_private_tool_details_and_usage_ownership() {
                     &serde_json::json!({"command":"git status"}),
                 )),
                 observation: shell,
+            },
+            LocatedObservation {
+                position: SourcePosition {
+                    source: step.position.source.clone(),
+                    offset: 18,
+                },
+                timestamp: Some(18),
+                result_timestamp: Some(40),
+                result_offset: Some(25),
+                tool: None,
+                observation: classify::call(
+                    "Agent",
+                    &serde_json::json!({}),
+                    None,
+                    "future".into(),
+                ),
             },
         ],
         vec![TimedInput {

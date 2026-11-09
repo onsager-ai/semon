@@ -553,6 +553,48 @@ fn scanner_capture_resolves_exact_ids_and_retains_no_bodies() {
 }
 
 #[test]
+fn apply_patch_evidence_handles_empty_malformed_and_native_custom_tool_input() {
+    for patch in ["*** Begin Patch\n*** End Patch\n", "malformed patch"] {
+        let input = json!({"patch": patch});
+        let evidence = tool_evidence("apply_patch", &input);
+        assert_eq!(evidence.target_path, None);
+        assert_eq!(
+            call("apply_patch", &input, None, "call".into()).commands,
+            [Command::Mutation]
+        );
+    }
+
+    let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch";
+    let record = json!({
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "call_id": "patch-call",
+            "name": "apply_patch",
+            "input": patch
+        }
+    });
+    let mut index = FileIndex::default();
+    crate::events::codex(&mut index, &record, 0);
+    capture(
+        &mut index,
+        "codex",
+        &record,
+        0,
+        &serde_json::to_vec(&record).unwrap(),
+    );
+    let event = index.events.iter().find(|event| event.k == Kind::Tool).unwrap();
+    assert_eq!(
+        event.activity_tool.as_ref().unwrap().target_path.as_deref(),
+        Some("src/lib.rs")
+    );
+    assert_eq!(
+        event.activity_observation.as_ref().unwrap().commands,
+        [Command::Mutation]
+    );
+}
+
+#[test]
 fn codex_custom_exec_nested_wait_is_captured_without_command_guessing() {
     assert!(crate::events::activity_wait_source(
         "console.log(await tools.wait_agent({ids:['synthetic']}))"

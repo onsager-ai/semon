@@ -972,12 +972,23 @@ fn input_value(input: &Value) -> Option<Cow<'_, Value>> {
     }
 }
 
+fn single_patch_target(patch: &str) -> Option<&str> {
+    let mut targets = patch.lines().filter_map(|line| {
+        line.strip_prefix("*** Update File: ")
+            .or_else(|| line.strip_prefix("*** Add File: "))
+            .or_else(|| line.strip_prefix("*** Delete File: "))
+    });
+    let target = targets.next()?;
+    targets.next().is_none().then_some(target)
+}
+
 pub(crate) fn tool_evidence(name: &str, input: &Value) -> ToolCallEvidence {
     let tool = name
         .strip_prefix("functions.")
         .or_else(|| name.strip_prefix("tools."))
         .unwrap_or(name)
         .to_owned();
+    let raw_patch = input.as_str();
     let input = input_value(input).unwrap_or(Cow::Owned(Value::Null));
     let target_path = match tool.as_str() {
         "Read" | "read_file" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => input
@@ -990,16 +1001,11 @@ pub(crate) fn tool_evidence(name: &str, input: &Value) -> ToolCallEvidence {
             .or_else(|| input.get("path"))
             .and_then(Value::as_str)
             .or_else(|| {
-                let patch = input.get("patch").and_then(Value::as_str)?;
-                let targets: Vec<_> = patch
-                    .lines()
-                    .filter_map(|line| {
-                        line.strip_prefix("*** Update File: ")
-                            .or_else(|| line.strip_prefix("*** Add File: "))
-                            .or_else(|| line.strip_prefix("*** Delete File: "))
-                    })
-                    .collect();
-                (targets.len() == 1).then_some(targets[0])
+                input
+                    .get("patch")
+                    .and_then(Value::as_str)
+                    .and_then(single_patch_target)
+                    .or_else(|| raw_patch.and_then(single_patch_target))
             }),
         _ => None,
     }
@@ -1754,6 +1760,8 @@ pub(crate) fn capture(
                             }))
                             .unwrap_or(Value::Null);
                         &decoded_input
+                    } else if field(payload, "type") == Some("custom_tool_call") {
+                        payload.get("input").unwrap_or(&Value::Null)
                     } else {
                         payload.get("arguments").unwrap_or(&Value::Null)
                     };
