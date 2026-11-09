@@ -26,7 +26,7 @@
     "coverage": {
       "timing": { "known_steps": 2, "unknown_steps": 1 },
       "classifier": {
-        "rules_version": 9,
+        "rules_version": 10,
         "levers_not_computed": ["TaskSpecification"],
         "activities_not_computed": ["Recover"],
         "triggers_not_computed": ["InstructionChange", "MissingInput"],

@@ -246,7 +246,7 @@ fn activity_codex_tool_search_keeps_native_facts_without_classifier_evidence() {
     let usage = |response: &str| {
         json!({
             "thread_id":"native","session_id":"native","turn_id":"turn","response_id":response,
-            "usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38,"cached_input_tokens":3,"reasoning_output_tokens":0}
+            "usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38,"cached_input_tokens":3,"cache_write_input_tokens":0,"reasoning_output_tokens":0}
         })
     };
     home.codex(
@@ -283,6 +283,14 @@ fn activity_codex_tool_search_keeps_native_facts_without_classifier_evidence() {
     let (_, rows) = read_catalog(&home);
     let row = rows.iter().find(|row| row.key == "native").unwrap();
     let c = rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let accepted: i64 = c
+        .query_row(
+            "SELECT count(*) FROM native_usage_facts WHERE model_outcome='accepted'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(accepted, 2);
     let changes = session_activity::items(
         &c,
         row,
@@ -339,7 +347,7 @@ fn activity_completion_only_connectors_keep_outcomes_without_inventing_duration(
                     codex_line(ts(0, 2), "event_msg", json!({"type":"item_completed","item":item})),
                     codex_line(ts(0, 3), "token_usage_record", json!({
                         "thread_id":"native","session_id":"native","turn_id":"turn","response_id":"response",
-                        "usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38,"cached_input_tokens":3,"reasoning_output_tokens":0}
+                        "usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38,"cached_input_tokens":3,"cache_write_input_tokens":0,"reasoning_output_tokens":0}
                     })),
                 ],
             );
@@ -352,6 +360,14 @@ fn activity_completion_only_connectors_keep_outcomes_without_inventing_duration(
             let row = rows.iter().find(|row| row.key == "native").unwrap();
             let c =
                 rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+            let accepted: i64 = c
+                .query_row(
+                    "SELECT count(*) FROM native_usage_facts WHERE model_outcome='accepted'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(accepted, 1);
             let facts = session_activity::step_facts(&c, row, &page.generation)
                 .unwrap()
                 .unwrap();

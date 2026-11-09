@@ -2508,7 +2508,7 @@ impl<'a> Builder<'a> {
                 file.summary
                     .events
                     .iter()
-                    .filter(|event| event.k == events::Kind::U)
+                    .filter(|event| matches!(event.k, events::Kind::U | events::Kind::Ask))
                     .map(|event| events::session_activity::TimedInput {
                         position: SourcePosition {
                             source: path.into(),
