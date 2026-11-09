@@ -96,13 +96,12 @@ pub(crate) fn repo_id(cwd: &str, home: Option<&Path>) -> Option<RepoId> {
 }
 
 /// The `url` of `[remote "origin"]` (also written `[remote.origin]`) in a Git
-/// config text; the last one, as `git config --get` reads it. Section names
+/// config text; the first one, as `git remote get-url origin` reads it. Section names
 /// and keys are case-insensitive, a quoted subsection is exact. A header may
 /// be followed by a comment or by an assignment, and a trailing backslash
 /// continues a line.
 fn origin_url(config: &str) -> Option<String> {
     let mut origin = false;
-    let mut url = None;
     for line in logical_lines(config) {
         let mut body = line.trim_start();
         if let Some(header) = body.strip_prefix('[') {
@@ -117,10 +116,10 @@ fn origin_url(config: &str) -> Option<String> {
             && let Some((key, value)) = body.split_once('=')
             && key.trim().eq_ignore_ascii_case("url")
         {
-            url = config_value(value);
+            return config_value(value).filter(|url| !url.is_empty());
         }
     }
-    url.filter(|url| !url.is_empty())
+    None
 }
 
 /// Join continuations outside comments. Quote state survives a continuation;
@@ -869,8 +868,30 @@ mod tests {
         assert_eq!(url("[remote.upstream]\n\turl = https://a.test/x\n"), None);
         assert_eq!(
             url("[remote \"origin\"]\n\turl = https://a.test/first\n\turl = https://a.test/last\n"),
-            some("https://a.test/last")
+            some("https://a.test/first")
         );
+    }
+
+    #[test]
+    fn repository_identity_uses_the_first_fetch_url_and_ignores_pushurl() {
+        let scratch = Scratch::new();
+        semon(&scratch);
+        let cwd = scratch.0.join("work/semon");
+        let expected = Some(RepoId::Remote("a.test/team/app".into()));
+        for secondary in ["https://b.test/secondary.git", "https://c.test/changed.git"] {
+            scratch.file(
+                "work/semon/.git/config",
+                &format!(
+                    "[remote \"origin\"]\npushurl = https://push.test/other.git\nurl = https://a.test/team/app.git\n[remote \"origin\"]\nurl = {secondary}\npushurl = https://push.test/changed.git\n"
+                ),
+            );
+            assert_eq!(repo_id(&cwd.to_string_lossy(), None), expected);
+        }
+        scratch.file(
+            "work/semon/.git/config",
+            "[remote \"origin\"]\npushurl = https://push.test/only.git\n",
+        );
+        assert_eq!(repo_id(&cwd.to_string_lossy(), None), Some(RepoId::Unknown));
     }
 
     #[test]
