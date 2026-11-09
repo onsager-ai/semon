@@ -501,7 +501,7 @@ fn change_facts_require_recognized_pairs_and_sanitized_values() {
             assert_eq!(fact, super::fact(&row, change.clone()));
             assert!(fact.step_id.is_none());
             assert_eq!(fact.position.offset, 11);
-            assert_eq!(fact.timestamp, Some(10));
+            assert_eq!(fact.timestamp, Some(11));
             let serialized = serde_json::to_string(&fact).unwrap();
             assert!(!serialized.contains("[topic"));
             assert!(!serialized.contains("secret"));

@@ -2476,7 +2476,19 @@ impl<'a> Builder<'a> {
                 .to_str()
                 .ok_or_else(|| io::Error::other("Invalid activity source path"))?;
             if file.harness() == "claude" {
+                let mut turns: Vec<_> = file
+                    .summary
+                    .events
+                    .iter()
+                    .filter(|event| event.k == events::Kind::U)
+                    .map(|event| (event.o, event.u.clone()))
+                    .collect();
+                turns.sort_by_key(|(offset, _)| *offset);
                 usage.extend(file.summary.usage().iter().map(|(id, used)| {
+                    let turn = turns
+                        .partition_point(|(offset, _)| *offset <= used.offset)
+                        .checked_sub(1)
+                        .and_then(|index| turns[index].1.clone());
                     let mut step = UsageStep::claude(
                         id.clone(),
                         SourcePosition {
@@ -2485,15 +2497,7 @@ impl<'a> Builder<'a> {
                         },
                         used.clone(),
                     );
-                    step.turn_id = file
-                        .summary
-                        .events
-                        .iter()
-                        .rev()
-                        .find(|event| {
-                            event.k == events::Kind::U && event.o <= used.offset
-                        })
-                        .and_then(|event| event.u.clone());
+                    step.turn_id = turn;
                     step
                 }));
             } else if file.summary.has_native_usage() {

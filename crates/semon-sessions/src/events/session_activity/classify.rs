@@ -1999,7 +1999,7 @@ pub(crate) fn fact(row: &LocatedObservation, change: Change) -> ChangeFact {
     );
     ChangeFact {
         identity,
-        timestamp: row.timestamp,
+        timestamp: row.result_timestamp.or(row.timestamp),
         step_id: row.observation.step_id.clone(),
         position: SourcePosition {
             source: row.position.source.clone(),
