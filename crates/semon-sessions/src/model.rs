@@ -5521,7 +5521,11 @@ impl<'a> Builder<'a> {
                     .insert(key, (inputs, derived.clone()));
                 derived
             });
+            // RepoId is deliberately outside reusable description/turn inputs.
+            // Keep the current observation when restoring a cached derivation.
+            let repo_id = self.sessions[index].out.repo_id.clone();
             self.sessions[index].out = derived.out;
+            self.sessions[index].out.repo_id = repo_id;
             transcripts.insert(self.sessions[index].key.clone(), derived.transcript);
             turns.extend(derived.turns);
         }
