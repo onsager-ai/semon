@@ -957,20 +957,36 @@ fn read_custody(dir: &Path) -> io::Result<Option<Custody>> {
 }
 
 /// Records, durably, that an archive chain holds the first `covered` bytes
-/// of `log` as it reads through [`LogFile`]. Until then a seal's segments
-/// are never removed: retiring a seal ([`seal`], [`tidy`], [`forget`])
-/// refuses while they may be the only copy. Nothing is recorded for a log
-/// with no seal.
-pub fn record_custody(log: &Path, covered: u64) -> io::Result<()> {
+/// of `log` as it reads through [`LogFile`]: the whole log, which must be
+/// `covered` bytes long still. Until then a seal's segments are never
+/// removed: retiring a seal ([`seal`], [`tidy`], [`forget`]) refuses while
+/// they may be the only copy.
+///
+/// Only the seal that describes this log is certified: one bound to this
+/// very file, or whose segments agree with its bytes (a copy). A seal left
+/// behind by other content (the log was replaced from outside) holds bytes
+/// the chain does not, so nothing is recorded and `false` is returned; its
+/// segments stay. `true` when the log has no seal, or its seal is covered.
+pub fn record_custody(log: &Path, covered: u64) -> io::Result<bool> {
     let dir = seal_dir(log);
     let Some(manifest) = read_manifest(&dir)? else {
-        return Ok(());
+        return Ok(true);
     };
+    let file = crate::open_input(log)?;
+    let meta = file.metadata()?;
+    if meta.len() != covered {
+        return Err(invalid("a log that changed after its bytes were archived"));
+    }
+    if !manifest.binds(Birth::of(&meta))
+        && !agrees(&file, covered, &dir, &manifest).unwrap_or(false)
+    {
+        return Ok(false);
+    }
     if let Some(held) = read_custody(&dir)?
         && held.generation == manifest.generation
         && held.covered >= covered
     {
-        return Ok(());
+        return Ok(true);
     }
     let temporary = dir.join(format!("{CUSTODY}.tmp"));
     let bytes = serde_json::to_vec(&Custody {
@@ -983,7 +999,8 @@ pub fn record_custody(log: &Path, covered: u64) -> io::Result<()> {
     file.sync_all()?;
     drop(file);
     fs::rename(&temporary, dir.join(CUSTODY))?;
-    sync_dir(&dir)
+    sync_dir(&dir)?;
+    Ok(true)
 }
 
 /// Errors unless a chain holds every sealed byte of `manifest`.

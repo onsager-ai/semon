@@ -119,7 +119,7 @@ impl Archive {
         let Some(id) = self.lookup(source)? else {
             return Ok(Vec::new());
         };
-        Ok(read_json::<Manifest>(&self.dir.join(id).join(MANIFEST))?.chains)
+        Ok(read_manifest(&self.dir.join(id))?.chains)
     }
 
     /// Opens the plain bytes of one of `source`'s chains.
@@ -138,23 +138,16 @@ impl Archive {
             return Ok(());
         };
         let dir = self.dir.join(id);
-        for chain in read_json::<Manifest>(&dir.join(MANIFEST))?.chains {
-            let mut hash = Sha256::new();
-            let bytes = io::copy(&mut open_chain(&dir, &chain)?, &mut HashWriter(&mut hash))?;
-            if bytes != chain.length || hex(&hash.finalize()) != chain.sha256 {
-                return Err(invalid(&format!(
-                    "archive chain {} differs from its manifest",
-                    chain.chain_id
-                )));
-            }
+        for chain in read_manifest(&dir)?.chains {
+            check_chain(&dir, &chain)?;
         }
         Ok(())
     }
 
     /// Writes everything `reader` yields as a new, immutable chain of
-    /// `source`, durably, and returns it. Bytes that an earlier chain
-    /// already holds (same length and SHA-256) are not written again: that
-    /// chain is returned. `None` for an empty reader.
+    /// `source`, durably, and returns it. Bytes that an earlier chain holds
+    /// intact (same length, SHA-256 and version) are not written again:
+    /// that chain is returned. `None` for an empty reader.
     pub fn preserve(
         &self,
         source: &str,
@@ -195,11 +188,16 @@ impl Archive {
             fs::remove_file(&temporary)?;
             return Ok(None);
         }
-        if let Some(held) = manifest
-            .chains
-            .iter()
-            .find(|held| held.length == length && held.sha256 == sha256)
-        {
+        // Reuse a chain only if it is the same bytes under the same version
+        // and still reads back whole. A damaged one stays, as evidence, and
+        // the fresh copy is published beside it.
+        let reusable = manifest.chains.iter().find(|held| {
+            held.length == length
+                && held.sha256 == sha256
+                && held.redactor_version == redactor_version
+                && check_chain(&dir, held).is_ok()
+        });
+        if let Some(held) = reusable {
             let held = held.clone();
             fs::remove_file(&temporary)?;
             return Ok(Some(held));
@@ -304,7 +302,7 @@ impl Archive {
             }
         };
         let dir = self.dir.join(id);
-        let manifest = read_json(&dir.join(MANIFEST))?;
+        let manifest = read_manifest(&dir)?;
         Ok((dir, manifest))
     }
 
@@ -525,6 +523,48 @@ fn read_some(reader: &mut impl Read, buffer: &mut [u8]) -> io::Result<usize> {
             other => return other,
         }
     }
+}
+
+/// The source's manifest in `dir`, checked before anything is built from
+/// it: ids, digests and the continuation state must be what this module
+/// writes, so a damaged or hostile manifest cannot name another path.
+fn read_manifest(dir: &Path) -> io::Result<Manifest> {
+    let manifest: Manifest = read_json(&dir.join(MANIFEST))?;
+    let mut seen = std::collections::BTreeSet::new();
+    for chain in &manifest.chains {
+        let sound = is_id(&chain.chain_id)
+            && seen.insert(chain.chain_id.as_str())
+            && chain.length > 0
+            && chain.stored_bytes > 0
+            && chain.sha256.len() == 64
+            && chain
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            && !chain.redactor_version.is_empty()
+            && chain.redactor_version.len() <= 64
+            && chain
+                .resume
+                .as_ref()
+                .is_none_or(|resume| resume.at <= chain.length && resume.at % 64 == 0);
+        if !sound {
+            return Err(invalid("an archive manifest that is not what was written"));
+        }
+    }
+    Ok(manifest)
+}
+
+/// Reads `chain` back whole and checks its length and SHA-256.
+fn check_chain(dir: &Path, chain: &Chain) -> io::Result<()> {
+    let mut hash = Sha256::new();
+    let bytes = io::copy(&mut open_chain(dir, chain)?, &mut HashWriter(&mut hash))?;
+    if bytes != chain.length || hex(&hash.finalize()) != chain.sha256 {
+        return Err(invalid(&format!(
+            "archive chain {} differs from its manifest",
+            chain.chain_id
+        )));
+    }
+    Ok(())
 }
 
 /// The plain bytes of `chain`, reading no more of its file than its

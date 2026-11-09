@@ -422,8 +422,9 @@ impl Receiver {
             return Ok(conflict());
         }
 
-        // Provenance and custody come before anything is changed: a refused
-        // or failed preservation leaves the copy as it was.
+        // Custody comes before anything is changed: a failed preservation
+        // leaves the copy as it was. Provenance follows the bytes that land:
+        // a write of no bytes contributes no version.
         let versions = self.versions_directory(machine)?;
         let version_path = versions.join(&marker_name);
         let stored = read_redactor_version(&version_path)?;
@@ -433,18 +434,17 @@ impl Receiver {
             (true, Some(version)) => Some(version.clone()),
             (true, None) => Some(archive::UNKNOWN_REDACTOR.to_owned()),
         };
+        let contributes = !bytes.is_empty();
         // Until a replace lands, the file may hold either version's bytes.
         let interim = match &held {
-            Some(held) if *held != incoming => archive::MIXED_REDACTOR.to_owned(),
+            Some(held) if contributes && *held != incoming => archive::MIXED_REDACTOR.to_owned(),
             _ => incoming.clone(),
         };
+        let write_interim = contributes && stored.as_deref() != Some(interim.as_str());
         if request.replace && length > 0 {
             let key = format!("{}/{}", request.root, request.path);
             let version = held.as_deref().unwrap_or(archive::UNKNOWN_REDACTOR);
             self.preserve(machine, &target, &key, version)?;
-        }
-        if stored.as_deref() != Some(interim.as_str()) {
-            write_redactor_version(&versions, &marker_name, &interim)?;
         }
 
         let new_length = bytes.len() as u64 + if request.replace { 0 } else { request.offset };
@@ -458,7 +458,11 @@ impl Receiver {
         });
         let reservation = reserved_total.saturating_sub(old_total);
         self.reserve(machine, reservation)?;
+        let mut mutated = false;
         let outcome = (|| -> Result<(), Refusal> {
+            if write_interim {
+                write_redactor_version(&versions, &marker_name, &interim)?;
+            }
             // Invalidate durably before admitted data mutation.
             match fs::remove_file(&marker_path) {
                 Ok(()) => sync_dir(&marker_dir)?,
@@ -466,7 +470,11 @@ impl Receiver {
                 Err(e) => return Err(e.into()),
             }
             if request.replace {
-                replace_file(&parent, name, bytes).map_err(|e| e.refusal)?;
+                replace_file(&parent, name, bytes).map_err(|e| {
+                    mutated = e.changed;
+                    e.refusal
+                })?;
+                mutated = true;
             } else {
                 let created = existing.is_none();
                 let mut file = match existing {
@@ -479,7 +487,11 @@ impl Receiver {
                     bytes,
                     created.then_some(parent.as_path()),
                 )
-                .map_err(|e| e.refusal)?;
+                .map_err(|e| {
+                    mutated = e.changed;
+                    e.refusal
+                })?;
+                mutated = true;
             }
             if let Some(generation) = &request.generation {
                 let marker = Generation {
@@ -507,6 +519,14 @@ impl Receiver {
             reservation.saturating_add(old_total - actual)
         };
         self.release(machine, release);
+        if outcome.is_err() && !mutated && write_interim {
+            // The copy is as it was, and so is its provenance. A restore that
+            // fails leaves `mixed`, which claims nothing false.
+            let _ = match &stored {
+                Some(version) => write_redactor_version(&versions, &marker_name, version),
+                None => fs::remove_file(&version_path).map_err(Refusal::from),
+            };
+        }
         outcome?;
         if request.replace && interim != incoming {
             write_redactor_version(&versions, &marker_name, &incoming)?;
@@ -537,6 +557,7 @@ impl Receiver {
         let covered = log.metadata()?.len();
         let raw = Archive::new(self.machine_dir(machine).join(archive::DIR));
         raw.preserve(key, &mut log, version)?;
+        // A seal left by other content is not certified, and keeps its segments.
         record_custody(target, covered)?;
         Ok(())
     }
@@ -1880,6 +1901,98 @@ mod tests {
         let held = chains(&receiver, "claude/projects/-work/old.jsonl");
         assert_eq!(held[0].0.redactor_version, "unknown");
         assert_eq!(held[0].1, b"old\n");
+    }
+
+    fn versions(receiver: &Receiver, key: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for (chain, _) in chains(receiver, key) {
+            found.push(chain.redactor_version);
+        }
+        found
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_provenance_of_the_bytes_it_did_not_change() {
+        let (_dir, receiver) = receiver();
+        let key = format!("claude/{LOG}");
+        receiver.append("laptop", &append(LOG, b"", 0, b"one\n", false));
+        FAULT.with(|fault| fault.set(Some(Fault::WriteAfter(2))));
+        let mut failing = append(LOG, b"one\n", 4, b"two\n", false);
+        failing.redactor_version = 2;
+        assert_eq!(receiver.append("laptop", &failing).status, 500);
+        assert_eq!(copy(&receiver, "laptop", &key), b"one\n");
+        receiver.append("laptop", &replaced(3, b"x\n"));
+        assert_eq!(versions(&receiver, &key), ["1"]);
+    }
+
+    #[test]
+    fn a_refused_quota_leaves_the_provenance_of_the_bytes_it_did_not_change() {
+        let (dir, _unused) = receiver();
+        let receiver = Receiver::new(&dir.0).with_max_bytes(6);
+        let key = format!("claude/{LOG}");
+        receiver.append("laptop", &append(LOG, b"", 0, b"one\n", false));
+        let mut over = append(LOG, b"one\n", 4, b"two\n", false);
+        over.redactor_version = 2;
+        assert_eq!(receiver.append("laptop", &over).status, 507);
+        receiver.append("laptop", &replaced(3, b"x\n"));
+        assert_eq!(versions(&receiver, &key), ["1"]);
+    }
+
+    #[test]
+    fn an_append_of_no_bytes_brings_no_version() {
+        let (_dir, receiver) = receiver();
+        let key = format!("claude/{LOG}");
+        receiver.append("laptop", &append(LOG, b"", 0, b"one\n", false));
+        let mut empty = append(LOG, b"one\n", 4, b"", false);
+        empty.redactor_version = 2;
+        assert_eq!(receiver.append("laptop", &empty).status, 200);
+        receiver.append("laptop", &replaced(3, b"x\n"));
+        assert_eq!(versions(&receiver, &key), ["1"]);
+    }
+
+    /// The file holding `chain`, wherever its source's directory is.
+    fn chain_file(receiver: &Receiver, chain: &archive::Chain) -> PathBuf {
+        let root = receiver.machine_dir("laptop").join(archive::DIR);
+        let name = format!("{}.zst", chain.chain_id);
+        fs::read_dir(root)
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join(&name))
+            .find(|path| path.exists())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_damaged_or_missing_chain_is_not_taken_for_the_bytes_it_should_hold() {
+        for corrupt in [true, false] {
+            let (_dir, receiver) = receiver();
+            let key = format!("claude/{LOG}");
+            let raw = Archive::new(receiver.machine_dir("laptop").join(archive::DIR));
+            receiver.append("laptop", &append(LOG, b"", 0, b"same\n", false));
+            receiver.append("laptop", &replaced(1, b"other\n"));
+            let first = raw.chains(&key).unwrap().remove(0);
+            let file = chain_file(&receiver, &first);
+            let evidence = zstd::bulk::compress(b"not the same\n", 3).unwrap();
+            if corrupt {
+                fs::write(&file, &evidence).unwrap();
+            } else {
+                fs::remove_file(&file).unwrap();
+            }
+
+            // The same bytes are replaced again: they get a good chain.
+            receiver.append("laptop", &replaced(1, b"same\n"));
+            receiver.append("laptop", &replaced(1, b"third\n"));
+            let held = raw.chains(&key).unwrap();
+            assert_eq!(held.len(), 3, "the damaged chain stays listed");
+            assert_eq!(held[0], first);
+            let mut bytes = Vec::new();
+            let mut reader = raw.open_chain(&key, &held[2]).unwrap();
+            reader.read_to_end(&mut bytes).unwrap();
+            assert_eq!(bytes, b"same\n");
+            assert_eq!(file.exists(), corrupt, "nothing is deleted");
+            if corrupt {
+                assert_eq!(fs::read(&file).unwrap(), evidence);
+            }
+        }
     }
 }
 

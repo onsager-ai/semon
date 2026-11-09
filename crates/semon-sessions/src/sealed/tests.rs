@@ -52,6 +52,18 @@ fn read_range(path: &Path, at: u64, len: u64) -> Vec<u8> {
     out
 }
 
+/// Archives `log`'s bytes into a real chain, as a receiver does before a
+/// replace, and asks for its seal to be certified: whether it was.
+fn chain(root: &Path, log: &Path) -> bool {
+    let archive = crate::archive::Archive::new(root.join("archive"));
+    let mut reader = LogFile::open(log).unwrap();
+    let key = log.to_string_lossy();
+    archive.preserve(&key, &mut reader, "1").unwrap().unwrap();
+    archive.verify(&key).unwrap();
+    let length = reader.metadata().unwrap().len();
+    record_custody(log, length).unwrap()
+}
+
 fn read_all(path: &Path) -> Vec<u8> {
     read_range(path, 0, u64::MAX)
 }
@@ -282,7 +294,7 @@ fn a_replaced_log_reads_its_new_bytes_and_retires_the_old_generation() {
     seal(&log, 1, u64::MAX).unwrap();
     // A chain holds the old bytes, as a receiver's archive does before a
     // replace.
-    record_custody(&log, fs::metadata(&log).unwrap().len()).unwrap();
+    assert!(chain(&root, &log));
     let old = read_manifest(&seal_dir(&log)).unwrap().unwrap();
 
     // As a receiver replaces a file: a new one renamed over it.
@@ -376,6 +388,7 @@ fn a_new_file_on_a_reused_inode_number_is_not_bound() {
     let old = root.join("old.jsonl");
     fs::write(&old, jsonl(200_000, 13)).unwrap();
     seal(&old, 1, u64::MAX).unwrap();
+    assert!(chain(&root, &old));
     let log = root.join("a.jsonl");
     let bytes = jsonl(250_000, 14);
     fs::write(&log, &bytes).unwrap();
@@ -394,7 +407,6 @@ fn a_new_file_on_a_reused_inode_number_is_not_bound() {
     write_manifest(&seal_dir(&log), &manifest).unwrap();
     assert!(!status(&log).unwrap().bound, "another birth time doesn't");
     assert_eq!(read_all(&log), bytes);
-    record_custody(&log, fs::metadata(&old).unwrap().len()).unwrap();
     let sealed = seal(&log, 1, u64::MAX).unwrap();
     assert!(sealed.retired && sealed.added.is_some());
     assert_eq!(read_all(&log), bytes);
@@ -412,26 +424,44 @@ fn a_seal_is_not_retired_while_no_chain_holds_its_bytes() {
     let manifest = read_manifest(&seal_dir(&log)).unwrap().unwrap();
     let segment = seal_dir(&log).join(manifest.segments[0].file_name(&manifest.generation));
 
-    // The log is replaced: only the segments hold the old bytes now.
+    // The log is replaced from outside by a file of the same length: only
+    // the segments hold the old bytes now.
     let next = root.join("a.jsonl.replace.tmp");
-    fs::write(&next, jsonl(150_000, 21)).unwrap();
+    let mut other = jsonl(old.len(), 21);
+    other.truncate(old.len());
+    fs::write(&next, other).unwrap();
     fs::rename(&next, &log).unwrap();
     let refused = io::ErrorKind::PermissionDenied;
     assert_eq!(seal(&log, 1, u64::MAX).unwrap_err().kind(), refused);
     assert_eq!(tidy(&log).unwrap_err().kind(), refused);
     assert_eq!(forget(&log).unwrap_err().kind(), refused);
+
+    // A chain of the new file's bytes does not certify the old seal.
+    assert!(!chain(&root, &log), "an unrelated seal is not certified");
+    assert_eq!(seal(&log, 1, u64::MAX).unwrap_err().kind(), refused);
+    assert_eq!(tidy(&log).unwrap_err().kind(), refused);
     assert!(segment.exists());
     assert!(read_manifest(&seal_dir(&log)).unwrap().is_some());
+    fs::remove_dir_all(root).unwrap();
+}
 
-    // A chain that holds only part of them is not enough.
-    record_custody(&log, manifest.end() - 1).unwrap();
-    assert_eq!(seal(&log, 1, u64::MAX).unwrap_err().kind(), refused);
-    assert!(segment.exists());
-
-    // Once a chain holds all of them, the seal retires.
-    record_custody(&log, old.len() as u64).unwrap();
-    assert!(seal(&log, 1, u64::MAX).unwrap().retired);
-    assert!(!segment.exists());
+#[cfg(target_os = "linux")]
+#[test]
+fn custody_is_for_the_bytes_that_were_archived() {
+    let root = scratch("custody");
+    let log = root.join("a.jsonl");
+    fs::write(&log, jsonl(100_000, 22)).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    // The log is not the length that was archived.
+    let length = fs::metadata(&log).unwrap().len();
+    append(&log, b"{}\n");
+    assert!(record_custody(&log, length).is_err());
+    assert!(forget(&log).is_err(), "nothing was certified");
+    // A log with no seal needs no certificate.
+    let plain = root.join("b.jsonl");
+    fs::write(&plain, jsonl(1_000, 23)).unwrap();
+    let length = fs::metadata(&plain).unwrap().len();
+    assert!(record_custody(&plain, length).unwrap());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -442,7 +472,7 @@ fn forget_removes_a_seal_before_a_replace() {
     let log = root.join("a.jsonl");
     fs::write(&log, jsonl(100_000, 15)).unwrap();
     seal(&log, 1, u64::MAX).unwrap();
-    record_custody(&log, fs::metadata(&log).unwrap().len()).unwrap();
+    assert!(chain(&root, &log));
     forget(&log).unwrap();
     assert!(!seal_dir(&log).exists());
     forget(&log).unwrap();

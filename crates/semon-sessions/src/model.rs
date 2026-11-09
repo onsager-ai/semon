@@ -1508,8 +1508,10 @@ fn scan(
         cache.retain(&seen, dirty);
     }
     // This machine's own logs, once the index has consumed them: custody
-    // before anything can rewrite them.
-    if selected.is_none() && options.facts.is_none() {
+    // before anything can rewrite them. Bounded selections (the Catalog
+    // producer's) archive just the sources they scanned, and only the
+    // prefix the index consumed so far.
+    if options.facts.is_none() {
         let archive = crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache));
         cache.archive_consumed(&archive, &seen);
     }

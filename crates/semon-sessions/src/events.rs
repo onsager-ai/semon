@@ -2185,9 +2185,12 @@ impl EventCache {
             let admitted = LogFile::open(Path::new(key))
                 .and_then(|mut log| archive.admit(key, &mut log, consumed.0, &consumed.1));
             match admitted {
-                Ok(_) => {
+                // Not admitted (the log changed since the index read it): tried
+                // again at the next scan, not remembered as done.
+                Ok(true) => {
                     self.archived.insert(key.clone(), consumed);
                 }
+                Ok(false) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => eprintln!("semon: native log archive: {key}: {error}"),
             }
@@ -10448,4 +10451,53 @@ fn native_connector_tool_classification_refuses_incomplete_identity_and_keeps_un
     assert_eq!(index.events[0].k, Kind::Tool);
     assert_eq!(index.events[0].r.as_ref().unwrap().f, UNKNOWN);
     assert!(index.pending.is_empty());
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn a_log_that_was_not_admitted_is_tried_again_at_the_next_scan() {
+        let name = format!("semon-archive-retry-{}", std::process::id());
+        let root = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("a.jsonl");
+        let consumed = b"{\"a\":1}\n{\"b\":2}\n";
+        // The log was rewritten after the index read it.
+        fs::write(&path, b"{\"changed\":true}\n{\"b\":2}\n").unwrap();
+        let key = path.to_string_lossy().into_owned();
+        let mut cache = EventCache::default();
+        cache.files.insert(
+            key.clone(),
+            CachedFile {
+                ledger: Ledger {
+                    stat: Stat {
+                        dev: 0,
+                        ino: 0,
+                        size: consumed.len() as u64,
+                        modified_ns: 0,
+                        changed_ns: None,
+                    },
+                    offset: consumed.len() as u64,
+                    prefix: Sha256::digest(consumed).into(),
+                    tail: [0; 32],
+                },
+                index: None,
+            },
+        );
+        let archive = Archive::new(root.join("archive"));
+        let seen = BTreeSet::from([key.clone()]);
+        cache.archive_consumed(&archive, &seen);
+        assert!(archive.chains(&key).unwrap().is_empty());
+        assert!(cache.archived.is_empty(), "a refusal is not remembered");
+
+        // The log holds the consumed bytes again: the next scan admits it.
+        fs::write(&path, consumed).unwrap();
+        cache.archive_consumed(&archive, &seen);
+        assert_eq!(archive.chains(&key).unwrap().len(), 1);
+        assert_eq!(cache.archived.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

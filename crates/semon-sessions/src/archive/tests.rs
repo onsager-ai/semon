@@ -257,3 +257,81 @@ fn a_failed_extension_is_retried_from_the_last_manifest() {
     assert_eq!(read_chain(&archive, "native", &chains[0]), log);
     archive.verify("native").unwrap();
 }
+
+#[test]
+fn identical_bytes_under_another_version_are_another_chain() {
+    let (_scratch, archive) = archive();
+    let bytes = lines(10_000, 1);
+    let first = preserve(&archive, "s", &bytes, "1").unwrap();
+    let second = preserve(&archive, "s", &bytes, "2").unwrap();
+    assert_ne!(first.chain_id, second.chain_id);
+    assert_eq!(second.redactor_version, "2");
+    // Each version finds its own chain again.
+    assert_eq!(preserve(&archive, "s", &bytes, "1"), Some(first));
+    assert_eq!(preserve(&archive, "s", &bytes, "2"), Some(second));
+    assert_eq!(archive.chains("s").unwrap().len(), 2);
+}
+
+#[test]
+fn a_chain_that_does_not_read_back_is_not_reused_and_is_kept() {
+    let (_scratch, archive) = archive();
+    let bytes = lines(10_000, 1);
+    let bad = preserve(&archive, "s", &bytes, "1").unwrap();
+    let id = archive.lookup("s").unwrap().unwrap();
+    let file = archive.dir.join(id).join(format!("{}.zst", bad.chain_id));
+
+    // Corrupt: other bytes where the chain was. The same bytes come again.
+    let other = zstd::bulk::compress(&lines(10_000, 9), LEVEL).unwrap();
+    fs::write(&file, &other).unwrap();
+    let fresh = preserve(&archive, "s", &bytes, "1").unwrap();
+    assert_ne!(fresh.chain_id, bad.chain_id);
+    assert_eq!(read_chain(&archive, "s", &fresh), bytes);
+    assert_eq!(fs::read(&file).unwrap(), other, "kept as evidence");
+    // The intact copy is reused from now on.
+    assert_eq!(preserve(&archive, "s", &bytes, "1"), Some(fresh));
+    assert_eq!(archive.chains("s").unwrap().len(), 2);
+
+    // Missing: the file is gone. The bytes still have a home.
+    let (_scratch, archive) = self::archive();
+    let lost = preserve(&archive, "s", &bytes, "1").unwrap();
+    let id = archive.lookup("s").unwrap().unwrap();
+    let file = archive.dir.join(id).join(format!("{}.zst", lost.chain_id));
+    fs::remove_file(file).unwrap();
+    let fresh = preserve(&archive, "s", &bytes, "1").unwrap();
+    assert_ne!(fresh.chain_id, lost.chain_id);
+    assert_eq!(read_chain(&archive, "s", &fresh), bytes);
+    assert_eq!(archive.chains("s").unwrap().len(), 2);
+}
+
+#[test]
+fn a_manifest_that_names_a_path_outside_the_archive_is_refused() {
+    let (_scratch, archive) = archive();
+    let log = lines(10_000, 1);
+    assert!(admit(&archive, &log, 5_000));
+    let outside = archive.dir.join("escape.zst");
+    fs::write(&outside, b"keep").unwrap();
+
+    let path = manifest_path(&archive, "native");
+    let mut manifest: Manifest = read_json(&path).unwrap();
+    manifest.chains[0].chain_id = "../escape".into();
+    publish(path.parent().unwrap(), MANIFEST, &manifest).unwrap();
+
+    assert!(archive.chains("native").is_err());
+    assert!(archive.verify("native").is_err());
+    let mut cursor = Cursor::new(&log);
+    let prefix = digest(&log);
+    let admitted = archive.admit("native", &mut cursor, 10_000, &prefix);
+    assert!(admitted.is_err());
+    let mut cursor = Cursor::new(&log);
+    assert!(archive.preserve("native", &mut cursor, "1").is_err());
+    assert_eq!(fs::read(&outside).unwrap(), b"keep");
+
+    // A continuation state past the chain's end is refused too.
+    manifest.chains[0].chain_id = "a".repeat(32);
+    manifest.chains[0].resume = None;
+    publish(path.parent().unwrap(), MANIFEST, &manifest).unwrap();
+    assert!(archive.chains("native").is_ok());
+    manifest.chains[0].length = 0;
+    publish(path.parent().unwrap(), MANIFEST, &manifest).unwrap();
+    assert!(archive.chains("native").is_err());
+}

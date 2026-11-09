@@ -7750,6 +7750,51 @@ mod tests {
     }
 
     #[test]
+    fn standalone_catalog_ingestion_archives_each_generation_of_a_source() {
+        use std::io::Read;
+        let fixture = Fixture::new();
+        let path = fixture.source("one");
+        let mut options = fixture.options.clone();
+        options.facts = None;
+        let inputs = [crate::inputs::Input {
+            root: crate::inputs::InputRoot::Claude,
+            path: "projects/project/one.jsonl".into(),
+        }];
+        let dir = crate::archive::standalone_dir(&options.cache);
+        let archive = crate::archive::Archive::new(dir);
+        let key = path.to_string_lossy().into_owned();
+        let read = |chain: &crate::archive::Chain| {
+            let mut bytes = Vec::new();
+            let mut reader = archive.open_chain(&key, chain).unwrap();
+            reader.read_to_end(&mut bytes).unwrap();
+            bytes
+        };
+        let mut cache = EventCache::open_scoped(&options.cache).unwrap();
+        let prepare = |cache: &mut EventCache| {
+            let now = crate::model::now_ms();
+            crate::model::prepare_sources(&options, cache, &inputs, now).unwrap();
+        };
+
+        // The normal bounded producer consumed the source: it is archived.
+        let first = fs::read(&path).unwrap();
+        prepare(&mut cache);
+        let chains = archive.chains(&key).unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(read(&chains[0]), first);
+
+        // The source is rewritten, and ingested again: both generations stay.
+        let record = json!({"type":"user","sessionId":"one","uuid":"one","parentUuid":null,"cwd":"/synthetic/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"a different and longer synthetic prompt"}});
+        let rewritten = format!("{record}\n");
+        fs::write(&path, &rewritten).unwrap();
+        prepare(&mut cache);
+        let chains = archive.chains(&key).unwrap();
+        assert_eq!(chains.len(), 2);
+        assert_eq!(read(&chains[0]), first);
+        assert_eq!(read(&chains[1]), rewritten.as_bytes());
+        archive.verify(&key).unwrap();
+    }
+
+    #[test]
     fn scoped_publication_rejects_newer_dirty_claim_and_keeps_unrelated_work() {
         let fixture = Fixture::new();
         fixture.source("selected");
