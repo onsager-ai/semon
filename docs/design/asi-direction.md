@@ -1,7 +1,10 @@
 # Agent Session Intelligence direction
 
-Status: accepted direction (2026-11-08; decisions extended the same day; architecture amended 2026-11-09; Viewer scope amended 2026-11-09). This document supersedes earlier product
-focus statements wherever they conflict.
+Status: accepted direction (2026-11-08; federation D1–D8 accepted through the
+PM's structured decision process on 2026-11-09; Viewer scope amended 2026-11-09).
+Federation supersedes option B's central-derivation default. This document
+supersedes earlier product focus statements wherever they conflict. Acceptance
+specifies the target architecture; it does not claim the safeguards are implemented.
 
 ## Decision
 
@@ -23,9 +26,11 @@ sequencing. Progress is tracked in the pinned roadmap issue, #549.
 
 1. **Storage.** A durable, multi-machine store of normalized session events:
    sessions, turns, tool calls and results, errors, tokens, cost, waits,
-   handoffs and lineage, bodies included. Native logs remain the source of truth;
-   the store is derived and rebuildable, respecting source availability, custody
-   and redaction. Push/receive is the collection path across machines.
+   handoffs and lineage. Native raw remains at the origin by default; body-free
+   analytics is precomputed there and published across machines. Receiver-held
+   facts remain durable when raw is unavailable and cannot be assumed rebuildable.
+   Read-only bodies are fetched on demand under origin policy; explicit replicas
+   retain supported mirror custody.
 2. **Query.** A documented schema served as read-only SQL, full-text search and
    the existing focused reads, exposed equally through MCP/CLI for agents and an
    analytics UI for humans.
@@ -41,8 +46,9 @@ sequencing. Progress is tracked in the pinned roadmap issue, #549.
 | Storage engine | SQLite for ingest (the Session Event Index), durable labels and FTS5. DuckDB over Parquet analytics partitions for analytics and the public SQL dialect, from day 1 (amended 2026-11-09). |
 | PostgreSQL track (#477) | Paused. The merged code stays behind its feature flag with its CI workflow. The Raw-plus-projection-cache model, namespace-bound storage port and runtime custody owners carry over to the SQLite ASI store. |
 | Hub | Hub is hosted Semon only: multi-tenant tenancy, workspace authorization and hosted views over Semon. ASI logic, schema and analytics live in Semon. Hub receives body-free analytics partitions and categorical labels only, never Raw or session bodies, and runs no L1 model classification. Each tenant workspace has its own analytics store. |
-| Session bodies off-machine | Redacted Raw goes to the operator's own receiver by default (amended 2026-11-09). It never goes to Hub. Transparency comes from open, validated code, and redaction is best-effort. |
-| Semantic labels (L1) | In v1. Labels follow methodology §3–§4 (rows with labeller, taxonomy version, confidence and evidence step IDs). Classifiers run where the bodies are: the receiver, or the machine itself when it has none. Sending evidence to a model provider needs its own per-source opt-in that names the provider and model; pushing to a receiver does not grant it. Categorical labels travel as metadata; free-text label fields (goal, mechanism) count as bodies. |
+| Session bodies off-machine | Federation default: raw stays at origin; the operator's receiver fetches redacted typed viewing pages only on demand. Origin authorizes and audits every read, including cache hits; no offline grants. Encrypted cache: 256 MiB global, 64 MiB/source, 15-minute absolute TTL; stream-through opt-in. Explicit raw replica custody remains supported. Hub never holds or serves bodies. Redaction remains best-effort. |
+| Metadata boundary | D7 accepts plain typed names and paths between origin and the operator's receiver. **PM interpretation, open to user correction:** this does not change the settled Hub rule; paths become HMAC tokens at Hub export and Hub gets no plain paths. Body exclusions, credential stripping and source policy remain. |
+| Semantic labels (L1) | In v1, computed at origin. Labels follow methodology §3–§4 (labeller, taxonomy version, confidence and exact generation-bound evidence IDs). Model-provider evidence egress needs per-source opt-in naming provider/model; receiver enrollment grants none. Only categorical labels export; free-text goal/mechanism/reason fields are bodies. Multi-source derivatives obey all contributor policies. |
 | Analytics UI spec | Adopt the session activity viewer spec (semon#532) as the analytics UI direction. |
 | Consumers | Agents (MCP/SQL) and humans (dashboards) equally, over one shared schema. |
 | Viewer | Amended 2026-11-09 (owner decision; research in [t3-viewer-reuse-research.md](t3-viewer-reuse-research.md)). The Viewer is an analytics UI plus standalone, read-only browsing of Semon-stored history. Analytics is the core; read-only raw-log viewing is its foundation, which analytics evidence links into, so it is not optional polish. It keeps the authenticated server, shell, security boundary, existing sidebar/navigation, and catalog/transcript owners. Existing catalog/transcript code is the starting point, not removal scope. Semon must work without T3 Code, and T3 Code's transcript is a presentation reference only. Reimplement any borrowed patterns in Semon's Preact UI under the [ownership contract](viewer-ownership.md), with no React/T3 runtime or state. Copied code or assets keep the applicable MIT/third-party notices. An "Open in T3" link is optional and appears only for a verified mapping. Bodies stay on the machine or the operator's receiver, and Hub stays analytics-only. There is no composer, control, runtime or SSH. Pixel/visual comparison stays removed from CI (semon#536/#537). Proposed, not yet authorized: a Storybook comparison on synthetic fixtures of the current transcript against a T3-style presentation, run under [the AI design workflow](ai-design-workflow.md). |
@@ -50,52 +56,57 @@ sequencing. Progress is tracked in the pinned roadmap issue, #549.
 
 ## Architecture
 
-Decided 2026-11-08 and amended 2026-11-09 (central derivation inside the
-operator's trust boundary, and DuckDB analytics). The specs (#544 storage, #545
-query, #546 L1 labels) own the details.
+Federation accepted 2026-11-09 replaces option B as the default. The
+[federation contract](asi-federation.md) owns governance, transport, cache and
+authority details; [store](asi-store.md) (#544), [query](asi-query.md) (#545)
+and #546 specify their respective surfaces. The user accepts mixed rules versions
+and possible permanent evidence loss when origins never return.
 
-- **Layers.**
-  - Raw is the admitted native logs, plus their redacted mirrors on a
-    receiver, kept immutably with redaction provenance.
-  - Index is the per-namespace ingest index (today's Session Event Index,
-    with the activity projection). It is internal and rebuildable from raw.
-  - Analytics is the public dimensional model: Kimball facts and dimensions over
-    methodology §1.1, held as Parquet partitions and queried with DuckDB. Analytics
-    is rebuildable from index and is the versioned public contract.
-  - State that can't be rebuilt (labels, adjudications, links, work items,
-    interventions) lives in a separate durable SQLite file.
-- **Central derivation inside the operator's trust boundary.**
-  - Machines push redacted Raw to the operator's own receiver through the
-    mirror path, and the receiver derives index and analytics for every machine.
-  - A single machine runs the same pipeline locally.
-  - Exactly one store derives each source's analytics. Re-derivation after a
-    rules, price or transform change needs only the receiver's raw.
-- **Hub gets analytics only.**
-  - A receiver (or a single machine) exports body-free analytics partitions and
-    categorical labels to Hub.
-  - File paths cross to Hub only as HMAC tokens keyed per operator
-    workspace. The receiver holds the key and Hub never does.
-  - Body columns never cross.
-- **Raw archive.** Raw is kept immutably, including bytes a source rewrite
-  replaces, and indefinitely by default. That keeps analytics re-derivable after a
-  harness prunes its logs.
-- **Versioning.** Every analytics row records its transform, rules and price
-  versions. A bump re-derives only the affected partitions. Labels are
-  append-only: a new taxonomy or labeller adds rows, and views pick the
-  current ones.
-- **Query reach.**
-  - Read-only DuckDB SQL over analytics, sandboxed: no external access or
-    extensions, locked configuration, memory, thread and time limits.
-  - FTS5 search over index bodies.
-  - Both through MCP/CLI on the machine, through the authenticated Viewer
-    server for its own store, and through Hub per tenant (analytics only). There is
-    no separate network SQL endpoint.
-- **Performance from day 1.** Ingest, freshness, dashboard, group-by and
-  search budgets are measured in CI on synthetic data at 1M, 10M and 100M rows.
-- **Crates.** A `semon-asi` library crate (analytics schema, transforms, partition
-  store and query engine) is split out of `semon-sessions` as part of #544.
-  `semon-sessions` keeps native parsing and the ingest index. Hub depends on
-  `semon-asi`.
+- **Layers and producers.** Origin raw/native archives feed a per-namespace SQLite
+  index. Activity, L0, StepFacts and recorded prices have one derivation there;
+  `semon-asi` projects admitted generations into Parquet for DuckDB. Origins publish
+  body-free facts to the receiver through immutable objects and atomic namespace
+  heads. Imported facts are durable evidence, not disposable caches. Labels and
+  other non-rebuildable state live in owned durable SQLite stores.
+- **Origin governance.** Sensitivity tags, secret/PII detection and versioned
+  policy govern egress locally. Every derivative obeys the intersection of its
+  contributors' policies. L0/L1 classification stays at origin; hosted model
+  evidence needs separate consent. Policy, redaction, source and computation
+  versions accompany provenance. Plain typed names/paths are permitted to the
+  operator receiver under D7, with the Hub-boundary interpretation recorded above.
+- **Read-only viewing.** Origins open outbound-only authenticated channels to the
+  self-hosted receiver. Only bounded read/append-subscription operations are
+  available; no control, runtime, SSH, remote execution or Encrypted Relay.
+  Origins pin native proofs and render redacted typed pages with exact evidence
+  mappings. Receiver presentation never treats redacted bytes as original proofs.
+  Machine/namespace/user access and origin authorization/audit apply on every read,
+  including hits in the encrypted bounded cache. Offline means new bodies are
+  unavailable even if cached; analytics remains queryable. Cache is never archive.
+- **Custody and optional replicas.** Origin archive retention stays unchanged
+  (indefinite default, optional explicit retention). Supported mirror and #572
+  custody remain. Raw replicas are opt-in per source; central analytics authority
+  may transfer only for a whole namespace with complete eligible source cohorts,
+  preserving unaffected facts and labels. Mixed replica/pull-only machines keep
+  origin analytics authority. Replica bodies still require online origin approval.
+- **Versions and loss.** Re-derive affected sessions when the origin returns with
+  complete inputs; retain old rows and show per-origin/version/freshness coverage
+  meanwhile. Retired origins may stay frozen permanently. Recorded origin costs
+  remain the current valuation; a separately named central valuation is later work.
+  Refuse old formats, preserve/export frozen data, and never automatically reset
+  custody. No multi-version exception or compatibility adapters.
+- **Hub gets analytics only.** A receiver or standalone origin exports body-free
+  facts/categories to a tenant-scoped Hub store. Paths are HMAC tokens at this
+  boundary; the exporting store holds the key, Hub never does. Hub never receives
+  bodies, serves transcripts, runs L1 or resolves body handles.
+- **Query reach.** Sandboxed read-only DuckDB SQL and schema work through MCP/CLI,
+  authenticated Viewer and tenant Hub, with no separate network SQL endpoint.
+  SQL uses admitted analytics heads and never pulls bodies. Local FTS and remote
+  bounded view come first; receiver search stays unavailable until federated
+  coverage/audit exists. Hub search/view refuse before I/O.
+- **Performance and boundaries.** Keep the local ingest/analytics/search budgets
+  and measure connected publication and online-view costs separately in CI.
+  `semon-asi` owns schema, transforms, publication and query; `semon-sessions`
+  owns native parsing/index/StepFacts. Hub depends only on `semon-asi`.
 
 ## Unchanged invariants
 
@@ -113,12 +124,14 @@ query, #546 L1 labels) own the details.
 2. Retire control/runtime/SSH code and their CI jobs (landed in semon#541).
    The browser, design-document and Hub Session display/control/runtime follow-ups
    remain in step 6.
-3. Specify the ASI store: layers, the analytics dimensional model over
-   methodology §1.1, central derivation on the receiver, retention beyond the
-   current 60-day Analytics window, multi-machine keys and Hub analytics export. Start from
-   the #477 carry-over: https://github.com/onsager-ai/semon/issues/477#issuecomment-6719032404.
-4. Ship the query surface: read-only SQL plus FTS through MCP/CLI, replacing the
-   paused `find`.
+3. Finish the ASI foundations: origin archive/index/StepFacts, the dimensional
+   model over methodology §1.1 and pure analytics projection. Add governed
+   origin-to-receiver publication with source/version coverage. Keep supported
+   mirror custody. The PM applies the [lane-change plan](asi-federation.md#lane-change-plan-for-pm-application)
+   after docs merge approval; existing PRs do not absorb channel/cache scope.
+4. Ship read-only SQL/schema and local FTS through MCP/CLI, replacing paused
+   `find`; add authenticated online remote view only after origin policy/audit,
+   exact page mappings and receiver cache/access gates. Receiver search is deferred.
 5. Rebuild Analytics on durable storage; shape the Viewer into the analytics UI
    plus read-only history browsing (Viewer decision above).
    Pixel baselines and visual tooling are removed by semon#536/#537 (Source) and

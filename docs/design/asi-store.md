@@ -1,35 +1,51 @@
 # ASI store
 
-Status: proposed spec for #544 (revised 2026-11-09 for central derivation and
-DuckDB analytics). Direction: [ASI direction](asi-direction.md#architecture).
+Status: accepted architecture/spec for #544 (revised 2026-11-09 for the user's
+federation decisions D1–D8 and DuckDB analytics). Implementation and validation
+remain delivery work. Direction: [ASI direction](asi-direction.md#architecture).
+Governance, read channel, cache and authority: [ASI federation](asi-federation.md).
 Method: [ASI methodology §1.1](asi-methodology.md#11-storage-schema). The
 query surface is specified in [ASI query](asi-query.md) (#545).
 
 ## Shape
 
-```
-machine A ─┐  redacted Raw (existing semon push mirror path)
-machine B ─┼──────────────▶ receiver (or a single machine, standalone)
-           │                 raw   immutable Raw chains + redaction provenance
-           │                 index   ingest index per machine (exists today) + activity + StepFacts
-           │                 analytics     Parquet generations (facts + dimensions) ─ DuckDB ── sql
-           │                 durable  asi-durable.sqlite3 (labels, links, work items)
-           │                 FTS5     body index in index ─────────────────────────────── search / view
-           │
-           └─ Hub (per tenant) ◀── analytics generations only: no bodies, paths as HMAC tokens
+```text
+origin (per namespace)                         operator receiver
+native logs + archive                         admitted immutable analytics heads
+  → SQLite activity, L0, StepFacts, prices    encrypted, bounded typed-page cache
+  → body-free analytics projection ─────────▶ DuckDB / SQL; remote view on demand
+  → authorized, audited typed view ─────────▶ Viewer
+                                                        │
+                                                        └─ Hub: analytics only,
+                                                           paths HMAC-tokenized
 ```
 
-Each source has one **authoritative store**: the receiver it pushes to, or the
-machine itself if it pushes nowhere. Only the authoritative store exports to
-Hub. A machine that pushes may also keep local analytics for offline queries; that
-copy is never merged or exported.
+The origin is the default producer and authority for its namespace. It retains
+raw custody and computes the SQLite activity projection, L0 classifications,
+StepFacts and prices before producing analytics. The receiver imports body-free
+facts, including plain typed names and paths, and does not derive activity or
+prices for origin-published namespaces. Only an explicitly transferred complete
+replica namespace uses the receiver as its authoritative producer. Mixed rules
+versions within the current format and permanent evidence loss when an origin and its
+raw disappear are accepted. A receiver may hold an explicitly opted-in raw replica;
+that is custody, not the default analytics path. The supported mirror and #572
+custody contracts remain in force.
+
+A namespace-wide authority transfer to a replica requires complete admitted source
+cohorts and preserves unaffected facts and categorical labels. If a machine has
+both replicated and pull-only sources, its origin retains authority for the whole
+namespace. A cache is never an archive. Every multi-source derivative, including
+labels and coverage, must satisfy the intersection of all contributor policies; a
+permissive source cannot export another source's contribution or make a fragment
+appear complete.
 
 | Data | Location | Rebuildable from | Engine |
 | --- | --- | --- | --- |
-| Raw | Native logs plus `archive/`; on a receiver, the mirror store | — (custody) | Files |
-| Index | `sessions-index.sqlite3`, one per namespace | Raw | SQLite |
-| Analytics | `analytics/` immutable Parquet generation files plus `analytics/manifest.json` | Index | DuckDB (read) |
-| Durable | `asi-durable.sqlite3` | — (custody) | SQLite |
+| Raw | Origin native logs plus `archive/`; optional approved replica | — (custody) | Files |
+| Index | Origin `sessions-index.sqlite3`, one per namespace | Available raw | SQLite |
+| Analytics | Origin projections and receiver admitted immutable Parquet heads | Origin index when available; imported frozen heads may be sole facts | DuckDB (read) |
+| Durable | Author-owned `asi-durable.sqlite3` | — (custody) | SQLite |
+| Remote view cache | Receiver encrypted typed pages, bounded and expiring | An authorized online origin | Encrypted cache |
 
 ## Identity
 
@@ -58,30 +74,28 @@ IDs, so labels survive every rebuild.
 
 ## Raw
 
-Raw custody is in phase 1: analytics is only as durable as the raw logs it can be
-rebuilt from.
+Raw remains at the origin under native custody. The standalone archiver keeps
+an append-only zstd copy of each native log under `archive/`, admitting only the
+prefix index has consumed. A rewrite starts a new chain and preserves the old
+one; index can read archived sources when native logs are gone. Existing origin
+retention is unchanged: indefinite by default, with optional
+`archive.retention_days`; native logs are never deleted by this design.
 
-- **Receiver.** The mirror store is raw. Before acknowledging a `replace`
-  append, the receiver moves the replaced logical bytes (read through `sealed`,
-  whether plain or sealed) into an immutable chain:
-  `archive/{archive_source_id}/{chain_id}.zst`, with random IDs and a manifest
-  published by atomic rename. Retiring a seal never deletes bytes that no chain
-  holds.
-- **Redaction provenance.** The mirror `Append` gains a required
-  `redactor_version`, a contract change made directly under the pre-release
-  policy. Each chain records it, together with the digest of the redacted bytes
-  it holds.
-- **Standalone machine.** The archiver keeps an append-only zstd copy of each
-  native log under `archive/`, admitting only the prefix index has consumed.
-  A native rewrite starts a new chain and keeps the old one. Index reads a
-  source from the archive when the native log is gone.
-- **Retention.** Raw is kept indefinitely by default (decided 2026-11-08),
-  with an optional `archive.retention_days`. Nothing deletes native logs.
+An opt-in replica follows supported mirror and #572 custody, including preserving
+replaced bytes and redaction provenance. Before acknowledging `replace`, preserve
+the logical bytes (plain or read through `sealed`) in an immutable verified chain
+`archive/{archive_source_id}/{chain_id}.zst` with atomic manifest publication.
+Seal retirement never deletes bytes without verified chain custody. Mirror `Append`
+requires `redactor_version`; each chain retains it and its redacted-byte digest.
+Replica enrollment records retention explicitly; neither federation nor cache expiry
+deletes existing custody. Replica custody does not itself transfer producer authority.
+Replica reads still require online origin authorization and audit; no offline grants.
 
 ## Index
 
-Index is today's ingest index and activity projection, run per namespace
-(receivers already do this for mirrored machines, in `received.rs`). It gains:
+Index is the authoritative producer's ingest index/activity projection, normally
+at the origin, or at the receiver after an explicit complete-namespace replica
+transfer. It runs per namespace and supplies:
 
 - **`StepFacts`** (#556, owned by the session activity lane): turn ID, tool
   calls (tool, target path, command tag, ok, exit code, tool time), model time,
@@ -96,8 +110,7 @@ Index is today's ingest index and activity projection, run per namespace
   and the session rows in one SQLite read transaction. A new incarnation
   makes the analytics writer re-read that namespace in full.
 - **Repository identity.** Sender facts gain, per repository root, a
-  sanitized `repo_id`, or `unknown` (see [Analytics model](#analytics-model)). This
-  changes the mirror facts contract directly.
+  sanitized `repo_id`, or `unknown` (see [Analytics model](#analytics-model)).
 - **Bodies for FTS5** (phase 2): see [ASI query](asi-query.md#search).
 
 ## Analytics model
@@ -125,6 +138,18 @@ column declares a class: `key`, `enum`, `number`, `time`, `name`, `path` or
 | `dim_model` | Immutable model identity: model, provider. Historical attributes can become SCD2 when they are needed. |
 | `dim_price` | SCD2 by price version: provider, model, `rate_kind`, `tier`, `threshold_tokens`, `usd_per_unit`, `valid_from`, `valid_to`, `learned_at` |
 
+The SQLite activity projection is the only derivation of steps, L0 labels,
+context, StepFacts, cost components and prices. Analytics is a pure projection of
+one admitted activity generation and catalog metadata in the same SQLite read
+transaction; it does not recalculate them. `fact_step` and `dim_price` retain all
+billing inputs and the pricing snapshot, including cache-write durations,
+web-search requests, speed and service tier. See the [one-model agreement](https://github.com/onsager-ai/semon/issues/557#issuecomment-6733930340).
+The origin may update pricing from retained billing inputs without raw bytes and
+atomically refresh all price-dependent summaries; reclassification requires
+available sources. Receivers use origin-recorded costs and expose their price
+versions and coverage. A future central valuation requires a separately named
+contract and must never be silently mixed with recorded costs.
+
 `usd_est` is an estimate under a named price version, never presented as
 billed spend. Spend views sum only `usage_owner = exclusive`, so copied Claude
 usage is never counted twice. Missing prices are `price_status = unpriced` and
@@ -141,14 +166,14 @@ session's current rows. This is the merge-on-read pattern used by lakehouse
 tables.
 
 - **Writer.** The first Semon process that needs analytics takes `analytics.lock` and
-  becomes the store's single writer: `semon receive`, `semon push`, the Viewer
-  server or `semon mcp` (so MCP-only users get fresh analytics). Other processes
-  only read.
+  becomes the authoritative producer store's single writer: push, Viewer, MCP,
+  or receive for an explicitly transferred replica namespace. Other processes only
+  read. Imported receiver heads are admitted publications, not locally rebuilt indexes.
 - **Cycle.** At most every 2 s, the writer reads the index change log and
   recomputes every touched session **whole**. It doesn't patch tails: a
   following step can change an earlier step's duration, and a late record can
   change older rows. Per-cycle work is proportional to the touched sessions'
-  size, which is milliseconds even for sessions of thousands of steps.
+  size; CI measures the cost without assuming a latency for large sessions.
   - It writes one new file per table, `analytics/{table}/g{generation}.parquet`,
     holding the full rows of those sessions with a `_gen` column. Dimensions
     are rewritten whole, as `analytics/dim_x/g{generation}.parquet`.
@@ -173,16 +198,24 @@ tables.
 - **Retirement.** A file leaves the store 10 minutes after the first
   published generation that no longer names it. Queries hold a snapshot for at
   most their deadline plus fetch time, well under that.
-- **Full refresh.** The same transform rebuilds all of analytics from index. CI
-  asserts that incremental and full-refresh live rows are identical.
-- **Version bumps.** Sessions whose rows carry a stale `transform_version`,
-  `rules_version` or `price_version` are queued in bounded batches, like
-  touched sessions.
-- **Missing raw.** Sessions whose sources are gone keep their rows and
-  versions and are listed as `source_missing` in the manifest. An analytics schema
-  change (`asi_schema_version`) rebuilds analytics, except that a store with
-  `source_missing` sessions refuses (decided 2026-11-08): the operator runs
-  `semon asi export` and then `semon asi reset`.
+- **Full refresh.** The same pure projection rebuilds origin analytics from an
+  available admitted index. CI compares incremental and full-refresh live rows.
+  Imported frozen heads may be the only surviving facts and are not assumed
+  rebuildable from a receiver index.
+- **Versions and missing sources.** Queue stale rules, transform and pricing
+  versions in bounded producer batches; a transform-only change reprojects admitted
+  index facts without deriving labels/prices again. Origin rules/pricing changes
+  publish the resulting admitted activity generation; receivers retain each origin's
+  recorded versions and report coverage. A missing source retains its complete
+  facts and is marked `source_missing`. In particular, the multi-source gap #582
+  must not replace a complete generation with a fragment. Re-derive at the origin
+  when raw returns. A format mismatch refuses exactly; preserve or export frozen
+  facts and custody, with no automatic reset or multi-version exception.
+- **Federated publication.** #555's immutable objects, `expected_parent` and
+  namespace claim epochs publish complete admitted heads. Receiver imports carry
+  per-origin heads and source, activity and transcript generations separately;
+  they do not resurrect the old #561 rows wire. Publication and namespace transfer
+  preserve the prior complete head until an eligible replacement is committed.
 
 ## Durable state
 
@@ -190,10 +223,11 @@ tables.
 `work_item`, `change`, `outcome`, `intervention` and `assignment`
 (methodology §1.1), keyed by UIDs.
 
-- **Writes.** WAL, `synchronous=FULL`, and a single writer through
-  `semon-asi`. `label` and `adjudication` are insert-only, enforced by triggers.
-- **Rebuilds** never open it for writing. It has its own version: on a
-  mismatch it refuses, and the operator exports and then resets.
+- **Writes.** WAL, `synchronous=FULL`, and a single author-owned writer through
+  `semon-asi`. Label assertions and adjudications are insert-only, enforced by
+  triggers; categorical exports retain authorship and contributor policies.
+- **Rebuilds** never open it for writing. A format mismatch refuses; preserve
+  or export the durable state without automatic reset.
 - **Body columns** (`label.mechanism_text`, `adjudication.reason`,
   `lane.title` and the intervention text) are classed `body`. They never reach
   analytics or Hub, and are readable only through `view` ([ASI query](asi-query.md)).
@@ -207,7 +241,12 @@ tables.
 
 ## Hub export (phase 3)
 
-Hub holds the same layout per tenant, with one independent head per
+Hub holds analytics and categorical L1 labels only; it runs no L1 inference and
+holds no bodies, body proxy or body cache. **PM interpretation of D7, open to user
+correction:** plain typed names/paths apply origin→operator receiver; the settled
+Hub boundary still HMAC-tokenizes all typed paths. This does not authorize arbitrary
+free text in labels or other fields: free text remains body data. Hub holds the
+same layout per tenant, with one independent head per
 **publisher** (a store that exports namespaces). Hub keeps a namespace table
 (`namespace → active publisher, epoch`), and the tenant's views read each
 namespace's rows (facts, namespace-scoped dimensions and labels) only from
@@ -225,6 +264,7 @@ publishers collapse in the views. Export is coherent and idempotent:
    one copy of M is visible before and after the switch.
 2. **Upload.** For each new generation, the store writes fresh export files:
    `path` columns become tokens, and only approved Parquet metadata is kept.
+   This is the Hub export boundary, not origin-to-receiver tokenization.
    It uploads each one with `PUT /v1/asi/objects/{digest}`. Uploads are
    immutable and content-addressed, so retries are safe.
 3. **Commit.** `POST /v1/asi/commit` sends the generation: added and removed
@@ -251,7 +291,7 @@ publishers collapse in the views. Export is coherent and idempotent:
 
 - analytics schema definitions (columns, classes and docs, from which the
   generated reference is built);
-- transforms over a index input trait;
+- pure projections over an index input trait;
 - the partition writer, manifest and garbage collection;
 - the durable store;
 - Hub export and import validation;
@@ -268,61 +308,69 @@ and binary size: the first slice measures both and caches the build.
 
 ## Performance from day 1
 
-Budgets on a pinned 4-vCPU, 16 GB CI runner, using deterministic synthetic
-data (1M rows per PR, 10M nightly, 100M weekly) plus the sanitized fixtures:
+CI measures deterministic synthetic workloads (1M rows per PR, 10M nightly,
+100M weekly) and sanitized fixtures on a pinned 4-vCPU, 16 GB runner:
 
-| Path | Budget |
+| Local path | Budget |
 | --- | --- |
 | Raw → index ingest | ≥ 10 MB/s |
-| Freshness (append to analytics visible) | p95 ≤ 5 s without backlog, including sustained appends to a 10,000-step session while queries run |
+| Append → origin analytics, without backlog | p95 ≤ 5 s, including sustained appends to a 10,000-step session while queries run |
 | Dashboard views | p95 ≤ 500 ms |
 | Ad-hoc group-by over `fact_step` | p95 ≤ 2 s at 10M rows, ≤ 5 s at 100M |
 | FTS top 20 | p95 ≤ 500 ms |
 | Analytics size and files | Recorded per 1M steps (Parquet, ZSTD); file count stays bounded under 100M-row sustained ingest |
 | Query setup (snapshot, live map, views) | ≤ 300 ms cold with 1M sessions |
 
-Runs record throughput, CPU, RSS, disk and spill. A run that misses a budget
-fails the scheduled job. For context, the measured workload of one heavy user
-today is about 466 MB of logs in 2.5 months.
+Record throughput, CPU, RSS, disk and spill. Measure origin computation and
+publication lag, connected push-hop freshness, bounded remote-view latency and
+memory, cancellation and offline/partial coverage separately. Local FTS is not a
+fleet latency promise; no fleet-wide 500 ms target is implied. Scheduled jobs fail
+their applicable budgets.
 
 ## Phases
 
-1. **Raw custody, analytics and SQL.**
-   - Receiver replace preservation, `redactor_version`, and the standalone
-     archive.
-   - The index change log and `repo_id` facts.
-   - `semon-asi`: the analytics model, generations, transforms, and the DuckDB
-     engine with `sql` and `schema`.
-   - The CI performance harness.
+1. **Origin projection and SQL:** preserve raw custody, implement the index
+   change log and repository identity, pure analytics projection, immutable
+   publication, SQL and CI performance harness.
+2. **Federated pull and viewing:** admit body-free heads at the receiver; deliver
+   local search and authorized, audited bounded remote view. Receiver search over
+   remote sources remains unavailable until federated coverage and audit exist.
+   Add author-owned durable categories and Viewer routes.
+3. **Hub:** path keys, analytics-only export and Hub import validation.
 
-   This works standalone and on receivers.
-2. **Labels and search.** The durable store and `fact_label`, FTS5 with
-   `search` and `view`, and Viewer routes.
-3. **Hub.** Path keys, analytics export and Hub import validation.
+These are accepted design requirements, not claims that authorization, audit or
+other safeguards have shipped.
 
 ## Tests (CI only)
 
-- Golden analytics rows for the sanitized fixtures, and incremental output equal
-  to full refresh.
-- Identity: UIDs equal across rebuilds; the encoding round-trips; record
-  anchors are stable under interleaved appends.
-- Incremental equals full refresh after: delayed tool results, a late earlier
-  record, a rewrite, a session crossing midnight, a removed session, and an
-  index rebuild (new incarnation).
-- Publication: a crash mid-cycle leaves the old generation; a crash after a
-  label commit still exports that label; repeating a compaction is a no-op; a file is retired
-  only 10 minutes after it leaves the live generation; compaction keeps the
-  live rows identical; a version bump queues only stale sessions.
-- Spend: copied usage is not double-counted; the step-to-tool-call view
-  doesn't multiply tokens.
-- Raw: a receiver `replace` preserves bytes; a standalone archive survives
-  pruning and rewrites; `source_missing` refusal, then export and reset.
-- Durable: bytes unchanged across rebuilds; label updates raise.
-- Hub export: no `body` column ever exported; `path` columns and local
-  remotes are tokens; credentials are stripped from `repo_id`; foreign Parquet
-  metadata is dropped; a stale publisher, a wrong parent and a retried upload
-  each behave as specified; two publishers in one tenant compose, and neither
-  can remove the other's objects; a namespace transfer shows exactly one copy
-  of its rows before and after activation; an interrupted export leaves Hub on the old
-  generation.
-- The performance budgets above.
+- Golden sanitized fixture rows and incremental equals full refresh for admitted
+  origin generations, including late results, rewrites, index incarnation changes
+  and source loss; #582 never publishes a partial multi-source generation as complete.
+- Identity and exact anchors survive supported rebuilds and source interleaving;
+  UID encoding round-trips. Incremental/full refresh cases include delayed results,
+  late earlier records, midnight crossings, rewrites, removals and new incarnation.
+- Keep publication/compaction gates: mid-cycle crash preserves the previous head;
+  a crash after durable label commit still exports it; repeat compaction is a no-op;
+  live rows remain identical; files retire only 10 minutes after unpublication;
+  only stale sessions queue on version bumps. Raw replace preserves logical bytes,
+  and origin archives survive pruning/rewrites. Durable updates raise and rebuilds
+  leave bytes unchanged. These gates are not replaced by federation tests.
+- Publication survives crashes, lost acknowledgments, parent conflicts, restarts,
+  compaction and interrupted refresh. Namespace transfer admits complete cohorts,
+  retains unaffected facts and labels, rejects stale publishers and leaves one
+  complete head; mixed replica/pull-only namespaces retain origin authority.
+- Intersection of all contributor policies governs each multi-source derivative,
+  label and coverage disclosure. Restricted contributions cannot leak through a
+  permissive source or a purportedly complete partial aggregate.
+- Mixed rules and price versions report coverage; copied usage is not double
+  counted and tool joins do not multiply measures. Origin repricing from stored
+  billing inputs updates all dependent summaries without receiver repricing.
+- Missing raw retains frozen facts. Exact format mismatch refuses without deletion,
+  automatic reset or a multi-version reader; export preserves custody.
+- Durable categorical assertions retain authorship and append-only history; free
+  text never enters analytics. Rebuilds leave durable bytes unchanged.
+- Hub export tokenizes typed paths and strips credentials and foreign Parquet
+  metadata; Hub rejects bodies and unsupported fields, scopes tenants and validates
+  claims, parents and complete heads. Retry is idempotent.
+- Exercise remote authorization, audit, cache, typed pages and limits as specified
+  in [ASI query](asi-query.md), and measure the performance paths above.

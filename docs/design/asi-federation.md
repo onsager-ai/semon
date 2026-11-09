@@ -1,11 +1,14 @@
 # Federated ASI custody and on-demand viewing
 
-Status: **proposal for user approval**, 2026-11-09. Docs only. This does not
-replace the accepted [ASI direction](asi-direction.md), [store](asi-store.md)
-or [query](asi-query.md) contracts until approved. It authorizes no product
-implementation, merge, deployment, data deletion or lane redirection.
+Status: **accepted architecture**, 2026-11-09, following the user's D1–D8
+answers through the PM's structured decision process on #587. This supersedes
+option B as the default and is reconciled with [ASI direction](asi-direction.md),
+[store](asi-store.md) and [query](asi-query.md). Acceptance is a design decision,
+not evidence that these safeguards have shipped. This docs change grants no merge,
+deployment or data-deletion authority. The PM applies the lane plan after the
+user approves the merge; this document does not itself redirect active lanes.
 
-## Recommendation and scope
+## Accepted direction and scope
 
 Lead with the user's design: keep native raw history at its origin, compute
 analytics there, and push governed, body-free facts to the operator's self-hosted
@@ -35,22 +38,23 @@ Do not build a general distributed query engine or a remote execution platform.
 The new transport carries enumerated read operations and analytics publication;
 it cannot start a harness, run a command, change origin policy or manipulate files.
 
-Recommended first delivery: origin analytics publication, origin-local archive
-and viewer, and online-authorized receiver pulls with encrypted cache. Defer
-federated full-text search and offline body grants until their separate contracts
-are approved. Retain an explicit opt-in replica mode in the architecture, gated
-by the stronger custody and security requirements below.
+First delivery: origin analytics publication, origin-local archive and viewer,
+and online-authorized receiver pulls with encrypted cache. Local search and remote
+view ship first; receiver search stays unavailable until federated coverage and
+audit exist. Offline body grants are excluded. An explicit opt-in replica mode
+retains supported mirror custody under the security requirements below.
 
 ## Compared with option B
 
-Option B is the 2026-11-09 amendment to [#549][roadmap], implemented by the specs
-merged in [#553][spec-pr]. It replaced the origin-derived metadata approach in
+Option B was the 2026-11-09 amendment to [#549][roadmap], specified by
+[#553][spec-pr]. It replaced the origin-derived metadata approach in
 [#550][old-decision] with central derivation over receiver-held redacted Raw.
-This proposal restores origin derivation but adds demand-driven body access,
-bounded caching and computational governance; it does not restore the old wire
-format or retired Encrypted Relay.
+The accepted federation decision now restores origin derivation with demand-driven
+body access, bounded caching and computational governance. The comparison below
+records the superseded default, not a second current contract. The old wire
+format and retired Encrypted Relay are not restored.
 
-| Concern | Federated default proposed here | Accepted option B |
+| Concern | Accepted federated default | Superseded option B default |
 | --- | --- | --- |
 | Raw custody | Origin native logs and local archive; receiver cache is expendable | Origin plus receiver immutable redacted mirror/archive |
 | Analytics producer | Origin SQLite projection, then local analytics writer | Receiver SQLite projection and analytics writer; local pipeline when standalone |
@@ -166,22 +170,30 @@ Queries pin a coherent map of per-origin heads. Heads need not have the same
 computation time or rules version; the result carries those distinctions. No
 atomic global clock or simultaneous cross-origin snapshot is promised.
 
-Default export excludes paths, commands, output, snippets, error messages,
-free-text titles/goals/explanations, source carrier names and arbitrary tool/model
-aliases. Map tool and model identities to controlled vocabularies; unknown values
-remain `unknown`, rather than exporting arbitrary strings. Repo/branch/machine
-names and native IDs can also identify people or projects. Use opaque identifiers
-and policy-approved display names. A policy may explicitly allow sanitized names
-inside the operator boundary; that does not permit their Hub export.
+**D7: plain names and paths are accepted between origin and the operator's
+receiver.** Export the typed schema's name/path fields, including repository,
+branch, machine, tool/model names and target paths, under the contributor-policy
+intersection. Do not substitute an origin-tokenized default. Credential stripping,
+field/size validation and source restrictions still apply. This choice knowingly
+reveals project/person names, local filesystem structure and cross-source joins
+to the receiver; body-free is not privacy-free. It does not authorize commands,
+output, snippets, error messages or free-text titles/goals/explanations as metadata.
+An explicit allowlisted `name` field is not a place to smuggle arbitrary body text.
+Native source handles and evidence links remain opaque; plain analytics paths do
+not become remote filesystem authority or URL content. Internal unkeyed path
+fingerprints remain non-exported implementation details.
 
-Path joins, when enabled, use workspace-keyed HMAC tokens at the **origin export**
-boundary by default. No unkeyed fingerprints leave. Tokenization is pseudonymity:
-equality and frequency still leak, and an origin holding a shared key can test
-guesses. A single key allows cross-origin joins but expands the compromise domain.
-Record key version and canonicalization version; never compare different token
-versions as equal. Raw local paths stay local unless a source explicitly opts into
-the trusted-receiver profile. Hub receives tokens only, including local repo paths,
-and never receives the key. Already tokenized values are validated, not re-HMACed.
+**PM interpretation of the destination boundary, open to user correction:** the
+user's plain-name/path choice applies to origin→operator receiver. The already
+settled Hub rule remains: all path-class fields, including local repo paths, are
+HMAC-tokenized at the Hub export boundary; Hub never gets plain paths or the key.
+This records the PM's interpretation rather than claiming the user explicitly
+restated the boundary. Origin tokenization is not required for receiver analytics.
+Use the existing #555 workspace-key/canonical-path contract at the exporting store,
+record token-key and canonicalization versions, and never equate different token
+versions. Hub validates tokens; it does not re-HMAC them. Names remain typed and
+policy-approved under the Hub export profile. HMAC is pseudonymity: equality and
+frequency still leak, and key holders can test guesses.
 
 Receiver-to-Hub export preserves origin provenance, status and versions while
 stripping disallowed names and metadata. Hub retains per-tenant publisher epochs
@@ -242,18 +254,17 @@ not a false success. Stream delivery records bounded range receipts, not one
 unbounded session audit entry. Bound and protect audit storage separately from
 cache retention; audit failure refuses new reads. Audits themselves are sensitive.
 
-**Recommended initial guarantee:** origin must authorize and audit every new body
+**Accepted initial guarantee (D2):** origin must authorize and audit every new body
 read, even a cache hit. This gives immediate origin policy checks while connected
 and means no newly requested cached body is shown when the origin is offline.
 An existing tab can show bytes already delivered, clearly marked disconnected;
 Semon cannot revoke information a viewer has already seen.
 
-Offline cached reading needs a different, weaker guarantee: a source-approved,
-short-lived user-scoped offline grant, receiver audit persisted before release and
-origin audit reconciliation after reconnect. Revocation can lag until grant expiry;
-origin audit cannot be synchronous and may never arrive if a machine is lost.
-Do not claim this meets the initial both-sides-before-release rule. Decision D2
-explicitly asks whether to accept that trade-off.
+Offline grants are not part of the accepted design. Eventual audit reconciliation
+cannot satisfy the origin's authorization and audit requirement before each read;
+a lost machine might never receive the audit. Neither a valid TTL nor replica
+custody bypasses the online check. Adding offline grants or delegated receiver-only
+body authorization later requires a new explicit user decision.
 
 ## Outbound-only body channel and read boundary
 
@@ -356,7 +367,7 @@ No automatic whole-machine prefetch, backup, archive promotion or central
 re-derivation from it is allowed. A requested session is fetched in bounded pages
 or ranges; opening it does not force retrieval of every source byte.
 
-Proposed conservative defaults, subject to D3: 256 MiB global encrypted cache,
+Accepted limits (D3): 256 MiB global encrypted cache,
 64 MiB per source, 15-minute absolute TTL from fetch, and a 256 KiB remote page/field
 response cap (the focused `view` budget). Origin-native reads retain the existing
 128 KiB per-range bound and whole-operation budgets. Origin policy and receiver
@@ -428,7 +439,7 @@ a single clear presentation state without inferring that availability is livenes
 | `cached-stale` / `rewrite-detected` | Continuation refused; explicit “open latest” action, no mixed pages |
 | `expired` / `evicted` | Metadata/analytics retained; a new authorized pull is needed |
 | `offline-uncached` | Origin offline, evidence unavailable; no fallback import or recovery |
-| `offline-cached` | Cache exists but new read unavailable under the recommended online-audit rule; optional offline grants would instead display a labelled cached copy |
+| `offline-cached` | Cache exists but new read is unavailable under D2's online authorization/audit rule; no offline grants |
 | `refused` / `source-missing` | Authorized user receives a bounded reason; permission denial differs internally from permanent source loss and transient disconnect |
 
 Partial cache coverage is “N of M requested ranges held”, with unknown totals
@@ -493,8 +504,9 @@ the existence of inaccessible namespaces.
 
 Price changes are different from rules changes. The current activity store can
 reprice saved complete billing inputs even when raw is unavailable; an offline
-origin still cannot publish that correction. D4 proposes retaining the recorded
-origin valuation first, with an optional separately named central valuation later.
+origin still cannot publish that correction. D4 accepts retaining the recorded
+origin valuation first. A separately named central valuation may be specified later;
+it is not part of the current pricing path.
 Such a view would label its selected price version and missing-input coverage,
 respect exclusive/copied usage and avoid multiplying cost through tool-call joins.
 It must not replace origin values or pretend to reclassify L0. Price-dependent
@@ -513,8 +525,8 @@ reset/removal. Do not implement parallel old readers, converters or dual writers
 
 This means a breaking schema change can make frozen history unavailable to current
 queries. Do not run `asi reset` automatically or treat remote imported evidence as
-rebuildable. D5 records the storage Manager's proposed compatibility exception and
-the recommendation to keep the current pre-release rule instead.
+rebuildable. D5 rejects a multi-version exception and keeps the current
+pre-release rule; frozen data must be preserved and exportable without conversion.
 
 ## Hybrid opt-in: receiver raw replica
 
@@ -558,17 +570,18 @@ offline use but is not independently exported into that namespace. L0 derives
 under the same single-model code. L1 remains origin-side by default; receiver
 L1/model egress requires a separate future source consent, not replica enrollment.
 
-Per-read origin authorization remains the default even for a replica. If offline
-viewing is the reason for replica mode, enrollment must additionally approve the
-bounded offline-grant/audit-reconciliation exception in D2, or explicitly delegate
-ongoing body-policy enforcement to the receiver. That delegation weakens the origin
-veto and synchronous origin audit; it cannot be described as the same guarantee.
-Without it, a replica can preserve raw and centrally re-derive under its approved
-producer policy, but offline viewer reads remain unavailable.
+Per-read origin authorization and audit remain mandatory even for a replica.
+D2 excludes offline grants and receiver-only body-policy delegation. A replica
+preserves raw and may centrally re-derive under its enrolled producer policy, but
+new offline viewer reads remain unavailable. Replica custody improves recoverability;
+it does not establish offline viewing authority. If the origin is permanently lost,
+body access stays blocked until a separate explicit recovery/authority decision;
+there is no automatic reassignment.
 
-Origin and replica archive retention must be separately selected; recommend no
-silent change to the existing origin retention policy and an explicit finite
-receiver retention at enrollment, with “indefinite” a conscious choice. Native
+Origin and replica archive retention are separate from cache TTL. D3 preserves
+the existing origin retention policy until it is deliberately changed. Replica
+enrollment records its retention explicitly; no new finite-retention default or
+automatic purge is introduced by this decision. Native
 log deletion remains an operator action. Approving this proposal never removes
 existing mirrors, archive chains, keys or user data. Switching back to pull-only
 stops new replication after explicit activation; old receiver custody remains
@@ -601,8 +614,9 @@ policy, audit receipts and the integrity/availability of analytics history.
   explicitly say the mirror is receiver-readable and not end-to-end encrypted.
   Zstd “sealed” copies are compression/storage representation, not encryption.
 - The accepted [Raw spec](asi-store.md#raw) keeps raw indefinitely by default and
-  specifies no encryption at rest. This proposal must add real key and retention
-  contracts before remote cache/replica activation.
+  originally specified no encryption at rest. The reconciled store and this
+  contract require key custody and explicit retention before remote cache/replica
+  activation; implementation evidence remains required.
 - Receiver-viewer per-user/per-machine authorization and body-read audit have
   **not been verified by this design review**. Existing authenticated routes and
   source fences do not establish those guarantees. Do not expose remote bodies on
@@ -618,10 +632,10 @@ qualitative design estimates, not delivery promises.
 
 | Slice | Disposition | Effect and proposed approval boundary |
 | --- | --- | --- |
-| #544 / #545 | Change specs | Reconcile custody/authority, exports, coverage and remote body behavior after approval; keep current accepted docs authoritative meanwhile. |
+| #544 / #545 | Change specs | Direction/store/query are reconciled in this PR; PM updates issue criteria after merge approval. |
 | #559 / #571 | Keep | Transactional query-ready change log, incarnation and repo identity work at origin unchanged. Export field policy is separate. Near-zero rework. |
 | #558 / #572 local archive | Keep | Essential origin custody across prune/rewrite. No permission to delete native data. |
-| #558 / #572 receiver custody | Change placement; keep for supported mirror/opt-in replica | Not part of pull-cache implementation. Storage Manager recommends merging intact while mirror remains supported; earlier PM candidate suggested dropping receiver half. Recommend preserve correctness of supported mirror, defer expanding default receiver custody. User merge decision stays separate. |
+| #558 / #572 receiver custody | Change placement; keep for supported mirror/opt-in replica | Not part of pull-cache implementation. Storage Manager recommends merging intact while mirror remains supported; earlier PM candidate suggested dropping receiver half. D6 preserves supported mirror correctness and optional replica custody. User merge decision stays separate. |
 | #575 | Keep, change policy scope | Archive-backed reads become critical at origin. Separate origin/replica retention from cache TTL; freeze coverage after authorized source loss. No automatic historical deletion. Low rework. |
 | #554 / #577 schema | Keep foundation; extend export contract | Typed body-free model and billing inputs survive. Add version/coverage and field-policy definitions in a focused subsequent schema slice; internal `path` is not export permission. |
 | #554 / #578 publication | Keep | Atomic generation/live-map writer remains local to each publisher. Add remote staging/namespace heads at the boundary, not inside local atomicity. |
@@ -629,7 +643,7 @@ qualitative design estimates, not delivery promises.
 | #554 / #580 compaction/retirement | Keep | Operates on admitted analytics files; never collect the only imported frozen facts as “rebuildable.” Cache eviction is independent. |
 | #554 / #581 DuckDB and build cache | Keep | Same query/storage engine and CI cache gate. No federation dependency. |
 | #556 / #583 StepFacts | Keep | Sole activity model, complete billing inputs and usage ownership remain origin-local. Do not export raw StepFacts. Federation/L1 are outside this slice. |
-| #557 transforms | Change execution/publication | Execute at origin, project the one admitted SQLite generation, add mixed-version/frozen coverage and exported-head ownership. Central pricing alternative needs D4. Low relocation cost; material semantics. |
+| #557 transforms | Change execution/publication | Execute at origin, project the one admitted SQLite generation, add mixed-version/frozen coverage and exported-head ownership. D4 keeps origin recorded costs; central valuation is later work. Low relocation cost; material semantics. |
 | #570 performance | Change measured path | Preserve local budgets; add connected origin→receiver freshness, cache/range/cancel budgets and bounded origin resources. Separate unavailable coverage from latency success. Fleet FTS cannot inherit a 500 ms local promise. |
 | #576 / #584 CI flake | Keep | Independent CI correctness work; no threshold relaxation. |
 | #585 Git includes | Keep | Origin-side repo identity resolution unchanged. |
@@ -643,27 +657,60 @@ qualitative design estimates, not delivery promises.
 | #566 MCP/CLI | Keep, extend envelope | `sql`/`schema` and `find` retirement survive; expose imported freshness/coverage. |
 | #567 search/view | Change substantially | Origin FTS; on-demand authenticated view; later optional fan-out with explicit partial coverage. No receiver cache-only global FTS. |
 | #568 Viewer routes | Change | Per-user/machine/namespace ACLs, origin policy/audit, generation-qualified cache and offline states. Keep read-only Semon viewer. |
-| #555 Hub export | Keep mechanism, change profiles/provenance | Reuse atomic objects/heads/epochs for receiver import; earlier path/name policy; preserve origin versions. Hub stays body-free; no deploy implied. |
+| #555 Hub export | Keep mechanism, change profiles/provenance | Reuse atomic objects/heads/epochs for receiver import with plain typed paths/names; HMAC at Hub boundary under D7's recorded interpretation; preserve origin versions. Hub stays body-free; no deploy implied. |
 | #546 L1 | Change location | Origin inference, consent, category/evidence provenance and accuracy/coverage work; not delivered by StepFacts. |
 | #547 / #586 Viewer scope | Keep accepted framing | Standalone read-only raw viewer and analytics; reconcile availability copy, without presentation redesign or T3 dependency. |
 
-**Pending approval:** recommend holding new federation implementation, new
-receiver body-serving/search routes, default replica expansion, offline body grants,
-central pricing changes and compatibility exceptions. #572 may finish its current
-correctness fixes; whether to merge it intact is a user/PM decision. Do not stop
-#571, #556, #577–#581, #576/#584 or #585, or redirect #557 ownership. Existing
-phase 1 continues under its current authority; new remote assumptions in #557,
-#567/#568 and #555 need this decision first. #575 origin archive reads are valuable
-under both designs; receiver retention/body-serving extensions await reconciliation.
-No issue is closed/reopened, and no implementation is paused by this document.
+**Execution boundary:** D1–D8 are accepted. The PM will apply the concrete lane
+plan after the user approves this docs merge. Existing phase 1 continues under its
+current authority until that coordination. Keep supported mirror/#572 custody,
+origin archive reads and the analytics foundation; do not enlarge current PRs with
+new channel/cache/authorization work. Offline grants, central valuation and
+multi-version support are excluded from the current scope, not unresolved choices.
+Receiver search remains unavailable until its separate coverage/audit work exists.
+No issue is closed/reopened and no lane is redirected by this document itself.
 
-After approval, amend the canonical direction/store/query docs, issue acceptance
-criteria and producer/consumer contracts together. Do not ship compatibility
-adapters for superseded Semon formats. Split transport, governance, cache/security,
-viewer and optional search into reviewable slices with the PM; do not bundle them
-into the existing analytics stack.
+The direction/store/query specs change together in this PR. Subsequent producer,
+consumer, fixture and issue changes implement one current contract without
+compatibility adapters. The following actions are for the PM to apply after merge
+approval; new issue titles are concrete proposals, not already-created issues.
 
-## Consultation and unresolved decisions
+### Lane-change plan for PM application
+
+| PM action | Issue/PR and next work |
+| --- | --- |
+| Retitle/update #544 | “ASI store: origin derivation, governed publication and optional replica custody”; replace default receiver derivation acceptance with this architecture and link new transport/governance slices below. |
+| Retitle/update #545 | “ASI query: body-free SQL, local search and online remote view”; add availability/version coverage and explicit receiver search refusal. |
+| Keep #559/#571 and #585 | Storage lane finishes existing index/identity work and review; no federation protocol in these PRs. Plain typed repo/path fields remain allowed to operator receiver. |
+| Keep #558/#572; clarify title/body | “Raw custody: origin archive and supported receiver mirror”; retain both halves and existing correctness fixes. Add no cache implementation. User merge approval remains separate. |
+| Retitle #575 | “Origin archive-backed reads and explicit archive retention”; implement prune/rewrite reads first, preserve default origin retention, distinguish explicit replica retention from TTL. |
+| Keep #554 stack #578–#581 | Finish publication/compaction/DuckDB layers following merged #577; no re-splitting or transport scope expansion. Follow-up provenance/export fields belong with transport integration. |
+| Keep #556/#583 and #582 | Activity lane finishes StepFacts and complete-generation preservation under existing ownership. No L1/channel work added to StepFacts; #582 must precede claiming complete federated updates. |
+| Retitle/update #557 | “Origin analytics projection, version coverage and reconnect refresh”; use the single SQLite model, origin recorded pricing and admitted cohorts. Wire local consumers first, then the publication slice; do not recompute costs in DuckDB. |
+| Keep #564/#565/#566 | Query lane implements sandbox/schema/MCP/CLI with coverage envelopes and exact-format refusal; SQL never fetches bodies. No current PR scope expansion beyond those contracts. |
+| Split/update #567 | Retitle “Origin-local FTS and focused view”; implement local search and view contracts. Move receiver fan-out into a new deferred issue; do not reopen closed #563. |
+| Retitle/update #568 | “Authenticated online receiver view and explicit availability states”; depend on new read-channel/cache gates. Origin-rendered typed pages and exact anchors; no offline grants. |
+| Retitle/update #555 | “Hub analytics export: tokenized paths and tenant-bound publisher heads”; reuse shared publication mechanism below, apply HMAC only at Hub boundary under the recorded D7 interpretation, preserve origin provenance. Hub deploy pause unchanged. |
+| Update #560/#546 | Durable author ownership/category export for #560; origin L1 inference, consent and exact evidence mapping for #546. Free text stays bodies. |
+| Update #570 | Keep local performance gates; add controlled connected origin→receiver freshness, bounded online view/cancel/cache resource cases. Defer fleet-search latency acceptance to its issue. |
+| Leave closed; link successors | #561/#562 remain historical closed issues; their metadata-default intent returns in the new publication issue. #563 remains closed as duplicate of #567. No issue closure is newly required. |
+| Leave completed work alone | Merged #577/#584/#586 and #576's resolution retain their scope. #547 references online/offline evidence states; no presentation redesign is authorized here. |
+| Open “ASI governance: origin policy, classification and export profiles” | Versioned policy, multi-source intersection, secret/PII scan status, provider consent, plain receiver name/path profile and tokenized Hub profile. Own test fixtures for body leakage and withheld coverage. |
+| Open “ASI publication: origin-to-receiver objects, heads and reconnect” | Shared #555 mechanism, namespace enrollment/epochs, typed allowlist validation, complete-source provenance, idempotent staging, mixed-version coverage and frozen-data export. Dependencies: #557, governance, complete-generation preservation. |
+| Open “ASI online body channel: origin-rendered pages and exact evidence” | Outbound-only read capability, identity assertions, origin recipes/proofs, redacted field mappings, bounded append subscriptions, cancellation and per-read origin audit. No generic RPC or remote execution. |
+| Open “ASI receiver body access: ACLs, dual audit and encrypted TTL cache” | Per-user/machine/namespace authorization, origin online checks even on hits, 256/64 MiB caps and 15-min TTL, key custody, stream-through and no-store boundaries. Depends on governance/channel; gates #568 exposure. |
+| Open “ASI replica enrollment and namespace authority transfer” | Source-approved raw custody; central producer activation only for complete eligible namespaces with unaffected facts/labels preserved. Supported mirror continues; offline body reads prohibited. |
+| Open deferred “ASI federated search with coverage and audit” | Later authorized-origin query fan-out, sensitive-query egress, per-namespace partial coverage, snippets/audit and measured budgets. Receiver `search` refuses until delivered. |
+
+Suggested order: finish existing storage/activity foundations; implement governance
+and shared publication; complete SQL/schema coverage; build the online read channel
+and receiver security/cache together before #568; add replica authority enrollment;
+implement Hub export after publication/profile validation, with no deployment
+implied. Local FTS can proceed independently after its native/durable prerequisites.
+The PM assigns new work to active or explicitly relaunched lanes; this plan does
+not wake the settled activity/Hub Managers or authorize unsolicited lane messages.
+
+## Consultation and accepted decisions
 
 The design owner requested targeted advice from peer Managers. Advice is evidence,
 not approval. Following the PM's correction, there were no follow-ups to the settled
@@ -676,14 +723,15 @@ its enforcement have not been verified.
   while mirror is supported; reusing #555's mechanism; treating #567 as the major
   redesign. Objects to permanently frozen rules, origin-only loss of custody,
   origin-frozen prices and exact-format mismatch. Recommends central price views
-  and a scoped multi-version exception. This proposal adopts reuse and coverage,
-  but leaves those latter two disagreements to D4/D5.
+  and a scoped multi-version exception. D4/D5 resolved those disagreements:
+  recorded origin costs first and no multi-version exception. Reuse and coverage
+  are retained.
 - **Viewer research Manager** (`mcp:0f1ba7d5-f083-4d84-a519-d0d6a60f42d3`, local
   environment): recommends explicitly labelled TTL-valid cached copies while
   offline, exact generation-qualified anchors and no T3 fallback. Flags that origin
   loss removes the raw-viewing foundation. Source: [#586 research at 3d59253e][viewer-research].
-  This proposal adopts the states/anchors but recommends online authorization first
-  because synchronous origin audit cannot hold offline; D2 records the difference.
+  States/anchors are retained; D2 selected online authorization and audit for every
+  read, rejecting the offline-cache alternative for the initial delivery.
 - **Session activity Manager** (thread
   `e167507d-cfbd-47b7-8ccc-ae5659c30304`, environment
   `40683a5c-9e29-48b4-930c-68d74f9a2bba`) supplied advice before the settled-lane
@@ -695,20 +743,22 @@ its enforcement have not been verified.
   lists; one 11,820-step selected read over budget; incomplete waste labels) do not
   establish current federation, L1 accuracy or anchor acceptance.
 
-The following decisions are for the user, routed through the PM after this review.
-All remain **unapproved**; recommendations are not defaults silently activated by
-this document. No dependent implementation may treat silence as approval.
+The user accepted the following on 2026-11-09 through the PM's structured
+question process. D7 chose the plain-name/path option rather than the author's
+origin-tokenization recommendation. All eight decisions are settled; the PM's
+interpretation of D7's destination boundary is explicitly marked below and remains
+open to user correction, not a new approval request.
 
-| Decision | Recommendation | Alternative and trade-off |
+| Decision | Accepted choice | Consequence |
 | --- | --- | --- |
-| D1: Replace option B as default? | Adopt origin derivation plus demand-driven receiver bodies; accept mixed versions and possible permanent evidence loss. | Keep central Raw/derivation for uniform refresh and offline evidence, with broader body exposure. |
-| D2: Offline cache and audit guarantee? | First release requires origin authorization/audit on every new read, including cache hits. | Viewer peer prefers TTL-valid offline cache. Approve bounded offline grants and eventual origin audit explicitly; revocation/audit cannot be immediate. Replica offline delegation has the same decision. |
-| D3: Retention and cache limits? | Start at 256 MiB global, 64 MiB/source, 15 min absolute TTL; stream-through opt-in; retain existing origin retention until deliberately changed. Require explicit finite replica retention or deliberate indefinite opt-in. | Larger/longer cache improves availability but increases exposure. Shorter origin retention freezes more history; no automatic purge of existing data. |
-| D4: Prices across offline origins? | Preserve origin recorded costs and their coverage first. Add a separately named central valuation only as a follow-up amendment using full billing inputs and the same pricing logic. | Storage peer prefers query-time central `usd_est` immediately; avoids stale prices but changes the agreed pure-projection contract and all price-dependent summaries. Never silently mix valuations. |
-| D5: Old-format offline origins? | Enforce the pre-release single-format rule; refuse mismatches and preserve/export frozen old-format custody. No exception. | Storage peer proposes a scoped live multi-version exception. It requires explicit user scope and compatibility tests; creates maintenance burden and is not implied by rules-version skew. |
-| D6: Opt-in raw replicas? | Permit source-approved replica custody; central analytics authority transfers only for a complete eligible namespace. Preserve supported mirror correctness and #572 custody. Never turn cache into archive. | Pure federation accepts single-origin loss. Mixed replica/pull-only machines retain origin analytics authority; finer-grained authority would need a new contract. Retiring supported mirror is a separate approved removal. |
-| D7: Metadata privacy and path joins? | Tokenize paths at origin; controlled names/opaque identifiers by default, with explicit trusted-receiver display-name exceptions. Shared workspace HMAC key only when cross-origin joins are required. | Plain internal names/paths give richer analytics at the cost of disclosure; per-origin keys isolate compromise but prevent cross-origin path equality. |
-| D8: Remote search in first delivery? | Deliver local search and remote bounded view first; keep receiver search explicitly unavailable until federated coverage/audit is built. | Immediate origin fan-out adds query egress, partial-result semantics and latency/resource work before the core pull viewer. |
+| D1: Default architecture | Federation replaces option B as the default. | Mixed rules versions and possible permanent evidence loss are accepted. |
+| D2: Online reads | Origin authorizes and audits every read, including cache hits; no offline grants. | Cached bytes and replica custody do not authorize offline viewing. |
+| D3: Cache and origin retention | 256 MiB global, 64 MiB per source, 15-minute absolute TTL; stream-through opt-in. Origin retention unchanged until deliberately changed. | Reads do not extend TTL; no archive purge or cache-to-archive conversion. |
+| D4: Costs | Keep origin recorded costs first. Separately named central valuation can come later. | Never silently mix valuations or add central repricing to current transforms. |
+| D5: Format compatibility | Refuse old-format origins; no multi-version exception. Preserve and export frozen data. | No adapters/dual readers; unavailable history is not silently reset or deleted. |
+| D6: Replicas | Opt-in replica; namespace-wide authority transfer only. Keep supported mirror and #572 custody. | Mixed-source replica/pull-only namespaces retain origin analytics authority; cache never becomes archive. |
+| D7: Metadata privacy | Plain names and paths for richer analytics. **PM interpretation:** this applies between origin and operator receiver; settled Hub rules remain, with paths tokenized at Hub boundary and no plain paths in Hub. Open to user correction of that interpretation. | Origin tokenization is not the default. Body exclusions, credential stripping and source policy still apply; receiver learns sensitive names and paths. |
+| D8: Search sequence | Local search plus remote view first. | Receiver search stays unavailable until federated coverage and audit exist. |
 
 ## Acceptance before implementation can claim these guarantees
 
@@ -716,10 +766,12 @@ All runtime validation belongs in CI or separately authorized bounded local
 aggregate checks. This docs proposal ran no product builds, tests or raw-data scans.
 Required acceptance slices include:
 
-- End-to-end outbound capture over synthetic fixtures: no bodies, paths, arbitrary
-  names or free-text labels in analytics exports, Parquet metadata, errors or logs.
-  Known/unknown secret and PII cases measure detector misses rather than claiming
-  perfect redaction. L1 opt-out produces zero provider evidence egress.
+- End-to-end outbound capture over synthetic fixtures: receiver analytics contains
+  only allowlisted typed facts, with plain name/path fields under D7, and no bodies
+  or free-text labels. Hub exports contain no plain paths; Parquet metadata,
+  errors and logs cannot bypass the destination profile. Known/unknown secret and
+  PII cases measure detector misses rather than claiming perfect redaction. L1
+  opt-out produces zero provider evidence egress.
 - Transport refuses path traversal/symlink races, replayed grants, foreign
   namespaces, wrong audiences, unsupported verbs, stale generations and malformed
   frames; all control/runtime/SSH requests fail before dispatch. Cancellation,
@@ -781,9 +833,14 @@ found two P1 contract gaps and one P2 projection gap. The author addressed them:
   owns recipes/proofs and original-to-redacted evidence mappings; the receiver
   never tests redacted bytes against original-byte proofs.
 
-These are author revisions after the independent review, not a second independent
-clean verdict. Runtime authorization/audit, Hub ingest enforcement and CI acceptance
-were outside this review. The proposal remains subject to D1–D8 and user approval.
+D1–D8 were then accepted by the user as recorded above. A fresh independent
+Codex `gpt-6.1-sol` review at high effort completed on 2026-11-09 with **no
+actionable findings** across the reconciled federation, direction, store and query
+contract. It checked the original sources and accepted decisions, including D7's
+qualified boundary interpretation, replica authority, policy intersection, native
+proofs and the lane plan. `git diff --check` passed. Runtime enforcement, detector
+effectiveness, performance, Hub ingest and exact-tree CI were not certified by
+that review and remain separate evidence requirements. Merge approval is separate.
 
 [roadmap]: https://github.com/onsager-ai/semon/issues/549
 [spec-pr]: https://github.com/onsager-ai/semon/pull/553
