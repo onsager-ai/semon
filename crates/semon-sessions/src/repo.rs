@@ -81,8 +81,8 @@ pub(crate) fn repo_id(cwd: &str, home: Option<&Path>) -> Option<RepoId> {
                 .and_then(|value| normalize(&target.join(value.trim())))
             {
                 Some(common) => common,
-                // `<common dir>/worktrees/<name>`
-                None => target.parent()?.parent()?.to_path_buf(),
+                // A submodule's or `--separate-git-dir` repository's own gitdir.
+                None => target,
             }
         } else {
             return None;
@@ -95,38 +95,104 @@ pub(crate) fn repo_id(cwd: &str, home: Option<&Path>) -> Option<RepoId> {
     None
 }
 
-/// The `url` of `[remote "origin"]` in a Git config text.
+/// The `url` of `[remote "origin"]` in a Git config text (the last one, as
+/// `git config --get` reads it). Section names and keys are case-insensitive,
+/// the subsection is exact.
 fn origin_url(config: &str) -> Option<String> {
     let mut origin = false;
-    for line in config.lines().map(str::trim) {
-        if line.starts_with('[') {
-            origin = line.eq_ignore_ascii_case("[remote \"origin\"]");
+    let mut url = None;
+    for line in config.lines().map(str::trim_start) {
+        if let Some(header) = line.strip_prefix('[') {
+            origin = is_origin_header(header);
         } else if origin
             && let Some((key, value)) = line.split_once('=')
             && key.trim().eq_ignore_ascii_case("url")
         {
-            let value = value.trim();
-            let value = value
-                .strip_prefix('"')
-                .and_then(|value| value.strip_suffix('"'))
-                .unwrap_or(value);
-            return (!value.is_empty()).then(|| value.to_owned());
+            url = config_value(value);
         }
     }
-    None
+    url.filter(|url| !url.is_empty())
+}
+
+/// Whether `header` (after the opening bracket) is `remote "origin"]`, with
+/// anything, such as a comment, allowed after the closing bracket.
+fn is_origin_header(header: &str) -> bool {
+    let Some((section, rest)) = header.split_once(char::is_whitespace) else {
+        return false;
+    };
+    if !section.eq_ignore_ascii_case("remote") {
+        return false;
+    }
+    let Some(rest) = rest.trim_start().strip_prefix('"') else {
+        return false;
+    };
+    let mut subsection = String::new();
+    let mut chars = rest.chars();
+    loop {
+        match chars.next() {
+            Some('"') => break,
+            Some('\\') => match chars.next() {
+                Some(escaped) => subsection.push(escaped),
+                None => return false,
+            },
+            Some(other) => subsection.push(other),
+            None => return false,
+        }
+    }
+    subsection == "origin" && chars.as_str().trim_start().starts_with(']')
+}
+
+/// A Git config value: quotes group, `\n`, `\t`, `\b`, `\\` and `\"` escape, an
+/// unquoted `#` or `;` starts a comment and unquoted outer whitespace is
+/// dropped. `None` for an unterminated quote or an unknown escape.
+fn config_value(raw: &str) -> Option<String> {
+    let mut value = String::new();
+    let mut spaces = String::new();
+    let mut quoted = false;
+    let mut chars = raw.trim_start().chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                value.push_str(&std::mem::take(&mut spaces));
+                quoted = !quoted;
+            }
+            '\\' => {
+                value.push_str(&std::mem::take(&mut spaces));
+                value.push(match chars.next()? {
+                    'n' => '\n',
+                    't' => '\t',
+                    'b' => '\u{8}',
+                    escaped @ ('\\' | '"') => escaped,
+                    _ => return None,
+                });
+            }
+            '#' | ';' if !quoted => break,
+            c if c.is_whitespace() && !quoted => spaces.push(c),
+            c => {
+                value.push_str(&std::mem::take(&mut spaces));
+                value.push(c);
+            }
+        }
+    }
+    (!quoted).then_some(value)
 }
 
 /// A remote URL as a [`RepoId`]: credentials, scheme and `.git` removed, the
-/// host lowercased, the default ports 443 and 22 dropped. scp-style
+/// host lowercased, and the scheme's default port (https 443, http 80, ssh
+/// 22) dropped; any other port is kept. scp-style
 /// `user@host:owner/repo` becomes `host/owner/repo`. `file:` URLs and local
 /// paths are [`RepoId::Path`].
 fn classify_origin(url: &str) -> RepoId {
-    let (authority, path) = if let Some((scheme, rest)) = url.split_once("://") {
-        if scheme.eq_ignore_ascii_case("file") {
-            return RepoId::Path(url.to_owned());
-        }
+    let (default_port, authority, path) = if let Some((scheme, rest)) = url.split_once("://") {
+        let default_port = match scheme.to_ascii_lowercase().as_str() {
+            "file" => return RepoId::Path(url.to_owned()),
+            "https" => Some("443"),
+            "http" => Some("80"),
+            "ssh" | "git+ssh" | "ssh+git" => Some("22"),
+            _ => None,
+        };
         match rest.split_once('/') {
-            Some(parts) => parts,
+            Some((authority, path)) => (default_port, authority, path),
             None => return RepoId::Unknown,
         }
     } else if url.starts_with("file:") {
@@ -134,15 +200,15 @@ fn classify_origin(url: &str) -> RepoId {
     } else {
         // Git reads `a:b` as scp-style unless a slash comes before the colon.
         match url.split_once(':') {
-            Some((host, path)) if !host.contains('/') => (host, path),
+            Some((host, path)) if !host.contains('/') => (None, host, path),
             _ => return RepoId::Path(url.to_owned()),
         }
     };
     let host = authority.rsplit('@').next().unwrap_or_default();
-    let host = host
-        .strip_suffix(":443")
-        .or_else(|| host.strip_suffix(":22"))
-        .unwrap_or(host);
+    let host = match host.rsplit_once(':') {
+        Some((name, port)) if Some(port) == default_port => name,
+        _ => host,
+    };
     let path = path.trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     if host.is_empty()
@@ -608,6 +674,26 @@ mod tests {
                 "host.example:2222/team/app",
             ),
             (
+                "ssh://git@github.com:443/onsager-ai/semon",
+                "github.com:443/onsager-ai/semon",
+            ),
+            (
+                "https://github.com:22/onsager-ai/semon",
+                "github.com:22/onsager-ai/semon",
+            ),
+            (
+                "http://example.test:80/onsager-ai/semon.git",
+                "example.test/onsager-ai/semon",
+            ),
+            (
+                "http://example.test:443/onsager-ai/semon",
+                "example.test:443/onsager-ai/semon",
+            ),
+            (
+                "git://example.test:9418/onsager-ai/semon",
+                "example.test:9418/onsager-ai/semon",
+            ),
+            (
                 "git@GitHub.com:onsager-ai/semon.git",
                 "github.com/onsager-ai/semon",
             ),
@@ -640,6 +726,8 @@ mod tests {
     fn a_repository_origin_is_read_from_its_git_config() {
         let scratch = Scratch::new();
         semon(&scratch);
+        scratch.file("work/semon/.git/worktrees/x/commondir", "../..\n");
+        scratch.file("work/semon/.git/worktrees/agent-1/commondir", "../..\n");
         let id = |relative: &str| repo_id(&scratch.0.join(relative).to_string_lossy(), None);
         assert_eq!(id("work/semon"), Some(RepoId::Unknown), "no config");
         scratch.file(
@@ -663,5 +751,84 @@ mod tests {
         assert_eq!(id("work/semon"), Some(RepoId::Unknown), "no origin");
         scratch.dir("elsewhere/plain");
         assert_eq!(id("elsewhere/plain"), None, "not in a repository");
+    }
+
+    #[test]
+    fn scp_style_addresses_have_no_port_to_drop() {
+        assert_eq!(
+            classify_origin("git@example.test:22/team/app.git"),
+            RepoId::Remote("example.test/22/team/app".into())
+        );
+        assert_eq!(
+            classify_origin("example.test:team/app"),
+            RepoId::Remote("example.test/team/app".into())
+        );
+    }
+
+    #[test]
+    fn git_config_syntax_is_read_as_git_reads_it() {
+        let url = origin_url;
+        let some = |value: &str| Some(value.to_owned());
+        assert_eq!(
+            url("[remote \"origin\"] # the origin\n\turl = https://a.test/x/y # c\n"),
+            some("https://a.test/x/y")
+        );
+        assert_eq!(
+            url("[remote \"origin\"]\n\turl = https://a.test/x/y ; c\n"),
+            some("https://a.test/x/y")
+        );
+        assert_eq!(
+            url("[REMOTE \"origin\"]\n\tURL = \"https://a.test/x#y\" # c\n"),
+            some("https://a.test/x#y")
+        );
+        assert_eq!(
+            url("[remote \"origin\"]\n\turl = \"a b\\\\c\"\n"),
+            some("a b\\c")
+        );
+        assert_eq!(
+            url("[remote \"Origin\"]\n\turl = https://a.test/other\n"),
+            None,
+            "subsections are case-sensitive"
+        );
+        assert_eq!(url("[remote]\n\turl = https://a.test/x/y\n"), None);
+        assert_eq!(url("[remote \"origin\"]\n\turl = \"unterminated\n"), None);
+        assert_eq!(
+            url("[remote \"origin\"]\n\turl = https://a.test/first\n\turl = https://a.test/last\n"),
+            some("https://a.test/last")
+        );
+    }
+
+    #[test]
+    fn submodule_and_separate_git_dir_repositories_use_their_own_origin() {
+        let scratch = Scratch::new();
+        scratch.file(
+            "super/.git/config",
+            "[remote \"origin\"]\n\turl = https://a.test/team/super\n",
+        );
+        scratch.file(
+            "super/.git/modules/sub/config",
+            "[remote \"origin\"]\n\turl = https://a.test/team/sub\n",
+        );
+        scratch.dir("super/sub");
+        scratch.pointer("super/sub", "super/.git/modules/sub");
+        scratch.file(
+            "storage/app.git/config",
+            "[remote \"origin\"]\n\turl = https://a.test/team/app\n",
+        );
+        scratch.dir("checkout");
+        scratch.pointer("checkout", "storage/app.git");
+        let id = |relative: &str| repo_id(&scratch.0.join(relative).to_string_lossy(), None);
+        assert_eq!(
+            id("super"),
+            Some(RepoId::Remote("a.test/team/super".into()))
+        );
+        assert_eq!(
+            id("super/sub"),
+            Some(RepoId::Remote("a.test/team/sub".into()))
+        );
+        assert_eq!(
+            id("checkout"),
+            Some(RepoId::Remote("a.test/team/app".into()))
+        );
     }
 }

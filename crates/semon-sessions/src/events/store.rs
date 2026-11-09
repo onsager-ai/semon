@@ -357,6 +357,10 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS silver_session_state (
+    session_key TEXT PRIMARY KEY,
+    digest TEXT NOT NULL
+) STRICT;
 CREATE TABLE IF NOT EXISTS silver_change (
     seq INTEGER PRIMARY KEY,
     session_key TEXT NOT NULL,
@@ -3624,10 +3628,13 @@ impl SqliteStore {
                 }
                 let started = metadata_measurements.start();
                 if claims.is_none() {
+                    session_activity::withdraw(&transaction, None).map_err(failure)?;
                     transaction.execute("UPDATE session_catalog SET lifecycle='retained', metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
                     transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
                 } else {
                     for key in &affected {
+                        session_activity::withdraw(&transaction, Some(key.as_str()))
+                            .map_err(failure)?;
                         transaction.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
                         transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
                     }
@@ -10637,6 +10644,102 @@ mod tests {
                 .is_err()
         );
         drop((reader, writer));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn silver_log(path: &Path) -> Vec<(String, String)> {
+        const LOG: &str = "SELECT session_key,kind FROM silver_change ORDER BY seq";
+        let Ok(db) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+            return Vec::new();
+        };
+        let Ok(mut statement) = db.prepare(LOG) else {
+            return Vec::new();
+        };
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn refresh_once(evidence: &crate::native_evidence::NativeEvidence) -> bool {
+        evidence
+            .refresh_catalog(
+                &mut crate::viewer::lock(&evidence.storage.work),
+                CATALOG_FIXTURE_NOW,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn the_change_log_waits_for_query_ready_activity_across_the_producer_cycle() {
+        let root = scratch("silver-ready");
+        let (options, _, _) = catalog_native_fixture(&root, 2, false);
+        let path = crate::events::EventCache::path(&options.cache);
+        assert!(silver_log(&path).is_empty(), "nothing before ingest");
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        const UNREADY: &str = "SELECT count(*) FROM silver_change WHERE kind='changed' AND session_key NOT IN (SELECT session_key FROM session_activity_projections)";
+        let mut complete = false;
+        for _ in 0..128 {
+            complete = refresh_once(&evidence);
+            // Ingest commits before activity is published; a change row may
+            // only ever name a session whose activity is query-ready.
+            let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let unready: i64 = db.query_row(UNREADY, [], |row| row.get(0)).unwrap();
+            assert_eq!(unready, 0);
+            if complete {
+                break;
+            }
+        }
+        evidence.retire();
+        assert!(complete);
+        assert!(
+            silver_log(&path)
+                .iter()
+                .any(|(_, kind)| kind == "changed")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_withdrawn_session_logs_one_removal_through_the_producer_cycle() {
+        let root = scratch("silver-withdrawn");
+        let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+        let path = crate::events::EventCache::path(&options.cache);
+        let claude = rows.iter().find(|row| row.harness == "claude").unwrap();
+        let key = claude.key.clone();
+        assert!(silver_log(&path).contains(&(key.clone(), "changed".into())));
+        fs::remove_file(&claude.sources[0].path).unwrap();
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        let mut complete = false;
+        for _ in 0..128 {
+            complete = refresh_once(&evidence);
+            if complete {
+                break;
+            }
+        }
+        assert!(complete);
+        let removed = || {
+            silver_log(&path)
+                .into_iter()
+                .filter(|entry| *entry == (key.clone(), "removed".to_owned()))
+                .count()
+        };
+        assert_eq!(removed(), 1);
+        let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let lifecycle: String = db
+            .query_row(
+                "SELECT lifecycle FROM session_catalog WHERE session_key=?1",
+                [&key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lifecycle, "retained", "history is kept");
+        for _ in 0..4 {
+            refresh_once(&evidence);
+        }
+        assert_eq!(removed(), 1, "a repeated publication logs nothing");
+        evidence.retire();
         fs::remove_dir_all(root).unwrap();
     }
 

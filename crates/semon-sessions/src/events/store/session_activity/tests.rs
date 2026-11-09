@@ -351,12 +351,15 @@ fn activity_repricing_resumes_and_never_serves_mixed_prices() {
     publish(&tx, row, &projection).unwrap();
     tx.commit().unwrap();
     let before = read(&store.connection, row);
+    let published = changes(&store.connection);
+    assert_eq!(published.last(), Some(&(row.key.clone(), "changed".into())));
     let mut new = (*old).clone();
     new.fingerprint = "synthetic-reprice".into();
     let new = Arc::new(new);
     let tx = store.connection.transaction().unwrap();
     assert!(reprice_step(&tx, &new).unwrap());
     tx.commit().unwrap();
+    assert_eq!(changes(&store.connection), published, "partial reprice");
     assert!(
         page(&store.connection, row, None, &old.fingerprint, 0, 256)
             .unwrap()
@@ -374,6 +377,9 @@ fn activity_repricing_resumes_and_never_serves_mixed_prices() {
         reprice_step(&tx, &new).unwrap();
         tx.commit().unwrap();
     }
+    let repriced = changes(&store.connection);
+    assert_eq!(repriced.len(), published.len() + 1, "final batch only");
+    assert_eq!(repriced.last(), Some(&(row.key.clone(), "changed".into())));
     let after = page(&store.connection, row, None, &new.fingerprint, 0, 256)
         .unwrap()
         .unwrap();
@@ -580,6 +586,10 @@ fn rewriting_activity_logs_a_change_only_when_it_differs() {
     let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
     let row = rows.iter().find(|row| row.harness == "claude").unwrap();
     let projection = row.session_activity.as_ref().unwrap();
+    // The fixture row may differ from the published one in catalog fields.
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, projection).unwrap();
+    tx.commit().unwrap();
     let start = changes(&store.connection).len();
     let tx = store.connection.transaction().unwrap();
     publish(&tx, row, projection).unwrap();
@@ -616,6 +626,67 @@ fn removing_a_mismatched_projection_logs_a_removal_once() {
     remove_mismatched(&tx, &moved).unwrap();
     tx.commit().unwrap();
     assert_eq!(changes(&store.connection).len(), start + 1, "nothing left");
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn publish_row(
+    store: &mut SqliteStore,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+) {
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, projection).unwrap();
+    tx.commit().unwrap();
+}
+
+#[test]
+fn catalog_changes_log_a_change_without_rewriting_unchanged_activity() {
+    let root = scratch("change-log-metadata");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let projection = row.session_activity.as_ref().unwrap();
+    publish_row(&mut store, row, projection);
+    let mut variants = Vec::new();
+    for edit in 0..5 {
+        let mut next = row.clone();
+        match edit {
+            0 => next.branch = Some("another-branch".into()),
+            1 => next.parent_source = Some("another-method".into()),
+            2 => next.start = Some(next.start.unwrap_or(0) + 1),
+            3 => next.repo = Some("another-repo".into()),
+            _ => next.overview.as_mut().unwrap().set_state("synthetic-state"),
+        }
+        variants.push(next);
+    }
+    for next in &variants {
+        let before = changes(&store.connection).len();
+        let generation: String = store
+            .connection
+            .query_row(
+                "SELECT generation FROM session_activity_projections WHERE session_key=?1",
+                [&row.key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        publish_row(&mut store, next, projection);
+        let logged = changes(&store.connection);
+        assert_eq!(logged.len(), before + 1);
+        assert_eq!(logged.last(), Some(&(row.key.clone(), "changed".into())));
+        publish_row(&mut store, next, projection);
+        assert_eq!(changes(&store.connection).len(), before + 1, "repeat");
+        let kept: String = store
+            .connection
+            .query_row(
+                "SELECT generation FROM session_activity_projections WHERE session_key=?1",
+                [&row.key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, generation, "steps are not rewritten");
+        publish_row(&mut store, row, projection);
+    }
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }

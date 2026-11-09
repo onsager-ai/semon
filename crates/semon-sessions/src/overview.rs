@@ -75,6 +75,14 @@ impl Summary {
             "activity":session.activity.as_ref().map(|(name,_,age,at)|(name,"",age,at)),"detail":null,"detail_from":content["detail_from"],"detail_from_name":content["detail_from_name"],"content":content,"cost":session.cost.usd,"events":events}),
         }
     }
+    /// The state fields analytics reads as the session's status.
+    pub(crate) fn status(&self) -> (&Value, &Value) {
+        (&self.home["state"], &self.home["turn_lifecycle"])
+    }
+    #[cfg(test)]
+    pub(crate) fn set_state(&mut self, state: &str) {
+        self.home["state"] = json!(state);
+    }
     pub(crate) fn with_sources(
         mut self,
         sources: &[crate::model::summary::CatalogSource],

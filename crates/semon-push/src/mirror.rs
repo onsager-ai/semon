@@ -1412,6 +1412,21 @@ mod tests {
                 ("/tmp".to_owned(), None),
             ]
             .into(),
+            repo_ids: [
+                (
+                    "/home/me/work/app".to_owned(),
+                    semon_sessions::RepoId::Remote("github.com/me/app".into()),
+                ),
+                (
+                    "/home/me/work/local".to_owned(),
+                    semon_sessions::RepoId::Path("/srv/git/local.git".into()),
+                ),
+                (
+                    "/home/me/work/bare".to_owned(),
+                    semon_sessions::RepoId::Unknown,
+                ),
+            ]
+            .into(),
             ..Facts::default()
         };
         let body = serde_json::to_vec(&facts).unwrap();
