@@ -243,6 +243,25 @@ fn activity_request_blob_replay_preserves_change_fact_and_read_step_coverage() {
             .unwrap();
             assert_eq!(facts.items.len(), 2, "{name} {input}");
             assert!(facts.items.iter().all(|fact| !fact["step_id"].is_null()));
+            assert!(facts
+                .items
+                .iter()
+                .all(|fact| fact.get("target_path").is_none()));
+            let steps = session_activity::items(
+                &db,
+                &rows[0],
+                None,
+                &crate::pricing::snapshot().fingerprint,
+                false,
+                None,
+                256,
+            )
+            .unwrap()
+            .unwrap();
+            assert!(steps
+                .items
+                .iter()
+                .all(|step| step.get("facts").is_none() && step.get("target_path").is_none()));
         } else {
             assert_eq!(
                 page.steps[1].waste,
