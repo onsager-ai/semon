@@ -3,9 +3,7 @@ use super::super::tests::{
 };
 use super::*;
 use crate::events::session_activity::classify::Change;
-use crate::events::session_activity::{
-    ActivityStepId, Ownership, TimedInput, UsageOwner,
-};
+use crate::events::session_activity::{ActivityStepId, Ownership, TimedInput, UsageOwner};
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
     page(
@@ -113,10 +111,7 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
             .unwrap()
     }
 
-    fn catalog_sources(
-        connection: &Connection,
-        key: &str,
-    ) -> Vec<(String, String, String)> {
+    fn catalog_sources(connection: &Connection, key: &str) -> Vec<(String, String, String)> {
         let mut statement = connection
             .prepare("SELECT source_path,native_id,lifecycle FROM session_catalog_sources WHERE session_key=?1 ORDER BY source_path")
             .unwrap();
@@ -163,10 +158,12 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     assert_eq!(rows.len(), 1, "the same-ID Claude files form one session");
     let row_index = rows.iter().position(|row| row.harness == "claude").unwrap();
     assert_eq!(rows[row_index].sources.len(), 2);
-    assert!(rows[row_index]
-        .sources
-        .iter()
-        .all(|source| source.native_id == "native-cl-00"));
+    assert!(
+        rows[row_index]
+            .sources
+            .iter()
+            .all(|source| source.native_id == "native-cl-00")
+    );
     let key = rows[row_index].key.clone();
     let missing_source = missing_path.to_string_lossy().into_owned();
     {
@@ -202,12 +199,17 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     );
     let complete = read(&store.connection, row);
     let original_header = header(&store.connection, &key);
-    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(false));
+    assert_eq!(
+        source_missing(&store.connection, &key).unwrap(),
+        Some(false)
+    );
     let original_membership = catalog_sources(&store.connection, &key);
     assert_eq!(original_membership.len(), 2);
-    assert!(original_membership
-        .iter()
-        .all(|(_, native_id, lifecycle)| native_id == "native-cl-00" && lifecycle == "current"));
+    assert!(
+        original_membership
+            .iter()
+            .all(|(_, native_id, lifecycle)| native_id == "native-cl-00" && lifecycle == "current")
+    );
     let present_source = original_membership
         .iter()
         .find(|(source_path, _, _)| source_path != &missing_source)
@@ -215,9 +217,11 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
         .0
         .clone();
     assert_ne!(present_source, missing_source);
-    assert!(original_membership
-        .iter()
-        .any(|(source_path, _, _)| source_path == &missing_source));
+    assert!(
+        original_membership
+            .iter()
+            .any(|(source_path, _, _)| source_path == &missing_source)
+    );
     let original_steps = table_rows(
         &store.connection,
         "session_activity_steps",
@@ -250,10 +254,7 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
 
     fs::remove_file(&missing_path).unwrap();
     let (partial_rows, partial_slots) = catalog_fixture_projection(&options);
-    let partial = partial_rows
-        .iter()
-        .find(|row| row.key == key)
-        .unwrap();
+    let partial = partial_rows.iter().find(|row| row.key == key).unwrap();
     assert_eq!(partial.sources.len(), 1, "Catalog membership reflects disk");
     let seen = partial_rows
         .iter()
@@ -287,30 +288,36 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
     let missing_membership = catalog_sources(&store.connection, &key);
     assert_eq!(missing_membership.len(), 2);
-    assert!(missing_membership
-        .iter()
-        .any(|(source_path, native_id, lifecycle)| {
-            source_path == &missing_source
-                && native_id == "native-cl-00"
-                && lifecycle == "retained"
-        }));
-    assert!(missing_membership
-        .iter()
-        .any(|(source_path, native_id, lifecycle)| {
-            source_path == &present_source
-                && native_id == "native-cl-00"
-                && lifecycle == "current"
-        }));
-    assert!(page(
-        &store.connection,
-        partial,
-        None,
-        &crate::pricing::snapshot().fingerprint,
-        0,
-        256,
-    )
-    .unwrap()
-    .is_none());
+    assert!(
+        missing_membership
+            .iter()
+            .any(|(source_path, native_id, lifecycle)| {
+                source_path == &missing_source
+                    && native_id == "native-cl-00"
+                    && lifecycle == "retained"
+            })
+    );
+    assert!(
+        missing_membership
+            .iter()
+            .any(|(source_path, native_id, lifecycle)| {
+                source_path == &present_source
+                    && native_id == "native-cl-00"
+                    && lifecycle == "current"
+            })
+    );
+    assert!(
+        page(
+            &store.connection,
+            partial,
+            None,
+            &crate::pricing::snapshot().fingerprint,
+            0,
+            256,
+        )
+        .unwrap()
+        .is_none()
+    );
     assert_eq!(read(&store.connection, row), complete);
     assert_eq!(header(&store.connection, &key), original_header);
     assert_eq!(
@@ -351,7 +358,10 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     assert_eq!(witness, original_witness);
     let missing_changes = changes(&store.connection);
     assert_eq!(missing_changes.len(), start.len() + 1);
-    assert_eq!(missing_changes.last(), Some(&(key.clone(), "changed".into())));
+    assert_eq!(
+        missing_changes.last(),
+        Some(&(key.clone(), "changed".into()))
+    );
 
     assert_eq!(
         catalog_write(
@@ -369,10 +379,7 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
 
     fs::write(&missing_path, &missing_records).unwrap();
     let (recovered_rows, recovered_slots) = catalog_fixture_projection(&options);
-    let recovered = recovered_rows
-        .iter()
-        .find(|row| row.key == key)
-        .unwrap();
+    let recovered = recovered_rows.iter().find(|row| row.key == key).unwrap();
     assert_eq!(recovered.sources.len(), 2);
     assert_eq!(
         catalog_write(
@@ -387,10 +394,15 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
         Outcome::Written
     );
 
-    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(false));
-    assert!(catalog_sources(&store.connection, &key)
-        .iter()
-        .all(|(_, native_id, lifecycle)| native_id == "native-cl-00" && lifecycle == "current"));
+    assert_eq!(
+        source_missing(&store.connection, &key).unwrap(),
+        Some(false)
+    );
+    assert!(
+        catalog_sources(&store.connection, &key)
+            .iter()
+            .all(|(_, native_id, lifecycle)| native_id == "native-cl-00" && lifecycle == "current")
+    );
     let recovered_page = read(&store.connection, recovered);
     let usage_step = recovered_page
         .steps

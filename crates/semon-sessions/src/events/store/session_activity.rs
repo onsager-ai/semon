@@ -494,9 +494,10 @@ fn witness_has_missing_member(
         .iter()
         .map(|source| (source.path.as_path(), source.native_id.as_str()))
         .collect::<BTreeSet<_>>();
-    witness.sources.iter().any(|source| {
-        !current.contains(&(source.path.as_path(), source.native_id.as_str()))
-    })
+    witness
+        .sources
+        .iter()
+        .any(|source| !current.contains(&(source.path.as_path(), source.native_id.as_str())))
 }
 
 fn source_missing_for_row(
@@ -531,7 +532,10 @@ fn source_missing_for_row(
 
 /// Whether a current session's complete admitted activity cohort is missing
 /// at least one source. This state is distinct from current Catalog membership.
-#[allow(dead_code, reason = "StepFacts reads source availability separately from Catalog membership")]
+#[allow(
+    dead_code,
+    reason = "StepFacts reads source availability separately from Catalog membership"
+)]
 pub(crate) fn source_missing(c: &Connection, key: &str) -> rusqlite::Result<Option<bool>> {
     let state: Option<(String, Option<String>, Option<String>, Option<String>)> = c
         .query_row(
