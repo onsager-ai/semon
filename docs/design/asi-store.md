@@ -223,6 +223,16 @@ tables.
   per-origin heads and source, activity and transcript generations separately;
   they do not resurrect the old #561 rows wire. Publication and namespace transfer
   preserve the prior complete head until an eligible replacement is committed.
+- **Partial-source retention.** If a current multi-source session loses any
+  `(path, native_id)` identity from its last complete activity witness, the index
+  retains that complete activity generation, source witness and versions. It
+  exposes `source_missing` independently from current Catalog source membership
+  and emits `changed` in the same publication transaction. It never publishes a
+  fragment from the surviving sources. An exact return to the retained source
+  generation reuses its complete activity; a changed generation clears the
+  missing state only after a complete activity publication contains every
+  previously witnessed identity and stores the full source vector.
+
 
 ## Durable state
 

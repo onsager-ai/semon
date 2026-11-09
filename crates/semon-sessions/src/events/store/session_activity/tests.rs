@@ -2,6 +2,7 @@ use super::super::tests::{
     catalog_fixture_projection, catalog_native_fixture, catalog_write, opened, scratch,
 };
 use super::*;
+use crate::events::session_activity::classify::Change;
 use crate::events::session_activity::{ActivityStepId, Ownership, TimedInput, UsageOwner};
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
@@ -57,6 +58,505 @@ fn activity_catalog_publication_rolls_back_header_steps_and_catalog_together() {
         .generation,
         before.generation
     );
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
+    fn table_rows(
+        connection: &Connection,
+        table: &str,
+        order: &str,
+        key: &str,
+    ) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT * FROM {table} WHERE session_key=?1 ORDER BY {order}"
+            ))
+            .unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_map([key], |row| {
+                (0..columns)
+                    .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                    .collect()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn header(
+        connection: &Connection,
+        key: &str,
+    ) -> (String, String, u32, String, i64, i64, String, String) {
+        connection
+            .query_row(
+                "SELECT generation,source_generation,rules_version,pricing_fingerprint,total,compactions,summary,preview FROM session_activity_projections WHERE session_key=?1",
+                [key],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap()
+    }
+
+    fn catalog_sources(connection: &Connection, key: &str) -> Vec<(String, String, String)> {
+        let mut statement = connection
+            .prepare("SELECT source_path,native_id,lifecycle FROM session_catalog_sources WHERE session_key=?1 ORDER BY source_path")
+            .unwrap();
+        statement
+            .query_map([key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    let root = scratch("activity-missing-source");
+    let (options, _, _) = catalog_native_fixture(&root, 1, false);
+    let missing_path = options
+        .claude_home
+        .join("projects/-work-proj-copy/native-cl-00.jsonl");
+    fs::create_dir_all(missing_path.parent().unwrap()).unwrap();
+    let missing_records = [
+        serde_json::json!({
+            "type":"system", "subtype":"compact_boundary", "sessionId":"native-cl-00",
+            "session_id":"native-cl-00", "timestamp":"2026-09-24T00:01:30Z",
+            "compactMetadata":{"trigger":"auto","preTokens":155000}
+        }),
+        serde_json::json!({
+            "type":"assistant", "uuid":"assistant-cleared", "sessionId":"native-cl-00",
+            "session_id":"native-cl-00", "timestamp":"2026-09-24T00:02:00Z",
+            "message":{"id":"message-cleared","role":"assistant","model":"claude-sonnet-4-5",
+                "content":[{"type":"tool_use","id":"commit-call","name":"Bash",
+                    "input":{"command":"git commit -m fixture"}}],
+                "usage":{"input_tokens":100,"output_tokens":25}}
+        }),
+        serde_json::json!({
+            "type":"user", "uuid":"result-cleared", "sessionId":"native-cl-00",
+            "session_id":"native-cl-00", "timestamp":"2026-09-24T00:02:01Z",
+            "message":{"role":"user","content":[{"type":"tool_result",
+                "tool_use_id":"commit-call","content":"[main abc1234] fixture"}]}
+        }),
+    ]
+    .map(|record| record.to_string())
+    .join("\n")
+        + "\n";
+    fs::write(&missing_path, &missing_records).unwrap();
+
+    let (mut rows, slots) = catalog_fixture_projection(&options);
+    assert_eq!(rows.len(), 1, "the same-ID Claude files form one session");
+    let row_index = rows.iter().position(|row| row.harness == "claude").unwrap();
+    assert_eq!(rows[row_index].sources.len(), 2);
+    assert!(
+        rows[row_index]
+            .sources
+            .iter()
+            .all(|source| source.native_id == "native-cl-00")
+    );
+    let key = rows[row_index].key.clone();
+    let missing_source = missing_path.to_string_lossy().into_owned();
+    {
+        let projection = rows[row_index].session_activity.as_mut().unwrap();
+        assert!(
+            projection
+                .activity
+                .steps
+                .iter()
+                .any(|step| step.position.source == missing_source),
+            "the missing file contributes its own usage step"
+        );
+        assert!(!projection.activity.compactions.is_empty());
+        // Change facts point to their tool result record, not the usage step.
+        assert!(projection.activity.facts.iter().any(|fact| {
+            fact.position.source == missing_source
+                && matches!(
+                    &fact.change,
+                    Change::Commit { branch, sha }
+                        if branch == "main" && sha == "abc1234"
+                )
+        }));
+    }
+
+    let row = &rows[row_index];
+    let path = crate::events::EventCache::path(&options.cache);
+    let (mut store, _) = opened(&path);
+    assert_eq!(
+        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto)
+            .unwrap()
+            .0,
+        Outcome::Written
+    );
+    let complete = read(&store.connection, row);
+    let original_header = header(&store.connection, &key);
+    assert_eq!(
+        source_missing(&store.connection, &key).unwrap(),
+        Some(false)
+    );
+    let original_membership = catalog_sources(&store.connection, &key);
+    assert_eq!(original_membership.len(), 2);
+    assert!(
+        original_membership
+            .iter()
+            .all(|(_, native_id, lifecycle)| native_id == "native-cl-00" && lifecycle == "current")
+    );
+    let present_source = original_membership
+        .iter()
+        .find(|(source_path, _, _)| source_path != &missing_source)
+        .unwrap()
+        .0
+        .clone();
+    assert_ne!(present_source, missing_source);
+    assert!(
+        original_membership
+            .iter()
+            .any(|(source_path, _, _)| source_path == &missing_source)
+    );
+    let original_steps = table_rows(
+        &store.connection,
+        "session_activity_steps",
+        "generation,ordinal",
+        &key,
+    );
+    let original_compactions = table_rows(
+        &store.connection,
+        "session_activity_compactions",
+        "generation,ordinal",
+        &key,
+    );
+    let original_facts = table_rows(
+        &store.connection,
+        "session_activity_facts",
+        "generation,identity",
+        &key,
+    );
+    let original_witness: String = store
+        .connection
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
+            [&key],
+            |record| record.get(0),
+        )
+        .unwrap();
+    assert!(!original_compactions.is_empty());
+    assert_eq!(original_facts.len(), 1);
+    let start = changes(&store.connection);
+
+    fs::remove_file(&missing_path).unwrap();
+    let (partial_rows, partial_slots) = catalog_fixture_projection(&options);
+    let partial = partial_rows.iter().find(|row| row.key == key).unwrap();
+    assert_eq!(partial.sources.len(), 1, "Catalog membership reflects disk");
+    let seen = partial_rows
+        .iter()
+        .flat_map(|row| row.sources.iter())
+        .map(|source| source.path.to_string_lossy().into_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    // Selected fixture projection leaves unseen ledgers alone. Reconcile this
+    // fixture's complete current inventory as the native full scan does.
+    let mut event_cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+    event_cache.begin_scan().unwrap();
+    event_cache.begin_full_scan().unwrap();
+    let mut dirty = false;
+    event_cache.retain(&seen, &mut dirty);
+    event_cache.end_scan();
+    drop(event_cache);
+    assert!(dirty, "the full scan retires the disappeared source ledger");
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &partial_rows,
+            &partial_slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap()
+        .0,
+        Outcome::Written,
+        "the current Catalog membership must publish after source retirement"
+    );
+
+    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
+    let missing_membership = catalog_sources(&store.connection, &key);
+    assert_eq!(missing_membership.len(), 2);
+    assert!(
+        missing_membership
+            .iter()
+            .any(|(source_path, native_id, lifecycle)| {
+                source_path == &missing_source
+                    && native_id == "native-cl-00"
+                    && lifecycle == "retained"
+            })
+    );
+    assert!(
+        missing_membership
+            .iter()
+            .any(|(source_path, native_id, lifecycle)| {
+                source_path == &present_source
+                    && native_id == "native-cl-00"
+                    && lifecycle == "current"
+            })
+    );
+    assert!(
+        page(
+            &store.connection,
+            partial,
+            None,
+            &crate::pricing::snapshot().fingerprint,
+            0,
+            256,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(read(&store.connection, row), complete);
+    assert_eq!(header(&store.connection, &key), original_header);
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_steps",
+            "generation,ordinal",
+            &key,
+        ),
+        original_steps
+    );
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_compactions",
+            "generation,ordinal",
+            &key,
+        ),
+        original_compactions
+    );
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_facts",
+            "generation,identity",
+            &key,
+        ),
+        original_facts
+    );
+    let witness: String = store
+        .connection
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
+            [&key],
+            |record| record.get(0),
+        )
+        .unwrap();
+    assert_eq!(witness, original_witness);
+    let missing_changes = changes(&store.connection);
+    assert_eq!(missing_changes.len(), start.len() + 1);
+    assert_eq!(
+        missing_changes.last(),
+        Some(&(key.clone(), "changed".into()))
+    );
+
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &partial_rows,
+            &partial_slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
+    assert_eq!(changes(&store.connection), missing_changes);
+
+    // Withdraw the entire session, then return the exact admitted generation
+    // without activity. Exact source proof is enough to clear missing state.
+    let withdraw_session = |store: &mut SqliteStore| {
+        store.connection.execute_batch(NO_MEMBERS).unwrap();
+        let tx = store.connection.transaction().unwrap();
+        withdraw(&tx, None).unwrap();
+        tx.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1", [&key]).unwrap();
+        tx.commit().unwrap();
+    };
+    withdraw_session(&mut store);
+    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
+    let tx = store.connection.transaction().unwrap();
+    tx.execute(
+        "UPDATE session_catalog SET lifecycle='current',metadata=?2 WHERE session_key=?1",
+        params![key, json(row).unwrap()],
+    )
+    .unwrap();
+    remove_mismatched(&tx, row).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        source_missing(&store.connection, &key).unwrap(),
+        Some(false)
+    );
+    assert_eq!(header(&store.connection, &key), original_header);
+    assert_eq!(count(&changes(&store.connection), &key, "removed"), 0);
+
+    // Lose a member again and withdraw fully. Returning both identities with
+    // changed source generations is only metadata proof, not a replacement.
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &partial_rows,
+            &partial_slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
+    withdraw_session(&mut store);
+    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
+
+    fs::write(&missing_path, &missing_records).unwrap();
+    let (recovered_rows, recovered_slots) = catalog_fixture_projection(&options);
+    let recovered = recovered_rows.iter().find(|row| row.key == key).unwrap();
+    assert_eq!(recovered.sources.len(), 2);
+    assert!(!witness_has_missing_member(row, recovered));
+    assert_ne!(
+        crate::retention::source_generation(&recovered.sources).unwrap(),
+        original_header.1
+    );
+    let mut metadata_rows = recovered_rows.clone();
+    metadata_rows
+        .iter_mut()
+        .find(|row| row.key == key)
+        .unwrap()
+        .session_activity = None;
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &metadata_rows,
+            &recovered_slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
+    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
+    assert_eq!(header(&store.connection, &key), original_header);
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_steps",
+            "generation,ordinal",
+            &key
+        ),
+        original_steps
+    );
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_compactions",
+            "generation,ordinal",
+            &key
+        ),
+        original_compactions
+    );
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_facts",
+            "generation,identity",
+            &key
+        ),
+        original_facts
+    );
+    let witness: String = store
+        .connection
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
+            [&key],
+            |record| record.get(0),
+        )
+        .unwrap();
+    assert_eq!(witness, original_witness);
+    assert_eq!(count(&changes(&store.connection), &key, "removed"), 0);
+    let before_replacement = changes(&store.connection);
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &recovered_rows,
+            &recovered_slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
+
+    assert_eq!(
+        source_missing(&store.connection, &key).unwrap(),
+        Some(false)
+    );
+    assert!(
+        catalog_sources(&store.connection, &key)
+            .iter()
+            .all(|(_, native_id, lifecycle)| native_id == "native-cl-00" && lifecycle == "current")
+    );
+    let recovered_page = read(&store.connection, recovered);
+    assert_ne!(recovered_page.generation, complete.generation);
+    let usage_step = recovered_page
+        .steps
+        .iter()
+        .position(|step| step.position.source == missing_source)
+        .unwrap();
+    let (_, usage) = step_at(
+        &store.connection,
+        recovered,
+        &recovered_page.generation,
+        usage_step as u64,
+    )
+    .unwrap()
+    .unwrap();
+    let Usage::Claude(usage) = usage else {
+        panic!("expected usage from the returned Claude source");
+    };
+    assert_eq!(usage.model_tokens.input, 100);
+    assert_eq!(usage.model_tokens.output, 25);
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_facts",
+            "generation,identity",
+            &key,
+        )
+        .len(),
+        original_facts.len()
+    );
+    let recovered_changes = changes(&store.connection);
+    assert_eq!(recovered_changes.len(), before_replacement.len() + 1);
+    assert_eq!(count(&recovered_changes, &key, "removed"), 0);
+    assert_eq!(
+        recovered_changes.last(),
+        Some(&(key.clone(), "changed".into()))
+    );
+    let witness: String = store
+        .connection
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
+            [&key],
+            |record| record.get(0),
+        )
+        .unwrap();
+    let witness: crate::model::summary::CatalogRow = serde_json::from_str(&witness).unwrap();
+    assert_eq!(witness.sources, recovered.sources);
+
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }

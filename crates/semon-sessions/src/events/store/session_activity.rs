@@ -10,6 +10,8 @@ use std::{
     sync::Arc,
 };
 
+const SOURCE_MISSING_DIGEST_PREFIX: &str = "source_missing:";
+
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_activity_projections (
  session_key TEXT PRIMARY KEY, generation TEXT NOT NULL,
@@ -351,11 +353,13 @@ pub(super) fn publish(
     row: &crate::model::summary::CatalogRow,
     projection: &Projection,
 ) -> rusqlite::Result<()> {
-    let rewritten = write_activity(tx, row, projection)?;
-    note_session_state(tx, row, rewritten)
+    let changed = write_activity(tx, row, projection)?;
+    note_session_state(tx, row, changed)
 }
 
-/// Write the activity rows. `false` when they already were this generation.
+/// Write the activity rows, or retain them when an admitted multi-source
+/// witness is incomplete. `true` when a complete activity generation is
+/// rewritten.
 fn write_activity(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
@@ -368,6 +372,12 @@ fn write_activity(
     }
     let sources = crate::retention::source_generation(&row.sources)
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if let Some(witness_generation) = source_state(tx, &row.key)?
+        && witness_generation != sources
+        && witness_has_missing_member(&source_witness(tx, &row.key, &witness_generation)?, row)
+    {
+        return Ok(false);
+    }
     // Include exact ownership and derivation output. Unrelated Catalog owners
     // can advance without invalidating this session's generation.
     let generation = format!(
@@ -432,10 +442,159 @@ fn write_activity(
     Ok(true)
 }
 
+/// Read the activity witness stamp without decoding its potentially large row.
+fn source_state(c: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    c.query_row(
+        "SELECT source_generation FROM session_activity_projections WHERE session_key=?1",
+        [key],
+        |record| record.get(0),
+    )
+    .optional()
+}
+
+/// The activity witness is the last complete source cohort published with the
+/// projection. Validate its header binding before using it to detect recovery.
+fn source_witness(
+    c: &Connection,
+    key: &str,
+    expected_generation: &str,
+) -> rusqlite::Result<crate::model::summary::CatalogRow> {
+    let metadata: Option<String> = c
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
+            [key],
+            |record| record.get(0),
+        )
+        .optional()?;
+    let Some(metadata) = metadata else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    let witness: crate::model::summary::CatalogRow = from_json(0, &metadata)?;
+    if witness.key != key
+        || crate::retention::source_generation(&witness.sources)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?
+            != expected_generation
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    Ok(witness)
+}
+
+/// Source paths and native IDs define the admitted cohort. Stat and digest
+/// changes are a new generation of the same source, not a missing source.
+fn witness_has_missing_member(
+    witness: &crate::model::summary::CatalogRow,
+    current: &crate::model::summary::CatalogRow,
+) -> bool {
+    if witness.sources.len() < 2 {
+        return false;
+    }
+    let current = current
+        .sources
+        .iter()
+        .map(|source| (source.path.as_path(), source.native_id.as_str()))
+        .collect::<BTreeSet<_>>();
+    witness
+        .sources
+        .iter()
+        .any(|source| !current.contains(&(source.path.as_path(), source.native_id.as_str())))
+}
+
+fn source_missing_for_row(
+    c: &Connection,
+    row: &crate::model::summary::CatalogRow,
+) -> rusqlite::Result<bool> {
+    if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
+        return Ok(true);
+    }
+    let Some(witness_generation) = source_state(c, &row.key)? else {
+        return Ok(false);
+    };
+    let current_generation = crate::retention::source_generation(&row.sources)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if witness_generation == current_generation {
+        return Ok(false);
+    }
+    if witness_has_missing_member(&source_witness(c, &row.key, &witness_generation)?, row) {
+        return Ok(true);
+    }
+    let digest: Option<String> = c
+        .query_row(
+            "SELECT digest FROM silver_session_state WHERE session_key=?1",
+            [&row.key],
+            |record| record.get(0),
+        )
+        .optional()?;
+    Ok(digest
+        .as_deref()
+        .is_some_and(|digest| digest.starts_with(SOURCE_MISSING_DIGEST_PREFIX)))
+}
+
+/// Whether a current session's complete admitted activity cohort is missing
+/// at least one source. This state is distinct from current Catalog membership.
+#[allow(
+    dead_code,
+    reason = "StepFacts reads source availability separately from Catalog membership"
+)]
+pub(crate) fn source_missing(c: &Connection, key: &str) -> rusqlite::Result<Option<bool>> {
+    type SourceAvailabilityRow = (String, Option<String>, Option<String>, Option<String>);
+    let state: Option<SourceAvailabilityRow> = c
+        .query_row(
+            "SELECT p.source_generation,c.metadata,s.metadata,ss.digest FROM session_activity_projections p LEFT JOIN session_catalog c USING(session_key) LEFT JOIN session_activity_sources s USING(session_key) LEFT JOIN silver_session_state ss USING(session_key) WHERE p.session_key=?1",
+            [key],
+            |record| {
+                Ok((
+                    record.get(0)?,
+                    record.get(1)?,
+                    record.get(2)?,
+                    record.get(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((witness_generation, current, witness, digest)) = state else {
+        return Ok(None);
+    };
+    let Some(current) = current else {
+        return Ok(Some(true));
+    };
+    let row: crate::model::summary::CatalogRow = from_json(0, &current)?;
+    if row.key != key {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if row.lifecycle != crate::model::summary::CatalogLifecycle::Current {
+        return Ok(Some(true));
+    }
+    let Some(witness) = witness else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    let current_generation = crate::retention::source_generation(&row.sources)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if current_generation == witness_generation {
+        return Ok(Some(false));
+    }
+    let witness: crate::model::summary::CatalogRow = from_json(0, &witness)?;
+    if witness.key != key
+        || crate::retention::source_generation(&witness.sources)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?
+            != witness_generation
+    {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let missing = witness_has_missing_member(&witness, &row)
+        || digest
+            .as_deref()
+            .is_some_and(|digest| digest.starts_with(SOURCE_MISSING_DIGEST_PREFIX));
+    Ok(Some(missing))
+}
+
 /// The catalog fields analytics reads besides activity, as one digest.
-fn analytics_digest(row: &crate::model::summary::CatalogRow) -> rusqlite::Result<String> {
+fn analytics_digest(
+    c: &Connection,
+    row: &crate::model::summary::CatalogRow,
+) -> rusqlite::Result<String> {
     let state = row.overview.as_ref().map(|overview| overview.status());
-    Ok(format!(
+    let digest = format!(
         "{:x}",
         Sha256::digest(
             json(&(
@@ -465,17 +624,23 @@ fn analytics_digest(row: &crate::model::summary::CatalogRow) -> rusqlite::Result
             ))?
             .as_bytes()
         )
-    ))
+    );
+    if source_missing_for_row(c, row)? {
+        Ok(format!("{SOURCE_MISSING_DIGEST_PREFIX}{digest}"))
+    } else {
+        Ok(digest)
+    }
 }
 
-/// Log a change for a query-ready session when its activity was rewritten
-/// (`rewritten`) or its analytics digest differs from the last one logged.
+/// Log a change for a query-ready session when its activity or source
+/// availability changed, or its analytics digest differs from the last one
+/// logged.
 fn note_session_state(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
-    rewritten: bool,
+    changed: bool,
 ) -> rusqlite::Result<()> {
-    let digest = analytics_digest(row)?;
+    let digest = analytics_digest(tx, row)?;
     let stored: Option<String> = tx
         .query_row(
             "SELECT digest FROM silver_session_state WHERE session_key=?1",
@@ -483,7 +648,7 @@ fn note_session_state(
             |r| r.get(0),
         )
         .optional()?;
-    if rewritten || stored.as_deref() != Some(digest.as_str()) {
+    if changed || stored.as_deref() != Some(digest.as_str()) {
         tx.execute(
             "INSERT INTO silver_session_state(session_key,digest,repo_id) VALUES(?1,?2,?3) ON CONFLICT(session_key) DO UPDATE SET digest=excluded.digest,repo_id=excluded.repo_id",
             params![row.key, digest, row.repo_id.as_ref().map(json).transpose()?],
@@ -503,8 +668,9 @@ fn log_change(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<()> {
 
 /// Mark sessions leaving the current catalog: a `changed` row for each that
 /// had query-ready activity, so analytics can see its sources are missing, and
-/// a digest that no republication matches, so a returning session is logged
-/// again. Their activity and retained history are untouched (`removed` is for
+/// a digest that no republication matches, preserving any missing-source marker
+/// until the exact generation returns or complete activity is published. Their
+/// activity and retained history are untouched (`removed` is for
 /// projections that are dropped). `key` limits the scope to one session, by
 /// its index. Runs before the lifecycle is set to `retained`, so a repeated
 /// publication logs nothing.
@@ -524,7 +690,7 @@ fn withdraw_sql(exact: bool) -> (String, String) {
             "INSERT INTO silver_change(session_key,kind) SELECT session_key,'changed' {gone} AND session_key IN (SELECT session_key FROM session_activity_projections) ORDER BY session_key"
         ),
         format!(
-            "UPDATE silver_session_state SET digest='retained' WHERE session_key IN (SELECT session_key {gone})"
+            "UPDATE silver_session_state SET digest=CASE WHEN digest GLOB 'source_missing:*' THEN 'source_missing:retained' ELSE 'retained' END WHERE session_key IN (SELECT session_key {gone})"
         ),
     )
 }
@@ -535,6 +701,10 @@ pub(super) fn remove_mismatched(
 ) -> rusqlite::Result<()> {
     let sources = crate::retention::source_generation(&row.sources)
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if source_missing_for_row(tx, row)? {
+        note_session_state(tx, row, false)?;
+        return Ok(());
+    }
     let removed = tx.execute(
         "DELETE FROM session_activity_projections WHERE session_key=?1 AND source_generation<>?2",
         params![row.key, sources],
