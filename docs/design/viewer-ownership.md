@@ -1,11 +1,16 @@
 # Canonical Viewer ownership
 
-> **Historical scope (2026-11-08).** This contract records the former session
-> Viewer, including control, composer, and live control/runtime observer owners.
-> Control delivery and session display are retired under the [ASI direction](asi-direction.md);
-> those feature-specific rules below are historical and do not define current
-> product scope. Future Viewer work is the analytics UI, with native query and
-> passive process/lock observations retained.
+> **Scope (amended 2026-11-09).** Current product scope is the Viewer decision in
+> the [ASI direction](asi-direction.md): an analytics UI plus standalone, read-only
+> browsing of Semon-stored history, with native query and passive process/lock
+> observations retained. This contract remains authoritative for the shell,
+> sidebar/navigation, catalog reader and transcript owners that browsing keeps.
+> Any T3-inspired presentation must follow these owners.
+>
+> Control delivery was retired on 2026-11-08. Rules below for control, composer,
+> local control and live control/runtime observer owners are historical: they
+> record former ownership and do not authorize restoring a composer, control,
+> runtime or SSH.
 
 The hosted Viewer has one bounded, source-scoped application. A document mounts
 `createCatalogViewer` through `mountViewerApplication`; replacement destroys the

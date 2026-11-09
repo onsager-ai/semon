@@ -1,9 +1,12 @@
 # #380 UI preservation evidence
 
-> **Historical scope (2026-11-08).** This document records a session Viewer
-> design and its visual evidence. Session display and control delivery have since
-> been retired under the [ASI direction](asi-direction.md). The recorded decisions
-> preserve their historical provenance and do not authorize restoring that product.
+> **Historical scope (2026-11-08; scope note amended 2026-11-09).** This document
+> records a session Viewer design and its visual evidence. Control delivery has
+> since been retired under the [ASI direction](asi-direction.md). Standalone,
+> read-only browsing of Semon-stored history remains in scope (see the Viewer
+> decision there). The recorded decisions keep their historical provenance. They
+> do not set current visual targets, and they do not authorize restoring control,
+> composer or runtime features.
 
 ## Latest user decision — neutral Machine facet and retained Welcome
 
