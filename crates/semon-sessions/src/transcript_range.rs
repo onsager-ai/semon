@@ -483,7 +483,11 @@ pub(crate) fn resolve_step_slot(
                         script_offset: Some(offset),
                         ..
                     } if offset == call.offset => Some("operation_parent"),
-                    _ if slot.offset == call.offset => Some("call_identity"),
+                    Recipe::Tool { .. } | Recipe::Yielded { .. } | Recipe::Sent { .. }
+                        if slot.offset == call.offset =>
+                    {
+                        Some("call_identity")
+                    }
                     _ => None,
                 }
             }),
