@@ -580,6 +580,7 @@ pub(crate) fn page(
 /// Read all persisted StepFacts under the same source, rules, price and
 /// generation admission as activity pages. This crate-internal reader is for
 /// the analytics writer; public query and mirror surfaces must use `items`.
+#[expect(dead_code, reason = "kept crate-internal for the analytics writer")]
 pub(crate) fn step_facts(
     c: &Connection,
     row: &crate::model::summary::CatalogRow,

@@ -2503,15 +2503,19 @@ impl<'a> Builder<'a> {
             } else if file.summary.has_native_usage() {
                 usage.extend(self.cache.activity_codex_steps(&summary::source(file))?);
             }
-            input_events.extend(file.summary.events.iter().filter_map(|event| {
-                (event.k == events::Kind::U).then(|| events::session_activity::TimedInput {
-                    position: SourcePosition {
-                        source: path.into(),
-                        offset: event.o,
-                    },
-                    timestamp: event.t,
-                })
-            }));
+            input_events.extend(
+                file.summary
+                    .events
+                    .iter()
+                    .filter(|event| event.k == events::Kind::U)
+                    .map(|event| events::session_activity::TimedInput {
+                        position: SourcePosition {
+                            source: path.into(),
+                            offset: event.o,
+                        },
+                        timestamp: event.t,
+                    }),
+            );
             observations.extend(file.summary.events.iter().filter_map(|event| {
                 event.activity_observation.clone().map(|mut observation| {
                     observation

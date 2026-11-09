@@ -415,7 +415,7 @@ pub(crate) fn apply_observations(
                 .changes
                 .iter()
                 .cloned()
-                .map(|change| classify::fact(&row, change)),
+                .map(|change| classify::fact(row, change)),
         );
         let owner = observation_owner(&exact, &sources, row);
         if let Some(owner) = owner {
