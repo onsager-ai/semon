@@ -287,7 +287,7 @@ fn unknown_and_revoked_tokens_are_401() {
         post(receiving.address, APPEND, Some(&tokens[0]), &more).status,
         401
     );
-    let facts = json!({"version": 2, "hostname": "laptop", "home": null, "proc_starts": {}, "codex_locks": {}, "repos": {}});
+    let facts = json!({"version": 2, "hostname": "laptop", "home": null, "proc_starts": {}, "codex_locks": {}, "repos": {}, "repo_ids": {}});
     let facts = facts.to_string().into_bytes();
     assert_eq!(
         post(

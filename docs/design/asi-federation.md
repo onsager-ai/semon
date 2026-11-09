@@ -681,7 +681,7 @@ approval; new issue titles are concrete proposals, not already-created issues.
 | --- | --- |
 | Retitle/update #544 | “ASI store: origin derivation, governed publication and optional replica custody”; replace default receiver derivation acceptance with this architecture and link new transport/governance slices below. |
 | Retitle/update #545 | “ASI query: body-free SQL, local search and online remote view”; add availability/version coverage and explicit receiver search refusal. |
-| Keep #559/#571 and #585 | Storage lane finishes existing index/identity work and review; no federation protocol in these PRs. Plain typed repo/path fields remain allowed to operator receiver. |
+| Keep #559/#571 and #585 | #571 landed during final integration; preserve its typed identity/change-log contract. Storage lane proceeds with #585; no federation protocol is added to this slice. Plain typed repo/path fields remain allowed to operator receiver. |
 | Keep #558/#572; clarify title/body | “Raw custody: origin archive and supported receiver mirror”; retain both halves and existing correctness fixes. Add no cache implementation. User merge approval remains separate. |
 | Retitle #575 | “Origin archive-backed reads and explicit archive retention”; implement prune/rewrite reads first, preserve default origin retention, distinguish explicit replica retention from TTL. |
 | Keep #554 stack #578–#581 | Finish publication/compaction/DuckDB layers following merged #577; no re-splitting or transport scope expansion. Follow-up provenance/export fields belong with transport integration. |
@@ -813,7 +813,9 @@ Required acceptance slices include:
 Initial source/review baseline: `6e8a6b6007f8cfb1c0185f911d0b1cc9dd725e5c`.
 Publication base refreshed on 2026-11-09 to
 `ff6194172dbf3a58a4cfd031a9dc4b5beafd698b`, including #577, #584 and #586;
-the changed Viewer direction was reconciled with this proposal.
+the changed Viewer direction was reconciled with this contract. Final integration
+also incorporates `45fbcc17baeded7aca0311e3b14d23ea2d91dec1` (#571), preserving
+its typed repository-identity amendment in the store spec.
 Relevant native contracts: [source readers](session-source-reader.md) and
 [retained projections](retained-native-projections.md). Their generation, custody
 and authorization invariants are reused; historical hosted-body activation text

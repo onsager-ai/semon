@@ -110,7 +110,14 @@ transfer. It runs per namespace and supplies:
   and the session rows in one SQLite read transaction. A new incarnation
   makes the analytics writer re-read that namespace in full.
 - **Repository identity.** Sender facts gain, per repository root, a
-  sanitized `repo_id`, or `unknown` (see [Analytics model](#analytics-model)).
+  sanitized `repo_id`, or `unknown` (see [Analytics model](#analytics-model)). This
+  changes the supported mirror facts contract directly. Index persists the typed
+  identity in `silver_session_state.repo_id` alongside its analytics digest, in the
+  same transaction as publication and `silver_change`. It remains available when
+  sources disappear; local remotes remain class `path` and are not display
+  metadata. D7 permits those typed paths in receiver analytics, not in arbitrary
+  display fields. Repository dependencies use the effective native working
+  directory, including a subagent sidecar's `worktreePath`.
 - **Bodies for FTS5** (phase 2): see [ASI query](asi-query.md#search).
 
 ## Analytics model

@@ -92,6 +92,9 @@ pub(crate) struct Session {
     pub(crate) codex_history: Option<CodexHistory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) repo: Option<String>,
+    /// The sanitized `origin` identity, for the index change log only.
+    #[serde(skip)]
+    pub(crate) repo_id: Option<crate::facts::RepoId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) branch: Option<String>,
     pub(crate) start: i64,
@@ -1073,6 +1076,22 @@ struct SourceFile {
     marker: Option<Marker>,
 }
 
+/// The repository directory selected by native metadata, including a Claude
+/// subagent's sidecar worktree. Shared with the durable dependency index.
+pub(crate) fn repository_dir(index: &FileIndex) -> Option<&str> {
+    index
+        .claude_sidecar
+        .as_ref()
+        .and_then(|sidecar| sidecar.metadata.cwd.as_deref())
+        .or_else(|| {
+            index
+                .codex_header
+                .as_ref()
+                .and_then(|header| header.metadata.cwd.as_deref())
+        })
+        .or(index.cwd.as_deref())
+}
+
 impl SourceFile {
     fn harness(&self) -> &'static str {
         if matches!(self.role, Role::Copilot) {
@@ -1932,6 +1951,7 @@ impl<'a> Builder<'a> {
             parent_source: None,
             codex_history: None,
             repo: None,
+            repo_id: None,
             branch: None,
             start: 0,
             last: 0,
@@ -2514,13 +2534,8 @@ impl<'a> Builder<'a> {
             let file = &self.files[*position];
             files.push((file.path.clone(), file.revision));
             metadata.push(format!("{:?}", file.role));
-            let cwd = match &file.role {
-                Role::Agent(meta) => meta.cwd.as_ref().or(file.summary.cwd.as_ref()),
-                Role::Codex(meta) => meta.cwd.as_ref().or(file.summary.cwd.as_ref()),
-                Role::Top { .. } | Role::Copilot => file.summary.cwd.as_ref(),
-            };
-            if let Some(cwd) = cwd {
-                repos.push((cwd.clone(), self.facts.recorded_repo(cwd)));
+            if let Some(cwd) = repository_dir(&file.summary) {
+                repos.push((cwd.to_owned(), self.facts.recorded_repo(cwd)));
             }
         }
         let reports: Vec<_> = self
@@ -2608,6 +2623,19 @@ impl<'a> Builder<'a> {
                 ),
             );
         }
+        // Repository identity is a current machine observation, independent of
+        // reusable descriptions. Read local Git metadata afresh so an origin
+        // change cannot be hidden by a long-lived Texts memo.
+        let repo_id = self.sessions[index]
+            .files
+            .last()
+            .and_then(|position| repository_dir(&self.files[*position].summary))
+            .and_then(|cwd| {
+                self.facts.recorded_repo_id(cwd).unwrap_or_else(|| {
+                    crate::repo::repo_id(cwd, crate::facts::env_home().as_deref().map(Path::new))
+                })
+            });
+        self.sessions[index].out.repo_id = repo_id;
     }
 
     /// Name, model, effort, tokens, repo, branch, start, last and busy.
@@ -5493,7 +5521,11 @@ impl<'a> Builder<'a> {
                     .insert(key, (inputs, derived.clone()));
                 derived
             });
+            // RepoId is deliberately outside reusable description/turn inputs.
+            // Keep the current observation when restoring a cached derivation.
+            let repo_id = self.sessions[index].out.repo_id.clone();
             self.sessions[index].out = derived.out;
+            self.sessions[index].out.repo_id = repo_id;
             transcripts.insert(self.sessions[index].key.clone(), derived.transcript);
             turns.extend(derived.turns);
         }

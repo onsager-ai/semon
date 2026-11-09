@@ -978,6 +978,7 @@ mod tests {
             parent: None,
             parent_source: None,
             repo: None,
+            repo_id: None,
             branch: None,
             model: "fixture".into(),
             effort: None,

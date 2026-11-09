@@ -1171,6 +1171,7 @@ mod tests {
                     parent: None,
                     parent_source: None,
                     repo: Some(format!("probe-repo-{}", position % 3)),
+                    repo_id: None,
                     branch: None,
                     model: "probe-model".into(),
                     effort: None,
