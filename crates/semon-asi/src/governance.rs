@@ -1230,12 +1230,13 @@ mod tests {
             ),
         ]);
         assert!(project_derived_row(&grant, "dim_repo", &benign).is_ok());
-        let mut malformed = repo_row(Value::String("/work/repository".into()));
-        malformed.insert("repo_key".into(), Value::String("github.com/%GG".into()));
-        assert!(matches!(
-            project_derived_row(&grant, "dim_repo", &malformed),
-            Err(GovernanceError::Denied)
-        ));
+        // Native repository paths are literal strings, unlike encoded UIDs.
+        let mut literal = repo_row(Value::String("/work/repository".into()));
+        literal.insert("repo_key".into(), Value::String("github.com/%GG".into()));
+        let row = project_derived_row(&grant, "dim_repo", &literal).unwrap();
+        let exported: Value = serde_json::from_str(&serialize_governed_row(&row).unwrap()).unwrap();
+        assert_eq!(exported["repo_key"], "github.com/%GG");
+        assert!(!valid_key("session_uid", "ns/claude/%GG"));
     }
 
     #[test]
