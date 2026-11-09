@@ -192,7 +192,7 @@ impl RuntimeObservations {
                 .ok_or_else(|| io::Error::other("runtime observation unavailable"));
         };
         let mut cwd = connection
-            .prepare("SELECT cwd FROM files WHERE path=?1")
+            .prepare("SELECT native_id FROM catalog_native_dependencies WHERE source_path=?1 AND harness='runtime:repo'")
             .map_err(io::Error::other)?;
         for source in &row.sources {
             let value = cwd
@@ -209,12 +209,19 @@ impl RuntimeObservations {
         let repos = cwds
             .iter()
             .map(|cwd| {
-                let repo = if self.local {
-                    Some(model::repo_of(cwd, facts.home.as_deref().map(Path::new)))
+                let home = facts.home.as_deref().map(Path::new);
+                let (repo, repo_id) = if self.local {
+                    (
+                        Some(model::repo_of(cwd, home)),
+                        crate::repo::repo_id(cwd, home),
+                    )
                 } else {
-                    facts.repos.get(cwd).cloned()
+                    (
+                        facts.repos.get(cwd).cloned(),
+                        facts.repo_ids.get(cwd).cloned(),
+                    )
                 };
-                (cwd, repo)
+                (cwd, repo, repo_id)
             })
             .collect::<Vec<_>>();
         let locks = ids

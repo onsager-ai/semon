@@ -63,7 +63,7 @@ impl Root {
         root.write(
             "received/machines/alpha/facts.json",
             &json!({"version": 2, "hostname": "alpha", "home": null, "proc_starts": {},
-                "codex_locks": {}, "repos": {}})
+                "codex_locks": {}, "repos": {}, "repo_ids": {}})
             .to_string(),
         );
         let codex = |time: String, kind: &str, payload: Value| {
