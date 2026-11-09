@@ -54,6 +54,15 @@ class ClassifierTests(unittest.TestCase):
         self.commit("mixed")
         self.assertTrue(self.classify())
 
+    def test_shell_contract_markdown_runs_expensive_suites(self):
+        (self.repo / "docs").mkdir()
+        contract = self.repo / "docs" / "shell.md"
+        contract.write_text("## Classes\noriginal\n")
+        self.base = self.commit("add compiled shell contract")
+        contract.write_text("## Classes\nchanged\n")
+        self.commit("edit only compiled shell contract")
+        self.assertTrue(self.classify())
+
     def test_deletions_and_renames_retain_code_classification(self):
         (self.repo / "old.rs").write_text("code\n")
         self.base = self.commit("add code")

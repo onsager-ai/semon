@@ -34,7 +34,10 @@ def should_run(event: str, base: str, head: str) -> bool:
         return True
     paths = changed_paths(base, head)
     return not paths or any(
-        not (path.endswith(b".md") or path.startswith(b"docs/")) for path in paths
+        # Rust embeds this document and tests its Classes contract against the CSS.
+        path == b"docs/shell.md"
+        or not (path.endswith(b".md") or path.startswith(b"docs/"))
+        for path in paths
     )
 
 
