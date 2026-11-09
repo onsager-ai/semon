@@ -663,6 +663,11 @@ fn prefix_resources(archive: &Archive) -> (usize, usize) {
         .values()
         .filter_map(|held| held.prefix.as_ref())
         .collect();
+    assert_eq!(
+        known.active_prefixes,
+        progress.len(),
+        "capacity count matches live decoder objects"
+    );
     (
         progress.len(),
         progress.iter().map(|prefix| prefix.digests.len()).sum(),
@@ -769,5 +774,76 @@ fn damaged_and_superseded_chains_release_prefix_decoders() {
     preserve(&other, "native", &log, "new-version").unwrap();
     // Observing another writer's successor releases superseded progress.
     assert!(admit(&archive, &log, log.len()));
+    assert_eq!(prefix_resources(&archive), (0, 0));
+}
+
+#[test]
+fn prefix_capacity_accounting_ignores_completed_history_and_cached_comparisons() {
+    let (_scratch, archive) = archive();
+    let log = lines(512, 1);
+    for n in 0..128 {
+        let source = format!("completed-{n}");
+        archive
+            .admit(
+                &source,
+                &mut Cursor::new(&log),
+                log.len() as u64,
+                &digest(&log),
+            )
+            .unwrap();
+        archive
+            .admit(&source, &mut Cursor::new(&log), 128, &digest(&log[..128]))
+            .unwrap();
+        archive
+            .admit(
+                &source,
+                &mut Cursor::new(&log),
+                log.len() as u64,
+                &digest(&log),
+            )
+            .unwrap();
+    }
+    assert_eq!(prefix_resources(&archive), (0, 0));
+    assert!(archive.known().verified.len() >= 128);
+    assert!(admit(&archive, &log, log.len()));
+    let work = PREFIX_CAPACITY_WORK.with(std::cell::Cell::get);
+    assert!(admit(&archive, &log, 128));
+    assert_eq!(
+        PREFIX_CAPACITY_WORK.with(std::cell::Cell::get) - work,
+        1,
+        "one constant-time capacity lookup, regardless of history"
+    );
+    let work = PREFIX_CAPACITY_WORK.with(std::cell::Cell::get);
+    let bytes = VERIFIED_BYTES.with(std::cell::Cell::get);
+    for _ in 0..128 {
+        assert!(admit(&archive, &log, 128));
+    }
+    assert_eq!(
+        PREFIX_CAPACITY_WORK.with(std::cell::Cell::get),
+        work,
+        "cached comparisons perform no capacity accounting"
+    );
+    assert_eq!(VERIFIED_BYTES.with(std::cell::Cell::get), bytes);
+    assert_eq!(prefix_resources(&archive), (1, 1));
+    assert!(admit(&archive, &log, log.len()));
+    assert_eq!(prefix_resources(&archive), (0, 0));
+}
+
+#[test]
+fn a_failed_prefix_decoder_open_does_not_reserve_capacity() {
+    let (_scratch, archive) = archive();
+    let log = lines(512, 1);
+    assert!(admit(&archive, &log, log.len()));
+    let chain = archive.chains("native").unwrap().remove(0);
+    let path = chain_file(&archive, "native", &chain);
+    fs::remove_file(&path).unwrap();
+    // Exercise the open-failure boundary after verification, without allocating a slot.
+    assert!(
+        archive
+            .matches_prefix(path.parent().unwrap(), &chain, 128, &digest(&log[..128]))
+            .is_err()
+    );
+    assert_eq!(prefix_resources(&archive), (0, 0));
+    assert!(admit(&archive, &log, 128));
     assert_eq!(prefix_resources(&archive), (0, 0));
 }

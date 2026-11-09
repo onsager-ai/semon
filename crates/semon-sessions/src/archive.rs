@@ -120,6 +120,28 @@ struct Known {
     read: u64,
     /// Verified chains, invalidated by a change to the file or manifest.
     verified: BTreeMap<String, Verified>,
+    active_prefixes: usize,
+}
+
+impl Known {
+    fn prefix_count(&self) -> usize {
+        #[cfg(test)]
+        PREFIX_CAPACITY_WORK.with(|work| work.set(work.get() + 1));
+        self.active_prefixes
+    }
+
+    fn release_prefix(&mut self, chain_id: &str) {
+        if let Some(verified) = self.verified.get_mut(chain_id)
+            && verified.prefix.take().is_some()
+        {
+            self.active_prefixes -= 1;
+        }
+    }
+
+    fn remove_verified(&mut self, chain_id: &str) {
+        self.release_prefix(chain_id);
+        self.verified.remove(chain_id);
+    }
 }
 
 struct Verified {
@@ -324,9 +346,7 @@ impl Archive {
         {
             let mut known = self.known();
             for chain in manifest.chains.iter().rev().skip(1) {
-                if let Some(verified) = known.verified.get_mut(&chain.chain_id) {
-                    verified.prefix = None;
-                }
+                known.release_prefix(&chain.chain_id);
             }
         }
         // Only a chain that reads back whole is trusted or extended. A
@@ -389,7 +409,7 @@ impl Archive {
         {
             return true;
         }
-        self.known().verified.remove(&chain.chain_id);
+        self.known().remove_verified(&chain.chain_id);
         if let Some(observed) = observed
             && check_chain(dir, chain).is_ok()
             && Verification::observed(dir, chain).ok().as_ref() == Some(&observed)
@@ -416,27 +436,37 @@ impl Archive {
         expected: &[u8; 32],
     ) -> io::Result<bool> {
         let mut known = self.known();
-        let active = known
+        if known
             .verified
-            .values()
-            .filter(|held| held.prefix.is_some())
-            .count();
-        let verified = known
-            .verified
-            .get_mut(&chain.chain_id)
-            .expect("trusted chain");
-        if verified.prefix.is_none() && active >= MAX_PREFIX_READERS {
-            return Ok(false);
-        }
-        if verified.prefix.is_none() {
-            verified.prefix = Some(ComparedPrefix {
-                reader: Box::new(open_chain(dir, chain)?),
+            .get(&chain.chain_id)
+            .expect("trusted chain")
+            .prefix
+            .is_none()
+        {
+            if known.prefix_count() >= MAX_PREFIX_READERS {
+                return Ok(false);
+            }
+            // Failed opens never reserve a slot.
+            let reader = Box::new(open_chain(dir, chain)?);
+            known
+                .verified
+                .get_mut(&chain.chain_id)
+                .expect("trusted chain")
+                .prefix = Some(ComparedPrefix {
+                reader,
                 hash: Sha256::new(),
                 offset: 0,
                 digests: BTreeMap::new(),
             });
+            known.active_prefixes += 1;
         }
-        let compared = verified.prefix.as_mut().expect("prefix reader");
+        let compared = known
+            .verified
+            .get_mut(&chain.chain_id)
+            .expect("trusted chain")
+            .prefix
+            .as_mut()
+            .expect("prefix reader");
         if let Some(digest) = compared.digests.get(&offset) {
             return Ok(digest == expected);
         }
@@ -458,15 +488,15 @@ impl Archive {
     }
 
     fn release_prefix(&self, chain_id: &str) {
-        if let Some(verified) = self.known().verified.get_mut(chain_id) {
-            verified.prefix = None;
-        }
+        self.known().release_prefix(chain_id);
     }
 
     /// Our own completed writes are already hashed, under the archive lock.
     fn remember(&self, dir: &Path, chain: &Chain) -> io::Result<()> {
         let observed = Verification::observed(dir, chain)?;
-        self.known().verified.insert(
+        let mut known = self.known();
+        known.remove_verified(&chain.chain_id);
+        known.verified.insert(
             chain.chain_id.clone(),
             Verified {
                 observation: observed,
@@ -934,6 +964,7 @@ fn publish(dir: &Path, name: &str, value: &impl Serialize) -> io::Result<()> {
 #[cfg(test)]
 thread_local! {
     pub(crate) static VERIFIED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static PREFIX_CAPACITY_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static DURING_JOURNAL_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Fails the next [`Archive::register`] before it writes.
     static FAIL_REGISTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
