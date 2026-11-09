@@ -988,6 +988,7 @@ impl Client {
                 known.generation.clone()
             };
             let bind = Append {
+                redactor_version: redact::VERSION,
                 relocation: None,
                 generation: Some(generation.clone()),
                 root: input.root.as_str().into(),
@@ -1017,6 +1018,7 @@ impl Client {
         }
         let generation = wire::new_generation().map_err(Failure::Local)?;
         let append = Append {
+            redactor_version: redact::VERSION,
             relocation: None,
             generation: Some(generation.clone()),
             root: input.root.as_str().into(),
@@ -1195,6 +1197,7 @@ impl Client {
                     head.extend_from_slice(&piece[..take]);
                 }
                 let append = Append {
+                    redactor_version: redact::VERSION,
                     relocation: relocation.clone(),
                     generation: Some(generation.clone()),
                     root: input.root.as_str().into(),
@@ -2700,6 +2703,7 @@ mod tests {
         let reference = mirror::Receiver::new(&mirror);
         let bytes = b"already sent\n";
         let existing = Append {
+            redactor_version: redact::VERSION,
             relocation: None,
             root: "claude".into(),
             path: "projects/-work/old.jsonl".into(),

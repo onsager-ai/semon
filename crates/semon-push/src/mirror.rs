@@ -1112,6 +1112,7 @@ mod tests {
         let mut head = if replace { Vec::new() } else { before.to_vec() };
         head.extend_from_slice(bytes);
         Append {
+            redactor_version: crate::redact::VERSION,
             relocation: None,
             generation: None,
             root: "claude".into(),
@@ -1683,6 +1684,7 @@ mod status_tests {
     }
     fn request(bytes: &[u8], generation: &str) -> Append {
         Append {
+            redactor_version: crate::redact::VERSION,
             relocation: None,
             root: "codex".into(),
             path: "sessions/native.jsonl".into(),

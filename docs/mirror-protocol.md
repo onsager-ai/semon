@@ -30,10 +30,11 @@ for the bounded archive reader, coexistence/restart rules and upload experiment.
 ### `POST <url>/v1/mirror/append`
 
 ```json
-{"root": "claude", "path": "projects/-work/abc.jsonl", "offset": 0, "head_sha256": "…", "bytes": "…", "replace": false}
+{"root": "claude", "path": "projects/-work/abc.jsonl", "redactor_version": 1, "offset": 0, "head_sha256": "…", "bytes": "…", "replace": false}
 ```
 
 - `root` is `claude` or `codex`. `path` is relative to that root, with `/` separators. The receiver checks both with `is_input_path` and answers 400 when they fail.
+- `redactor_version` is the required integer version of the sender's redaction rules. The current sender uses version 1.
 - `bytes` holds the file bytes, as standard base64 with padding. One request carries at most 4 MiB of file bytes.
 - `offset` is where `bytes` go. Without `replace`, the receiver appends only when `offset` equals its copy's current length; a missing file has length 0.
 - `replace: true` means: empty the copy, then write `bytes` from offset 0. `offset` is then 0.
