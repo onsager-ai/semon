@@ -10436,7 +10436,7 @@ mod tests {
             (
                 "missing-silver-state-column",
                 "ALTER TABLE silver_session_state DROP COLUMN digest",
-                "malformed schema",
+                "malformed persistent state",
             ),
             (
                 "missing-reported-column",

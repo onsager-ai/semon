@@ -12306,7 +12306,9 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
 #[test]
 fn a_catalog_row_carries_the_repository_identity_recorded_in_facts() {
     let home = Home::new();
-    home.top("root", &[human("root", ts(0, 0), "identity")]);
+    let mut record = human("root", ts(0, 0), "identity");
+    record["cwd"] = json!("/work/proj");
+    home.top("root", &[record]);
     let path = home.root.join("identity-facts.json");
     let options = Options {
         facts: Some(path.clone()),
