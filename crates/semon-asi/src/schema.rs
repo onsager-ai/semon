@@ -268,8 +268,16 @@ const TARGET_TYPE: &[&str] = &["session", "turn", "step", "compaction", "lane", 
 const ROLE: &[&str] = &["manager", "worker", "reviewer", "solo", "unknown"];
 const PARENT_METHOD: &[&str] = &["native", "workspace", "none"];
 const STATUS: &[&str] = &["active", "ended", "unknown"];
-const REMOTE_KIND: &[&str] = &["remote", "local_path", "unknown"];
-const RATE_KIND: &[&str] = &["input", "output", "cache_read", "cache_write", "reasoning"];
+const RATE_KIND: &[&str] = &[
+    "input",
+    "output",
+    "cache_read",
+    "cache_write_5m",
+    "cache_write_1h",
+    "reasoning",
+    "web_search_request",
+];
+const PRICE_UNIT: &[&str] = &["mtok", "request"];
 
 pub static FACT_STEP: Table = Table {
     name: "fact_step",
@@ -281,7 +289,10 @@ pub static FACT_STEP: Table = Table {
         key("turn_uid", "Turn UID."),
         key("session_uid", "Session UID."),
         key("model_key", "Key into dim_model."),
-        key("repo_key", "Key into dim_repo."),
+        key(
+            "repo_key",
+            "Key into dim_repo; never a path or a hash of one.",
+        ),
         int_key("date_key", "UTC start date as yyyymmdd; key into dim_date."),
         ts("ts", "Start of the model call."),
         num("input_tokens", "tokens", "Uncached input tokens."),
@@ -292,14 +303,41 @@ pub static FACT_STEP: Table = Table {
             "Input tokens read from the cache.",
         ),
         num(
-            "cache_write_tokens",
+            "cache_write_5m_tokens",
             "tokens",
-            "Input tokens written to the cache.",
+            "Input tokens written to the 5-minute cache.",
+        ),
+        num(
+            "cache_write_1h_tokens",
+            "tokens",
+            "Input tokens written to the 1-hour cache.",
         ),
         num(
             "reasoning_tokens",
             "tokens",
             "Reasoning tokens, when reported separately.",
+        ),
+        num(
+            "web_search_requests",
+            "requests",
+            "Billed web-search requests.",
+        ),
+        label_opt(
+            "speed",
+            "Speed mode the harness reported; it can change the rate.",
+        ),
+        label_opt(
+            "service_tier",
+            "Service tier the harness reported; it can change the rate.",
+        ),
+        num(
+            "prompt_size_tokens",
+            "tokens",
+            "Prompt size that selects a context tier.",
+        ),
+        flag(
+            "split_unknown",
+            "True when the cache-write TTL split was not reported.",
         ),
         en(
             "usage_owner",
@@ -412,14 +450,24 @@ pub static FACT_SESSION: Table = Table {
             "Cache-read tokens over exclusive usage.",
         ),
         num(
-            "cache_write_tokens",
+            "cache_write_5m_tokens",
             "tokens",
-            "Cache-write tokens over exclusive usage.",
+            "5-minute cache-write tokens, exclusive usage.",
+        ),
+        num(
+            "cache_write_1h_tokens",
+            "tokens",
+            "1-hour cache-write tokens, exclusive usage.",
         ),
         num(
             "reasoning_tokens",
             "tokens",
             "Reasoning tokens over exclusive usage.",
+        ),
+        num(
+            "web_search_requests",
+            "requests",
+            "Web-search requests over exclusive usage.",
         ),
         real_opt("usd_est", "usd", "Estimate over priced exclusive steps."),
         real_opt(
@@ -544,7 +592,10 @@ pub static DIM_SESSION: Table = Table {
         key_opt("parent_session_uid", "Parent session UID."),
         en("parent_method", PARENT_METHOD, "How the parent was found."),
         key_opt("lane_root_uid", "Session UID of the lane's root."),
-        key("repo_key", "Key into dim_repo."),
+        key(
+            "repo_key",
+            "Key into dim_repo; never a path or a hash of one.",
+        ),
         label_opt("branch", "Branch at the start of the session."),
         en("status", STATUS, "Session status."),
         ts("started_at", "Start of the session."),
@@ -558,13 +609,16 @@ pub static DIM_REPO: Table = Table {
     kind: Kind::Dimension,
     sort_time: None,
     columns: &[
-        key("repo_key", "Sanitised repo_id, or `unknown`."),
-        label("display_name", "Display name."),
-        en(
-            "remote_kind",
-            REMOTE_KIND,
-            "`local_path` keys are tokenised on Hub export.",
+        key(
+            "repo_key",
+            "Join key: the repo_id of a remote, a random local ID, or `unknown`.",
         ),
+        label_opt(
+            "repo_id",
+            "Sanitised remote repo_id; null for a local repository.",
+        ),
+        path_opt("repo_path", "Local repository path; null for a remote."),
+        label("display_name", "Display name."),
     ],
 };
 
@@ -589,14 +643,24 @@ pub static DIM_PRICE: Table = Table {
         key("price_version", "Price version."),
         label("provider", "Provider name."),
         label("model", "Model name."),
-        en("rate_kind", RATE_KIND, "Token class the rate applies to."),
+        en("rate_kind", RATE_KIND, "Billing input the rate applies to."),
         label_opt("tier", "Pricing tier, when the rate is tiered."),
+        label_opt("speed", "Speed mode the rate applies to; null for all."),
+        label_opt(
+            "service_tier",
+            "Service tier the rate applies to; null for all.",
+        ),
         num_opt(
             "threshold_tokens",
             "tokens",
             "Context size above which the tier applies.",
         ),
-        real("usd_per_unit", "usd_per_mtok", "Price per million tokens."),
+        en(
+            "unit",
+            PRICE_UNIT,
+            "What usd_per_unit prices: a million tokens or one request.",
+        ),
+        real("usd_per_unit", "usd", "Price per `unit`."),
         ts("valid_from", "Start of validity."),
         ts_opt("valid_to", "End of validity; null while current."),
         ts("learned_at", "When Semon learned the rate."),
@@ -747,6 +811,44 @@ mod tests {
                 assert_eq!(column.name, field.name());
                 assert_eq!(column.nullable, field.is_nullable());
                 assert_eq!(column.data_type.arrow(), *field.data_type());
+            }
+        }
+    }
+
+    #[test]
+    fn billing_inputs_are_kept_apart() {
+        let step = table("fact_step").unwrap();
+        for name in [
+            "cache_write_5m_tokens",
+            "cache_write_1h_tokens",
+            "web_search_requests",
+            "speed",
+            "service_tier",
+            "prompt_size_tokens",
+            "split_unknown",
+        ] {
+            assert!(step.column(name).is_some(), "fact_step lacks {name}");
+        }
+        assert!(step.column("cache_write_tokens").is_none());
+        let price = table("dim_price").unwrap();
+        let rates = price.column("rate_kind").unwrap().values;
+        for kind in ["cache_write_5m", "cache_write_1h", "web_search_request"] {
+            assert!(rates.contains(&kind), "dim_price lacks rate kind {kind}");
+        }
+        assert_eq!(price.column("unit").unwrap().values, ["mtok", "request"]);
+    }
+
+    #[test]
+    fn local_paths_are_never_keys() {
+        let repo = table("dim_repo").unwrap();
+        assert_eq!(repo.column("repo_path").unwrap().class, Class::Path);
+        assert!(repo.column("repo_path").unwrap().nullable);
+        assert_eq!(repo.column("repo_key").unwrap().class, Class::Key);
+        for table in TABLES {
+            for column in table.columns {
+                if column.name.contains("path") {
+                    assert_eq!(column.class, Class::Path, "{}.{}", table.name, column.name);
+                }
             }
         }
     }

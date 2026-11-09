@@ -21,6 +21,15 @@ const ROW_GROUP_ROWS: usize = 128 * 1024;
 pub(crate) struct Written {
     pub rows: u64,
     pub bytes: u64,
+    /// Decoded size of the rows, as the caller reported it.
+    pub memory: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Parquet files this thread has opened for reading, for tests that assert a run
+    /// reads nothing.
+    pub(crate) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A Parquet file being written. `finish` fsyncs it.
@@ -28,6 +37,7 @@ pub(crate) struct OutFile {
     writer: ArrowWriter<File>,
     sync: File,
     rows: u64,
+    memory: u64,
 }
 
 impl OutFile {
@@ -43,18 +53,27 @@ impl OutFile {
             writer,
             sync,
             rows: 0,
+            memory: 0,
         })
     }
 
-    pub(crate) fn write(&mut self, batch: &RecordBatch) -> Result<()> {
+    /// Appends `batch` as one row group. `memory` is its decoded size, which the
+    /// caller knows better than a sliced batch can say.
+    pub(crate) fn write_group(&mut self, batch: &RecordBatch, memory: u64) -> Result<()> {
         self.rows += batch.num_rows() as u64;
+        self.memory += memory;
         self.writer.write(batch)?;
+        self.writer.flush()?;
         Ok(())
     }
 
-    /// Bytes written so far plus the buffered row group, for rolling files.
-    pub(crate) fn size_hint(&self) -> u64 {
-        (self.writer.bytes_written() + self.writer.in_progress_size()) as u64
+    /// Bytes of the completed row groups; the footer is not included.
+    pub(crate) fn size(&self) -> u64 {
+        self.writer.bytes_written() as u64
+    }
+
+    pub(crate) fn rows(&self) -> u64 {
+        self.rows
     }
 
     pub(crate) fn finish(self) -> Result<Written> {
@@ -63,18 +82,21 @@ impl OutFile {
         Ok(Written {
             rows: self.rows,
             bytes: self.sync.metadata()?.len(),
+            memory: self.memory,
         })
     }
 }
 
 pub(crate) fn write_file(path: &Path, batch: &RecordBatch) -> Result<Written> {
     let mut out = OutFile::create(path, batch.schema())?;
-    out.write(batch)?;
+    out.write_group(batch, batch.get_array_memory_size() as u64)?;
     out.finish()
 }
 
 /// Reads every batch of a file, or only the named top-level columns.
 pub(crate) fn read_batches(path: &Path, columns: Option<&[&str]>) -> Result<Vec<RecordBatch>> {
+    #[cfg(test)]
+    READS.with(|reads| reads.set(reads.get() + 1));
     let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?;
     let builder = match columns {
         Some(names) => {

@@ -1,6 +1,7 @@
 //! Fixtures shared by the unit tests.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 
@@ -9,9 +10,15 @@ use arrow::array::{
 };
 use arrow::record_batch::RecordBatch;
 
+use arrow::util::display::array_value_to_string;
+
+use crate::error::Result;
 use crate::parquet_io::{int_column, read_batches, string_column};
-use crate::schema::{FACT_SESSION, FACT_STEP, SESSION_COLUMN, Table, Type};
-use crate::store::{Clock, Store, TableBatch, Update};
+use crate::schema::{
+    FACT_COMPACTION, FACT_LABEL, FACT_SESSION, FACT_STEP, FACT_TOOL_CALL, FACT_TURN, Kind,
+    SESSION_COLUMN, Table, Type,
+};
+use crate::store::{Clock, Manifest, Store, TableBatch, Update};
 
 pub(crate) struct TestClock(AtomicI64);
 
@@ -118,3 +125,117 @@ pub(crate) fn live_steps<C: Clock>(store: &Store<C>) -> BTreeSet<(String, i64, S
     }
     rows
 }
+
+/// An update that recomputes `sessions` whole in every session table, and appends one
+/// label row. `sessions` gives the step and tool-call rows per session; the other
+/// tables get one row per session.
+pub(crate) fn update_all(sessions: &[(&str, usize)], tag: &str, ts_base: i64) -> Update {
+    let summary: Vec<(&str, usize)> = sessions.iter().map(|(session, _)| (*session, 1)).collect();
+    let batch = |table: &'static Table, rows: &[(&str, usize)]| TableBatch {
+        table,
+        batch: sample(table, rows, tag, ts_base),
+    };
+    Update {
+        tables: vec![
+            batch(&FACT_STEP, sessions),
+            batch(&FACT_TOOL_CALL, sessions),
+            batch(&FACT_TURN, summary.as_slice()),
+            batch(&FACT_SESSION, summary.as_slice()),
+            batch(&FACT_COMPACTION, summary.as_slice()),
+            batch(&FACT_LABEL, [("label", 1)].as_slice()),
+        ],
+        touched_sessions: sessions
+            .iter()
+            .map(|(session, _)| (*session).to_owned())
+            .collect(),
+        ..Update::default()
+    }
+}
+
+/// `batch` with the column `name` replaced.
+pub(crate) fn replace_column(batch: &RecordBatch, name: &str, array: ArrayRef) -> RecordBatch {
+    let index = batch.schema().index_of(name).unwrap();
+    let mut columns = batch.columns().to_vec();
+    columns[index] = array;
+    RecordBatch::try_new(batch.schema(), columns).unwrap()
+}
+
+/// Incompressible hex strings, `length` characters each.
+pub(crate) fn noise(rows: usize, length: usize, mut seed: u64) -> ArrayRef {
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let values: Vec<String> = (0..rows)
+        .map(|_| {
+            let mut text = String::with_capacity(length + 16);
+            while text.len() < length {
+                text.push_str(&format!("{:016x}", next()));
+            }
+            text.truncate(length);
+            text
+        })
+        .collect();
+    Arc::new(StringArray::from(values))
+}
+
+/// Every row of `table` that `manifest` and `live` name, as a multiset of all column
+/// values (including `_gen`). Session tables count live rows only.
+pub(crate) fn rows_of(
+    analytics: &Path,
+    manifest: &Manifest,
+    live: &HashMap<String, i64>,
+    table: &Table,
+) -> Result<BTreeMap<String, usize>> {
+    let mut rows = BTreeMap::new();
+    for file in manifest.files_of(table.name) {
+        for batch in read_batches(&analytics.join(&file.path), None)? {
+            for row in 0..batch.num_rows() {
+                if table.kind == Kind::Session {
+                    let session = string_column(&batch, SESSION_COLUMN)?.value(row);
+                    if live.get(session) != Some(&int_column(&batch, "_gen")?.value(row)) {
+                        continue;
+                    }
+                }
+                let mut text = String::new();
+                for column in batch.columns() {
+                    text.push_str(&array_value_to_string(column, row).unwrap());
+                    text.push('|');
+                }
+                *rows.entry(text).or_insert(0) += 1;
+            }
+        }
+    }
+    Ok(rows)
+}
+
+/// `rows_of` for every table of the store's current manifest.
+pub(crate) fn all_rows<C: Clock>(
+    store: &Store<C>,
+    tables: &[&'static Table],
+) -> Vec<BTreeMap<String, usize>> {
+    tables
+        .iter()
+        .map(|table| {
+            rows_of(
+                store.analytics_dir(),
+                store.manifest(),
+                store.live_map(),
+                table,
+            )
+            .unwrap()
+        })
+        .collect()
+}
+
+/// Every fact table: the session tables and the labels.
+pub(crate) static FACT_TABLES: [&Table; 6] = [
+    &FACT_STEP,
+    &FACT_TOOL_CALL,
+    &FACT_TURN,
+    &FACT_SESSION,
+    &FACT_COMPACTION,
+    &FACT_LABEL,
+];

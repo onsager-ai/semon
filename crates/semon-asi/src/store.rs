@@ -11,6 +11,10 @@
 //! A row of a session table is live when the live map maps its `session_uid` to its
 //! `_gen`. A session is recomputed whole, so a newer generation makes the older rows
 //! dead without touching their files.
+//!
+//! Once the manifest rename has happened the generation is published, whatever
+//! follows: the writer adopts it in memory before the directory fsync, so a failure
+//! there is reported but never lets the next publish reuse a visible generation.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{self, File, OpenOptions, TryLockError};
@@ -26,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 use crate::parquet_io::{int_column, read_batches, string_column, with_generation, write_file};
 use crate::schema::{
-    ASI_SCHEMA_VERSION, GEN_COLUMN, Kind, SESSION_COLUMN, TABLES, Table, live_map_schema,
+    ASI_SCHEMA_VERSION, GEN_COLUMN, Kind, SESSION_COLUMN, TABLES, Table, live_map_schema, table,
 };
 
 const ANALYTICS_DIR: &str = "analytics";
@@ -68,6 +72,13 @@ pub struct Versions {
     pub price: String,
 }
 
+/// A session whose native source is gone. Its rows and versions are kept.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourceMissing {
+    /// When the writer first found the source missing, in UTC milliseconds.
+    pub detected_at: i64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct FileEntry {
     pub table: String,
@@ -75,9 +86,18 @@ pub struct FileEntry {
     pub path: String,
     /// 0 for a cycle file, 1 for a compacted file.
     pub level: u8,
+    /// The generation that wrote the file.
     pub generation: u64,
+    /// Smallest and largest `_gen` among the rows of the file.
+    pub min_row_gen: u64,
+    pub max_row_gen: u64,
     pub rows: u64,
     pub bytes: u64,
+    /// Decoded size of the rows; compaction bounds its input by it.
+    pub memory: u64,
+    /// Rows no longer live. `None` means unknown: a publication may have killed rows
+    /// of the file, and compaction counts them again before it decides.
+    pub dead: Option<u64>,
 }
 
 /// What readers see: the files, the live map and the checkpoints of one generation.
@@ -93,6 +113,8 @@ pub struct Manifest {
     pub checkpoints: BTreeMap<String, String>,
     /// Last durable revision exported to `fact_label`.
     pub durable_revision: u64,
+    /// Live sessions whose native source is gone, by `session_uid`.
+    pub source_missing: BTreeMap<String, SourceMissing>,
     /// Files no generation names any more, with the time of the first such generation.
     pub unpublished: BTreeMap<String, i64>,
 }
@@ -107,6 +129,7 @@ impl Manifest {
             live_map: None,
             checkpoints: BTreeMap::new(),
             durable_revision: 0,
+            source_missing: BTreeMap::new(),
             unpublished: BTreeMap::new(),
         }
     }
@@ -133,15 +156,32 @@ pub struct Update {
     pub touched_sessions: Vec<String>,
     /// Sessions that no longer exist; their rows become dead.
     pub removed_sessions: Vec<String>,
+    /// Live sessions to mark as source-missing (kept as they are, added to the manifest).
+    pub source_missing: BTreeMap<String, SourceMissing>,
+    /// Sessions whose source is back.
+    pub source_restored: Vec<String>,
     /// Checkpoints to set, keyed by namespace; others are kept.
     pub checkpoints: BTreeMap<String, String>,
     pub durable_revision: u64,
     pub versions: Versions,
 }
 
+/// A generation whose files are on disk but whose manifest is not yet current.
 pub(crate) struct Staged {
     pub manifest: Manifest,
     pub live: Option<HashMap<String, i64>>,
+    /// Files the current manifest names that this one drops; stamped at installation.
+    pub dropped: Vec<String>,
+}
+
+/// Failure points for tests.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Fault {
+    /// After the new manifest is durable under its temporary name, before the rename.
+    BeforeRename,
+    /// After the rename, where the directory fsync would be.
+    AfterRename,
 }
 
 /// The analytics writer for one store directory. Holding it holds `analytics.lock`.
@@ -150,6 +190,8 @@ pub struct Store<C: Clock = SystemClock> {
     pub(crate) clock: C,
     pub(crate) manifest: Manifest,
     pub(crate) live: HashMap<String, i64>,
+    #[cfg(test)]
+    pub(crate) fault: Option<Fault>,
     _lock: File,
 }
 
@@ -185,6 +227,8 @@ impl<C: Clock> Store<C> {
             clock,
             manifest,
             live,
+            #[cfg(test)]
+            fault: None,
             _lock: lock,
         })
     }
@@ -202,11 +246,12 @@ impl<C: Clock> Store<C> {
     }
 
     /// Writes one generation and makes it current. A crash before the manifest rename
-    /// leaves the previous generation.
+    /// leaves the previous generation. An error after the rename still leaves this
+    /// store holding the new generation: it is visible to readers.
     pub fn publish(&mut self, update: &Update) -> Result<u64> {
         let staged = self.stage(update)?;
         let generation = staged.manifest.generation;
-        self.commit(staged)?;
+        self.install(staged)?;
         Ok(generation)
     }
 
@@ -264,11 +309,32 @@ impl<C: Clock> Store<C> {
                 path,
                 level: 0,
                 generation,
+                min_row_gen: generation,
+                max_row_gen: generation,
                 rows: out.rows,
                 bytes: out.bytes,
+                memory: out.memory,
+                dead: None,
             };
             written.push(entry.clone());
             files.push(entry);
+        }
+
+        // The rows these sessions had until now die. A compacted file whose generation
+        // range holds one of those generations has an unknown dead count from here on.
+        let dying: BTreeSet<i64> = update
+            .touched_sessions
+            .iter()
+            .chain(&update.removed_sessions)
+            .filter_map(|session| self.live.get(session))
+            .copied()
+            .collect();
+        for file in &mut files {
+            let session_table = table(&file.table).is_some_and(|t| t.kind == Kind::Session);
+            let (low, high) = (file.min_row_gen as i64, file.max_row_gen as i64);
+            if file.level == 1 && session_table && dying.range(low..=high).next().is_some() {
+                file.dead = None;
+            }
         }
 
         let mut live = self.live.clone();
@@ -278,6 +344,21 @@ impl<C: Clock> Store<C> {
         for session in &update.removed_sessions {
             live.remove(session);
         }
+        let mut source_missing = self.manifest.source_missing.clone();
+        for session in update
+            .removed_sessions
+            .iter()
+            .chain(&update.source_restored)
+        {
+            source_missing.remove(session);
+        }
+        source_missing.extend(update.source_missing.clone());
+        if let Some(stray) = source_missing.keys().find(|s| !live.contains_key(*s)) {
+            return Err(Error::invalid(format!(
+                "{stray} is marked source-missing but is not a live session"
+            )));
+        }
+
         let live_map = format!("{LIVE_DIR}/g{generation}.parquet");
         fs::create_dir_all(self.analytics.join(LIVE_DIR))?;
         write_live_map(&self.analytics.join(&live_map), &live)?;
@@ -290,59 +371,82 @@ impl<C: Clock> Store<C> {
         let mut checkpoints = self.manifest.checkpoints.clone();
         checkpoints.extend(update.checkpoints.clone());
         let live_map = Some(live_map);
+        let dropped = self.dropped_paths(&files, live_map.as_deref());
         let manifest = Manifest {
             generation,
             schema_version: ASI_SCHEMA_VERSION,
             versions: update.versions.clone(),
-            unpublished: self.unpublish_dropped(&files, live_map.as_deref()),
+            unpublished: self.manifest.unpublished.clone(),
             files,
             live_map,
             checkpoints,
             durable_revision: update.durable_revision,
+            source_missing,
         };
         Ok(Staged {
             manifest,
             live: Some(live),
+            dropped,
         })
     }
 
-    /// Makes a staged generation current: manifest, fsync, rename, directory fsync.
-    pub(crate) fn commit(&mut self, staged: Staged) -> Result<()> {
-        write_manifest(&self.analytics, &staged.manifest)?;
-        self.manifest = staged.manifest;
-        if let Some(live) = staged.live {
+    /// Makes a staged generation current: the manifest is written under a temporary
+    /// name and fsynced, renamed into place, and the directory is fsynced. The
+    /// rename is the publication: from there on this store holds the new manifest
+    /// and live map even if the directory fsync fails, so no later generation can
+    /// reuse a number a reader may already see. Unpublication is stamped with the
+    /// time of this publication, not of staging.
+    pub(crate) fn install(&mut self, staged: Staged) -> Result<()> {
+        let Staged {
+            mut manifest,
+            live,
+            dropped,
+        } = staged;
+        let now = self.clock.now_ms();
+        for path in dropped {
+            manifest.unpublished.entry(path).or_insert(now);
+        }
+        let temporary = self.analytics.join(MANIFEST_TMP);
+        let mut file = File::create(&temporary)?;
+        file.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
+        file.sync_all()?;
+        #[cfg(test)]
+        self.inject(Fault::BeforeRename)?;
+        fs::rename(&temporary, self.analytics.join(MANIFEST_FILE))?;
+        self.manifest = manifest;
+        if let Some(live) = live {
             self.live = live;
+        }
+        #[cfg(test)]
+        self.inject(Fault::AfterRename)?;
+        sync_dir(&self.analytics)
+    }
+
+    #[cfg(test)]
+    fn inject(&mut self, point: Fault) -> Result<()> {
+        if self.fault == Some(point) {
+            self.fault = None;
+            return Err(Error::Io(std::io::Error::other("injected fault")));
         }
         Ok(())
     }
 
-    /// The unpublication times for a manifest that will name `files` and `live_map`:
-    /// the existing ones, plus now for every file the current manifest names that the
-    /// next one drops.
-    pub(crate) fn unpublish_dropped(
-        &self,
-        files: &[FileEntry],
-        live_map: Option<&str>,
-    ) -> BTreeMap<String, i64> {
-        let now = self.clock.now_ms();
+    /// The files the current manifest names that a manifest naming `files` and
+    /// `live_map` drops.
+    pub(crate) fn dropped_paths(&self, files: &[FileEntry], live_map: Option<&str>) -> Vec<String> {
         let named: HashSet<&str> = files
             .iter()
             .map(|file| file.path.as_str())
             .chain(live_map)
             .collect();
-        let mut unpublished = self.manifest.unpublished.clone();
-        let previous = self
-            .manifest
+        self.manifest
             .files
             .iter()
             .map(|file| file.path.as_str())
-            .chain(self.manifest.live_map.as_deref());
-        for path in previous {
-            if !named.contains(path) {
-                unpublished.entry(path.to_owned()).or_insert(now);
-            }
-        }
-        unpublished
+            .chain(self.manifest.live_map.as_deref())
+            .filter(|path| !named.contains(path))
+            .map(str::to_owned)
+            .collect()
     }
 
     /// Deletes every file unpublished at least [`RETIREMENT_DELAY_MS`] ago and returns
@@ -371,8 +475,11 @@ impl<C: Clock> Store<C> {
         for path in &due {
             manifest.unpublished.remove(path);
         }
-        write_manifest(&self.analytics, &manifest)?;
-        self.manifest = manifest;
+        self.install(Staged {
+            manifest,
+            live: None,
+            dropped: Vec::new(),
+        })?;
         Ok(due)
     }
 }
@@ -405,15 +512,6 @@ fn read_manifest_in(analytics: &Path) -> Result<Option<Manifest>> {
         )));
     }
     Ok(Some(manifest))
-}
-
-fn write_manifest(analytics: &Path, manifest: &Manifest) -> Result<()> {
-    let temporary = analytics.join(MANIFEST_TMP);
-    let mut file = File::create(&temporary)?;
-    file.write_all(&serde_json::to_vec_pretty(manifest)?)?;
-    file.sync_all()?;
-    fs::rename(&temporary, analytics.join(MANIFEST_FILE))?;
-    sync_dir(analytics)
 }
 
 fn write_live_map(path: &Path, live: &HashMap<String, i64>) -> Result<()> {
@@ -504,14 +602,26 @@ fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::FACT_SESSION;
-    use crate::testutil::{TestClock, live_steps, update};
+    use crate::schema::{DIM_REPO, FACT_LABEL, FACT_SESSION, FACT_STEP};
+    use crate::testutil::{
+        FACT_TABLES, TestClock, all_rows, live_steps, replace_column, rows_of, sample, update,
+        update_all,
+    };
 
     const S1: &str = "m1/claude/s1";
     const S2: &str = "m1/claude/s2";
 
     fn open(dir: &Path, clock: &Arc<TestClock>) -> Store<Arc<TestClock>> {
         Store::open_with_clock(dir, clock.clone()).unwrap()
+    }
+
+    fn g2_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut files = Vec::new();
+        for table in ["fact_step", "fact_session", "live"] {
+            let path = dir.join(format!("analytics/{table}/g2.parquet"));
+            files.push((table.to_owned(), fs::read(path).unwrap()));
+        }
+        files
     }
 
     #[test]
@@ -528,10 +638,11 @@ mod tests {
         assert_eq!(manifest.generation, 1);
         assert_eq!(manifest.live_map.as_deref(), Some("live/g1.parquet"));
         let step = manifest.files_of("fact_step").next().unwrap();
-        assert_eq!(
-            (step.path.as_str(), step.level, step.rows),
-            ("fact_step/g1.parquet", 0, 3)
-        );
+        assert_eq!(step.path, "fact_step/g1.parquet");
+        assert_eq!((step.level, step.rows), (0, 3));
+        assert_eq!((step.min_row_gen, step.max_row_gen), (1, 1));
+        let on_disk = fs::metadata(dir.path().join("analytics").join(&step.path)).unwrap();
+        assert_eq!(step.bytes, on_disk.len());
         assert!(
             dir.path()
                 .join("analytics/fact_session/g1.parquet")
@@ -584,6 +695,22 @@ mod tests {
     }
 
     #[test]
+    fn unpublication_is_stamped_when_the_generation_is_published_not_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(1_000);
+        let mut store = open(dir.path(), &clock);
+        store.publish(&update(&[(S1, 1)], "a", 0)).unwrap();
+
+        let staged = store.stage(&update(&[(S1, 1)], "b", 0)).unwrap();
+        clock.advance(7_000);
+        store.install(staged).unwrap();
+        assert_eq!(
+            store.manifest().unpublished,
+            BTreeMap::from([("live/g1.parquet".to_owned(), 8_000)])
+        );
+    }
+
+    #[test]
     fn a_crash_before_the_manifest_rename_leaves_the_old_generation() {
         let dir = tempfile::tempdir().unwrap();
         let clock = TestClock::new(0);
@@ -606,6 +733,89 @@ mod tests {
         assert!(!dir.path().join("analytics/fact_step/g2.parquet").exists());
         assert!(!dir.path().join("analytics/live/g2.parquet").exists());
         assert_eq!(store.publish(&update(&[(S1, 1)], "again", 0)).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_failure_before_the_rename_keeps_the_old_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        store.publish(&update(&[(S1, 2)], "old", 0)).unwrap();
+        let before = live_steps(&store);
+
+        store.fault = Some(Fault::BeforeRename);
+        assert!(matches!(
+            store.publish(&update(&[(S1, 5)], "new", 0)),
+            Err(Error::Io(_))
+        ));
+        assert_eq!(store.manifest().generation, 1);
+        assert_eq!(read_manifest(dir.path()).unwrap().unwrap().generation, 1);
+        assert_eq!(live_steps(&store), before);
+        assert_eq!(store.publish(&update(&[(S1, 1)], "again", 0)).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_failure_after_the_rename_still_publishes_and_the_number_is_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = open(dir.path(), &clock);
+        store.publish(&update(&[(S1, 2)], "one", 0)).unwrap();
+
+        // The directory fsync after the rename fails: the error is reported, but
+        // generation 2 is visible to readers and to this writer.
+        store.fault = Some(Fault::AfterRename);
+        assert!(matches!(
+            store.publish(&update(&[(S1, 3)], "two", 0)),
+            Err(Error::Io(_))
+        ));
+        assert_eq!(store.manifest().generation, 2);
+        let visible = read_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(&visible, store.manifest());
+        let reader_rows = rows_of(
+            &dir.path().join("analytics"),
+            &visible,
+            &read_live_map(dir.path(), &visible).unwrap(),
+            &FACT_STEP,
+        )
+        .unwrap();
+        let reader_files = g2_bytes(dir.path());
+
+        // Continuing: the next publish takes generation 3 and leaves generation 2 alone.
+        assert_eq!(store.publish(&update(&[(S1, 4)], "three", 0)).unwrap(), 3);
+        assert_eq!(g2_bytes(dir.path()), reader_files);
+        assert_eq!(
+            rows_of(
+                &dir.path().join("analytics"),
+                &visible,
+                &read_live_map(dir.path(), &visible).unwrap(),
+                &FACT_STEP,
+            )
+            .unwrap(),
+            reader_rows
+        );
+        drop(store);
+
+        // Reopening after such a failure behaves the same.
+        let mut store = open(dir.path(), &clock);
+        assert_eq!(store.manifest().generation, 3);
+        assert_eq!(store.publish(&update(&[(S1, 1)], "four", 0)).unwrap(), 4);
+        assert_eq!(g2_bytes(dir.path()), reader_files);
+    }
+
+    #[test]
+    fn a_failed_publication_followed_by_a_reopen_keeps_the_visible_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = open(dir.path(), &clock);
+        store.publish(&update(&[(S1, 2)], "one", 0)).unwrap();
+        store.fault = Some(Fault::AfterRename);
+        assert!(store.publish(&update(&[(S1, 3)], "two", 0)).is_err());
+        let reader_files = g2_bytes(dir.path());
+        drop(store);
+
+        let mut store = open(dir.path(), &clock);
+        assert_eq!(store.manifest().generation, 2);
+        assert_eq!(g2_bytes(dir.path()), reader_files);
+        assert_eq!(store.publish(&update(&[(S1, 1)], "three", 0)).unwrap(), 3);
     }
 
     #[test]
@@ -632,6 +842,38 @@ mod tests {
             Some(store.manifest())
         );
         assert!(store.retire().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_older_snapshot_stays_readable_until_its_files_are_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = open(dir.path(), &clock);
+        store.publish(&update_all(&[(S1, 2)], "old", 0)).unwrap();
+        let snapshot = read_manifest(dir.path()).unwrap().unwrap();
+        let analytics = dir.path().join("analytics");
+        let live = read_live_map(dir.path(), &snapshot).unwrap();
+        let before = rows_of(&analytics, &snapshot, &live, &FACT_STEP).unwrap();
+
+        store.publish(&update_all(&[(S1, 3)], "new", 0)).unwrap();
+        assert_eq!(
+            rows_of(&analytics, &snapshot, &live, &FACT_STEP).unwrap(),
+            before
+        );
+
+        clock.advance(RETIREMENT_DELAY_MS - 1);
+        store.retire().unwrap();
+        assert_eq!(
+            rows_of(&analytics, &snapshot, &live, &FACT_STEP).unwrap(),
+            before
+        );
+
+        // The snapshot's live map was unpublished by the second generation.
+        clock.advance(1);
+        store.retire().unwrap();
+        assert!(read_live_map(dir.path(), &snapshot).is_err());
+        let current = read_manifest(dir.path()).unwrap().unwrap();
+        assert!(read_live_map(dir.path(), &current).is_ok());
     }
 
     #[test]
@@ -681,5 +923,167 @@ mod tests {
         wrong.tables.truncate(1);
         wrong.tables[0].table = &FACT_SESSION;
         assert!(matches!(store.publish(&wrong), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn replacing_a_dimension_replaces_every_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        let dimension = |rows: usize, tag: &str| Update {
+            tables: vec![TableBatch {
+                table: &DIM_REPO,
+                batch: sample(&DIM_REPO, &[("repo", rows)], tag, 0),
+            }],
+            ..Update::default()
+        };
+        store.publish(&dimension(2, "v1")).unwrap();
+        store.publish(&dimension(3, "v2")).unwrap();
+
+        let files: Vec<_> = store.manifest().files_of("dim_repo").collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "dim_repo/g2.parquet");
+        assert!(
+            store
+                .manifest()
+                .unpublished
+                .contains_key("dim_repo/g1.parquet")
+        );
+        let rows = rows_of(
+            store.analytics_dir(),
+            store.manifest(),
+            store.live_map(),
+            &DIM_REPO,
+        )
+        .unwrap();
+        assert_eq!(rows.values().sum::<usize>(), 3);
+        assert!(
+            rows.keys()
+                .all(|row| row.contains(":v2|") && !row.contains(":v1|"))
+        );
+    }
+
+    #[test]
+    fn source_missing_sessions_persist_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = open(dir.path(), &clock);
+        let mut first = update(&[(S1, 1), (S2, 1)], "a", 0);
+        first
+            .source_missing
+            .insert(S1.to_owned(), SourceMissing { detected_at: 42 });
+        store.publish(&first).unwrap();
+        drop(store);
+
+        let mut store = open(dir.path(), &clock);
+        assert_eq!(
+            store.manifest().source_missing,
+            BTreeMap::from([(S1.to_owned(), SourceMissing { detected_at: 42 })])
+        );
+        let on_disk = read_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(on_disk.source_missing, store.manifest().source_missing);
+
+        // A later publish keeps the mark; it must name a live session.
+        store.publish(&update(&[(S2, 1)], "b", 0)).unwrap();
+        assert!(store.manifest().source_missing.contains_key(S1));
+        let mut stray = update(&[(S2, 1)], "c", 0);
+        stray.source_missing.insert(
+            "m1/claude/nobody".to_owned(),
+            SourceMissing { detected_at: 1 },
+        );
+        assert!(matches!(store.publish(&stray), Err(Error::Invalid(_))));
+
+        let mut restored = update(&[(S2, 1)], "d", 0);
+        restored.source_restored.push(S1.to_owned());
+        store.publish(&restored).unwrap();
+        assert!(store.manifest().source_missing.is_empty());
+
+        let mut again = update(&[(S1, 1)], "e", 0);
+        again
+            .source_missing
+            .insert(S1.to_owned(), SourceMissing { detected_at: 9 });
+        store.publish(&again).unwrap();
+        let mut removed = update(&[(S2, 1)], "f", 0);
+        removed.removed_sessions.push(S1.to_owned());
+        store.publish(&removed).unwrap();
+        assert!(store.manifest().source_missing.is_empty());
+    }
+
+    #[test]
+    fn equal_token_totals_with_different_billing_inputs_stay_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        let batch = sample(&FACT_STEP, &[(S1, 3)], "a", 0);
+        let ints = |values: [i64; 3]| -> arrow::array::ArrayRef {
+            Arc::new(Int64Array::from(values.to_vec()))
+        };
+        let texts = |values: [Option<&str>; 3]| -> arrow::array::ArrayRef {
+            Arc::new(StringArray::from(values.to_vec()))
+        };
+        // Each row bills 100 cache-write tokens, split differently.
+        let batch = replace_column(&batch, "cache_write_5m_tokens", ints([100, 0, 100]));
+        let batch = replace_column(&batch, "cache_write_1h_tokens", ints([0, 100, 0]));
+        let batch = replace_column(&batch, "web_search_requests", ints([0, 0, 2]));
+        let batch = replace_column(
+            &batch,
+            "speed",
+            texts([Some("standard"), Some("standard"), Some("fast")]),
+        );
+        let mut update = update(&[(S1, 3)], "a", 0);
+        update.tables[0].batch = batch;
+        store.publish(&update).unwrap();
+
+        let rows = rows_of(
+            store.analytics_dir(),
+            store.manifest(),
+            store.live_map(),
+            &FACT_STEP,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        let file = store.manifest().files_of("fact_step").next().unwrap();
+        let read =
+            crate::parquet_io::read_batches(&store.analytics_dir().join(&file.path), None).unwrap();
+        let five = crate::parquet_io::int_column(&read[0], "cache_write_5m_tokens").unwrap();
+        let hour = crate::parquet_io::int_column(&read[0], "cache_write_1h_tokens").unwrap();
+        let searches = crate::parquet_io::int_column(&read[0], "web_search_requests").unwrap();
+        let speed = crate::parquet_io::string_column(&read[0], "speed").unwrap();
+        let seen: Vec<(i64, i64, i64, &str)> = (0..3)
+            .map(|row| {
+                (
+                    five.value(row),
+                    hour.value(row),
+                    searches.value(row),
+                    speed.value(row),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (100, 0, 0, "standard"),
+                (0, 100, 0, "standard"),
+                (100, 0, 2, "fast")
+            ]
+        );
+    }
+
+    #[test]
+    fn every_fact_table_publishes_and_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        store
+            .publish(&update_all(&[(S1, 2), (S2, 1)], "a", 0))
+            .unwrap();
+        let rows = all_rows(&store, &FACT_TABLES);
+        assert_eq!(rows.len(), 6);
+        assert!(rows.iter().all(|table| !table.is_empty()));
+        let labels = rows_of(
+            store.analytics_dir(),
+            store.manifest(),
+            store.live_map(),
+            &FACT_LABEL,
+        )
+        .unwrap();
+        assert_eq!(labels.values().sum::<usize>(), 1);
     }
 }
