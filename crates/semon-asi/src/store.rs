@@ -546,16 +546,13 @@ fn read_live_map_file(path: &Path) -> Result<HashMap<String, i64>> {
 }
 
 fn create_durable_dir(path: &Path) -> Result<()> {
+    if !path.is_absolute() {
+        return create_durable_dir(&std::env::current_dir()?.join(path));
+    }
     if let Some(parent) = path.parent() {
-        // A relative single-component path lives in the working directory.
-        let parent = if parent.as_os_str().is_empty() {
-            Path::new(".")
-        } else {
-            parent
-        };
-        if !parent.exists() {
-            create_durable_dir(parent)?;
-        }
+        // Existing ancestors may come from an attempt whose parent sync failed.
+        // Repeat the sync chain on retries before publishing into this directory.
+        create_durable_dir(parent)?;
         fs::create_dir_all(path)?;
         sync_dir(parent)?;
     }
@@ -606,7 +603,6 @@ fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
-        let mut removed = false;
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name();
@@ -616,14 +612,11 @@ fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
                 .is_some_and(|generation| generation > committed)
             {
                 fs::remove_file(entry.path())?;
-                removed = true;
             }
         }
-        // The removals must be durable before this generation number is reused,
-        // or a crash could bring back a file that then looks committed.
-        if removed {
-            sync_dir(&analytics.join(dir))?;
-        }
+        // A previous attempt may have removed files but failed before syncing.
+        // Sync even an unchanged directory before allowing generation reuse.
+        sync_dir(&analytics.join(dir))?;
     }
     Ok(())
 }
