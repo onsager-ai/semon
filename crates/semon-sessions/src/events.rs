@@ -95,7 +95,7 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// compact activity summary adds coverage and component totals, and the
 /// projection stores a bounded timeline preview beside it.
 /// v39: activity steps retain exact Codex call provenance for transcript anchors.
-pub(crate) const CACHE_VERSION: u32 = 39;
+pub(crate) const CACHE_VERSION: u32 = 40;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3735,6 +3735,10 @@ pub(crate) struct Event {
     /// Sanitized classifier evidence; native bodies stay source-backed.
     #[serde(skip)]
     pub(crate) activity_observation: Option<session_activity::classify::Observation>,
+    /// Private tool detail kept outside `Observation` so the activity surface
+    /// remains body- and path-free. It is persisted only for StepFacts.
+    #[serde(skip)]
+    pub(crate) activity_tool: Option<session_activity::classify::ToolCallEvidence>,
 }
 
 fn is_zero(value: &u32) -> bool {

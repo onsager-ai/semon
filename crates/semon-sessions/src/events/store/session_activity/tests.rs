@@ -2,7 +2,7 @@ use super::super::tests::{
     catalog_fixture_projection, catalog_native_fixture, catalog_write, opened, scratch,
 };
 use super::*;
-use crate::events::session_activity::{ActivityStepId, Ownership};
+use crate::events::session_activity::{ActivityStepId, Ownership, TimedInput, UsageOwner};
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
     page(
@@ -113,6 +113,18 @@ fn activity_pages_require_exact_sources_generation_rules_and_prices() {
         Outcome::Written
     );
     assert_eq!(read(&store.connection, row), initial);
+    store
+        .connection
+        .execute(
+            "UPDATE session_activity_steps SET pricing_fingerprint='mixed-price' WHERE session_key=?1 AND generation=?2 AND ordinal=0",
+            params![row.key, initial.generation],
+        )
+        .unwrap();
+    assert!(
+        step_facts(&store.connection, row, &initial.generation)
+            .unwrap()
+            .is_none()
+    );
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
@@ -257,6 +269,7 @@ fn codex_anchor_requires_a_rendered_exact_call() {
         &Default::default(),
         vec![],
         vec![],
+        (vec![], vec![]),
         crate::pricing::snapshot(),
     );
     let tx = store.connection.transaction().unwrap();
@@ -316,6 +329,178 @@ fn codex_anchor_requires_a_rendered_exact_call() {
 }
 
 #[test]
+fn step_facts_keep_private_tool_details_and_usage_ownership() {
+    use crate::events::session_activity::classify::{self, LocatedObservation};
+    let root = scratch("step-facts");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let usage = row
+        .session_activity
+        .as_ref()
+        .unwrap()
+        .inputs
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let mut usage = match usage {
+        Usage::Claude(usage) => usage,
+        Usage::Codex(_) => unreachable!(),
+    };
+    usage.billing.timestamp = Some(20);
+    let step = UsageStep::claude(
+        "facts-message".into(),
+        SourcePosition {
+            source: row.sources[0].path.to_string_lossy().into_owned(),
+            offset: 20,
+        },
+        usage,
+    );
+    let mut read_observation = classify::call(
+        "functions.Read",
+        &serde_json::json!({"file_path":"/local/secret.rs"}),
+        Some(step.id.clone()),
+        "read".into(),
+    );
+    classify::finish(
+        &mut read_observation,
+        &serde_json::json!("ok"),
+        false,
+        Some(10),
+        Some(15),
+        "read-result".into(),
+    );
+    let mut shell = classify::call(
+        "Bash",
+        &serde_json::json!({"command":"git status"}),
+        Some(step.id.clone()),
+        "shell".into(),
+    );
+    classify::finish(
+        &mut shell,
+        &serde_json::json!(""),
+        false,
+        Some(16),
+        Some(19),
+        "shell-result".into(),
+    );
+    let projection = Projection::derive(
+        row.key.clone(),
+        vec![step.clone()],
+        &Default::default(),
+        vec![],
+        vec![
+            LocatedObservation {
+                position: SourcePosition {
+                    source: step.position.source.clone(),
+                    offset: 11,
+                },
+                timestamp: Some(10),
+                result_timestamp: Some(15),
+                result_offset: Some(12),
+                tool: Some(classify::tool_evidence(
+                    "functions.Read",
+                    &serde_json::json!({"file_path":"/local/secret.rs"}),
+                )),
+                observation: read_observation,
+            },
+            LocatedObservation {
+                position: SourcePosition {
+                    source: step.position.source.clone(),
+                    offset: 13,
+                },
+                timestamp: Some(16),
+                result_timestamp: Some(19),
+                result_offset: Some(14),
+                tool: Some(classify::tool_evidence(
+                    "Bash",
+                    &serde_json::json!({"command":"git status"}),
+                )),
+                observation: shell,
+            },
+            LocatedObservation {
+                position: SourcePosition {
+                    source: step.position.source.clone(),
+                    offset: 18,
+                },
+                timestamp: Some(18),
+                result_timestamp: Some(40),
+                result_offset: Some(25),
+                tool: None,
+                observation: classify::call("Agent", &serde_json::json!({}), None, "future".into()),
+            },
+        ],
+        (
+            vec![],
+            vec![TimedInput {
+                position: SourcePosition {
+                    source: step.position.source.clone(),
+                    offset: 1,
+                },
+                timestamp: Some(1),
+            }],
+        ),
+        crate::pricing::snapshot(),
+    );
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, &projection).unwrap();
+    tx.commit().unwrap();
+    let page = read(&store.connection, row);
+    let facts = step_facts(&store.connection, row, &page.generation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(facts.len(), 1);
+    let (_, id, facts) = &facts[0];
+    assert_eq!(id, &step.id);
+    assert_eq!(facts.usage_owner, UsageOwner::Exclusive);
+    assert_eq!(facts.model_ms, Some(1));
+    assert_eq!(facts.tool_ms, Some(8));
+    assert_eq!(facts.tool_calls.len(), 2);
+    assert_eq!(facts.tool_calls[0].tool, "Read");
+    assert_eq!(
+        facts.tool_calls[0].target_path.as_deref(),
+        Some("/local/secret.rs")
+    );
+    assert_eq!(facts.tool_calls[0].ok, Some(true));
+    assert_eq!(facts.tool_calls[1].target_path, None);
+    let public = items(
+        &store.connection,
+        row,
+        None,
+        &crate::pricing::snapshot().fingerprint,
+        false,
+        None,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(public.items[0].get("facts").is_none());
+    assert!(public.items[0].get("target_path").is_none());
+    let copied = Projection::derive(
+        row.key.clone(),
+        vec![step.clone()],
+        &[("facts-message".into(), "other-session".into())]
+            .into_iter()
+            .collect(),
+        vec![],
+        vec![],
+        (vec![], vec![]),
+        crate::pricing::snapshot(),
+    );
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, &copied).unwrap();
+    tx.commit().unwrap();
+    let copied_page = read(&store.connection, row);
+    let copied_facts = step_facts(&store.connection, row, &copied_page.generation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(copied_facts[0].2.usage_owner, UsageOwner::Copied);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn activity_repricing_resumes_and_never_serves_mixed_prices() {
     let root = scratch("activity-reprice");
     let (options, mut rows, _) = catalog_native_fixture(&root, 2, true);
@@ -343,6 +528,7 @@ fn activity_repricing_resumes_and_never_serves_mixed_prices() {
         &Default::default(),
         Vec::new(),
         Vec::new(),
+        (Vec::new(), Vec::new()),
         old.clone(),
     );
     let path = crate::events::EventCache::path(&options.cache);

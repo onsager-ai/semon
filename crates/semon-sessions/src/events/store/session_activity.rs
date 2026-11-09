@@ -2,9 +2,13 @@
 //! Native bodies never enter these rows. Pricing inputs retain only typed usage.
 use super::*;
 use crate::events::session_activity::{
-    self as activity, ActivityStep, SessionActivity, SourcePosition, Usage, UsageStep,
+    self as activity, ActivityStep, ActivityStepId, SessionActivity, SourcePosition, Usage,
+    UsageStep,
 };
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_activity_projections (
@@ -40,6 +44,7 @@ pub(crate) struct Projection {
     pub(crate) activity: SessionActivity,
     // Kept outside Catalog JSON and keyed by the same exact native step identity.
     inputs: BTreeMap<activity::ActivityStepId, Usage>,
+    facts: BTreeMap<activity::ActivityStepId, activity::StepFacts>,
 }
 
 impl Projection {
@@ -49,24 +54,42 @@ impl Projection {
         shared: &crate::claude_usage::Shared,
         signals: Vec<(String, Signal)>,
         observations: Vec<activity::classify::LocatedObservation>,
+        native_timing: (Vec<activity::UnclassifiedTool>, Vec<activity::TimedInput>),
         table: Arc<crate::pricing::EffectiveTable>,
     ) -> Self {
         let mut inputs = BTreeMap::new();
+        let mut turn_ids = BTreeMap::new();
         for row in &usage {
             match &row.id {
                 activity::ActivityStepId::Claude(_) => {
                     inputs.insert(row.id.clone(), row.usage.clone());
+                    turn_ids.insert(row.id.clone(), row.turn_id.clone());
                 }
                 activity::ActivityStepId::Codex(_) => {
                     inputs
                         .entry(row.id.clone())
                         .or_insert_with(|| row.usage.clone());
+                    turn_ids
+                        .entry(row.id.clone())
+                        .or_insert_with(|| row.turn_id.clone());
                 }
             }
         }
         let mut activity = activity::derive(key, usage, shared, signals, table);
-        activity::apply_observations(&mut activity, observations);
-        Self { activity, inputs }
+        let observations = activity::apply_observations(&mut activity, observations);
+        let facts = derive_facts(
+            &activity,
+            &inputs,
+            &turn_ids,
+            &observations,
+            &native_timing.0,
+            &native_timing.1,
+        );
+        Self {
+            activity,
+            inputs,
+            facts,
+        }
     }
 }
 
@@ -74,6 +97,176 @@ impl Projection {
 struct SavedStep {
     step: ActivityStep,
     usage: Usage,
+    facts: activity::StepFacts,
+}
+
+fn billing(usage: &Usage) -> crate::events::BillingUsage {
+    match usage {
+        Usage::Claude(usage) => usage.billing.clone(),
+        Usage::Codex(event) => crate::events::BillingUsage {
+            input: event.tokens.input,
+            output: event.tokens.output,
+            cache_read: event.tokens.cache_read,
+            prompt_size: event.tokens.input.saturating_add(event.tokens.cache_read),
+            timestamp: event.timestamp,
+            ..Default::default()
+        },
+    }
+}
+
+/// Model time is measured only from the latest preceding user prompt or tool
+/// result with a timestamp in the same physical source to the step's native
+/// usage record. Absent or reversed timestamps remain unknown.
+fn model_ms(
+    step: &ActivityStep,
+    observations: &[activity::classify::LocatedObservation],
+    unclassified_tools: &[activity::UnclassifiedTool],
+    input_events: &[activity::TimedInput],
+) -> Option<u64> {
+    observations
+        .iter()
+        .filter(|row| {
+            row.position.source == step.position.source
+                && row.position.offset < step.position.offset
+        })
+        .filter_map(|row| match row.result_offset {
+            Some(offset) if offset < step.position.offset => row.result_timestamp,
+            _ => None,
+        })
+        .chain(
+            unclassified_tools
+                .iter()
+                .filter(|row| {
+                    row.position.source == step.position.source
+                        && row.position.offset < step.position.offset
+                })
+                .filter_map(|row| match row.result_offset {
+                    Some(offset) if offset < step.position.offset => row.result_timestamp,
+                    _ => None,
+                }),
+        )
+        .chain(
+            input_events
+                .iter()
+                .filter(|input| {
+                    input.position.source == step.position.source
+                        && input.position.offset < step.position.offset
+                })
+                .filter_map(|input| input.timestamp),
+        )
+        .max()
+        .zip(step.timestamp)
+        .and_then(|(start, end)| (end >= start).then_some((end - start) as u64))
+}
+
+fn derive_facts(
+    activity: &SessionActivity,
+    inputs: &BTreeMap<ActivityStepId, Usage>,
+    turn_ids: &BTreeMap<ActivityStepId, Option<String>>,
+    observations: &[activity::classify::LocatedObservation],
+    unclassified_tools: &[activity::UnclassifiedTool],
+    input_events: &[activity::TimedInput],
+) -> BTreeMap<ActivityStepId, activity::StepFacts> {
+    let mut exact = BTreeMap::new();
+    let mut sources: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
+    for (index, step) in activity.steps.iter().enumerate() {
+        exact.insert(step.id.clone(), index);
+        sources
+            .entry(step.position.source.clone())
+            .or_default()
+            .push((step.position.offset, index));
+    }
+    for offsets in sources.values_mut() {
+        offsets.sort_unstable();
+    }
+    let mut calls: Vec<Vec<(activity::SourcePosition, activity::ToolCallFact)>> =
+        vec![Vec::new(); activity.steps.len()];
+    for row in observations {
+        let Some(tool) = &row.tool else {
+            continue;
+        };
+        let Some(owner) = activity::observation_owner(&exact, &sources, row) else {
+            continue;
+        };
+        let tool_ms = row
+            .timestamp
+            .zip(row.result_timestamp)
+            .and_then(|(start, end)| (end >= start).then_some((end - start) as u64));
+        calls[owner].push((
+            row.position.clone(),
+            activity::ToolCallFact {
+                ord: 0,
+                tool: tool.tool.clone(),
+                target_path: tool.target_path.clone(),
+                command_tag: row.observation.command_tag(),
+                ok: row.observation.ok(),
+                exit_code: row.observation.exit_code(),
+                tool_ms,
+            },
+        ));
+    }
+    for row in unclassified_tools {
+        let Some(tool) = &row.tool else {
+            continue;
+        };
+        let Some(owner) = activity::position_owner(&exact, &sources, &row.position, None) else {
+            continue;
+        };
+        let tool_ms = row
+            .timestamp
+            .zip(row.result_timestamp)
+            .and_then(|(start, end)| (end >= start).then_some((end - start) as u64));
+        calls[owner].push((
+            row.position.clone(),
+            activity::ToolCallFact {
+                ord: 0,
+                tool: tool.clone(),
+                target_path: None,
+                command_tag: activity::CommandTag::Unknown,
+                ok: row.ok,
+                exit_code: None,
+                tool_ms,
+            },
+        ));
+    }
+    for rows in &mut calls {
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+    }
+    activity
+        .steps
+        .iter()
+        .enumerate()
+        .map(|(index, step)| {
+            let usage = inputs.get(&step.id).expect("step has normalized usage");
+            let tool_ms = calls[index]
+                .iter()
+                .filter_map(|(_, call)| call.tool_ms)
+                .reduce(u64::saturating_add);
+            let turn_id = turn_ids.get(&step.id).cloned().flatten();
+            let usage_owner = match &step.ownership {
+                activity::Ownership::Exclusive => activity::UsageOwner::Exclusive,
+                activity::Ownership::Shared(_) => activity::UsageOwner::Copied,
+            };
+            (
+                step.id.clone(),
+                activity::StepFacts {
+                    turn_id,
+                    usage_owner,
+                    billing: billing(usage),
+                    model_ms: model_ms(step, observations, unclassified_tools, input_events),
+                    tool_ms,
+                    tool_calls: std::mem::take(&mut calls[index])
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ord, (_, mut call))| {
+                            call.ord = ord as u64;
+                            call
+                        })
+                        .collect(),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Only model-accepted observations from the exact committed native receipt.
@@ -204,6 +397,11 @@ fn write_activity(
             step: step.clone(),
             usage: projection
                 .inputs
+                .get(&step.id)
+                .ok_or(rusqlite::Error::InvalidQuery)?
+                .clone(),
+            facts: projection
+                .facts
                 .get(&step.id)
                 .ok_or(rusqlite::Error::InvalidQuery)?
                 .clone(),
@@ -438,6 +636,46 @@ pub(crate) fn page(
         total: total as u64,
         steps,
     }))
+}
+
+/// Read all persisted StepFacts under the same source, rules, price and
+/// generation admission as activity pages. This crate-internal reader is for
+/// the analytics writer; public query and mirror surfaces must use `items`.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "kept crate-internal for the analytics writer")
+)]
+pub(crate) fn step_facts(
+    c: &Connection,
+    row: &crate::model::summary::CatalogRow,
+    generation: &str,
+) -> rusqlite::Result<Option<Vec<(u64, ActivityStepId, activity::StepFacts)>>> {
+    let price = crate::pricing::snapshot();
+    let Some(admitted) = page(c, row, Some(generation), &price.fingerprint, 0, 0)? else {
+        return Ok(None);
+    };
+    let mut statement = c.prepare(
+        "SELECT ordinal,metadata,pricing_fingerprint FROM session_activity_steps WHERE session_key=?1 AND generation=?2 ORDER BY ordinal",
+    )?;
+    let mut records = statement.query(params![row.key, generation])?;
+    let mut facts = Vec::new();
+    while let Some(record) = records.next()? {
+        crate::selected_read::row(record, 256)?;
+        if record.get::<_, String>(2)? != price.fingerprint {
+            return Ok(None);
+        }
+        let ordinal =
+            u64::try_from(record.get::<_, i64>(0)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        if ordinal != facts.len() as u64 {
+            return Ok(None);
+        }
+        let saved: SavedStep = from_json(1, &record.get::<_, String>(1)?)?;
+        facts.push((ordinal, saved.step.id, saved.facts));
+    }
+    if facts.len() as u64 != admitted.total {
+        return Ok(None);
+    }
+    Ok(Some(facts))
 }
 
 /// Read one persisted step and its native usage under the page admission fence.

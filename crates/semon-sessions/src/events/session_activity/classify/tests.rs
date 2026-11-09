@@ -356,7 +356,9 @@ fn located(offset: u64, observation: Observation) -> LocatedObservation {
             offset,
         },
         timestamp: Some(offset as i64),
+        result_timestamp: Some(offset as i64 + 1),
         result_offset: Some(offset + 1),
+        tool: None,
         observation,
     }
 }
@@ -499,7 +501,7 @@ fn change_facts_require_recognized_pairs_and_sanitized_values() {
             assert_eq!(fact, super::fact(&row, change.clone()));
             assert!(fact.step_id.is_none());
             assert_eq!(fact.position.offset, 11);
-            assert_eq!(fact.timestamp, Some(10));
+            assert_eq!(fact.timestamp, Some(11));
             let serialized = serde_json::to_string(&fact).unwrap();
             assert!(!serialized.contains("[topic"));
             assert!(!serialized.contains("secret"));
@@ -548,6 +550,102 @@ fn scanner_capture_resolves_exact_ids_and_retains_no_bodies() {
             .unwrap()
             .contains("activity_observation")
     );
+}
+
+#[test]
+fn apply_patch_evidence_handles_empty_malformed_and_native_custom_tool_input() {
+    for patch in ["*** Begin Patch\n*** End Patch\n", "malformed patch"] {
+        let input = json!({"patch": patch});
+        let evidence = tool_evidence("apply_patch", &input);
+        assert_eq!(evidence.target_path, None);
+        assert_eq!(
+            call("apply_patch", &input, None, "call".into()).commands,
+            [Command::Mutation]
+        );
+    }
+
+    let patch = "*** Begin Patch\n*** Update File: src/lib.rs\n@@\n-old\n+new\n*** End Patch";
+    let record = json!({
+        "type": "response_item",
+        "payload": {
+            "type": "custom_tool_call",
+            "call_id": "patch-call",
+            "name": "apply_patch",
+            "input": patch
+        }
+    });
+    let mut index = FileIndex::default();
+    crate::events::codex(&mut index, &record, 0);
+    capture(
+        &mut index,
+        "codex",
+        &record,
+        0,
+        &serde_json::to_vec(&record).unwrap(),
+    );
+    let event = index
+        .events
+        .iter()
+        .find(|event| event.k == Kind::Tool)
+        .unwrap();
+    assert_eq!(
+        event.activity_tool.as_ref().unwrap().target_path.as_deref(),
+        Some("src/lib.rs")
+    );
+    assert_eq!(
+        event.activity_observation.as_ref().unwrap().commands,
+        [Command::Mutation]
+    );
+}
+
+#[test]
+fn notebook_evidence_uses_native_target_path() {
+    let record = json!({"type":"assistant","message":{"id":"notebook-message","role":"assistant","content":[{"type":"tool_use","id":"notebook-call","name":"NotebookEdit","input":{"notebook_path":"/synthetic/analysis.ipynb","new_source":"print(1)","edit_mode":"replace"}}]}});
+    let mut index = FileIndex::default();
+    crate::events::claude(&mut index, &record, 0);
+    capture(
+        &mut index,
+        "claude",
+        &record,
+        0,
+        &serde_json::to_vec(&record).unwrap(),
+    );
+    let tool = index
+        .events
+        .iter()
+        .find_map(|event| event.activity_tool.as_ref())
+        .unwrap();
+    assert_eq!(tool.tool, "NotebookEdit");
+    assert_eq!(
+        tool.target_path.as_deref(),
+        Some("/synthetic/analysis.ipynb")
+    );
+}
+
+#[test]
+fn codex_custom_exec_evidence_preserves_native_name() {
+    for script in [
+        "text('hello')",
+        "console.log(await tools.wait_agent({ids:['synthetic']}))",
+    ] {
+        let record = json!({"type":"response_item","payload":{"type":"custom_tool_call","call_id":"exec-call","name":"exec","input":script}});
+        let mut index = FileIndex::default();
+        crate::events::codex(&mut index, &record, 0);
+        capture(
+            &mut index,
+            "codex",
+            &record,
+            0,
+            &serde_json::to_vec(&record).unwrap(),
+        );
+        let tool = index
+            .events
+            .iter()
+            .find_map(|event| event.activity_tool.as_ref())
+            .unwrap();
+        assert_eq!(tool.tool, "exec");
+        assert_eq!(tool.target_path, None);
+    }
 }
 
 #[test]
@@ -1169,7 +1267,9 @@ fn code_mode_printed_output_repeats_native_shell_reads() {
                             offset: event.o,
                         },
                         timestamp: event.t,
+                        result_timestamp: event.r.as_ref().and_then(|reply| reply.t),
                         result_offset: event.r.as_ref().map(|reply| reply.o),
+                        tool: None,
                         observation,
                     })
             })
