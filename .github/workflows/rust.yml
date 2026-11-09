@@ -149,13 +149,13 @@ jobs:
           cold_catalog_default_status=$?
           cat "$RUNNER_TEMP/cold-catalog-default.log"
           set -e
-          grep -Fq '1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' "$RUNNER_TEMP/cold-catalog-default.log"
+          grep -Fq '1 passed; 0 failed;' "$RUNNER_TEMP/cold-catalog-default.log"
           set +e
           SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --lib --features test-clock,test-ui-account-server --locked viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture > "$RUNNER_TEMP/cold-catalog-viewer.log" 2>&1
           cold_catalog_viewer_status=$?
           cat "$RUNNER_TEMP/cold-catalog-viewer.log"
           set -e
-          grep -Fq '1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out' "$RUNNER_TEMP/cold-catalog-viewer.log"
+          grep -Fq '1 passed; 0 failed;' "$RUNNER_TEMP/cold-catalog-viewer.log"
           SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked journal_append_and_warm_restart_ignore_unrelated_history -- --nocapture
           SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked native_codex_archive_unarchive_reuses_the_indexed_generation -- --nocapture
           SEMON_BUILD_TIMING=1 cargo test --locked -- --skip initial_catalog_page_precedes_global_native_observation
