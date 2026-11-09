@@ -6463,8 +6463,17 @@ fn activity_family_rolls_up_without_child_step_duplication() {
 #[test]
 fn activity_step_transcript_anchor_reads_exact_record() {
     let home = activity_fixture();
+    let mut cache = crate::events::EventCache::open_scoped(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    drop(cache);
     let mut query = home.query();
-    call(&mut query, "list_sessions", json!({}));
     let activity = call(&mut query, "get_session_activity", json!({"id":"activity"}));
     let args = json!({"id":"activity", "step": {
         "generation": activity["generation"], "ordinal": 0, "id": activity["items"][0]["id"]
