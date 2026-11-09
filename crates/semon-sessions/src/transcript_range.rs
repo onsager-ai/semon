@@ -439,11 +439,11 @@ pub(crate) fn resolve_step_slot(
         crate::selected_read::row(record, 256)?;
         let slot: SavedSlot = serde_json::from_str(&record.get::<_, String>(1)?)
             .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        has_native_ids |= slot.native_event_id.is_some();
         let Some(file) = &slot.file else { continue };
         if !row.sources.iter().any(|source| source.path == file.path) {
             continue;
         }
-        has_native_ids |= slot.native_event_id.is_some();
         use crate::slot_projection::Recipe;
         if !matches!(
             slot.recipe,
