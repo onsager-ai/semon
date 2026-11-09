@@ -60,9 +60,9 @@ pub(crate) fn sample(
                         }
                     },
                 ))),
-                Type::Integer => {
-                    Arc::new(Int64Array::from_iter_values(rows.iter().map(|(_, row)| *row as i64)))
-                }
+                Type::Integer => Arc::new(Int64Array::from_iter_values(
+                    rows.iter().map(|(_, row)| *row as i64),
+                )),
                 Type::Float => Arc::new(Float64Array::from(vec![1.5; rows.len()])),
                 Type::Boolean => Arc::new(BooleanArray::from(vec![true; rows.len()])),
                 Type::Timestamp => Arc::new(
@@ -91,7 +91,10 @@ pub(crate) fn update(sessions: &[(&str, usize)], tag: &str, ts_base: i64) -> Upd
                 batch: sample(&FACT_SESSION, &summary, tag, ts_base),
             },
         ],
-        touched_sessions: sessions.iter().map(|(session, _)| (*session).to_owned()).collect(),
+        touched_sessions: sessions
+            .iter()
+            .map(|(session, _)| (*session).to_owned())
+            .collect(),
         ..Update::default()
     }
 }

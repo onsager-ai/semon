@@ -10,7 +10,9 @@ use crate::testutil::{TestClock, update};
 fn a_live_row_view_shows_only_current_rows() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = Store::open_with_clock(dir.path(), TestClock::new(0)).unwrap();
-    store.publish(&update(&[("m1/claude/a", 2), ("m1/claude/b", 2)], "old", 0)).unwrap();
+    store
+        .publish(&update(&[("m1/claude/a", 2), ("m1/claude/b", 2)], "old", 0))
+        .unwrap();
     let mut next = update(&[("m1/claude/a", 3)], "new", 0);
     next.removed_sessions.push("m1/claude/b".to_owned());
     store.publish(&next).unwrap();
@@ -39,7 +41,13 @@ fn a_live_row_view_shows_only_current_rows() {
     let count = |sql: &str| -> i64 { db.query_row(sql, params![], |row| row.get(0)).unwrap() };
     assert_eq!(count("SELECT count(*) FROM fact_step_files"), 7);
     assert_eq!(count("SELECT count(*) FROM fact_step"), 3);
-    assert_eq!(count("SELECT count(DISTINCT session_uid) FROM fact_step"), 1);
+    assert_eq!(
+        count("SELECT count(DISTINCT session_uid) FROM fact_step"),
+        1
+    );
     assert_eq!(count("SELECT count(*) FROM fact_step WHERE _gen = 2"), 3);
-    assert_eq!(count("SELECT count(*) FROM fact_step WHERE step_uid LIKE '%:old'"), 0);
+    assert_eq!(
+        count("SELECT count(*) FROM fact_step WHERE step_uid LIKE '%:old'"),
+        0
+    );
 }

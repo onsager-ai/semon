@@ -222,10 +222,16 @@ impl<C: Clock> Store<C> {
             return Err(Error::invalid("a session is both touched and removed"));
         }
         if update.durable_revision < self.manifest.durable_revision {
-            return Err(Error::invalid("the durable revision checkpoint went backwards"));
+            return Err(Error::invalid(
+                "the durable revision checkpoint went backwards",
+            ));
         }
         let mut seen = HashSet::new();
-        if !update.tables.iter().all(|item| seen.insert(item.table.name)) {
+        if !update
+            .tables
+            .iter()
+            .all(|item| seen.insert(item.table.name))
+        {
             return Err(Error::invalid("a table appears twice in one update"));
         }
 
@@ -275,7 +281,10 @@ impl<C: Clock> Store<C> {
         let live_map = format!("{LIVE_DIR}/g{generation}.parquet");
         fs::create_dir_all(self.analytics.join(LIVE_DIR))?;
         write_live_map(&self.analytics.join(&live_map), &live)?;
-        sync_parents(&self.analytics, written.iter().map(|file| file.path.as_str()))?;
+        sync_parents(
+            &self.analytics,
+            written.iter().map(|file| file.path.as_str()),
+        )?;
         sync_dir(&self.analytics.join(LIVE_DIR))?;
 
         let mut checkpoints = self.manifest.checkpoints.clone();
@@ -509,28 +518,44 @@ mod tests {
     fn publish_writes_files_live_map_and_manifest() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path(), &TestClock::new(0));
-        assert_eq!(store.publish(&update(&[(S1, 2), (S2, 1)], "a", 0)).unwrap(), 1);
+        assert_eq!(
+            store.publish(&update(&[(S1, 2), (S2, 1)], "a", 0)).unwrap(),
+            1
+        );
 
         let manifest = read_manifest(dir.path()).unwrap().unwrap();
         assert_eq!(&manifest, store.manifest());
         assert_eq!(manifest.generation, 1);
         assert_eq!(manifest.live_map.as_deref(), Some("live/g1.parquet"));
         let step = manifest.files_of("fact_step").next().unwrap();
-        assert_eq!((step.path.as_str(), step.level, step.rows), ("fact_step/g1.parquet", 0, 3));
-        assert!(dir.path().join("analytics/fact_session/g1.parquet").is_file());
+        assert_eq!(
+            (step.path.as_str(), step.level, step.rows),
+            ("fact_step/g1.parquet", 0, 3)
+        );
+        assert!(
+            dir.path()
+                .join("analytics/fact_session/g1.parquet")
+                .is_file()
+        );
 
         let live = read_live_map(dir.path(), &manifest).unwrap();
-        assert_eq!(live, HashMap::from([(S1.to_owned(), 1), (S2.to_owned(), 1)]));
+        assert_eq!(
+            live,
+            HashMap::from([(S1.to_owned(), 1), (S2.to_owned(), 1)])
+        );
     }
 
     #[test]
     fn a_later_generation_supersedes_and_removes_sessions() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path(), &TestClock::new(0));
-        store.publish(&update(&[(S1, 2), (S2, 2)], "old", 0)).unwrap();
+        store
+            .publish(&update(&[(S1, 2), (S2, 2)], "old", 0))
+            .unwrap();
         let mut next = update(&[(S1, 3)], "new", 0);
         next.removed_sessions.push(S2.to_owned());
-        next.checkpoints.insert("m1".to_owned(), "inc1:7".to_owned());
+        next.checkpoints
+            .insert("m1".to_owned(), "inc1:7".to_owned());
         store.publish(&next).unwrap();
 
         let live = live_steps(&store);
@@ -602,7 +627,10 @@ mod tests {
         assert!(!old_live.exists());
         assert!(current_live.is_file());
         assert!(store.manifest().unpublished.is_empty());
-        assert_eq!(read_manifest(dir.path()).unwrap().as_ref(), Some(store.manifest()));
+        assert_eq!(
+            read_manifest(dir.path()).unwrap().as_ref(),
+            Some(store.manifest())
+        );
         assert!(store.retire().unwrap().is_empty());
     }
 
@@ -637,7 +665,11 @@ mod tests {
         drop(store);
         let path = dir.path().join("analytics/manifest.json");
         let text = fs::read_to_string(&path).unwrap();
-        fs::write(&path, text.replace("\"schema_version\": 1", "\"schema_version\": 99")).unwrap();
+        fs::write(
+            &path,
+            text.replace("\"schema_version\": 1", "\"schema_version\": 99"),
+        )
+        .unwrap();
         assert!(matches!(read_manifest(dir.path()), Err(Error::Invalid(_))));
     }
 

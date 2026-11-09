@@ -111,7 +111,11 @@ impl<C: Clock> Store<C> {
         let path = self.analytics.join(&file.path);
         let mut dead = 0;
         for batch in read_batches(&path, Some(&[SESSION_COLUMN, GEN_COLUMN]))? {
-            dead += self.live_flags(&batch)?.iter().filter(|live| !**live).count() as u64;
+            dead += self
+                .live_flags(&batch)?
+                .iter()
+                .filter(|live| !**live)
+                .count() as u64;
         }
         Ok(dead)
     }
@@ -164,7 +168,10 @@ impl<C: Clock> Store<C> {
                 Some(open) => open,
                 None => {
                     let path = format!("{}/g{generation}-{}.parquet", table.name, outputs.len());
-                    (OutFile::create(&self.analytics.join(&path), schema.clone())?, path)
+                    (
+                        OutFile::create(&self.analytics.join(&path), schema.clone())?,
+                        path,
+                    )
                 }
             };
             file.write(&sorted.slice(offset, rows))?;
@@ -260,12 +267,18 @@ mod tests {
     fn level_zero_merges_only_above_the_threshold() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path());
-        store.publish(&update(&[("m1/claude/a", 1)], "a", 0)).unwrap();
-        store.publish(&update(&[("m1/claude/b", 1)], "b", 0)).unwrap();
+        store
+            .publish(&update(&[("m1/claude/a", 1)], "a", 0))
+            .unwrap();
+        store
+            .publish(&update(&[("m1/claude/b", 1)], "b", 0))
+            .unwrap();
         assert_eq!(store.compact(&policy()).unwrap(), None);
         assert_eq!(store.manifest().generation, 2);
 
-        store.publish(&update(&[("m1/claude/c", 1)], "c", 0)).unwrap();
+        store
+            .publish(&update(&[("m1/claude/c", 1)], "c", 0))
+            .unwrap();
         assert_eq!(store.compact(&CompactionPolicy::default()).unwrap(), None);
         assert_eq!(store.compact(&policy()).unwrap(), Some(4));
         assert!(levels(&store, 0).is_empty());
@@ -276,8 +289,12 @@ mod tests {
     fn live_rows_are_identical_before_and_after_compaction() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path());
-        store.publish(&update(&[("m1/claude/a", 2), ("m1/claude/b", 2)], "old", 0)).unwrap();
-        store.publish(&update(&[("m1/claude/a", 3)], "new", 10)).unwrap();
+        store
+            .publish(&update(&[("m1/claude/a", 2), ("m1/claude/b", 2)], "old", 0))
+            .unwrap();
+        store
+            .publish(&update(&[("m1/claude/a", 3)], "new", 10))
+            .unwrap();
         let mut last = update(&[("m1/claude/c", 1)], "c", 20);
         last.removed_sessions.push("m1/claude/b".to_owned());
         store.publish(&last).unwrap();
@@ -300,7 +317,9 @@ mod tests {
         let mut store = open(dir.path());
         for (index, session) in ["a", "b", "c", "d"].into_iter().enumerate() {
             let uid = format!("m1/claude/{session}");
-            store.publish(&update(&[(uid.as_str(), 2)], "x", index as i64)).unwrap();
+            store
+                .publish(&update(&[(uid.as_str(), 2)], "x", index as i64))
+                .unwrap();
         }
         let first = store.compact(&policy()).unwrap().expect("a generation");
         let manifest = store.manifest().clone();
@@ -315,9 +334,15 @@ mod tests {
     fn level_one_files_are_sorted_by_namespace_then_time() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path());
-        store.publish(&update(&[("z/claude/a", 2)], "x", 50)).unwrap();
-        store.publish(&update(&[("a/claude/b", 2)], "x", 40)).unwrap();
-        store.publish(&update(&[("a/claude/c", 2)], "x", 10)).unwrap();
+        store
+            .publish(&update(&[("z/claude/a", 2)], "x", 50))
+            .unwrap();
+        store
+            .publish(&update(&[("a/claude/b", 2)], "x", 40))
+            .unwrap();
+        store
+            .publish(&update(&[("a/claude/c", 2)], "x", 10))
+            .unwrap();
         store.compact(&policy()).unwrap().expect("a generation");
 
         let files = levels(&store, 1);
@@ -338,7 +363,9 @@ mod tests {
         let mut store = open(dir.path());
         for session in ["a", "b", "c", "d"] {
             let uid = format!("m1/claude/{session}");
-            store.publish(&update(&[(uid.as_str(), 1)], "x", 0)).unwrap();
+            store
+                .publish(&update(&[(uid.as_str(), 1)], "x", 0))
+                .unwrap();
         }
         // One row per file, so each session lands in its own level-1 file.
         let split = CompactionPolicy {
@@ -352,7 +379,9 @@ mod tests {
         let before = live_steps(&store);
 
         // Session a is recomputed: its level-1 row is now entirely dead.
-        store.publish(&update(&[("m1/claude/a", 1)], "y", 0)).unwrap();
+        store
+            .publish(&update(&[("m1/claude/a", 1)], "y", 0))
+            .unwrap();
         let generation = store.compact(&split).unwrap().expect("a generation");
         let after = levels(&store, 1);
         assert_eq!(after.len(), 3);
@@ -371,7 +400,9 @@ mod tests {
         let mut store = open(dir.path());
         for session in ["a", "b", "c"] {
             let uid = format!("m1/claude/{session}");
-            store.publish(&update(&[(uid.as_str(), 1)], "x", 0)).unwrap();
+            store
+                .publish(&update(&[(uid.as_str(), 1)], "x", 0))
+                .unwrap();
         }
         let inputs = levels(&store, 0);
         store.compact(&policy()).unwrap().expect("a generation");

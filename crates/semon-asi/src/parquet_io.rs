@@ -108,8 +108,14 @@ pub(crate) fn with_generation(
         )));
     }
     let mut columns = batch.columns().to_vec();
-    columns.push(Arc::new(Int64Array::from(vec![generation; batch.num_rows()])));
-    Ok(RecordBatch::try_new(Arc::new(table.file_schema()), columns)?)
+    columns.push(Arc::new(Int64Array::from(vec![
+        generation;
+        batch.num_rows()
+    ])));
+    Ok(RecordBatch::try_new(
+        Arc::new(table.file_schema()),
+        columns,
+    )?)
 }
 
 pub(crate) fn string_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray> {

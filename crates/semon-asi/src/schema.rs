@@ -286,20 +286,68 @@ pub static FACT_STEP: Table = Table {
         ts("ts", "Start of the model call."),
         num("input_tokens", "tokens", "Uncached input tokens."),
         num("output_tokens", "tokens", "Output tokens."),
-        num("cache_read_tokens", "tokens", "Input tokens read from the cache."),
-        num("cache_write_tokens", "tokens", "Input tokens written to the cache."),
-        num("reasoning_tokens", "tokens", "Reasoning tokens, when reported separately."),
-        en("usage_owner", USAGE_OWNER, "Spend sums only `exclusive` usage; `copied` repeats it."),
-        num("context_tokens", "tokens", "Uncached plus cached input of the call."),
+        num(
+            "cache_read_tokens",
+            "tokens",
+            "Input tokens read from the cache.",
+        ),
+        num(
+            "cache_write_tokens",
+            "tokens",
+            "Input tokens written to the cache.",
+        ),
+        num(
+            "reasoning_tokens",
+            "tokens",
+            "Reasoning tokens, when reported separately.",
+        ),
+        en(
+            "usage_owner",
+            USAGE_OWNER,
+            "Spend sums only `exclusive` usage; `copied` repeats it.",
+        ),
+        num(
+            "context_tokens",
+            "tokens",
+            "Uncached plus cached input of the call.",
+        ),
         en("context_band", CONTEXT_BAND, "Band of context_tokens."),
-        num_opt("model_ms", "ms", "Model time; null when the harness does not report it."),
-        num_opt("tool_ms", "ms", "Time in the tool calls this step requested."),
-        real_opt("usd_est", "usd", "Estimate under price_version; null when unpriced."),
-        en("price_status", PRICE_STATUS, "`unpriced` is never summed as zero."),
+        num_opt(
+            "model_ms",
+            "ms",
+            "Model time; null when the harness does not report it.",
+        ),
+        num_opt(
+            "tool_ms",
+            "ms",
+            "Time in the tool calls this step requested.",
+        ),
+        real_opt(
+            "usd_est",
+            "usd",
+            "Estimate under price_version; null when unpriced.",
+        ),
+        en(
+            "price_status",
+            PRICE_STATUS,
+            "`unpriced` is never summed as zero.",
+        ),
         key("price_version", "Price version used for usd_est."),
-        en("activity", ACTIVITY, "Deterministic activity label; first matching rule."),
-        en_opt("waste_kind", WASTE_KIND, "Waste label, when the step is waste."),
-        en_opt("trigger", TRIGGER, "What triggered a failure or waste step."),
+        en(
+            "activity",
+            ACTIVITY,
+            "Deterministic activity label; first matching rule.",
+        ),
+        en_opt(
+            "waste_kind",
+            WASTE_KIND,
+            "Waste label, when the step is waste.",
+        ),
+        en_opt(
+            "trigger",
+            TRIGGER,
+            "What triggered a failure or waste step.",
+        ),
         flag("ok", "False when the step's main action failed."),
     ],
 };
@@ -348,19 +396,51 @@ pub static FACT_SESSION: Table = Table {
         int_key("date_key", "UTC start date as yyyymmdd; key into dim_date."),
         ts("started_at", "Start of the session."),
         ts_opt("ended_at", "End of the session; null while it runs."),
-        num("input_tokens", "tokens", "Uncached input tokens over exclusive usage."),
-        num("output_tokens", "tokens", "Output tokens over exclusive usage."),
-        num("cache_read_tokens", "tokens", "Cache-read tokens over exclusive usage."),
-        num("cache_write_tokens", "tokens", "Cache-write tokens over exclusive usage."),
-        num("reasoning_tokens", "tokens", "Reasoning tokens over exclusive usage."),
+        num(
+            "input_tokens",
+            "tokens",
+            "Uncached input tokens over exclusive usage.",
+        ),
+        num(
+            "output_tokens",
+            "tokens",
+            "Output tokens over exclusive usage.",
+        ),
+        num(
+            "cache_read_tokens",
+            "tokens",
+            "Cache-read tokens over exclusive usage.",
+        ),
+        num(
+            "cache_write_tokens",
+            "tokens",
+            "Cache-write tokens over exclusive usage.",
+        ),
+        num(
+            "reasoning_tokens",
+            "tokens",
+            "Reasoning tokens over exclusive usage.",
+        ),
         real_opt("usd_est", "usd", "Estimate over priced exclusive steps."),
-        real_opt("reported_usd", "usd", "Spend the harness reported itself, when it does."),
-        num("wall_ms", "ms", "Wall-clock time from first to last record."),
+        real_opt(
+            "reported_usd",
+            "usd",
+            "Spend the harness reported itself, when it does.",
+        ),
+        num(
+            "wall_ms",
+            "ms",
+            "Wall-clock time from first to last record.",
+        ),
         num("model_ms", "ms", "Summed model time."),
         num("step_count", "steps", "Steps in the session."),
         num("failure_count", "steps", "Steps with ok = false."),
         flag("usage_complete", "True when every step reported its usage."),
-        num("transform_version", "", "Transform version that produced the row."),
+        num(
+            "transform_version",
+            "",
+            "Transform version that produced the row.",
+        ),
         num("rules_version", "", "Rules version that produced the row."),
         key("price_version", "Price version that produced the row."),
     ],
@@ -456,7 +536,11 @@ pub static DIM_SESSION: Table = Table {
         key("session_uid", "Session UID."),
         key("machine_key", "Key into dim_machine."),
         key("harness_key", "Key into dim_harness."),
-        en("role", ROLE, "Role from native lineage first; unknown is never root."),
+        en(
+            "role",
+            ROLE,
+            "Role from native lineage first; unknown is never root.",
+        ),
         key_opt("parent_session_uid", "Parent session UID."),
         en("parent_method", PARENT_METHOD, "How the parent was found."),
         key_opt("lane_root_uid", "Session UID of the lane's root."),
@@ -476,7 +560,11 @@ pub static DIM_REPO: Table = Table {
     columns: &[
         key("repo_key", "Sanitised repo_id, or `unknown`."),
         label("display_name", "Display name."),
-        en("remote_kind", REMOTE_KIND, "`local_path` keys are tokenised on Hub export."),
+        en(
+            "remote_kind",
+            REMOTE_KIND,
+            "`local_path` keys are tokenised on Hub export.",
+        ),
     ],
 };
 
@@ -503,7 +591,11 @@ pub static DIM_PRICE: Table = Table {
         label("model", "Model name."),
         en("rate_kind", RATE_KIND, "Token class the rate applies to."),
         label_opt("tier", "Pricing tier, when the rate is tiered."),
-        num_opt("threshold_tokens", "tokens", "Context size above which the tier applies."),
+        num_opt(
+            "threshold_tokens",
+            "tokens",
+            "Context size above which the tier applies.",
+        ),
         real("usd_per_unit", "usd_per_mtok", "Price per million tokens."),
         ts("valid_from", "Start of validity."),
         ts_opt("valid_to", "End of validity; null while current."),
@@ -575,7 +667,12 @@ mod tests {
                     column.name
                 );
                 assert_ne!(column.name, GEN_COLUMN, "{} declares _gen", table.name);
-                assert!(!column.doc.is_empty(), "{}.{} has no doc", table.name, column.name);
+                assert!(
+                    !column.doc.is_empty(),
+                    "{}.{} has no doc",
+                    table.name,
+                    column.name
+                );
             }
         }
     }
@@ -585,12 +682,19 @@ mod tests {
         for table in TABLES {
             for column in table.columns {
                 let id = format!("{}.{}", table.name, column.name);
-                assert_ne!(column.class, Class::Body, "{id}: analytics has no body column");
+                assert_ne!(
+                    column.class,
+                    Class::Body,
+                    "{id}: analytics has no body column"
+                );
                 let is_enum = column.class == Class::Enum;
                 if is_enum && column.data_type == Type::Text {
                     assert!(!column.values.is_empty(), "{id}: enum without values");
                 } else {
-                    assert!(column.values.is_empty(), "{id}: values on a non-enum text column");
+                    assert!(
+                        column.values.is_empty(),
+                        "{id}: values on a non-enum text column"
+                    );
                 }
                 match column.class {
                     Class::Time => assert_eq!(column.data_type, Type::Timestamp, "{id}"),
