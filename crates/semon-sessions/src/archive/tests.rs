@@ -77,7 +77,7 @@ fn a_preserved_chain_holds_the_bytes_and_the_redactor_version() {
     assert_eq!(chain.sha256, hex(&digest(&bytes)));
     assert_eq!(chain.redactor_version, "7");
     assert!(is_id(&chain.chain_id));
-    assert_eq!(archive.chains("claude/a.jsonl").unwrap(), [chain.clone()]);
+    assert_eq!(archive.chains("claude/a.jsonl").unwrap(), std::slice::from_ref(&chain));
     assert_eq!(read_chain(&archive, "claude/a.jsonl", &chain), bytes);
     archive.verify("claude/a.jsonl").unwrap();
 
@@ -116,7 +116,7 @@ fn a_failure_before_the_rename_leaves_the_last_manifest() {
     let second = lines(6_000, 2);
     let mut cursor = Cursor::new(&second);
     assert!(archive.preserve("s", &mut cursor, "1").is_err());
-    assert_eq!(archive.chains("s").unwrap(), [kept.clone()]);
+    assert_eq!(archive.chains("s").unwrap(), std::slice::from_ref(&kept));
     assert_eq!(fs::read(manifest_path(&archive, "s")).unwrap(), before);
     archive.verify("s").unwrap();
 
