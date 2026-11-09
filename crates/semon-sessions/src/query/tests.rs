@@ -6356,7 +6356,55 @@ fn activity_analytics_is_additive_and_preserves_unknown_cost_and_duration() {
         summary["waste_cost_by_category"].as_object().unwrap().len(),
         0
     );
-    assert_eq!(summary["levers_not_computed"], json!(["TaskSpecification"]));
+    let classifier = &summary["coverage"]["classifier"];
+    assert_eq!(
+        classifier["levers_not_computed"],
+        json!(["TaskSpecification"])
+    );
+    assert_eq!(
+        classifier["rules_version"],
+        crate::events::session_activity::ACTIVITY_RULES_VERSION
+    );
+    // Scattered values moved into coverage rather than appearing twice.
+    for moved in [
+        "rules_version",
+        "levers_not_computed",
+        "activities_not_computed",
+        "triggers_not_computed",
+        "unlabelled_activity_steps",
+    ] {
+        assert!(summary.get(moved).is_none(), "{moved}");
+    }
+    let pricing = &summary["coverage"]["pricing"];
+    let priced: u64 = ["full_steps", "partial_steps", "unpriced_steps"]
+        .iter()
+        .map(|key| pricing[key].as_u64().unwrap())
+        .sum();
+    assert_eq!(priced, 3);
+    assert_eq!(summary["coverage"]["timing"]["known_steps"], 2);
+    assert_eq!(summary["coverage"]["timing"]["unknown_steps"], 1);
+    // The timeline is served by kind preview, never inside the summary.
+    assert!(summary.get("preview").is_none());
+    // Exclusive steps only; never repeated per ownership view or band.
+    let exclusive = &summary["component_cost_usd"];
+    for key in [
+        "fresh_input_usd",
+        "cache_read_usd",
+        "cache_write_usd",
+        "output_usd",
+    ] {
+        assert!(exclusive[key]["unknown_steps"].is_u64(), "{key}");
+    }
+    let totals = &summary["totals"]["exclusive"];
+    assert!(totals.get("carry_cost_usd").is_none());
+    assert!(totals.get("output_usd").is_none());
+    assert!(
+        summary["by_band"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|band| band["exclusive"].get("output_usd").is_none())
+    );
     let selected = call(&mut query, "get_session", json!({"id":"activity"}));
     assert_eq!(&selected["session"]["activity_analytics"], summary);
     assert!(summary.get("steps").is_none());
@@ -6397,9 +6445,10 @@ fn activity_family_rolls_up_without_child_step_duplication() {
     assert_eq!(waste_cost.as_object().unwrap().len(), 1);
     assert_eq!(waste_cost["OrchestrationWait"]["steps"], 1);
     assert_eq!(
-        parent["family"]["levers_not_computed"],
+        parent["family"]["coverage"]["classifier"]["levers_not_computed"],
         json!(["TaskSpecification"])
     );
+    assert!(parent["family"].get("preview").is_none());
     assert!(child["family"].is_null());
     let page = call(&mut query, "get_session_activity", json!({"id":"lead"}));
     assert_eq!(page["items"].as_array().unwrap().len(), 3);
@@ -6466,6 +6515,17 @@ fn activity_pages_sort_bound_and_refuse_generation_mismatch() {
     assert_eq!(items.len(), 2);
     assert!(items[0]["timestamp"].as_i64() < items[1]["timestamp"].as_i64());
     assert!(items.iter().all(|item| item.get("position").is_none()));
+    // Dollar components are always present, null when unpriced; carry cost is
+    // the cache-read component.
+    for key in [
+        "fresh_input_usd",
+        "cache_read_usd",
+        "cache_write_usd",
+        "output_usd",
+    ] {
+        assert!(items.iter().all(|item| item.get(key).is_some()), "{key}");
+    }
+    assert!(items[0].get("carry_cost_usd").is_none());
     let second = call(
         &mut query,
         "get_session_activity",
@@ -6502,6 +6562,28 @@ fn activity_pages_sort_bound_and_refuse_generation_mismatch() {
         failure(&mut query, "get_session_activity", json!({"id":"absent"})),
         "unknown_session"
     );
+    let reason = |query: &mut Query, args: Value| {
+        let error = query
+            .call_optional_at("get_session_activity", &args, NOW)
+            .unwrap_err();
+        let json = error.to_json();
+        let named = json["error"].get("reason").and_then(Value::as_str);
+        assert_eq!(named, error.reason);
+        error.reason
+    };
+    assert_eq!(
+        reason(&mut query, json!({"id":"activity","generation":"stale"})),
+        Some("stale_generation")
+    );
+    assert_eq!(
+        reason(&mut query, json!({"id":"absent"})),
+        Some("no_activity")
+    );
+    // An argument error is not a refusal of the activity itself.
+    assert_eq!(
+        reason(&mut query, json!({"id":"activity","cursor":"1"})),
+        None
+    );
     let facts = call(
         &mut query,
         "get_session_activity",
@@ -6512,6 +6594,42 @@ fn activity_pages_sort_bound_and_refuse_generation_mismatch() {
     assert!(facts["items"][0].get("position").is_none());
     assert!(facts["items"][0].get("record_digest").is_none());
     assert!(facts["next_cursor"].is_null());
+    let preview = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","kind":"preview"}),
+    );
+    assert_eq!(preview["kind"], "preview");
+    assert_eq!(preview["generation"], first["generation"]);
+    assert_eq!(preview["steps_total"], 3);
+    assert_eq!(preview["binned_steps"], 3);
+    assert_eq!(preview["bins"].as_array().unwrap().len(), 3);
+    assert!(preview.get("items").is_none() && preview.get("next_cursor").is_none());
+    let same = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","kind":"preview","generation":first["generation"]}),
+    );
+    assert_eq!(same, preview);
+    assert_eq!(
+        reason(
+            &mut query,
+            json!({"id":"activity","kind":"preview","generation":"stale"})
+        ),
+        Some("stale_generation")
+    );
+    assert_eq!(
+        reason(&mut query, json!({"id":"absent","kind":"preview"})),
+        Some("no_activity")
+    );
+    assert_eq!(
+        failure(
+            &mut query,
+            "get_session_activity",
+            json!({"id":"activity","kind":"preview","generation":first["generation"],"cursor":"1"})
+        ),
+        "invalid_arguments"
+    );
 }
 
 #[test]
@@ -6536,6 +6654,34 @@ fn mcp_activity_request_returns_the_same_typed_page_and_refuses_stale_generation
     let error: Value =
         serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(error["error"]["code"], "stale_projection");
+    assert_eq!(error["error"]["reason"], "stale_generation");
+}
+
+#[test]
+fn activity_refusal_reasons_follow_the_code_and_the_request_budget() {
+    for (code, reason) in [
+        ("unknown_session", Some("no_activity")),
+        ("stale_projection", Some("source_unavailable")),
+        ("io", Some("source_unavailable")),
+        ("unavailable", Some("interrupted")),
+        ("capability_unavailable", Some("unsupported_storage")),
+        ("invalid_arguments", None),
+        ("id_conflict", None),
+    ] {
+        let error = QueryError::new(code, "refused").activity_refusal();
+        assert_eq!(error.reason, reason, "{code}");
+        if let Some(reason) = reason {
+            assert!(super::ACTIVITY_REFUSAL_REASONS.contains(&reason));
+        }
+    }
+    // An exhausted row or byte budget is the limit, whichever code carried it.
+    let control = crate::SelectedReadControl::default().with_limits(1, 1024);
+    let _scope = crate::selected_read::Scope::enter(&control);
+    let _ = crate::selected_read::limit_error();
+    for code in ["io", "unavailable"] {
+        let error = QueryError::new(code, "refused").activity_refusal();
+        assert_eq!(error.reason, Some("limit_exceeded"), "{code}");
+    }
 }
 
 #[test]
@@ -6661,6 +6807,20 @@ fn sanitized_activity_query_matches_owned_golden() {
         "get_session_activity",
         json!({"id":"activity","limit":2}),
     );
+    let preview = call(
+        &mut query,
+        "get_session_activity",
+        json!({"id":"activity","kind":"preview"}),
+    );
+    // Bin costs follow the live pricing table; everything else is fixed.
+    let mut preview = json!({
+        "steps_total":preview["steps_total"],
+        "binned_steps":preview["binned_steps"],
+        "bins":preview["bins"]
+    });
+    for bin in preview["bins"].as_array_mut().unwrap() {
+        bin.as_object_mut().unwrap().remove("list_cost_usd");
+    }
     let actual = json!({
         "summary": {
             "observed_steps":summary["totals"]["observed"]["steps"],
@@ -6676,14 +6836,15 @@ fn sanitized_activity_query_matches_owned_golden() {
             "waits_without_interval":summary["waits_without_interval"],
             "waste_cost_by_kind":summary["waste_cost_by_kind"],
             "waste_cost_by_category":summary["waste_cost_by_category"],
-            "levers_not_computed":summary["levers_not_computed"],
-            "activities_not_computed":summary["activities_not_computed"],
-            "triggers_not_computed":summary["triggers_not_computed"],
+            "coverage":{
+                "timing":summary["coverage"]["timing"],
+                "classifier":summary["coverage"]["classifier"]
+            },
+            "preview":preview,
             "by_activity_steps":summary["by_activity"].as_object().unwrap().iter()
                 .map(|(activity, totals)| (activity.clone(), totals["steps"].clone()))
                 .collect::<serde_json::Map<_, _>>(),
             "by_trigger":summary["by_trigger"],
-            "unlabelled_activity_steps":summary["unlabelled_activity_steps"],
             "family":summary["family"]
         },
         "page": {

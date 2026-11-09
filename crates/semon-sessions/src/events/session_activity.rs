@@ -137,8 +137,16 @@ pub(crate) struct ActivityStep {
     pub(crate) tokens: ModelTokens,
     pub(crate) context_tokens: u64,
     pub(crate) band: ContextBand,
+    /// Sum of the four token components below plus any web search, known only
+    /// when every priced category is.
     pub(crate) list_cost_usd: Option<f64>,
-    pub(crate) carry_cost_usd: Option<f64>,
+    /// Each component is priced independently, so one can stay known when
+    /// another rate is missing. No tokens is a known zero. The cache-read
+    /// component is the carry cost of the step's context.
+    pub(crate) fresh_input_usd: Option<f64>,
+    pub(crate) cache_read_usd: Option<f64>,
+    pub(crate) cache_write_usd: Option<f64>,
+    pub(crate) output_usd: Option<f64>,
     pub(crate) timestamp: Option<i64>,
     pub(crate) elapsed_ms: Option<u64>,
     pub(crate) compactions: u64,
@@ -243,7 +251,6 @@ impl<T: std::ops::AddAssign> Measured<T> {
 pub(crate) struct StepTotals {
     pub(crate) steps: u64,
     pub(crate) list_cost_usd: Measured<f64>,
-    pub(crate) carry_cost_usd: Measured<f64>,
     pub(crate) elapsed_ms: Measured<u64>,
 }
 
@@ -251,7 +258,6 @@ impl StepTotals {
     fn add(&mut self, step: &ActivityStep) {
         self.steps += 1;
         self.list_cost_usd.add(step.list_cost_usd);
-        self.carry_cost_usd.add(step.carry_cost_usd);
         self.elapsed_ms.add(step.elapsed_ms);
     }
 }
@@ -445,7 +451,7 @@ pub(crate) fn derive(
                     )
                 }
             };
-            let (list_cost_usd, carry_cost_usd) = cost.finish_step(tokens.cache_read);
+            let cost = cost.finish_step();
             let context_tokens = tokens
                 .input
                 .saturating_add(tokens.cache_read)
@@ -464,8 +470,11 @@ pub(crate) fn derive(
                 tokens,
                 context_tokens,
                 band: ContextBand::for_tokens(context_tokens),
-                list_cost_usd,
-                carry_cost_usd,
+                list_cost_usd: cost.list,
+                fresh_input_usd: cost.fresh_input,
+                cache_read_usd: cost.cache_read,
+                cache_write_usd: cost.cache_write,
+                output_usd: cost.output,
                 timestamp,
                 elapsed_ms: None,
                 compactions: 0,

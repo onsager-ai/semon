@@ -207,6 +207,33 @@ fn activity_repricing_resumes_and_never_serves_mixed_prices() {
         .len(),
         4
     );
+    // The final batch recomputes every price-dependent summary value.
+    let summary: String = store
+        .connection
+        .query_row(
+            "SELECT summary FROM session_activity_projections WHERE session_key=?1",
+            [&row.key],
+            |record| record.get(0),
+        )
+        .unwrap();
+    let summary: activity::analytics::Analytics = serde_json::from_str(&summary).unwrap();
+    assert_eq!(summary.pricing_fingerprint, new.fingerprint);
+    assert_eq!(summary.counts.totals.exclusive.steps, 260);
+    let pricing = &summary.counts.coverage.pricing;
+    assert_eq!(
+        pricing.full_steps + pricing.partial_steps + pricing.unpriced_steps,
+        260
+    );
+    let preview: String = store
+        .connection
+        .query_row(
+            "SELECT preview FROM session_activity_projections WHERE session_key=?1",
+            [&row.key],
+            |record| record.get(0),
+        )
+        .unwrap();
+    let preview: activity::analytics::Preview = serde_json::from_str(&preview).unwrap();
+    assert_eq!((preview.steps_total, preview.bins.len()), (260, 52));
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }

@@ -20,6 +20,33 @@ pub(crate) struct OwnedMeasured {
     pub(crate) shared: Measured<u64>,
 }
 
+/// Each token component of exclusive steps priced independently; the exclusive
+/// list cost in `Counts::totals` is what these usually sum to. Kept to the
+/// exclusive view and out of the context bands so Catalog rows stay small.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Components {
+    pub(crate) fresh_input_usd: Measured<f64>,
+    pub(crate) cache_read_usd: Measured<f64>,
+    pub(crate) cache_write_usd: Measured<f64>,
+    pub(crate) output_usd: Measured<f64>,
+}
+
+impl Components {
+    fn add(&mut self, step: &ActivityStep) {
+        self.fresh_input_usd.add(step.fresh_input_usd);
+        self.cache_read_usd.add(step.cache_read_usd);
+        self.cache_write_usd.add(step.cache_write_usd);
+        self.output_usd.add(step.output_usd);
+    }
+
+    fn merge(&mut self, other: &Self) {
+        measured(&mut self.fresh_input_usd, &other.fresh_input_usd);
+        measured(&mut self.cache_read_usd, &other.cache_read_usd);
+        measured(&mut self.cache_write_usd, &other.cache_write_usd);
+        measured(&mut self.output_usd, &other.output_usd);
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct OwnedCounts {
     pub(crate) observed: u64,
@@ -45,6 +72,103 @@ pub(crate) enum TriggerNotComputed {
     MissingInput,
 }
 
+/// At most this many bins summarize the ordered exclusive steps.
+const PREVIEW_BINS: usize = 64;
+
+/// Exclusive steps by how completely their token components are priced. Only
+/// components that carry tokens count: a step is `full` when all of them are
+/// priced (including a step with no tokens), `unpriced` when none is.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct PricingCoverage {
+    pub(crate) full_steps: u64,
+    pub(crate) partial_steps: u64,
+    pub(crate) unpriced_steps: u64,
+}
+
+/// Exclusive steps by whether their `elapsed_ms` is known.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct TimingCoverage {
+    pub(crate) known_steps: u64,
+    pub(crate) unknown_steps: u64,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ClassifierCoverage {
+    pub(crate) rules_version: u32,
+    pub(crate) levers_not_computed: Vec<LeverNotComputed>,
+    pub(crate) activities_not_computed: Vec<Activity>,
+    pub(crate) triggers_not_computed: Vec<TriggerNotComputed>,
+    /// Exclusive steps with no activity label: `by_activity` steps plus this
+    /// equal the exclusive step total.
+    pub(crate) unlabelled_activity_steps: u64,
+}
+
+/// What the other summary values did not or could not measure. The measured
+/// wait union is `wait_time_ms`, which does not depend on step pages.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Coverage {
+    pub(crate) pricing: PricingCoverage,
+    pub(crate) timing: TimingCoverage,
+    pub(crate) classifier: ClassifierCoverage,
+}
+
+/// One bin of the timeline preview. Step numbers are the producer ordinals
+/// `get_session_activity` pages by; shared steps are not binned.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PreviewBin {
+    pub(crate) first_step: u64,
+    pub(crate) last_step: u64,
+    pub(crate) max_context_tokens: u64,
+    pub(crate) last_context_tokens: u64,
+    pub(crate) list_cost_usd: Measured<f64>,
+    pub(crate) waste_by_category: BTreeMap<WasteCategory, u64>,
+    pub(crate) compactions: u64,
+}
+
+/// The ordered exclusive steps in equal-count bins of ceil(n/64) steps, so at
+/// most 64 bins whatever the session length. Derived with the summary.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Preview {
+    pub(crate) steps_total: u64,
+    pub(crate) binned_steps: u64,
+    pub(crate) bins: Vec<PreviewBin>,
+}
+
+impl Preview {
+    pub(crate) fn of(steps: &[ActivityStep]) -> Self {
+        let exclusive: Vec<_> = steps
+            .iter()
+            .enumerate()
+            .filter(|(_, step)| matches!(step.ownership, Ownership::Exclusive))
+            .collect();
+        let bins = exclusive
+            .chunks(exclusive.len().div_ceil(PREVIEW_BINS).max(1))
+            .map(|chunk| {
+                let mut bin = PreviewBin {
+                    first_step: chunk[0].0 as u64,
+                    last_step: chunk[chunk.len() - 1].0 as u64,
+                    ..PreviewBin::default()
+                };
+                for (_, step) in chunk {
+                    bin.max_context_tokens = bin.max_context_tokens.max(step.context_tokens);
+                    bin.last_context_tokens = step.context_tokens;
+                    bin.list_cost_usd.add(step.list_cost_usd);
+                    if let Some(kind) = step.waste {
+                        *bin.waste_by_category.entry(kind.category()).or_default() += 1;
+                    }
+                    bin.compactions += step.compactions;
+                }
+                bin
+            })
+            .collect();
+        Self {
+            steps_total: steps.len() as u64,
+            binned_steps: exclusive.len() as u64,
+            bins,
+        }
+    }
+}
+
 const ACTIVITIES_NOT_COMPUTED: [Activity; 1] = [Activity::Recover];
 const TRIGGERS_NOT_COMPUTED: [TriggerNotComputed; 2] = [
     TriggerNotComputed::InstructionChange,
@@ -54,6 +178,7 @@ const TRIGGERS_NOT_COMPUTED: [TriggerNotComputed; 2] = [
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Counts {
     pub(crate) totals: OwnershipTotals,
+    pub(crate) component_cost_usd: Components,
     pub(crate) by_band: BTreeMap<ContextBand, OwnershipTotals>,
     pub(crate) compactions: u64,
     pub(crate) waste_by_kind: BTreeMap<WasteKind, u64>,
@@ -64,9 +189,7 @@ pub(crate) struct Counts {
     pub(crate) by_activity: BTreeMap<Activity, WasteTotals>,
     /// Exclusive steps with waste or a verify failure, by their trigger.
     pub(crate) by_trigger: BTreeMap<Trigger, WasteTotals>,
-    /// Exclusive steps with no activity label: `by_activity` steps plus this
-    /// equal the exclusive step total.
-    pub(crate) unlabelled_activity_steps: u64,
+    pub(crate) coverage: Coverage,
     pub(crate) wait_time_ms: OwnedMeasured,
     pub(crate) waits_without_interval: OwnedCounts,
     pub(crate) empty_search_steps: u64,
@@ -78,13 +201,9 @@ pub(crate) struct Counts {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Analytics {
-    pub(crate) rules_version: u32,
     pub(crate) pricing_fingerprint: String,
     #[serde(flatten)]
     pub(crate) counts: Counts,
-    pub(crate) levers_not_computed: Vec<LeverNotComputed>,
-    pub(crate) activities_not_computed: Vec<Activity>,
-    pub(crate) triggers_not_computed: Vec<TriggerNotComputed>,
     pub(crate) thrash: bool,
     pub(crate) family: Option<Family>,
 }
@@ -95,9 +214,6 @@ pub(crate) struct Family {
     pub(crate) counts: Counts,
     pub(crate) member_sessions: u64,
     pub(crate) thrashed_sessions: u64,
-    pub(crate) levers_not_computed: Vec<LeverNotComputed>,
-    pub(crate) activities_not_computed: Vec<Activity>,
-    pub(crate) triggers_not_computed: Vec<TriggerNotComputed>,
     /// Sum of capped physical-session step durations, including shared
     /// observations. Overlapping sessions can exceed family wall-clock time.
     pub(crate) total_step_time_ms: Measured<u64>,
@@ -154,16 +270,26 @@ impl OwnedMeasured {
 }
 
 impl Counts {
-    fn of(activity: &SessionActivity) -> Self {
+    /// Every value derived from steps alone, shared by first derivation and
+    /// repricing.
+    fn of_steps(steps: &[ActivityStep]) -> Self {
         let mut counts = Self {
-            totals: activity.aggregate.totals.clone(),
-            by_band: activity.aggregate.by_band.clone(),
-            compactions: activity.aggregate.compactions,
-            exclusive_cost_complete: activity.aggregate.exclusive_cost_complete,
+            coverage: Coverage {
+                classifier: ClassifierCoverage {
+                    rules_version: ACTIVITY_RULES_VERSION,
+                    levers_not_computed: vec![LeverNotComputed::TaskSpecification],
+                    activities_not_computed: ACTIVITIES_NOT_COMPUTED.to_vec(),
+                    triggers_not_computed: TRIGGERS_NOT_COMPUTED.to_vec(),
+                    unlabelled_activity_steps: 0,
+                },
+                ..Coverage::default()
+            },
             ..Self::default()
         };
         let mut wait_intervals: [Vec<(i64, i64)>; 3] = Default::default();
-        for step in &activity.steps {
+        for step in steps {
+            counts.totals.add(step);
+            counts.by_band.entry(step.band).or_default().add(step);
             if let Some(kind) = step.waste {
                 *counts.waste_by_kind.entry(kind).or_default() += 1;
                 *counts.waste_by_category.entry(kind.category()).or_default() += 1;
@@ -190,11 +316,13 @@ impl Counts {
                 }
                 match step.activity {
                     Some(activity) => add_waste(&mut counts.by_activity, activity, step),
-                    None => counts.unlabelled_activity_steps += 1,
+                    None => counts.coverage.classifier.unlabelled_activity_steps += 1,
                 }
                 if let Some(trigger) = step.trigger {
                     add_waste(&mut counts.by_trigger, trigger, step);
                 }
+                counts.coverage.add_exclusive(step);
+                counts.component_cost_usd.add(step);
             }
             counts.empty_search_steps += u64::from(step.empty_search);
             counts.verify_failure_steps += u64::from(step.verify_failure);
@@ -203,6 +331,14 @@ impl Counts {
         counts.wait_time_ms.exclusive.known = interval_union_ms(&wait_intervals[0]);
         counts.wait_time_ms.shared.known = interval_union_ms(&wait_intervals[1]);
         counts.wait_time_ms.observed.known = interval_union_ms(&wait_intervals[2]);
+        counts.exclusive_cost_complete = counts.totals.shared.steps == 0
+            && counts.totals.exclusive.list_cost_usd.unknown_steps == 0;
+        counts
+    }
+
+    fn of(activity: &SessionActivity) -> Self {
+        let mut counts = Self::of_steps(&activity.steps);
+        counts.compactions = activity.aggregate.compactions;
         for fact in &activity.facts {
             match fact.change {
                 Change::Commit { .. } => counts.change_facts.commits += 1,
@@ -215,18 +351,64 @@ impl Counts {
     }
 }
 
+impl Coverage {
+    fn add_exclusive(&mut self, step: &ActivityStep) {
+        let tokens = &step.tokens;
+        let (mut priced, mut unpriced) = (0, 0);
+        for (tokens, usd) in [
+            (tokens.input, step.fresh_input_usd),
+            (tokens.cache_read, step.cache_read_usd),
+            (tokens.cache_write, step.cache_write_usd),
+            (tokens.output, step.output_usd),
+        ] {
+            if tokens > 0 {
+                if usd.is_some() {
+                    priced += 1;
+                } else {
+                    unpriced += 1;
+                }
+            }
+        }
+        match (priced, unpriced) {
+            (_, 0) => self.pricing.full_steps += 1,
+            (0, _) => self.pricing.unpriced_steps += 1,
+            _ => self.pricing.partial_steps += 1,
+        }
+        if step.elapsed_ms.is_some() {
+            self.timing.known_steps += 1;
+        } else {
+            self.timing.unknown_steps += 1;
+        }
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.pricing.full_steps += other.pricing.full_steps;
+        self.pricing.partial_steps += other.pricing.partial_steps;
+        self.pricing.unpriced_steps += other.pricing.unpriced_steps;
+        self.timing.known_steps += other.timing.known_steps;
+        self.timing.unknown_steps += other.timing.unknown_steps;
+        self.classifier.unlabelled_activity_steps += other.classifier.unlabelled_activity_steps;
+    }
+}
+
 impl Analytics {
     pub(crate) fn of(activity: &SessionActivity) -> Self {
         Self {
-            rules_version: activity.rules_version,
             pricing_fingerprint: activity.pricing_fingerprint.clone(),
             counts: Counts::of(activity),
-            levers_not_computed: vec![LeverNotComputed::TaskSpecification],
-            activities_not_computed: ACTIVITIES_NOT_COMPUTED.to_vec(),
-            triggers_not_computed: TRIGGERS_NOT_COMPUTED.to_vec(),
             thrash: activity.aggregate.thrash,
             family: None,
         }
+    }
+
+    /// Prices change no other fact: recompute every step-derived value from
+    /// the repriced steps and keep the compaction and change-fact counts.
+    pub(crate) fn reprice(&mut self, steps: &[ActivityStep]) {
+        self.counts = Counts {
+            compactions: self.counts.compactions,
+            change_facts: self.counts.change_facts.clone(),
+            ..Counts::of_steps(steps)
+        };
     }
 }
 
@@ -237,7 +419,6 @@ fn measured<T: std::ops::AddAssign + Copy>(a: &mut Measured<T>, b: &Measured<T>)
 fn totals(a: &mut StepTotals, b: &StepTotals) {
     a.steps += b.steps;
     measured(&mut a.list_cost_usd, &b.list_cost_usd);
-    measured(&mut a.carry_cost_usd, &b.carry_cost_usd);
     measured(&mut a.elapsed_ms, &b.elapsed_ms);
 }
 fn ownership(a: &mut OwnershipTotals, b: &OwnershipTotals) {
@@ -302,12 +483,14 @@ impl Fold {
         let mut counts = Counts::of(activity);
         // Sum exclusive steps now; add each exact shared key once at the end.
         counts.totals = OwnershipTotals::default();
+        counts.component_cost_usd = Components::default();
         counts.by_band.clear();
         let mut shared = BTreeMap::new();
         for step in &activity.steps {
             match &step.ownership {
                 Ownership::Exclusive => {
                     counts.totals.add(step);
+                    counts.component_cost_usd.add(step);
                     counts.by_band.entry(step.band).or_default().add(step);
                 }
                 Ownership::Shared(key) => {
@@ -325,6 +508,9 @@ impl Fold {
     }
     pub(crate) fn merge(&mut self, child: Self) {
         ownership(&mut self.counts.totals, &child.counts.totals);
+        self.counts
+            .component_cost_usd
+            .merge(&child.counts.component_cost_usd);
         for (band, values) in child.counts.by_band {
             ownership(self.counts.by_band.entry(band).or_default(), &values);
         }
@@ -345,7 +531,7 @@ impl Fold {
         );
         waste_map(&mut self.counts.by_activity, child.counts.by_activity);
         waste_map(&mut self.counts.by_trigger, child.counts.by_trigger);
-        self.counts.unlabelled_activity_steps += child.counts.unlabelled_activity_steps;
+        self.counts.coverage.merge(&child.counts.coverage);
         owned_measured(&mut self.counts.wait_time_ms, &child.counts.wait_time_ms);
         owned_counts(
             &mut self.counts.waits_without_interval,
@@ -376,9 +562,6 @@ impl Fold {
             counts,
             member_sessions: self.members,
             thrashed_sessions: self.thrashed,
-            levers_not_computed: vec![LeverNotComputed::TaskSpecification],
-            activities_not_computed: ACTIVITIES_NOT_COMPUTED.to_vec(),
-            triggers_not_computed: TRIGGERS_NOT_COMPUTED.to_vec(),
             total_step_time_ms: self.time.clone(),
         }
     }

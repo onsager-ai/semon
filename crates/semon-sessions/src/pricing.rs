@@ -243,6 +243,18 @@ pub(crate) struct ModelCostBuild {
     pub(crate) unpriced: bool,
 }
 
+/// One usage fact's dollar components. `list` also includes web search, which
+/// is outside the four token components, and is known only when every priced
+/// category is known.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct StepCost {
+    pub(crate) list: Option<f64>,
+    pub(crate) fresh_input: Option<f64>,
+    pub(crate) cache_read: Option<f64>,
+    pub(crate) cache_write: Option<f64>,
+    pub(crate) output: Option<f64>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct CostBuild {
     #[serde(default)]
@@ -502,23 +514,34 @@ impl CostBuild {
         }
     }
 
-    /// Finish a single native usage fact. Read the priced cache component before
-    /// `finish` fills absent categories with zero for presentation. A missing
-    /// output rate can make list cost unknown while cache-read cost stays known.
-    #[allow(
-        dead_code,
-        reason = "Activity publication is a separate follow-up slice"
-    )]
-    pub(crate) fn finish_step(self, cache_read: u64) -> (Option<f64>, Option<f64>) {
-        let carry = if cache_read == 0 {
-            Some(0.0)
-        } else {
-            self.models
-                .values()
-                .next()
-                .and_then(|model| model.usd_by_kind.get("cache_read").copied())
+    /// Finish a single native usage fact. Each token component is priced
+    /// independently, before `finish` fills absent categories with zero for
+    /// presentation: a missing output rate makes list cost unknown while a
+    /// priced input or cache-read component stays known. A component with no
+    /// tokens is a known zero.
+    pub(crate) fn finish_step(self) -> StepCost {
+        let empty = ModelCostBuild::default();
+        let model = self.models.values().next().unwrap_or(&empty);
+        let tokens = &model.tokens;
+        let component = |parts: &[(&str, u64)]| {
+            parts.iter().try_fold(0.0, |sum, (kind, tokens)| {
+                if *tokens == 0 {
+                    Some(sum)
+                } else {
+                    model.usd_by_kind.get(*kind).map(|usd| sum + usd)
+                }
+            })
         };
-        (self.finish().usd, carry)
+        StepCost {
+            fresh_input: component(&[("input", tokens.input)]),
+            cache_read: component(&[("cache_read", tokens.cache_read)]),
+            cache_write: component(&[
+                ("cache_write_5m", tokens.cache_write_5m),
+                ("cache_write_1h", tokens.cache_write_1h),
+            ]),
+            output: component(&[("output", tokens.output)]),
+            list: self.finish().usd,
+        }
     }
 
     pub(crate) fn finish(self) -> Cost {

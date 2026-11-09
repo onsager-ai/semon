@@ -10,6 +10,23 @@ fn unavailable(_: impl fmt::Display) -> QueryError {
     )
 }
 
+/// A refusal carries its closed `reason` beside the stale-projection code.
+fn refusal(reason: &'static str) -> QueryError {
+    QueryError {
+        reason: Some(reason),
+        ..unavailable("")
+    }
+}
+
+/// A continuation names a generation; a first page has none to be stale.
+fn missing(expected: Option<&str>) -> QueryError {
+    refusal(if expected.is_some() {
+        "stale_generation"
+    } else {
+        "no_activity"
+    })
+}
+
 pub(super) fn read(
     options: &Options,
     namespace: Option<&crate::storage::Namespace>,
@@ -75,21 +92,44 @@ pub(super) fn read(
     }
     let limit = integer(args, "limit").unwrap_or(100) as u32;
     let price = crate::pricing::snapshot();
-    let facts = args["kind"] == "facts";
-    if !facts && cursor.is_some_and(|cursor| cursor.parse::<u64>().is_err()) {
+    let kind = args["kind"].as_str().unwrap_or("steps");
+    let facts = kind == "facts";
+    if kind == "preview" && cursor.is_some() {
+        return Err(QueryError::invalid("A preview has no continuation"));
+    }
+    if kind == "steps" && cursor.is_some_and(|cursor| cursor.parse::<u64>().is_err()) {
         return Err(QueryError::invalid("A step cursor must be an ordinal"));
     }
-    let page = crate::events::store::session_activity::items(
-        &snapshot,
-        &row,
-        expected,
-        &price.fingerprint,
-        facts,
-        cursor,
-        limit,
-    )
-    .map_err(unavailable)?
-    .ok_or_else(|| unavailable("Activity generation mismatch"))?;
+    let (generation, body) = if kind == "preview" {
+        let (generation, preview) = crate::events::store::session_activity::preview(
+            &snapshot,
+            &row,
+            expected,
+            &price.fingerprint,
+        )
+        .map_err(unavailable)?
+        .ok_or_else(|| missing(expected))?;
+        // The preview's own fields sit beside the generation.
+        let mut body = serde_json::to_value(preview).map_err(unavailable)?;
+        body["kind"] = json!(kind);
+        (generation, body)
+    } else {
+        let page = crate::events::store::session_activity::items(
+            &snapshot,
+            &row,
+            expected,
+            &price.fingerprint,
+            facts,
+            cursor,
+            limit,
+        )
+        .map_err(unavailable)?
+        .ok_or_else(|| missing(expected))?;
+        (
+            page.generation,
+            json!({"kind": kind, "items": page.items, "next_cursor": page.next_cursor}),
+        )
+    };
     // Hand the pinned selection snapshot to the existing request-owned source
     // witness. No native body or provenance path is returned by this tool.
     snapshot.set_drop_behavior(rusqlite::DropBehavior::Ignore);
@@ -129,18 +169,19 @@ pub(super) fn read(
         )
         .optional()
         .map_err(unavailable)?;
-    if current_text.as_deref() != Some(&text)
-        || current_generation.as_deref() != Some(&page.generation)
+    if current_text.as_deref() != Some(&text) || current_generation.as_deref() != Some(&generation)
     {
-        return Err(unavailable("Activity publication changed"));
+        return Err(refusal("stale_generation"));
     }
     crate::selected_read::check().map_err(|error| selected_error(&error))?;
-    Ok(json!({
+    let mut answer = json!({
         "now": now,
         "session": {"id": key, "harness": row.harness, "native_ids": row.native_ids},
-        "generation": page.generation,
-        "kind": if facts { "facts" } else { "steps" },
-        "items": page.items,
-        "next_cursor": page.next_cursor,
-    }))
+        "generation": generation,
+    });
+    answer
+        .as_object_mut()
+        .expect("activity answer")
+        .extend(body.as_object().expect("activity body").clone());
+    Ok(answer)
 }
