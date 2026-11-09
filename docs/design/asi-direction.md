@@ -1,15 +1,18 @@
 # Agent Session Intelligence direction
 
-Status: accepted direction (2026-11-08; decisions extended the same day; architecture amended 2026-11-09). This document supersedes earlier product
+Status: accepted direction (2026-11-08; decisions extended the same day; architecture amended 2026-11-09; Viewer scope amended 2026-11-09). This document supersedes earlier product
 focus statements wherever they conflict.
 
 ## Decision
 
 Semon's product focus is **Agent Session Intelligence (ASI)**: durable storage,
-query and analytics over harness-native agent sessions. Session display and
-two-way harness control are no longer product goals. T3 Code covers them, and
-Semon should be a backend that T3 Code and other agents query, not a competing
-front end.
+query and analytics over harness-native agent sessions. Two-way harness control
+is not a product goal; T3 Code covers it. Semon is a backend that T3 Code and
+other agents query, not a competing control front end. Analytics is the core,
+and read-only viewing of the raw session logs is its foundation: analytics
+evidence links into it, so it is not optional polish. Semon therefore keeps
+standalone, read-only browsing of the history it stores (amended 2026-11-09,
+see the Viewer decision), so it never depends on T3 Code.
 
 The method (data model, storage schema, measurement layers, labels, ledgers,
 evidence grades and interventions) is defined in the
@@ -42,7 +45,7 @@ sequencing. Progress is tracked in the pinned roadmap issue, #549.
 | Semantic labels (L1) | In v1. Labels follow methodology §3–§4 (rows with labeller, taxonomy version, confidence and evidence step IDs). Classifiers run where the bodies are: the receiver, or the machine itself when it has none. Sending evidence to a model provider needs its own per-source opt-in that names the provider and model; pushing to a receiver does not grant it. Categorical labels travel as metadata; free-text label fields (goal, mechanism) count as bodies. |
 | Analytics UI spec | Adopt the session activity viewer spec (semon#532) as the analytics UI direction. |
 | Consumers | Agents (MCP/SQL) and humans (dashboards) equally, over one shared schema. |
-| Viewer | Shrink to an analytics UI: keep the authenticated server, shell and security boundary; drop transcript-browsing polish. Pixel/visual comparison is removed from CI by semon#536/#537. New UI work is dashboards and query results. |
+| Viewer | Amended 2026-11-09 (owner decision; research in [t3-viewer-reuse-research.md](t3-viewer-reuse-research.md)). The Viewer is an analytics UI plus standalone, read-only browsing of Semon-stored history. Analytics is the core; read-only raw-log viewing is its foundation, which analytics evidence links into, so it is not optional polish. It keeps the authenticated server, shell, security boundary, existing sidebar/navigation, and catalog/transcript owners. Existing catalog/transcript code is the starting point, not removal scope. Semon must work without T3 Code, and T3 Code's transcript is a presentation reference only. Reimplement any borrowed patterns in Semon's Preact UI under the [ownership contract](viewer-ownership.md), with no React/T3 runtime or state. Copied code or assets keep the applicable MIT/third-party notices. An "Open in T3" link is optional and appears only for a verified mapping. Bodies stay on the machine or the operator's receiver, and Hub stays analytics-only. There is no composer, control, runtime or SSH. Pixel/visual comparison stays removed from CI (semon#536/#537). Proposed, not yet authorized: a Storybook comparison on synthetic fixtures of the current transcript against a T3-style presentation, run under [the AI design workflow](ai-design-workflow.md). |
 | Control, runtime, SSH | Retired in step 2: `semon-control`, `semon-runtime` and `semon-ssh` code and active entry points are removed. Push/receive over TLS covers multi-machine collection. Retirement deletes no user data, credentials, history or installed services. |
 
 ## Architecture
@@ -116,7 +119,8 @@ query, #546 L1 labels) own the details.
    the #477 carry-over: https://github.com/onsager-ai/semon/issues/477#issuecomment-6719032404.
 4. Ship the query surface: read-only SQL plus FTS through MCP/CLI, replacing the
    paused `find`.
-5. Rebuild Analytics on durable storage; shrink the Viewer into the analytics UI.
+5. Rebuild Analytics on durable storage; shape the Viewer into the analytics UI
+   plus read-only history browsing (Viewer decision above).
    Pixel baselines and visual tooling are removed by semon#536/#537 (Source) and
    semon-hub#377 (Hub).
 6. Hub follow-ups: shrink browser suites that exercise display/control/runtime,
