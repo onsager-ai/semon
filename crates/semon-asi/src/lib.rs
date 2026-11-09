@@ -5,4 +5,6 @@ pub mod governance;
 pub mod schema;
 
 pub use error::{Error, Result};
-pub use governance::{ExportProfile, GovernanceError, Policy, PolicyBundle, Source, evaluate};
+pub use governance::{
+    Destination, GovernanceError, Policy, PolicyBundle, Principal, Scope, Source, evaluate,
+};
