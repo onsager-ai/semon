@@ -120,9 +120,11 @@ fn activity_pages_require_exact_sources_generation_rules_and_prices() {
             params![row.key, initial.generation],
         )
         .unwrap();
-    assert!(step_facts(&store.connection, row, &initial.generation)
-        .unwrap()
-        .is_none());
+    assert!(
+        step_facts(&store.connection, row, &initial.generation)
+            .unwrap()
+            .is_none()
+    );
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
@@ -425,12 +427,7 @@ fn step_facts_keep_private_tool_details_and_usage_ownership() {
                 result_timestamp: Some(40),
                 result_offset: Some(25),
                 tool: None,
-                observation: classify::call(
-                    "Agent",
-                    &serde_json::json!({}),
-                    None,
-                    "future".into(),
-                ),
+                observation: classify::call("Agent", &serde_json::json!({}), None, "future".into()),
             },
         ],
         vec![TimedInput {

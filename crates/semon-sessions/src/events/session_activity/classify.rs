@@ -991,10 +991,11 @@ pub(crate) fn tool_evidence(name: &str, input: &Value) -> ToolCallEvidence {
     let raw_patch = input.as_str();
     let input = input_value(input).unwrap_or(Cow::Owned(Value::Null));
     let target_path = match tool.as_str() {
-        "Read" | "read_file" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => input
+        "Read" | "read_file" | "Write" | "Edit" | "MultiEdit" => input
             .get("file_path")
             .or_else(|| input.get("path"))
             .and_then(Value::as_str),
+        "NotebookEdit" => input.get("notebook_path").and_then(Value::as_str),
         "Grep" | "Glob" => input.get("path").and_then(Value::as_str),
         "apply_patch" => input
             .get("file_path")
@@ -1766,7 +1767,7 @@ pub(crate) fn capture(
                         payload.get("arguments").unwrap_or(&Value::Null)
                     };
                     let tool_name = if name == "exec" { "exec_command" } else { name };
-                    let tool = tool_evidence(tool_name, input);
+                    let tool = tool_evidence(name, input);
                     let mut observation = call(tool_name, input, codex_step(payload), hash.clone());
                     bind_source_context(&mut observation, index.cwd.as_deref());
                     observation.formatter = index.events[event].native_direct_call

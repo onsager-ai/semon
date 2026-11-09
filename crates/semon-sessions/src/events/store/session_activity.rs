@@ -57,29 +57,6 @@ impl Projection {
         input_events: Vec<activity::TimedInput>,
         table: Arc<crate::pricing::EffectiveTable>,
     ) -> Self {
-        Self::derive_with_copied(
-            key,
-            usage,
-            shared,
-            signals,
-            observations,
-            input_events,
-            &BTreeSet::new(),
-            table,
-        )
-    }
-
-    pub(crate) fn derive_with_copied(
-        key: String,
-        usage: Vec<UsageStep>,
-        shared: &crate::claude_usage::Shared,
-        signals: Vec<(String, Signal)>,
-        observations: Vec<activity::classify::LocatedObservation>,
-        input_events: Vec<activity::TimedInput>,
-        // Native event positions that Builder resolved as continued-in copies.
-        copied_observations: &BTreeSet<(String, u64)>,
-        table: Arc<crate::pricing::EffectiveTable>,
-    ) -> Self {
         let mut inputs = BTreeMap::new();
         let mut turn_ids = BTreeMap::new();
         for row in &usage {
@@ -100,14 +77,7 @@ impl Projection {
         }
         let mut activity = activity::derive(key, usage, shared, signals, table);
         let observations = activity::apply_observations(&mut activity, observations);
-        let facts = derive_facts(
-            &activity,
-            &inputs,
-            &turn_ids,
-            &observations,
-            &input_events,
-            copied_observations,
-        );
+        let facts = derive_facts(&activity, &inputs, &turn_ids, &observations, &input_events);
         Self {
             activity,
             inputs,
@@ -144,13 +114,11 @@ fn model_ms(
     step: &ActivityStep,
     observations: &[activity::classify::LocatedObservation],
     input_events: &[activity::TimedInput],
-    copied_observations: &BTreeSet<(String, u64)>,
 ) -> Option<u64> {
     observations
         .iter()
         .filter(|row| {
-            !copied_observations.contains(&(row.position.source.clone(), row.position.offset))
-                && row.position.source == step.position.source
+            row.position.source == step.position.source
                 && row.position.offset < step.position.offset
         })
         .filter_map(|row| match row.result_offset {
@@ -177,7 +145,6 @@ fn derive_facts(
     turn_ids: &BTreeMap<ActivityStepId, Option<String>>,
     observations: &[activity::classify::LocatedObservation],
     input_events: &[activity::TimedInput],
-    copied_observations: &BTreeSet<(String, u64)>,
 ) -> BTreeMap<ActivityStepId, activity::StepFacts> {
     let mut exact = BTreeMap::new();
     let mut sources: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
@@ -193,9 +160,6 @@ fn derive_facts(
     }
     let mut calls: Vec<Vec<activity::ToolCallFact>> = vec![Vec::new(); activity.steps.len()];
     for row in observations {
-        if copied_observations.contains(&(row.position.source.clone(), row.position.offset)) {
-            continue;
-        }
         let Some(tool) = &row.tool else {
             continue;
         };
@@ -238,7 +202,7 @@ fn derive_facts(
                     turn_id,
                     usage_owner,
                     billing: billing(usage),
-                    model_ms: model_ms(step, observations, input_events, copied_observations),
+                    model_ms: model_ms(step, observations, input_events),
                     tool_ms,
                     tool_calls: std::mem::take(&mut calls[index]),
                 },

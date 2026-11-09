@@ -186,6 +186,7 @@ fn activity_copy_resume_tool_calls_are_counted_once_in_step_facts() {
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].2.tool_calls.len(), 1);
     assert_eq!(facts[0].2.tool_ms, Some(60_000));
+    assert_eq!(facts[0].2.model_ms, Some(60_000));
 }
 
 #[test]

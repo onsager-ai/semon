@@ -2469,7 +2469,6 @@ impl<'a> Builder<'a> {
         let mut signals = Vec::new();
         let mut observations = Vec::new();
         let mut input_events = Vec::new();
-        let mut copied_observations = BTreeSet::new();
         for position in &session.files {
             let file = &self.files[*position];
             let path = file
@@ -2504,22 +2503,10 @@ impl<'a> Builder<'a> {
             } else if file.summary.has_native_usage() {
                 usage.extend(self.cache.activity_codex_steps(&summary::source(file))?);
             }
-            for (event_index, event) in file.summary.events.iter().enumerate() {
-                if event.activity_observation.is_some()
-                    && self.copied.contains(&(*position, event_index))
-                {
-                    copied_observations.insert((path.to_owned(), event.o));
-                }
-            }
             input_events.extend(
                 file.summary
                     .events
                     .iter()
-                    .enumerate()
-                    .filter(|(event_index, _)| {
-                        !self.copied.contains(&(*position, *event_index))
-                    })
-                    .map(|(_, event)| event)
                     .filter(|event| event.k == events::Kind::U)
                     .map(|event| events::session_activity::TimedInput {
                         position: SourcePosition {
@@ -2529,23 +2516,33 @@ impl<'a> Builder<'a> {
                         timestamp: event.t,
                     }),
             );
-            observations.extend(file.summary.events.iter().filter_map(|event| {
-                event.activity_observation.clone().map(|mut observation| {
-                    observation
-                        .fill_wait_from_reply(event.t, event.r.as_ref().and_then(|reply| reply.t));
-                    events::session_activity::classify::LocatedObservation {
-                        position: SourcePosition {
-                            source: path.into(),
-                            offset: event.o,
-                        },
-                        timestamp: event.t,
-                        result_timestamp: event.r.as_ref().and_then(|reply| reply.t),
-                        result_offset: event.r.as_ref().map(|reply| reply.o),
-                        tool: event.activity_tool.clone(),
-                        observation,
-                    }
-                })
-            }));
+            observations.extend(file.summary.events.iter().enumerate().filter_map(
+                |(at, event)| {
+                    event.activity_observation.clone().map(|mut observation| {
+                        observation.fill_wait_from_reply(
+                            event.t,
+                            event.r.as_ref().and_then(|reply| reply.t),
+                        );
+                        events::session_activity::classify::LocatedObservation {
+                            position: SourcePosition {
+                                source: path.into(),
+                                offset: event.o,
+                            },
+                            timestamp: event.t,
+                            result_timestamp: event.r.as_ref().and_then(|reply| reply.t),
+                            result_offset: event.r.as_ref().map(|reply| reply.o),
+                            // Copies retain timing and classifier evidence, but do
+                            // not contribute a second tool call to StepFacts.
+                            tool: if self.copied.contains(&(*position, at)) {
+                                None
+                            } else {
+                                event.activity_tool.clone()
+                            },
+                            observation,
+                        }
+                    })
+                },
+            ));
             signals.extend(
                 file.summary
                     .signals
@@ -2560,29 +2557,15 @@ impl<'a> Builder<'a> {
             .cloned()
             .unwrap_or_default();
         let table = crate::pricing::snapshot();
-        let projection = if copied_observations.is_empty() {
-            events::store::session_activity::Projection::derive(
-                session.key.clone(),
-                usage,
-                &shared,
-                signals,
-                observations,
-                input_events,
-                table,
-            )
-        } else {
-            events::store::session_activity::Projection::derive_with_copied(
-                session.key.clone(),
-                usage,
-                &shared,
-                signals,
-                observations,
-                input_events,
-                &copied_observations,
-                table,
-            )
-        };
-        Ok(Some(projection))
+        Ok(Some(events::store::session_activity::Projection::derive(
+            session.key.clone(),
+            usage,
+            &shared,
+            signals,
+            observations,
+            input_events,
+            table,
+        )))
     }
 
     fn describe(&mut self, index: usize) {
