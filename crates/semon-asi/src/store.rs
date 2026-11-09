@@ -590,7 +590,7 @@ fn generation_of(name: &str) -> Option<u64> {
 
 /// Generation numbers only grow, and the writer lock is held, so a file of a later
 /// generation than the manifest's is the leftover of a publish that never committed.
-fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
+pub(crate) fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
     match fs::remove_file(analytics.join(MANIFEST_TMP)) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}

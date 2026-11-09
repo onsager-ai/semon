@@ -15,9 +15,8 @@
 //! when a single file is larger than the cap. Every output file is sorted by
 //! namespace and start time.
 //!
-//! Output files hold at most `level1_max_bytes`, footer included, except that one
-//! row group larger than the cap gets a file of its own. Row groups are
-//! `chunk_rows` rows, so that is rare.
+//! Output files hold at most `level1_max_bytes`, footer included. Oversized row
+//! groups are subdivided; a single row larger than the cap is an error.
 
 use std::collections::HashSet;
 use std::fs;
@@ -31,7 +30,7 @@ use arrow::record_batch::RecordBatch;
 use crate::error::{Error, Result};
 use crate::parquet_io::{OutFile, Written, int_column, read_batches, string_column};
 use crate::schema::{GEN_COLUMN, Kind, SESSION_COLUMN, TABLES, Table};
-use crate::store::{Clock, FileEntry, Staged, Store, sync_parents};
+use crate::store::{Clock, FileEntry, Staged, Store, discard_uncommitted, sync_parents};
 
 /// Room kept for the Parquet footer: a base, plus a share per row group.
 const FOOTER_BASE_BYTES: u64 = 64 * 1024;
@@ -68,7 +67,10 @@ impl<C: Clock> Store<C> {
     /// number, or `None` when there was nothing to do. A run handles a bounded
     /// amount of input; call again while it returns a generation to finish.
     pub fn compact(&mut self, policy: &CompactionPolicy) -> Result<Option<u64>> {
-        self.count_unknown_dead_rows()?;
+        discard_uncommitted(&self.analytics, self.manifest.generation)?;
+        if self.count_unknown_dead_rows(policy)? {
+            return Ok(Some(self.manifest.generation));
+        }
         let generation = self.manifest.generation + 1;
         let mut dropped: HashSet<String> = HashSet::new();
         let mut added: Vec<FileEntry> = Vec::new();
@@ -110,15 +112,20 @@ impl<C: Clock> Store<C> {
 
     /// Counts dead rows of the level-1 files whose count a publication invalidated,
     /// and records them. Files with a known count are not read.
-    fn count_unknown_dead_rows(&mut self) -> Result<()> {
+    fn count_unknown_dead_rows(&mut self, policy: &CompactionPolicy) -> Result<bool> {
         let mut manifest = self.manifest.clone();
         let mut changed = false;
+        let mut memory = 0u64;
         for file in &mut manifest.files {
             let session_table = TABLES
                 .iter()
                 .any(|table| table.name == file.table && table.kind == Kind::Session);
             if file.level == 1 && session_table && file.dead.is_none() {
+                if changed && memory.saturating_add(file.memory) > policy.max_input_bytes {
+                    break;
+                }
                 file.dead = Some(self.dead_rows(file)?);
+                memory = memory.saturating_add(file.memory);
                 changed = true;
             }
         }
@@ -129,7 +136,7 @@ impl<C: Clock> Store<C> {
                 dropped: Vec::new(),
             })?;
         }
-        Ok(())
+        Ok(changed)
     }
 
     fn compaction_inputs(&self, table: &Table, policy: &CompactionPolicy) -> Vec<FileEntry> {
@@ -229,12 +236,10 @@ impl<C: Clock> Store<C> {
         fs::create_dir_all(self.analytics.join(table.name))?;
         let total = sorted.num_rows();
         let step = policy.chunk_rows.max(1);
-        let groups: Vec<(usize, usize)> = (0..total)
+        let mut groups: Vec<(usize, usize)> = (0..total)
             .step_by(step)
             .map(|offset| (offset, step.min(total - offset)))
             .collect();
-        // Decoded size of a row, to attribute memory to row groups.
-        let row_memory = sorted.get_array_memory_size() as f64 / total as f64;
         let mut outputs = Vec::new();
         let mut next = 0;
         while next < groups.len() {
@@ -245,9 +250,19 @@ impl<C: Clock> Store<C> {
                 sorted: &sorted,
                 groups: &groups[next..],
                 cap: policy.level1_max_bytes,
-                row_memory,
             };
-            let (written, taken, low, high) = run.write()?;
+            let Some((written, taken, low, high)) = run.write()? else {
+                let (offset, len) = groups[next];
+                if len == 1 {
+                    return Err(Error::invalid(
+                        "a single row exceeds the compaction output cap",
+                    ));
+                }
+                let first = len / 2;
+                groups[next] = (offset, first);
+                groups.insert(next + 1, (offset + first, len - first));
+                continue;
+            };
             next += taken;
             outputs.push(FileEntry {
                 table: table.name.to_owned(),
@@ -277,7 +292,6 @@ struct WriteRun<'a> {
     sorted: &'a RecordBatch,
     groups: &'a [(usize, usize)],
     cap: u64,
-    row_memory: f64,
 }
 
 impl WriteRun<'_> {
@@ -287,9 +301,9 @@ impl WriteRun<'_> {
     /// Before each row group the bytes so far and a prediction from the average row
     /// size are checked against the cap. The prediction can be wrong for variable
     /// data, so the finished file is measured, footer included; if it is over the
-    /// cap, the file is written again with one row group fewer. One row group alone
-    /// is always accepted.
-    fn write(&self) -> Result<(Written, usize, i64, i64)> {
+    /// cap, the file is written again with one row group fewer. An oversized first
+    /// group is returned to the caller for subdivision.
+    fn write(&self) -> Result<Option<(Written, usize, i64, i64)>> {
         let mut limit = self.groups.len();
         loop {
             let mut out = OutFile::create(&self.path, self.schema.clone())?;
@@ -307,15 +321,21 @@ impl WriteRun<'_> {
                 let generations = int_column(&slice, GEN_COLUMN)?;
                 low = low.min(min(generations).unwrap_or(i64::MAX));
                 high = high.max(max(generations).unwrap_or(i64::MIN));
-                out.write_group(&slice, (self.row_memory * len as f64) as u64)?;
+                // Materialize the slice so its buffers reflect the rows in this group.
+                let indices = UInt32Array::from_iter_values(0..len as u32);
+                let materialized = take_record_batch(&slice, &indices)?;
+                out.write_group(&materialized, materialized.get_array_memory_size() as u64)?;
                 taken += 1;
             }
             let written = out.finish()?;
-            if written.bytes > self.cap && taken > 1 {
+            if written.bytes > self.cap {
+                if taken == 1 {
+                    return Ok(None);
+                }
                 limit = taken - 1;
                 continue;
             }
-            return Ok((written, taken, low, high));
+            return Ok(Some((written, taken, low, high)));
         }
     }
 }
@@ -381,7 +401,7 @@ mod tests {
     /// One row group per file: every row group is its own level-1 file.
     fn one_group_per_file(chunk_rows: usize) -> CompactionPolicy {
         CompactionPolicy {
-            level1_max_bytes: 1,
+            level1_max_bytes: 64 * 1024,
             chunk_rows,
             ..policy()
         }
@@ -530,6 +550,7 @@ mod tests {
         // Exactly 30 of 100 rows dead: not rewritten.
         publish_range(&mut store, 0..30, "y");
         let generation = store.manifest().generation;
+        assert_eq!(store.compact(&wide).unwrap(), Some(generation));
         assert_eq!(store.compact(&wide).unwrap(), None);
         assert_eq!(store.manifest().generation, generation);
         assert_eq!(levels(&store, 1)[0].path, merged[0].path);
@@ -538,6 +559,7 @@ mod tests {
         // 31 of 100: rewritten, with only live rows.
         publish_range(&mut store, 30..31, "y");
         let before = all_rows(&store, &FACT_TABLES);
+        store.compact(&wide).unwrap().expect("a recount");
         store.compact(&wide).unwrap().expect("a generation");
         let rewritten = levels(&store, 1);
         assert_eq!(rewritten.len(), 1);
@@ -565,12 +587,43 @@ mod tests {
         store.publish(&update_all(&rows, "y", 0)).unwrap();
 
         let before = all_rows(&store, &FACT_TABLES);
+        store.compact(&split).unwrap().expect("a recount");
         store.compact(&split).unwrap().expect("a generation");
         let paths: Vec<String> = levels(&store, 1).into_iter().map(|f| f.path).collect();
         assert!(paths.contains(&files[2].path), "the clean file is kept");
         assert!(!paths.contains(&files[0].path));
         assert!(!paths.contains(&files[1].path));
         assert_eq!(all_rows(&store, &FACT_TABLES), before);
+    }
+
+    #[test]
+    fn recount_of_invalidated_files_is_bounded_and_makes_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path());
+        for start in [0, 10, 20] {
+            publish_range(&mut store, start..start + 10, "x");
+        }
+        store.compact(&one_group_per_file(10)).unwrap();
+        publish_range(&mut store, 0..30, "new");
+        let before = store
+            .manifest
+            .files
+            .iter()
+            .filter(|f| f.level == 1 && f.dead.is_none())
+            .count();
+        assert!(before > 1);
+        let bounded = CompactionPolicy {
+            max_input_bytes: 1,
+            ..policy()
+        };
+        store.compact(&bounded).unwrap();
+        let after = store
+            .manifest
+            .files
+            .iter()
+            .filter(|f| f.level == 1 && f.dead.is_none())
+            .count();
+        assert_eq!(after, before - 1);
     }
 
     #[test]
@@ -671,19 +724,19 @@ mod tests {
     }
 
     #[test]
-    fn one_row_group_larger_than_the_cap_gets_a_file_of_its_own() {
+    fn single_row_larger_than_the_cap_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path());
         for start in 0..3 {
             publish_range(&mut store, start * 4..start * 4 + 4, "x");
         }
-        store
-            .compact(&one_group_per_file(4))
-            .unwrap()
-            .expect("a generation");
-        let files = levels(&store, 1);
-        assert_eq!(files.len(), 3);
-        assert!(files.iter().all(|file| file.rows == 4 && file.bytes > 1));
+        let tiny = CompactionPolicy {
+            level1_max_bytes: 1,
+            chunk_rows: 4,
+            ..policy()
+        };
+        assert!(store.compact(&tiny).is_err());
+        assert_eq!(store.manifest().generation, 3);
     }
 
     #[test]
