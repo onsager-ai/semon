@@ -18,7 +18,7 @@ use crate::{claude_usage::Shared, pricing};
 pub(crate) mod analytics;
 pub(crate) mod classify;
 
-pub(crate) const ACTIVITY_RULES_VERSION: u32 = 8;
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 9;
 const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
@@ -132,6 +132,7 @@ impl UsageStep {
 pub(crate) struct ActivityStep {
     pub(crate) id: ActivityStepId,
     pub(crate) position: SourcePosition,
+    pub(crate) call_position: Option<SourcePosition>,
     pub(crate) ownership: Ownership,
     pub(crate) model: Option<String>,
     pub(crate) tokens: ModelTokens,
@@ -359,6 +360,15 @@ pub(crate) fn apply_observations(
         };
         if let Some(owner) = owner {
             let step = &mut activity.steps[owner];
+            if matches!(step.id, ActivityStepId::Codex(_))
+                && row.observation.step_id.as_ref() == Some(&step.id)
+                && step
+                    .call_position
+                    .as_ref()
+                    .is_none_or(|old| row.position < *old)
+            {
+                step.call_position = Some(row.position.clone());
+            }
             step.empty_search |= row.observation.empty_search;
             step.verify_failure |= row.observation.verify_failure;
             step.silent_exit |= row.observation.silent_exit;
@@ -465,6 +475,7 @@ pub(crate) fn derive(
             ActivityStep {
                 id: row.id,
                 position: row.position,
+                call_position: None,
                 ownership,
                 model,
                 tokens,

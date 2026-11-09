@@ -619,7 +619,10 @@ fn check_schema(tool: &str, schema: &Value) {
                     "maximum",
                     "minLength",
                     "maxLength",
-                    "default"
+                    "default",
+                    "properties",
+                    "required",
+                    "additionalProperties"
                 ]
                 .contains(&key.as_str()),
                 "{tool}.{name}: {key}"
@@ -627,7 +630,7 @@ fn check_schema(tool: &str, schema: &Value) {
         }
         let kind = property["type"].as_str().unwrap();
         assert!(
-            ["string", "integer"].contains(&kind),
+            ["string", "integer", "object"].contains(&kind),
             "{tool}.{name}: {kind}"
         );
         assert!(
@@ -643,6 +646,12 @@ fn check_schema(tool: &str, schema: &Value) {
                     .unwrap_or_else(|| panic!("{tool}.{name}.{key}"))
             })
         };
+        if kind == "object" {
+            assert!(property["properties"].is_object());
+            assert!(property["required"].is_array());
+            assert_eq!(property["additionalProperties"], false);
+            continue;
+        }
         if kind == "string" {
             assert!(bound("minimum").is_none() && bound("maximum").is_none());
             if let (Some(min), Some(max)) = (bound("minLength"), bound("maxLength")) {

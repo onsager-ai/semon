@@ -1,4 +1,6 @@
-use super::super::tests::{catalog_native_fixture, catalog_write, opened, scratch};
+use super::super::tests::{
+    catalog_fixture_projection, catalog_native_fixture, catalog_write, opened, scratch,
+};
 use super::*;
 use crate::events::session_activity::{ActivityStepId, Ownership};
 
@@ -111,6 +113,204 @@ fn activity_pages_require_exact_sources_generation_rules_and_prices() {
         Outcome::Written
     );
     assert_eq!(read(&store.connection, row), initial);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn activity_anchor_admits_only_current_exact_records() {
+    let root = scratch("activity-anchor");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let page = read(&store.connection, row);
+    let anchor = crate::transcript_range::StepAnchor {
+        generation: page.generation.clone(),
+        ordinal: 0,
+        id: page.steps[0].id.clone(),
+    };
+    let resolved =
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap();
+    assert_eq!(resolved["available"], true);
+    assert_eq!(resolved["basis"], "native_record_id");
+    let selected = resolved["slot"].as_i64().unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO session_slots(session_key,slot,metadata) SELECT session_key,slot+1000,metadata FROM session_slots WHERE session_key=?1 AND slot=?2",
+            params![row.key, selected],
+        )
+        .unwrap();
+    let repeated =
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap();
+    assert_eq!(repeated["slot"], selected);
+    let mut stale = anchor.clone();
+    stale.generation = "stale".into();
+    assert_eq!(
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &stale).unwrap()
+            ["reason"],
+        "stale_activity"
+    );
+    let mut changed = row.clone();
+    changed.sources[0].offset += 1;
+    assert_eq!(
+        crate::transcript_range::resolve_step_slot(&store.connection, &changed, false, &anchor)
+            .unwrap()["reason"],
+        "source_generation_mismatch"
+    );
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn streamed_claude_anchor_selects_lowest_exact_record() {
+    use std::io::Write;
+
+    let root = scratch("streamed-activity-anchor");
+    let (options, _, _) = catalog_native_fixture(&root, 2, false);
+    let path = options
+        .claude_home
+        .join("projects/-work-proj/native-cl-00.jsonl");
+    let record = serde_json::json!({
+        "type": "assistant", "uuid": "assistant-second", "sessionId": "native-cl-00",
+        "timestamp": "2026-09-24T00:01:01Z",
+        "message": {"id": "message-native-cl-00", "role": "assistant",
+            "model": "claude-sonnet-4-5", "content": [{"type": "text", "text": "More"}],
+            "usage": {"input_tokens": 10, "output_tokens": 6}}
+    });
+    writeln!(
+        fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{record}"
+    )
+    .unwrap();
+    let (rows, slots) = catalog_fixture_projection(&options);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let page = read(&store.connection, row);
+    let anchor = crate::transcript_range::StepAnchor {
+        generation: page.generation,
+        ordinal: 0,
+        id: page.steps[0].id.clone(),
+    };
+    let (_, usage) = step_at(&store.connection, row, &anchor.generation, 0)
+        .unwrap()
+        .unwrap();
+    let Usage::Claude(usage) = usage else {
+        panic!("expected Claude usage");
+    };
+    assert!(usage.record_ids.contains("assistant-native-cl-00"));
+    assert!(usage.record_ids.contains("assistant-second"));
+    let mut matching = store
+        .connection
+        .prepare("SELECT slot, metadata FROM session_slots WHERE session_key=?1 ORDER BY slot")
+        .unwrap();
+    let matches = matching
+        .query_map([&row.key], |record| {
+            Ok((record.get::<_, i64>(0)?, record.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .filter_map(|(slot, metadata)| {
+            let saved: crate::slot_projection::SavedSlot = serde_json::from_str(&metadata).unwrap();
+            saved
+                .native_event_id
+                .filter(|id| usage.record_ids.contains(id))
+                .map(|id| (slot, id))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(matches.len(), 2);
+    assert_ne!(matches[0].1, matches[1].1);
+    let resolved =
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap();
+    assert_eq!(resolved["basis"], "native_record_id");
+    assert_eq!(resolved["slot"], matches[0].0);
+    drop(matching);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_anchor_requires_a_rendered_exact_call() {
+    use crate::slot_projection::{File, Outcome, Recipe, SavedSlot};
+    let root = scratch("codex-activity-anchor");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "codex").unwrap();
+    let identity = ["thread", "session", "turn", "response"].map(str::to_owned);
+    let position = SourcePosition {
+        source: row.sources[0].path.to_string_lossy().into_owned(),
+        offset: 42,
+    };
+    let usage = UsageStep::normalized_codex(
+        identity.clone(),
+        position.clone(),
+        CodexUsageEvent {
+            model: "synthetic".into(),
+            tokens: Default::default(),
+            timestamp: None,
+        },
+    );
+    let mut projection = Projection::derive(
+        row.key.clone(),
+        vec![usage],
+        &Default::default(),
+        vec![],
+        vec![],
+        crate::pricing::snapshot(),
+    );
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, &projection).unwrap();
+    tx.commit().unwrap();
+    let page = read(&store.connection, row);
+    let mut anchor = crate::transcript_range::StepAnchor {
+        generation: page.generation,
+        ordinal: 0,
+        id: ActivityStepId::Codex(identity),
+    };
+    assert_eq!(
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap()
+            ["reason"],
+        "no_exact_record"
+    );
+    projection.activity.steps[0].call_position = Some(position);
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, &projection).unwrap();
+    tx.commit().unwrap();
+    anchor.generation = read(&store.connection, row).generation;
+    let slot = SavedSlot {
+        recipe: Recipe::Tool {
+            outcome: Outcome::Ok,
+            name: "exec_command".into(),
+            result_source: false,
+            reply: None,
+            item: None,
+            background: None,
+        },
+        file: Some(File {
+            path: row.sources[0].path.clone(),
+            cwd: None,
+        }),
+        offset: 42,
+        block: 0,
+        t: None,
+        turn: None,
+        first: false,
+        field: None,
+        native_event_id: None,
+        images: vec![],
+    };
+    store
+        .connection
+        .execute(
+            "INSERT INTO session_slots(session_key,slot,metadata) VALUES(?1,1000,?2)",
+            params![row.key, serde_json::to_string(&slot).unwrap()],
+        )
+        .unwrap();
+    let resolved =
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap();
+    assert_eq!(resolved["basis"], "call_identity");
+    assert_eq!(resolved["slot"], 1000);
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }

@@ -88,7 +88,10 @@ Event Index or preparing a semantic cohort. Catalog publishes exact call/error
 counts and pending/background observations under its source/runtime fence;
 recipes themselves grant no live authority. The shared renderer keeps original
 slot addresses and the preceding Thinking timestamp. Turn anchors use the
-existing selected-session turn indexes. Completion rechecks the selected row,
+existing selected-session turn indexes. An exclusive `step` anchor accepts the
+activity generation, ordinal and native ID, resolving exact record evidence in
+the same SQLite snapshot. It refuses on fallback and PostgreSQL; the returned
+`transcript_generation` identifies the slot projection. Completion rechecks the selected row,
 slot generation, touched sources and runtime, permitting unrelated publication.
 Recipe windows stop at 512 candidates plus one preceding context row; selected
 recipe metadata and content-free proof hashes each have a 4 MiB read budget.

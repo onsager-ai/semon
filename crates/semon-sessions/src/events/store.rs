@@ -7527,7 +7527,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    fn catalog_fixture_projection(
+    pub(super) fn catalog_fixture_projection(
         options: &crate::Options,
     ) -> (
         Vec<crate::model::summary::CatalogRow>,

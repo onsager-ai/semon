@@ -94,7 +94,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// v38: activity steps carry independently priced dollar components; the
 /// compact activity summary adds coverage and component totals, and the
 /// projection stores a bounded timeline preview beside it.
-pub(crate) const CACHE_VERSION: u32 = 38;
+/// v39: activity steps retain exact Codex call provenance for transcript anchors.
+pub(crate) const CACHE_VERSION: u32 = 39;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

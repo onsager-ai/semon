@@ -65,7 +65,7 @@ At 360px, retain 16px side gutters and safe-area insets, stack analysis sections
 
 Implementation needs the following additions, with explicit source/cohort and generation qualification:
 
-1. Per-step transcript anchors for the selected native session and source generation.
+1. Delivered: per-step transcript anchor resolution for the selected native session and source generation; see [the analytics API contract](session-activity-analytics.md). Viewer jump integration remains open.
 2. Delivered: nullable fresh-input, cache-read, cache-write and output **dollar** components per step, measured exclusive component totals in `component_cost_usd` (not per band) and the pricing fingerprint. Independently known components stay known. See [the analytics contract](session-activity-analytics.md).
 3. Delivered in part: `get_session_activity` with `kind: "preview"` serves a bounded timeline of at most 64 bins (not in the summary), and `coverage` reports pricing, timing and classifier gaps. Bounded range/bucket reads for expanded heavy-tail sessions remain open.
 4. Delivered: `coverage` plus the typed `error.reason` of a refused `get_session_activity` (`no_activity`, `stale_generation`, `source_unavailable`, `limit_exceeded`, `interrupted`, `unsupported_storage`). The measured unique wait duration is the existing `wait_time_ms`, which survives when step pages refuse.

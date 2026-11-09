@@ -310,6 +310,29 @@ pub(crate) fn page(
     }))
 }
 
+/// Read one persisted step and its native usage under the page admission fence.
+pub(crate) fn step_at(
+    c: &Connection,
+    row: &crate::model::summary::CatalogRow,
+    generation: &str,
+    ordinal: u64,
+) -> rusqlite::Result<Option<(ActivityStep, Usage)>> {
+    let price = crate::pricing::snapshot();
+    let Some(admitted) = page(c, row, Some(generation), &price.fingerprint, ordinal, 1)? else {
+        return Ok(None);
+    };
+    if admitted.steps.is_empty() {
+        return Ok(None);
+    }
+    let metadata: String = c.query_row(
+        "SELECT metadata FROM session_activity_steps WHERE session_key=?1 AND generation=?2 AND ordinal=?3",
+        params![row.key, generation, i64::try_from(ordinal).map_err(|_| rusqlite::Error::InvalidQuery)?],
+        |record| record.get(0),
+    )?;
+    let saved: SavedStep = from_json(0, &metadata)?;
+    Ok(Some((saved.step, saved.usage)))
+}
+
 /// The bounded timeline stored with the projection, under the same source,
 /// rules, price and generation admission as the step pages.
 pub(crate) fn preview(
@@ -394,9 +417,9 @@ pub(crate) fn items(
     } else {
         for step in header.steps {
             let mut item = serde_json::to_value(step).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            item.as_object_mut()
-                .expect("typed activity step")
-                .remove("position");
+            let object = item.as_object_mut().expect("typed activity step");
+            object.remove("position");
+            object.remove("call_position");
             items.push(item);
         }
         if start > header.total {

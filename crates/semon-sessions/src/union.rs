@@ -1116,6 +1116,14 @@ impl ViewerCore {
                     | "/api/session-entry"
             )
         {
+            if path == "/api/session-activity-anchor" {
+                return ViewerReply {
+                    status: 200,
+                    content_type: "application/json; charset=utf-8",
+                    body: br#"{"available":false,"reason":"unsupported_storage"}"#.to_vec(),
+                    etag: None,
+                };
+            }
             return crate::catalog::error(
                 503,
                 "capability_unavailable",
@@ -1185,6 +1193,7 @@ impl ViewerCore {
                 | "/api/session-capabilities"
                 | "/api/session-identity"
                 | "/api/session-anchor"
+                | "/api/session-activity-anchor"
                 | "/api/session-annotations"
                 | "/api/session-trace"
                 | "/api/session-home"
@@ -1532,6 +1541,18 @@ impl ViewerCore {
                         Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
                     Ok(())
                 })
+            }
+            "/api/session-activity-anchor" => {
+                crate::transcript_range::session_activity_anchor_with_gate(
+                    view.options(),
+                    key,
+                    query,
+                    || {
+                        refresh_error =
+                            Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                        Ok(())
+                    },
+                )
             }
             "/api/session-annotations" => {
                 crate::session_annotations_with_gate(view.options(), key, query, || {

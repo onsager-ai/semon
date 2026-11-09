@@ -281,6 +281,41 @@ fn native_payload() -> serde_json::Value {
 }
 
 #[test]
+fn codex_call_provenance_requires_exact_identity() {
+    let payload = native_payload();
+    let step = UsageStep::codex(
+        &payload,
+        "accepted",
+        position("s", 100),
+        "synthetic-model".into(),
+        None,
+    )
+    .unwrap();
+    let identity = step.id.clone();
+    let mut result = activity(vec![step], vec![]);
+    let observation = |offset, id| classify::LocatedObservation {
+        position: position("s", offset),
+        timestamp: None,
+        result_offset: None,
+        observation: classify::call(
+            "exec_command",
+            &json!({"cmd":"true"}),
+            id,
+            format!("call-{offset}"),
+        ),
+    };
+    apply_observations(
+        &mut result,
+        vec![
+            observation(5, None),
+            observation(20, Some(identity.clone())),
+            observation(10, Some(identity)),
+        ],
+    );
+    assert_eq!(result.steps[0].call_position, Some(position("s", 10)));
+}
+
+#[test]
 fn codex_requires_accepted_complete_tuple_and_never_adds_duplicate_or_conflict() {
     let payload = native_payload();
     let mut conflict = payload.clone();
