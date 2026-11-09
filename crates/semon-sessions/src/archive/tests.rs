@@ -536,11 +536,15 @@ fn a_changed_manifest_invalidates_cached_verification() {
     let old = manifest.chains[0].clone();
     let file = chain_file(&archive, "native", &old);
     let bytes = fs::read(&file).unwrap();
-    manifest.chains[0].sha256 = hex(&digest(b"changed manifest"));
+    let changed = lines(log.len(), 2);
+    manifest.chains[0].sha256 = hex(&digest(&changed));
     publish(path.parent().unwrap(), MANIFEST, &manifest).unwrap();
 
-    assert!(admit(&archive, &log, log.len()));
-    assert_eq!(archive.chains("native").unwrap().len(), 2);
+    // The new digest matches the incoming bytes, but not the unchanged file.
+    assert!(admit(&archive, &changed, changed.len()));
+    let chains = archive.chains("native").unwrap();
+    assert_eq!(chains.len(), 2);
+    assert_eq!(read_chain(&archive, "native", &chains[1]), changed);
     assert_eq!(fs::read(file).unwrap(), bytes);
 }
 
