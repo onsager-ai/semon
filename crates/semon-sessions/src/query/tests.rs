@@ -6461,6 +6461,30 @@ fn activity_family_rolls_up_without_child_step_duplication() {
 }
 
 #[test]
+fn activity_step_transcript_anchor_reads_exact_record() {
+    let home = activity_fixture();
+    let mut query = home.query();
+    call(&mut query, "list_sessions", json!({}));
+    let activity = call(&mut query, "get_session_activity", json!({"id":"activity"}));
+    let args = json!({"id":"activity", "step": {
+        "generation": activity["generation"], "ordinal": 0, "id": activity["items"][0]["id"]
+    }});
+    let page = call(&mut query, "read_transcript", args);
+    assert!(page["transcript_generation"].is_string());
+}
+
+#[test]
+fn activity_step_transcript_anchor_refuses_in_memory_fallback() {
+    let home = activity_fixture();
+    let mut query = home.query();
+    let activity = call(&mut query, "get_session_activity", json!({"id":"activity"}));
+    let args = json!({"id":"activity", "step": {
+        "generation": activity["generation"], "ordinal": 0, "id": activity["items"][0]["id"]
+    }});
+    assert!(query.read_transcript(&args, NOW, None).is_err());
+}
+
+#[test]
 fn activity_projection_rejects_a_different_storage_namespace() {
     let home = activity_fixture();
     let mut query = home.query();
