@@ -99,7 +99,10 @@ fn a_preserved_chain_holds_the_bytes_and_the_redactor_version() {
     let index: Index = read_json(&archive.dir.join(INDEX)).unwrap();
     assert_eq!(index.sources.len(), 2);
     assert!(index.sources.values().all(|id| is_id(id)));
-    let (a, b) = (&index.sources["claude/a.jsonl"], &index.sources["claude/b.jsonl"]);
+    let (a, b) = (
+        &index.sources["claude/a.jsonl"],
+        &index.sources["claude/b.jsonl"],
+    );
     assert_ne!(a, b);
 }
 
@@ -133,7 +136,11 @@ fn a_digest_mismatch_is_detected() {
     // Other bytes in the chain's place, as damage would leave them.
     let id = archive.lookup("s").unwrap().unwrap();
     let file = archive.dir.join(id).join(format!("{}.zst", chain.chain_id));
-    fs::write(file, zstd::bulk::compress(&lines(50_000, 9), LEVEL).unwrap()).unwrap();
+    fs::write(
+        file,
+        zstd::bulk::compress(&lines(50_000, 9), LEVEL).unwrap(),
+    )
+    .unwrap();
     assert!(archive.verify("s").is_err());
 
     // A manifest that claims other bytes than its chain holds.
@@ -199,7 +206,11 @@ fn bytes_that_are_not_the_consumed_prefix_are_not_admitted() {
     let wrong = digest(&lines(30_000, 2));
     // The log changed after the index read it.
     let mut cursor = Cursor::new(&log);
-    assert!(!archive.admit("native", &mut cursor, 30_000, &wrong).unwrap());
+    assert!(
+        !archive
+            .admit("native", &mut cursor, 30_000, &wrong)
+            .unwrap()
+    );
     // The log is shorter than what the index consumed.
     let mut cursor = Cursor::new(&log[..100]);
     let all = digest(&log);
@@ -210,7 +221,11 @@ fn bytes_that_are_not_the_consumed_prefix_are_not_admitted() {
     let chain = archive.chains("native").unwrap().remove(0);
     // Growth whose digest is not the log's leaves the chain as it was.
     let mut cursor = Cursor::new(&log);
-    assert!(!archive.admit("native", &mut cursor, 30_000, &wrong).unwrap());
+    assert!(
+        !archive
+            .admit("native", &mut cursor, 30_000, &wrong)
+            .unwrap()
+    );
     assert_eq!(archive.chains("native").unwrap(), [chain]);
     archive.verify("native").unwrap();
 }
@@ -225,7 +240,11 @@ fn a_failed_extension_is_retried_from_the_last_manifest() {
     FAIL_BEFORE_RENAME.with(|fail| fail.set(true));
     let prefix = digest(&log[..150_000]);
     let mut cursor = Cursor::new(&log);
-    assert!(archive.admit("native", &mut cursor, 150_000, &prefix).is_err());
+    assert!(
+        archive
+            .admit("native", &mut cursor, 150_000, &prefix)
+            .is_err()
+    );
     assert_eq!(archive.chains("native").unwrap(), kept);
     archive.verify("native").unwrap();
 

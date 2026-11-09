@@ -1870,7 +1870,9 @@ mod tests {
         assert_eq!(versions, ["1", "2", "mixed"]);
 
         // Bytes stored with no recorded version are unknown.
-        let path = receiver.machine_dir("laptop").join("claude/projects/-work/old.jsonl");
+        let path = receiver
+            .machine_dir("laptop")
+            .join("claude/projects/-work/old.jsonl");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"old\n").unwrap();
         let request = append("projects/-work/old.jsonl", b"", 0, b"new\n", true);
