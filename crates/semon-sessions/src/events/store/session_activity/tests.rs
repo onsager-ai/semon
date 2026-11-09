@@ -161,6 +161,91 @@ fn activity_anchor_admits_only_current_exact_records() {
 }
 
 #[test]
+fn codex_anchor_requires_a_rendered_exact_call() {
+    use crate::slot_projection::{File, Outcome, Recipe, SavedSlot};
+    let root = scratch("codex-activity-anchor");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "codex").unwrap();
+    let identity = ["thread", "session", "turn", "response"].map(str::to_owned);
+    let position = SourcePosition {
+        source: row.sources[0].path.to_string_lossy().into_owned(),
+        offset: 42,
+    };
+    let usage = UsageStep::normalized_codex(
+        identity.clone(),
+        position.clone(),
+        CodexUsageEvent {
+            model: "synthetic".into(),
+            tokens: Default::default(),
+            timestamp: None,
+        },
+    );
+    let mut projection = Projection::derive(
+        row.key.clone(),
+        vec![usage],
+        &Default::default(),
+        vec![],
+        vec![],
+        crate::pricing::snapshot(),
+    );
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, &projection).unwrap();
+    tx.commit().unwrap();
+    let page = read(&store.connection, row);
+    let mut anchor = crate::transcript_range::StepAnchor {
+        generation: page.generation,
+        ordinal: 0,
+        id: ActivityStepId::Codex(identity),
+    };
+    assert_eq!(
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor)
+            .unwrap()["reason"],
+        "no_exact_record"
+    );
+    projection.activity.steps[0].call_position = Some(position);
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, &projection).unwrap();
+    tx.commit().unwrap();
+    anchor.generation = read(&store.connection, row).generation;
+    let slot = SavedSlot {
+        recipe: Recipe::Tool {
+            outcome: Outcome::Ok,
+            name: "exec_command".into(),
+            result_source: false,
+            reply: None,
+            item: None,
+            background: None,
+        },
+        file: Some(File {
+            path: row.sources[0].path.clone(),
+            cwd: None,
+        }),
+        offset: 42,
+        block: 0,
+        t: None,
+        turn: None,
+        first: false,
+        field: None,
+        native_event_id: None,
+        images: vec![],
+    };
+    store
+        .connection
+        .execute(
+            "INSERT INTO session_slots(session_key,slot,metadata) VALUES(?1,1000,?2)",
+            params![row.key, serde_json::to_string(&slot).unwrap()],
+        )
+        .unwrap();
+    let resolved =
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap();
+    assert_eq!(resolved["basis"], "call_identity");
+    assert_eq!(resolved["slot"], 1000);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn activity_repricing_resumes_and_never_serves_mixed_prices() {
     let root = scratch("activity-reprice");
     let (options, mut rows, _) = catalog_native_fixture(&root, 2, true);
