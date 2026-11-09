@@ -655,3 +655,119 @@ fn planted_archive_temporary_symlinks_never_truncate_the_target() {
             .is_symlink()
     );
 }
+
+fn prefix_resources(archive: &Archive) -> (usize, usize) {
+    let known = archive.known();
+    let progress: Vec<_> = known
+        .verified
+        .values()
+        .filter_map(|held| held.prefix.as_ref())
+        .collect();
+    (
+        progress.len(),
+        progress.iter().map(|prefix| prefix.digests.len()).sum(),
+    )
+}
+
+#[test]
+fn many_archive_ahead_sources_bound_live_decoders_and_release_on_catch_up() {
+    let (_scratch, archive) = archive();
+    let log = lines(4096, 1);
+    let sources: Vec<_> = (0..MAX_PREFIX_READERS * 2)
+        .map(|n| format!("native-{n}"))
+        .collect();
+    for source in &sources {
+        archive
+            .admit(
+                source,
+                &mut Cursor::new(&log),
+                log.len() as u64,
+                &digest(&log),
+            )
+            .unwrap();
+    }
+    for (n, source) in sources.iter().enumerate() {
+        archive
+            .admit(source, &mut Cursor::new(&log), 1024, &digest(&log[..1024]))
+            .unwrap();
+        let (readers, digests) = prefix_resources(&archive);
+        assert_eq!(readers, (n + 1).min(MAX_PREFIX_READERS));
+        assert_eq!(digests, readers);
+        assert_eq!(
+            archive.chains(source).unwrap().len(),
+            if n < MAX_PREFIX_READERS { 1 } else { 2 }
+        );
+    }
+    // Capacity pressure must not evict active sources and restart their scans.
+    let before = VERIFIED_BYTES.with(std::cell::Cell::get);
+    for source in &sources[..MAX_PREFIX_READERS] {
+        archive
+            .admit(source, &mut Cursor::new(&log), 2048, &digest(&log[..2048]))
+            .unwrap();
+    }
+    assert_eq!(
+        VERIFIED_BYTES.with(std::cell::Cell::get) - before,
+        MAX_PREFIX_READERS as u64 * 1024
+    );
+    for source in &sources {
+        archive
+            .admit(
+                source,
+                &mut Cursor::new(&log),
+                log.len() as u64,
+                &digest(&log),
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        prefix_resources(&archive),
+        (0, 0),
+        "catch-up drops decoder objects and their open files"
+    );
+}
+
+#[test]
+fn prefix_digest_capacity_starts_a_chain_without_rescanning() {
+    let (_scratch, archive) = archive();
+    let log = lines(MAX_PREFIX_DIGESTS * 4, 1);
+    assert!(admit(&archive, &log, log.len()));
+    for offset in 1..=MAX_PREFIX_DIGESTS {
+        assert!(admit(&archive, &log, offset));
+    }
+    assert_eq!(prefix_resources(&archive), (1, MAX_PREFIX_DIGESTS));
+    let before = VERIFIED_BYTES.with(std::cell::Cell::get);
+    assert!(admit(&archive, &log, MAX_PREFIX_DIGESTS + 1));
+    assert_eq!(prefix_resources(&archive), (0, 0));
+    assert_eq!(archive.chains("native").unwrap().len(), 2);
+    assert!(admit(&archive, &log, MAX_PREFIX_DIGESTS + 2));
+    assert_eq!(
+        VERIFIED_BYTES.with(std::cell::Cell::get),
+        before,
+        "overflow writes native bytes, never replays the archived prefix"
+    );
+}
+
+#[test]
+fn damaged_and_superseded_chains_release_prefix_decoders() {
+    let (_scratch, archive) = archive();
+    let log = lines(4096, 1);
+    assert!(admit(&archive, &log, log.len()));
+    assert!(admit(&archive, &log, 1024));
+    let old = archive.chains("native").unwrap().remove(0);
+    let path = chain_file(&archive, "native", &old);
+    let damaged = b"damaged evidence";
+    fs::write(&path, damaged).unwrap();
+    assert!(admit(&archive, &log, 1024));
+    assert_eq!(prefix_resources(&archive), (0, 0));
+    assert_eq!(fs::read(&path).unwrap(), damaged);
+    assert_eq!(archive.chains("native").unwrap().len(), 2);
+
+    assert!(admit(&archive, &log, log.len()));
+    assert!(admit(&archive, &log, 2048));
+    assert_eq!(prefix_resources(&archive).0, 1);
+    let other = Archive::new(&archive.dir);
+    preserve(&other, "native", &log, "new-version").unwrap();
+    // Observing another writer's successor releases superseded progress.
+    assert!(admit(&archive, &log, log.len()));
+    assert_eq!(prefix_resources(&archive), (0, 0));
+}

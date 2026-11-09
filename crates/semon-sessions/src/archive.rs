@@ -56,6 +56,9 @@ const LOCK: &str = ".lock";
 const LEVEL: i32 = 3;
 const METADATA_MAX: u64 = 64 << 20;
 const BUFFER: usize = 1 << 20;
+// Overflow starts a native chain instead of evicting and rescanning prefixes.
+const MAX_PREFIX_READERS: usize = 16;
+const MAX_PREFIX_DIGESTS: usize = 256;
 
 /// The standalone archive beside the index cache at `cache`, in the Semon
 /// state directory.
@@ -288,6 +291,9 @@ impl Archive {
             redactor_version: redactor_version.to_owned(),
             resume: Some(hasher.resume()),
         };
+        if let Some(previous) = manifest.chains.last() {
+            self.release_prefix(&previous.chain_id);
+        }
         manifest.chains.push(chain.clone());
         publish(&dir, MANIFEST, &manifest)?;
         Ok(Some(chain))
@@ -314,6 +320,15 @@ impl Archive {
         }
         let _guard = self.lock(true)?;
         let (dir, mut manifest) = self.open_source(source)?;
+        // Another Archive may have superseded this source's old chain.
+        {
+            let mut known = self.known();
+            for chain in manifest.chains.iter().rev().skip(1) {
+                if let Some(verified) = known.verified.get_mut(&chain.chain_id) {
+                    verified.prefix = None;
+                }
+            }
+        }
         // Only a chain that reads back whole is trusted or extended. A
         // missing or damaged one stays as evidence and the log's consumed
         // prefix starts a new chain beside it.
@@ -321,6 +336,7 @@ impl Archive {
             && self.trusted(&dir, &held)
         {
             if held.length == offset && held.sha256 == hex(prefix) {
+                self.release_prefix(&held.chain_id);
                 return Ok(true);
             }
             if held.length > offset {
@@ -348,6 +364,9 @@ impl Archive {
                     Err(error) => return Err(error),
                 }
             }
+        }
+        if let Some(chain) = manifest.chains.last() {
+            self.release_prefix(&chain.chain_id);
         }
         let begun = begin(&dir, &mut manifest, log, offset, prefix)?;
         if begun && let Some(chain) = manifest.chains.last() {
@@ -397,10 +416,18 @@ impl Archive {
         expected: &[u8; 32],
     ) -> io::Result<bool> {
         let mut known = self.known();
+        let active = known
+            .verified
+            .values()
+            .filter(|held| held.prefix.is_some())
+            .count();
         let verified = known
             .verified
             .get_mut(&chain.chain_id)
             .expect("trusted chain");
+        if verified.prefix.is_none() && active >= MAX_PREFIX_READERS {
+            return Ok(false);
+        }
         if verified.prefix.is_none() {
             verified.prefix = Some(ComparedPrefix {
                 reader: Box::new(open_chain(dir, chain)?),
@@ -415,7 +442,7 @@ impl Archive {
         }
         // An unseen earlier offset has no retained comparison proof. Start a
         // new chain from the native prefix rather than reread archived bytes.
-        if offset < compared.offset {
+        if offset < compared.offset || compared.digests.len() >= MAX_PREFIX_DIGESTS {
             return Ok(false);
         }
         let copied = io::copy(
@@ -428,6 +455,12 @@ impl Archive {
         let digest: [u8; 32] = compared.hash.clone().finalize().into();
         compared.digests.insert(compared.offset, digest);
         Ok(compared.offset == offset && digest == *expected)
+    }
+
+    fn release_prefix(&self, chain_id: &str) {
+        if let Some(verified) = self.known().verified.get_mut(chain_id) {
+            verified.prefix = None;
+        }
     }
 
     /// Our own completed writes are already hashed, under the archive lock.
