@@ -613,6 +613,8 @@ struct EventState {
     native_direct_call: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     activity_observation: Option<super::session_activity::classify::Observation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    activity_tool: Option<super::session_activity::classify::ToolCallEvidence>,
 }
 
 const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
@@ -5966,16 +5968,18 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
         .get::<_, Option<String>>(12)?
         .map(|text| event_state(12, &text))
         .transpose()?;
-    let (y, poll_target, result_source, native_direct_call, activity_observation) = match state {
-        Some(state) => (
-            state.yielded,
-            state.poll_target,
-            state.result_source,
-            state.native_direct_call,
-            state.activity_observation,
-        ),
-        None => (None, None, false, false, None),
-    };
+    let (y, poll_target, result_source, native_direct_call, activity_observation, activity_tool) =
+        match state {
+            Some(state) => (
+                state.yielded,
+                state.poll_target,
+                state.result_source,
+                state.native_direct_call,
+                state.activity_observation,
+                state.activity_tool,
+            ),
+            None => (None, None, false, false, None, None),
+        };
     let r = if row.get::<_, bool>(14)? {
         Some(Reply {
             o: uint(row.get(15)?),
@@ -6018,6 +6022,7 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
         peer,
         u: row.get(26)?,
         activity_observation,
+        activity_tool,
     };
     Ok((row.get(0)?, seq_of(row.get(1)?), event))
 }
@@ -6600,12 +6605,14 @@ fn put_event(
         peer,
         u,
         activity_observation,
+        activity_tool,
     } = event;
     let y = if y.is_some()
         || poll_target.is_some()
         || *result_source
         || *native_direct_call
         || activity_observation.is_some()
+        || activity_tool.is_some()
     {
         Some(json(&EventState {
             version: 1,
@@ -6614,6 +6621,7 @@ fn put_event(
             result_source: *result_source,
             native_direct_call: *native_direct_call,
             activity_observation: activity_observation.clone(),
+            activity_tool: activity_tool.clone(),
         })?)
     } else {
         None
@@ -9896,6 +9904,7 @@ mod tests {
                     }),
                     u: Some("uuid-1".to_owned()),
                     activity_observation: None,
+                    activity_tool: None,
                 },
                 // A peer with nothing known is still a peer.
                 Event {

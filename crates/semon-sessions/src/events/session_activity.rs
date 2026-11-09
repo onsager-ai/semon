@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
 use super::CodexNativeUsage;
-use super::{CodexUsageEvent, MessageUsage, ModelTokens, Signal, SignalKind};
+use super::{BillingUsage, CodexUsageEvent, MessageUsage, ModelTokens, Signal, SignalKind};
 use crate::{claude_usage::Shared, pricing};
 
 pub(crate) mod analytics;
@@ -59,6 +59,67 @@ pub(crate) enum Ownership {
     Shared(String),
 }
 
+/// Stable ownership vocabulary for downstream billing facts. Shared Claude
+/// usage is copied evidence, never another billable invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum UsageOwner {
+    Exclusive,
+    Copied,
+}
+
+/// The classifier's bounded, closed command vocabulary. This is deliberately
+/// separate from the activity category: a tool call can be a known `Read` even
+/// when its enclosing model step has several kinds of activity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum CommandTag {
+    Read,
+    Search,
+    Setup,
+    Stage,
+    BodyWrite,
+    Inspect,
+    Commit,
+    Push,
+    PullRequest,
+    PrChecks,
+    Watch,
+    Sleep,
+    Wait,
+    CiStatus,
+    CiStart,
+    Report,
+    Verify,
+    Merge,
+    Mutation,
+    Ambiguous,
+    Unknown,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ToolCallFact {
+    pub(crate) ord: u64,
+    pub(crate) tool: String,
+    /// A raw local path for a native file tool only. It never enters the
+    /// activity API, mirrors, or source-independent event observation.
+    pub(crate) target_path: Option<String>,
+    pub(crate) command_tag: CommandTag,
+    pub(crate) ok: Option<bool>,
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) tool_ms: Option<u64>,
+}
+
+/// Inputs for one analytics `fact_step` row. The surrounding saved step is
+/// keyed by its `ActivityStepId`; this payload intentionally carries no body.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct StepFacts {
+    pub(crate) turn_id: Option<String>,
+    pub(crate) usage_owner: UsageOwner,
+    pub(crate) billing: BillingUsage,
+    pub(crate) model_ms: Option<u64>,
+    pub(crate) tool_ms: Option<u64>,
+    pub(crate) tool_calls: Vec<ToolCallFact>,
+}
+
 /// A normalized usage row, before session ordering and pricing. Keep these
 /// constructors at the boundary so legacy cumulative Codex counters cannot be
 /// mistaken for native response facts.
@@ -66,6 +127,8 @@ pub(crate) enum Ownership {
 pub(crate) struct UsageStep {
     pub(crate) id: ActivityStepId,
     pub(crate) position: SourcePosition,
+    /// Exact native turn identity when the source records one.
+    pub(crate) turn_id: Option<String>,
     pub(crate) usage: Usage,
 }
 
@@ -84,6 +147,7 @@ impl UsageStep {
         Self {
             id: ActivityStepId::Claude(message_id),
             position,
+            turn_id: None,
             usage: Usage::Claude(usage),
         }
     }
@@ -94,6 +158,7 @@ impl UsageStep {
         event: CodexUsageEvent,
     ) -> Self {
         Self {
+            turn_id: Some(identity[2].clone()),
             id: ActivityStepId::Codex(identity),
             position,
             usage: Usage::Codex(event),
@@ -117,6 +182,7 @@ impl UsageStep {
         let identity: [String; 4] =
             serde_json::from_str(&identity).expect("native decoder emits a complete string tuple");
         Some(Self {
+            turn_id: Some(identity[2].clone()),
             id: ActivityStepId::Codex(identity),
             position,
             usage: Usage::Codex(CodexUsageEvent {
@@ -309,7 +375,7 @@ pub(crate) struct SessionActivity {
 pub(crate) fn apply_observations(
     activity: &mut SessionActivity,
     mut observations: Vec<classify::LocatedObservation>,
-) {
+) -> Vec<classify::LocatedObservation> {
     let compactions: Vec<_> = activity
         .compactions
         .iter()
@@ -329,7 +395,7 @@ pub(crate) fn apply_observations(
     for offsets in sources.values_mut() {
         offsets.sort_unstable();
     }
-    for mut row in observations {
+    for row in &mut observations {
         if row
             .observation
             .step_id
@@ -345,19 +411,7 @@ pub(crate) fn apply_observations(
                 .cloned()
                 .map(|change| classify::fact(&row, change)),
         );
-        let owner = if let Some(id) = &row.observation.step_id {
-            exact.get(id).copied()
-        } else {
-            sources.get(&row.position.source).and_then(|offsets| {
-                let next = offsets.partition_point(|(offset, _)| *offset < row.position.offset);
-                // Response usage follows its calls. This association never
-                // becomes an exact response identity on a change fact.
-                offsets
-                    .get(next)
-                    .or_else(|| offsets.last())
-                    .map(|(_, index)| *index)
-            })
-        };
+        let owner = observation_owner(&exact, &sources, row);
         if let Some(owner) = owner {
             let step = &mut activity.steps[owner];
             if matches!(step.id, ActivityStepId::Codex(_))
@@ -415,6 +469,27 @@ pub(crate) fn apply_observations(
         .facts
         .sort_by(|a, b| (&a.position, &a.identity).cmp(&(&b.position, &b.identity)));
     activity.facts.dedup_by(|a, b| a.identity == b.identity);
+    observations
+}
+
+pub(crate) fn observation_owner(
+    exact: &BTreeMap<ActivityStepId, usize>,
+    sources: &BTreeMap<String, Vec<(u64, usize)>>,
+    row: &classify::LocatedObservation,
+) -> Option<usize> {
+    if let Some(id) = &row.observation.step_id {
+        exact.get(id).copied()
+    } else {
+        sources.get(&row.position.source).and_then(|offsets| {
+            let next = offsets.partition_point(|(offset, _)| *offset < row.position.offset);
+            // Response usage follows its calls. This association never becomes
+            // an exact response identity on a change fact.
+            offsets
+                .get(next)
+                .or_else(|| offsets.last())
+                .map(|(_, index)| *index)
+        })
+    }
 }
 
 /// Use the model's existing Claude merge order: the last normalized row for a

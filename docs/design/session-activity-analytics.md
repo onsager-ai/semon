@@ -17,6 +17,27 @@ usage decoder and an `accepted` model outcome. Duplicate, conflict and
 unavailable outcomes do not contribute steps. A source receipt must already be
 qualified by the caller; the pure function does not grant source authority.
 
+## StepFacts
+
+`StepFacts` is the private, step-keyed input for analytics. It is persisted with
+its `ActivityStep`, keyed by the activity step identity and projection ordinal,
+but it is not part of the activity API or any MCP, HTTP, mirror, or push
+surface. In particular, raw `target_path` values remain local to the index.
+
+Each fact carries the native `turn_id` (`turn_id` from the Codex identity tuple,
+or the UUID of the exact preceding Claude user record in the same source; absent
+when that record is not exact), `usage_owner` (`exclusive` or `copied`), and the
+complete billing usage input. Each owned tool call is in source order with its
+ordinal, stripped native tool name, closed command tag, settled outcome, decoded
+exit code, and raw file-tool target path where known. Shell calls never receive
+an invented target path.
+
+`model_ms` is measured only from the latest preceding tool result with a
+recorded timestamp in the same physical source to the step's own usage record.
+`tool_ms` is the sum of known call-to-result timestamp intervals; when
+no call has a known interval it is absent. Neither duration is inferred from
+cross-source order or missing timestamps.
+
 Context is input plus cache read plus cache write. Bands are below 50,000,
 50,000 through 150,000 inclusive, and above 150,000. One immutable pricing
 snapshot prices each step. Every step carries four nullable dollar components,
@@ -47,10 +68,11 @@ thrash and retain those three step identities. Fewer than three steps cannot
 form a thrash window. Derive each physical session independently; interleaving
 parent and child steps must never create a family thrash window.
 
-Schema 41 stores a session activity header, ordered step rows keyed by
-`(session_key, generation, ordinal)`, separate ordered compaction rows, compact summary metadata, and typed
-change facts keyed by session, generation and stable identity.
-Parser 38 retains the exact last Claude usage observation offset alongside the
+The current session activity schema stores a session activity header, ordered
+step rows keyed by `(session_key, generation, ordinal)` with their private
+`StepFacts`, separate ordered compaction rows, compact summary metadata, and
+typed change facts keyed by session, generation and stable identity.
+Parser 40 retains the exact last Claude usage observation offset alongside the
 existing message ID and assistant UUIDs. The producer uses its established file
 merge order and copied-record ownership map; Codex reads only model-accepted
 facts whose normalized source receipt matches the selected consumed ledger.

@@ -356,7 +356,9 @@ fn located(offset: u64, observation: Observation) -> LocatedObservation {
             offset,
         },
         timestamp: Some(offset as i64),
+        result_timestamp: Some(offset as i64 + 1),
         result_offset: Some(offset + 1),
+        tool: None,
         observation,
     }
 }
@@ -1169,7 +1171,9 @@ fn code_mode_printed_output_repeats_native_shell_reads() {
                             offset: event.o,
                         },
                         timestamp: event.t,
+                        result_timestamp: event.r.as_ref().and_then(|reply| reply.t),
                         result_offset: event.r.as_ref().map(|reply| reply.o),
+                        tool: None,
                         observation,
                     })
             })

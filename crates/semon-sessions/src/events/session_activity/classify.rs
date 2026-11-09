@@ -299,6 +299,7 @@ pub(crate) struct Observation {
     failure_results: bool,
     completed: bool,
     settled: bool,
+    exit_code: Option<i32>,
     background: bool,
     pub(crate) waste: Option<WasteKind>,
     pub(crate) wait: Option<WaitInterval>,
@@ -308,15 +309,59 @@ pub(crate) struct Observation {
     pub(crate) changes: Vec<Change>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct ToolCallEvidence {
+    pub(crate) tool: String,
+    /// Raw local file target, held separately from `Observation` so activity
+    /// evidence remains body- and path-free.
+    pub(crate) target_path: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct LocatedObservation {
     pub(crate) position: SourcePosition,
     pub(crate) timestamp: Option<i64>,
+    pub(crate) result_timestamp: Option<i64>,
     pub(crate) result_offset: Option<u64>,
+    pub(crate) tool: Option<ToolCallEvidence>,
     pub(crate) observation: Observation,
 }
 
 impl Observation {
+    pub(crate) fn command_tag(&self) -> CommandTag {
+        match self.commands.first().unwrap_or(&Command::Unknown) {
+            Command::Read(..) => CommandTag::Read,
+            Command::Search(..) => CommandTag::Search,
+            Command::Setup => CommandTag::Setup,
+            Command::Stage => CommandTag::Stage,
+            Command::BodyWrite => CommandTag::BodyWrite,
+            Command::Inspect => CommandTag::Inspect,
+            Command::Commit => CommandTag::Commit,
+            Command::Push => CommandTag::Push,
+            Command::PullRequest => CommandTag::PullRequest,
+            Command::PrChecks => CommandTag::PrChecks,
+            Command::Watch => CommandTag::Watch,
+            Command::Sleep => CommandTag::Sleep,
+            Command::Wait => CommandTag::Wait,
+            Command::CiStatus => CommandTag::CiStatus,
+            Command::CiStart => CommandTag::CiStart,
+            Command::Report => CommandTag::Report,
+            Command::Verify => CommandTag::Verify,
+            Command::Merge => CommandTag::Merge,
+            Command::Mutation => CommandTag::Mutation,
+            Command::Ambiguous => CommandTag::Ambiguous,
+            Command::Unknown => CommandTag::Unknown,
+        }
+    }
+
+    pub(crate) fn ok(&self) -> Option<bool> {
+        self.settled.then_some(self.completed)
+    }
+
+    pub(crate) fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
     /// The activity of this call: the first match among its commands and agent
     /// evidence. Unknown and ambiguous commands prove nothing.
     pub(crate) fn activity(&self) -> Option<Activity> {
@@ -927,6 +972,30 @@ fn input_value(input: &Value) -> Option<Cow<'_, Value>> {
     }
 }
 
+pub(super) fn tool_evidence(name: &str, input: &Value) -> ToolCallEvidence {
+    let tool = name
+        .strip_prefix("functions.")
+        .or_else(|| name.strip_prefix("tools."))
+        .unwrap_or(name)
+        .to_owned();
+    let input = input_value(input).unwrap_or(Cow::Owned(Value::Null));
+    let target_path = match tool.as_str() {
+        "Read" | "read_file" | "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => input
+            .get("file_path")
+            .or_else(|| input.get("path"))
+            .and_then(Value::as_str),
+        "Grep" | "Glob" => input.get("path").and_then(Value::as_str),
+        "apply_patch" => input
+            .get("file_path")
+            .or_else(|| input.get("path"))
+            .and_then(Value::as_str),
+        _ => None,
+    }
+    .filter(|path| path.len() <= 4096)
+    .map(str::to_owned);
+    ToolCallEvidence { tool, target_path }
+}
+
 pub(super) fn call(
     name: &str,
     input: &Value,
@@ -1058,6 +1127,7 @@ pub(super) fn call(
         failure_results: false,
         completed: false,
         settled: false,
+        exit_code: None,
         background,
         waste: orchestration.then_some(WasteKind::OrchestrationWait),
         wait: None,
@@ -1536,6 +1606,7 @@ pub(super) fn finish(
         }
     }
     observation.settled = !observation.background && !result.running;
+    observation.exit_code = result.exit.and_then(|code| i32::try_from(code).ok());
     observation.completed =
         observation.settled && !result.error && result.exit.is_none_or(|code| code == 0);
     if result.is_wait {
@@ -1620,18 +1691,14 @@ pub(crate) fn capture(
                             .pointer("/message/id")
                             .and_then(Value::as_str)
                             .map(|id| ActivityStepId::Claude(id.into()));
-                        let mut observation = call(
-                            field(item, "name").unwrap_or(""),
-                            &item["input"],
-                            step,
-                            hash.clone(),
-                        );
+                        let name = field(item, "name").unwrap_or("");
+                        let tool = tool_evidence(name, &item["input"]);
+                        let mut observation = call(name, &item["input"], step, hash.clone());
                         bind_source_context(&mut observation, index.cwd.as_deref());
                         observation.claude_bash = field(item, "name") == Some("Bash");
-                        index
-                            .event_mut(event)
-                            .expect("located event")
-                            .activity_observation = Some(observation);
+                        let event = index.event_mut(event).expect("located event");
+                        event.activity_observation = Some(observation);
+                        event.activity_tool = Some(tool);
                     }
                 }
                 Some("tool_result") => complete(
@@ -1678,12 +1745,9 @@ pub(crate) fn capture(
                     } else {
                         payload.get("arguments").unwrap_or(&Value::Null)
                     };
-                    let mut observation = call(
-                        if name == "exec" { "exec_command" } else { name },
-                        input,
-                        codex_step(payload),
-                        hash.clone(),
-                    );
+                    let tool_name = if name == "exec" { "exec_command" } else { name };
+                    let tool = tool_evidence(tool_name, input);
+                    let mut observation = call(tool_name, input, codex_step(payload), hash.clone());
                     bind_source_context(&mut observation, index.cwd.as_deref());
                     observation.formatter = index.events[event].native_direct_call
                         || (name == "exec"
@@ -1712,10 +1776,9 @@ pub(crate) fn capture(
                             .flat_map(|shell| shell.commands)
                             .collect();
                     }
-                    index
-                        .event_mut(event)
-                        .expect("located event")
-                        .activity_observation = Some(observation);
+                    let event = index.event_mut(event).expect("located event");
+                    event.activity_observation = Some(observation);
+                    event.activity_tool = Some(tool);
                 }
             }
             Some("function_call_output" | "custom_tool_call_output") => complete(

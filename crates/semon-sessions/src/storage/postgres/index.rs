@@ -11,28 +11,47 @@ use std::{path::Path, sync::Arc};
 /// normalized record carries it explicitly under its own key.
 fn encode_event(event: &crate::events::Event) -> Result<String, StorageError> {
     let mut record = serde_json::to_value(event).map_err(backend)?;
-    if let Some(observation) = &event.activity_observation {
+    if event.activity_observation.is_some() || event.activity_tool.is_some() {
         let object = record
             .as_object_mut()
             .ok_or_else(|| StorageError::Backend("normalized event is not an object".into()))?;
-        object.insert(
-            "activity_observation".into(),
-            serde_json::to_value(observation).map_err(backend)?,
-        );
+        if let Some(observation) = &event.activity_observation {
+            object.insert(
+                "activity_observation".into(),
+                serde_json::to_value(observation).map_err(backend)?,
+            );
+        }
+        if let Some(tool) = &event.activity_tool {
+            object.insert(
+                "activity_tool".into(),
+                serde_json::to_value(tool).map_err(backend)?,
+            );
+        }
     }
     serde_json::to_string(&record).map_err(backend)
 }
 
 fn decode_event(text: &str) -> Result<crate::events::Event, StorageError> {
     let mut record: serde_json::Value = serde_json::from_str(text).map_err(backend)?;
-    let observation = record
+    let (observation, tool) = record
         .as_object_mut()
-        .and_then(|object| object.remove("activity_observation"))
-        .map(serde_json::from_value)
-        .transpose()
-        .map_err(backend)?;
+        .map(|object| {
+            let observation = object
+                .remove("activity_observation")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(backend)?;
+            let tool = object
+                .remove("activity_tool")
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(backend)?;
+            Ok((observation, tool))
+        })
+        .ok_or_else(|| StorageError::Backend("normalized event is not an object".into()))?;
     let mut event: crate::events::Event = serde_json::from_value(record).map_err(backend)?;
     event.activity_observation = observation;
+    event.activity_tool = tool;
     Ok(event)
 }
 

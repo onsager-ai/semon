@@ -2476,14 +2476,24 @@ impl<'a> Builder<'a> {
                 .ok_or_else(|| io::Error::other("Invalid activity source path"))?;
             if file.harness() == "claude" {
                 usage.extend(file.summary.usage().iter().map(|(id, used)| {
-                    UsageStep::claude(
+                    let mut step = UsageStep::claude(
                         id.clone(),
                         SourcePosition {
                             source: path.into(),
                             offset: used.offset,
                         },
                         used.clone(),
-                    )
+                    );
+                    step.turn_id = file
+                        .summary
+                        .events
+                        .iter()
+                        .rev()
+                        .find(|event| {
+                            event.k == events::Kind::U && event.o <= used.offset
+                        })
+                        .and_then(|event| event.u.clone());
+                    step
                 }));
             } else if file.summary.has_native_usage() {
                 usage.extend(self.cache.activity_codex_steps(&summary::source(file))?);
@@ -2497,8 +2507,10 @@ impl<'a> Builder<'a> {
                             source: path.into(),
                             offset: event.o,
                         },
-                        timestamp: event.r.as_ref().and_then(|reply| reply.t).or(event.t),
+                        timestamp: event.t,
+                        result_timestamp: event.r.as_ref().and_then(|reply| reply.t),
                         result_offset: event.r.as_ref().map(|reply| reply.o),
+                        tool: event.activity_tool.clone(),
                         observation,
                     }
                 })
