@@ -333,16 +333,18 @@ fn step_facts_keep_private_tool_details_and_usage_ownership() {
         .next()
         .unwrap()
         .clone();
+    let mut usage = match usage {
+        Usage::Claude(usage) => usage,
+        Usage::Codex(_) => unreachable!(),
+    };
+    usage.billing.timestamp = Some(20);
     let step = UsageStep::claude(
         "facts-message".into(),
         SourcePosition {
             source: row.sources[0].path.to_string_lossy().into_owned(),
             offset: 20,
         },
-        match usage {
-            Usage::Claude(usage) => usage,
-            Usage::Codex(_) => unreachable!(),
-        },
+        usage,
     );
     let mut read_observation = classify::call(
         "functions.Read",
