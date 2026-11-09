@@ -504,6 +504,7 @@ impl Receiver {
             || status.runtime.codex_rollouts.is_some()
             || status.runtime.codex_provisional_rollouts.is_some()
             || !status.runtime.repos.is_empty()
+            || !status.runtime.repo_ids.is_empty()
             || !status.runtime.reported_runs.is_empty()
         {
             return Err(Refusal::Invalid("invalid partial observation".into()));
@@ -1409,6 +1410,21 @@ mod tests {
             repos: [
                 ("/home/me/work/app".to_owned(), Some("app".to_owned())),
                 ("/tmp".to_owned(), None),
+            ]
+            .into(),
+            repo_ids: [
+                (
+                    "/home/me/work/app".to_owned(),
+                    semon_sessions::RepoId::Remote("github.com/me/app".into()),
+                ),
+                (
+                    "/home/me/work/local".to_owned(),
+                    semon_sessions::RepoId::Path("/srv/git/local.git".into()),
+                ),
+                (
+                    "/home/me/work/bare".to_owned(),
+                    semon_sessions::RepoId::Unknown,
+                ),
             ]
             .into(),
             ..Facts::default()

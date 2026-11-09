@@ -43,6 +43,7 @@ async fn observation(
         parent: None,
         parent_source: None,
         repo: Some("project".into()),
+        repo_id: None,
         branch: None,
         model: String::new(),
         effort: None,

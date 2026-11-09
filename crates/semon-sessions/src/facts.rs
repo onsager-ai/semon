@@ -63,6 +63,9 @@ pub struct Facts {
     /// The repository (its directory's name) of every working directory the
     /// logs name, or null when it's in none.
     pub repos: BTreeMap<String, Option<String>>,
+    /// The sanitized `origin` identity (`repo_id`) of every working directory
+    /// in a repository.
+    pub repo_ids: BTreeMap<String, RepoId>,
     /// Set by a receiver that has stopped hearing from the machine: when it
     /// was last seen (epoch ms). The machine then counts as offline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -83,6 +86,18 @@ pub struct Facts {
     /// Name-only observations, qualified by this machine's source and native harness/id.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_names: Vec<NativeName>,
+}
+
+/// Repository origin, with local remotes explicitly classified as paths.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum RepoId {
+    /// `host[:port]/owner/repo`, without credentials, scheme or `.git`.
+    Remote(String),
+    /// A `file:` or local-path remote, as written.
+    Path(String),
+    /// A repository with no usable `origin`.
+    Unknown,
 }
 
 /// The allowlisted values of one `projects.*` last-run record. The project
@@ -232,6 +247,13 @@ pub(crate) fn collect_facts(
     dirty: &mut bool,
 ) -> io::Result<Facts> {
     let cwds = model::working_dirs(options, cache, dirty)?;
+    let repo_ids = cwds
+        .iter()
+        .filter_map(|cwd| {
+            crate::repo::repo_id(cwd, env_home().as_deref().map(Path::new))
+                .map(|id| (cwd.clone(), id))
+        })
+        .collect();
     let repos = cwds
         .into_iter()
         .map(|cwd| {
@@ -241,6 +263,7 @@ pub(crate) fn collect_facts(
         .collect();
     let mut facts = local_runtime_facts(options)?;
     facts.repos = repos;
+    facts.repo_ids = repo_ids;
     facts.codex_rollouts = Some(
         crate::inputs(options)?
             .into_iter()
@@ -307,6 +330,7 @@ pub fn local_runtime_facts(options: &crate::Options) -> io::Result<Facts> {
         codex_rollouts: None,
         codex_provisional_rollouts: None,
         repos: BTreeMap::new(),
+        repo_ids: BTreeMap::new(),
         offline_since: None,
         runs,
         reported_runs: Vec::new(),
@@ -452,6 +476,14 @@ impl MachineFacts {
         match self {
             Self::Local => None,
             Self::Recorded(facts) => Some(facts.repos.get(cwd).cloned().flatten()),
+        }
+    }
+
+    /// `None` when the origin identity comes from walking the local disk.
+    pub(crate) fn recorded_repo_id(&self, cwd: &str) -> Option<Option<RepoId>> {
+        match self {
+            Self::Local => None,
+            Self::Recorded(facts) => Some(facts.repo_ids.get(cwd).cloned()),
         }
     }
 

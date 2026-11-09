@@ -143,15 +143,31 @@ pub(crate) fn publish_selected(
             "Selected activity source generation changed",
         ));
     }
-    publish(&tx, row, projection).map_err(io::Error::other)?;
+    // The Catalog fields of `row` are not published here, so the analytics
+    // digest stays as the last Catalog publication left it.
+    if write_activity(&tx, row, projection).map_err(io::Error::other)? {
+        log_change(&tx, &row.key).map_err(io::Error::other)?;
+    }
     tx.commit().map_err(io::Error::other)
 }
 
+/// Publish a session's activity together with the Catalog fields analytics
+/// reads: the caller is the transaction that publishes those fields.
 pub(super) fn publish(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
     projection: &Projection,
 ) -> rusqlite::Result<()> {
+    let rewritten = write_activity(tx, row, projection)?;
+    note_session_state(tx, row, rewritten)
+}
+
+/// Write the activity rows. `false` when they already were this generation.
+fn write_activity(
+    tx: &Transaction<'_>,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+) -> rusqlite::Result<bool> {
     let activity = &projection.activity;
     if activity.session_key != row.key || activity.rules_version != activity::ACTIVITY_RULES_VERSION
     {
@@ -167,7 +183,7 @@ pub(super) fn publish(
     );
     let unchanged: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_activity_projections WHERE session_key=?1 AND generation=?2 AND source_generation=?3 AND rules_version=?4 AND pricing_fingerprint=?5)",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint],|r|r.get(0))?;
     if unchanged {
-        return Ok(());
+        return Ok(false);
     }
     tx.execute(
         "DELETE FROM session_activity_steps WHERE session_key=?1",
@@ -215,7 +231,104 @@ pub(super) fn publish(
     }
     tx.execute("INSERT INTO session_activity_sources VALUES(?1,?2) ON CONFLICT(session_key) DO UPDATE SET metadata=excluded.metadata", params![row.key,json(row)?])?;
     tx.execute("INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,rules_version=excluded.rules_version,pricing_fingerprint=excluded.pricing_fingerprint,total=excluded.total,compactions=excluded.compactions,thrash=excluded.thrash,summary=excluded.summary,preview=excluded.preview",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint,activity.steps.len() as i64,activity.compactions.len() as i64,activity.aggregate.thrash,json(&activity::analytics::Analytics::of(activity))?,json(&activity::analytics::Preview::of(&activity.steps))?])?;
+    Ok(true)
+}
+
+/// The catalog fields analytics reads besides activity, as one digest.
+fn analytics_digest(row: &crate::model::summary::CatalogRow) -> rusqlite::Result<String> {
+    let state = row.overview.as_ref().map(|overview| overview.status());
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(
+            json(&(
+                row.lifecycle,
+                &row.kind,
+                &row.presentation_kind,
+                &row.parent,
+                &row.parent_source,
+                &row.repo,
+                &row.repo_id,
+                &row.branch,
+                row.start,
+                row.last,
+                state,
+                (
+                    &row.name,
+                    &row.harness,
+                    &row.native_ids,
+                    &row.model,
+                    &row.effort,
+                    &row.tokens,
+                    &row.cost,
+                ),
+                row.overview
+                    .as_ref()
+                    .map(|overview| overview.analytics_inputs()),
+            ))?
+            .as_bytes()
+        )
+    ))
+}
+
+/// Log a change for a query-ready session when its activity was rewritten
+/// (`rewritten`) or its analytics digest differs from the last one logged.
+fn note_session_state(
+    tx: &Transaction<'_>,
+    row: &crate::model::summary::CatalogRow,
+    rewritten: bool,
+) -> rusqlite::Result<()> {
+    let digest = analytics_digest(row)?;
+    let stored: Option<String> = tx
+        .query_row(
+            "SELECT digest FROM silver_session_state WHERE session_key=?1",
+            [&row.key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if rewritten || stored.as_deref() != Some(digest.as_str()) {
+        tx.execute(
+            "INSERT INTO silver_session_state(session_key,digest,repo_id) VALUES(?1,?2,?3) ON CONFLICT(session_key) DO UPDATE SET digest=excluded.digest,repo_id=excluded.repo_id",
+            params![row.key, digest, row.repo_id.as_ref().map(json).transpose()?],
+        )?;
+        log_change(tx, &row.key)?;
+    }
     Ok(())
+}
+
+fn log_change(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO silver_change(session_key,kind) VALUES(?1,'changed')",
+        [key],
+    )?;
+    Ok(())
+}
+
+/// Mark sessions leaving the current catalog: a `changed` row for each that
+/// had query-ready activity, so analytics can see its sources are missing, and
+/// a digest that no republication matches, so a returning session is logged
+/// again. Their activity and retained history are untouched (`removed` is for
+/// projections that are dropped). `key` limits the scope to one session, by
+/// its index. Runs before the lifecycle is set to `retained`, so a repeated
+/// publication logs nothing.
+pub(super) fn withdraw(tx: &Transaction<'_>, key: Option<&str>) -> rusqlite::Result<()> {
+    let (log, mark) = withdraw_sql(key.is_some());
+    tx.execute(&log, rusqlite::params_from_iter(key))?;
+    tx.execute(&mark, rusqlite::params_from_iter(key))?;
+    Ok(())
+}
+
+fn withdraw_sql(exact: bool) -> (String, String) {
+    const ALL: &str = "FROM session_catalog WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)";
+    const ONE: &str = "FROM session_catalog WHERE session_key=?1 AND lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)";
+    let gone = if exact { ONE } else { ALL };
+    (
+        format!(
+            "INSERT INTO silver_change(session_key,kind) SELECT session_key,'changed' {gone} AND session_key IN (SELECT session_key FROM session_activity_projections) ORDER BY session_key"
+        ),
+        format!(
+            "UPDATE silver_session_state SET digest='retained' WHERE session_key IN (SELECT session_key {gone})"
+        ),
+    )
 }
 
 pub(super) fn remove_mismatched(
@@ -230,6 +343,14 @@ pub(super) fn remove_mismatched(
     )?;
     if removed > 0 {
         tx.execute(
+            "INSERT INTO silver_change(session_key,kind) VALUES(?1,'removed')",
+            [&row.key],
+        )?;
+        tx.execute(
+            "DELETE FROM silver_session_state WHERE session_key=?1",
+            [&row.key],
+        )?;
+        tx.execute(
             "DELETE FROM session_activity_facts WHERE session_key=?1",
             [&row.key],
         )?;
@@ -241,6 +362,15 @@ pub(super) fn remove_mismatched(
             "DELETE FROM session_activity_compactions WHERE session_key=?1",
             [&row.key],
         )?;
+    } else {
+        let ready: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_activity_projections WHERE session_key=?1)",
+            [&row.key],
+            |r| r.get(0),
+        )?;
+        if ready {
+            note_session_state(tx, row, false)?;
+        }
     }
     Ok(())
 }
@@ -664,6 +794,10 @@ pub(super) fn reprice_step(
         summary.pricing_fingerprint = table.fingerprint.clone();
         tx.execute("UPDATE session_activity_projections SET pricing_fingerprint=?2,generation=?3,summary=?4,preview=?5 WHERE session_key=?1",params![key,table.fingerprint,next,json(&summary)?,json(&preview)?])?;
         refresh_at_price(tx, &key, &table.fingerprint)?;
+        tx.execute(
+            "INSERT INTO silver_change(session_key,kind) VALUES(?1,'changed')",
+            [&key],
+        )?;
     }
     Ok(true)
 }

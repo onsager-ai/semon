@@ -135,7 +135,7 @@ pub use source_reader::{SESSION_SOURCE_CHUNK_MAX, SessionSourceRange, SessionSou
 mod union;
 mod viewer;
 pub use facts::{
-    FACTS_VERSION, Facts, FactsSource, NativeName, RUN_VARIABLES, ReportedModelUsage,
+    FACTS_VERSION, Facts, FactsSource, NativeName, RUN_VARIABLES, RepoId, ReportedModelUsage,
     ReportedRunSnapshot, local_facts, local_facts_in, local_runtime_facts, read_facts, write_facts,
 };
 pub use harness::{HARNESS_ICONS, HARNESSES, HarnessDefinition, harness};

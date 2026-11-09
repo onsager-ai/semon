@@ -249,7 +249,7 @@ fn emit_catalog_publish_attempt(
 // the per-database storage version stamp (current stores do not run storage
 // DDL), the ledger epoch on source ledgers and published sources, and compact
 // activity summaries for bounded family publication.
-pub(crate) const SCHEMA_VERSION: i64 = 41;
+pub(crate) const SCHEMA_VERSION: i64 = 43;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -356,6 +356,16 @@ CREATE TABLE IF NOT EXISTS session_descriptions (
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS silver_session_state (
+    session_key TEXT PRIMARY KEY,
+    digest TEXT NOT NULL,
+    repo_id TEXT
+) STRICT;
+CREATE TABLE IF NOT EXISTS silver_change (
+    seq INTEGER PRIMARY KEY,
+    session_key TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('changed','removed'))
 ) STRICT;
 CREATE TABLE IF NOT EXISTS files (
     file_id INTEGER PRIMARY KEY,
@@ -636,6 +646,33 @@ const RUN_COLUMNS: &str = "session_id, start, cost, duration, api_duration, tool
 const PUT_RUN: &str = "INSERT OR REPLACE INTO reported_runs (session_id, start, cost, duration, \
      api_duration, tool_duration, lines_added, lines_removed, model_usage, capture_at) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)";
+
+/// Read the index incarnation, the changes after `after` and, through `read`,
+/// derived rows from the same SQLite snapshot. A changed incarnation means
+/// the caller must re-read the namespace in full.
+#[allow(dead_code, reason = "the analytics writer is the first caller")]
+pub(crate) fn read_silver_changes<T>(
+    connection: &mut Connection,
+    after: i64,
+    read: impl FnOnce(&Transaction<'_>, &str, &[(i64, String, String)]) -> rusqlite::Result<T>,
+) -> rusqlite::Result<T> {
+    let tx = connection.transaction()?;
+    let incarnation: String = tx.query_row(
+        "SELECT value FROM meta WHERE key='incarnation'",
+        [],
+        |row| row.get(0),
+    )?;
+    let changes = {
+        let mut statement =
+            tx.prepare("SELECT seq,session_key,kind FROM silver_change WHERE seq>?1 ORDER BY seq")?;
+        let rows =
+            statement.query_map([after], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let result = read(&tx, &incarnation, &changes)?;
+    tx.commit()?;
+    Ok(result)
+}
 
 /// The SQLite [`IndexStore`]: one connection, used by one
 /// [`super::EventCache`].
@@ -1319,11 +1356,20 @@ pub(crate) fn enqueue_facts(
             enqueue_native_tx(&tx, "claude", &run.last_session_id).map_err(io::Error::other)?;
         }
     }
-    for cwd in before.repos.keys().chain(after.repos.keys()) {
-        if before.repos.get(cwd) != after.repos.get(cwd) {
+    let cwds = before
+        .repos
+        .keys()
+        .chain(after.repos.keys())
+        .chain(before.repo_ids.keys())
+        .chain(after.repo_ids.keys())
+        .collect::<std::collections::BTreeSet<_>>();
+    for cwd in cwds {
+        if before.repos.get(cwd) != after.repos.get(cwd)
+            || before.repo_ids.get(cwd) != after.repo_ids.get(cwd)
+        {
             let paths = {
                 let mut statement = tx
-                    .prepare("SELECT path FROM files WHERE cwd=?1")
+                    .prepare("SELECT source_path FROM catalog_native_dependencies WHERE harness='runtime:repo' AND native_id=?1")
                     .map_err(io::Error::other)?;
                 statement
                     .query_map([cwd], |row| row.get::<_, String>(0))
@@ -3531,7 +3577,7 @@ impl SqliteStore {
                             for source in &row.sources {
                                 let started = metadata_measurements.start();
                                 let path = source.path.to_string_lossy();
-                                transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'",[path.as_ref()]).map_err(failure)?;
+                                transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%' AND harness<>'runtime:repo'",[path.as_ref()]).map_err(failure)?;
                                 let parent = source.native_role.as_ref().and_then(|role| {
                                     role.pointer("/Agent/parent")
                                         .and_then(Value::as_str)
@@ -3592,10 +3638,13 @@ impl SqliteStore {
                 }
                 let started = metadata_measurements.start();
                 if claims.is_none() {
+                    session_activity::withdraw(&transaction, None).map_err(failure)?;
                     transaction.execute("UPDATE session_catalog SET lifecycle='retained', metadata=CASE WHEN json_valid(metadata) THEN json_set(metadata,'$.lifecycle','retained') ELSE metadata END WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
                     transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)", []).map_err(failure)?;
                 } else {
                     for key in &affected {
+                        session_activity::withdraw(&transaction, Some(key.as_str()))
+                            .map_err(failure)?;
                         transaction.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
                         transaction.execute("UPDATE session_catalog_sources SET lifecycle='retained' WHERE session_key=?1 AND session_key NOT IN (SELECT session_key FROM catalog_members)",[key]).map_err(failure)?;
                     }
@@ -4597,6 +4646,8 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT generation,ordinal,metadata,waste_kind,waste_category,empty_search FROM session_activity_steps LIMIT 0",
         "SELECT generation,identity,metadata FROM session_activity_facts LIMIT 0",
         "SELECT generation,ordinal,metadata FROM session_activity_compactions LIMIT 0",
+        "SELECT seq,session_key,kind FROM silver_change LIMIT 0",
+        "SELECT session_key,digest,repo_id FROM silver_session_state LIMIT 0",
         "SELECT metadata FROM session_history_catalog LIMIT 0",
         "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
     ] {
@@ -4928,7 +4979,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
                     transaction.execute_batch(ddl)?;
                 }
                 transaction.execute(
-                    "INSERT INTO meta(key,value) VALUES('cache_version',?1),('storage_stamp',?2)",
+                    "INSERT INTO meta(key,value) VALUES('cache_version',?1),('storage_stamp',?2),('incarnation',lower(hex(randomblob(16))))",
                     [CACHE_VERSION.to_string(), crate::storage::sqlite::stamp()],
                 )?;
                 transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -6178,6 +6229,18 @@ fn write_index_changes_measured(
         transaction.execute(
             "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'bridge:claude',?2)",
             params![path, id],
+        )?;
+    }
+    // Store the same effective directory the model uses, rather than only
+    // the cwd embedded in the log. Sidecar-only changes update this dependency.
+    transaction.execute(
+        "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness='runtime:repo'",
+        [path],
+    )?;
+    if let Some(cwd) = crate::model::repository_dir(index) {
+        transaction.execute(
+            "INSERT INTO catalog_native_dependencies VALUES(?1,'runtime:repo',?2)",
+            params![path, cwd],
         )?;
     }
     measurements.record("dependencies", started, 1);
@@ -10374,6 +10437,26 @@ mod tests {
                 "malformed schema",
             ),
             (
+                "missing-silver-change",
+                "DROP TABLE silver_change",
+                "malformed schema",
+            ),
+            (
+                "missing-silver-state",
+                "DROP TABLE silver_session_state",
+                "malformed schema",
+            ),
+            (
+                "missing-silver-state-column",
+                "ALTER TABLE silver_session_state DROP COLUMN digest",
+                "malformed persistent state",
+            ),
+            (
+                "missing-silver-repo-id",
+                "ALTER TABLE silver_session_state DROP COLUMN repo_id",
+                "malformed persistent state",
+            ),
+            (
                 "missing-reported-column",
                 "ALTER TABLE reported_runs DROP COLUMN capture_at",
                 "malformed persistent state",
@@ -10514,6 +10597,200 @@ mod tests {
             unchanged();
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn a_rebuilt_index_has_a_new_incarnation_and_an_empty_change_log() {
+        let root = scratch("incarnation");
+        let cache = root.join("index.json");
+        let path = cache.with_extension("sqlite3");
+        let incarnation = |path: &Path| {
+            let mut db = Connection::open(path).unwrap();
+            read_silver_changes(&mut db, 0, |_, incarnation, changes| {
+                assert!(changes.is_empty());
+                Ok(incarnation.to_owned())
+            })
+            .unwrap()
+        };
+        let (old, _) = opened(&path);
+        drop(old);
+        let first = incarnation(&path);
+        assert_eq!(first.len(), 32);
+        let (reopened, _) = opened(&path);
+        drop(reopened);
+        assert_eq!(incarnation(&path), first, "reopening keeps the incarnation");
+        let db = Connection::open(&path).unwrap();
+        db.execute(
+            "INSERT INTO silver_change(session_key,kind) VALUES('a','changed')",
+            [],
+        )
+        .unwrap();
+        db.execute_batch("PRAGMA user_version=1; PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        drop(db);
+        let producer = super::super::EventCache::open(&cache).unwrap();
+        drop(producer);
+        let (current, _) = opened(&path);
+        drop(current);
+        let second = incarnation(&path);
+        assert_ne!(second, first, "a rebuild is a new incarnation");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn silver_changes_and_derived_rows_are_read_from_one_snapshot() {
+        let root = scratch("silver-read");
+        let path = root.join("index.sqlite3");
+        let (store, _) = opened(&path);
+        drop(store);
+        let writer = Connection::open(&path).unwrap();
+        writer
+            .execute_batch(
+                "INSERT INTO silver_change(session_key,kind) VALUES('a','changed'),('b','changed'),('a','removed')",
+            )
+            .unwrap();
+        let mut reader = Connection::open(&path).unwrap();
+        let (changes, count, later) = read_silver_changes(&mut reader, 1, |tx, _, changes| {
+            writer
+                .execute(
+                    "INSERT INTO silver_change(session_key,kind) VALUES('c','changed')",
+                    [],
+                )
+                .unwrap();
+            let count: i64 =
+                tx.query_row("SELECT count(*) FROM silver_change", [], |row| row.get(0))?;
+            let later: i64 = tx.query_row(
+                "SELECT count(*) FROM silver_change WHERE session_key='c'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((changes.to_vec(), count, later))
+        })
+        .unwrap();
+        assert_eq!(
+            changes,
+            [
+                (2, "b".to_owned(), "changed".to_owned()),
+                (3, "a".to_owned(), "removed".to_owned())
+            ]
+        );
+        assert_eq!((count, later), (3, 0), "the closure sees the same snapshot");
+        let tail =
+            read_silver_changes(&mut reader, 3, |_, _, changes| Ok(changes.to_vec())).unwrap();
+        assert_eq!(tail, [(4, "c".to_owned(), "changed".to_owned())]);
+        assert!(
+            writer
+                .execute(
+                    "INSERT INTO silver_change(session_key,kind) VALUES('d','other')",
+                    []
+                )
+                .is_err()
+        );
+        drop((reader, writer));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn silver_log(path: &Path) -> Vec<(String, String)> {
+        const LOG: &str = "SELECT session_key,kind FROM silver_change ORDER BY seq";
+        let Ok(db) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+            return Vec::new();
+        };
+        let Ok(mut statement) = db.prepare(LOG) else {
+            return Vec::new();
+        };
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    fn refresh_once(evidence: &crate::native_evidence::NativeEvidence) -> bool {
+        evidence
+            .refresh_catalog(
+                &mut crate::viewer::lock(&evidence.storage.work),
+                CATALOG_FIXTURE_NOW,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn the_change_log_waits_for_query_ready_activity_across_the_producer_cycle() {
+        let root = scratch("silver-ready");
+        let (options, _, _) = catalog_native_fixture(&root, 2, false);
+        let path = crate::events::EventCache::path(&options.cache);
+        assert!(silver_log(&path).is_empty(), "nothing before ingest");
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        const UNREADY: &str = "SELECT count(*) FROM silver_change WHERE kind='changed' AND session_key NOT IN (SELECT session_key FROM session_activity_projections)";
+        let mut complete = false;
+        for _ in 0..128 {
+            complete = refresh_once(&evidence);
+            // Ingest commits before activity is published; a change row may
+            // only ever name a session whose activity is query-ready.
+            let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            let unready: i64 = db.query_row(UNREADY, [], |row| row.get(0)).unwrap();
+            assert_eq!(unready, 0);
+            if complete {
+                break;
+            }
+        }
+        evidence.retire();
+        assert!(complete);
+        assert!(silver_log(&path).iter().any(|(_, kind)| kind == "changed"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_withdrawn_session_stays_in_analytics_as_changed_through_the_producer_cycle() {
+        let root = scratch("silver-withdrawn");
+        let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+        let path = crate::events::EventCache::path(&options.cache);
+        let claude = rows.iter().find(|row| row.harness == "claude").unwrap();
+        let key = claude.key.clone();
+        let count = |kind: &str| {
+            silver_log(&path)
+                .into_iter()
+                .filter(|entry| *entry == (key.clone(), kind.to_owned()))
+                .count()
+        };
+        let before = count("changed");
+        assert!(before >= 1);
+        fs::remove_file(&claude.sources[0].path).unwrap();
+        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        let mut complete = false;
+        for _ in 0..128 {
+            complete = refresh_once(&evidence);
+            if complete {
+                break;
+            }
+        }
+        assert!(complete);
+        let withdrawn = count("changed");
+        assert!(withdrawn > before, "the retained session is logged");
+        assert_eq!(count("removed"), 0, "its analytics rows are kept");
+        let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let lifecycle: String = db
+            .query_row(
+                "SELECT lifecycle FROM session_catalog WHERE session_key=?1",
+                [&key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lifecycle, "retained", "history is kept");
+        let projections: i64 = db
+            .query_row(
+                "SELECT count(*) FROM session_activity_projections WHERE session_key=?1",
+                [&key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projections, 1);
+        for _ in 0..4 {
+            refresh_once(&evidence);
+        }
+        assert_eq!(count("changed"), withdrawn, "a repeat logs nothing");
+        evidence.retire();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
