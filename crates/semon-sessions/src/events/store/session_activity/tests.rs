@@ -62,6 +62,293 @@ fn activity_catalog_publication_rolls_back_header_steps_and_catalog_together() {
 }
 
 #[test]
+fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
+    fn table_rows(
+        connection: &Connection,
+        table: &str,
+        order: &str,
+        key: &str,
+    ) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT * FROM {table} WHERE session_key=?1 ORDER BY {order}"
+            ))
+            .unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_map([key], |row| {
+                (0..columns)
+                    .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                    .collect()
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn header(
+        connection: &Connection,
+        key: &str,
+    ) -> (String, String, u32, String, i64, i64, String, String) {
+        connection
+            .query_row(
+                "SELECT generation,source_generation,rules_version,pricing_fingerprint,total,compactions,summary,preview FROM session_activity_projections WHERE session_key=?1",
+                [key],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .unwrap()
+    }
+
+    let root = scratch("activity-missing-source");
+    let (options, _, _) = catalog_native_fixture(&root, 1, false);
+    let missing_path = options
+        .claude_home
+        .join("projects/-work-proj/cleared.jsonl");
+    let missing_records = [
+        serde_json::json!({
+            "type":"system", "subtype":"compact_boundary", "sessionId":"cleared",
+            "session_id":"native-cl-00", "timestamp":"2026-09-24T00:01:30Z",
+            "compactMetadata":{"trigger":"auto","preTokens":155000}
+        }),
+        serde_json::json!({
+            "type":"assistant", "uuid":"assistant-cleared", "sessionId":"cleared",
+            "session_id":"native-cl-00", "timestamp":"2026-09-24T00:02:00Z",
+            "message":{"id":"message-cleared","role":"assistant","model":"claude-sonnet-4-5",
+                "content":[{"type":"tool_use","id":"commit-call","name":"Bash",
+                    "input":{"command":"git commit -m fixture"}}],
+                "usage":{"input_tokens":100,"output_tokens":25}}
+        }),
+        serde_json::json!({
+            "type":"user", "uuid":"result-cleared", "sessionId":"cleared",
+            "session_id":"native-cl-00", "timestamp":"2026-09-24T00:02:01Z",
+            "message":{"role":"user","content":[{"type":"tool_result",
+                "tool_use_id":"commit-call","content":"[main abc1234] fixture"}]}
+        }),
+    ]
+    .map(|record| record.to_string())
+    .join("\n")
+        + "\n";
+    fs::write(&missing_path, &missing_records).unwrap();
+
+    let (mut rows, slots) = catalog_fixture_projection(&options);
+    assert_eq!(rows.len(), 1, "the linked Claude files form one session");
+    let row_index = rows.iter().position(|row| row.harness == "claude").unwrap();
+    assert_eq!(rows[row_index].sources.len(), 2);
+    let key = rows[row_index].key.clone();
+    let missing_source = missing_path.to_string_lossy().into_owned();
+    {
+        let projection = rows[row_index].session_activity.as_mut().unwrap();
+        let missing_step = projection
+            .activity
+            .steps
+            .iter()
+            .find(|step| step.position.source == missing_source)
+            .expect("the cleared file contributes its own usage step");
+        let missing_step_id = missing_step.id.clone();
+        let missing_offset = missing_step.position.offset;
+        assert!(!projection.activity.compactions.is_empty());
+        assert!(projection.activity.facts.iter().any(|fact| {
+            fact.position.source == missing_source
+                && fact.step_id.as_ref() == Some(&missing_step_id)
+                && fact.position.offset == missing_offset
+        }));
+    }
+
+    let row = &rows[row_index];
+    let path = crate::events::EventCache::path(&options.cache);
+    let (mut store, _) = opened(&path);
+    catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    let complete = read(&store.connection, row);
+    let original_header = header(&store.connection, &key);
+    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(false));
+    let original_steps = table_rows(
+        &store.connection,
+        "session_activity_steps",
+        "generation,ordinal",
+        &key,
+    );
+    let original_compactions = table_rows(
+        &store.connection,
+        "session_activity_compactions",
+        "generation,ordinal",
+        &key,
+    );
+    let original_facts = table_rows(
+        &store.connection,
+        "session_activity_facts",
+        "generation,identity",
+        &key,
+    );
+    let original_witness: String = store
+        .connection
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
+            [&key],
+            |record| record.get(0),
+        )
+        .unwrap();
+    assert!(!original_compactions.is_empty());
+    assert_eq!(original_facts.len(), 1);
+    let start = changes(&store.connection);
+
+    fs::remove_file(&missing_path).unwrap();
+    let (partial_rows, partial_slots) = catalog_fixture_projection(&options);
+    let partial = partial_rows
+        .iter()
+        .find(|row| row.key == key)
+        .unwrap();
+    assert_eq!(partial.sources.len(), 1, "Catalog membership reflects disk");
+    catalog_write(
+        &mut store,
+        &partial_rows,
+        &partial_slots,
+        false,
+        CatalogWriter::Auto,
+    )
+    .unwrap();
+
+    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
+    assert!(page(
+        &store.connection,
+        partial,
+        None,
+        &crate::pricing::snapshot().fingerprint,
+        0,
+        256,
+    )
+    .unwrap()
+    .is_none());
+    assert_eq!(read(&store.connection, row), complete);
+    assert_eq!(header(&store.connection, &key), original_header);
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_steps",
+            "generation,ordinal",
+            &key,
+        ),
+        original_steps
+    );
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_compactions",
+            "generation,ordinal",
+            &key,
+        ),
+        original_compactions
+    );
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_facts",
+            "generation,identity",
+            &key,
+        ),
+        original_facts
+    );
+    let witness: String = store
+        .connection
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
+            [&key],
+            |record| record.get(0),
+        )
+        .unwrap();
+    assert_eq!(witness, original_witness);
+    let missing_changes = changes(&store.connection);
+    assert_eq!(missing_changes.len(), start.len() + 1);
+    assert_eq!(missing_changes.last(), Some(&(key.clone(), "changed".into())));
+
+    catalog_write(
+        &mut store,
+        &partial_rows,
+        &partial_slots,
+        false,
+        CatalogWriter::Auto,
+    )
+    .unwrap();
+    assert_eq!(changes(&store.connection), missing_changes);
+
+    fs::write(&missing_path, &missing_records).unwrap();
+    let (recovered_rows, recovered_slots) = catalog_fixture_projection(&options);
+    let recovered = recovered_rows
+        .iter()
+        .find(|row| row.key == key)
+        .unwrap();
+    assert_eq!(recovered.sources.len(), 2);
+    catalog_write(
+        &mut store,
+        &recovered_rows,
+        &recovered_slots,
+        false,
+        CatalogWriter::Auto,
+    )
+    .unwrap();
+
+    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(false));
+    let recovered_page = read(&store.connection, recovered);
+    let usage_step = recovered_page
+        .steps
+        .iter()
+        .position(|step| step.position.source == missing_source)
+        .unwrap();
+    let (_, usage) = step_at(
+        &store.connection,
+        recovered,
+        &recovered_page.generation,
+        usage_step as u64,
+    )
+    .unwrap()
+    .unwrap();
+    let Usage::Claude(usage) = usage else {
+        panic!("expected usage from the returned Claude source");
+    };
+    assert_eq!(usage.model_tokens.input, 100);
+    assert_eq!(usage.model_tokens.output, 25);
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_facts",
+            "generation,identity",
+            &key,
+        )
+        .len(),
+        original_facts.len()
+    );
+    let recovered_changes = changes(&store.connection);
+    assert_eq!(recovered_changes.len(), missing_changes.len() + 1);
+    assert_eq!(
+        recovered_changes.last(),
+        Some(&(key.clone(), "changed".into()))
+    );
+    let witness: String = store
+        .connection
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
+            [&key],
+            |record| record.get(0),
+        )
+        .unwrap();
+    let witness: crate::model::summary::CatalogRow = serde_json::from_str(&witness).unwrap();
+    assert_eq!(witness.sources, recovered.sources);
+
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn activity_pages_require_exact_sources_generation_rules_and_prices() {
     let root = scratch("activity-generation");
     let (options, rows, slots) = catalog_native_fixture(&root, 2, true);
