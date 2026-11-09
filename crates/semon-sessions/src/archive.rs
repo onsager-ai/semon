@@ -116,7 +116,19 @@ struct Known {
     /// Bytes of `sources.log` read: up to the end of its last whole line.
     read: u64,
     /// Verified chains, invalidated by a change to the file or manifest.
-    verified: BTreeMap<String, Verification>,
+    verified: BTreeMap<String, Verified>,
+}
+
+struct Verified {
+    observation: Verification,
+    prefix: Option<ComparedPrefix>,
+}
+
+struct ComparedPrefix {
+    reader: Box<dyn Read + Send>,
+    hash: Sha256,
+    offset: u64,
+    digests: BTreeMap<u64, [u8; 32]>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -312,11 +324,7 @@ impl Archive {
                 return Ok(true);
             }
             if held.length > offset {
-                // The archive may already hold more than the index has read.
-                let mut hash = Sha256::new();
-                let mut bytes = open_chain(&dir, &held)?.take(offset);
-                let copied = io::copy(&mut bytes, &mut HashWriter(&mut hash))?;
-                if copied == offset && hash.finalize().as_slice() == prefix {
+                if self.matches_prefix(&dir, &held, offset, prefix)? {
                     return Ok(true);
                 }
             } else if held.length < offset
@@ -353,7 +361,12 @@ impl Archive {
     fn trusted(&self, dir: &Path, chain: &Chain) -> bool {
         let observed = Verification::observed(dir, chain).ok();
         if let Some(observed) = &observed
-            && self.known().verified.get(&chain.chain_id) == Some(observed)
+            && self
+                .known()
+                .verified
+                .get(&chain.chain_id)
+                .map(|held| &held.observation)
+                == Some(observed)
         {
             return true;
         }
@@ -362,20 +375,71 @@ impl Archive {
             && check_chain(dir, chain).is_ok()
             && Verification::observed(dir, chain).ok().as_ref() == Some(&observed)
         {
-            self.known()
-                .verified
-                .insert(chain.chain_id.clone(), observed);
+            self.known().verified.insert(
+                chain.chain_id.clone(),
+                Verified {
+                    observation: observed,
+                    prefix: None,
+                },
+            );
             return true;
         }
         false
     }
 
+    /// Continue comparison inside an already verified chain. Repeated offsets
+    /// reuse their digest; increasing bounded scans decompress each byte once.
+    fn matches_prefix(
+        &self,
+        dir: &Path,
+        chain: &Chain,
+        offset: u64,
+        expected: &[u8; 32],
+    ) -> io::Result<bool> {
+        let mut known = self.known();
+        let verified = known
+            .verified
+            .get_mut(&chain.chain_id)
+            .expect("trusted chain");
+        if verified.prefix.is_none() {
+            verified.prefix = Some(ComparedPrefix {
+                reader: Box::new(open_chain(dir, chain)?),
+                hash: Sha256::new(),
+                offset: 0,
+                digests: BTreeMap::new(),
+            });
+        }
+        let compared = verified.prefix.as_mut().expect("prefix reader");
+        if let Some(digest) = compared.digests.get(&offset) {
+            return Ok(digest == expected);
+        }
+        // An unseen earlier offset has no retained comparison proof. Start a
+        // new chain from the native prefix rather than reread archived bytes.
+        if offset < compared.offset {
+            return Ok(false);
+        }
+        let copied = io::copy(
+            &mut compared.reader.by_ref().take(offset - compared.offset),
+            &mut HashWriter(&mut compared.hash),
+        )?;
+        #[cfg(test)]
+        VERIFIED_BYTES.with(|total| total.set(total.get() + copied));
+        compared.offset += copied;
+        let digest: [u8; 32] = compared.hash.clone().finalize().into();
+        compared.digests.insert(compared.offset, digest);
+        Ok(compared.offset == offset && digest == *expected)
+    }
+
     /// Our own completed writes are already hashed, under the archive lock.
     fn remember(&self, dir: &Path, chain: &Chain) -> io::Result<()> {
         let observed = Verification::observed(dir, chain)?;
-        self.known()
-            .verified
-            .insert(chain.chain_id.clone(), observed);
+        self.known().verified.insert(
+            chain.chain_id.clone(),
+            Verified {
+                observation: observed,
+                prefix: None,
+            },
+        );
         Ok(())
     }
 
@@ -820,7 +884,7 @@ fn read_json<T: DeserializeOwned + Default>(path: &Path) -> io::Result<T> {
 /// Writes `value` as `dir/name`: a temporary file, synced, renamed over the
 /// old one, and the directory synced.
 fn publish(dir: &Path, name: &str, value: &impl Serialize) -> io::Result<()> {
-    let temporary = dir.join(format!("{name}.tmp"));
+    let temporary = dir.join(format!("{name}.{}.tmp", random_id()?));
     let bytes = serde_json::to_vec(value).map_err(io::Error::other)?;
     let mut file = create_file(&temporary)?;
     file.write_all(&bytes)?;
@@ -845,14 +909,14 @@ thread_local! {
     static FAIL_BEFORE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// A new or truncated file, 0600.
+/// A new exclusive file, 0600; never follows a planted symlink.
 fn create_file(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
     options.open(path)
 }

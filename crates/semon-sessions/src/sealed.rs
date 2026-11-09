@@ -281,12 +281,33 @@ fn read_manifest(dir: &Path) -> io::Result<Option<Manifest>> {
     Ok(Some(manifest))
 }
 
+fn temporary_path(dir: &Path, name: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    dir.join(format!(
+        "{name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
+fn create_temporary(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    options.open(path)
+}
+
 /// Writes `manifest` to a temporary file, syncs it and renames it over the
 /// old one.
 fn write_manifest(dir: &Path, manifest: &Manifest) -> io::Result<()> {
-    let temporary = dir.join(format!("{MANIFEST}.tmp"));
+    let temporary = temporary_path(dir, MANIFEST);
     let bytes = serde_json::to_vec(manifest).map_err(io::Error::other)?;
-    let mut file = fs::File::create(&temporary)?;
+    let mut file = create_temporary(&temporary)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
@@ -992,7 +1013,7 @@ pub fn record_custody(
     archive.with_verified_chain(source, chain, |bytes| {
         compare_segments(&dir, &manifest, bytes)
     })?;
-    let temporary = dir.join(format!("{CUSTODY}.tmp"));
+    let temporary = temporary_path(&dir, CUSTODY);
     let bytes = serde_json::to_vec(&Custody {
         generation: manifest.generation,
         archive: archive.directory()?,
@@ -1000,7 +1021,7 @@ pub fn record_custody(
         chain: chain.clone(),
     })
     .map_err(io::Error::other)?;
-    let mut file = fs::File::create(&temporary)?;
+    let mut file = create_temporary(&temporary)?;
     file.write_all(&bytes)?;
     file.sync_all()?;
     drop(file);
@@ -1176,9 +1197,9 @@ fn write_segment(
         zst_sha256: String::new(),
     }
     .file_name(generation);
-    let temporary = dir.join(format!("{name}.tmp"));
+    let temporary = temporary_path(dir, &name);
     let written = (|| -> io::Result<Segment> {
-        let mut out = BufWriter::new(fs::File::create(&temporary)?);
+        let mut out = BufWriter::new(create_temporary(&temporary)?);
         let (mut plain_hash, mut zst_hash) = (Sha256::new(), Sha256::new());
         let mut entries = Vec::new();
         let mut chunk = vec![0; FRAME_BYTES];
@@ -1282,14 +1303,9 @@ fn punch(_file: &fs::File, _offset: u64, _len: u64) -> io::Result<()> {
 /// temporary file there, removed after. `Ok(false)` when the filesystem or
 /// platform doesn't support it.
 pub fn punch_supported(dir: &Path) -> io::Result<bool> {
-    let path = dir.join(format!(".punch-probe-{}.tmp", std::process::id()));
+    let path = temporary_path(dir, ".punch-probe");
+    let mut file = create_temporary(&path)?;
     let probe = (|| -> io::Result<bool> {
-        let mut file = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&path)?;
         file.write_all(&[b'x'; 3 * BLOCK as usize])?;
         file.sync_all()?;
         match punch(&file, BLOCK, BLOCK) {

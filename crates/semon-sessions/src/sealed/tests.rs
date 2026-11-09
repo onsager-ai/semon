@@ -652,3 +652,20 @@ fn orphan_segments_survive_a_new_generation_and_its_retirement() {
     }
     fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn planted_seal_temporary_symlinks_never_truncate_the_target() {
+    use std::os::unix::fs::symlink;
+    let root = scratch("temp-symlink");
+    let target = root.join("evidence.zst");
+    fs::write(&target, b"keep evidence").unwrap();
+    for name in ["manifest.json.tmp", "custody.json.tmp", "segment.zst.tmp"] {
+        let planted = root.join(name);
+        symlink(&target, &planted).unwrap();
+        assert!(create_temporary(&planted).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"keep evidence");
+    }
+    assert_eq!(remove_temporaries(&root).unwrap(), 0);
+    fs::remove_dir_all(root).unwrap();
+}

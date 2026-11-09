@@ -278,7 +278,9 @@ impl Server {
             .map_err(|error| format!("cannot listen on {}: {error}", options.listen))?;
         Ok(Self {
             listener,
-            receiver: Receiver::new(dir.clone()).with_max_bytes(options.max_bytes),
+            receiver: Receiver::new(dir.clone())
+                .map_err(|error| error.to_string())?
+                .with_max_bytes(options.max_bytes),
             tokens,
             tls,
             limits: Limits::default(),

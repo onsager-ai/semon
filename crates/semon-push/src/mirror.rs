@@ -169,20 +169,33 @@ pub struct Receiver {
     locks: Locks,
     max_bytes: u64,
     usage: Mutex<HashMap<String, u64>>,
+    // The open directory holds the exclusive OS lock for this receiver's lifetime.
+    _store_lock: fs::File,
 }
 
 impl Receiver {
     /// A receiver writing under `dir`, which must exist. What each machine's
     /// copy already holds is counted now, by a walk of `DIR/machines/`.
-    pub fn new(dir: impl Into<PathBuf>) -> Self {
+    pub fn new(dir: impl Into<PathBuf>) -> io::Result<Self> {
         let dir = dir.into();
+        let store_lock = fs::File::open(&dir)?;
+        store_lock.try_lock().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "cannot start receiver for {}: store is locked by another receiver ({error})",
+                    dir.display()
+                ),
+            )
+        })?;
         let usage = measure(&dir.join(MACHINES_DIR));
-        Self {
+        Ok(Self {
             dir,
             locks: Locks::default(),
             max_bytes: DEFAULT_MAX_BYTES,
             usage: Mutex::new(usage),
-        }
+            _store_lock: store_lock,
+        })
     }
 
     /// Caps each machine's copy at `bytes`.
@@ -1246,8 +1259,24 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        let receiver = Receiver::new(&dir);
+        let receiver = Receiver::new(&dir).unwrap();
         (Dir(dir), receiver)
+    }
+
+    #[test]
+    fn a_second_receiver_on_the_same_store_is_refused_until_drop() {
+        let (dir, first) = receiver();
+        let error = Receiver::new(&dir.0)
+            .err()
+            .expect("overlapping receiver accepted");
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            error
+                .to_string()
+                .contains("store is locked by another receiver")
+        );
+        drop(first);
+        assert!(Receiver::new(&dir.0).is_ok());
     }
 
     /// An append of `bytes` at `offset` onto a copy whose first bytes are
@@ -1698,7 +1727,8 @@ mod tests {
         for leftover in &leftovers {
             fs::write(leftover, vec![b'x'; 1000]).unwrap();
         }
-        let again = Receiver::new(&dir.0);
+        drop(receiver);
+        let again = Receiver::new(&dir.0).unwrap();
         assert_eq!(again.used_bytes("laptop"), 4 + facts_bytes);
         for leftover in &leftovers {
             assert!(!leftover.exists(), "{}", leftover.display());
@@ -1731,7 +1761,8 @@ mod tests {
         let reply = receiver.append("laptop", &append(LOG, b"12", 2, b"abcdefgh", false));
         assert_eq!(reply, Reply::new(200, json!({"length": 10})));
         // A new receiver counts what is already there.
-        let again = Receiver::new(&dir.0).with_max_bytes(10);
+        drop(receiver);
+        let again = Receiver::new(&dir.0).unwrap().with_max_bytes(10);
         assert_eq!(again.used_bytes("laptop"), 10);
         assert_eq!(again.used_bytes("desk"), 8);
         let reply = again.append("laptop", &append(LOG, b"12abcdefgh", 10, b"!", false));
@@ -1927,8 +1958,9 @@ mod tests {
 
     #[test]
     fn a_refused_quota_leaves_the_provenance_of_the_bytes_it_did_not_change() {
-        let (dir, _unused) = receiver();
-        let receiver = Receiver::new(&dir.0).with_max_bytes(6);
+        let (dir, unused) = receiver();
+        drop(unused);
+        let receiver = Receiver::new(&dir.0).unwrap().with_max_bytes(6);
         let key = format!("claude/{LOG}");
         receiver.append("laptop", &append(LOG, b"", 0, b"one\n", false));
         let mut over = append(LOG, b"one\n", 4, b"two\n", false);
@@ -2008,7 +2040,7 @@ mod status_tests {
             NEXT_TEMPORARY.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&dir).unwrap();
-        let receiver = Receiver::new(&dir);
+        let receiver = Receiver::new(&dir).unwrap();
         (dir, receiver)
     }
     fn observation(bytes: &[u8], generation: &str) -> Status {
@@ -2068,7 +2100,8 @@ mod status_tests {
             1
         );
         assert!(!receiver.machine_dir("laptop").join(FACTS_FILE).exists());
-        let resumed = Receiver::new(&dir);
+        drop(receiver);
+        let resumed = Receiver::new(&dir).unwrap();
         let mut next = status.clone();
         next.sequence += 1;
         next.observed_at_ms += 1;
@@ -2106,8 +2139,10 @@ mod status_tests {
             ));
         fs::remove_file(&marker).unwrap();
         let status = observation(bytes, &generation);
+        drop(receiver);
+        let receiver = Receiver::new(&dir).unwrap();
         assert!(
-            Receiver::new(&dir).status("laptop", &status).body["confirmed"]
+            receiver.status("laptop", &status).body["confirmed"]
                 .as_array()
                 .unwrap()
                 .is_empty()
@@ -2217,7 +2252,9 @@ mod status_tests {
         );
         let before = receiver.used_bytes("laptop");
         assert!(before > bytes.len() as u64);
-        assert_eq!(Receiver::new(&dir).used_bytes("laptop"), before);
+        drop(receiver);
+        let receiver = Receiver::new(&dir).unwrap().with_max_bytes(4096);
+        assert_eq!(receiver.used_bytes("laptop"), before);
         let mut grow = request(&vec![b'x'; 4096], &generation);
         grow.offset = 3;
         grow.replace = false;
@@ -2233,10 +2270,10 @@ mod status_tests {
                 .len(),
             1
         );
-        assert_eq!(
-            Receiver::new(&dir).used_bytes("laptop"),
-            receiver.used_bytes("laptop")
-        );
+        let before = receiver.used_bytes("laptop");
+        drop(receiver);
+        let receiver = Receiver::new(&dir).unwrap();
+        assert_eq!(receiver.used_bytes("laptop"), before);
         let zero = receiver.with_max_bytes(0);
         assert_eq!(zero.append("empty", &request(b"", &generation)).status, 507);
         let mut status = observation(b"", &generation);

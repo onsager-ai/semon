@@ -602,3 +602,56 @@ fn a_reader_inside_a_torn_record_blocks_repair() {
     );
     assert_eq!(reader.chains("torn").unwrap().len(), 1);
 }
+
+#[test]
+fn archive_ahead_bounded_rebuild_compares_each_prefix_byte_once() {
+    let (_scratch, archive) = archive();
+    let log = lines(400_000, 1);
+    assert!(admit(&archive, &log, log.len()));
+    let reopened = Archive::new(&archive.dir);
+    let before = VERIFIED_BYTES.with(std::cell::Cell::get);
+    for offset in [40_000, 80_000, 120_000, 160_000, 200_000] {
+        assert!(admit(&reopened, &log, offset));
+        assert_eq!(
+            VERIFIED_BYTES.with(std::cell::Cell::get) - before,
+            log.len() as u64 + offset as u64
+        );
+    }
+    assert_eq!(archive.chains("native").unwrap().len(), 1);
+}
+
+#[test]
+fn unchanged_shorter_prefix_reuses_its_archived_comparison() {
+    let (_scratch, archive) = archive();
+    let log = lines(200_000, 1);
+    assert!(admit(&archive, &log, log.len()));
+    let reopened = Archive::new(&archive.dir);
+    let before = VERIFIED_BYTES.with(std::cell::Cell::get);
+    for _ in 0..4 {
+        assert!(admit(&reopened, &log[..40_000], 40_000));
+        assert_eq!(VERIFIED_BYTES.with(std::cell::Cell::get) - before, 240_000);
+    }
+    assert_eq!(archive.chains("native").unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn planted_archive_temporary_symlinks_never_truncate_the_target() {
+    use std::os::unix::fs::symlink;
+    let (_scratch, archive) = archive();
+    let held = preserve(&archive, "s", b"keep these bytes", "1").unwrap();
+    let target = chain_file(&archive, "s", &held);
+    let before = fs::read(&target).unwrap();
+    let dir = target.parent().unwrap();
+    let planted = dir.join("manifest.json.tmp");
+    symlink(&target, &planted).unwrap();
+    assert!(create_file(&planted).is_err());
+    preserve(&archive, "s", b"other bytes", "1").unwrap();
+    assert_eq!(fs::read(&target).unwrap(), before);
+    assert!(
+        fs::symlink_metadata(planted)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
