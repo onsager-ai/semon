@@ -649,7 +649,7 @@ mod tests {
     #[test]
     fn rejects_invalid_enum_before_writing_generation() {
         for (table, column, invalid) in [
-            (&FACT_SESSION, "usage_owner", "Exclusive"),
+            (&FACT_STEP, "usage_owner", "Exclusive"),
             (&DIM_PRICE, "unit", "token"),
         ] {
             let dir = tempfile::tempdir().unwrap();
