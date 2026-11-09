@@ -201,7 +201,11 @@ pub(crate) fn rows_of(
                 }
                 let mut text = String::new();
                 for column in batch.columns() {
-                    text.push_str(&array_value_to_string(column, row).unwrap());
+                    // Formatting a time zone needs chrono-tz; the raw milliseconds do.
+                    match column.as_any().downcast_ref::<TimestampMillisecondArray>() {
+                        Some(times) => text.push_str(&times.value(row).to_string()),
+                        None => text.push_str(&array_value_to_string(column, row).unwrap()),
+                    }
                     text.push('|');
                 }
                 *rows.entry(text).or_insert(0) += 1;
