@@ -1,5 +1,5 @@
 {
-  "rules_version": 8,
+  "rules_version": 9,
   "pricing_fingerprint": "synthetic-prices-v1",
   "steps": [
     {"id": "first", "context_tokens": 49999, "band": "Under50k", "elapsed_ms": 2000, "compactions": 0},

@@ -222,6 +222,21 @@ snapshot, with request-owned source witnesses. Mismatches return
 `stale_projection`; unknown sessions and invalid arguments refuse explicitly.
 No source paths, offsets, commands, raw bytes or output bodies leave these pages.
 
+For exact transcript navigation, `read_transcript` accepts an exclusive `step`
+anchor `{generation, ordinal, id}`, using the activity page's generation and
+native step ID. Its response includes `transcript_generation`. The viewer can
+resolve the same identity on demand using `/api/session-activity-anchor` with
+`sid`, `scope=retained_history`, `generation`, `ordinal` and JSON-encoded `step`
+(the native ID). A successful response is `{available: true,
+activity_generation, step: {ordinal, id}, source_generation,
+transcript_generation, slot, basis}`. Basis is `native_record_id`, `usage_record`,
+`call_identity` or `operation_parent`. An unavailable response is `{available:
+false, reason}`, where reason is `stale_activity`, `stale_transcript`,
+`source_generation_mismatch`, `history_incomplete` or `no_exact_record`.
+The resolver never exposes source paths. PostgreSQL and the in-memory transcript
+fallback do not support activity anchors. An ordinal, time or nearby record alone
+never establishes a match.
+
 A refused `get_session_activity` names why in `error.reason`, beside the existing
 `error.code`, in both Query JSON and MCP. The closed values are `no_activity` (no
 current activity for the session: unknown or outside the window, or none published

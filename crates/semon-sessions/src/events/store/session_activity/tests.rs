@@ -116,6 +116,31 @@ fn activity_pages_require_exact_sources_generation_rules_and_prices() {
 }
 
 #[test]
+fn activity_anchor_admits_only_current_exact_records() {
+    let root = scratch("activity-anchor");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let page = read(&store.connection, row);
+    let anchor = crate::transcript_range::StepAnchor {
+        generation: page.generation.clone(),
+        ordinal: 0,
+        id: page.steps[0].id.clone(),
+    };
+    let resolved = crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap();
+    assert_eq!(resolved["available"], true);
+    assert_eq!(resolved["basis"], "native_record_id");
+    let mut stale = anchor.clone();
+    stale.generation = "stale".into();
+    assert_eq!(crate::transcript_range::resolve_step_slot(&store.connection, row, false, &stale).unwrap()["reason"], "stale_activity");
+    let mut changed = row.clone();
+    changed.sources[0].offset += 1;
+    assert_eq!(crate::transcript_range::resolve_step_slot(&store.connection, &changed, false, &anchor).unwrap()["reason"], "source_generation_mismatch");
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn activity_repricing_resumes_and_never_serves_mixed_prices() {
     let root = scratch("activity-reprice");
     let (options, mut rows, _) = catalog_native_fixture(&root, 2, true);

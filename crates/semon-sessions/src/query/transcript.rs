@@ -287,6 +287,9 @@ fn virtual_read(
     mode: crate::SessionSourceReadMode,
     now: i64,
 ) -> Result<Option<Value>, QueryError> {
+    if !args["step"].is_null() {
+        return Err(unavailable("Activity anchor requires a physical projection"));
+    }
     let requested = args["id"].as_str().expect("validated focused id");
     let served = args["_machine_alias"]
         .as_str()
