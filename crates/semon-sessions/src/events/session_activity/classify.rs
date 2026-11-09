@@ -988,7 +988,19 @@ pub(super) fn tool_evidence(name: &str, input: &Value) -> ToolCallEvidence {
         "apply_patch" => input
             .get("file_path")
             .or_else(|| input.get("path"))
-            .and_then(Value::as_str),
+            .and_then(Value::as_str)
+            .or_else(|| {
+                let patch = input.get("patch").and_then(Value::as_str)?;
+                let targets: Vec<_> = patch
+                    .lines()
+                    .filter_map(|line| {
+                        line.strip_prefix("*** Update File: ")
+                            .or_else(|| line.strip_prefix("*** Add File: "))
+                            .or_else(|| line.strip_prefix("*** Delete File: "))
+                    })
+                    .collect();
+                (targets.len() == 1).then_some(targets[0])
+            }),
         _ => None,
     }
     .filter(|path| path.len() <= 4096)
