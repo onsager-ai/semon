@@ -215,6 +215,10 @@ pub(super) fn publish(
     }
     tx.execute("INSERT INTO session_activity_sources VALUES(?1,?2) ON CONFLICT(session_key) DO UPDATE SET metadata=excluded.metadata", params![row.key,json(row)?])?;
     tx.execute("INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,rules_version=excluded.rules_version,pricing_fingerprint=excluded.pricing_fingerprint,total=excluded.total,compactions=excluded.compactions,thrash=excluded.thrash,summary=excluded.summary,preview=excluded.preview",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint,activity.steps.len() as i64,activity.compactions.len() as i64,activity.aggregate.thrash,json(&activity::analytics::Analytics::of(activity))?,json(&activity::analytics::Preview::of(&activity.steps))?])?;
+    tx.execute(
+        "INSERT INTO silver_change(session_key,kind) VALUES(?1,'changed')",
+        [&row.key],
+    )?;
     Ok(())
 }
 
@@ -229,6 +233,10 @@ pub(super) fn remove_mismatched(
         params![row.key, sources],
     )?;
     if removed > 0 {
+        tx.execute(
+            "INSERT INTO silver_change(session_key,kind) VALUES(?1,'removed')",
+            [&row.key],
+        )?;
         tx.execute(
             "DELETE FROM session_activity_facts WHERE session_key=?1",
             [&row.key],
@@ -664,6 +672,10 @@ pub(super) fn reprice_step(
         summary.pricing_fingerprint = table.fingerprint.clone();
         tx.execute("UPDATE session_activity_projections SET pricing_fingerprint=?2,generation=?3,summary=?4,preview=?5 WHERE session_key=?1",params![key,table.fingerprint,next,json(&summary)?,json(&preview)?])?;
         refresh_at_price(tx, &key, &table.fingerprint)?;
+        tx.execute(
+            "INSERT INTO silver_change(session_key,kind) VALUES(?1,'changed')",
+            [&key],
+        )?;
     }
     Ok(true)
 }

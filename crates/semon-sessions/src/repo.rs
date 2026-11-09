@@ -15,8 +15,13 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use crate::facts::RepoId;
+
 /// The most of a `.git` file that is read. A real one is a line long.
 const GIT_FILE_MAX: u64 = 4096;
+
+/// The most of a Git `config` that is read for the origin.
+const CONFIG_MAX: u64 = 64 * 1024;
 
 /// The repository `cwd` is in, by name: the directory holding the nearest
 /// `.git` below `home`. When that `.git` is a linked worktree's file, the
@@ -51,6 +56,105 @@ pub(crate) fn repo_of(cwd: &str, home: Option<&Path>) -> Option<String> {
     claude_owner(cwd)
 }
 
+/// The sanitized `origin` identity of the repository `cwd` is in, read from
+/// bounded Git metadata (no git subprocess). `None` when `cwd` is in no
+/// repository; a repository without a usable `origin` is `Unknown`.
+pub(crate) fn repo_id(cwd: &str, home: Option<&Path>) -> Option<RepoId> {
+    for current in Path::new(cwd).ancestors() {
+        if current == Path::new("/") || home == Some(current) {
+            break;
+        }
+        let git = current.join(".git");
+        let Ok(metadata) = fs::symlink_metadata(&git) else {
+            continue;
+        };
+        let common = if metadata.is_dir() {
+            git
+        } else if metadata.is_file() {
+            let pointer = read_metadata(&git, GIT_FILE_MAX)?;
+            let target = pointer
+                .lines()
+                .find_map(|line| line.strip_prefix("gitdir:"))?
+                .trim();
+            let target = normalize(&current.join(target))?;
+            match read_metadata(&target.join("commondir"), GIT_FILE_MAX)
+                .and_then(|value| normalize(&target.join(value.trim())))
+            {
+                Some(common) => common,
+                // `<common dir>/worktrees/<name>`
+                None => target.parent()?.parent()?.to_path_buf(),
+            }
+        } else {
+            return None;
+        };
+        let origin = read_metadata(&common.join("config"), CONFIG_MAX)
+            .and_then(|config| origin_url(&config))
+            .map_or(RepoId::Unknown, |url| classify_origin(&url));
+        return Some(origin);
+    }
+    None
+}
+
+/// The `url` of `[remote "origin"]` in a Git config text.
+fn origin_url(config: &str) -> Option<String> {
+    let mut origin = false;
+    for line in config.lines().map(str::trim) {
+        if line.starts_with('[') {
+            origin = line.eq_ignore_ascii_case("[remote \"origin\"]");
+        } else if origin
+            && let Some((key, value)) = line.split_once('=')
+            && key.trim().eq_ignore_ascii_case("url")
+        {
+            let value = value.trim();
+            let value = value
+                .strip_prefix('"')
+                .and_then(|value| value.strip_suffix('"'))
+                .unwrap_or(value);
+            return (!value.is_empty()).then(|| value.to_owned());
+        }
+    }
+    None
+}
+
+/// A remote URL as a [`RepoId`]: credentials, scheme and `.git` removed, the
+/// host lowercased, the default ports 443 and 22 dropped. scp-style
+/// `user@host:owner/repo` becomes `host/owner/repo`. `file:` URLs and local
+/// paths are [`RepoId::Path`].
+fn classify_origin(url: &str) -> RepoId {
+    let (authority, path) = if let Some((scheme, rest)) = url.split_once("://") {
+        if scheme.eq_ignore_ascii_case("file") {
+            return RepoId::Path(url.to_owned());
+        }
+        match rest.split_once('/') {
+            Some(parts) => parts,
+            None => return RepoId::Unknown,
+        }
+    } else if url.starts_with("file:") {
+        return RepoId::Path(url.to_owned());
+    } else {
+        // Git reads `a:b` as scp-style unless a slash comes before the colon.
+        match url.split_once(':') {
+            Some((host, path)) if !host.contains('/') => (host, path),
+            _ => return RepoId::Path(url.to_owned()),
+        }
+    };
+    let host = authority.rsplit('@').next().unwrap_or_default();
+    let host = host
+        .strip_suffix(":443")
+        .or_else(|| host.strip_suffix(":22"))
+        .unwrap_or(host);
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    if host.is_empty()
+        || path.is_empty()
+        || host.chars().any(|c| c.is_control() || c.is_whitespace())
+        || path.chars().any(char::is_control)
+    {
+        return RepoId::Unknown;
+    }
+    RepoId::Remote(format!("{}/{path}", host.to_ascii_lowercase()))
+}
+
 fn claude_owner(cwd: &str) -> Option<String> {
     let (before, _) = cwd.split_once("/.claude/worktrees/")?;
     name(Path::new(before))
@@ -83,7 +187,7 @@ fn worktree_owner(dir: &Path, git: &Path, home: Option<&Path>) -> Option<String>
     if worktrees.file_name()? != "worktrees" {
         return None;
     }
-    let recorded_common = read_metadata(&target.join("commondir"))
+    let recorded_common = read_metadata(&target.join("commondir"), GIT_FILE_MAX)
         .and_then(|value| normalize(&target.join(value.trim())));
     let common = recorded_common.as_deref().unwrap_or(worktrees.parent()?);
     let common_name = common.file_name()?.to_string_lossy();
@@ -94,7 +198,7 @@ fn worktree_owner(dir: &Path, git: &Path, home: Option<&Path>) -> Option<String>
     // External common directories may instead belong to --separate-git-dir
     // checkouts. Do not label their linked worktrees after an unrelated storage
     // directory when Git explicitly says it is not bare.
-    if let Some(config) = read_metadata(&common.join("config")) {
+    if let Some(config) = read_metadata(&common.join("config"), GIT_FILE_MAX) {
         let mut core = false;
         let mut bare = None;
         let mut checkout = None;
@@ -145,7 +249,7 @@ fn worktree_owner(dir: &Path, git: &Path, home: Option<&Path>) -> Option<String>
 
 /// Only bounded regular metadata, with no symbolic-link ancestor. Files
 /// named by untrusted pointers must not redirect reads through a symlink.
-fn read_metadata(path: &Path) -> Option<String> {
+fn read_metadata(path: &Path, max: u64) -> Option<String> {
     if path.ancestors().any(|part| {
         fs::symlink_metadata(part)
             .ok()
@@ -155,10 +259,10 @@ fn read_metadata(path: &Path) -> Option<String> {
     }
     let mut text = String::new();
     crate::events::open_regular(path)?
-        .take(GIT_FILE_MAX + 1)
+        .take(max + 1)
         .read_to_string(&mut text)
         .ok()?;
-    (text.len() <= GIT_FILE_MAX as usize).then_some(text)
+    (text.len() as u64 <= max).then_some(text)
 }
 
 /// `path` with `.` and `..` resolved by its text alone (no disk access, so no
@@ -475,8 +579,64 @@ mod tests {
             scratch.0.join("storage/config"),
         )
         .unwrap();
-        assert!(read_metadata(&scratch.0.join("storage/config")).is_none());
+        assert!(read_metadata(&scratch.0.join("storage/config"), GIT_FILE_MAX).is_none());
         std::os::unix::fs::symlink(scratch.0.join("real"), scratch.0.join("alias")).unwrap();
-        assert!(read_metadata(&scratch.0.join("alias/config")).is_none());
+        assert!(read_metadata(&scratch.0.join("alias/config"), GIT_FILE_MAX).is_none());
+    }
+
+    #[test]
+    fn origin_urls_become_sanitized_remote_ids() {
+        for (url, want) in [
+            ("https://user:secret@GitHub.com/onsager-ai/semon.git", "github.com/onsager-ai/semon"),
+            ("https://github.com:8443/onsager-ai/semon", "github.com:8443/onsager-ai/semon"),
+            ("https://github.com:443/onsager-ai/semon.git", "github.com/onsager-ai/semon"),
+            ("ssh://git@github.com:22/onsager-ai/semon.git", "github.com/onsager-ai/semon"),
+            ("ssh://git@host.example:2222/team/app/", "host.example:2222/team/app"),
+            ("git@GitHub.com:onsager-ai/semon.git", "github.com/onsager-ai/semon"),
+        ] {
+            assert_eq!(classify_origin(url), RepoId::Remote(want.to_owned()), "{url}");
+        }
+    }
+
+    #[test]
+    fn local_origins_are_paths_and_unusable_ones_are_unknown() {
+        for url in [
+            "file:///srv/git/semon.git",
+            "file:/srv/git/semon",
+            "/srv/git/semon.git",
+            "../semon",
+            "./dir:with-colon",
+        ] {
+            assert_eq!(classify_origin(url), RepoId::Path(url.to_owned()), "{url}");
+        }
+        for url in ["https://github.com", "https://github.com/", "git@host:"] {
+            assert_eq!(classify_origin(url), RepoId::Unknown, "{url}");
+        }
+    }
+
+    #[test]
+    fn a_repository_origin_is_read_from_its_git_config() {
+        let scratch = Scratch::new();
+        semon(&scratch);
+        let id = |relative: &str| repo_id(&scratch.0.join(relative).to_string_lossy(), None);
+        assert_eq!(id("work/semon"), Some(RepoId::Unknown), "no config");
+        scratch.file(
+            "work/semon/.git/config",
+            "[core]\n\turl = https://wrong.example/core\n[remote \"upstream\"]\n\turl = https://wrong.example/upstream\n[remote \"origin\"]\n\turl = https://user:token@GitHub.com/onsager-ai/semon.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n",
+        );
+        let want = || Some(RepoId::Remote("github.com/onsager-ai/semon".into()));
+        assert_eq!(id("work/semon"), want());
+        assert_eq!(id("work/semon/src"), want());
+        assert_eq!(id("work/semon-wt-x/crates/deep"), want(), "linked worktree");
+        assert_eq!(id("work/semon/.claude/worktrees/agent-1"), want());
+        scratch.file(
+            "work/semon/.git/config",
+            "[remote \"origin\"]\n\turl = /srv/git/semon.git\n",
+        );
+        assert_eq!(id("work/semon"), Some(RepoId::Path("/srv/git/semon.git".into())));
+        scratch.file("work/semon/.git/config", "[core]\n\tbare = false\n");
+        assert_eq!(id("work/semon"), Some(RepoId::Unknown), "no origin");
+        scratch.dir("elsewhere/plain");
+        assert_eq!(id("elsewhere/plain"), None, "not in a repository");
     }
 }

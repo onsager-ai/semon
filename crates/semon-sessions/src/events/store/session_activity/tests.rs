@@ -540,3 +540,82 @@ fn activity_observations_survive_restart_and_facts_share_publication_generation(
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
+
+fn changes(c: &Connection) -> Vec<(String, String)> {
+    c.prepare("SELECT session_key,kind FROM silver_change ORDER BY seq")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+#[test]
+fn the_change_log_is_empty_before_activity_is_query_ready_and_has_a_row_after() {
+    let root = scratch("change-log-ready");
+    let (store, _) = opened(&root.join("fresh.sqlite3"));
+    assert!(changes(&store.connection).is_empty());
+    drop(store);
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    assert!(changes(&store.connection).contains(&(row.key.clone(), "changed".into())));
+    let orphans: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM silver_change WHERE session_key NOT IN (SELECT session_key FROM session_activity_projections)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphans, 0, "a change names only query-ready sessions");
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn rewriting_activity_logs_a_change_only_when_it_differs() {
+    let root = scratch("change-log-rewrite");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let projection = row.session_activity.as_ref().unwrap();
+    let start = changes(&store.connection).len();
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, projection).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(changes(&store.connection).len(), start, "unchanged");
+    let mut rewritten = projection.clone();
+    rewritten.activity.steps[0].tokens.output += 1;
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, &rewritten).unwrap();
+    tx.commit().unwrap();
+    let logged = changes(&store.connection);
+    assert_eq!(logged.len(), start + 1);
+    assert_eq!(logged.last(), Some(&(row.key.clone(), "changed".into())));
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn removing_a_mismatched_projection_logs_a_removal_once() {
+    let root = scratch("change-log-removed");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let start = changes(&store.connection).len();
+    let mut moved = row.clone();
+    moved.sources[0].offset += 1;
+    let tx = store.connection.transaction().unwrap();
+    remove_mismatched(&tx, &moved).unwrap();
+    tx.commit().unwrap();
+    let logged = changes(&store.connection);
+    assert_eq!(logged.len(), start + 1);
+    assert_eq!(logged.last(), Some(&(row.key.clone(), "removed".into())));
+    let tx = store.connection.transaction().unwrap();
+    remove_mismatched(&tx, &moved).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(changes(&store.connection).len(), start + 1, "nothing left");
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}

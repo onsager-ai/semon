@@ -5483,6 +5483,7 @@ fn recorded_facts_decide_liveness_hostname_home_and_repos() {
         mirror_observation_id: None,
         mirror_sequence: None,
         repos: BTreeMap::new(),
+        repo_ids: BTreeMap::new(),
         offline_since: None,
         runs: BTreeMap::new(),
         reported_runs: Vec::new(),

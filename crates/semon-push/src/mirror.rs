@@ -504,6 +504,7 @@ impl Receiver {
             || status.runtime.codex_rollouts.is_some()
             || status.runtime.codex_provisional_rollouts.is_some()
             || !status.runtime.repos.is_empty()
+            || !status.runtime.repo_ids.is_empty()
             || !status.runtime.reported_runs.is_empty()
         {
             return Err(Refusal::Invalid("invalid partial observation".into()));
