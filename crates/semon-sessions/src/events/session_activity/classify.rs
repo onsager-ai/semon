@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use super::{ActivityStepId, SourcePosition};
+use super::{ActivityStepId, CommandTag, SourcePosition};
 use crate::events::{FileIndex, Kind, field, record_time};
 
 const MAX_BYTES: usize = 256 * 1024;
@@ -1008,7 +1008,7 @@ pub(crate) fn tool_evidence(name: &str, input: &Value) -> ToolCallEvidence {
     ToolCallEvidence { tool, target_path }
 }
 
-pub(super) fn call(
+pub(crate) fn call(
     name: &str,
     input: &Value,
     step_id: Option<ActivityStepId>,
@@ -1548,7 +1548,7 @@ fn changes(commands: &[Command], text: &str) -> Vec<Change> {
     facts
 }
 
-pub(super) fn finish(
+pub(crate) fn finish(
     observation: &mut Observation,
     output: &Value,
     error: bool,

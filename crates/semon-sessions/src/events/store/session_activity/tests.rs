@@ -453,7 +453,9 @@ fn step_facts_keep_private_tool_details_and_usage_ownership() {
     let copied = Projection::derive(
         row.key.clone(),
         vec![step.clone()],
-        &[(step.id.clone(), "other-session".into())].into_iter().collect(),
+        &[("facts-message".into(), "other-session".into())]
+            .into_iter()
+            .collect(),
         vec![],
         vec![],
         vec![],

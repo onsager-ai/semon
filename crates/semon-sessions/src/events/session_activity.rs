@@ -437,8 +437,8 @@ pub(crate) fn apply_observations(
                 .into_iter()
                 .chain(row.observation.activity())
                 .min();
-            if let Some(wait) = row.observation.wait {
-                step.waits.push(wait);
+            if let Some(wait) = &row.observation.wait {
+                step.waits.push(wait.clone());
             }
             if let Some(waste) = row.observation.waste {
                 let rank = |kind| match kind {
