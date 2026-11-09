@@ -2,8 +2,9 @@ use super::super::tests::{
     catalog_fixture_projection, catalog_native_fixture, catalog_write, opened, scratch,
 };
 use super::*;
+use crate::events::session_activity::classify::Change;
 use crate::events::session_activity::{
-    classify::Change, ActivityStepId, Ownership, TimedInput, UsageOwner,
+    ActivityStepId, Ownership, TimedInput, UsageOwner,
 };
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
@@ -112,19 +113,34 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
             .unwrap()
     }
 
+    fn catalog_sources(
+        connection: &Connection,
+        key: &str,
+    ) -> Vec<(String, String, String)> {
+        let mut statement = connection
+            .prepare("SELECT source_path,native_id,lifecycle FROM session_catalog_sources WHERE session_key=?1 ORDER BY source_path")
+            .unwrap();
+        statement
+            .query_map([key], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
     let root = scratch("activity-missing-source");
     let (options, _, _) = catalog_native_fixture(&root, 1, false);
     let missing_path = options
         .claude_home
-        .join("projects/-work-proj/cleared.jsonl");
+        .join("projects/-work-proj-copy/native-cl-00.jsonl");
+    fs::create_dir_all(missing_path.parent().unwrap()).unwrap();
     let missing_records = [
         serde_json::json!({
-            "type":"system", "subtype":"compact_boundary", "sessionId":"cleared",
+            "type":"system", "subtype":"compact_boundary", "sessionId":"native-cl-00",
             "session_id":"native-cl-00", "timestamp":"2026-09-24T00:01:30Z",
             "compactMetadata":{"trigger":"auto","preTokens":155000}
         }),
         serde_json::json!({
-            "type":"assistant", "uuid":"assistant-cleared", "sessionId":"cleared",
+            "type":"assistant", "uuid":"assistant-cleared", "sessionId":"native-cl-00",
             "session_id":"native-cl-00", "timestamp":"2026-09-24T00:02:00Z",
             "message":{"id":"message-cleared","role":"assistant","model":"claude-sonnet-4-5",
                 "content":[{"type":"tool_use","id":"commit-call","name":"Bash",
@@ -132,7 +148,7 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
                 "usage":{"input_tokens":100,"output_tokens":25}}
         }),
         serde_json::json!({
-            "type":"user", "uuid":"result-cleared", "sessionId":"cleared",
+            "type":"user", "uuid":"result-cleared", "sessionId":"native-cl-00",
             "session_id":"native-cl-00", "timestamp":"2026-09-24T00:02:01Z",
             "message":{"role":"user","content":[{"type":"tool_result",
                 "tool_use_id":"commit-call","content":"[main abc1234] fixture"}]}
@@ -144,9 +160,13 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     fs::write(&missing_path, &missing_records).unwrap();
 
     let (mut rows, slots) = catalog_fixture_projection(&options);
-    assert_eq!(rows.len(), 1, "the linked Claude files form one session");
+    assert_eq!(rows.len(), 1, "the same-ID Claude files form one session");
     let row_index = rows.iter().position(|row| row.harness == "claude").unwrap();
     assert_eq!(rows[row_index].sources.len(), 2);
+    assert!(rows[row_index]
+        .sources
+        .iter()
+        .all(|source| source.native_id == "native-cl-00"));
     let key = rows[row_index].key.clone();
     let missing_source = missing_path.to_string_lossy().into_owned();
     {
@@ -157,7 +177,7 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
                 .steps
                 .iter()
                 .any(|step| step.position.source == missing_source),
-            "the cleared file contributes its own usage step"
+            "the missing file contributes its own usage step"
         );
         assert!(!projection.activity.compactions.is_empty());
         // Change facts point to their tool result record, not the usage step.
@@ -174,10 +194,30 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     let row = &rows[row_index];
     let path = crate::events::EventCache::path(&options.cache);
     let (mut store, _) = opened(&path);
-    catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    assert_eq!(
+        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto)
+            .unwrap()
+            .0,
+        Outcome::Written
+    );
     let complete = read(&store.connection, row);
     let original_header = header(&store.connection, &key);
     assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(false));
+    let original_membership = catalog_sources(&store.connection, &key);
+    assert_eq!(original_membership.len(), 2);
+    assert!(original_membership
+        .iter()
+        .all(|(_, native_id, lifecycle)| native_id == "native-cl-00" && lifecycle == "current"));
+    let present_source = original_membership
+        .iter()
+        .find(|(source_path, _, _)| source_path != &missing_source)
+        .unwrap()
+        .0
+        .clone();
+    assert_ne!(present_source, missing_source);
+    assert!(original_membership
+        .iter()
+        .any(|(source_path, _, _)| source_path == &missing_source));
     let original_steps = table_rows(
         &store.connection,
         "session_activity_steps",
@@ -215,16 +255,52 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
         .find(|row| row.key == key)
         .unwrap();
     assert_eq!(partial.sources.len(), 1, "Catalog membership reflects disk");
-    catalog_write(
-        &mut store,
-        &partial_rows,
-        &partial_slots,
-        false,
-        CatalogWriter::Auto,
-    )
-    .unwrap();
+    let seen = partial_rows
+        .iter()
+        .flat_map(|row| row.sources.iter())
+        .map(|source| source.path.to_string_lossy().into_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    // Selected fixture projection leaves unseen ledgers alone. Reconcile this
+    // fixture's complete current inventory as the native full scan does.
+    let mut event_cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+    event_cache.begin_scan().unwrap();
+    event_cache.begin_full_scan().unwrap();
+    let mut dirty = false;
+    event_cache.retain(&seen, &mut dirty);
+    event_cache.end_scan();
+    drop(event_cache);
+    assert!(dirty, "the full scan retires the disappeared source ledger");
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &partial_rows,
+            &partial_slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap()
+        .0,
+        Outcome::Written,
+        "the current Catalog membership must publish after source retirement"
+    );
 
     assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
+    let missing_membership = catalog_sources(&store.connection, &key);
+    assert_eq!(missing_membership.len(), 2);
+    assert!(missing_membership
+        .iter()
+        .any(|(source_path, native_id, lifecycle)| {
+            source_path == &missing_source
+                && native_id == "native-cl-00"
+                && lifecycle == "retained"
+        }));
+    assert!(missing_membership
+        .iter()
+        .any(|(source_path, native_id, lifecycle)| {
+            source_path == &present_source
+                && native_id == "native-cl-00"
+                && lifecycle == "current"
+        }));
     assert!(page(
         &store.connection,
         partial,
@@ -277,14 +353,18 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     assert_eq!(missing_changes.len(), start.len() + 1);
     assert_eq!(missing_changes.last(), Some(&(key.clone(), "changed".into())));
 
-    catalog_write(
-        &mut store,
-        &partial_rows,
-        &partial_slots,
-        false,
-        CatalogWriter::Auto,
-    )
-    .unwrap();
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &partial_rows,
+            &partial_slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
     assert_eq!(changes(&store.connection), missing_changes);
 
     fs::write(&missing_path, &missing_records).unwrap();
@@ -294,16 +374,23 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
         .find(|row| row.key == key)
         .unwrap();
     assert_eq!(recovered.sources.len(), 2);
-    catalog_write(
-        &mut store,
-        &recovered_rows,
-        &recovered_slots,
-        false,
-        CatalogWriter::Auto,
-    )
-    .unwrap();
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &recovered_rows,
+            &recovered_slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
 
     assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(false));
+    assert!(catalog_sources(&store.connection, &key)
+        .iter()
+        .all(|(_, native_id, lifecycle)| native_id == "native-cl-00" && lifecycle == "current"));
     let recovered_page = read(&store.connection, recovered);
     let usage_step = recovered_page
         .steps
