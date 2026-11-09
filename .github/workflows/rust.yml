@@ -176,7 +176,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2, 3]
+        partition: [1, 2]
     steps:
       - name: Check out
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -198,7 +198,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-${{ matrix.partition }}-${{ steps.rust-toolchain.outputs.cachekey }}-
       - name: Partitioned cargo nextest suite
-        run: SEMON_BUILD_TIMING=1 cargo nextest run --locked --partition count:${{ matrix.partition }}/3 -- --skip initial_catalog_page_precedes_global_native_observation
+        run: SEMON_BUILD_TIMING=1 cargo nextest run --locked --partition count:${{ matrix.partition }}/2 -- --skip initial_catalog_page_precedes_global_native_observation
       # nextest excludes documentation tests; run the existing doc-test suite once.
       - name: Rust documentation tests
         if: matrix.partition == 1
