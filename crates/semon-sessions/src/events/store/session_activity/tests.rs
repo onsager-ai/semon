@@ -2,7 +2,9 @@ use super::super::tests::{
     catalog_fixture_projection, catalog_native_fixture, catalog_write, opened, scratch,
 };
 use super::*;
-use crate::events::session_activity::{ActivityStepId, Ownership};
+use crate::events::session_activity::{
+    ActivityStepId, Ownership, TimedInput, UsageOwner,
+};
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
     page(
@@ -312,6 +314,140 @@ fn codex_anchor_requires_a_rendered_exact_call() {
         crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap();
     assert_eq!(resolved["basis"], "call_identity");
     assert_eq!(resolved["slot"], 1000);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn step_facts_keep_private_tool_details_and_usage_ownership() {
+    use crate::events::session_activity::classify::{self, LocatedObservation};
+    let root = scratch("step-facts");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let usage = row
+        .session_activity
+        .as_ref()
+        .unwrap()
+        .inputs
+        .values()
+        .next()
+        .unwrap()
+        .clone();
+    let step = UsageStep::claude(
+        "facts-message".into(),
+        SourcePosition {
+            source: row.sources[0].path.to_string_lossy().into_owned(),
+            offset: 20,
+        },
+        match usage {
+            Usage::Claude(usage) => usage,
+            Usage::Codex(_) => unreachable!(),
+        },
+    );
+    let mut read_observation = classify::call(
+        "functions.Read",
+        &serde_json::json!({"file_path":"/local/secret.rs"}),
+        Some(step.id.clone()),
+        "read".into(),
+    );
+    classify::finish(
+        &mut read_observation,
+        &serde_json::json!("ok"),
+        false,
+        Some(10),
+        Some(15),
+        "read-result".into(),
+    );
+    let mut shell = classify::call(
+        "Bash",
+        &serde_json::json!({"command":"git status"}),
+        Some(step.id.clone()),
+        "shell".into(),
+    );
+    classify::finish(
+        &mut shell,
+        &serde_json::json!(""),
+        false,
+        Some(16),
+        Some(19),
+        "shell-result".into(),
+    );
+    let projection = Projection::derive(
+        row.key.clone(),
+        vec![step.clone()],
+        &Default::default(),
+        vec![],
+        vec![
+            LocatedObservation {
+                position: SourcePosition {
+                    source: step.position.source.clone(),
+                    offset: 11,
+                },
+                timestamp: Some(10),
+                result_timestamp: Some(15),
+                result_offset: Some(12),
+                tool: Some(classify::tool_evidence(
+                    "functions.Read",
+                    &serde_json::json!({"file_path":"/local/secret.rs"}),
+                )),
+                observation: read_observation,
+            },
+            LocatedObservation {
+                position: SourcePosition {
+                    source: step.position.source.clone(),
+                    offset: 13,
+                },
+                timestamp: Some(16),
+                result_timestamp: Some(19),
+                result_offset: Some(14),
+                tool: Some(classify::tool_evidence(
+                    "Bash",
+                    &serde_json::json!({"command":"git status"}),
+                )),
+                observation: shell,
+            },
+        ],
+        vec![TimedInput {
+            position: SourcePosition {
+                source: step.position.source.clone(),
+                offset: 1,
+            },
+            timestamp: Some(1),
+        }],
+        crate::pricing::snapshot(),
+    );
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, &projection).unwrap();
+    tx.commit().unwrap();
+    let page = read(&store.connection, row);
+    let facts = step_facts(&store.connection, row, &page.generation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(facts.len(), 1);
+    let (_, id, facts) = &facts[0];
+    assert_eq!(id, &step.id);
+    assert_eq!(facts.usage_owner, UsageOwner::Exclusive);
+    assert_eq!(facts.model_ms, Some(19));
+    assert_eq!(facts.tool_ms, Some(8));
+    assert_eq!(facts.tool_calls.len(), 2);
+    assert_eq!(facts.tool_calls[0].tool, "Read");
+    assert_eq!(facts.tool_calls[0].target_path.as_deref(), Some("/local/secret.rs"));
+    assert_eq!(facts.tool_calls[0].ok, Some(true));
+    assert_eq!(facts.tool_calls[1].target_path, None);
+    let public = items(
+        &store.connection,
+        row,
+        None,
+        &crate::pricing::snapshot().fingerprint,
+        false,
+        None,
+        1,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(public.items[0].get("facts").is_none());
+    assert!(public.items[0].get("target_path").is_none());
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
