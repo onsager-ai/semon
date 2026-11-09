@@ -77,7 +77,10 @@ fn a_preserved_chain_holds_the_bytes_and_the_redactor_version() {
     assert_eq!(chain.sha256, hex(&digest(&bytes)));
     assert_eq!(chain.redactor_version, "7");
     assert!(is_id(&chain.chain_id));
-    assert_eq!(archive.chains("claude/a.jsonl").unwrap(), std::slice::from_ref(&chain));
+    assert_eq!(
+        archive.chains("claude/a.jsonl").unwrap(),
+        std::slice::from_ref(&chain)
+    );
     assert_eq!(read_chain(&archive, "claude/a.jsonl", &chain), bytes);
     archive.verify("claude/a.jsonl").unwrap();
 
