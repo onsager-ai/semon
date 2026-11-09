@@ -7,6 +7,9 @@ pub mod store;
 
 mod parquet_io;
 
+#[cfg(test)]
+mod testutil;
+
 pub use error::{Error, Result};
 pub use governance::{
     ContributorWitness, CoverageWitness, Destination, ExportAuthority, ExportWitness,
