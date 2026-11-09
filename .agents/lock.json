@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "manifest_sha256": "88a26c906c339ee33f5dae81bdd6a460af9e275758694771aa845f826f8672db",
+  "manifest_sha256": "282df73f7584768039761322048e030bdd2296d0cf30a0cc66fa70692dad6b44",
   "block_sha256": "21b24d84a4636c657f08116aac12fb3d4a0ea717b66c92f4cfe1dff433f8d9a4",
   "resolved_skills": [
     "ci-triage",
@@ -18,12 +18,12 @@
       "mode": "100644"
     },
     ".agents/skills/ci-triage/SKILL.md": {
-      "sha256": "077630e924b33308599f863a64ddc20dae5cca4341be847084dcecba7f58fcc5",
+      "sha256": "a61e1f9c08c5305c5c1fbaeccee806e13c505939c1436b78ec34d17f4e47b59f",
       "owner": "shared",
       "mode": "100644"
     },
     ".agents/skills/docs-drift-guard/SKILL.md": {
-      "sha256": "055577de81943f8b09f0515b5306592a768686eeaace9739285555cba0213277",
+      "sha256": "158e9c8c2d68b598a5609b181f97081c784dfe2b85a1b00a26a9b3e26d322d3f",
       "owner": "shared",
       "mode": "100644"
     },
@@ -43,7 +43,7 @@
       "mode": "100644"
     },
     ".agents/skills/harness-operations/SKILL.md": {
-      "sha256": "ae7dc9b93a64b46d5926b5772aeb61eacde09c764051785b2fe32aa3d13c7d46",
+      "sha256": "63a72db7b2893148463b8861322a52489fd24992ec88af5be6ff7a4e146d193e",
       "owner": "shared",
       "mode": "100644"
     },
@@ -63,7 +63,7 @@
       "mode": "100755"
     },
     ".agents/skills/issue-spec/SKILL.md": {
-      "sha256": "08cf37607416096ca7ed3e6fe6a9fafc8965d0323582c8ce3c981c6466605e48",
+      "sha256": "4faa4cc41a4091cf623497dc6b1f84dd36895115da01550e99050e63659ceb1b",
       "owner": "shared",
       "mode": "100644"
     },
@@ -72,18 +72,33 @@
       "owner": "shared",
       "mode": "100644"
     },
+    ".agents/skills/pr-lifecycle/references/pr-ci-trigger.md": {
+      "sha256": "a1ce7225b8649ef178a7be1a66a5303685c656c777ba4807770aac8f66eb4b52",
+      "owner": "shared",
+      "mode": "100644"
+    },
+    ".agents/skills/pr-lifecycle/references/review-and-cleanup.md": {
+      "sha256": "b06c3b88b4a8461a84a13032f9843da900c90134e5331bb9509c6a9d18ff1acc",
+      "owner": "shared",
+      "mode": "100644"
+    },
     ".agents/skills/pr-lifecycle/SKILL.md": {
-      "sha256": "bd4bd6fbd8aab970057c4e2cb252d1a2115d3649d59602ffc82d31d2361d9d31",
+      "sha256": "b1afb127bf10fbf6736349b3d2da7b5a5b8755b56fd25f36ff67a53ad2b74b8e",
+      "owner": "shared",
+      "mode": "100644"
+    },
+    ".agents/skills/pre-push/references/commits.md": {
+      "sha256": "4cd62dde32a894944805648f15012d219460a942f376ced5f74402bc6288b7c9",
       "owner": "shared",
       "mode": "100644"
     },
     ".agents/skills/pre-push/SKILL.md": {
-      "sha256": "f2371605bc3ca58df3596af0362f633462a5da6fb8a0c3410d43d00167c77aae",
+      "sha256": "153e3faba2fa93c81885415b3d1e85b66ab93ab65dacb07a27b7b61efeb8b367",
       "owner": "shared",
       "mode": "100644"
     },
     ".agents/skills/ui-design/SKILL.md": {
-      "sha256": "cd54334b997f1939e4344979c0770f0deecb3fc040a82bffe612f159858f222c",
+      "sha256": "47a3433e2324238e04c364216d1ecf102d2404b6bf4c605d5b6752f791438a9f",
       "owner": "shared",
       "mode": "100644"
     },
@@ -93,12 +108,12 @@
       "mode": "100644"
     },
     ".claude/skills/ci-triage/SKILL.md": {
-      "sha256": "077630e924b33308599f863a64ddc20dae5cca4341be847084dcecba7f58fcc5",
+      "sha256": "a61e1f9c08c5305c5c1fbaeccee806e13c505939c1436b78ec34d17f4e47b59f",
       "owner": "shared",
       "mode": "100644"
     },
     ".claude/skills/docs-drift-guard/SKILL.md": {
-      "sha256": "055577de81943f8b09f0515b5306592a768686eeaace9739285555cba0213277",
+      "sha256": "158e9c8c2d68b598a5609b181f97081c784dfe2b85a1b00a26a9b3e26d322d3f",
       "owner": "shared",
       "mode": "100644"
     },
@@ -123,7 +138,7 @@
       "mode": "100644"
     },
     ".claude/skills/harness-operations/SKILL.md": {
-      "sha256": "ae7dc9b93a64b46d5926b5772aeb61eacde09c764051785b2fe32aa3d13c7d46",
+      "sha256": "63a72db7b2893148463b8861322a52489fd24992ec88af5be6ff7a4e146d193e",
       "owner": "shared",
       "mode": "100644"
     },
@@ -143,7 +158,7 @@
       "mode": "100755"
     },
     ".claude/skills/issue-spec/SKILL.md": {
-      "sha256": "08cf37607416096ca7ed3e6fe6a9fafc8965d0323582c8ce3c981c6466605e48",
+      "sha256": "4faa4cc41a4091cf623497dc6b1f84dd36895115da01550e99050e63659ceb1b",
       "owner": "shared",
       "mode": "100644"
     },
@@ -152,13 +167,28 @@
       "owner": "shared",
       "mode": "100644"
     },
+    ".claude/skills/pr-lifecycle/references/pr-ci-trigger.md": {
+      "sha256": "a1ce7225b8649ef178a7be1a66a5303685c656c777ba4807770aac8f66eb4b52",
+      "owner": "shared",
+      "mode": "100644"
+    },
+    ".claude/skills/pr-lifecycle/references/review-and-cleanup.md": {
+      "sha256": "b06c3b88b4a8461a84a13032f9843da900c90134e5331bb9509c6a9d18ff1acc",
+      "owner": "shared",
+      "mode": "100644"
+    },
     ".claude/skills/pr-lifecycle/SKILL.md": {
-      "sha256": "bd4bd6fbd8aab970057c4e2cb252d1a2115d3649d59602ffc82d31d2361d9d31",
+      "sha256": "b1afb127bf10fbf6736349b3d2da7b5a5b8755b56fd25f36ff67a53ad2b74b8e",
+      "owner": "shared",
+      "mode": "100644"
+    },
+    ".claude/skills/pre-push/references/commits.md": {
+      "sha256": "4cd62dde32a894944805648f15012d219460a942f376ced5f74402bc6288b7c9",
       "owner": "shared",
       "mode": "100644"
     },
     ".claude/skills/pre-push/SKILL.md": {
-      "sha256": "f2371605bc3ca58df3596af0362f633462a5da6fb8a0c3410d43d00167c77aae",
+      "sha256": "153e3faba2fa93c81885415b3d1e85b66ab93ab65dacb07a27b7b61efeb8b367",
       "owner": "shared",
       "mode": "100644"
     },
@@ -168,7 +198,7 @@
       "mode": "100644"
     },
     ".claude/skills/ui-design/SKILL.md": {
-      "sha256": "cd54334b997f1939e4344979c0770f0deecb3fc040a82bffe612f159858f222c",
+      "sha256": "47a3433e2324238e04c364216d1ecf102d2404b6bf4c605d5b6752f791438a9f",
       "owner": "shared",
       "mode": "100644"
     },
