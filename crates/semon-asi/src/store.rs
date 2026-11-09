@@ -598,4 +598,3 @@ fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
     }
     Ok(())
 }
-
