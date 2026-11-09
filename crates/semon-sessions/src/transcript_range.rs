@@ -350,7 +350,8 @@ pub(crate) fn resolve_step_slot(
         if !matches!(slot.recipe, Recipe::A | Recipe::Think | Recipe::Tool { .. } | Recipe::Yielded { .. } | Recipe::Sent { .. } | Recipe::Operation { .. }) {
             continue;
         }
-        let index: u64 = record.get(0)?;
+        let index = u64::try_from(record.get::<_, i64>(0)?)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
         has_native_ids |= slot.native_event_id.is_some();
         let basis = match (&step.id, ids) {
             (ActivityStepId::Claude(_), Some(ids)) if slot.native_event_id.as_ref().is_some_and(|id| ids.contains(id)) => Some("native_record_id"),

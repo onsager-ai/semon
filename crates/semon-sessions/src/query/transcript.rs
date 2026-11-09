@@ -517,6 +517,7 @@ fn virtual_read(
             tx::Anchor::Last => (false, total),
             tx::Anchor::Before(before) => (false, before.min(total)),
             tx::Anchor::After(after) => (true, after.min(total)),
+            tx::Anchor::Step(_) => return Err(unavailable("Activity anchor requires a physical projection")),
             tx::Anchor::Turn(turn) => {
                 return Err(QueryError::new(
                     "unknown_turn",
