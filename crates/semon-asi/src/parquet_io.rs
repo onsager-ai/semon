@@ -111,6 +111,23 @@ pub(crate) fn with_generation(
             table.name
         )));
     }
+    for column in table
+        .columns
+        .iter()
+        .filter(|column| !column.values.is_empty())
+    {
+        let values = string_column(batch, column.name)?;
+        if let Some(value) = values
+            .iter()
+            .flatten()
+            .find(|value| !column.values.contains(value))
+        {
+            return Err(Error::invalid(format!(
+                "invalid value {value:?} for {}.{}",
+                table.name, column.name
+            )));
+        }
+    }
     let mut columns = batch.columns().to_vec();
     columns.push(Arc::new(Int64Array::from(vec![
         generation;

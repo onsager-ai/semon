@@ -205,7 +205,7 @@ impl<C: Clock> Store<C> {
     /// Takes the writer lock and discards files of a generation that never committed.
     pub fn open_with_clock(root: &Path, clock: C) -> Result<Self> {
         let analytics = root.join(ANALYTICS_DIR);
-        fs::create_dir_all(&analytics)?;
+        create_durable_dir(&analytics)?;
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -280,6 +280,11 @@ impl<C: Clock> Store<C> {
             return Err(Error::invalid("a table appears twice in one update"));
         }
 
+        discard_uncommitted(&self.analytics, self.manifest.generation)?;
+        // Validate all batches before writing any file in this generation.
+        for item in &update.tables {
+            with_generation(item.table, &item.batch, 0)?;
+        }
         let generation = self.manifest.generation + 1;
         let stamp = generation as i64;
         let mut files = self.manifest.files.clone();
@@ -302,7 +307,7 @@ impl<C: Clock> Store<C> {
             }
             let path = format!("{}/g{generation}.parquet", table.name);
             let batch = with_generation(table, &item.batch, stamp)?;
-            fs::create_dir_all(self.analytics.join(table.name))?;
+            create_durable_dir(&self.analytics.join(table.name))?;
             let out = write_file(&self.analytics.join(&path), &batch)?;
             let entry = FileEntry {
                 table: table.name.to_owned(),
@@ -360,7 +365,7 @@ impl<C: Clock> Store<C> {
         }
 
         let live_map = format!("{LIVE_DIR}/g{generation}.parquet");
-        fs::create_dir_all(self.analytics.join(LIVE_DIR))?;
+        create_durable_dir(&self.analytics.join(LIVE_DIR))?;
         write_live_map(&self.analytics.join(&live_map), &live)?;
         sync_parents(
             &self.analytics,
@@ -538,6 +543,20 @@ fn read_live_map_file(path: &Path) -> Result<HashMap<String, i64>> {
         }
     }
     Ok(live)
+}
+
+fn create_durable_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        if !parent.exists() {
+            create_durable_dir(parent)?;
+        }
+        fs::create_dir_all(path)?;
+        sync_dir(parent)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn sync_dir(path: &Path) -> Result<()> {
