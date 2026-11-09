@@ -385,7 +385,10 @@ fn a_restart_after_the_chain_is_published_finds_it() {
     let chain = archive.chains("native").unwrap().remove(0);
     // A new process: nothing is remembered, the directory is attributed.
     let restarted = Archive::new(archive.dir.clone());
-    assert_eq!(restarted.chains("native").unwrap(), [chain.clone()]);
+    assert_eq!(
+        restarted.chains("native").unwrap(),
+        std::slice::from_ref(&chain)
+    );
     assert!(admit(&restarted, &log, 20_000));
     assert_eq!(restarted.chains("native").unwrap(), [chain]);
     let id = restarted.lookup("native").unwrap().unwrap();
