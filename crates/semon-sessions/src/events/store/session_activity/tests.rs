@@ -377,10 +377,116 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     );
     assert_eq!(changes(&store.connection), missing_changes);
 
+    // Withdraw the entire session, then return the exact admitted generation
+    // without activity. Exact source proof is enough to clear missing state.
+    let withdraw_session = |store: &mut SqliteStore| {
+        store.connection.execute_batch(NO_MEMBERS).unwrap();
+        let tx = store.connection.transaction().unwrap();
+        withdraw(&tx, None).unwrap();
+        tx.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key=?1", [&key]).unwrap();
+        tx.commit().unwrap();
+    };
+    withdraw_session(&mut store);
+    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
+    let tx = store.connection.transaction().unwrap();
+    tx.execute(
+        "UPDATE session_catalog SET lifecycle='current',metadata=?2 WHERE session_key=?1",
+        params![key, json(row).unwrap()],
+    )
+    .unwrap();
+    remove_mismatched(&tx, row).unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        source_missing(&store.connection, &key).unwrap(),
+        Some(false)
+    );
+    assert_eq!(header(&store.connection, &key), original_header);
+    assert_eq!(count(&changes(&store.connection), &key, "removed"), 0);
+
+    // Lose a member again and withdraw fully. Returning both identities with
+    // changed source generations is only metadata proof, not a replacement.
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &partial_rows,
+            &partial_slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
+    withdraw_session(&mut store);
+    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
+
     fs::write(&missing_path, &missing_records).unwrap();
     let (recovered_rows, recovered_slots) = catalog_fixture_projection(&options);
     let recovered = recovered_rows.iter().find(|row| row.key == key).unwrap();
     assert_eq!(recovered.sources.len(), 2);
+    assert!(!witness_has_missing_member(row, recovered));
+    assert_ne!(
+        crate::retention::source_generation(&recovered.sources).unwrap(),
+        original_header.1
+    );
+    let mut metadata_rows = recovered_rows.clone();
+    metadata_rows
+        .iter_mut()
+        .find(|row| row.key == key)
+        .unwrap()
+        .session_activity = None;
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &metadata_rows,
+            &recovered_slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
+    assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
+    assert_eq!(header(&store.connection, &key), original_header);
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_steps",
+            "generation,ordinal",
+            &key
+        ),
+        original_steps
+    );
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_compactions",
+            "generation,ordinal",
+            &key
+        ),
+        original_compactions
+    );
+    assert_eq!(
+        table_rows(
+            &store.connection,
+            "session_activity_facts",
+            "generation,identity",
+            &key
+        ),
+        original_facts
+    );
+    let witness: String = store
+        .connection
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
+            [&key],
+            |record| record.get(0),
+        )
+        .unwrap();
+    assert_eq!(witness, original_witness);
+    assert_eq!(count(&changes(&store.connection), &key, "removed"), 0);
+    let before_replacement = changes(&store.connection);
     assert_eq!(
         catalog_write(
             &mut store,
@@ -404,6 +510,7 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
             .all(|(_, native_id, lifecycle)| native_id == "native-cl-00" && lifecycle == "current")
     );
     let recovered_page = read(&store.connection, recovered);
+    assert_ne!(recovered_page.generation, complete.generation);
     let usage_step = recovered_page
         .steps
         .iter()
@@ -433,7 +540,8 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
         original_facts.len()
     );
     let recovered_changes = changes(&store.connection);
-    assert_eq!(recovered_changes.len(), missing_changes.len() + 1);
+    assert_eq!(recovered_changes.len(), before_replacement.len() + 1);
+    assert_eq!(count(&recovered_changes, &key, "removed"), 0);
     assert_eq!(
         recovered_changes.last(),
         Some(&(key.clone(), "changed".into()))

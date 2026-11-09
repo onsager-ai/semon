@@ -668,8 +668,9 @@ fn log_change(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<()> {
 
 /// Mark sessions leaving the current catalog: a `changed` row for each that
 /// had query-ready activity, so analytics can see its sources are missing, and
-/// a digest that no republication matches, so a returning session is logged
-/// again. Their activity and retained history are untouched (`removed` is for
+/// a digest that no republication matches, preserving any missing-source marker
+/// until the exact generation returns or complete activity is published. Their
+/// activity and retained history are untouched (`removed` is for
 /// projections that are dropped). `key` limits the scope to one session, by
 /// its index. Runs before the lifecycle is set to `retained`, so a repeated
 /// publication logs nothing.
@@ -689,7 +690,7 @@ fn withdraw_sql(exact: bool) -> (String, String) {
             "INSERT INTO silver_change(session_key,kind) SELECT session_key,'changed' {gone} AND session_key IN (SELECT session_key FROM session_activity_projections) ORDER BY session_key"
         ),
         format!(
-            "UPDATE silver_session_state SET digest='retained' WHERE session_key IN (SELECT session_key {gone})"
+            "UPDATE silver_session_state SET digest=CASE WHEN digest GLOB 'source_missing:*' THEN 'source_missing:retained' ELSE 'retained' END WHERE session_key IN (SELECT session_key {gone})"
         ),
     )
 }
