@@ -353,6 +353,7 @@ pub(crate) fn session_activity_anchor_with_gate(
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct StepAnchor {
     pub(crate) generation: String,
     pub(crate) ordinal: u64,
