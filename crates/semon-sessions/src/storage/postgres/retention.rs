@@ -288,10 +288,7 @@ fn index_digest(
     let mut digest = Sha256::new();
     digest.update(serde_json::to_vec(&(ledger, index)).map_err(backend)?);
     for event in index.events.iter().chain(&index.extras) {
-        digest.update(
-            serde_json::to_vec(&(event, &event.activity_observation, &event.activity_tool))
-                .map_err(backend)?,
-        );
+        digest.update(serde_json::to_vec(&(event, &event.activity_observation)).map_err(backend)?);
     }
     digest.update(serde_json::to_vec(&index.signals).map_err(backend)?);
     let chunks = index
