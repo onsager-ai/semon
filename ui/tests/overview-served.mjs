@@ -663,10 +663,7 @@ test(
             if (width === 1280) {
               await page.getByRole('button', { name: 'Collapse sidebar', exact: true }).click();
               await page.locator('.app.rail').waitFor();
-              await page
-                .locator('#lanes .child-dot')
-                .first()
-                .waitFor({ state: 'attached' });
+              await page.locator('#lanes .child-dot').first().waitFor({ state: 'attached' });
               assert.ok(
                 (await page.locator('#lanes .child-dot').count()) > 0,
                 'collapsed rail retains recorded descendant activity',
