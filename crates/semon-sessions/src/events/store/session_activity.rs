@@ -537,7 +537,8 @@ fn source_missing_for_row(
     reason = "StepFacts reads source availability separately from Catalog membership"
 )]
 pub(crate) fn source_missing(c: &Connection, key: &str) -> rusqlite::Result<Option<bool>> {
-    let state: Option<(String, Option<String>, Option<String>, Option<String>)> = c
+    type SourceAvailabilityRow = (String, Option<String>, Option<String>, Option<String>);
+    let state: Option<SourceAvailabilityRow> = c
         .query_row(
             "SELECT p.source_generation,c.metadata,s.metadata,ss.digest FROM session_activity_projections p LEFT JOIN session_catalog c USING(session_key) LEFT JOIN session_activity_sources s USING(session_key) LEFT JOIN silver_session_state ss USING(session_key) WHERE p.session_key=?1",
             [key],
