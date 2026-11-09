@@ -1507,6 +1507,13 @@ fn scan(
     } else {
         cache.retain(&seen, dirty);
     }
+    // This machine's own logs, once the index has consumed them: custody
+    // before anything can rewrite them. Bounded selections (the Catalog
+    // producer's) archive just the sources they scanned, and only the
+    // prefix the index consumed so far.
+    if options.facts.is_none() {
+        cache.archive_consumed(&options.cache, &seen);
+    }
     cache.end_scan();
     texts
         .prompt_caches

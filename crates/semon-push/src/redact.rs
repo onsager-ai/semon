@@ -17,6 +17,9 @@
 //! line stays valid JSON. No pattern spans a newline: redacting a file line
 //! by line gives the same bytes as redacting it whole.
 
+/// Version of the rules used to redact mirror bytes.
+pub const VERSION: u32 = 1;
+
 /// Whether redaction may replace this byte.
 fn allowed(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/' | b'+' | b'=')

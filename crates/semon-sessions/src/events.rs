@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{Tokens, attachments, field, sealed::LogFile};
+use crate::{Tokens, archive::Archive, attachments, field, sealed::LogFile};
 
 pub(crate) mod session_activity;
 pub(crate) mod store;
@@ -1372,6 +1372,8 @@ pub(crate) struct EventCache {
     /// processes kept moving them on): read again at the next scan, which
     /// writes them through.
     unpersisted: BTreeSet<String>,
+    /// Native custody and its verification cache live across bounded scans.
+    archive: Option<Archive>,
 }
 
 /// How often an index without its store tries to open it again.
@@ -2166,6 +2168,28 @@ impl EventCache {
     /// Ends a scan, and with it the refresh: the store gets its writes again.
     pub(crate) fn end_scan(&mut self) {
         self.busy = false;
+    }
+
+    /// Admits every scanned native prefix, including unchanged ones so lost
+    /// custody is repaired. Intact chains use the verification cache. A failure is
+    /// reported and retried by the next full scan; it does not stop the read.
+    pub(crate) fn archive_consumed(&mut self, cache: &Path, seen: &BTreeSet<String>) {
+        let archive = self
+            .archive
+            .get_or_insert_with(|| Archive::new(crate::archive::standalone_dir(cache)));
+        for key in seen {
+            let Some(file) = self.files.get(key) else {
+                continue;
+            };
+            let consumed = (file.ledger.offset, file.ledger.prefix);
+            let admitted = LogFile::open(Path::new(key))
+                .and_then(|mut log| archive.admit(key, &mut log, consumed.0, &consumed.1));
+            match admitted {
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => eprintln!("semon: native log archive: {key}: {error}"),
+            }
+        }
     }
 
     /// Drop only durably committed producer payloads after Catalog publication.
@@ -10426,4 +10450,51 @@ fn native_connector_tool_classification_refuses_incomplete_identity_and_keeps_un
     assert_eq!(index.events[0].k, Kind::Tool);
     assert_eq!(index.events[0].r.as_ref().unwrap().f, UNKNOWN);
     assert!(index.pending.is_empty());
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+
+    #[test]
+    fn a_log_that_was_not_admitted_is_tried_again_at_the_next_scan() {
+        let name = format!("semon-archive-retry-{}", std::process::id());
+        let root = std::env::temp_dir().join(name);
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("a.jsonl");
+        let consumed = b"{\"a\":1}\n{\"b\":2}\n";
+        // The log was rewritten after the index read it.
+        fs::write(&path, b"{\"changed\":true}\n{\"b\":2}\n").unwrap();
+        let key = path.to_string_lossy().into_owned();
+        let mut cache = EventCache::default();
+        cache.files.insert(
+            key.clone(),
+            CachedFile {
+                ledger: Ledger {
+                    stat: Stat {
+                        dev: 0,
+                        ino: 0,
+                        size: consumed.len() as u64,
+                        modified_ns: 0,
+                        changed_ns: None,
+                    },
+                    offset: consumed.len() as u64,
+                    prefix: Sha256::digest(consumed).into(),
+                    tail: [0; 32],
+                },
+                index: None,
+            },
+        );
+        let archive = Archive::new(root.join("archive"));
+        let seen = BTreeSet::from([key.clone()]);
+        cache.archive_consumed(&root.join("index.json"), &seen);
+        assert!(archive.chains(&key).unwrap().is_empty());
+
+        // The log holds the consumed bytes again: the next scan admits it.
+        fs::write(&path, consumed).unwrap();
+        cache.archive_consumed(&root.join("index.json"), &seen);
+        assert_eq!(archive.chains(&key).unwrap().len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

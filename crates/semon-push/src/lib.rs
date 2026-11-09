@@ -988,6 +988,7 @@ impl Client {
                 known.generation.clone()
             };
             let bind = Append {
+                redactor_version: redact::VERSION,
                 relocation: None,
                 generation: Some(generation.clone()),
                 root: input.root.as_str().into(),
@@ -1017,6 +1018,7 @@ impl Client {
         }
         let generation = wire::new_generation().map_err(Failure::Local)?;
         let append = Append {
+            redactor_version: redact::VERSION,
             relocation: None,
             generation: Some(generation.clone()),
             root: input.root.as_str().into(),
@@ -1195,6 +1197,7 @@ impl Client {
                     head.extend_from_slice(&piece[..take]);
                 }
                 let append = Append {
+                    redactor_version: redact::VERSION,
                     relocation: relocation.clone(),
                     generation: Some(generation.clone()),
                     root: input.root.as_str().into(),
@@ -1974,7 +1977,7 @@ mod tests {
         let upgraded = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let directory = fixture.root.join("receiver");
         fs::create_dir_all(&directory).unwrap();
-        let reference = Arc::new(mirror::Receiver::new(directory));
+        let reference = Arc::new(mirror::Receiver::new(directory).unwrap());
         let (worker, recorded, enabled, sink) = (
             Arc::clone(&server),
             Arc::clone(&appends),
@@ -2241,7 +2244,7 @@ mod tests {
             b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"fresh-native\"}}\n".to_vec();
         let mirror_dir = fixture.root.join("receiver");
         fs::create_dir_all(&mirror_dir).unwrap();
-        let receiver = Arc::new(mirror::Receiver::new(&mirror_dir));
+        let receiver = Arc::new(mirror::Receiver::new(&mirror_dir).unwrap());
         let sink = Arc::clone(&receiver);
         let listener = Arc::clone(&server);
         let (waiting, first_pending) = mpsc::channel();
@@ -2697,9 +2700,10 @@ mod tests {
         let url = format!("http://{}", server.server_addr());
         let mirror = fixture.root.join("mirror");
         fs::create_dir_all(&mirror).unwrap();
-        let reference = mirror::Receiver::new(&mirror);
+        let reference = mirror::Receiver::new(&mirror).unwrap();
         let bytes = b"already sent\n";
         let existing = Append {
+            redactor_version: redact::VERSION,
             relocation: None,
             root: "claude".into(),
             path: "projects/-work/old.jsonl".into(),

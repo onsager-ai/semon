@@ -20,6 +20,8 @@ pub struct Append {
     pub generation: Option<String>,
     pub root: String,
     pub path: String,
+    /// Version of the sender's redaction rules.
+    pub redactor_version: u32,
     pub offset: u64,
     /// SHA-256 (lowercase hex) of the first `min(4096, offset + len)` bytes
     /// the file holds once this append is applied.
@@ -174,6 +176,28 @@ pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn append_requires_and_round_trips_redactor_version() {
+        let request = Append {
+            relocation: None,
+            generation: None,
+            root: "claude".into(),
+            path: "projects/test.jsonl".into(),
+            redactor_version: crate::redact::VERSION,
+            offset: 0,
+            head_sha256: head_sha256(b""),
+            bytes: String::new(),
+            replace: false,
+        };
+        let mut value = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Append>(value.clone()).unwrap(),
+            request
+        );
+        value.as_object_mut().unwrap().remove("redactor_version");
+        assert!(serde_json::from_value::<Append>(value).is_err());
+    }
 
     #[test]
     fn base64_round_trips_and_matches_the_standard() {
