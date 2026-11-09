@@ -1185,6 +1185,7 @@ impl ViewerCore {
                 | "/api/session-capabilities"
                 | "/api/session-identity"
                 | "/api/session-anchor"
+                | "/api/session-activity-anchor"
                 | "/api/session-annotations"
                 | "/api/session-trace"
                 | "/api/session-home"
@@ -1528,6 +1529,13 @@ impl ViewerCore {
             ),
             "/api/session-anchor" => {
                 crate::session_turn_anchor_with_gate(view.options(), key, query, || {
+                    refresh_error =
+                        Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
+                    Ok(())
+                })
+            }
+            "/api/session-activity-anchor" => {
+                crate::transcript_range::session_activity_anchor_with_gate(view.options(), key, query, || {
                     refresh_error =
                         Some(wait_for_catalog_read(view, deadline, allow_catalog_wait)?);
                     Ok(())

@@ -335,7 +335,7 @@ fn retained_query_tools() -> Vec<QueryTool> {
             name: "read_transcript",
             description: "A page of one session's transcript, the same page the viewer's /api/tx serves: entries \
                 with from and to (their positions) and total. With no anchor, the last page; before or after a \
-                position; or the page starting at a turn. Tool input and output are previews.",
+                position; or the page starting at a turn or an exact activity step. Tool input and output are previews.",
             positional: Some("id"),
             input_schema: json!({
                 "type": "object",
@@ -344,6 +344,7 @@ fn retained_query_tools() -> Vec<QueryTool> {
                     "before": {"type": "integer", "minimum": 0, "description": "The page ending before this position (a page's from)."},
                     "after": {"type": "integer", "minimum": 0, "description": "The page starting at this position (a page's to)."},
                     "turn": {"type": "string", "minLength": 1, "description": "The page starting at this turn's first entry."},
+                    "step": {"type":"object", "properties":{"generation":{"type":"string","minLength":1},"ordinal":{"type":"integer","minimum":0},"id":{"type":"object"}},"required":["generation","ordinal","id"],"additionalProperties":false,"description":"Exact generation-qualified activity step."},
                     "limit": {"type": "integer", "minimum": 1, "maximum": tx::PAGE_ENTRIES, "default": tx::PAGE_ENTRIES, "description": "At most this many entries."},
                 },
                 "required": ["id"],
@@ -1455,6 +1456,12 @@ impl Query {
             answer["window_start"] = json!(self.start);
             return Ok(answer);
         }
+        if tool == "read_transcript" && !args["step"].is_null() {
+            return Err(QueryError::new(
+                "stale_projection",
+                "Activity step anchors require a current SQLite transcript projection",
+            ));
+        }
         let result = evidence
             .storage
             .with_selected_query(catalog_key, provider, mode, now, |data| {
@@ -1636,6 +1643,12 @@ impl Query {
         )>,
     ) -> Result<Value, QueryError> {
         let id = string(args, "id").unwrap_or_default();
+        if !args["step"].is_null() {
+            return Err(QueryError::new(
+                "stale_projection",
+                "Activity step anchors require a current SQLite transcript projection",
+            ));
+        }
         let position = |key: &str| integer(args, key).map(|value| value.max(0) as usize);
         let anchor = tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
             .ok_or_else(|| QueryError::invalid("before, after and turn are exclusive"))?;

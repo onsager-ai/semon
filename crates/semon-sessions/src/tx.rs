@@ -53,6 +53,8 @@ pub(crate) enum Anchor {
     After(usize),
     /// The page starting at this turn's first entry.
     Turn(String),
+    /// A generation-qualified activity step, resolved only in SQLite.
+    Step(crate::transcript_range::StepAnchor),
 }
 
 impl Anchor {
@@ -2233,6 +2235,7 @@ pub(crate) fn page_from_lines(
         Anchor::Before(before) => (false, (*before).min(total)),
         Anchor::After(after) => (true, (*after).min(total)),
         Anchor::Turn(turn) => (true, first_of(turn).ok_or(io::ErrorKind::NotFound)?),
+        Anchor::Step(_) => return Err(io::ErrorKind::Unsupported.into()),
     };
     // The background calls still running anywhere in the session: a viewer
     // that loaded one on an earlier page learns it stopped without its

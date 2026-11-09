@@ -766,12 +766,28 @@ fn read_inner(
         return Err(unavailable("Native transcript source generation changed"));
     }
     let position = |name: &str| integer(args, name).map(|value| value.max(0) as usize);
-    let anchor = tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
-        .ok_or_else(|| QueryError::invalid("before, after and turn are exclusive"))?;
+    let anchor = if args["step"].is_null() {
+        tx::Anchor::of(position("before"), position("after"), string(args, "turn"))
+            .ok_or_else(|| QueryError::invalid("before, after, turn and step are exclusive"))?
+    } else {
+        if position("before").is_some() || position("after").is_some() || string(args, "turn").is_some() {
+            return Err(QueryError::invalid("before, after, turn and step are exclusive"));
+        }
+        tx::Anchor::Step(serde_json::from_value(args["step"].clone()).map_err(|_| QueryError::invalid("Invalid activity step anchor"))?)
+    };
     let (forward, from) = match &anchor {
         tx::Anchor::Last => (false, total),
         tx::Anchor::Before(before) => (false, (*before).min(total)),
         tx::Anchor::After(after) => (true, (*after).min(total)),
+        tx::Anchor::Step(step) => {
+            let result = crate::transcript_range::resolve_step_slot(&tx, &row, history.is_some(), step)
+                .map_err(unavailable)?;
+            let slot = result["slot"].as_u64().ok_or_else(|| QueryError::new(
+                "stale_projection",
+                format!("Activity anchor unavailable: {}", result["reason"].as_str().unwrap_or("stale_transcript")),
+            ))?;
+            (true, usize::try_from(slot).map_err(unavailable)?)
+        }
         tx::Anchor::Turn(turn) => {
             let turn_column = if history.is_some() {
                 "json_extract(metadata,'$.turn')"
@@ -1232,7 +1248,7 @@ fn read_inner(
         .iter()
         .map(|(_, id)| id.clone())
         .collect();
-    let answer = loop {
+    let mut answer = loop {
         let (low, high) = if forward {
             (
                 from.saturating_sub(1),
@@ -1340,6 +1356,7 @@ fn read_inner(
             "Native transcript observation changed during this read",
         ));
     }
+    answer["transcript_generation"] = json!(crate::transcript_range::entry_generation(&slot_generation));
     Ok(Some(answer))
 }
 
