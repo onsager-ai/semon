@@ -1,6 +1,6 @@
 # Agent Session Intelligence direction
 
-Status: accepted direction (2026-11-08; decisions extended the same day). This document supersedes earlier product
+Status: accepted direction (2026-11-08; decisions extended the same day; architecture amended 2026-11-09). This document supersedes earlier product
 focus statements wherever they conflict.
 
 ## Decision
@@ -35,11 +35,11 @@ sequencing. Progress is tracked in the pinned roadmap issue, #549.
 
 | Area | Decision |
 | --- | --- |
-| Storage engine | Extend the SQLite Session Event Index first (event/content tables, FTS5). Design the schema so it can be exported to a columnar store (Parquet/DuckDB) once analytical volume calls for it. |
+| Storage engine | SQLite for ingest (the Session Event Index), durable labels and FTS5. DuckDB over Parquet gold partitions for analytics and the public SQL dialect, from day 1 (amended 2026-11-09). |
 | PostgreSQL track (#477) | Paused. The merged code stays behind its feature flag with its CI workflow. The Raw-plus-projection-cache model, namespace-bound storage port and runtime custody owners carry over to the SQLite ASI store. |
-| Hub | Hub is hosted Semon only: multi-tenant tenancy, workspace authorization and hosted views over Semon. ASI logic, schema and analytics live in Semon. Hub receives metadata rows and labels only, never session bodies, and runs no L1 model classification. Each tenant workspace gets its own ASI database. |
-| Session bodies off-machine | Opt-in per source. Without opt-in, only metadata and aggregates leave the machine (see [Architecture](#architecture)). Opted-in bodies are redacted by default before they leave. |
-| Semantic labels (L1) | In v1. Labels follow methodology §3–§4 (rows with labeller, taxonomy version, confidence and evidence step IDs). Classifiers run where the bodies are, on the origin machine by default. Sending evidence to a model provider needs its own per-source opt-in that names the provider and model; the bodies opt-in does not grant it. Categorical labels travel as metadata; free-text label fields (goal, mechanism) count as bodies. |
+| Hub | Hub is hosted Semon only: multi-tenant tenancy, workspace authorization and hosted views over Semon. ASI logic, schema and analytics live in Semon. Hub receives body-free gold partitions and categorical labels only, never Raw or session bodies, and runs no L1 model classification. Each tenant workspace has its own gold store. |
+| Session bodies off-machine | Redacted Raw goes to the operator's own receiver by default (amended 2026-11-09). It never goes to Hub. Transparency comes from open, validated code, and redaction is best-effort. |
+| Semantic labels (L1) | In v1. Labels follow methodology §3–§4 (rows with labeller, taxonomy version, confidence and evidence step IDs). Classifiers run where the bodies are: the receiver, or the machine itself when it has none. Sending evidence to a model provider needs its own per-source opt-in that names the provider and model; pushing to a receiver does not grant it. Categorical labels travel as metadata; free-text label fields (goal, mechanism) count as bodies. |
 | Analytics UI spec | Adopt the session activity viewer spec (semon#532) as the analytics UI direction. |
 | Consumers | Agents (MCP/SQL) and humans (dashboards) equally, over one shared schema. |
 | Viewer | Shrink to an analytics UI: keep the authenticated server, shell and security boundary; drop transcript-browsing polish. Pixel/visual comparison is removed from CI by semon#536/#537. New UI work is dashboards and query results. |
@@ -47,44 +47,52 @@ sequencing. Progress is tracked in the pinned roadmap issue, #549.
 
 ## Architecture
 
-Decided 2026-11-08. The specs (#544 storage, #545 query, #546 L1 labels) own the
-details.
+Decided 2026-11-08 and amended 2026-11-09 (central derivation inside the
+operator's trust boundary, and DuckDB gold). The specs (#544 storage, #545
+query, #546 L1 labels) own the details.
 
-- **Layers.** Native Raw, then the per-namespace ingest index (today's Session
-  Event Index; internal and rebuildable), then the public ASI projection, then
-  query. The public projection is the methodology §1.1 tables, held in typed
-  tables in their own database and read-only to queries. Internal ingest tables
-  may change freely; the public schema is the versioned contract. State that
-  can't be rebuilt (labels, adjudications, links, work items, interventions)
-  lives in a separate durable file that derived-cache rebuilds never touch.
-- **Metadata push by default.** The origin machine derives the L0 projection
-  (sessions, turns, steps, cost, compactions) and pushes typed rows, not Raw.
-  Rows carry the origin's projector, rules and price versions, and the Raw
-  prefix digest they came from. The receiver validates rows against the schema,
-  stores them in the pushing machine's namespace, and asks for a re-push when
-  versions move; it never repairs rows in place. Repo, branch, model and tool
-  names cross in plain text. File paths cross only as keyed HMAC tokens; the key
-  is shared by an operator's workspace and is never held by a receiver or Hub.
-  Message, command, tool-output and other body text never crosses without
-  opt-in. Opted-in sources also send redacted Raw through the mirror path. That
-  Raw feeds only body tables, FTS5 and L1 evidence packets; the ASI rows still
-  come from the origin.
-- **Raw archive.** The machine with custody of the bodies (the origin, or a
-  receiver for opted-in sources) keeps compressed, sealed Raw under explicit
-  retention, so derived layers can be re-derived when rules, prices or the
-  projector change. Derived rows older than the archive are frozen History,
-  marked with the versions they were computed under.
-- **Versioning.** Every derived row records its projector, rules and price
-  versions. A version bump re-derives only the affected rows. Labels are
-  append-only: a new taxonomy or labeller adds rows, and views pick the current
-  ones.
-- **Query reach.** Read-only SQL and FTS5 search are available through MCP/CLI
-  on the machine, through the authenticated Viewer server for its own
-  namespaces, and through Hub per tenant. There is no separate network SQL
-  endpoint.
-- **Crates.** A `semon-asi` library crate (public schema, projection store and
-  query engine) is split out of `semon-sessions` as part of #544. `semon-sessions`
-  keeps native parsing and the ingest index. Hub depends on `semon-asi`.
+- **Medallion layers.**
+  - Bronze is admitted Raw: native logs, plus their redacted mirrors on a
+    receiver, kept immutably with redaction provenance.
+  - Silver is the per-namespace ingest index (today's Session Event Index,
+    with the activity projection). It is internal and rebuildable from bronze.
+  - Gold is the public dimensional model: Kimball facts and dimensions over
+    methodology §1.1, held as Parquet partitions and queried with DuckDB. Gold
+    is rebuildable from silver and is the versioned public contract.
+  - State that can't be rebuilt (labels, adjudications, links, work items,
+    interventions) lives in a separate durable SQLite file.
+- **Central derivation inside the operator's trust boundary.**
+  - Machines push redacted Raw to the operator's own receiver through the
+    mirror path, and the receiver derives silver and gold for every machine.
+  - A single machine runs the same pipeline locally.
+  - Exactly one store derives each source's gold. Re-derivation after a
+    rules, price or transform change needs only the receiver's bronze.
+- **Hub gets gold only.**
+  - A receiver (or a single machine) exports body-free gold partitions and
+    categorical labels to Hub.
+  - File paths cross to Hub only as HMAC tokens keyed per operator
+    workspace. The receiver holds the key and Hub never does.
+  - Body columns never cross.
+- **Raw archive.** Bronze is kept immutably, including bytes a source rewrite
+  replaces, and indefinitely by default. That keeps gold re-derivable after a
+  harness prunes its logs.
+- **Versioning.** Every gold row records its transform, rules and price
+  versions. A bump re-derives only the affected partitions. Labels are
+  append-only: a new taxonomy or labeller adds rows, and views pick the
+  current ones.
+- **Query reach.**
+  - Read-only DuckDB SQL over gold, sandboxed: no external access or
+    extensions, locked configuration, memory, thread and time limits.
+  - FTS5 search over silver bodies.
+  - Both through MCP/CLI on the machine, through the authenticated Viewer
+    server for its own store, and through Hub per tenant (gold only). There is
+    no separate network SQL endpoint.
+- **Performance from day 1.** Ingest, freshness, dashboard, group-by and
+  search budgets are measured in CI on synthetic data at 1M, 10M and 100M rows.
+- **Crates.** A `semon-asi` library crate (gold schema, transforms, partition
+  store and query engine) is split out of `semon-sessions` as part of #544.
+  `semon-sessions` keeps native parsing and the ingest index. Hub depends on
+  `semon-asi`.
 
 ## Unchanged invariants
 
@@ -102,9 +110,9 @@ details.
 2. Retire control/runtime/SSH code and their CI jobs (landed in semon#541).
    The browser, design-document and Hub Session display/control/runtime follow-ups
    remain in step 6.
-3. Specify the ASI storage schema by adopting methodology §1.1 in SQLite
-   (normalized events and content, FTS5, retention beyond the current 60-day
-   Analytics window, multi-machine keys, body opt-in and redaction). Start from
+3. Specify the ASI store: medallion layers, the gold dimensional model over
+   methodology §1.1, central derivation on the receiver, retention beyond the
+   current 60-day Analytics window, multi-machine keys and Hub gold export. Start from
    the #477 carry-over: https://github.com/onsager-ai/semon/issues/477#issuecomment-6719032404.
 4. Ship the query surface: read-only SQL plus FTS through MCP/CLI, replacing the
    paused `find`.

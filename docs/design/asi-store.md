@@ -1,519 +1,249 @@
 # ASI store
 
-Status: proposed spec for #544 (2026-11-08). Direction and settled
-architecture: [ASI direction](asi-direction.md#architecture). Method and target
-schema: [ASI methodology §1.1](asi-methodology.md#11-storage-schema). The query
-surface over this store is specified in [ASI query](asi-query.md) (#545).
+Status: proposed spec for #544 (revised 2026-11-09 for central derivation and
+DuckDB gold). Direction: [ASI direction](asi-direction.md#architecture).
+Method: [ASI methodology §1.1](asi-methodology.md#11-storage-schema). The
+query surface is specified in [ASI query](asi-query.md) (#545).
 
-This document defines the public ASI database, its keys and versions, how
-rows are derived, published and re-derived, the Raw archive, the
-durable-state file, the metadata-push wire contract, path tokens, retention
-and the `semon-asi` crate boundary. Implementation slices are child issues of
-#544.
-
-## Layers and files
+## Shape
 
 ```
-native Raw ─┬─▶ ingest index (per namespace, internal) ──▶ ASI projector ──▶ asi.sqlite3 (public, typed)
-            │                       ▲                                             ▲
-            └─▶ Raw archive ────────┘ (read when native Raw is gone)  metadata push from other origins
-                                                     asi-durable.sqlite3 (labels, links, work, experiments)
-                                                     asi-search.sqlite3 (body tables + FTS5; body custody only)
+machine A ─┐  redacted Raw (existing semon push mirror path)
+machine B ─┼──────────────▶ receiver (or a single machine, standalone)
+           │                 bronze   immutable Raw chains + redaction provenance
+           │                 silver   ingest index per machine (exists today) + activity + StepFacts
+           │                 gold     Parquet partitions (facts + dimensions) ── DuckDB ── sql
+           │                 durable  asi-durable.sqlite3 (labels, links, work items)
+           │                 FTS5     body index in silver ─────────────────────────────── search / view
+           │
+           └─ Hub (per tenant) ◀── gold partitions only: no bodies, paths as HMAC tokens
 ```
 
-| File | Content | Rebuildable | Writer |
+Each source has one **authoritative store**: the receiver it pushes to, or the
+machine itself if it pushes nowhere. Only the authoritative store exports to
+Hub. A machine that pushes may also keep local gold for offline queries; that
+copy is never merged or exported.
+
+| Data | Location | Rebuildable from | Engine |
 | --- | --- | --- | --- |
-| ingest index (`sessions-index.sqlite3`, one per namespace) | Today's Session Event Index | Yes, from Raw (`SCHEMA_VERSION`) | `semon-sessions` |
-| `asi.sqlite3` | Public §1.1 tables for every namespace the store holds | Own rows: from Raw or the archive. Received rows: by re-push. Frozen rows: no. | ASI projector (own namespace), push ingest (other namespaces) |
-| `asi-durable.sqlite3` | Labels, adjudications, links, lanes, work items, changes, outcomes, interventions, assignments; the origin's `generation_mark` | No | Append-only APIs in `semon-asi` |
-| `asi-search.sqlite3` | Body tables and their FTS5 index | Yes, from Raw | Body indexer, only where bodies are in custody |
+| Bronze | Native logs plus `archive/`; on a receiver, the mirror store | — (custody) | Files |
+| Silver | `sessions-index.sqlite3`, one per namespace | Bronze | SQLite |
+| Gold | `gold/` Parquet partitions plus `gold/manifest.json` | Silver | DuckDB (read) |
+| Durable | `asi-durable.sqlite3` | — (custody) | SQLite |
 
-All ASI files sit in Semon's state directory (`$XDG_STATE_HOME/semon/`, else
-`~/.local/state/semon/`). A Hub tenant workspace has its own `asi.sqlite3`
-and `asi-durable.sqlite3`, and no search file. Queries open `asi.sqlite3`
-read-only and attach the durable file read-only (see
-[ASI query](asi-query.md)). Ingest-index rebuilds never touch any ASI file.
+## Identity
 
-## Keys and identity
+Identity stays native. Rows are never keyed by ordinals, generations or row
+IDs, so labels survive every rebuild.
 
-Identity stays native. A row is never keyed by an ordinal, generation or
-SQLite row ID, so labels, links and evidence step IDs survive every rebuild.
+- **Namespace.** Each machine's sources use its configured machine name. A
+  receiver binds each push token to the token's name, refuses a token named
+  after itself, and reserves `local`.
+- **Encoding.** A UID is a sequence of percent-encoded components joined by
+  `/`. RFC 3986 unreserved characters stay as they are, and every other byte
+  becomes `%XX`.
+- **Keys.**
 
-**Namespace.** Each store's own sessions use its configured machine name as
-their namespace from the start, never `local`, so a UID is the same on the
-origin and on every receiver. A receiver binds each push token to a
-namespace equal to the token's name (`semon receive token add NAME`), refuses
-a token whose name equals its own machine name, and reserves `local`. The
-origin learns the receiver's name for it from `GET /v1/asi/status` and refuses
-to push when that name differs from its own machine name, so the two can't
-diverge silently.
+  | Key | Components |
+  | --- | --- |
+  | `session_uid` | `{namespace}/{harness}/{native_session_id}` |
+  | `turn_uid` | `{session_uid}/t/{id}`, where `id` is the Codex `turn_id`, the Claude initiating record `uuid`, the handoff ID, or else a record anchor |
+  | `step_uid` | `{session_uid}/s/claude/{message_id}` or `{session_uid}/s/codex/{thread}/{session}/{turn}/{response}` (`ActivityStepId`) |
+  | `compaction_uid` | `{session_uid}/c/{id}`, where `id` is the native record ID or else a record anchor |
 
-**Encoding.** A UID is a sequence of components joined by `/`. Every
-component is percent-encoded: RFC 3986 unreserved characters stay as they
-are, and every other byte (including `/`, `:` and `%`) becomes `%XX`. Joining
-is therefore unambiguous. On the wire, rows carry namespace-relative UIDs (the
-part after `{namespace}/`), and each store prefixes the namespace.
+- **Record anchor.** `@{source}:{n}`, where `source` is the native log's file
+  stem (which matches `^[A-Za-z0-9._\-]{1,128}$`) and `n` is the record's
+  ordinal within that log. It is independent of paths, keys and how logs
+  interleave, and stable while the log's prefix is unchanged.
 
-| Key | Components | Native source, in order of preference |
+## Bronze
+
+- **Receiver.** The mirror store is bronze. A `replace` append first moves
+  the replaced bytes into an immutable chain
+  (`archive/{archive_source_id}/{chain_id}.zst`, with random IDs and a
+  manifest written by atomic rename), so earlier content stays re-derivable.
+  Each chain records `redactor_version` and the digests of the redacted bytes
+  it holds.
+- **Standalone machine.** The archiver keeps an append-only zstd copy of each
+  native log under `archive/`, admitting only the prefix silver has consumed.
+  A native rewrite starts a new chain and keeps the old one. Silver reads a
+  source from the archive when the native log is gone.
+- **Retention.** Bronze is kept indefinitely by default (decided 2026-11-08),
+  with an optional `archive.retention_days`. Nothing deletes native logs.
+
+## Silver
+
+Silver is today's ingest index and activity projection, run per namespace
+(receivers already do this for mirrored machines, in `received.rs`). It gains:
+
+- **`StepFacts`** (#556, owned by the session activity lane): turn ID, tool
+  calls (tool, target path, command tag, ok, exit code, tool time), model time
+  and the full `BillingUsage` inputs. These are facts only; the L0 rules stay
+  with that lane.
+- **Change sequence.** A monotonic per-namespace `ingest_seq`, stamped on each
+  committed source advance or rewrite, lets gold transforms find touched
+  sessions without scanning by event time. An offline machine can deliver
+  months-old events today.
+- **Bodies for FTS5** (phase 2): see [ASI query](asi-query.md#search).
+
+## Gold model
+
+Kimball facts at explicit grains, plus conformed dimensions. Columns are
+typed, timestamps are UTC milliseconds, and enums are closed sets. Every
+column declares a class: `key`, `enum`, `number`, `time`, `name`, `path` or
+`body`. The class drives the Hub export and the query reference. Gold has no
+`body` columns.
+
+| Fact | Grain | Main columns |
 | --- | --- | --- |
-| `session_uid` | `{namespace}/{harness}/{native_session_id}` | Harness session ID |
-| `turn_uid` | `{session_uid}/t/{turn_id}` | Codex `turn_id`; Claude initiating record `uuid`; the handoff ID; else the record anchor `@{n}` of the turn's first record |
-| `step_uid` | `{session_uid}/s/claude/{message_id}` or `{session_uid}/s/codex/{thread}/{session}/{turn}/{response}` | `ActivityStepId` components, each encoded separately |
-| `compaction_uid` | `{session_uid}/c/{id}` | Native record ID; else the record anchor of the compaction record |
-| `source_uid` | `{namespace}/{harness}` | One §1.1 source row per harness and machine |
+| `fact_step` | One model invocation | step, turn and session keys; `model_key`, `repo_key`, `date_key`; billing inputs; `context_tokens`, `context_band`; `model_ms`, `tool_ms`; `usd_est`, `price_status`; `activity`, `waste_kind`, `trigger`, `ok` |
+| `fact_tool_call` | One tool call | `step_uid`, `ord`, `tool_key`, `target_path` (class `path`), `command_tag`, `ok`, `exit_code`, `tool_ms` |
+| `fact_turn` | One turn | `initiator`, `started_at`, `ended_at`, step count |
+| `fact_session` | One session (aggregate grain) | Totals by token class, `usd_est`, `reported_usd`, wall and model time, step and failure counts |
+| `fact_compaction` | One compaction | `step_uid` (nullable), `ts` |
+| `fact_label` | One label assertion | Target UID, field, value, labeller, taxonomy version, confidence, `created_at` (exported from the durable file; no free text) |
 
-A **record anchor** `@{source}:{n}` names a record by its native log and its
-position in that log. `source` is the native log's file stem, which the
-harness generates from native IDs (for example a Claude session or agent ID,
-or a Codex rollout name). It must match `^[A-Za-z0-9._\-]{1,128}$`, and a log
-whose stem does not is refused as unsupported. `n` is the zero-based ordinal
-of the record among that log's complete records. An anchor depends on neither
-paths nor the path key, so key rotation never changes it. It does not depend
-on how logs interleave in the session either, so an append to one log never
-shifts another log's anchors. Any store holding the Raw (an origin, or a
-receiver for opted-in sources, whose mirror keeps the stem and record
-boundaries) computes the same anchor. It is stable while the log's prefix is
-unchanged. A native rewrite can change it, and that publishes a new
-generation. Each table also stores the components as separate indexed
-columns. `idx` columns are ordinals for ordering only. A rebuild from the same
-admitted Raw yields identical UIDs, and a conformance test enforces this.
-
-## Public schema (`asi_schema_version` 1)
-
-Typed columns only: no JSON blobs, so the database exports to Parquet table by
-table. Timestamps are integer Unix milliseconds (UTC). Enums are `TEXT` with a
-`CHECK` listing the closed set.
-
-Every column in `semon-asi`'s schema definition declares a **class**: `key`,
-`enum`, `number`, `time`, `name` (bounded plain identifiers: repo, branch,
-model, tool), `token` (path tokens, digests) or `body` (free text). The class
-drives the push validator, the egress rules and the query allowlist
-([ASI query](asi-query.md)). A column without a class does not compile into
-the schema. No `body` column exists in `asi.sqlite3`.
-
-| Table | Columns beyond keys and versions | Origin of data |
-| --- | --- | --- |
-| `asi_meta` | `key`, `value`: `asi_schema_version`, `store_kind` (`origin`, `receiver`, `hub`), `machine`, `path_key_id` | Store |
-| `source` | `harness`, `machine`, `archive_coverage_from`, `archive_coverage_to` | Ingest catalog sources plus archive manifest |
-| `session` | `harness`, `model`, `role` (`manager`, `worker`, `solo`, `unknown`), `parent_session_uid`, `parent_method` (`native`, `workspace`, `none`), `lane_id` (root `session_uid`), `repo` (display name), `repo_id`, `branch`, `started_at`, `ended_at`, `status` (`active`, `idle`, `ended`, `unknown`), `stale` | `session_catalog`, `model::Session`, lineage, [repo identity](#repo-identity) |
-| `session_source` | `session_uid`, `source_token`, `raw_offset`, `raw_prefix_sha256`, `ledger_epoch` | `ProjectionTag` of each contributing Raw ledger (the publication witness) |
-| `turn` | `session_uid`, `idx`, `started_at`, `ended_at`, `initiator` (`user`, `manager`, `peer`, `self`) | `model::Turn`, slots |
-| `step` | `session_uid`, `turn_uid`, `idx`, `started_at`, `ended_at`, `model`, `tool` (primary call), `activity`, `ok`, `exit_code`, billing inputs, `context_tokens`, `context_band` (`lt50k`, `50k_150k`, `gt150k`), `model_ms`, `tool_ms`, `usd`, `carry_usd`, `price_status`, `waste_kind`, `trigger`, `compactions` | Activity projection plus `StepFacts` |
-| `step_call` | `step_uid`, `ord`, `tool`, `target_token`, `command_tag`, `ok`, `exit_code`, `tool_ms` | `StepFacts`: one row per tool call the model call requested |
-| `compaction` | `session_uid`, `step_uid` (nullable), `ts` | `session_activity_compactions` |
-| `cost` | `target_type` (`session`, `turn`), `target_uid`, billing inputs, `model_s`, `wall_s`, `usd`, `reported_usd`, `price_status` | Projector; `reported_usd` from `reported_runs` |
-| `price` | `price_version`, `provider`, `model`, `rate_kind`, `tier`, `threshold_tokens`, `usd_per_unit` | The effective pricing snapshot identified by its fingerprint |
-| `event` | `turn_uid`, `ts`, `kind`, `tool`, `status`, token classes, `latency_ms`, `context_tokens`, `payload_ref` | Ingest `events` and `signals`; present only where Raw is in custody, never pushed |
-
-**Billing inputs** are the typed `BillingUsage` facts, kept so price bumps
-are reproducible: `input_tokens`, `output_tokens`, `reasoning_tokens`,
-`cache_read_tokens`, `cache_write_5m_tokens`, `cache_write_1h_tokens`,
-`web_search_requests`, `speed`, `service_tier` and `prompt_tokens` (selects
-the long-context tier). `price.rate_kind` covers each of those inputs, and
-`tier` (`base`, `long_context`, `fast`, …) with `threshold_tokens` covers tiered
-rates. `price_status` is `priced`, `partial` (some inputs had no rate) or
-`unpriced` (unknown model). `usd` is `null` when unpriced. Step-level cost
-lives on `step`; `cost` holds session and turn totals, including
-provider-reported cost.
-
-Activity, waste-kind and trigger enums are the activity lane's closed sets
-(methodology §3.1.1, `events/session_activity.rs`). This store mirrors them;
-it does not define rules. `null` means "not derived", which is distinct from a
-value. Lane membership and metrics are views (methodology rule 5); the v1
-views are `lane_session`, `cost_by_day` (repo, model, harness, day) and
-`step_failure`. Segments are created by L1 (#546) and are not in v1.
-
-### Step facts input
-
-`ActivityStep` today lacks turn ID, tool calls with target, `ok` and exit code,
-separate model and tool time, and the full billing inputs. The projector reads
-them from an explicit `StepFacts` input that `semon-sessions` provides next to
-`ActivityStep`, built from the same admitted native facts. These are facts,
-not rules: activity, waste and trigger stay owned by the session activity
-lane, which implements `StepFacts` (#556) after its in-flight activity API
-work. The projector (S4) depends on `StepFacts` as delivered by that lane.
-
-**Where path tokens are computed.** The activity projection stores no file
-paths, only unkeyed SHA-256 fingerprints of tool inputs. Those can be attacked
-with a dictionary of likely paths, so they are never written to an ASI file
-and never cross the wire. `StepFacts` carries each tool call's raw target path
-in memory only, never persisted in the ingest index or `asi.sqlite3`. The
-projector computes the keyed `pt1_` token from it ([Path tokens](#path-tokens))
-and drops the raw path. The activity lane's fingerprints stay internal to
-its projection.
-
-## Versions, publication and re-derivation
-
-Every derived row (`session`, `session_source`, `turn`, `step`, `step_call`,
-`compaction`, `cost`) carries:
-
-| Column | Meaning |
+| Dimension | Notes |
 | --- | --- |
-| `projector_version` | `semon-asi` projector version (new constant `ASI_PROJECTOR_VERSION`) |
-| `rules_version` | `ACTIVITY_RULES_VERSION` the activity fields were computed under |
-| `price_version` | Pricing fingerprint (effective-table SHA-256) used for `usd`; `null` when unpriced |
-| `path_key_id` | Key ID of the path tokens in the row; `null` when the row has none |
-| `generation` | Session generation (see below) |
-| `frozen` | `1` when the Raw the row came from is no longer available |
+| `dim_machine`, `dim_harness`, `dim_tool`, `dim_date` | Conformed and small |
+| `dim_session` | Role, parent, parent method, lane root, repo, branch, status, start and end |
+| `dim_repo` | `repo_id` (the normalized `origin` remote; non-default ports kept) and a display name |
+| `dim_model` | SCD2: `model_key`, model, provider, `valid_from`, `valid_to` |
+| `dim_price` | SCD2 by price version: provider, model, `rate_kind`, `tier`, `threshold_tokens`, `usd_per_unit`, `valid_from`, `valid_to`, `learned_at` |
 
-`asi_schema_version` is a single fence per file, as `SCHEMA_VERSION` is for the
-ingest index. The unit of projection, publication and re-derivation is a
-session.
+`usd_est` is an estimate under a named price version, never presented as
+billed spend. Missing prices are `price_status = unpriced` and never summed as
+zero. Parallel tool calls live in `fact_tool_call`, so joining them never
+multiplies step tokens. The semantic layer is a set of versioned DuckDB views:
+`cost_by_day`, `step_failure`, `lane_session` and `current_label` (the latest
+assertion per target and field, with human adjudication taking precedence).
 
-**Generation.** A session's generation is `max(high_water + 1, now_ms)`. The
-origin keeps each session's `high_water` in the durable file
-(`generation_mark`), which rebuilds never touch, so generations stay
-monotonic across rebuilds and clock regressions. Before pushing to a
-destination, the sender reads its status. Equal generation and equal digest
-means synchronized: nothing is sent unless the destination marked the session
-`repush`, in which case the identical snapshot is resent. Only a destination
-generation above the local one, or an equal generation with a different
-digest (for example after a durable reset), makes the sender allocate a new
-generation above it, republish locally and then push. Monotonicity is therefore per destination and never depends on an
-unreachable one. A receiver refuses a generation more than 24 hours in the
-future.
+## Partitions, publication and versions
 
-**Single projector queue.** One projector task per store is the only writer
-of its own namespace's rows. It serializes all work: appends, rules and
-projector bumps, repricing, key rotation and freezing. Each job reads the
-session in one ingest read transaction and publishes it in one `asi.sqlite3`
-transaction. Jobs never overlap, so an older result cannot overwrite a newer
-one, and no cross-database ordering of offsets or epochs is needed. The job
-records the **witness** it read (each contributing source's `ProjectionTag`)
-in `session_source`. If the ingest ledger moved during the job, the job
-publishes anyway and queues a follow-up, so the next publication catches
-up.
+- **Layout.** Each fact is stored as
+  `gold/{table}/ns={namespace}/day={session start day}/part-{id}.parquet`.
+  Dimensions are one file per table. `gold/manifest.json` lists every current
+  file with its digest, row count and versions (`transform_version`,
+  `rules_version`, `price_version`), plus the `ingest_seq` checkpoint of each
+  namespace.
+- **Single writer.** One gold writer per store, inside the long-running Semon
+  process (the receiver, or the local push/viewer service), with a
+  `gold.lock` file. Readers never take locks.
+- **Incremental.** Each cycle (at most every 2 s) reads the sessions touched
+  since the checkpoint, recomputes only their new or changed steps from
+  silver (the tail), and rewrites the affected day partitions as new files.
+  It then publishes the files, and the new checkpoint, with one atomic manifest
+  rename. A crash leaves the previous manifest. Files no manifest names are
+  removed after a 10-minute grace period, so in-flight queries finish.
+- **Full refresh.** The same transform can rebuild all of gold from silver. CI
+  asserts that incremental and full-refresh gold are identical.
+- **Version bumps.** The writer compares each partition's versions in the
+  manifest with the current ones and rewrites stale partitions in bounded
+  background batches. A price bump recomputes only `usd_est` from the stored
+  billing inputs.
+- **Missing bronze.** A partition whose sources are gone keeps its old
+  versions and is marked `source_missing` in the manifest. A gold schema change
+  (`asi_schema_version`) rebuilds gold, except that a store holding
+  `source_missing` partitions refuses (decided 2026-11-08): the operator runs
+  `semon asi export` and then `semon asi reset`.
 
-**Triggers:**
+## Durable state
 
-- **Append.** A source grows (`TagCheck::Advanced`): re-project that session.
-- **Invalidation.** A source mismatches (`TagCheck::Mismatch`): the session's
-  rows get `stale = 1` and remain queryable until re-projection publishes them
-  again or they freeze. SQL never blocks on the projector; staleness is visible
-  as data.
-- **Rules or projector bump.** Indexed scans (`WHERE rules_version <> ?`,
-  `WHERE projector_version <> ?`) queue stale, non-frozen sessions in bounded
-  batches, following the `session_activity_projections` repair pattern.
-- **Price bump.** Non-frozen rows are repriced from their stored billing
-  inputs and the new `price` rows (`usd`, `carry_usd`, `price_version` and
-  `price_status` only), following the existing repricing worker. Rules are not
-  re-run.
-- **Key rotation.** A new `path_key_id` re-projects every non-frozen session.
-- **Raw unavailable.** A session whose Raw is neither native nor archived gets
-  `frozen = 1`. Frozen rows are never changed again, including their price:
-  they keep the versions they were computed under, and views can re-price
-  them on read from `price`.
+`asi-durable.sqlite3` holds `label`, `adjudication`, `link`, `lane`,
+`work_item`, `change`, `outcome`, `intervention` and `assignment`
+(methodology §1.1), keyed by UIDs.
 
-Labels are never rewritten by any of this: they reference UIDs, which do not
-change.
+- **Writes.** WAL, `synchronous=FULL`, and a single writer through
+  `semon-asi`. `label` and `adjudication` are insert-only, enforced by triggers.
+- **Rebuilds** never open it for writing. It has its own version: on a
+  mismatch it refuses, and the operator exports and then resets.
+- **Body columns** (`label.mechanism_text`, `adjudication.reason`,
+  `lane.title` and the intervention text) are classed `body`. They never reach
+  gold or Hub, and are readable only through `view` ([ASI query](asi-query.md)).
+- **Export.** Categorical columns are exported to `fact_label` on change.
+  `semon asi backup PATH` copies the file with the SQLite online backup API.
 
-### Public schema changes
+## Hub export (phase 3)
 
-Each file has one rule, in this order:
+A store pushes its gold partitions to its Hub tenant:
+`PUT /v1/asi/gold/{table}/{namespace}/{day}`, with the Parquet file as the
+body and `X-Semon-Digest` and `X-Semon-Versions` headers. The bearer token is
+bound to the tenant workspace and to the namespaces that token may publish.
 
-1. **A store holding any frozen rows refuses to open** under a new
-   `asi_schema_version` (decided 2026-11-08). This applies to origins,
-   receivers and Hub alike: replicated frozen rows carry `frozen = 1` too. The
-   operator runs `semon asi export` (JSON Lines of every table, Parquet once
-   export lands) and then `semon asi reset`. No migration or import code: after
-   the reset, the export is an external record only.
-2. **Otherwise the store recreates `asi.sqlite3`.** An origin re-projects
-   everything its native Raw and archive still hold. A receiver or Hub store
-   reports an empty status and origins re-push.
+- **Paths.** Before upload, every `path` column is replaced by
+  `pt1_` followed by the first 22 characters of
+  base64url(HMAC-SHA256(key, canonical path)). The canonical path is the
+  `repo_id` plus the repo-relative path, or else the absolute path with `~` for
+  home. The key is 32 bytes in `~/.config/semon/asi-path-key` (mode 0600) and
+  is shared across the operator's stores with `semon asi key export` and
+  `semon asi key import`. Hub never holds it.
+- **Validation.** Hub checks the file against the gold schema for its
+  `asi_schema_version`: column set, types, enums, and token patterns on `path`
+  columns. It refuses any column outside the schema, then replaces the
+  partition atomically.
+- **Errors.** `invalid_partition` (400), `schema_mismatch` (409),
+  `namespace_not_allowed` (403), plus size and quota errors as for mirror.
 
-A receiver is a replica of its origins. If an origin machine is
-decommissioned, the receiver's rows are the only copy, and they follow rule 1
-once they freeze. Until then, the operator should export before upgrading.
+## Crate boundary
 
-The durable file has its own `durable_schema_version`: it refuses on
-mismatch, and the operator exports and then resets explicitly. It is never
-recreated implicitly.
+`semon-asi` is a library with no dependency on `semon-sessions`. It holds:
 
-## Raw archive
+- gold schema definitions (columns, classes and docs, from which the
+  generated reference is built);
+- transforms over a silver input trait;
+- the partition writer, manifest and garbage collection;
+- the durable store;
+- Hub export and import validation;
+- the DuckDB query engine ([ASI query](asi-query.md)).
 
-Whoever holds body custody keeps the archive: the origin for its own
-sessions, a receiver for opted-in sources. On a receiver, the mirror store
-serves as the archive. It already retains deleted files and seals them, but
-today a `replace` append overwrites earlier bytes
-(`crates/semon-push/src/mirror.rs`). The receiver therefore moves the replaced
-content into an immutable chain, using the same object, manifest and index
-format, before it accepts the replacement. On both, the archive works as
-follows:
+`semon-sessions` implements the silver input trait and keeps parsing, the
+ingest index, the activity projection, `StepFacts` and bronze. Hub depends on
+`semon-asi` only.
 
-- **Identities.** Archive names never use ingest counters or path tokens. On
-  first archiving, each native source gets a random `archive_source_id`, and
-  each content chain (the initial content, then every native rewrite) gets a
-  random `chain_id`. `archive/index.json` maps a native source (its local
-  path, plus the SHA-256 of its first line) to its `archive_source_id`. The
-  index is non-rebuildable custody: ingest rebuilds and key rotation leave it
-  untouched, and a rebuilt ingest index finds archived sources through it.
-- **Objects.** `archive/{archive_source_id}/{chain_id}/{start}-{end}.zst`
-  holds immutable copies of the byte range `[start, end)` of one chain, in the
-  zstd seekable format that `sealed` already writes and reads. It does not
-  punch holes in or otherwise modify native files.
-- **Manifest.** `archive/{archive_source_id}/manifest.json` lists each chain
-  in order, with its segments contiguous from 0, each ending on a line
-  boundary, the SHA-256 of the plain bytes, and the `prefix_sha256` at each
-  segment end. Segments are written to a temporary name, fsynced and renamed,
-  and then the manifest is replaced by fsync and rename. On startup, files not
-  named by the manifest are removed. A crash leaves the last published
-  manifest.
-- **Admission.** The archiver copies only the prefix the ingest index has
-  admitted (the same consumed offset and digest as the `ProjectionTag`), so
-  the archive and the projection agree on bytes.
-- **Rewrites.** A native rewrite starts a new chain. Earlier chains are kept,
-  so generations already projected stay reproducible.
-- **Reads.** When native Raw is gone, the ingest index reads the source from
-  the archive by verifying segment hashes against the manifest. A hash mismatch
-  is `archive_corrupt`: the source is unavailable and rows stay as they are
-  (not frozen) until the operator intervenes.
-- **Retention.** Kept indefinitely by default (decided 2026-11-08); the
-  operator may set `archive.retention_days`. Withdrawal follows existing
-  History custody rules: it never deletes native logs, and it marks affected
-  rows `frozen`.
-- `source.archive_coverage_from` and `source.archive_coverage_to` report what
-  the archive covers.
+DuckDB comes from the `duckdb` crate with its `bundled` feature. Its C++ build
+adds CI time and binary size: the first slice measures both and caches the
+build in CI.
 
-## Durable state (`asi-durable.sqlite3`)
+## Performance from day 1
 
-Tables: `label`, `adjudication`, `link`, `lane`, `work_item`, `change`,
-`outcome`, `intervention` and `assignment`, as in methodology §1.1. Targets are
-UIDs.
+Budgets on a pinned 4-vCPU, 16 GB CI runner, using deterministic synthetic
+data (1M rows per PR, 10M nightly, 100M weekly) plus the sanitized fixtures:
 
-- **Classes.** Every column declares a class, as in the public schema. These
-  columns are `body`: `label.mechanism_text`, `adjudication.reason`,
-  `lane.title`, `intervention.hypothesis` and `intervention.guardrails`, and any
-  later free-text field (for example, segment goal text in #546). Body columns
-  never leave the machine without opt-in, `sql` cannot read them, and `view`
-  reads them ([ASI query](asi-query.md)).
-- **Custody.** WAL, `synchronous=FULL`, a single writer, opened only through
-  `semon-asi`'s durable store type. Derived-cache rebuilds, schema refusals on
-  `asi.sqlite3` and ingest rebuilds never open it for writing.
-- **Append-only.** `label` and `adjudication` are insert-only, enforced by the
-  API and by `BEFORE UPDATE`/`BEFORE DELETE` triggers that raise. Corrections are
-  new rows. `link`, `lane`, `work_item`, `change` and `outcome` are upserts keyed
-  by natural key, with `updated_at`. `outcome` stays `null` until its window
-  closes.
-- **Backup.** `semon asi backup PATH` uses the SQLite online backup API.
-  Deletion is only an explicit operator action.
-- **Hub.** Hub receives categorical labels as metadata through the label-push
-  extension specified by #546, never body columns.
+| Path | Budget |
+| --- | --- |
+| Raw → silver ingest | ≥ 10 MB/s |
+| Freshness (append to gold visible) | p95 ≤ 5 s without backlog; per-cycle work independent of session length |
+| Dashboard views | p95 ≤ 500 ms |
+| Ad-hoc group-by over `fact_step` | p95 ≤ 2 s at 10M rows, ≤ 5 s at 100M |
+| FTS top 20 | p95 ≤ 500 ms |
+| Gold size | Recorded per 1M steps; Parquet with ZSTD |
 
-## Metadata-push wire contract
+Runs record throughput, CPU, RSS, disk and spill. A run that misses a budget
+fails the scheduled job. For context, the measured workload of one heavy user
+today is about 466 MB of logs in 2.5 months.
 
-The push receiver (`semon receive`) and Hub serve two endpoints next to
-`/v1/mirror/append`, with the same bearer tokens, TLS and authentication
-rules ([mirror protocol](../mirror-protocol.md)). The token resolves to a
-namespace (and, on Hub, a tenant workspace) before the body is read. The
-wire format has no namespace field, so a request cannot name another
-namespace.
+## Phases
 
-### `GET /v1/asi/status?cursor=C`
-
-Returns `{"asi_schema_version":1,"namespace":"…","path_key_id":"k1_…"|null,"sessions":[{"session":"{harness}/{native_session_id}","generation":N,"digest":"…","repush":false}],"next":C|null}`
-for the token's namespace, paged at 5,000 sessions. The sender diffs this
-against its own store and pushes sessions whose generation or digest differs,
-or that are marked `repush` (failed staging, or an operator's
-`semon receive asi repush --machine M`).
-
-### `POST /v1/asi/rows`
-
-One session snapshot, optionally split into pages. Every page repeats the
-snapshot descriptor:
-
-```json
-{
-  "asi_schema_version": 1,
-  "snapshot": {"session": "codex/…", "generation": 1762600000000, "digest": "sha256:…", "pages": 2, "rows": {"turns": 40, "steps": 6100, "step_calls": 9050, "compactions": 2, "costs": 41}},
-  "page": 0,
-  "path_key_id": "k1_3f9a0c1d2e4b5a69",
-  "session": {"…": "§1.1 session columns and versions (page 0 only)"},
-  "session_sources": [], "turns": [], "steps": [], "step_calls": [], "compactions": [], "costs": [],
-  "prices": []
-}
-```
-
-`digest` is the SHA-256 of the snapshot's canonical serialization (the rows
-in UID order, each column in schema order).
-
-- **Commit and replace.** Pages are staged under `(namespace, session,
-  generation)`. When every page has arrived and the row counts and digest
-  match the descriptor, the snapshot replaces every row of that session in one
-  transaction.
-- **Idempotency.** A page whose descriptor and content equal a staged or
-  committed one is acknowledged without effect, so lost acknowledgements and
-  `repush` resends converge. The same generation with a different descriptor
-  or page content is `conflicting_snapshot`. A newer generation discards older
-  staging. Staging still incomplete after 24 hours is discarded and marked
-  `repush`.
-- **Validation.** All of it happens before any write, and a refused request
-  leaves no effect:
-  - Strict schema: unknown fields, missing required fields and wrong types are
-    refused.
-  - Enums must be in their closed sets. Numbers must be non-negative, finite
-    and within column range. Timestamps must be integer milliseconds.
-  - `name` columns: at most 256 bytes, no control characters, and must not look
-    like an absolute or home path (leading `/`, `~` or `\`, a drive letter, or
-    a `..` segment). Tool names must match `^[A-Za-z0-9_.:\-]{1,128}$`, and
-    `repo_id` must match `^[a-z0-9.\-]+(:[0-9]{1,5})?(/[A-Za-z0-9._\-]+)+$`.
-  - `token` columns match their pattern (`^pt1_[A-Za-z0-9_-]{22}$` for paths),
-    and `path_key_id` is required whenever path tokens are present.
-  - Every row belongs to the snapshot's session.
-  - Every `price_version` must be in `prices` or already stored.
-  - The body is at most 6 MiB and a page at most 5,000 steps. Bytes count
-    toward the machine's receiver quota.
-- **Responses.** `200 {"committed":true|false,"generation":N}`. Errors are
-  `{"error":code,…}`:
-
-| Status | `error` | Meaning |
-| --- | --- | --- |
-| 400 | `invalid_rows` (with `path` to the first offending field) | Validation failed |
-| 401 | — | Token unknown |
-| 409 | `schema_mismatch` (with `asi_schema_version`) | Sender and receiver disagree; upgrade one side. No negotiation (pre-release). |
-| 409 | `stale_generation` (with stored `generation`) | Older than the committed generation |
-| 409 | `conflicting_snapshot` | Same generation, different content |
-| 409 | `unknown_price_version` | Resend with `prices` |
-| 413 / 507 | — | Size or quota, as for mirror |
-
-The receiver never derives or repairs ASI rows. It stores what the origin
-sends, under the origin's versions. Origins push a new generation whenever
-they re-derive, and push everything again when a receiver's status comes back
-empty. Senders push at most 4 sessions concurrently and back off on 5xx or
-507, so a re-push after a reset does not flood the receiver.
-
-### Sender behavior and body opt-in
-
-`semon push` pushes ASI rows for every local session by default, and nothing
-else. Without a bodies opt-in it sends **no** `/v1/mirror/append`,
-`/v1/mirror/facts` or status heartbeat: today these carry `$HOME`, repository,
-rollout and target paths (`crates/semon-push/src/lib.rs`, push heartbeat and
-facts worker). Machine facts that ASI needs travel as ASI rows.
-
-Raw, facts and status run only for sources the operator opts in, per harness
-(`semon push --bodies claude --bodies codex`, or the push config), and they are
-scoped to those sources. Opted-in Raw is redacted by the existing push-side
-redaction. On the receiver it feeds only `asi-search.sqlite3` and L1 evidence
-packets; it never produces `asi.sqlite3` rows. This replaces the current
-Raw-only push default (pre-release, no compatibility mode). A CI test captures
-the complete outbound HTTP exchange of a metadata-only push over the fixtures
-and fails on any path, message, command or output text.
-
-## Path tokens
-
-File paths cross machines only as keyed HMAC tokens, so redundant-read and
-rework overlap still join across sessions and machines.
-
-- **Key.** 32 random bytes in `$XDG_CONFIG_HOME/semon/asi-path-key`
-  (`~/.config/semon/asi-path-key`), mode 0600, created on first projection if
-  absent. One key per operator workspace: `semon asi key export` and
-  `semon asi key import FILE` copy it between the operator's machines.
-  Receivers and Hub never hold it, and no wire field carries it.
-- **Key ID.** `k1_` followed by the first 16 hex digits of
-  `SHA-256("semon-asi-path-key-id\0" || key)`. Rows and batches carry it, and
-  tokens are only comparable within one key ID.
-- **Canonical input.** For a path inside a repository with a remote-derived
-  `repo_id`: `"r\0" || repo_id || "\0" || path relative to the checkout or
-  worktree root`. Otherwise: `"a\0" || absolute path`, with the home directory
-  written as `~`. Paths are lexically normalized (`.` and `..` resolved, no
-  trailing slash) and not resolved through symlinks.
-- **Token.** `pt1_` followed by the first 22 characters of
-  base64url(HMAC-SHA256(key, input)), which is 132 bits.
-- **Rotation.** Importing a new key changes `path_key_id`, re-projects
-  non-frozen sessions and re-pushes them. Frozen rows keep their old key ID.
-
-`session_source.source_token` uses the same tokenization. Identities (UIDs,
-record anchors, archive names) never depend on a path token.
-
-### Repo identity
-
-`repo` stays the existing display name (`repo_of`: the checkout's basename).
-`repo_id` is the stable identity: the `origin` remote URL with scheme,
-credentials and a trailing `.git` removed, and the host lowercased:
-`github.com/onsager-ai/semon`. scp-style remotes (`git@host:owner/repo`)
-normalize to the same form. A port is dropped only when it is the scheme's
-default (443 for HTTPS, 22 for SSH). Any other port stays, as in
-`host:8443/team/app`, so distinct endpoints never merge. Linked worktrees resolve to the main checkout's
-remote. A repository without a remote has `repo_id` `null`, and its paths use
-the absolute form, so unrelated repositories that share a basename never share
-tokens.
-
-## Retention
-
-- `asi.sqlite3` and `asi-durable.sqlite3`: no automatic deletion. The 60-day
-  `analytics::KEEP_MS` window bounds only the existing Analytics input
-  projection until Analytics is rebuilt on this store (#547); it does not
-  apply here.
-- The Raw archive is kept indefinitely by default (see
-  [Raw archive](#raw-archive)).
-
-## Crate boundary: `semon-asi`
-
-`semon-asi` is a library crate with no dependency on `semon-sessions` or any
-native parser:
-
-- schema definition (tables, columns, classes, enums, documentation), which
-  emits the DDL, the validator rules, the query allowlist and the generated
-  schema reference;
-- row and wire types (serde, `deny_unknown_fields`), validation, snapshot
-  digests, and the push-ingest function `ingest(&NamespaceCapability, Page) ->
-  Result`;
-- path tokenization, key IDs and `repo_id` normalization (the key file itself
-  is managed by the CLI);
-- public store: open and version fence, frozen refusal, conditional
-  publication, version scans, repricing, freeze, export and reset;
-- durable store;
-- the query engine ([ASI query](asi-query.md)).
-
-`semon-sessions` depends on `semon-asi`. It keeps native parsing, the ingest
-index, the activity projection, `StepFacts`, the Raw archive, the body indexer
-and the ASI projector, which maps ingest state to `semon-asi` row types.
-`semon-push` hosts the HTTP endpoints and calls `ingest`. Hub depends on
-`semon-asi` only, for ingest, store and query per tenant workspace, mapping its
-own authentication to a namespace capability.
-
-## Budgets
-
-Proposed defaults, to be measured under #510:
-
-- incremental projection of an appended step: under 5 ms;
-- ingest of a 5,000-step page on the CI runner: under 500 ms;
-- `asi.sqlite3` growth: under 2 KiB per step;
-- the existing 2 s cold first-page gate stays green.
+1. **Local and receiver gold plus SQL.** `semon-asi`, the gold model,
+   partitions, transforms and the DuckDB engine with `sql` and `schema`, plus
+   the CI performance harness. This works standalone and on receivers, which
+   already hold silver per machine.
+2. **Labels, search and bronze hardening.** The durable store and
+   `fact_label`, FTS5 with `search` and `view`, the bronze archive and
+   receiver replace preservation, and Viewer routes.
+3. **Hub.** Path keys, gold export and Hub import validation.
 
 ## Tests (CI only)
 
-- Golden public rows for the sanitized harness fixtures (`asi-golden.json`),
-  covering every §1.1 column the fixtures exercise.
-- Identity: rebuilding gives identical UIDs and rows; encoding round-trips
-  components containing `/`, `:` and `%`; turns and compactions without native
-  IDs use record anchors, which are unchanged by key rotation (existing labels
-  still resolve), unchanged by interleaved appends to another log of the same
-  session, and equal on origin and receiver; a receiver refuses a token
-  named after itself or `local`.
-- Publication: append, rules bump and repricing queued together converge to
-  the latest state; a ledger move during a job queues a follow-up;
-  invalidation sets `stale`; generations stay monotonic after an origin
-  rebuild, a clock regression and a durable reset; repeated unchanged sweeps
-  over two destinations send nothing.
-- Version scans: a rules bump re-derives only rows with a stale
-  `rules_version`; a price bump touches only cost columns and skips frozen
-  rows; counts are asserted.
-- Archive: pruning native Raw leaves rows re-derivable; a rewrite keeps the
-  earlier chain; rebuilding the ingest index after a rewrite and a key rotation
-  still finds every chain; a crash mid-copy leaves the last manifest;
-  corruption is `archive_corrupt`, not frozen; a receiver `replace` preserves
-  the replaced bytes.
-- Freeze and schema change: withdrawing the archive freezes rows; a schema
-  bump with frozen rows refuses on origin and receiver; export then reset
-  proceeds; without frozen rows, a receiver recreates and origins re-push.
-- Durable custody: the durable file's bytes are unchanged across rebuilds;
-  updating or deleting a label raises; every text column has a class.
-- Wire: every refusal in the table, with no partial effect; a token for
-  machine A cannot write machine B; paged staging; a lost acknowledgement and
-  a `repush` resend converge; a conflicting snapshot is refused; stale
-  generation; generation stays monotonic after an origin rebuild.
-- Privacy: path-token known-answer vectors; same-name unrelated repositories
-  and same-host repositories on different ports never share tokens; worktrees and renamed clones of one remote do share
-  them; a full outbound-exchange scan of a metadata-only push finds no path,
-  message, command or output text.
-- Namespace conformance cases from `storage/conformance.rs` keep passing.
+- Golden gold rows for the sanitized fixtures, and incremental output equal
+  to full refresh.
+- Identity: UIDs equal across rebuilds; the encoding round-trips; record
+  anchors are stable under interleaved appends.
+- Publication: a crash mid-cycle leaves the old manifest; garbage collection
+  respects the grace period; a version bump rewrites only stale partitions.
+- Bronze: a receiver `replace` preserves bytes; a standalone archive survives
+  pruning and rewrites; `source_missing` refusal, then export and reset.
+- Durable: bytes unchanged across rebuilds; label updates raise.
+- Hub export: no `body` column ever exported; `path` columns are tokens;
+  every refusal leaves the partition unchanged.
+- The performance budgets above.
