@@ -32,9 +32,9 @@ ordinal, stripped native tool name, closed command tag, settled outcome, decoded
 exit code, and raw file-tool target path where known. Shell calls never receive
 an invented target path.
 
-`model_ms` is measured only from the latest preceding tool result with a
-recorded timestamp in the same physical source to the step's own usage record.
-`tool_ms` is the sum of known call-to-result timestamp intervals; when
+`model_ms` is measured only from the latest preceding user prompt or tool result
+with a recorded timestamp in the same physical source to the step's own usage
+record. `tool_ms` is the sum of known call-to-result timestamp intervals; when
 no call has a known interval it is absent. Neither duration is inferred from
 cross-source order or missing timestamps.
 

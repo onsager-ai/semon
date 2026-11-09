@@ -257,6 +257,7 @@ fn codex_anchor_requires_a_rendered_exact_call() {
         &Default::default(),
         vec![],
         vec![],
+        vec![],
         crate::pricing::snapshot(),
     );
     let tx = store.connection.transaction().unwrap();
@@ -341,6 +342,7 @@ fn activity_repricing_resumes_and_never_serves_mixed_prices() {
         row.key.clone(),
         usage,
         &Default::default(),
+        Vec::new(),
         Vec::new(),
         Vec::new(),
         old.clone(),

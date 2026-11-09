@@ -51,6 +51,7 @@ impl Projection {
         shared: &crate::claude_usage::Shared,
         signals: Vec<(String, Signal)>,
         observations: Vec<activity::classify::LocatedObservation>,
+        input_events: Vec<activity::TimedInput>,
         table: Arc<crate::pricing::EffectiveTable>,
     ) -> Self {
         let mut inputs = BTreeMap::new();
@@ -73,7 +74,13 @@ impl Projection {
         }
         let mut activity = activity::derive(key, usage, shared, signals, table);
         let observations = activity::apply_observations(&mut activity, observations);
-        let facts = derive_facts(&activity, &inputs, &turn_ids, &observations);
+        let facts = derive_facts(
+            &activity,
+            &inputs,
+            &turn_ids,
+            &observations,
+            &input_events,
+        );
         Self {
             activity,
             inputs,
@@ -103,10 +110,14 @@ fn billing(usage: &Usage) -> crate::events::BillingUsage {
     }
 }
 
-/// Model time is measured only from the latest preceding tool-result timestamp
-/// in the same physical source to the step's native usage record. Absent or
-/// reversed timestamps remain unknown.
-fn model_ms(step: &ActivityStep, observations: &[activity::classify::LocatedObservation]) -> Option<u64> {
+/// Model time is measured only from the latest preceding user prompt or tool
+/// result with a timestamp in the same physical source to the step's native
+/// usage record. Absent or reversed timestamps remain unknown.
+fn model_ms(
+    step: &ActivityStep,
+    observations: &[activity::classify::LocatedObservation],
+    input_events: &[activity::TimedInput],
+) -> Option<u64> {
     observations
         .iter()
         .filter(|row| {
@@ -114,6 +125,15 @@ fn model_ms(step: &ActivityStep, observations: &[activity::classify::LocatedObse
                 && row.position.offset < step.position.offset
         })
         .filter_map(|row| row.result_timestamp)
+        .chain(
+            input_events
+                .iter()
+                .filter(|input| {
+                    input.position.source == step.position.source
+                        && input.position.offset < step.position.offset
+                })
+                .filter_map(|input| input.timestamp),
+        )
         .max()
         .zip(step.timestamp)
         .and_then(|(start, end)| (end >= start).then_some((end - start) as u64))
@@ -124,6 +144,7 @@ fn derive_facts(
     inputs: &BTreeMap<ActivityStepId, Usage>,
     turn_ids: &BTreeMap<ActivityStepId, Option<String>>,
     observations: &[activity::classify::LocatedObservation],
+    input_events: &[activity::TimedInput],
 ) -> BTreeMap<ActivityStepId, activity::StepFacts> {
     let mut exact = BTreeMap::new();
     let mut sources: BTreeMap<String, Vec<(u64, usize)>> = BTreeMap::new();
@@ -181,7 +202,7 @@ fn derive_facts(
                     turn_id,
                     usage_owner,
                     billing: billing(usage),
-                    model_ms: model_ms(step, observations),
+                    model_ms: model_ms(step, observations, input_events),
                     tool_ms,
                     tool_calls: std::mem::take(&mut calls[index]),
                 },

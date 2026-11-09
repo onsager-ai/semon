@@ -35,6 +35,12 @@ pub(crate) struct SourcePosition {
     pub(crate) offset: u64,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct TimedInput {
+    pub(crate) position: SourcePosition,
+    pub(crate) timestamp: Option<i64>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum ContextBand {
     Under50k,
