@@ -25,9 +25,11 @@ only). There is no network SQL endpoint. These tools replace the paused
    with `max_temp_directory_size` (1 GiB), and turn off
    `autoinstall_known_extensions`, `autoload_known_extensions` and
    `allow_community_extensions`.
-2. Read `gold/manifest.json` once, as a snapshot. Set `allowed_paths` to
-   exactly the Parquet files it names, and create one view per gold table
-   (`read_parquet([...])`) plus the semantic-layer views.
+2. Load the bundled Parquet and JSON extensions explicitly. Read
+   `gold/manifest.json` once, as a snapshot. Set `allowed_paths` to exactly the
+   Parquet files it names, and create the live-row views (see
+   [ASI store](asi-store.md#generations-publication-and-versions)) plus the
+   semantic-layer views.
 3. Set `enable_external_access=false` and then `lock_configuration=true`. From
    here on, no file, network, extension or setting is reachable except the
    snapshot's files.
@@ -41,25 +43,29 @@ only). There is no network SQL endpoint. These tools replace the paused
    - `ATTACH`, `COPY`, `INSTALL`, `LOAD`, `SET`, `PRAGMA` and every
      non-`SELECT` statement.
 
-   A rejection is `not_allowed`, naming the offending item, before execution.
-   This allowlist does the job SQLite's authorizer did, at the AST level, with
-   DuckDB's own settings as a second layer.
+   The AST walk is recursive and rejects any node type it doesn't recognize,
+   so a new DuckDB syntax form fails closed. A rejection is `not_allowed`,
+   naming the offending item, before execution. DuckDB documents its own
+   settings as defense in depth, not a sandbox. The AST allowlist and the
+   process limits below are the primary controls.
 5. Run the query with a watchdog thread that calls the connection's
    interrupt handle at the deadline. Stream result chunks, stopping at the row
    and byte caps.
 
-The local MCP server runs queries in its own process, which belongs to the
-agent. The Viewer server runs each query in a child process
-(`semon asi query-worker`), which also gets OS limits: address space and CPU
-time. A runaway query therefore can't take the server down. Hub chooses its
-own isolation, at least one worker per tenant.
+Every surface runs each query in a child process, `semon asi query-worker`,
+with OS limits: address space 2 GiB and CPU time. The parent kills the child
+at the deadline, which covers setup, parsing, binding, execution and fetching;
+the interrupt handle stops execution earlier where it can. DuckDB's
+`memory_limit` bounds only its buffer manager, so the address-space limit is
+the real memory ceiling. A runaway query therefore cannot take down the MCP
+server, the Viewer or Hub. Hub runs workers per tenant.
 
 ### Limits
 
 | Limit | Default | Maximum | On exceed |
 | --- | --- | --- | --- |
 | Deadline (whole request) | 2 s | 10 s | `query_timeout`, no rows |
-| Memory | 1 GiB | — | `resource_limit` |
+| Memory | 1 GiB DuckDB buffer pool; 2 GiB process address space | — | `resource_limit` |
 | Rows | 1,000 | 10,000 | `truncated: true` |
 | Response bytes | 1 MiB | 4 MiB | Stop at the last whole row; `truncated: true` |
 | SQL text | — | 16 KiB | `invalid_argument` |
@@ -113,7 +119,9 @@ pushes Raw to it.
 - **Input:** `query` (FTS5 syntax; a malformed query is `invalid_query`), and
   optionally `repo`, `harness`, `part`, `since`, `until` and `limit` (default
   20, maximum 200).
-- **Output:** hits ranked by bm25, merged across namespaces. Each hit has
+- **Output:** hits ranked by bm25 within each namespace and merged across
+  namespaces by reciprocal rank fusion, because bm25 scores from different
+  indexes aren't comparable. Each hit has
   `body_uid`, `session_uid`, `turn_uid`, `step_uid`, `part`, `ts`, and a snippet
   of up to 300 characters as `{"untrusted_text": "…"}`. The response is capped
   at 1 MiB, and the deadline and cancellation are the same as for `sql`.
@@ -194,13 +202,14 @@ before execution and have no side effects.
 - Configuration cannot be changed after lock.
 - Limits: deadline on a cross join and on a recursive CTE, with the
   interrupt landing within deadline plus 200 ms; `resource_limit` on a large
-  sort under a reduced memory cap; row and byte truncation; the Viewer worker
-  is killed by its OS limit without affecting the server.
+  sort under a reduced memory cap; row and byte truncation; a worker that
+  exceeds its OS limit is killed without affecting the server; an unknown AST
+  node is refused.
 - Snapshot consistency: a query running during a gold publish sees one
   manifest generation, and garbage collection doesn't remove its files.
 - Schema: generated files match; every view, column and allowlisted function
   appears.
-- Search: fixture hits; bm25 merge across namespaces; snippets wrapped and
+- Search: fixture hits; rank fusion across namespaces; snippets wrapped and
   capped; Hub refusal before I/O; a rewrite leaves no stale body.
 - View: body, step, turn and durable UIDs; durable `body` columns are never in
   gold.

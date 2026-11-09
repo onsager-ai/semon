@@ -12,11 +12,11 @@ machine A ─┐  redacted Raw (existing semon push mirror path)
 machine B ─┼──────────────▶ receiver (or a single machine, standalone)
            │                 bronze   immutable Raw chains + redaction provenance
            │                 silver   ingest index per machine (exists today) + activity + StepFacts
-           │                 gold     Parquet partitions (facts + dimensions) ── DuckDB ── sql
+           │                 gold     Parquet generations (facts + dimensions) ─ DuckDB ── sql
            │                 durable  asi-durable.sqlite3 (labels, links, work items)
            │                 FTS5     body index in silver ─────────────────────────────── search / view
            │
-           └─ Hub (per tenant) ◀── gold partitions only: no bodies, paths as HMAC tokens
+           └─ Hub (per tenant) ◀── gold generations only: no bodies, paths as HMAC tokens
 ```
 
 Each source has one **authoritative store**: the receiver it pushes to, or the
@@ -28,7 +28,7 @@ copy is never merged or exported.
 | --- | --- | --- | --- |
 | Bronze | Native logs plus `archive/`; on a receiver, the mirror store | — (custody) | Files |
 | Silver | `sessions-index.sqlite3`, one per namespace | Bronze | SQLite |
-| Gold | `gold/` Parquet partitions plus `gold/manifest.json` | Silver | DuckDB (read) |
+| Gold | `gold/` immutable Parquet generation files plus `gold/manifest.json` | Silver | DuckDB (read) |
 | Durable | `asi-durable.sqlite3` | — (custody) | SQLite |
 
 ## Identity
@@ -58,11 +58,18 @@ IDs, so labels survive every rebuild.
 
 ## Bronze
 
-- **Receiver.** The mirror store is bronze. A `replace` append first moves
-  the replaced bytes into an immutable chain
-  (`archive/{archive_source_id}/{chain_id}.zst`, with random IDs and a
-  manifest written by atomic rename), so earlier content stays re-derivable.
-  Each chain records `redactor_version` and the digests of the redacted bytes
+Bronze custody is in phase 1: gold is only as durable as the bronze it can be
+rebuilt from.
+
+- **Receiver.** The mirror store is bronze. Before acknowledging a `replace`
+  append, the receiver moves the replaced logical bytes (read through `sealed`,
+  whether plain or sealed) into an immutable chain:
+  `archive/{archive_source_id}/{chain_id}.zst`, with random IDs and a manifest
+  published by atomic rename. Retiring a seal never deletes bytes that no chain
+  holds.
+- **Redaction provenance.** The mirror `Append` gains a required
+  `redactor_version`, a contract change made directly under the pre-release
+  policy. Each chain records it, together with the digest of the redacted bytes
   it holds.
 - **Standalone machine.** The archiver keeps an append-only zstd copy of each
   native log under `archive/`, admitting only the prefix silver has consumed.
@@ -77,13 +84,21 @@ Silver is today's ingest index and activity projection, run per namespace
 (receivers already do this for mirrored machines, in `received.rs`). It gains:
 
 - **`StepFacts`** (#556, owned by the session activity lane): turn ID, tool
-  calls (tool, target path, command tag, ok, exit code, tool time), model time
-  and the full `BillingUsage` inputs. These are facts only; the L0 rules stay
-  with that lane.
-- **Change sequence.** A monotonic per-namespace `ingest_seq`, stamped on each
-  committed source advance or rewrite, lets gold transforms find touched
-  sessions without scanning by event time. An offline machine can deliver
-  months-old events today.
+  calls (tool, target path, command tag, ok, exit code, tool time), model time,
+  the full `BillingUsage` inputs and usage ownership (exclusive or copied).
+  These are facts only; the L0 rules stay with that lane.
+- **Change log.** `silver_change(seq, session_key, kind)`, where `kind` is
+  `changed` or `removed`. A row is written in the same transaction that makes a
+  session's derived state query-ready: activity publication, a `StepFacts`
+  change, or a rewrite or removal. Ingest commits that are not yet query-ready
+  write nothing. `seq` is monotonic within an index **incarnation**, a random
+  ID created whenever the index is created or rebuilt. Gold reads the changes
+  and the session rows in one SQLite read transaction. A new incarnation
+  makes gold re-read that namespace in full. Labels written to the durable file
+  notify the gold writer directly.
+- **Repository identity.** Sender facts gain, per repository root, a
+  sanitized `repo_id`, or `unknown` (see [Gold model](#gold-model)). This
+  changes the mirror facts contract directly.
 - **Bodies for FTS5** (phase 2): see [ASI query](asi-query.md#search).
 
 ## Gold model
@@ -96,10 +111,10 @@ column declares a class: `key`, `enum`, `number`, `time`, `name`, `path` or
 
 | Fact | Grain | Main columns |
 | --- | --- | --- |
-| `fact_step` | One model invocation | step, turn and session keys; `model_key`, `repo_key`, `date_key`; billing inputs; `context_tokens`, `context_band`; `model_ms`, `tool_ms`; `usd_est`, `price_status`; `activity`, `waste_kind`, `trigger`, `ok` |
+| `fact_step` | One model invocation | step, turn and session keys; `model`, `repo_key`, `date_key`; billing inputs; `usage_owner` (`exclusive`, `copied`); `context_tokens`, `context_band`; `model_ms`, `tool_ms`; `usd_est`, `price_status`; `activity`, `waste_kind`, `trigger`, `ok` |
 | `fact_tool_call` | One tool call | `step_uid`, `ord`, `tool_key`, `target_path` (class `path`), `command_tag`, `ok`, `exit_code`, `tool_ms` |
 | `fact_turn` | One turn | `initiator`, `started_at`, `ended_at`, step count |
-| `fact_session` | One session (aggregate grain) | Totals by token class, `usd_est`, `reported_usd`, wall and model time, step and failure counts |
+| `fact_session` | One session (aggregate grain) | Totals by token class over exclusive usage, `usd_est`, `reported_usd`, wall and model time, step and failure counts, `usage_complete` |
 | `fact_compaction` | One compaction | `step_uid` (nullable), `ts` |
 | `fact_label` | One label assertion | Target UID, field, value, labeller, taxonomy version, confidence, `created_at` (exported from the durable file; no free text) |
 
@@ -107,44 +122,60 @@ column declares a class: `key`, `enum`, `number`, `time`, `name`, `path` or
 | --- | --- |
 | `dim_machine`, `dim_harness`, `dim_tool`, `dim_date` | Conformed and small |
 | `dim_session` | Role, parent, parent method, lane root, repo, branch, status, start and end |
-| `dim_repo` | `repo_id` (the normalized `origin` remote; non-default ports kept) and a display name |
-| `dim_model` | SCD2: `model_key`, model, provider, `valid_from`, `valid_to` |
+| `dim_repo` | `repo_id` and a display name. `repo_id` is the `origin` remote with credentials, scheme and `.git` removed and the host lowercased, keeping non-default ports (`github.com/onsager-ai/semon`). A local-path or `file:` remote is classed `path`, and no remote gives `unknown`. |
+| `dim_model` | Immutable model identity: model, provider. Historical attributes can become SCD2 when they are needed. |
 | `dim_price` | SCD2 by price version: provider, model, `rate_kind`, `tier`, `threshold_tokens`, `usd_per_unit`, `valid_from`, `valid_to`, `learned_at` |
 
 `usd_est` is an estimate under a named price version, never presented as
-billed spend. Missing prices are `price_status = unpriced` and never summed as
-zero. Parallel tool calls live in `fact_tool_call`, so joining them never
-multiplies step tokens. The semantic layer is a set of versioned DuckDB views:
+billed spend. Spend views sum only `usage_owner = exclusive`, so copied Claude
+usage is never counted twice. Missing prices are `price_status = unpriced` and
+never summed as zero. Joining `fact_step` to `fact_tool_call` repeats step
+measures once per call, so the views aggregate tool calls to step grain
+before joining. The schema reference states this rule. The semantic layer is a set of versioned DuckDB views:
 `cost_by_day`, `step_failure`, `lane_session` and `current_label` (the latest
 assertion per target and field, with human adjudication taking precedence).
 
-## Partitions, publication and versions
+## Generations, publication and versions
 
-- **Layout.** Each fact is stored as
-  `gold/{table}/ns={namespace}/day={session start day}/part-{id}.parquet`.
-  Dimensions are one file per table. `gold/manifest.json` lists every current
-  file with its digest, row count and versions (`transform_version`,
-  `rules_version`, `price_version`), plus the `ingest_seq` checkpoint of each
-  namespace.
-- **Single writer.** One gold writer per store, inside the long-running Semon
-  process (the receiver, or the local push/viewer service), with a
-  `gold.lock` file. Readers never take locks.
-- **Incremental.** Each cycle (at most every 2 s) reads the sessions touched
-  since the checkpoint, recomputes only their new or changed steps from
-  silver (the tail), and rewrites the affected day partitions as new files.
-  It then publishes the files, and the new checkpoint, with one atomic manifest
-  rename. A crash leaves the previous manifest. Files no manifest names are
-  removed after a 10-minute grace period, so in-flight queries finish.
-- **Full refresh.** The same transform can rebuild all of gold from silver. CI
-  asserts that incremental and full-refresh gold are identical.
-- **Version bumps.** The writer compares each partition's versions in the
-  manifest with the current ones and rewrites stale partitions in bounded
-  background batches. A price bump recomputes only `usd_est` from the stored
-  billing inputs.
-- **Missing bronze.** A partition whose sources are gone keeps its old
-  versions and is marked `source_missing` in the manifest. A gold schema change
-  (`asi_schema_version`) rebuilds gold, except that a store holding
-  `source_missing` partitions refuses (decided 2026-11-08): the operator runs
+Gold is published as immutable files, plus a map of which file holds each
+session's current rows. This is the merge-on-read pattern used by lakehouse
+tables.
+
+- **Writer.** The first Semon process that needs gold takes `gold.lock` and
+  becomes the store's single writer: `semon receive`, `semon push`, the Viewer
+  server or `semon mcp` (so MCP-only users get fresh gold). Other processes
+  only read.
+- **Cycle.** At most every 2 s, the writer reads the silver change log and
+  recomputes every touched session **whole**. It doesn't patch tails: a
+  following step can change an earlier step's duration, and a late record can
+  change older rows. Per-cycle work is proportional to the touched sessions'
+  size, which is milliseconds even for sessions of thousands of steps.
+  - It writes one new file per table, `gold/{table}/g{generation}.parquet`,
+    holding the full rows of those sessions with a `_gen` column. Dimensions
+    are rewritten whole, as `gold/dim_x/g{generation}.parquet`.
+  - It fsyncs those files, then writes `manifest.json` (the generation, file
+    lists, versions, each namespace's incarnation and `seq` checkpoint, and the
+    live map `session_uid → _gen`; removed sessions are dropped from it). It
+    fsyncs the manifest, renames it into place, and fsyncs the directory. A
+    crash leaves the previous generation.
+- **Reading.** Each fact view keeps only live rows:
+  `… semi join live on (session_uid, _gen)`.
+- **Compaction.** When dead rows exceed 30% or a table has more than 64 files,
+  the writer rewrites them into files of about 128 MB, sorted by namespace and
+  start time so that Parquet row-group statistics prune time ranges. Compaction
+  publishes as just another generation.
+- **Retirement.** A file leaves the store 10 minutes after the first
+  published generation that no longer names it. Queries hold a snapshot for at
+  most their deadline plus fetch time, well under that.
+- **Full refresh.** The same transform rebuilds all of gold from silver. CI
+  asserts that incremental and full-refresh live rows are identical.
+- **Version bumps.** Sessions whose rows carry a stale `transform_version`,
+  `rules_version` or `price_version` are queued in bounded batches, like
+  touched sessions.
+- **Missing bronze.** Sessions whose sources are gone keep their rows and
+  versions and are listed as `source_missing` in the manifest. A gold schema
+  change (`asi_schema_version`) rebuilds gold, except that a store with
+  `source_missing` sessions refuses (decided 2026-11-08): the operator runs
   `semon asi export` and then `semon asi reset`.
 
 ## Durable state
@@ -165,24 +196,31 @@ assertion per target and field, with human adjudication taking precedence).
 
 ## Hub export (phase 3)
 
-A store pushes its gold partitions to its Hub tenant:
-`PUT /v1/asi/gold/{table}/{namespace}/{day}`, with the Parquet file as the
-body and `X-Semon-Digest` and `X-Semon-Versions` headers. The bearer token is
-bound to the tenant workspace and to the namespaces that token may publish.
+Hub holds the same layout per tenant. Export is coherent and idempotent:
 
-- **Paths.** Before upload, every `path` column is replaced by
-  `pt1_` followed by the first 22 characters of
+1. **Bind.** `semon hub claim --namespace M` binds the namespace to this
+   store's publisher ID and increments its epoch. Hub accepts generations for
+   M only from the current publisher and epoch, so a transfer is an explicit
+   operator action and stale publishers are refused.
+2. **Upload.** For each new generation, the store writes fresh export files:
+   `path` columns become tokens, and only approved Parquet metadata is kept.
+   It uploads each one with `PUT /v1/asi/objects/{digest}`. Uploads are
+   immutable and content-addressed, so retries are safe.
+3. **Commit.** `POST /v1/asi/commit` sends the generation: added and removed
+   files, the live-map delta, versions, and `expected_parent`. Hub validates
+   each file (column set, types, enums, token patterns on `path` columns, every
+   row's namespace in the claimed set) and commits atomically. A wrong parent
+   is `parent_mismatch` (409); the store fetches Hub's head and re-sends the
+   difference.
+
+- **Paths.** A token is `pt1_` followed by the first 22 characters of
   base64url(HMAC-SHA256(key, canonical path)). The canonical path is the
   `repo_id` plus the repo-relative path, or else the absolute path with `~` for
-  home. The key is 32 bytes in `~/.config/semon/asi-path-key` (mode 0600) and
-  is shared across the operator's stores with `semon asi key export` and
+  home. The key is 32 bytes in `~/.config/semon/asi-path-key` (mode 0600),
+  shared across the operator's stores with `semon asi key export` and
   `semon asi key import`. Hub never holds it.
-- **Validation.** Hub checks the file against the gold schema for its
-  `asi_schema_version`: column set, types, enums, and token patterns on `path`
-  columns. It refuses any column outside the schema, then replaces the
-  partition atomically.
-- **Errors.** `invalid_partition` (400), `schema_mismatch` (409),
-  `namespace_not_allowed` (403), plus size and quota errors as for mirror.
+- **Errors.** `invalid_object` (400), `schema_mismatch` (409),
+  `not_publisher` (403), `parent_mismatch` (409), plus size and quota errors.
 
 ## Crate boundary
 
@@ -200,9 +238,10 @@ bound to the tenant workspace and to the namespaces that token may publish.
 ingest index, the activity projection, `StepFacts` and bronze. Hub depends on
 `semon-asi` only.
 
-DuckDB comes from the `duckdb` crate with its `bundled` feature. Its C++ build
-adds CI time and binary size: the first slice measures both and caches the
-build in CI.
+DuckDB comes from the `duckdb` crate, at a pinned version, with the
+`bundled`, `parquet` and `json` features. The engine initializes Parquet and
+JSON explicitly; extensions are never autoloaded. The C++ build adds CI time
+and binary size: the first slice measures both and caches the build.
 
 ## Performance from day 1
 
@@ -212,11 +251,11 @@ data (1M rows per PR, 10M nightly, 100M weekly) plus the sanitized fixtures:
 | Path | Budget |
 | --- | --- |
 | Raw → silver ingest | ≥ 10 MB/s |
-| Freshness (append to gold visible) | p95 ≤ 5 s without backlog; per-cycle work independent of session length |
+| Freshness (append to gold visible) | p95 ≤ 5 s without backlog, including sustained appends to a 10,000-step session while queries run |
 | Dashboard views | p95 ≤ 500 ms |
 | Ad-hoc group-by over `fact_step` | p95 ≤ 2 s at 10M rows, ≤ 5 s at 100M |
 | FTS top 20 | p95 ≤ 500 ms |
-| Gold size | Recorded per 1M steps; Parquet with ZSTD |
+| Gold size and files | Recorded per 1M steps (Parquet, ZSTD); file count stays bounded by compaction |
 
 Runs record throughput, CPU, RSS, disk and spill. A run that misses a budget
 fails the scheduled job. For context, the measured workload of one heavy user
@@ -224,13 +263,17 @@ today is about 466 MB of logs in 2.5 months.
 
 ## Phases
 
-1. **Local and receiver gold plus SQL.** `semon-asi`, the gold model,
-   partitions, transforms and the DuckDB engine with `sql` and `schema`, plus
-   the CI performance harness. This works standalone and on receivers, which
-   already hold silver per machine.
-2. **Labels, search and bronze hardening.** The durable store and
-   `fact_label`, FTS5 with `search` and `view`, the bronze archive and
-   receiver replace preservation, and Viewer routes.
+1. **Bronze custody, gold and SQL.**
+   - Receiver replace preservation, `redactor_version`, and the standalone
+     archive.
+   - The silver change log and `repo_id` facts.
+   - `semon-asi`: the gold model, generations, transforms, and the DuckDB
+     engine with `sql` and `schema`.
+   - The CI performance harness.
+
+   This works standalone and on receivers.
+2. **Labels and search.** The durable store and `fact_label`, FTS5 with
+   `search` and `view`, and Viewer routes.
 3. **Hub.** Path keys, gold export and Hub import validation.
 
 ## Tests (CI only)
@@ -239,11 +282,20 @@ today is about 466 MB of logs in 2.5 months.
   to full refresh.
 - Identity: UIDs equal across rebuilds; the encoding round-trips; record
   anchors are stable under interleaved appends.
-- Publication: a crash mid-cycle leaves the old manifest; garbage collection
-  respects the grace period; a version bump rewrites only stale partitions.
+- Incremental equals full refresh after: delayed tool results, a late earlier
+  record, a rewrite, a session crossing midnight, a removed session, and an
+  index rebuild (new incarnation).
+- Publication: a crash mid-cycle leaves the old generation; a file is retired
+  only 10 minutes after it leaves the live generation; compaction keeps the
+  live rows identical; a version bump queues only stale sessions.
+- Spend: copied usage is not double-counted; the step-to-tool-call view
+  doesn't multiply tokens.
 - Bronze: a receiver `replace` preserves bytes; a standalone archive survives
   pruning and rewrites; `source_missing` refusal, then export and reset.
 - Durable: bytes unchanged across rebuilds; label updates raise.
-- Hub export: no `body` column ever exported; `path` columns are tokens;
-  every refusal leaves the partition unchanged.
+- Hub export: no `body` column ever exported; `path` columns and local
+  remotes are tokens; credentials are stripped from `repo_id`; foreign Parquet
+  metadata is dropped; a stale publisher, a wrong parent and a retried upload
+  each behave as specified; an interrupted export leaves Hub on the old
+  generation.
 - The performance budgets above.
