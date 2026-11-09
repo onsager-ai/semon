@@ -1512,8 +1512,7 @@ fn scan(
     // producer's) archive just the sources they scanned, and only the
     // prefix the index consumed so far.
     if options.facts.is_none() {
-        let archive = crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache));
-        cache.archive_consumed(&archive, &seen);
+        cache.archive_consumed(&options.cache, &seen);
     }
     cache.end_scan();
     texts

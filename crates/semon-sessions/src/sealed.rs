@@ -924,6 +924,20 @@ pub fn forget(log: &Path) -> io::Result<()> {
     let dir = seal_dir(log);
     if let Some(manifest) = read_manifest(&dir)? {
         require_chain(&dir, &manifest)?;
+    } else {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            if entry?.path().extension().is_some_and(|ext| ext == "zst") {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "sealed segments without a manifest have unknown custody and are not removed",
+                ));
+            }
+        }
     }
     match fs::remove_file(dir.join(MANIFEST)) {
         Ok(()) => sync_dir(&dir)?,

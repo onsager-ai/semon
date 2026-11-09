@@ -1372,6 +1372,8 @@ pub(crate) struct EventCache {
     /// processes kept moving them on): read again at the next scan, which
     /// writes them through.
     unpersisted: BTreeSet<String>,
+    /// Native custody and its verification cache live across bounded scans.
+    archive: Option<Archive>,
     /// The offset and digest last copied to the standalone archive, per log.
     archived: BTreeMap<String, (u64, [u8; 32])>,
 }
@@ -2173,7 +2175,10 @@ impl EventCache {
     /// Copies the consumed prefix of each scanned native log that changed
     /// since the last call into the standalone archive. A failure is
     /// reported and retried by the next full scan; it does not stop the read.
-    pub(crate) fn archive_consumed(&mut self, archive: &Archive, seen: &BTreeSet<String>) {
+    pub(crate) fn archive_consumed(&mut self, cache: &Path, seen: &BTreeSet<String>) {
+        let archive = self
+            .archive
+            .get_or_insert_with(|| Archive::new(crate::archive::standalone_dir(cache)));
         for key in seen {
             let Some(file) = self.files.get(key) else {
                 continue;
@@ -10489,13 +10494,13 @@ mod archive_tests {
         );
         let archive = Archive::new(root.join("archive"));
         let seen = BTreeSet::from([key.clone()]);
-        cache.archive_consumed(&archive, &seen);
+        cache.archive_consumed(&root.join("index.json"), &seen);
         assert!(archive.chains(&key).unwrap().is_empty());
         assert!(cache.archived.is_empty(), "a refusal is not remembered");
 
         // The log holds the consumed bytes again: the next scan admits it.
         fs::write(&path, consumed).unwrap();
-        cache.archive_consumed(&archive, &seen);
+        cache.archive_consumed(&root.join("index.json"), &seen);
         assert_eq!(archive.chains(&key).unwrap().len(), 1);
         assert_eq!(cache.archived.len(), 1);
         fs::remove_dir_all(root).unwrap();

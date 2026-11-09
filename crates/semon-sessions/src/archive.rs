@@ -115,9 +115,27 @@ struct Known {
     sources: BTreeMap<String, String>,
     /// Bytes of `sources.log` read: up to the end of its last whole line.
     read: u64,
-    /// Chains read back whole in this process, by id, with the stored size
-    /// they had then; one that changed size is read back again.
-    verified: BTreeMap<String, u64>,
+    /// Verified chains, invalidated by a change to the file or manifest.
+    verified: BTreeMap<String, Verification>,
+}
+
+#[derive(PartialEq, Eq)]
+struct Verification {
+    file: crate::events::Stat,
+    length: u64,
+    stored_bytes: u64,
+    sha256: String,
+}
+
+impl Verification {
+    fn observed(dir: &Path, chain: &Chain) -> io::Result<Self> {
+        Ok(Self {
+            file: crate::events::Stat::of(&dir.join(format!("{}.zst", chain.chain_id)))?,
+            length: chain.length,
+            stored_bytes: chain.stored_bytes,
+            sha256: chain.sha256.clone(),
+        })
+    }
 }
 
 /// Holds the archive's advisory lock until dropped.
@@ -171,7 +189,7 @@ impl Archive {
         reader: &mut impl Read,
         redactor_version: &str,
     ) -> io::Result<Option<Chain>> {
-        let _guard = self.lock()?;
+        let _guard = self.lock(true)?;
         let (dir, mut manifest) = self.open_source(source)?;
         let chain_id = random_id()?;
         let temporary = dir.join(format!("{chain_id}.zst.tmp"));
@@ -253,7 +271,7 @@ impl Archive {
         if offset == 0 {
             return Ok(true);
         }
-        let _guard = self.lock()?;
+        let _guard = self.lock(true)?;
         let (dir, mut manifest) = self.open_source(source)?;
         // Only a chain that reads back whole is trusted or extended. A
         // missing or damaged one stays as evidence and the log's consumed
@@ -283,9 +301,8 @@ impl Archive {
                     Ok((hasher, mark)) if hasher.digest() == *prefix && agrees(&held, mark) => {
                         let extended =
                             extend(&dir, &mut manifest, &held, resume, log, offset, prefix)?;
-                        if extended {
-                            let stored = manifest.chains.last().map(|c| c.stored_bytes);
-                            self.verified(&held.chain_id, stored);
+                        if extended && let Some(chain) = manifest.chains.last() {
+                            self.remember(&dir, chain)?;
                         }
                         return Ok(extended);
                     }
@@ -297,28 +314,40 @@ impl Archive {
         }
         let begun = begin(&dir, &mut manifest, log, offset, prefix)?;
         if begun && let Some(chain) = manifest.chains.last() {
-            self.verified(&chain.chain_id, Some(chain.stored_bytes));
+            self.remember(&dir, chain)?;
         }
         Ok(begun)
     }
 
-    /// Whether `chain` reads back whole: checked once per process for each
-    /// stored size it has.
+    /// Trust only the file and manifest previously checked. Missing files
+    /// invalidate the cache too; damaged evidence is never extended.
     fn trusted(&self, dir: &Path, chain: &Chain) -> bool {
-        if self.known().verified.get(&chain.chain_id) == Some(&chain.stored_bytes) {
+        let observed = Verification::observed(dir, chain).ok();
+        if let Some(observed) = &observed
+            && self.known().verified.get(&chain.chain_id) == Some(observed)
+        {
             return true;
         }
-        let sound = check_chain(dir, chain).is_ok();
-        self.verified(&chain.chain_id, sound.then_some(chain.stored_bytes));
-        sound
+        self.known().verified.remove(&chain.chain_id);
+        if let Some(observed) = observed
+            && check_chain(dir, chain).is_ok()
+            && Verification::observed(dir, chain).ok().as_ref() == Some(&observed)
+        {
+            self.known()
+                .verified
+                .insert(chain.chain_id.clone(), observed);
+            return true;
+        }
+        false
     }
 
-    fn verified(&self, chain_id: &str, stored: Option<u64>) {
-        let mut known = self.known();
-        match stored {
-            Some(stored) => known.verified.insert(chain_id.to_owned(), stored),
-            None => known.verified.remove(chain_id),
-        };
+    /// Our own completed writes are already hashed, under the archive lock.
+    fn remember(&self, dir: &Path, chain: &Chain) -> io::Result<()> {
+        let observed = Verification::observed(dir, chain)?;
+        self.known()
+            .verified
+            .insert(chain.chain_id.clone(), observed);
+        Ok(())
     }
 
     fn known(&self) -> MutexGuard<'_, Known> {
@@ -338,6 +367,12 @@ impl Archive {
         }
         file.seek(SeekFrom::Start(known.read))?;
         let mut bytes = Vec::new();
+        #[cfg(test)]
+        if let Some(hook) = DURING_JOURNAL_READ.with(|hook| hook.borrow_mut().take()) {
+            // Let a test pause after the first byte of the unread record.
+            Read::by_ref(&mut file).take(1).read_to_end(&mut bytes)?;
+            hook();
+        }
         file.take(METADATA_MAX + 1).read_to_end(&mut bytes)?;
         if bytes.len() as u64 > METADATA_MAX {
             return Err(invalid("an oversized archive source log"));
@@ -363,6 +398,12 @@ impl Archive {
 
     /// The source's archive id, if it has one.
     fn lookup(&self, source: &str) -> io::Result<Option<String>> {
+        let _guard = self.lock(false)?;
+        self.lookup_locked(source)
+    }
+
+    /// Caller holds the flock. Lock order is always flock, then `known`.
+    fn lookup_locked(&self, source: &str) -> io::Result<Option<String>> {
         let mut known = self.known();
         if !known.sources.contains_key(source) {
             self.refresh(&mut known)?;
@@ -375,7 +416,7 @@ impl Archive {
     /// ever written under an id that is not recorded. Holds the archive lock,
     /// so another instance's allocation is found and reused.
     fn open_source(&self, source: &str) -> io::Result<(PathBuf, Manifest)> {
-        let id = match self.lookup(source)? {
+        let id = match self.lookup_locked(source)? {
             Some(id) => id,
             None => self.register(source)?,
         };
@@ -432,8 +473,9 @@ impl Archive {
         Ok(id)
     }
 
-    /// Takes the archive's advisory lock, making the directory if needed.
-    fn lock(&self) -> io::Result<Guard> {
+    /// Takes the flock before any in-memory mutex: shared for journal reads,
+    /// exclusive for writes (including torn-tail repair).
+    fn lock(&self, exclusive: bool) -> io::Result<Guard> {
         match fs::symlink_metadata(&self.dir) {
             Ok(meta) if meta.file_type().is_dir() => {}
             Ok(_) => return Err(invalid("the archive is not a directory")),
@@ -452,7 +494,12 @@ impl Archive {
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            let operation = if exclusive {
+                libc::LOCK_EX
+            } else {
+                libc::LOCK_SH
+            };
+            if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
                 return Err(io::Error::last_os_error());
             }
         }
@@ -687,6 +734,8 @@ fn read_manifest(dir: &Path) -> io::Result<Manifest> {
 fn check_chain(dir: &Path, chain: &Chain) -> io::Result<()> {
     let mut hash = Sha256::new();
     let bytes = io::copy(&mut open_chain(dir, chain)?, &mut HashWriter(&mut hash))?;
+    #[cfg(test)]
+    VERIFIED_BYTES.with(|total| total.set(total.get() + bytes));
     if bytes != chain.length || hex(&hash.finalize()) != chain.sha256 {
         return Err(invalid(&format!(
             "archive chain {} differs from its manifest",
@@ -758,6 +807,8 @@ fn publish(dir: &Path, name: &str, value: &impl Serialize) -> io::Result<()> {
 
 #[cfg(test)]
 thread_local! {
+    pub(crate) static VERIFIED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static DURING_JOURNAL_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     /// Fails the next [`Archive::register`] before it writes.
     static FAIL_REGISTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Fails the next [`publish`] after its temporary file is synced and

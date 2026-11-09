@@ -451,18 +451,15 @@ fn a_missing_chain_is_kept_listed_and_a_new_one_is_written() {
     let lost = archive.chains("native").unwrap().remove(0);
     fs::remove_file(chain_file(&archive, "native", &lost)).unwrap();
 
-    // The same prefix again (the equal-offset case) and then growth.
-    let restarted = Archive::new(archive.dir.clone());
-    assert!(admit(&restarted, &log, 20_000));
-    assert!(admit(&restarted, &log, 40_000));
-    let chains = restarted.chains("native").unwrap();
+    // The same instance must invalidate its cached trust at an equal offset.
+    assert!(admit(&archive, &log, 20_000));
+    assert!(admit(&archive, &log, 40_000));
+    let chains = archive.chains("native").unwrap();
     assert_eq!(chains.len(), 2);
     assert_eq!(chains[0], lost, "the damaged entry stays");
-    assert_eq!(read_chain(&restarted, "native", &chains[1]), log);
-    assert!(
-        restarted.verify("native").is_err(),
-        "the loss stays visible"
-    );
+    assert_eq!(read_chain(&archive, "native", &chains[1]), log);
+    assert!(!chain_file(&archive, "native", &lost).exists());
+    assert!(archive.verify("native").is_err(), "the loss stays visible");
 }
 
 #[test]
@@ -477,18 +474,17 @@ fn a_chain_corrupted_at_the_same_size_is_not_trusted_or_extended() {
     bytes[middle] ^= 0xff;
     fs::write(&file, &bytes).unwrap();
 
-    let restarted = Archive::new(archive.dir.clone());
-    // Equal offset and digest: the damaged chain is not taken on trust.
-    assert!(admit(&restarted, &log, 20_000));
-    let chains = restarted.chains("native").unwrap();
+    // Equal offset and digest in the same instance must invalidate trust.
+    assert!(admit(&archive, &log, 20_000));
+    let chains = archive.chains("native").unwrap();
     assert_eq!(chains.len(), 2);
-    assert_eq!(read_chain(&restarted, "native", &chains[1]), &log[..20_000]);
+    assert_eq!(read_chain(&archive, "native", &chains[1]), &log[..20_000]);
     // Growth extends the new, verified chain, never the damaged one.
-    assert!(admit(&restarted, &log, 40_000));
-    let chains = restarted.chains("native").unwrap();
+    assert!(admit(&archive, &log, 40_000));
+    let chains = archive.chains("native").unwrap();
     assert_eq!(chains.len(), 2);
     assert_eq!(chains[0], bad);
-    assert_eq!(read_chain(&restarted, "native", &chains[1]), log);
+    assert_eq!(read_chain(&archive, "native", &chains[1]), log);
     assert_eq!(fs::read(&file).unwrap(), bytes, "kept as found");
 }
 
@@ -504,12 +500,101 @@ fn growth_after_corruption_does_not_extend_the_damaged_chain() {
     bytes[middle] ^= 0xff;
     fs::write(&file, &bytes).unwrap();
 
-    // Growth is the first thing the restarted instance sees.
-    let restarted = Archive::new(archive.dir.clone());
-    assert!(admit(&restarted, &log, 40_000));
-    let chains = restarted.chains("native").unwrap();
+    // Growth is the first thing this same instance sees after damage.
+    assert!(admit(&archive, &log, 40_000));
+    let chains = archive.chains("native").unwrap();
     assert_eq!(chains.len(), 2);
     assert_eq!(chains[0], bad, "the manifest entry is unchanged");
     assert_eq!(fs::read(&file).unwrap(), bytes, "no bytes appended");
-    assert_eq!(read_chain(&restarted, "native", &chains[1]), log);
+    assert_eq!(read_chain(&archive, "native", &chains[1]), log);
+}
+
+#[test]
+fn growth_after_deletion_starts_a_new_chain_in_the_same_instance() {
+    let (_scratch, archive) = archive();
+    let log = lines(40_000, 1);
+    assert!(admit(&archive, &log, 20_000));
+    let lost = archive.chains("native").unwrap().remove(0);
+    let file = chain_file(&archive, "native", &lost);
+    fs::remove_file(&file).unwrap();
+
+    assert!(admit(&archive, &log, 40_000));
+    let chains = archive.chains("native").unwrap();
+    assert_eq!(chains.len(), 2);
+    assert_eq!(chains[0], lost);
+    assert!(!file.exists());
+    assert_eq!(read_chain(&archive, "native", &chains[1]), log);
+}
+
+#[test]
+fn a_changed_manifest_invalidates_cached_verification() {
+    let (_scratch, archive) = archive();
+    let log = lines(20_000, 1);
+    assert!(admit(&archive, &log, log.len()));
+    let path = manifest_path(&archive, "native");
+    let mut manifest = read_manifest(path.parent().unwrap()).unwrap();
+    let old = manifest.chains[0].clone();
+    let file = chain_file(&archive, "native", &old);
+    let bytes = fs::read(&file).unwrap();
+    manifest.chains[0].sha256 = hex(&digest(b"changed manifest"));
+    publish(path.parent().unwrap(), MANIFEST, &manifest).unwrap();
+
+    assert!(admit(&archive, &log, log.len()));
+    assert_eq!(archive.chains("native").unwrap().len(), 2);
+    assert_eq!(fs::read(file).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_reader_inside_a_torn_record_blocks_repair() {
+    use std::{os::fd::AsRawFd, sync::mpsc, thread, time::Duration};
+
+    let (_scratch, archive) = archive();
+    preserve(&archive, "first", b"first", "1").unwrap();
+    let journal = archive.dir.join(SOURCES);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&journal)
+        .unwrap()
+        .write_all(b"{\"source\":\"torn\",\"id\":\"0123")
+        .unwrap();
+    let reader = Archive::new(archive.dir.clone());
+    assert!(reader.lookup("missing").unwrap().is_none());
+    let dir = archive.dir.clone();
+    let (paused_tx, paused_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        DURING_JOURNAL_READ.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                paused_tx.send(()).unwrap();
+                resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            }));
+        });
+        let found = reader.lookup("torn").unwrap();
+        (reader, found)
+    });
+    paused_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+
+    // This is the exact exclusive flock required by torn-tail repair. It
+    // must fail while the reader is paused between bytes of that record.
+    let file = fs::OpenOptions::new()
+        .append(true)
+        .open(dir.join(LOCK))
+        .unwrap();
+    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    let error = io::Error::last_os_error();
+    resume_tx.send(()).unwrap();
+    let (reader, found) = handle.join().unwrap();
+    assert_eq!(locked, -1, "repair acquired the lock during a read");
+    assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    assert!(found.is_none(), "a torn record is never a mapping");
+    drop(file);
+
+    preserve(&archive, "torn", b"repaired", "1").unwrap();
+    let fresh = Archive::new(dir);
+    assert_eq!(
+        reader.lookup("torn").unwrap(),
+        fresh.lookup("torn").unwrap()
+    );
+    assert_eq!(reader.chains("torn").unwrap().len(), 1);
 }

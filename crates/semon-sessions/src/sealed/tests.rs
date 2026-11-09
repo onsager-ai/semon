@@ -447,6 +447,41 @@ fn a_seal_is_not_retired_while_no_chain_holds_its_bytes() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn forget_keeps_every_segment_when_the_manifest_is_missing() {
+    let root = scratch("missing-manifest");
+    let log = root.join("a.jsonl");
+    fs::write(&log, jsonl(100_000, 24)).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    append(&log, &jsonl(100_000, 25));
+    seal(&log, 1, u64::MAX).unwrap();
+    assert!(chain(&root, &log));
+    let dir = seal_dir(&log);
+    let manifest = read_manifest(&dir).unwrap().unwrap();
+    assert!(manifest.segments.len() >= 2);
+    let segments: Vec<_> = manifest
+        .segments
+        .iter()
+        .map(|segment| {
+            let path = dir.join(segment.file_name(&manifest.generation));
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    fs::remove_file(dir.join(MANIFEST)).unwrap();
+
+    assert_eq!(
+        forget(&log).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(dir.is_dir());
+    for (path, bytes) in segments {
+        assert_eq!(fs::read(path).unwrap(), bytes);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn custody_is_for_the_bytes_that_were_archived() {
     let root = scratch("custody");
     let log = root.join("a.jsonl");
