@@ -164,6 +164,27 @@ pub(crate) fn replace_column(batch: &RecordBatch, name: &str, array: ArrayRef) -
     RecordBatch::try_new(batch.schema(), columns).unwrap()
 }
 
+/// Incompressible hex strings, `length` characters each.
+pub(crate) fn noise(rows: usize, length: usize, mut seed: u64) -> ArrayRef {
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let values: Vec<String> = (0..rows)
+        .map(|_| {
+            let mut text = String::with_capacity(length + 16);
+            while text.len() < length {
+                text.push_str(&format!("{:016x}", next()));
+            }
+            text.truncate(length);
+            text
+        })
+        .collect();
+    Arc::new(StringArray::from(values))
+}
+
 /// Every row of `table` that `manifest` and `live` name, as a multiset of all column
 /// values (including `_gen`). Session tables count live rows only.
 pub(crate) fn rows_of(
