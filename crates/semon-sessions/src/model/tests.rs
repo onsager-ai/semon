@@ -12329,7 +12329,9 @@ fn a_catalog_row_carries_the_repository_identity_recorded_in_facts() {
     };
     assert_eq!(identity(&facts), None);
     for remote in ["github.com/a/app", "github.com/b/app"] {
-        facts.repo_ids.insert("/work/proj".into(), crate::RepoId::Remote(remote.into()));
+        facts
+            .repo_ids
+            .insert("/work/proj".into(), crate::RepoId::Remote(remote.into()));
         assert_eq!(identity(&facts), Some(crate::RepoId::Remote(remote.into())));
     }
 }
