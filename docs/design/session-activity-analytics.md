@@ -232,7 +232,8 @@ activity_generation, step: {ordinal, id}, source_generation,
 transcript_generation, slot, basis}`. Basis is `native_record_id`, `usage_record`,
 `call_identity` or `operation_parent`. An unavailable response is `{available:
 false, reason}`, where reason is `stale_activity`, `stale_transcript`,
-`source_generation_mismatch`, `history_incomplete` or `no_exact_record`.
+`source_generation_mismatch`, `history_incomplete`, `no_exact_record` or
+`unsupported_storage`.
 The resolver never exposes source paths. PostgreSQL and the in-memory transcript
 fallback do not support activity anchors. An ordinal, time or nearby record alone
 never establishes a match.

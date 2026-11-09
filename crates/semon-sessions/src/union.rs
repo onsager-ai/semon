@@ -1116,6 +1116,14 @@ impl ViewerCore {
                     | "/api/session-entry"
             )
         {
+            if path == "/api/session-activity-anchor" {
+                return ViewerReply {
+                    status: 200,
+                    content_type: "application/json; charset=utf-8",
+                    body: br#"{"available":false,"reason":"unsupported_storage"}"#.to_vec(),
+                    etag: None,
+                };
+            }
             return crate::catalog::error(
                 503,
                 "capability_unavailable",
