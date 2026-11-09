@@ -237,6 +237,7 @@ pub(crate) fn session_activity_anchor_with_gate(
     before_read: impl FnOnce() -> Result<(), ViewerReply>,
 ) -> ViewerReply {
     let read = || -> Result<ViewerReply, Box<dyn std::error::Error>> {
+        let _scope = crate::selected_read::Scope::ensure();
         let invalid = || {
             catalog::error(
                 400,
