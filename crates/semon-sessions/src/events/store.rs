@@ -10693,11 +10693,7 @@ mod tests {
         }
         evidence.retire();
         assert!(complete);
-        assert!(
-            silver_log(&path)
-                .iter()
-                .any(|(_, kind)| kind == "changed")
-        );
+        assert!(silver_log(&path).iter().any(|(_, kind)| kind == "changed"));
         fs::remove_dir_all(root).unwrap();
     }
 

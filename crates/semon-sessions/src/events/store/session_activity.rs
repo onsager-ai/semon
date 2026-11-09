@@ -276,8 +276,12 @@ fn note_session_state(
 /// to `retained`, so a repeated publication logs nothing.
 pub(super) fn withdraw(tx: &Transaction<'_>, key: Option<&str>) -> rusqlite::Result<()> {
     const GONE: &str = "FROM session_catalog WHERE lifecycle='current' AND (?1 IS NULL OR session_key=?1) AND session_key NOT IN (SELECT session_key FROM catalog_members)";
-    let log = format!("INSERT INTO silver_change(session_key,kind) SELECT session_key,'removed' {GONE} AND session_key IN (SELECT session_key FROM session_activity_projections) ORDER BY session_key");
-    let forget = format!("DELETE FROM silver_session_state WHERE session_key IN (SELECT session_key {GONE})");
+    let log = format!(
+        "INSERT INTO silver_change(session_key,kind) SELECT session_key,'removed' {GONE} AND session_key IN (SELECT session_key FROM session_activity_projections) ORDER BY session_key"
+    );
+    let forget = format!(
+        "DELETE FROM silver_session_state WHERE session_key IN (SELECT session_key {GONE})"
+    );
     tx.execute(&log, [key])?;
     tx.execute(&forget, [key])?;
     Ok(())
