@@ -12399,6 +12399,14 @@ fn repository_identity_survives_description_reuse_reopen_and_missing_source() {
         assert!(!metadata.contains("repo_id"));
     }
     fs::remove_file(log).unwrap();
+    crate::invalidate_session_sources(
+        &options,
+        &[crate::Input {
+            root: crate::InputRoot::Claude,
+            path: "projects/-work-proj/root.jsonl".into(),
+        }],
+    )
+    .unwrap();
     drain_repository_catalog(&options);
     let (published, seq) = published_repository_state(&options, "root");
     assert_eq!(
