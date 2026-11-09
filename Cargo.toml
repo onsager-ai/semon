@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/semon-asi",
     "crates/semon-cli",
     "crates/semon-push",
     "crates/semon-sessions",
