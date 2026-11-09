@@ -199,8 +199,8 @@ fn codex_anchor_requires_a_rendered_exact_call() {
         id: ActivityStepId::Codex(identity),
     };
     assert_eq!(
-        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor)
-            .unwrap()["reason"],
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap()
+            ["reason"],
         "no_exact_record"
     );
     projection.activity.steps[0].call_position = Some(position);
