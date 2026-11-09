@@ -394,9 +394,9 @@ pub(crate) fn items(
     } else {
         for step in header.steps {
             let mut item = serde_json::to_value(step).map_err(|_| rusqlite::Error::InvalidQuery)?;
-            item.as_object_mut()
-                .expect("typed activity step")
-                .remove("position");
+            let object = item.as_object_mut().expect("typed activity step");
+            object.remove("position");
+            object.remove("call_position");
             items.push(item);
         }
         if start > header.total {
