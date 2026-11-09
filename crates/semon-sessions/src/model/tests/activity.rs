@@ -239,6 +239,84 @@ fn activity_codex_uses_only_accepted_native_response_facts_across_restart() {
 }
 
 #[test]
+fn activity_codex_tool_search_keeps_native_facts_without_classifier_evidence() {
+    use crate::events::session_activity::CommandTag;
+
+    let home = Home::new();
+    let usage = |response: &str| {
+        json!({
+            "thread_id":"native","session_id":"native","turn_id":"turn","response_id":response,
+            "usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38,"cached_input_tokens":3,"reasoning_output_tokens":0}
+        })
+    };
+    home.codex(
+        "native",
+        json!({}),
+        &[
+            codex_line(ts(0, 0), "turn_context", json!({"model":"gpt-test"})),
+            codex_user(ts(0, 0), "synthetic prompt"),
+            codex_line(
+                ts(0, 1),
+                "response_item",
+                json!({"type":"tool_search_call","id":"search","arguments":{"query":"synthetic"}}),
+            ),
+            codex_line(ts(0, 2), "token_usage_record", usage("first")),
+            codex_line(
+                ts(0, 3),
+                "response_item",
+                json!({"type":"tool_search_output","call_id":"search","tools":[{"name":"lookup"}]}),
+            ),
+            codex_line(ts(0, 4), "token_usage_record", usage("second")),
+        ],
+    );
+    home.build_query();
+    let page = activity(&home, "native");
+    assert_eq!(page.total, 2);
+    for step in &page.steps {
+        assert_eq!(step.activity, None);
+        assert_eq!(step.waste, None);
+        assert_eq!(step.trigger, None);
+        assert!(!step.empty_search && !step.verify_failure && !step.silent_exit);
+        assert!(step.waits.is_empty());
+        assert!(step.call_position.is_none());
+    }
+    let (_, rows) = read_catalog(&home);
+    let row = rows.iter().find(|row| row.key == "native").unwrap();
+    let c = rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let changes = session_activity::items(
+        &c,
+        row,
+        None,
+        &crate::pricing::snapshot().fingerprint,
+        true,
+        None,
+        256,
+    )
+    .unwrap()
+    .unwrap();
+    assert!(changes.items.is_empty());
+    let facts = session_activity::step_facts(&c, row, &page.generation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(facts.len(), 2);
+    assert_eq!(facts[0].2.model_ms, Some(120_000));
+    assert_eq!(facts[0].2.tool_ms, Some(120_000));
+    let call = &facts[0].2.tool_calls[0];
+    assert_eq!(facts[0].2.tool_calls.len(), 1);
+    assert_eq!(call.tool, "tool_search");
+    assert_eq!(call.tool_ms, Some(120_000));
+    assert_eq!(call.command_tag, CommandTag::Unknown);
+    assert_eq!(
+        (call.target_path.as_ref(), call.ok, call.exit_code),
+        (None, None, None)
+    );
+    assert_eq!(facts[1].2.model_ms, Some(60_000));
+    assert!(facts[1].2.tool_calls.is_empty());
+    home.build_query();
+    assert_eq!(activity(&home, "native"), page);
+}
+
+#[test]
 fn activity_request_blob_replay_preserves_change_fact_and_read_step_coverage() {
     for (name, input, output, change) in [
         (

@@ -269,7 +269,7 @@ fn codex_anchor_requires_a_rendered_exact_call() {
         &Default::default(),
         vec![],
         vec![],
-        vec![],
+        (vec![], vec![]),
         crate::pricing::snapshot(),
     );
     let tx = store.connection.transaction().unwrap();
@@ -430,13 +430,16 @@ fn step_facts_keep_private_tool_details_and_usage_ownership() {
                 observation: classify::call("Agent", &serde_json::json!({}), None, "future".into()),
             },
         ],
-        vec![TimedInput {
-            position: SourcePosition {
-                source: step.position.source.clone(),
-                offset: 1,
-            },
-            timestamp: Some(1),
-        }],
+        (
+            vec![],
+            vec![TimedInput {
+                position: SourcePosition {
+                    source: step.position.source.clone(),
+                    offset: 1,
+                },
+                timestamp: Some(1),
+            }],
+        ),
         crate::pricing::snapshot(),
     );
     let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
@@ -482,7 +485,7 @@ fn step_facts_keep_private_tool_details_and_usage_ownership() {
             .collect(),
         vec![],
         vec![],
-        vec![],
+        (vec![], vec![]),
         crate::pricing::snapshot(),
     );
     let tx = store.connection.transaction().unwrap();
@@ -525,7 +528,7 @@ fn activity_repricing_resumes_and_never_serves_mixed_prices() {
         &Default::default(),
         Vec::new(),
         Vec::new(),
-        Vec::new(),
+        (Vec::new(), Vec::new()),
         old.clone(),
     );
     let path = crate::events::EventCache::path(&options.cache);

@@ -54,7 +54,7 @@ impl Projection {
         shared: &crate::claude_usage::Shared,
         signals: Vec<(String, Signal)>,
         observations: Vec<activity::classify::LocatedObservation>,
-        input_events: Vec<activity::TimedInput>,
+        native_timing: (Vec<activity::UnclassifiedTool>, Vec<activity::TimedInput>),
         table: Arc<crate::pricing::EffectiveTable>,
     ) -> Self {
         let mut inputs = BTreeMap::new();
@@ -77,7 +77,14 @@ impl Projection {
         }
         let mut activity = activity::derive(key, usage, shared, signals, table);
         let observations = activity::apply_observations(&mut activity, observations);
-        let facts = derive_facts(&activity, &inputs, &turn_ids, &observations, &input_events);
+        let facts = derive_facts(
+            &activity,
+            &inputs,
+            &turn_ids,
+            &observations,
+            &native_timing.0,
+            &native_timing.1,
+        );
         Self {
             activity,
             inputs,
@@ -113,6 +120,7 @@ fn billing(usage: &Usage) -> crate::events::BillingUsage {
 fn model_ms(
     step: &ActivityStep,
     observations: &[activity::classify::LocatedObservation],
+    unclassified_tools: &[activity::UnclassifiedTool],
     input_events: &[activity::TimedInput],
 ) -> Option<u64> {
     observations
@@ -125,6 +133,18 @@ fn model_ms(
             Some(offset) if offset < step.position.offset => row.result_timestamp,
             _ => None,
         })
+        .chain(
+            unclassified_tools
+                .iter()
+                .filter(|row| {
+                    row.position.source == step.position.source
+                        && row.position.offset < step.position.offset
+                })
+                .filter_map(|row| match row.result_offset {
+                    Some(offset) if offset < step.position.offset => row.result_timestamp,
+                    _ => None,
+                }),
+        )
         .chain(
             input_events
                 .iter()
@@ -144,6 +164,7 @@ fn derive_facts(
     inputs: &BTreeMap<ActivityStepId, Usage>,
     turn_ids: &BTreeMap<ActivityStepId, Option<String>>,
     observations: &[activity::classify::LocatedObservation],
+    unclassified_tools: &[activity::UnclassifiedTool],
     input_events: &[activity::TimedInput],
 ) -> BTreeMap<ActivityStepId, activity::StepFacts> {
     let mut exact = BTreeMap::new();
@@ -158,7 +179,8 @@ fn derive_facts(
     for offsets in sources.values_mut() {
         offsets.sort_unstable();
     }
-    let mut calls: Vec<Vec<activity::ToolCallFact>> = vec![Vec::new(); activity.steps.len()];
+    let mut calls: Vec<Vec<(activity::SourcePosition, activity::ToolCallFact)>> =
+        vec![Vec::new(); activity.steps.len()];
     for row in observations {
         let Some(tool) = &row.tool else {
             continue;
@@ -170,16 +192,45 @@ fn derive_facts(
             .timestamp
             .zip(row.result_timestamp)
             .and_then(|(start, end)| (end >= start).then_some((end - start) as u64));
-        let ord = calls[owner].len() as u64;
-        calls[owner].push(activity::ToolCallFact {
-            ord,
-            tool: tool.tool.clone(),
-            target_path: tool.target_path.clone(),
-            command_tag: row.observation.command_tag(),
-            ok: row.observation.ok(),
-            exit_code: row.observation.exit_code(),
-            tool_ms,
-        });
+        calls[owner].push((
+            row.position.clone(),
+            activity::ToolCallFact {
+                ord: 0,
+                tool: tool.tool.clone(),
+                target_path: tool.target_path.clone(),
+                command_tag: row.observation.command_tag(),
+                ok: row.observation.ok(),
+                exit_code: row.observation.exit_code(),
+                tool_ms,
+            },
+        ));
+    }
+    for row in unclassified_tools {
+        let Some(tool) = &row.tool else {
+            continue;
+        };
+        let Some(owner) = activity::position_owner(&exact, &sources, &row.position, None) else {
+            continue;
+        };
+        let tool_ms = row
+            .timestamp
+            .zip(row.result_timestamp)
+            .and_then(|(start, end)| (end >= start).then_some((end - start) as u64));
+        calls[owner].push((
+            row.position.clone(),
+            activity::ToolCallFact {
+                ord: 0,
+                tool: tool.clone(),
+                target_path: None,
+                command_tag: activity::CommandTag::Unknown,
+                ok: None,
+                exit_code: None,
+                tool_ms,
+            },
+        ));
+    }
+    for rows in &mut calls {
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
     }
     activity
         .steps
@@ -189,7 +240,7 @@ fn derive_facts(
             let usage = inputs.get(&step.id).expect("step has normalized usage");
             let tool_ms = calls[index]
                 .iter()
-                .filter_map(|call| call.tool_ms)
+                .filter_map(|(_, call)| call.tool_ms)
                 .reduce(u64::saturating_add);
             let turn_id = turn_ids.get(&step.id).cloned().flatten();
             let usage_owner = match &step.ownership {
@@ -202,9 +253,16 @@ fn derive_facts(
                     turn_id,
                     usage_owner,
                     billing: billing(usage),
-                    model_ms: model_ms(step, observations, input_events),
+                    model_ms: model_ms(step, observations, unclassified_tools, input_events),
                     tool_ms,
-                    tool_calls: std::mem::take(&mut calls[index]),
+                    tool_calls: std::mem::take(&mut calls[index])
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ord, (_, mut call))| {
+                            call.ord = ord as u64;
+                            call
+                        })
+                        .collect(),
                 },
             )
         })

@@ -2468,6 +2468,7 @@ impl<'a> Builder<'a> {
         let mut usage = Vec::new();
         let mut signals = Vec::new();
         let mut observations = Vec::new();
+        let mut unclassified_tools = Vec::new();
         let mut input_events = Vec::new();
         for position in &session.files {
             let file = &self.files[*position];
@@ -2543,6 +2544,29 @@ impl<'a> Builder<'a> {
                     })
                 },
             ));
+            unclassified_tools.extend(
+                file.summary
+                    .events
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, event)| {
+                        event.k == events::Kind::Tool && event.activity_observation.is_none()
+                    })
+                    .map(|(at, event)| events::session_activity::UnclassifiedTool {
+                        position: SourcePosition {
+                            source: path.into(),
+                            offset: event.o,
+                        },
+                        timestamp: event.t,
+                        result_timestamp: event.r.as_ref().and_then(|reply| reply.t),
+                        result_offset: event.r.as_ref().map(|reply| reply.o),
+                        tool: if self.copied.contains(&(*position, at)) {
+                            None
+                        } else {
+                            event.n.clone()
+                        },
+                    }),
+            );
             signals.extend(
                 file.summary
                     .signals
@@ -2563,7 +2587,7 @@ impl<'a> Builder<'a> {
             &shared,
             signals,
             observations,
-            input_events,
+            (unclassified_tools, input_events),
             table,
         )))
     }

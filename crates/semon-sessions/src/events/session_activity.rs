@@ -18,7 +18,7 @@ use crate::{claude_usage::Shared, pricing};
 pub(crate) mod analytics;
 pub(crate) mod classify;
 
-pub(crate) const ACTIVITY_RULES_VERSION: u32 = 9;
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 10;
 const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
@@ -39,6 +39,16 @@ pub(crate) struct SourcePosition {
 pub(crate) struct TimedInput {
     pub(crate) position: SourcePosition,
     pub(crate) timestamp: Option<i64>,
+}
+
+/// Native tool evidence without an activity classifier observation.
+#[derive(Clone, Debug)]
+pub(crate) struct UnclassifiedTool {
+    pub(crate) position: SourcePosition,
+    pub(crate) timestamp: Option<i64>,
+    pub(crate) result_timestamp: Option<i64>,
+    pub(crate) result_offset: Option<u64>,
+    pub(crate) tool: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -483,11 +493,25 @@ pub(crate) fn observation_owner(
     sources: &BTreeMap<String, Vec<(u64, usize)>>,
     row: &classify::LocatedObservation,
 ) -> Option<usize> {
-    if let Some(id) = &row.observation.step_id {
+    position_owner(
+        exact,
+        sources,
+        &row.position,
+        row.observation.step_id.as_ref(),
+    )
+}
+
+pub(crate) fn position_owner(
+    exact: &BTreeMap<ActivityStepId, usize>,
+    sources: &BTreeMap<String, Vec<(u64, usize)>>,
+    position: &SourcePosition,
+    step_id: Option<&ActivityStepId>,
+) -> Option<usize> {
+    if let Some(id) = step_id {
         exact.get(id).copied()
     } else {
-        sources.get(&row.position.source).and_then(|offsets| {
-            let next = offsets.partition_point(|(offset, _)| *offset < row.position.offset);
+        sources.get(&position.source).and_then(|offsets| {
+            let next = offsets.partition_point(|(offset, _)| *offset < position.offset);
             // Response usage follows its calls. This association never becomes
             // an exact response identity on a change fact.
             offsets
