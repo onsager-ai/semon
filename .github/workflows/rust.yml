@@ -20,8 +20,30 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  classify:
+    name: classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      run_expensive: ${{ steps.classify.outputs.run_expensive }}
+    steps:
+      - name: Check out full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: classify
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/scripts/should-run-expensive-ci.py
+      - name: Test change classifier
+        run: python3 .github/scripts/test-should-run-expensive-ci.py
+
   fmt:
     name: fmt
+    needs: classify
+    if: needs.classify.outputs.run_expensive == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -56,6 +78,8 @@ jobs:
 
   clippy:
     name: clippy
+    needs: classify
+    if: needs.classify.outputs.run_expensive == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -83,6 +107,8 @@ jobs:
 
   regressions:
     name: focused regressions
+    needs: classify
+    if: needs.classify.outputs.run_expensive == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Check out
@@ -172,6 +198,8 @@ jobs:
 
   test:
     name: test
+    needs: classify
+    if: needs.classify.outputs.run_expensive == 'true'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -207,20 +235,31 @@ jobs:
   aggregate:
     name: fmt, clippy, test
     if: always()
-    needs: [fmt, clippy, regressions, test]
+    needs: [classify, fmt, clippy, regressions, test]
     runs-on: ubuntu-latest
     steps:
       - name: Require every Rust gate
         env:
+          CLASSIFIER_RESULT: ${{ needs.classify.result }}
+          RUN_EXPENSIVE: ${{ needs.classify.outputs.run_expensive }}
           FMT_RESULT: ${{ needs.fmt.result }}
           CLIPPY_RESULT: ${{ needs.clippy.result }}
           REGRESSIONS_RESULT: ${{ needs.regressions.result }}
           TEST_RESULT: ${{ needs.test.result }}
         run: |
-          test "$FMT_RESULT" = success
-          test "$CLIPPY_RESULT" = success
-          test "$REGRESSIONS_RESULT" = success
-          test "$TEST_RESULT" = success
+          test "$CLASSIFIER_RESULT" = success
+          if [ "$RUN_EXPENSIVE" = true ]; then
+            test "$FMT_RESULT" = success
+            test "$CLIPPY_RESULT" = success
+            test "$REGRESSIONS_RESULT" = success
+            test "$TEST_RESULT" = success
+          else
+            test "$RUN_EXPENSIVE" = false
+            test "$FMT_RESULT" = skipped
+            test "$CLIPPY_RESULT" = skipped
+            test "$REGRESSIONS_RESULT" = skipped
+            test "$TEST_RESULT" = skipped
+          fi
 
   codex-conformance:
     name: Pinned Codex fixture conformance
