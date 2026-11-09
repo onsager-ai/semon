@@ -165,8 +165,7 @@ jobs:
 
   checks:
     name: viewer / ${{ matrix.suite }}
-    needs: [classify, build]
-    if: needs.classify.outputs.run_expensive == 'true'
+    needs: build
     runs-on: ubuntu-latest
     # The diagnostic lane runs the unchanged journey twice plus a phase sweep.
     # Product deadlines and every other suite's existing allowance stay unchanged.
