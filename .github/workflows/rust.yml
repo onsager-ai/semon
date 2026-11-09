@@ -144,7 +144,7 @@ jobs:
         run: |
           # Foreground and incremental budgets use normal execution. Keep the
           # existing instrumented full suite as separate regression evidence.
-          cold_catalog_output=$(SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture)
+          cold_catalog_output=$(SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --lib --locked viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture)
           printf '%s\n' "$cold_catalog_output"
           printf '%s\n' "$cold_catalog_output" | grep -Fq '1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out'
           cold_catalog_viewer_output=$(SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --lib --features test-clock,test-ui-account-server --locked viewer::tests::initial_catalog_page_precedes_global_native_observation -- --exact --nocapture)
