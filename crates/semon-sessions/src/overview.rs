@@ -72,8 +72,22 @@ impl Summary {
             home: json!({"name":session.name,"kind":session.kind,"harness":session.harness,
             "model":session.model,"repo":session.repo,"state":session.state,"last":session.last,"turn_lifecycle":session.turn_lifecycle,
             "start":session.start,"parent":parent,"branch":session.branch,"waiting_for":null,"waiting_since":session.waiting_since,
+            "reported_runs":session.reported_runs,"cost_check":session.cost_check,
+            "claude_usage":session.claude_usage,"copilot":session.copilot,
+            "incomplete_usage_days":session.incomplete_usage_days,"incomplete_usage_time":session.incomplete_usage_time,
+            "lane":session.lane,"role":session.role,
             "activity":session.activity.as_ref().map(|(name,_,age,at)|(name,"",age,at)),"detail":null,"detail_from":content["detail_from"],"detail_from_name":content["detail_from_name"],"content":content,"cost":session.cost.usd,"events":events}),
         }
+    }
+    /// Published session facts used by analytics outside the activity generation.
+    pub(crate) fn analytics_inputs(&self) -> Value {
+        json!({
+            "reported_runs":self.home["reported_runs"],"cost_check":self.home["cost_check"],
+            "claude_usage":self.home["claude_usage"],"copilot":self.home["copilot"],
+            "incomplete_usage_days":self.home["incomplete_usage_days"],
+            "incomplete_usage_time":self.home["incomplete_usage_time"],
+            "lane":self.home["lane"],"role":self.home["role"]
+        })
     }
     /// The state fields analytics reads as the session's status.
     pub(crate) fn status(&self) -> (&Value, &Value) {

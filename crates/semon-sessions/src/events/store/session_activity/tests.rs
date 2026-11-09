@@ -649,15 +649,38 @@ fn catalog_changes_log_a_change_without_rewriting_unchanged_activity() {
     let projection = row.session_activity.as_ref().unwrap();
     publish_row(&mut store, row, projection);
     let mut variants = Vec::new();
-    for edit in 0..5 {
+    for edit in 0..12 {
         let mut next = row.clone();
         match edit {
             0 => next.branch = Some("another-branch".into()),
             1 => next.parent_source = Some("another-method".into()),
             2 => next.start = Some(next.start.unwrap_or(0) + 1),
             3 => next.repo = Some("another-repo".into()),
-            _ => next.overview.as_mut().unwrap().set_state("synthetic-state"),
+            4 => next.overview.as_mut().unwrap().set_state("synthetic-state"),
+            5 => next.model = "another-model".into(),
+            6 => next.effort = Some("high".into()),
+            7 => next.tokens[0] += 1.0,
+            8 => next.cost.usd = Some(next.cost.usd.unwrap_or(0.0) + 1.0),
+            9 => next.name = "another-name".into(),
+            10 => next.harness = "another-harness".into(),
+            _ => next.native_ids.push("another-native-id".into()),
         }
+        variants.push(next);
+    }
+    for (field, value) in [
+        ("reported_runs", serde_json::json!([{"cost_usd":2.0}])),
+        ("cost_check", serde_json::json!([{"reported_usd":2.0}])),
+        ("claude_usage", serde_json::json!({"complete":false})),
+        ("copilot", serde_json::json!({"usage":null})),
+        ("incomplete_usage_days", serde_json::json!([123])),
+        ("incomplete_usage_time", serde_json::json!(true)),
+        ("lane", serde_json::json!("changed")),
+        ("role", serde_json::json!("changed")),
+    ] {
+        let mut next = row.clone();
+        let mut overview = serde_json::to_value(next.overview.as_ref().unwrap()).unwrap();
+        overview["home"][field] = value;
+        next.overview = Some(serde_json::from_value(overview).unwrap());
         variants.push(next);
     }
     for next in &variants {

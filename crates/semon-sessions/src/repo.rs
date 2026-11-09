@@ -102,7 +102,7 @@ pub(crate) fn repo_id(cwd: &str, home: Option<&Path>) -> Option<RepoId> {
 /// continues a line.
 fn origin_url(config: &str) -> Option<String> {
     let mut origin = false;
-    for line in logical_lines(config) {
+    for line in logical_lines(config.strip_prefix('\u{feff}').unwrap_or(config)) {
         let mut body = line.trim_start();
         if let Some(header) = body.strip_prefix('[') {
             let Some((is_origin, rest)) = origin_header(header) else {
@@ -229,7 +229,12 @@ fn config_value(raw: &str) -> Option<String> {
 /// `user@host:owner/repo` becomes `host/owner/repo`. `file:` URLs and local
 /// paths are [`RepoId::Path`].
 fn classify_origin(url: &str) -> RepoId {
-    let (default_port, authority, path) = if let Some((scheme, rest)) = url.split_once("://") {
+    let scheme_url = url.split_once("://").filter(|(scheme, _)| {
+        let mut bytes = scheme.bytes();
+        bytes.next().is_some_and(|byte| byte.is_ascii_alphabetic())
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'.' | b'-'))
+    });
+    let (default_port, authority, path) = if let Some((scheme, rest)) = scheme_url {
         let default_port = match scheme.to_ascii_lowercase().as_str() {
             "file" => return RepoId::Path(url.to_owned()),
             "https" => Some("443"),
@@ -238,6 +243,7 @@ fn classify_origin(url: &str) -> RepoId {
             "git" => Some("9418"),
             _ => None,
         };
+        let rest = rest.split(['?', '#']).next().unwrap_or(rest);
         match rest.split_once('/') {
             Some((authority, path)) => (default_port, authority, path),
             None => return RepoId::Unknown,
@@ -256,7 +262,11 @@ fn classify_origin(url: &str) -> RepoId {
         Some((name, port)) if Some(port) == default_port => name,
         _ => host,
     };
-    let path = path.trim_matches('/');
+    let path = path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(path)
+        .trim_matches('/');
     let path = path.strip_suffix(".git").unwrap_or(path);
     if host.is_empty()
         || path.is_empty()
@@ -762,6 +772,44 @@ mod tests {
     }
 
     #[test]
+    fn remote_identity_drops_query_fragment_and_encoded_userinfo() {
+        for url in [
+            "https://a.test/team/app.git?access_token=private",
+            "https://a.test/team/app.git#access_token=private",
+            "https://user%40mail:secret%3Avalue@a.test/team/app.git?token=private#secret",
+            "ssh://user%40mail:secret%2Fvalue@a.test/team/app.git#secret",
+            "user%40mail@a.test:team/app.git",
+            "user@a.test:team/app.git?access_token=private#secret",
+        ] {
+            assert_eq!(
+                classify_origin(url),
+                RepoId::Remote("a.test/team/app".into()),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_paths_with_url_like_text_remain_paths() {
+        for path in [
+            "./backup://private/repo.git",
+            "/backup://private/repo.git",
+            "dir/https://private/repo.git",
+        ] {
+            assert_eq!(classify_origin(path), RepoId::Path(path.into()));
+        }
+        assert_eq!(
+            classify_origin("git+ssh://user@a.test/team/app.git"),
+            RepoId::Remote("a.test/team/app".into())
+        );
+        assert_eq!(
+            classify_origin("1host://team/app.git"),
+            RepoId::Remote("1host/team/app".into()),
+            "an invalid scheme follows Git's scp-style rule"
+        );
+    }
+
+    #[test]
     fn local_origins_are_paths_and_unusable_ones_are_unknown() {
         for url in [
             "file:///srv/git/semon.git",
@@ -892,6 +940,14 @@ mod tests {
             "[remote \"origin\"]\npushurl = https://push.test/only.git\n",
         );
         assert_eq!(repo_id(&cwd.to_string_lossy(), None), Some(RepoId::Unknown));
+    }
+
+    #[test]
+    fn leading_bom_preserves_first_fetch_url_selection() {
+        assert_eq!(
+            origin_url("\u{feff}[remote \"origin\"]\npushurl = https://push.test/other.git\nurl = https://a.test/first.git\nurl = https://b.test/second.git\n").as_deref(),
+            Some("https://a.test/first.git")
+        );
     }
 
     #[test]

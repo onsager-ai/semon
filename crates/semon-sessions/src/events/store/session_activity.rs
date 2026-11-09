@@ -252,6 +252,18 @@ fn analytics_digest(row: &crate::model::summary::CatalogRow) -> rusqlite::Result
                 row.start,
                 row.last,
                 state,
+                (
+                    &row.name,
+                    &row.harness,
+                    &row.native_ids,
+                    &row.model,
+                    &row.effort,
+                    &row.tokens,
+                    &row.cost,
+                ),
+                row.overview
+                    .as_ref()
+                    .map(|overview| overview.analytics_inputs()),
             ))?
             .as_bytes()
         )

@@ -12340,6 +12340,54 @@ fn publish_repository_facts(options: &Options, facts: &crate::Facts) {
 }
 
 #[test]
+fn reported_cost_only_change_logs_a_query_ready_session_change() {
+    let home = Home::new();
+    home.top(
+        "root",
+        &[
+            human("root", ts(0, 0), "billing"),
+            assistant("root", ts(0, 1), vec![text("answer")]),
+        ],
+    );
+    let options = Options {
+        facts: Some(home.root.join("billing-facts.json")),
+        ..home.options.clone()
+    };
+    let mut facts = crate::local_runtime_facts(&home.options).unwrap();
+    facts.reported_runs.push(ReportedRunSnapshot {
+        last_session_id: "root".into(),
+        last_start_time: BASE,
+        last_cost: Some(1.0),
+        capture_at: NOW,
+        ..ReportedRunSnapshot::default()
+    });
+    let published = || {
+        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        db.query_row(
+            "SELECT (SELECT max(seq) FROM silver_change WHERE session_key='root'),p.generation,o.summary FROM session_activity_projections p JOIN session_overview o USING(session_key) WHERE p.session_key='root'",
+            [], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
+        ).unwrap()
+    };
+    publish_repository_facts(&options, &facts);
+    drain_repository_catalog(&options);
+    let before = published();
+    facts.reported_runs[0].last_cost = Some(2.0);
+    publish_repository_facts(&options, &facts);
+    drain_repository_catalog(&options);
+    let after = published();
+    assert!(
+        after.0 > before.0,
+        "reported billing alone must emit changed"
+    );
+    assert_eq!(after.1, before.1, "activity is not rewritten");
+    let summary: Value = serde_json::from_str(&after.2).unwrap();
+    assert_eq!(summary["home"]["reported_runs"][0]["cost_usd"], json!(2.0));
+    assert_eq!(summary["home"]["cost_check"][0]["reported_usd"], json!(2.0));
+    drain_repository_catalog(&options);
+    assert_eq!(published(), after, "unchanged republication adds nothing");
+}
+
+#[test]
 fn repository_identity_survives_description_reuse_reopen_and_missing_source() {
     let home = Home::new();
     let mut records = vec![
