@@ -508,7 +508,7 @@ impl Receiver {
         };
         self.release(machine, release);
         outcome?;
-        if interim != incoming {
+        if request.replace && interim != incoming {
             write_redactor_version(&versions, &marker_name, &incoming)?;
         }
         Ok(Reply::new(
