@@ -131,6 +131,17 @@ fn activity_anchor_admits_only_current_exact_records() {
         crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap();
     assert_eq!(resolved["available"], true);
     assert_eq!(resolved["basis"], "native_record_id");
+    let selected = resolved["slot"].as_i64().unwrap();
+    store
+        .connection
+        .execute(
+            "INSERT INTO session_slots(session_key,slot,metadata) SELECT session_key,slot+1000,metadata FROM session_slots WHERE session_key=?1 AND slot=?2",
+            params![row.key, selected],
+        )
+        .unwrap();
+    let repeated =
+        crate::transcript_range::resolve_step_slot(&store.connection, row, false, &anchor).unwrap();
+    assert_eq!(repeated["slot"], selected);
     let mut stale = anchor.clone();
     stale.generation = "stale".into();
     assert_eq!(
