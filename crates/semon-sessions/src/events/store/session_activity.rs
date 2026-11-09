@@ -223,7 +223,7 @@ fn derive_facts(
                 tool: tool.clone(),
                 target_path: None,
                 command_tag: activity::CommandTag::Unknown,
-                ok: None,
+                ok: row.ok,
                 exit_code: None,
                 tool_ms,
             },

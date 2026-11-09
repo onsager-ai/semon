@@ -49,6 +49,7 @@ pub(crate) struct UnclassifiedTool {
     pub(crate) result_timestamp: Option<i64>,
     pub(crate) result_offset: Option<u64>,
     pub(crate) tool: Option<String>,
+    pub(crate) ok: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

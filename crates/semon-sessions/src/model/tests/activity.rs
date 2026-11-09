@@ -317,6 +317,58 @@ fn activity_codex_tool_search_keeps_native_facts_without_classifier_evidence() {
 }
 
 #[test]
+fn activity_completion_only_connectors_keep_outcomes_without_inventing_duration() {
+    for kind in ["McpToolCall", "DynamicToolCall"] {
+        for (outcome, expected) in [
+            (json!({"success": false}), Some(false)),
+            (json!({"status": "failed"}), Some(false)),
+            (json!({"success": true}), Some(true)),
+            (json!({}), None),
+        ] {
+            let home = Home::new();
+            let mut item = json!({"type":kind,"id":"connector","tool":"lookup"});
+            item.as_object_mut()
+                .unwrap()
+                .extend(outcome.as_object().unwrap().clone());
+            home.codex(
+                "native",
+                json!({}),
+                &[
+                    codex_line(ts(0, 0), "turn_context", json!({"model":"gpt-test"})),
+                    codex_user(ts(0, 0), "synthetic prompt"),
+                    codex_line(ts(0, 2), "event_msg", json!({"type":"item_completed","item":item})),
+                    codex_line(ts(0, 3), "token_usage_record", json!({
+                        "thread_id":"native","session_id":"native","turn_id":"turn","response_id":"response",
+                        "usage":{"input_tokens":31,"output_tokens":7,"total_tokens":38,"cached_input_tokens":3,"reasoning_output_tokens":0}
+                    })),
+                ],
+            );
+            home.build_query();
+            let page = activity(&home, "native");
+            assert_eq!(page.total, 1);
+            assert_eq!(page.steps[0].activity, None);
+            assert_eq!(page.steps[0].waste, None);
+            let (_, rows) = read_catalog(&home);
+            let row = rows.iter().find(|row| row.key == "native").unwrap();
+            let c =
+                rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+            let facts = session_activity::step_facts(&c, row, &page.generation)
+                .unwrap()
+                .unwrap();
+            let step = &facts[0].2;
+            assert_eq!(step.model_ms, Some(60_000));
+            assert_eq!(step.tool_ms, None);
+            assert_eq!(step.tool_calls.len(), 1);
+            let call = &step.tool_calls[0];
+            assert_eq!(call.tool, "lookup");
+            assert_eq!(call.tool_ms, None);
+            assert_eq!(call.ok, expected);
+            assert_eq!(call.exit_code, None);
+        }
+    }
+}
+
+#[test]
 fn activity_request_blob_replay_preserves_change_fact_and_read_step_coverage() {
     for (name, input, output, change) in [
         (

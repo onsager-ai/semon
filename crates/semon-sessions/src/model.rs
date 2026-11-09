@@ -2557,9 +2557,17 @@ impl<'a> Builder<'a> {
                             source: path.into(),
                             offset: event.o,
                         },
-                        timestamp: event.t,
+                        // A completion-only connector has its call and reply
+                        // at the same record; it provides no observed start.
+                        timestamp: event
+                            .t
+                            .filter(|_| event.r.as_ref().is_none_or(|reply| reply.o != event.o)),
                         result_timestamp: event.r.as_ref().and_then(|reply| reply.t),
                         result_offset: event.r.as_ref().map(|reply| reply.o),
+                        ok: event
+                            .r
+                            .as_ref()
+                            .and_then(|reply| (reply.f & events::UNKNOWN == 0).then_some(!reply.e)),
                         tool: if self.copied.contains(&(*position, at)) {
                             None
                         } else {
