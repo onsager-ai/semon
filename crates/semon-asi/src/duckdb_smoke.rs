@@ -1,6 +1,6 @@
 //! DuckDB reads a generated store through a live-row view and sees only current rows.
 
-use duckdb::{Connection, params};
+use duckdb::{Config, Connection, params};
 
 use crate::schema::FACT_STEP;
 use crate::store::Store;
@@ -26,7 +26,17 @@ fn a_live_row_view_shows_only_current_rows() {
         .collect();
     assert_eq!(files.len(), 2);
 
-    let db = Connection::open_in_memory().unwrap();
+    let config = Config::default().enable_autoload_extension(false).unwrap();
+    let db = Connection::open_in_memory_with_flags(config).unwrap();
+    db.execute_batch("LOAD parquet; LOAD json;").unwrap();
+    let json: i64 = db
+        .query_row(
+            "SELECT json_extract_string('{\"value\": 42}', '$.value')::BIGINT",
+            params![],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(json, 42);
     db.execute_batch(&format!(
         "CREATE VIEW live AS SELECT * FROM read_parquet('{live}');
          CREATE VIEW fact_step_files AS SELECT * FROM read_parquet([{files}]);
