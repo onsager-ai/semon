@@ -209,12 +209,19 @@ impl RuntimeObservations {
         let repos = cwds
             .iter()
             .map(|cwd| {
-                let repo = if self.local {
-                    Some(model::repo_of(cwd, facts.home.as_deref().map(Path::new)))
+                let home = facts.home.as_deref().map(Path::new);
+                let (repo, repo_id) = if self.local {
+                    (
+                        Some(model::repo_of(cwd, home)),
+                        crate::repo::repo_id(cwd, home),
+                    )
                 } else {
-                    facts.repos.get(cwd).cloned()
+                    (
+                        facts.repos.get(cwd).cloned(),
+                        facts.repo_ids.get(cwd).cloned(),
+                    )
                 };
-                (cwd, repo)
+                (cwd, repo, repo_id)
             })
             .collect::<Vec<_>>();
         let locks = ids

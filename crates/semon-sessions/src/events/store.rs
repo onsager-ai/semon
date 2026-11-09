@@ -249,7 +249,7 @@ fn emit_catalog_publish_attempt(
 // the per-database storage version stamp (current stores do not run storage
 // DDL), the ledger epoch on source ledgers and published sources, and compact
 // activity summaries for bounded family publication.
-pub(crate) const SCHEMA_VERSION: i64 = 42;
+pub(crate) const SCHEMA_VERSION: i64 = 43;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -1355,8 +1355,17 @@ pub(crate) fn enqueue_facts(
             enqueue_native_tx(&tx, "claude", &run.last_session_id).map_err(io::Error::other)?;
         }
     }
-    for cwd in before.repos.keys().chain(after.repos.keys()) {
-        if before.repos.get(cwd) != after.repos.get(cwd) {
+    let cwds = before
+        .repos
+        .keys()
+        .chain(after.repos.keys())
+        .chain(before.repo_ids.keys())
+        .chain(after.repo_ids.keys())
+        .collect::<std::collections::BTreeSet<_>>();
+    for cwd in cwds {
+        if before.repos.get(cwd) != after.repos.get(cwd)
+            || before.repo_ids.get(cwd) != after.repo_ids.get(cwd)
+        {
             let paths = {
                 let mut statement = tx
                     .prepare("SELECT path FROM files WHERE cwd=?1")
@@ -4637,6 +4646,7 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT generation,identity,metadata FROM session_activity_facts LIMIT 0",
         "SELECT generation,ordinal,metadata FROM session_activity_compactions LIMIT 0",
         "SELECT seq,session_key,kind FROM silver_change LIMIT 0",
+        "SELECT session_key,digest FROM silver_session_state LIMIT 0",
         "SELECT metadata FROM session_history_catalog LIMIT 0",
         "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
     ] {
@@ -10414,6 +10424,21 @@ mod tests {
                 "malformed schema",
             ),
             (
+                "missing-silver-change",
+                "DROP TABLE silver_change",
+                "malformed schema",
+            ),
+            (
+                "missing-silver-state",
+                "DROP TABLE silver_session_state",
+                "malformed schema",
+            ),
+            (
+                "missing-silver-state-column",
+                "ALTER TABLE silver_session_state DROP COLUMN digest",
+                "malformed schema",
+            ),
+            (
                 "missing-reported-column",
                 "ALTER TABLE reported_runs DROP COLUMN capture_at",
                 "malformed persistent state",
@@ -10698,13 +10723,20 @@ mod tests {
     }
 
     #[test]
-    fn a_withdrawn_session_logs_one_removal_through_the_producer_cycle() {
+    fn a_withdrawn_session_stays_in_analytics_as_changed_through_the_producer_cycle() {
         let root = scratch("silver-withdrawn");
         let (options, rows, _) = catalog_native_fixture(&root, 2, true);
         let path = crate::events::EventCache::path(&options.cache);
         let claude = rows.iter().find(|row| row.harness == "claude").unwrap();
         let key = claude.key.clone();
-        assert!(silver_log(&path).contains(&(key.clone(), "changed".into())));
+        let count = |kind: &str| {
+            silver_log(&path)
+                .into_iter()
+                .filter(|entry| *entry == (key.clone(), kind.to_owned()))
+                .count()
+        };
+        let before = count("changed");
+        assert!(before >= 1);
         fs::remove_file(&claude.sources[0].path).unwrap();
         let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
         let mut complete = false;
@@ -10715,13 +10747,9 @@ mod tests {
             }
         }
         assert!(complete);
-        let removed = || {
-            silver_log(&path)
-                .into_iter()
-                .filter(|entry| *entry == (key.clone(), "removed".to_owned()))
-                .count()
-        };
-        assert_eq!(removed(), 1);
+        let withdrawn = count("changed");
+        assert!(withdrawn > before, "the retained session is logged");
+        assert_eq!(count("removed"), 0, "its analytics rows are kept");
         let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         let lifecycle: String = db
             .query_row(
@@ -10731,10 +10759,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(lifecycle, "retained", "history is kept");
+        let projections: i64 = db
+            .query_row(
+                "SELECT count(*) FROM session_activity_projections WHERE session_key=?1",
+                [&key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(projections, 1);
         for _ in 0..4 {
             refresh_once(&evidence);
         }
-        assert_eq!(removed(), 1, "a repeated publication logs nothing");
+        assert_eq!(count("changed"), withdrawn, "a repeat logs nothing");
         evidence.retire();
         fs::remove_dir_all(root).unwrap();
     }

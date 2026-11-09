@@ -145,6 +145,9 @@ pub(crate) struct CatalogRow {
     pub(crate) parent: Option<String>,
     pub(crate) parent_source: Option<String>,
     pub(crate) repo: Option<String>,
+    /// Not persisted in the Catalog: the change log's repository identity.
+    #[serde(skip)]
+    pub(crate) repo_id: Option<crate::facts::RepoId>,
     pub(crate) branch: Option<String>,
     pub(crate) model: String,
     pub(crate) effort: Option<String>,
@@ -254,6 +257,7 @@ pub(super) fn catalog(builder: &Builder<'_>, handoffs: &[Handoff]) -> Vec<Catalo
             parent: session_parent(&session.key, out, handoffs),
             parent_source: out.parent_source.clone(),
             repo: out.repo.clone(),
+            repo_id: out.repo_id.clone(),
             branch: out.branch.clone(),
             model: out.model.clone(),
             effort: out.effort.clone(),

@@ -143,15 +143,31 @@ pub(crate) fn publish_selected(
             "Selected activity source generation changed",
         ));
     }
-    publish(&tx, row, projection).map_err(io::Error::other)?;
+    // The Catalog fields of `row` are not published here, so the analytics
+    // digest stays as the last Catalog publication left it.
+    if write_activity(&tx, row, projection).map_err(io::Error::other)? {
+        log_change(&tx, &row.key).map_err(io::Error::other)?;
+    }
     tx.commit().map_err(io::Error::other)
 }
 
+/// Publish a session's activity together with the Catalog fields analytics
+/// reads: the caller is the transaction that publishes those fields.
 pub(super) fn publish(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
     projection: &Projection,
 ) -> rusqlite::Result<()> {
+    let rewritten = write_activity(tx, row, projection)?;
+    note_session_state(tx, row, rewritten)
+}
+
+/// Write the activity rows. `false` when they already were this generation.
+fn write_activity(
+    tx: &Transaction<'_>,
+    row: &crate::model::summary::CatalogRow,
+    projection: &Projection,
+) -> rusqlite::Result<bool> {
     let activity = &projection.activity;
     if activity.session_key != row.key || activity.rules_version != activity::ACTIVITY_RULES_VERSION
     {
@@ -167,8 +183,7 @@ pub(super) fn publish(
     );
     let unchanged: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM session_activity_projections WHERE session_key=?1 AND generation=?2 AND source_generation=?3 AND rules_version=?4 AND pricing_fingerprint=?5)",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint],|r|r.get(0))?;
     if unchanged {
-        // Steps stay as they are; analytics still sees catalog changes.
-        return note_session_state(tx, row, false);
+        return Ok(false);
     }
     tx.execute(
         "DELETE FROM session_activity_steps WHERE session_key=?1",
@@ -216,7 +231,7 @@ pub(super) fn publish(
     }
     tx.execute("INSERT INTO session_activity_sources VALUES(?1,?2) ON CONFLICT(session_key) DO UPDATE SET metadata=excluded.metadata", params![row.key,json(row)?])?;
     tx.execute("INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,rules_version=excluded.rules_version,pricing_fingerprint=excluded.pricing_fingerprint,total=excluded.total,compactions=excluded.compactions,thrash=excluded.thrash,summary=excluded.summary,preview=excluded.preview",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint,activity.steps.len() as i64,activity.compactions.len() as i64,activity.aggregate.thrash,json(&activity::analytics::Analytics::of(activity))?,json(&activity::analytics::Preview::of(&activity.steps))?])?;
-    note_session_state(tx, row, true)
+    Ok(true)
 }
 
 /// The catalog fields analytics reads besides activity, as one digest.
@@ -232,6 +247,7 @@ fn analytics_digest(row: &crate::model::summary::CatalogRow) -> rusqlite::Result
                 &row.parent,
                 &row.parent_source,
                 &row.repo,
+                &row.repo_id,
                 &row.branch,
                 row.start,
                 row.last,
@@ -262,29 +278,45 @@ fn note_session_state(
             "INSERT INTO silver_session_state VALUES(?1,?2) ON CONFLICT(session_key) DO UPDATE SET digest=excluded.digest",
             params![row.key, digest],
         )?;
-        tx.execute(
-            "INSERT INTO silver_change(session_key,kind) VALUES(?1,'changed')",
-            [&row.key],
-        )?;
+        log_change(tx, &row.key)?;
     }
     Ok(())
 }
 
-/// Log and forget sessions leaving the current catalog: a `removed` row for
-/// each that had query-ready activity. Their retained history is untouched.
-/// `key` limits the scope to one session. Runs before their lifecycle is set
-/// to `retained`, so a repeated publication logs nothing.
-pub(super) fn withdraw(tx: &Transaction<'_>, key: Option<&str>) -> rusqlite::Result<()> {
-    const GONE: &str = "FROM session_catalog WHERE lifecycle='current' AND (?1 IS NULL OR session_key=?1) AND session_key NOT IN (SELECT session_key FROM catalog_members)";
-    let log = format!(
-        "INSERT INTO silver_change(session_key,kind) SELECT session_key,'removed' {GONE} AND session_key IN (SELECT session_key FROM session_activity_projections) ORDER BY session_key"
-    );
-    let forget = format!(
-        "DELETE FROM silver_session_state WHERE session_key IN (SELECT session_key {GONE})"
-    );
-    tx.execute(&log, [key])?;
-    tx.execute(&forget, [key])?;
+fn log_change(tx: &Transaction<'_>, key: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO silver_change(session_key,kind) VALUES(?1,'changed')",
+        [key],
+    )?;
     Ok(())
+}
+
+/// Mark sessions leaving the current catalog: a `changed` row for each that
+/// had query-ready activity, so analytics can see its sources are missing, and
+/// a digest that no republication matches, so a returning session is logged
+/// again. Their activity and retained history are untouched (`removed` is for
+/// projections that are dropped). `key` limits the scope to one session, by
+/// its index. Runs before the lifecycle is set to `retained`, so a repeated
+/// publication logs nothing.
+pub(super) fn withdraw(tx: &Transaction<'_>, key: Option<&str>) -> rusqlite::Result<()> {
+    let (log, mark) = withdraw_sql(key.is_some());
+    tx.execute(&log, rusqlite::params_from_iter(key))?;
+    tx.execute(&mark, rusqlite::params_from_iter(key))?;
+    Ok(())
+}
+
+fn withdraw_sql(exact: bool) -> (String, String) {
+    const ALL: &str = "FROM session_catalog WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)";
+    const ONE: &str = "FROM session_catalog WHERE session_key=?1 AND lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)";
+    let gone = if exact { ONE } else { ALL };
+    (
+        format!(
+            "INSERT INTO silver_change(session_key,kind) SELECT session_key,'changed' {gone} AND session_key IN (SELECT session_key FROM session_activity_projections) ORDER BY session_key"
+        ),
+        format!(
+            "UPDATE silver_session_state SET digest='retained' WHERE session_key IN (SELECT session_key {gone})"
+        ),
+    )
 }
 
 pub(super) fn remove_mismatched(

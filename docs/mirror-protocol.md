@@ -53,7 +53,7 @@ The body is a `Facts` object:
 {"version": 1, "hostname": "laptop", "home": "/home/me", "proc_starts": {"4242": 7788}, "codex_locks": {"<thread id>": 4250}, "repos": {"/home/me/work/app": "app", "/tmp": null}, "repo_ids": {"/home/me/work/app": {"kind": "remote", "value": "github.com/me/app"}}}
 ```
 
-`repo_ids` holds, per working directory inside a repository, a sanitized identity of the repository's `origin` remote, read from the Git config without running git. A `remote` value has credentials, the scheme and a trailing `.git` removed, the host lowercased and the scheme's default port dropped (https 443, http 80, ssh 22; every other port is kept); scp-style `git@host:owner/repo` becomes `host/owner/repo`. A `file:` URL or local path remote is `{"kind": "path", "value": "<remote as written>"}`, and a repository with no `origin` is `{"kind": "unknown"}`. A directory outside any repository has no entry.
+`repo_ids` holds, per working directory inside a repository, a sanitized identity of the repository's `origin` remote, read from the Git config without running git. A `remote` value has credentials, the scheme and a trailing `.git` removed, the host lowercased and the scheme's default port dropped (https 443, http 80, ssh 22, git 9418; every other port is kept); scp-style `git@host:owner/repo` becomes `host/owner/repo`. A `file:` URL or local path remote is `{"kind": "path", "value": "<remote as written>"}`, and a repository with no `origin` is `{"kind": "unknown"}`. A directory outside any repository has no entry.
 
 The answer is 200 when it is stored. A receiver that hasn't had facts for a while may treat the machine as offline: it keeps the same hostname and repositories, but no process as live and no lock as held (`Facts::offline`).
 

@@ -690,3 +690,185 @@ fn catalog_changes_log_a_change_without_rewriting_unchanged_activity() {
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
+
+fn count(logged: &[(String, String)], key: &str, kind: &str) -> usize {
+    logged
+        .iter()
+        .filter(|(k, found)| k == key && found == kind)
+        .count()
+}
+
+fn digest(c: &Connection, key: &str) -> Option<String> {
+    c.query_row(
+        "SELECT digest FROM silver_session_state WHERE session_key=?1",
+        [key],
+        |r| r.get(0),
+    )
+    .optional()
+    .unwrap()
+}
+
+const NO_MEMBERS: &str = "CREATE TEMP TABLE IF NOT EXISTS catalog_members (session_key TEXT PRIMARY KEY) WITHOUT ROWID; DELETE FROM catalog_members;";
+
+#[test]
+fn a_withdrawn_session_is_logged_changed_and_again_when_it_returns() {
+    let root = scratch("change-log-return");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let projection = row.session_activity.as_ref().unwrap();
+    publish_row(&mut store, row, projection);
+    let settled = digest(&store.connection, &row.key);
+    let start = changes(&store.connection);
+    store.connection.execute_batch(NO_MEMBERS).unwrap();
+    let retire = |store: &mut SqliteStore| {
+        let tx = store.connection.transaction().unwrap();
+        withdraw(&tx, None).unwrap();
+        tx.execute(
+            "UPDATE session_catalog SET lifecycle='retained' WHERE lifecycle='current' AND session_key NOT IN (SELECT session_key FROM catalog_members)",
+            [],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+    };
+    retire(&mut store);
+    let withdrawn = changes(&store.connection);
+    assert_eq!(
+        count(&withdrawn, &row.key, "changed"),
+        count(&start, &row.key, "changed") + 1
+    );
+    assert_eq!(count(&withdrawn, &row.key, "removed"), 0);
+    assert_eq!(
+        digest(&store.connection, &row.key).as_deref(),
+        Some("retained")
+    );
+    let kept: i64 = store
+        .connection
+        .query_row(
+            "SELECT count(*) FROM session_activity_projections WHERE session_key=?1",
+            [&row.key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(kept, 1, "analytics state is kept");
+    retire(&mut store);
+    assert_eq!(
+        changes(&store.connection),
+        withdrawn,
+        "a repeat logs nothing"
+    );
+    publish_row(&mut store, row, projection);
+    let returned = changes(&store.connection);
+    assert_eq!(
+        count(&returned, &row.key, "changed"),
+        count(&withdrawn, &row.key, "changed") + 1
+    );
+    assert_eq!(digest(&store.connection, &row.key), settled);
+    publish_row(&mut store, row, projection);
+    assert_eq!(changes(&store.connection), returned);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn scoped_withdrawal_searches_the_session_key_index_and_touches_one_session() {
+    let root = scratch("change-log-scoped");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    store.connection.execute_batch(NO_MEMBERS).unwrap();
+    let (log, mark) = withdraw_sql(true);
+    for sql in [log, mark] {
+        let plan = store
+            .connection
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap()
+            .query_map(["key"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+            .join("\n");
+        assert!(plan.contains("SEARCH session_catalog"), "{plan}");
+        assert!(!plan.contains("SCAN session_catalog"), "{plan}");
+    }
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let start = changes(&store.connection);
+    let tx = store.connection.transaction().unwrap();
+    withdraw(&tx, Some(&row.key)).unwrap();
+    tx.commit().unwrap();
+    let logged = changes(&store.connection);
+    assert_eq!(logged.len(), start.len() + 1);
+    assert_eq!(logged.last(), Some(&(row.key.clone(), "changed".into())));
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_focused_publication_leaves_the_catalog_digest_for_the_catalog_publication() {
+    let root = scratch("change-log-focused");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let path = crate::events::EventCache::path(&options.cache);
+    let (mut store, _) = opened(&path);
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    publish_row(&mut store, row, row.session_activity.as_ref().unwrap());
+    let settled = digest(&store.connection, &row.key);
+    drop(store);
+    // The focused derivation sees newer Catalog fields and newer activity.
+    let mut focused = row.clone();
+    focused.branch = Some("focused-branch".into());
+    focused.session_activity.as_mut().unwrap().activity.steps[0]
+        .tokens
+        .output += 1;
+    let start = {
+        let (store, _) = opened(&path);
+        changes(&store.connection)
+    };
+    publish_selected(&options, &focused, None).unwrap();
+    let (mut store, _) = opened(&path);
+    let after_focused = changes(&store.connection);
+    assert_eq!(
+        count(&after_focused, &row.key, "changed"),
+        count(&start, &row.key, "changed") + 1,
+        "its activity rewrite is logged"
+    );
+    assert_eq!(digest(&store.connection, &row.key), settled);
+    // The analytics checkpoint has read everything so far. The Catalog
+    // publication that follows must still be logged.
+    publish_row(
+        &mut store,
+        &focused,
+        focused.session_activity.as_ref().unwrap(),
+    );
+    let published = changes(&store.connection);
+    assert_eq!(
+        count(&published, &row.key, "changed"),
+        count(&after_focused, &row.key, "changed") + 1
+    );
+    assert_ne!(digest(&store.connection, &row.key), settled);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_change_of_repository_identity_alone_is_logged() {
+    let root = scratch("change-log-origin");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let projection = row.session_activity.as_ref().unwrap();
+    publish_row(&mut store, row, projection);
+    for (origin, logs) in [
+        (Some("github.com/a/app"), 1),
+        (Some("github.com/a/app"), 0),
+        (Some("github.com/b/app"), 1),
+        (None, 1),
+    ] {
+        let before = count(&changes(&store.connection), &row.key, "changed");
+        let mut next = row.clone();
+        next.repo_id = origin.map(|origin| crate::RepoId::Remote(origin.into()));
+        publish_row(&mut store, &next, projection);
+        let after = count(&changes(&store.connection), &row.key, "changed");
+        assert_eq!(after - before, logs, "{origin:?}");
+    }
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}

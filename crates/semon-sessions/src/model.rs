@@ -92,6 +92,9 @@ pub(crate) struct Session {
     pub(crate) codex_history: Option<CodexHistory>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) repo: Option<String>,
+    /// The sanitized `origin` identity, for the index change log only.
+    #[serde(skip)]
+    pub(crate) repo_id: Option<crate::facts::RepoId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) branch: Option<String>,
     pub(crate) start: i64,
@@ -504,6 +507,7 @@ pub(crate) struct Texts {
     descriptions: HashMap<String, (DescriptionInputs, Description)>,
     prompt_caches: HashMap<PathBuf, (u64, Arc<crate::attachments::PromptCache>)>,
     repos: HashMap<String, Option<String>>,
+    repo_ids: HashMap<String, Option<crate::facts::RepoId>>,
 }
 
 impl Texts {
@@ -633,6 +637,19 @@ impl Texts {
                     .saturating_sub(value.map_or(0, |text| text.len()) + key.what.len() + 96);
             }
         }
+    }
+
+    fn repo_id(&mut self, cwd: &str) -> Option<crate::facts::RepoId> {
+        if let Some(id) = self.repo_ids.get(cwd) {
+            return id.clone();
+        }
+        let id = crate::repo::repo_id(cwd, crate::facts::env_home().as_deref().map(Path::new));
+        // Bounded like `repos`.
+        if self.repo_ids.len() >= REPO_CACHE_MAX {
+            self.repo_ids.clear();
+        }
+        self.repo_ids.insert(cwd.to_owned(), id.clone());
+        id
     }
 
     fn repo(&mut self, cwd: &str) -> Option<String> {
@@ -1932,6 +1949,7 @@ impl<'a> Builder<'a> {
             parent_source: None,
             codex_history: None,
             repo: None,
+            repo_id: None,
             branch: None,
             start: 0,
             last: 0,
@@ -2778,6 +2796,11 @@ impl<'a> Builder<'a> {
                 .recorded_repo(cwd)
                 .unwrap_or_else(|| self.texts.repo(cwd))
         });
+        let repo_id = cwd.as_deref().and_then(|cwd| {
+            self.facts
+                .recorded_repo_id(cwd)
+                .unwrap_or_else(|| self.texts.repo_id(cwd))
+        });
         let billing_messages: Vec<events::MessageUsage> = usage.values().cloned().collect();
         let mut cost = if harness == "codex" {
             let mut cost = crate::pricing::CostBuild::default();
@@ -2920,6 +2943,7 @@ impl<'a> Builder<'a> {
         out.role = repo.is_none();
         out.branch = repo.as_ref().and(branch);
         out.repo = repo;
+        out.repo_id = repo_id;
         if out.name.is_empty() {
             out.name = codex_task_title.unwrap_or_else(|| match session.kind {
                 SessKind::Lineage | SessKind::Copilot => title.unwrap_or(fallback_name),

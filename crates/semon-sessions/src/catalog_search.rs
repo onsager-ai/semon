@@ -927,6 +927,7 @@ mod sqlite_tests {
             parent: None,
             parent_source: None,
             repo: Some("fixture".into()),
+            repo_id: None,
             branch: None,
             model: "fixture-model".into(),
             effort: None,

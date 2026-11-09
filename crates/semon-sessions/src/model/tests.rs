@@ -108,7 +108,7 @@ fn publication_runtime_scopes_match_fresh_reader_observations() {
         ..home.options.clone()
     };
     let recorded = scoped_runtime_reader_oracle(&options, &rows);
-    for change in ["process-start", "name", "repository", "lock"] {
+    for change in ["process-start", "name", "repository", "origin", "lock"] {
         let mut changed = facts.clone();
         match change {
             "process-start" => {
@@ -119,6 +119,12 @@ fn publication_runtime_scopes_match_fresh_reader_observations() {
                 changed
                     .repos
                     .insert("/work/proj".into(), Some("other-repo".into()));
+            }
+            "origin" => {
+                changed.repo_ids.insert(
+                    "/work/proj".into(),
+                    crate::RepoId::Remote("github.com/other/app".into()),
+                );
             }
             "lock" => {
                 changed.codex_locks.insert(native.into(), 42);
@@ -12295,4 +12301,35 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
         crate::session_catalog_history_identity(&options, "fixture", native),
         Err(crate::CatalogIdentityError::Unavailable)
     );
+}
+
+#[test]
+fn a_catalog_row_carries_the_repository_identity_recorded_in_facts() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "identity")]);
+    let path = home.root.join("identity-facts.json");
+    let options = Options {
+        facts: Some(path.clone()),
+        ..home.options.clone()
+    };
+    let mut facts = crate::local_runtime_facts(&home.options).unwrap();
+    facts.repos.insert("/work/proj".into(), Some("proj".into()));
+    let identity = |facts: &crate::Facts| {
+        crate::write_facts(&path, facts).unwrap();
+        let inputs = crate::inputs::inputs(&options)
+            .unwrap()
+            .into_iter()
+            .filter(|input| input.path.ends_with(".jsonl"))
+            .collect::<Vec<_>>();
+        let mut cache = EventCache::open(&options.cache).unwrap();
+        let prepared = prepare_sources(&options, &mut cache, &inputs, NOW).unwrap();
+        let row = prepared.rows.iter().find(|row| row.key == "root").unwrap();
+        assert_eq!(row.repo.as_deref(), Some("proj"));
+        row.repo_id.clone()
+    };
+    assert_eq!(identity(&facts), None);
+    for remote in ["github.com/a/app", "github.com/b/app"] {
+        facts.repo_ids.insert("/work/proj".into(), crate::RepoId::Remote(remote.into()));
+        assert_eq!(identity(&facts), Some(crate::RepoId::Remote(remote.into())));
+    }
 }

@@ -479,6 +479,14 @@ impl MachineFacts {
         }
     }
 
+    /// `None` when the origin identity comes from walking the local disk.
+    pub(crate) fn recorded_repo_id(&self, cwd: &str) -> Option<Option<RepoId>> {
+        match self {
+            Self::Local => None,
+            Self::Recorded(facts) => Some(facts.repo_ids.get(cwd).cloned()),
+        }
+    }
+
     /// Codex threads whose writer lock is held, with the holder's pid.
     /// `None` when this machine's `/proc/locks` can't be read: then nothing
     /// is known about any lock.

@@ -95,17 +95,26 @@ pub(crate) fn repo_id(cwd: &str, home: Option<&Path>) -> Option<RepoId> {
     None
 }
 
-/// The `url` of `[remote "origin"]` in a Git config text (the last one, as
-/// `git config --get` reads it). Section names and keys are case-insensitive,
-/// the subsection is exact.
+/// The `url` of `[remote "origin"]` (also written `[remote.origin]`) in a Git
+/// config text; the last one, as `git config --get` reads it. Section names
+/// and keys are case-insensitive, a quoted subsection is exact. A header may
+/// be followed by a comment or by an assignment, and a trailing backslash
+/// continues a line.
 fn origin_url(config: &str) -> Option<String> {
     let mut origin = false;
     let mut url = None;
-    for line in config.lines().map(str::trim_start) {
-        if let Some(header) = line.strip_prefix('[') {
-            origin = is_origin_header(header);
-        } else if origin
-            && let Some((key, value)) = line.split_once('=')
+    for line in logical_lines(config) {
+        let mut body = line.trim_start();
+        if let Some(header) = body.strip_prefix('[') {
+            let Some((is_origin, rest)) = origin_header(header) else {
+                origin = false;
+                continue;
+            };
+            origin = is_origin;
+            body = rest.trim_start();
+        }
+        if origin
+            && let Some((key, value)) = body.split_once('=')
             && key.trim().eq_ignore_ascii_case("url")
         {
             url = config_value(value);
@@ -114,32 +123,51 @@ fn origin_url(config: &str) -> Option<String> {
     url.filter(|url| !url.is_empty())
 }
 
-/// Whether `header` (after the opening bracket) is `remote "origin"]`, with
-/// anything, such as a comment, allowed after the closing bracket.
-fn is_origin_header(header: &str) -> bool {
-    let Some((section, rest)) = header.split_once(char::is_whitespace) else {
-        return false;
-    };
-    if !section.eq_ignore_ascii_case("remote") {
-        return false;
-    }
-    let Some(rest) = rest.trim_start().strip_prefix('"') else {
-        return false;
-    };
-    let mut subsection = String::new();
-    let mut chars = rest.chars();
-    loop {
-        match chars.next() {
-            Some('"') => break,
-            Some('\\') => match chars.next() {
-                Some(escaped) => subsection.push(escaped),
-                None => return false,
-            },
-            Some(other) => subsection.push(other),
-            None => return false,
+/// The lines of `config` with each backslash-newline continuation joined.
+fn logical_lines(config: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut pending = String::new();
+    for line in config.lines() {
+        pending.push_str(line);
+        let slashes = pending.chars().rev().take_while(|c| *c == '\\').count();
+        if slashes % 2 == 1 {
+            pending.pop();
+        } else {
+            lines.push(std::mem::take(&mut pending));
         }
     }
-    subsection == "origin" && chars.as_str().trim_start().starts_with(']')
+    if !pending.is_empty() {
+        lines.push(pending);
+    }
+    lines
+}
+
+/// Whether `header` (after the opening bracket) names `remote "origin"` and
+/// what follows its closing bracket. `None` for a malformed header.
+fn origin_header(header: &str) -> Option<(bool, &str)> {
+    let name_end = header.find(|c: char| c.is_whitespace() || c == ']')?;
+    let (name, tail) = header.split_at(name_end);
+    if let Some(rest) = tail.strip_prefix(']') {
+        // `[remote.origin]`: the subsection is lowercased.
+        let origin = name.split_once('.').is_some_and(|(section, subsection)| {
+            section.eq_ignore_ascii_case("remote") && subsection.eq_ignore_ascii_case("origin")
+        });
+        return Some((origin, rest));
+    }
+    let mut chars = tail.trim_start().strip_prefix('"')?.chars();
+    let mut subsection = String::new();
+    loop {
+        match chars.next()? {
+            '"' => break,
+            '\\' => subsection.push(chars.next()?),
+            other => subsection.push(other),
+        }
+    }
+    let rest = chars.as_str().trim_start().strip_prefix(']')?;
+    Some((
+        name.eq_ignore_ascii_case("remote") && subsection == "origin",
+        rest,
+    ))
 }
 
 /// A Git config value: quotes group, `\n`, `\t`, `\b`, `\\` and `\"` escape, an
@@ -179,7 +207,7 @@ fn config_value(raw: &str) -> Option<String> {
 
 /// A remote URL as a [`RepoId`]: credentials, scheme and `.git` removed, the
 /// host lowercased, and the scheme's default port (https 443, http 80, ssh
-/// 22) dropped; any other port is kept. scp-style
+/// 22, git 9418) dropped; any other port is kept. scp-style
 /// `user@host:owner/repo` becomes `host/owner/repo`. `file:` URLs and local
 /// paths are [`RepoId::Path`].
 fn classify_origin(url: &str) -> RepoId {
@@ -189,6 +217,7 @@ fn classify_origin(url: &str) -> RepoId {
             "https" => Some("443"),
             "http" => Some("80"),
             "ssh" | "git+ssh" | "ssh+git" => Some("22"),
+            "git" => Some("9418"),
             _ => None,
         };
         match rest.split_once('/') {
@@ -691,7 +720,15 @@ mod tests {
             ),
             (
                 "git://example.test:9418/onsager-ai/semon",
-                "example.test:9418/onsager-ai/semon",
+                "example.test/onsager-ai/semon",
+            ),
+            (
+                "git://example.test/onsager-ai/semon",
+                "example.test/onsager-ai/semon",
+            ),
+            (
+                "git://example.test:9419/onsager-ai/semon",
+                "example.test:9419/onsager-ai/semon",
             ),
             (
                 "git@GitHub.com:onsager-ai/semon.git",
@@ -792,6 +829,25 @@ mod tests {
         );
         assert_eq!(url("[remote]\n\turl = https://a.test/x/y\n"), None);
         assert_eq!(url("[remote \"origin\"]\n\turl = \"unterminated\n"), None);
+        assert_eq!(
+            url("[remote \"origin\"]\n\turl = https://a.test/\\\nx/y\n"),
+            some("https://a.test/x/y"),
+            "continuation"
+        );
+        assert_eq!(
+            url("[remote \"origin\"] url = https://a.test/x/y # c\n"),
+            some("https://a.test/x/y"),
+            "assignment on the header line"
+        );
+        assert_eq!(
+            url("[remote.origin]\n\turl = https://a.test/x/y\n"),
+            some("https://a.test/x/y")
+        );
+        assert_eq!(
+            url("[Remote.ORIGIN] ; c\n\turl = https://a.test/x/y\n"),
+            some("https://a.test/x/y")
+        );
+        assert_eq!(url("[remote.upstream]\n\turl = https://a.test/x\n"), None);
         assert_eq!(
             url("[remote \"origin\"]\n\turl = https://a.test/first\n\turl = https://a.test/last\n"),
             some("https://a.test/last")
