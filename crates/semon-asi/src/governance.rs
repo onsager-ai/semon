@@ -485,6 +485,24 @@ pub fn coverage_witness(row: &GovernedRow) -> Result<CoverageWitness, Governance
 /// Serialize only an explicitly coverage-authorized witness. It omits the
 /// authenticated principal and is never included in a governed-row envelope.
 pub fn serialize_coverage_witness(witness: &CoverageWitness) -> Result<String, GovernanceError> {
+    // Local provenance is retained verbatim; disclosure has its own export fence.
+    let opaque = |value: &str| {
+        valid_subject(value)
+            && !credential_like(value)
+            && value
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if !valid_metadata_text(&witness.scope.namespace, false)
+        || !valid_metadata_text(&witness.scope.machine, false)
+        || witness.contributors.iter().any(|source| {
+            !opaque(&source.source_id)
+                || !opaque(&source.detector_version)
+                || !opaque(&source.redactor_version)
+        })
+    {
+        return Err(GovernanceError::Denied);
+    }
     let contributors = witness
         .contributors
         .iter()
@@ -730,7 +748,8 @@ fn valid_remote_repository_id(value: &str) -> bool {
         })
         && !path.is_empty()
         && value.len() <= 4096
-        && path.split('/').all(valid_encoded_component)
+        && !path.chars().any(char::is_control)
+        && !path.contains(['?', '#'])
 }
 
 fn valid_local_repository_id(value: &str) -> bool {
@@ -771,7 +790,7 @@ fn valid_display_name(value: &str) -> bool {
     valid_metadata_text(value, true)
         && value.len() <= 160
         && value.chars().all(|character| {
-            character.is_ascii_alphanumeric()
+            character.is_alphanumeric()
                 || matches!(character, ' ' | '-' | '_' | '.' | '(' | ')' | '[' | ']')
         })
 }
@@ -783,8 +802,8 @@ fn valid_branch(value: &str) -> bool {
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
         && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
 }
 
 fn valid_metadata_text(value: &str, allow_spaces: bool) -> bool {
@@ -1530,6 +1549,65 @@ mod tests {
                 .unwrap()
                 .contains("detector-v1")
         );
+    }
+
+    #[test]
+    fn coverage_export_refuses_sensitive_witness_without_losing_local_provenance() {
+        for destination in [Destination::Receiver, Destination::Hub] {
+            for field in ["source", "detector", "redactor"] {
+                let mut contributor = source("source");
+                match field {
+                    "source" => contributor.id = "/home/private/session.jsonl".into(),
+                    "detector" => {
+                        contributor.scan.detector_version = "token=synthetic-secret".into()
+                    }
+                    _ => contributor.scan.redactor_version = "/home/private/redactor".into(),
+                }
+                let policies = [(
+                    contributor.id.clone(),
+                    bundle(&["repo_key", "display_name", "repo_path"], false, false),
+                )]
+                .into();
+                let authority = evaluate(
+                    &policies,
+                    std::slice::from_ref(&contributor),
+                    &principal(),
+                    &scope(destination),
+                )
+                .unwrap();
+                let row =
+                    project_derived_row(&authority, "dim_repo", &repo_row(Value::Null)).unwrap();
+                assert_eq!(
+                    local_witness(&row).contributors()[0].source_id(),
+                    contributor.id
+                );
+                let coverage = coverage_witness(&row).unwrap();
+                assert!(matches!(
+                    serialize_coverage_witness(&coverage),
+                    Err(GovernanceError::Denied)
+                ));
+                assert_eq!(format!("{coverage:?}"), "CoverageWitness { private }");
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_names_and_native_remote_repository_paths_are_preserved() {
+        for destination in [Destination::Receiver, Destination::Hub] {
+            let grant = authority(destination, &["repo_key", "display_name", "repo_path"]);
+            for repository in ["git.example/team/café", "git.example/team/a+b"] {
+                let mut input = repo_row(Value::Null);
+                input.insert("repo_key".into(), Value::String(repository.into()));
+                input.insert("display_name".into(), Value::String("研发".into()));
+                let row = project_derived_row(&grant, "dim_repo", &input).unwrap();
+                let output: Value =
+                    serde_json::from_str(&serialize_governed_row(&row).unwrap()).unwrap();
+                assert_eq!(output["repo_key"], repository);
+                assert_eq!(output["display_name"], "研发");
+            }
+        }
+        assert!(valid_branch("功能/修复"));
+        assert!(!valid_branch("/home/private"));
     }
 
     #[test]
