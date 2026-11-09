@@ -5,7 +5,10 @@ use crate::events::session_activity::{
     self as activity, ActivityStep, ActivityStepId, SessionActivity, SourcePosition, Usage,
     UsageStep,
 };
-use std::{collections::{BTreeMap, BTreeSet}, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_activity_projections (
@@ -74,13 +77,7 @@ impl Projection {
         }
         let mut activity = activity::derive(key, usage, shared, signals, table);
         let observations = activity::apply_observations(&mut activity, observations);
-        let facts = derive_facts(
-            &activity,
-            &inputs,
-            &turn_ids,
-            &observations,
-            &input_events,
-        );
+        let facts = derive_facts(&activity, &inputs, &turn_ids, &observations, &input_events);
         Self {
             activity,
             inputs,
@@ -599,8 +596,8 @@ pub(crate) fn step_facts(
     let mut facts = Vec::new();
     while let Some(record) = records.next()? {
         crate::selected_read::row(record, 256)?;
-        let ordinal = u64::try_from(record.get::<_, i64>(0)?)
-            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        let ordinal =
+            u64::try_from(record.get::<_, i64>(0)?).map_err(|_| rusqlite::Error::InvalidQuery)?;
         if ordinal != facts.len() as u64 {
             return Ok(None);
         }

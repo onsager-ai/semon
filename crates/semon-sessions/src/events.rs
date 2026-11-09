@@ -3739,7 +3739,6 @@ pub(crate) struct Event {
     /// remains body- and path-free. It is persisted only for StepFacts.
     #[serde(skip)]
     pub(crate) activity_tool: Option<session_activity::classify::ToolCallEvidence>,
-
 }
 
 fn is_zero(value: &u32) -> bool {

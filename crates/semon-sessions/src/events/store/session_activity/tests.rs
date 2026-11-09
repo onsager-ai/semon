@@ -2,9 +2,7 @@ use super::super::tests::{
     catalog_fixture_projection, catalog_native_fixture, catalog_write, opened, scratch,
 };
 use super::*;
-use crate::events::session_activity::{
-    ActivityStepId, Ownership, TimedInput, UsageOwner,
-};
+use crate::events::session_activity::{ActivityStepId, Ownership, TimedInput, UsageOwner};
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
     page(
@@ -434,7 +432,10 @@ fn step_facts_keep_private_tool_details_and_usage_ownership() {
     assert_eq!(facts.tool_ms, Some(8));
     assert_eq!(facts.tool_calls.len(), 2);
     assert_eq!(facts.tool_calls[0].tool, "Read");
-    assert_eq!(facts.tool_calls[0].target_path.as_deref(), Some("/local/secret.rs"));
+    assert_eq!(
+        facts.tool_calls[0].target_path.as_deref(),
+        Some("/local/secret.rs")
+    );
     assert_eq!(facts.tool_calls[0].ok, Some(true));
     assert_eq!(facts.tool_calls[1].target_path, None);
     let public = items(
