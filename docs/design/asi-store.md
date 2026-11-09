@@ -208,16 +208,21 @@ tables.
 ## Hub export (phase 3)
 
 Hub holds the same layout per tenant, with one independent head per
-**publisher** (a store that exports namespaces). The tenant's views read the
-union of all publishers' current heads. Dimension tables use stable natural
+**publisher** (a store that exports namespaces). Hub keeps a namespace table
+(`namespace → active publisher, epoch`), and the tenant's views read each
+namespace's rows (facts, namespace-scoped dimensions and labels) only from
+that namespace's active publisher head. Dimension tables use stable natural
 keys (model name, `repo_id`, tool name, date, `session_uid`) and no surrogate
 keys, so the union composes without renumbering, and duplicate rows across
 publishers collapse in the views. Export is coherent and idempotent:
 
-1. **Bind.** `semon hub claim --namespace M` binds the namespace to this
-   store's publisher ID and increments its epoch. Hub accepts generations for
-   M only from the current publisher and epoch, so a transfer is an explicit
-   operator action and stale publishers are refused.
+1. **Bind.** `semon hub claim --namespace M` records this store as M's
+   pending publisher with a new epoch. Hub accepts generations for M only from
+   that publisher and epoch, so a transfer is an explicit operator action and
+   stale publishers are refused. The previous publisher's rows for M stay
+   visible until the new publisher's first complete commit containing M. That
+   commit switches M's active publisher in the same transaction, so exactly
+   one copy of M is visible before and after the switch.
 2. **Upload.** For each new generation, the store writes fresh export files:
    `path` columns become tokens, and only approved Parquet metadata is kept.
    It uploads each one with `PUT /v1/asi/objects/{digest}`. Uploads are
@@ -317,6 +322,7 @@ today is about 466 MB of logs in 2.5 months.
   remotes are tokens; credentials are stripped from `repo_id`; foreign Parquet
   metadata is dropped; a stale publisher, a wrong parent and a retried upload
   each behave as specified; two publishers in one tenant compose, and neither
-  can remove the other's objects; an interrupted export leaves Hub on the old
+  can remove the other's objects; a namespace transfer shows exactly one copy
+  of its rows before and after activation; an interrupted export leaves Hub on the old
   generation.
 - The performance budgets above.
