@@ -129,7 +129,7 @@ impl std::fmt::Display for GovernanceError {
 impl std::error::Error for GovernanceError {}
 
 struct ContributorGrant {
-    policy_version: String,
+    witness: ContributorWitness,
     sensitivity: Sensitivity,
     fields: BTreeSet<String>,
     allow_row_existence: bool,
@@ -139,13 +139,92 @@ struct ContributorGrant {
     scan_complete_without_findings: bool,
 }
 
+/// One source's immutable evaluated-policy and scan witness. This is available
+/// to trusted local publication/audit code only; it has no automatic serializer.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ContributorWitness {
+    source_id: String,
+    policy_version: String,
+    scan_state: ScanState,
+    detector_version: String,
+    redactor_version: String,
+}
+
+impl std::fmt::Debug for ContributorWitness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ContributorWitness { private }")
+    }
+}
+
+impl ContributorWitness {
+    pub fn source_id(&self) -> &str {
+        &self.source_id
+    }
+
+    pub fn policy_version(&self) -> &str {
+        &self.policy_version
+    }
+
+    pub fn scan_state(&self) -> ScanState {
+        self.scan_state
+    }
+
+    pub fn detector_version(&self) -> &str {
+        &self.detector_version
+    }
+
+    pub fn redactor_version(&self) -> &str {
+        &self.redactor_version
+    }
+}
+
+/// Immutable local provenance bound to a governed row.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ExportWitness {
+    principal_id: String,
+    scope: Scope,
+    contributors: Vec<ContributorWitness>,
+    coverage_allowed: bool,
+}
+
+impl std::fmt::Debug for ExportWitness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ExportWitness { private }")
+    }
+}
+
+impl ExportWitness {
+    pub fn principal_id(&self) -> &str {
+        &self.principal_id
+    }
+
+    pub fn scope(&self) -> &Scope {
+        &self.scope
+    }
+
+    pub fn contributors(&self) -> &[ContributorWitness] {
+        &self.contributors
+    }
+}
+
+/// Explicit, coverage-authorized provenance that may be serialized separately.
+pub struct CoverageWitness {
+    scope: Scope,
+    contributors: Vec<ContributorWitness>,
+}
+
+impl std::fmt::Debug for CoverageWitness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CoverageWitness { private }")
+    }
+}
+
 /// A non-forgeable result of evaluating a complete admitted contributor cohort.
 ///
 /// The fields are private so callers cannot construct a permissive authority,
 /// replay it to another destination, or drop a restrictive contributor.
 pub struct ExportAuthority {
-    scope: Scope,
-    principal_id: String,
+    witness: ExportWitness,
     contributors: Vec<ContributorGrant>,
 }
 
@@ -160,6 +239,7 @@ impl std::fmt::Debug for ExportAuthority {
 /// intentionally absent from this export envelope.
 pub struct GovernedRow {
     fields: Map<String, Value>,
+    witness: ExportWitness,
 }
 
 impl std::fmt::Debug for GovernedRow {
@@ -268,9 +348,17 @@ pub fn evaluate(
         contributors.push(grant);
     }
 
-    Ok(ExportAuthority {
-        scope: scope.clone(),
+    let witness = ExportWitness {
         principal_id: principal.id.clone(),
+        scope: scope.clone(),
+        contributors: contributors
+            .iter()
+            .map(|grant| grant.witness.clone())
+            .collect(),
+        coverage_allowed: contributors.iter().all(|grant| grant.allow_coverage),
+    };
+    Ok(ExportAuthority {
+        witness,
         contributors,
     })
 }
@@ -297,7 +385,7 @@ pub fn provider_egress_allowed(
 /// Hub is never a body destination. Receiver body use also needs completed scans,
 /// zero findings, and unanimous policy consent; actual authorization/audit is later work.
 pub fn body_read_allowed(authority: &ExportAuthority) -> bool {
-    authority.scope.destination == Destination::Receiver
+    authority.witness.scope.destination == Destination::Receiver
         && authority
             .contributors
             .iter()
@@ -307,10 +395,7 @@ pub fn body_read_allowed(authority: &ExportAuthority) -> bool {
 /// Coverage values, counts, source handles, and version vectors must be withheld
 /// unless every contributor allows coverage disclosure.
 pub fn coverage_allowed(authority: &ExportAuthority) -> bool {
-    authority
-        .contributors
-        .iter()
-        .all(|grant| grant.allow_coverage)
+    authority.witness.coverage_allowed
 }
 
 /// The strongest baseline, local, and source classification floor in the cohort.
@@ -331,12 +416,12 @@ pub fn project_derived_row(
     table_name: &str,
     row: &Map<String, Value>,
 ) -> Result<GovernedRow, GovernanceError> {
-    if authority.principal_id.is_empty()
+    if authority.witness.principal_id.is_empty()
         || authority.contributors.is_empty()
         || authority
             .contributors
             .iter()
-            .any(|grant| grant.policy_version.is_empty() || !grant.allow_row_existence)
+            .any(|grant| grant.witness.policy_version.is_empty() || !grant.allow_row_existence)
     {
         return Err(GovernanceError::Denied);
     }
@@ -358,7 +443,7 @@ pub fn project_derived_row(
         if column.class == Class::Body || !fields.contains(name) {
             return Err(GovernanceError::Denied);
         }
-        validate_column_value(column, value, authority.scope.destination)?;
+        validate_column_value(column, value, authority.witness.scope.destination)?;
         projected.insert(name.clone(), value.clone());
     }
     for column in table.columns {
@@ -368,13 +453,56 @@ pub fn project_derived_row(
             return Err(GovernanceError::InvalidRow);
         }
     }
-    Ok(GovernedRow { fields: projected })
+    Ok(GovernedRow {
+        fields: projected,
+        witness: authority.witness.clone(),
+    })
 }
 
 /// Serialize only an already-governed row. Internal policy, scan, provenance,
 /// source, and coverage metadata are never part of this envelope.
 pub fn serialize_governed_row(row: &GovernedRow) -> Result<String, GovernanceError> {
     serde_json::to_string(&row.fields).map_err(|_| GovernanceError::InvalidRow)
+}
+
+/// Access immutable provenance only at the trusted local integration boundary.
+pub fn local_witness(row: &GovernedRow) -> &ExportWitness {
+    &row.witness
+}
+
+/// Coverage disclosure needs unanimous authorization and is deliberately
+/// separate from row serialization.
+pub fn coverage_witness(row: &GovernedRow) -> Result<CoverageWitness, GovernanceError> {
+    if !row.witness.coverage_allowed {
+        return Err(GovernanceError::Denied);
+    }
+    Ok(CoverageWitness {
+        scope: row.witness.scope.clone(),
+        contributors: row.witness.contributors.clone(),
+    })
+}
+
+/// Serialize only an explicitly coverage-authorized witness. It omits the
+/// authenticated principal and is never included in a governed-row envelope.
+pub fn serialize_coverage_witness(witness: &CoverageWitness) -> Result<String, GovernanceError> {
+    let contributors = witness
+        .contributors
+        .iter()
+        .map(|contributor| {
+            serde_json::json!({
+                "source_id": contributor.source_id,
+                "policy_version": contributor.policy_version,
+                "scan_state": contributor.scan_state,
+                "detector_version": contributor.detector_version,
+                "redactor_version": contributor.redactor_version,
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string(&serde_json::json!({
+        "scope": witness.scope,
+        "contributors": contributors,
+    }))
+    .map_err(|_| GovernanceError::InvalidRow)
 }
 
 fn effective(bundle: &PolicyBundle, source: &Source) -> Result<ContributorGrant, GovernanceError> {
@@ -387,7 +515,13 @@ fn effective(bundle: &PolicyBundle, source: &Source) -> Result<ContributorGrant,
         .max(bundle.local.sensitivity)
         .max(source.floor);
     Ok(ContributorGrant {
-        policy_version,
+        witness: ContributorWitness {
+            source_id: source.id.clone(),
+            policy_version,
+            scan_state: source.scan.state,
+            detector_version: source.scan.detector_version.clone(),
+            redactor_version: source.scan.redactor_version.clone(),
+        },
         sensitivity,
         fields: bundle
             .baseline
@@ -399,17 +533,48 @@ fn effective(bundle: &PolicyBundle, source: &Source) -> Result<ContributorGrant,
             && bundle.local.allow_row_existence,
         allow_coverage: bundle.baseline.allow_coverage && bundle.local.allow_coverage,
         body_read: bundle.baseline.body_read && bundle.local.body_read,
-        consents: bundle
-            .baseline
-            .provider_egress
-            .iter()
-            .filter(|consent| bundle.local.provider_egress.contains(consent))
-            .cloned()
-            .collect(),
+        consents: intersect_consents(
+            &bundle.baseline.provider_egress,
+            &bundle.local.provider_egress,
+        ),
         scan_complete_without_findings: source.scan.state == ScanState::Completed
             && source.scan.secret_findings == 0
             && source.scan.pii_findings == 0,
     })
+}
+
+fn intersect_consents(
+    baseline: &[EgressConsent],
+    local: &[EgressConsent],
+) -> BTreeSet<EgressConsent> {
+    let mut common = BTreeMap::<(String, String), BTreeSet<String>>::new();
+    for baseline_consent in baseline {
+        for local_consent in local.iter().filter(|local_consent| {
+            local_consent.provider == baseline_consent.provider
+                && local_consent.model == baseline_consent.model
+        }) {
+            let classes = baseline_consent
+                .evidence_classes
+                .intersection(&local_consent.evidence_classes);
+            common
+                .entry((
+                    baseline_consent.provider.clone(),
+                    baseline_consent.model.clone(),
+                ))
+                .or_default()
+                .extend(classes.cloned());
+        }
+    }
+    common
+        .into_iter()
+        .filter_map(|((provider, model), evidence_classes)| {
+            (!evidence_classes.is_empty()).then_some(EgressConsent {
+                provider,
+                model,
+                evidence_classes,
+            })
+        })
+        .collect()
 }
 
 fn valid_source(source: &Source, scope: &Scope) -> bool {
@@ -455,15 +620,14 @@ fn validate_column_value(
                 }
             }
         },
-        Class::Key => {
-            if !text.is_some_and(|text| valid_key(column.name, text)) {
-                return Err(GovernanceError::Denied);
-            }
+        Class::Key
+            if column.data_type == Type::Text
+                && !text.is_some_and(|text| valid_key(column.name, text)) =>
+        {
+            return Err(GovernanceError::Denied);
         }
-        Class::Name => {
-            if !text.is_some_and(|text| valid_name(column.name, text)) {
-                return Err(GovernanceError::Denied);
-            }
+        Class::Name if !text.is_some_and(|text| valid_name(column.name, text)) => {
+            return Err(GovernanceError::Denied);
         }
         _ => {}
     }
@@ -500,8 +664,23 @@ fn validate_value(
     Ok(())
 }
 
-fn valid_key(_field: &str, value: &str) -> bool {
-    valid_metadata_text(value, false) && valid_identifier(value)
+fn valid_key(field: &str, value: &str) -> bool {
+    if credential_like(value) || path_like(value) {
+        return false;
+    }
+    match field {
+        "session_uid" | "parent_session_uid" | "lane_root_uid" => valid_uid(value, "", 3),
+        "turn_uid" => valid_uid(value, "t", 5),
+        "step_uid" => valid_step_uid(value),
+        "compaction_uid" => valid_uid(value, "c", 5),
+        "repo_key" => valid_repository_key(value),
+        "machine_key" | "harness_key" | "tool_key" | "model_key" | "price_version" => {
+            valid_key_text(value)
+        }
+        // fact_label is refused before row validation. Unknown key contracts are
+        // not accepted as generic text metadata.
+        _ => false,
+    }
 }
 
 fn valid_name(field: &str, value: &str) -> bool {
@@ -516,12 +695,76 @@ fn valid_name(field: &str, value: &str) -> bool {
     }
 }
 
-fn valid_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+fn valid_uid(value: &str, marker: &str, components: usize) -> bool {
+    let parts = value.split('/').collect::<Vec<_>>();
+    parts.len() == components
+        && parts.iter().all(|part| valid_encoded_component(part))
+        && (marker.is_empty() || parts.get(3) == Some(&marker))
+}
+
+fn valid_step_uid(value: &str) -> bool {
+    let parts = value.split('/').collect::<Vec<_>>();
+    parts.iter().all(|part| valid_encoded_component(part))
+        && parts.get(3) == Some(&"s")
+        && matches!(
+            parts.as_slice(),
+            [_, _, _, "s", "claude", _] | [_, _, _, "s", "codex", _, _, _, _]
+        )
+}
+
+fn valid_repository_key(value: &str) -> bool {
+    value == "unknown" || valid_remote_repository_id(value) || valid_local_repository_id(value)
+}
+
+/// `RepoId::Remote` is the native, sanitized `host[:port]/path` identity.
+/// A local repository instead receives an opaque single-component ID; paths
+/// remain path-class values and are never a repository key.
+fn valid_remote_repository_id(value: &str) -> bool {
+    let Some((host, path)) = value.split_once('/') else {
+        return false;
+    };
+    !host.is_empty()
+        && host.len() <= 253
+        && host.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']')
+        })
+        && !path.is_empty()
+        && value.len() <= 4096
+        && path.split('/').all(valid_encoded_component)
+}
+
+fn valid_local_repository_id(value: &str) -> bool {
+    value.len() <= 256 && valid_encoded_component(value)
+}
+
+fn valid_key_text(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 4096 && !value.chars().any(char::is_control)
+}
+
+fn valid_encoded_component(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() > 4096 {
+        return false;
+    }
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' => {
+                if index + 2 >= bytes.len()
+                    || !bytes[index + 1].is_ascii_hexdigit()
+                    || !bytes[index + 2].is_ascii_hexdigit()
+                {
+                    return false;
+                }
+                index += 3;
+            }
+            byte if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') => {
+                index += 1;
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 fn valid_display_name(value: &str) -> bool {
@@ -571,10 +814,156 @@ fn credential_like(value: &str) -> bool {
         "apikey=",
         "authorization:",
         "bearer ",
-        "sk-",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
+        || known_token_shape(value)
+}
+
+struct TokenShape {
+    prefix: &'static str,
+    min: usize,
+    exact: bool,
+    body: fn(u8) -> bool,
+}
+
+const TOKEN_SHAPES: &[TokenShape] = &[
+    TokenShape {
+        prefix: "sk-",
+        min: 20,
+        exact: false,
+        body: token_char,
+    },
+    TokenShape {
+        prefix: "ghp_",
+        min: 20,
+        exact: false,
+        body: alnum,
+    },
+    TokenShape {
+        prefix: "gho_",
+        min: 20,
+        exact: false,
+        body: alnum,
+    },
+    TokenShape {
+        prefix: "ghs_",
+        min: 20,
+        exact: false,
+        body: alnum,
+    },
+    TokenShape {
+        prefix: "ghu_",
+        min: 20,
+        exact: false,
+        body: alnum,
+    },
+    TokenShape {
+        prefix: "ghr_",
+        min: 20,
+        exact: false,
+        body: alnum,
+    },
+    TokenShape {
+        prefix: "github_pat_",
+        min: 20,
+        exact: false,
+        body: alnum_underscore,
+    },
+    TokenShape {
+        prefix: "AKIA",
+        min: 16,
+        exact: true,
+        body: upper_digit,
+    },
+    TokenShape {
+        prefix: "ASIA",
+        min: 16,
+        exact: true,
+        body: upper_digit,
+    },
+    TokenShape {
+        prefix: "xoxb-",
+        min: 10,
+        exact: false,
+        body: alnum_dash,
+    },
+    TokenShape {
+        prefix: "xoxp-",
+        min: 10,
+        exact: false,
+        body: alnum_dash,
+    },
+    TokenShape {
+        prefix: "xoxa-",
+        min: 10,
+        exact: false,
+        body: alnum_dash,
+    },
+    TokenShape {
+        prefix: "xoxr-",
+        min: 10,
+        exact: false,
+        body: alnum_dash,
+    },
+    TokenShape {
+        prefix: "xoxs-",
+        min: 10,
+        exact: false,
+        body: alnum_dash,
+    },
+    TokenShape {
+        prefix: "xapp-",
+        min: 10,
+        exact: false,
+        body: alnum_dash,
+    },
+];
+
+fn token_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')
+}
+fn alnum(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+}
+fn alnum_underscore(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+fn upper_digit(byte: u8) -> bool {
+    byte.is_ascii_uppercase() || byte.is_ascii_digit()
+}
+fn alnum_dash(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'-'
+}
+
+fn known_token_shape(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    for start in 0..bytes.len() {
+        if start > 0 && bytes[start - 1].is_ascii_alphanumeric() {
+            continue;
+        }
+        for shape in TOKEN_SHAPES {
+            let prefix = shape.prefix.as_bytes();
+            if !bytes[start..].starts_with(prefix) {
+                continue;
+            }
+            let body_start = start + prefix.len();
+            let body = bytes[body_start..]
+                .iter()
+                .take_while(|byte| (shape.body)(**byte))
+                .count();
+            if body >= shape.min
+                && (!shape.exact
+                    || (body == shape.min
+                        && bytes
+                            .get(body_start + body)
+                            .is_none_or(|next| !next.is_ascii_alphanumeric())))
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn path_like(value: &str) -> bool {
@@ -726,13 +1115,32 @@ mod tests {
 
     fn repo_row(path: Value) -> Map<String, Value> {
         Map::from_iter([
-            ("repo_key".into(), Value::String("repo-1".into())),
+            (
+                "repo_key".into(),
+                Value::String("github.com/onsager-ai/semon".into()),
+            ),
             (
                 "display_name".into(),
                 Value::String("sample repository".into()),
             ),
             ("repo_path".into(), path),
         ])
+    }
+
+    fn session_uid() -> &'static str {
+        "laptop/codex/native%2Fsession"
+    }
+
+    fn turn_uid() -> &'static str {
+        "laptop/codex/native%2Fsession/t/turn%201"
+    }
+
+    fn step_uid() -> &'static str {
+        "laptop/codex/native%2Fsession/s/codex/thread/native%2Fsession/turn/response"
+    }
+
+    fn object(value: Value) -> Map<String, Value> {
+        value.as_object().cloned().unwrap()
     }
 
     #[test]
@@ -777,6 +1185,7 @@ mod tests {
             ("repo_key", "token=synthetic-secret"),
             ("repo_key", "/tmp/token=synthetic-secret"),
             ("display_name", "C:\\\\token=synthetic-secret"),
+            ("repo_key", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
         ] {
             let mut row = repo_row(Value::String("/home/example/project".into()));
             row.insert(field.into(), Value::String(value.into()));
@@ -793,6 +1202,178 @@ mod tests {
             ),
             Err(GovernanceError::Denied)
         ));
+        let benign = Map::from_iter([
+            ("repo_key".into(), Value::String("sk-short".into())),
+            ("display_name".into(), Value::String("task-worker".into())),
+            (
+                "repo_path".into(),
+                Value::String("/work/task-worker".into()),
+            ),
+        ]);
+        assert!(project_derived_row(&grant, "dim_repo", &benign).is_ok());
+        let mut malformed = repo_row(Value::String("/work/repository".into()));
+        malformed.insert("repo_key".into(), Value::String("github.com/%GG".into()));
+        assert!(matches!(
+            project_derived_row(&grant, "dim_repo", &malformed),
+            Err(GovernanceError::Denied)
+        ));
+    }
+
+    #[test]
+    fn typed_keys_accept_documented_uids_repositories_and_integer_dates() {
+        let date_fields = [
+            "date_key",
+            "day_start",
+            "year",
+            "month",
+            "day",
+            "iso_week",
+            "weekday",
+        ];
+        let date = object(serde_json::json!({
+            "date_key": 20261109,
+            "day_start": 1794182400000_i64,
+            "year": 2026,
+            "month": 11,
+            "day": 9,
+            "iso_week": 46,
+            "weekday": 1,
+        }));
+        assert!(
+            project_derived_row(
+                &authority(Destination::Receiver, &date_fields),
+                "dim_date",
+                &date,
+            )
+            .is_ok()
+        );
+
+        let session_fields = [
+            "session_uid",
+            "date_key",
+            "started_at",
+            "ended_at",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_5m_tokens",
+            "cache_write_1h_tokens",
+            "reasoning_tokens",
+            "web_search_requests",
+            "usd_est",
+            "reported_usd",
+            "wall_ms",
+            "model_ms",
+            "step_count",
+            "failure_count",
+            "usage_complete",
+            "transform_version",
+            "rules_version",
+            "price_version",
+        ];
+        let session = object(serde_json::json!({
+            "session_uid": session_uid(), "date_key": 20261109, "started_at": 0_i64,
+            "ended_at": null, "input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_5m_tokens": 0,
+            "cache_write_1h_tokens": 0, "reasoning_tokens": 0,
+            "web_search_requests": 0, "usd_est": null, "reported_usd": null,
+            "wall_ms": 0, "model_ms": 0, "step_count": 1, "failure_count": 0,
+            "usage_complete": true, "transform_version": 1, "rules_version": 1,
+            "price_version": "pricing:v1",
+        }));
+        assert!(
+            project_derived_row(
+                &authority(Destination::Receiver, &session_fields),
+                "fact_session",
+                &session,
+            )
+            .is_ok()
+        );
+
+        let step_fields = [
+            "step_uid",
+            "turn_uid",
+            "session_uid",
+            "model_key",
+            "repo_key",
+            "date_key",
+            "ts",
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_5m_tokens",
+            "cache_write_1h_tokens",
+            "reasoning_tokens",
+            "web_search_requests",
+            "speed",
+            "service_tier",
+            "prompt_size_tokens",
+            "split_unknown",
+            "usage_owner",
+            "context_tokens",
+            "context_band",
+            "model_ms",
+            "tool_ms",
+            "usd_est",
+            "price_status",
+            "price_version",
+            "activity",
+            "waste_kind",
+            "trigger",
+            "ok",
+        ];
+        let step = object(serde_json::json!({
+            "step_uid": step_uid(), "turn_uid": turn_uid(), "session_uid": session_uid(),
+            "model_key": "anthropic/claude-sonnet-4-6",
+            "repo_key": "github.com/onsager-ai/semon", "date_key": 20261109,
+            "ts": 0_i64, "input_tokens": 0, "output_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_5m_tokens": 0,
+            "cache_write_1h_tokens": 0, "reasoning_tokens": 0,
+            "web_search_requests": 0, "speed": null, "service_tier": null,
+            "prompt_size_tokens": 0, "split_unknown": false, "usage_owner": "exclusive",
+            "context_tokens": 0, "context_band": "under_50k", "model_ms": null,
+            "tool_ms": null, "usd_est": null, "price_status": "unpriced",
+            "price_version": "pricing:v1", "activity": "implement", "waste_kind": null,
+            "trigger": null, "ok": true,
+        }));
+        assert!(
+            project_derived_row(
+                &authority(Destination::Receiver, &step_fields),
+                "fact_step",
+                &step,
+            )
+            .is_ok()
+        );
+
+        let session_dimension_fields = [
+            "session_uid",
+            "machine_key",
+            "harness_key",
+            "role",
+            "parent_session_uid",
+            "parent_method",
+            "lane_root_uid",
+            "repo_key",
+            "branch",
+            "status",
+            "started_at",
+            "ended_at",
+        ];
+        let session_dimension = object(serde_json::json!({
+            "session_uid": session_uid(), "machine_key": "laptop", "harness_key": "codex",
+            "role": "worker", "parent_session_uid": "laptop/codex/parent%2Fsession",
+            "parent_method": "native", "lane_root_uid": "laptop/codex/root%2Fsession",
+            "repo_key": "example.test:8443/team/app", "branch": "feature/governance",
+            "status": "active", "started_at": 0_i64, "ended_at": null,
+        }));
+        assert!(
+            project_derived_row(
+                &authority(Destination::Receiver, &session_dimension_fields),
+                "dim_session",
+                &session_dimension,
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -915,6 +1496,40 @@ mod tests {
             assert!(!serialized.contains(private));
             assert!(!debug.contains(private));
         }
+        assert!(matches!(
+            coverage_witness(&row),
+            Err(GovernanceError::Denied)
+        ));
+    }
+
+    #[test]
+    fn governed_rows_retain_private_witness_and_export_coverage_only_when_allowed() {
+        let grant = authority(
+            Destination::Receiver,
+            &["repo_key", "display_name", "repo_path"],
+        );
+        let row = project_derived_row(
+            &grant,
+            "dim_repo",
+            &repo_row(Value::String("/home/example/project".into())),
+        )
+        .unwrap();
+        let witness = local_witness(&row);
+        assert_eq!(witness.principal_id(), "alice");
+        assert_eq!(witness.scope().destination, Destination::Receiver);
+        assert_eq!(witness.contributors().len(), 1);
+        assert_eq!(witness.contributors()[0].source_id(), "source");
+        assert_eq!(witness.contributors()[0].detector_version(), "detector-v1");
+        assert_eq!(format!("{witness:?}"), "ExportWitness { private }");
+        let coverage = coverage_witness(&row).unwrap();
+        let serialized = serialize_coverage_witness(&coverage).unwrap();
+        assert!(serialized.contains("source"));
+        assert!(serialized.contains("detector-v1"));
+        assert!(
+            !serialize_governed_row(&row)
+                .unwrap()
+                .contains("detector-v1")
+        );
     }
 
     #[test]
@@ -991,5 +1606,30 @@ mod tests {
         )
         .unwrap();
         assert!(null.contains("\"repo_path\":null"));
+    }
+
+    #[test]
+    fn consent_intersects_evidence_classes_for_matching_provider_and_model() {
+        let fields = ["session_uid"];
+        let mut baseline = policy(&fields, false, false);
+        baseline.provider_egress = vec![EgressConsent {
+            provider: "provider".into(),
+            model: "model".into(),
+            evidence_classes: ["step".into(), "turn".into()].into(),
+        }];
+        let mut local = baseline.clone();
+        local.provider_egress[0].evidence_classes = ["step".into()].into();
+        let policies = [("source".into(), PolicyBundle { baseline, local })].into();
+        let grant = evaluate(
+            &policies,
+            &[source("source")],
+            &principal(),
+            &scope(Destination::Receiver),
+        )
+        .unwrap();
+        assert!(provider_egress_allowed(&grant, "provider", "model", "step"));
+        assert!(!provider_egress_allowed(
+            &grant, "provider", "model", "turn"
+        ));
     }
 }
