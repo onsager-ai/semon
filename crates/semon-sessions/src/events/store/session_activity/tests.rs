@@ -178,7 +178,11 @@ fn streamed_claude_anchor_selects_lowest_exact_record() {
             "model": "claude-sonnet-4-5", "content": [{"type": "text", "text": "More"}],
             "usage": {"input_tokens": 10, "output_tokens": 6}}
     });
-    writeln!(fs::OpenOptions::new().append(true).open(path).unwrap(), "{record}").unwrap();
+    writeln!(
+        fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{record}"
+    )
+    .unwrap();
     let (rows, slots) = catalog_fixture_projection(&options);
     let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
     catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
