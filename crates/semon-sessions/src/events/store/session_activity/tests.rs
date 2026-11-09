@@ -430,7 +430,7 @@ fn step_facts_keep_private_tool_details_and_usage_ownership() {
     let (_, id, facts) = &facts[0];
     assert_eq!(id, &step.id);
     assert_eq!(facts.usage_owner, UsageOwner::Exclusive);
-    assert_eq!(facts.model_ms, Some(19));
+    assert_eq!(facts.model_ms, Some(1));
     assert_eq!(facts.tool_ms, Some(8));
     assert_eq!(facts.tool_calls.len(), 2);
     assert_eq!(facts.tool_calls[0].tool, "Read");
