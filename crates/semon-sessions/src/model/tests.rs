@@ -12303,6 +12303,245 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     );
 }
 
+fn drain_repository_catalog(options: &Options) {
+    let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+    for _ in 0..128 {
+        if evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
+            .unwrap()
+        {
+            evidence.retire();
+            return;
+        }
+    }
+    panic!("repository fixture did not finish publication");
+}
+
+fn published_repository_state(options: &Options, key: &str) -> (Option<crate::RepoId>, i64) {
+    // A new connection observes only committed analytics-facing state.
+    let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+    let (identity, seq): (Option<String>, i64) = db
+        .query_row(
+            "SELECT repo_id,(SELECT max(seq) FROM silver_change WHERE session_key=?1) FROM silver_session_state WHERE session_key=?1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    (
+        identity.map(|json| serde_json::from_str(&json).unwrap()),
+        seq,
+    )
+}
+
+fn publish_repository_facts(options: &Options, facts: &crate::Facts) {
+    let write = crate::SessionFactsWrite::begin(options, "", facts).unwrap();
+    crate::write_facts(options.facts.as_ref().unwrap(), facts).unwrap();
+    write.complete().unwrap();
+}
+
+#[test]
+fn repository_identity_survives_description_reuse_reopen_and_missing_source() {
+    let home = Home::new();
+    let mut records = vec![
+        human("root", ts(0, 0), "repository identity"),
+        assistant("root", ts(0, 1), vec![text("answer")]),
+    ];
+    for record in &mut records {
+        record["cwd"] = json!("/work/proj");
+    }
+    let log = home.top("root", &records);
+    let options = Options {
+        facts: Some(home.root.join("repository-facts.json")),
+        ..home.options.clone()
+    };
+    let mut facts = crate::local_runtime_facts(&home.options).unwrap();
+    facts.repos.insert("/work/proj".into(), Some("proj".into()));
+    let original = crate::RepoId::Remote("a.test/team/app".into());
+    facts.repo_ids.insert("/work/proj".into(), original.clone());
+    publish_repository_facts(&options, &facts);
+    drain_repository_catalog(&options);
+    assert_eq!(
+        published_repository_state(&options, "root").0,
+        Some(original)
+    );
+
+    let descriptions = || {
+        let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+        db.query_row(
+            "SELECT inputs,description FROM session_descriptions WHERE session_key='root'",
+            [],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap()
+    };
+    let description = descriptions();
+    let mut last = published_repository_state(&options, "root").1;
+    // Every cycle constructs a fresh producer and reopens the SQLite index.
+    for identity in [
+        crate::RepoId::Remote("b.test/team/app".into()),
+        crate::RepoId::Path("/srv/private/app.git".into()),
+    ] {
+        facts.repo_ids.insert("/work/proj".into(), identity.clone());
+        publish_repository_facts(&options, &facts);
+        drain_repository_catalog(&options);
+        let (published, seq) = published_repository_state(&options, "root");
+        assert_eq!(published, Some(identity));
+        assert!(seq > last, "origin-only changes must publish");
+        last = seq;
+        assert_eq!(
+            descriptions(),
+            description,
+            "stable description is reusable"
+        );
+        let (_, rows) = read_catalog(&home);
+        let metadata = serde_json::to_string(&rows).unwrap();
+        assert!(!metadata.contains("/srv/private/app.git"));
+        assert!(!metadata.contains("repo_id"));
+    }
+    fs::remove_file(log).unwrap();
+    drain_repository_catalog(&options);
+    let (published, seq) = published_repository_state(&options, "root");
+    assert_eq!(
+        published,
+        Some(crate::RepoId::Path("/srv/private/app.git".into()))
+    );
+    assert!(
+        seq > last,
+        "withdrawal is published without losing identity"
+    );
+    let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+    let lifecycle: String = db
+        .query_row(
+            "SELECT lifecycle FROM session_catalog WHERE session_key='root'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(lifecycle, "retained");
+}
+
+#[test]
+fn local_origin_changes_refresh_identity_with_reused_texts_and_descriptions() {
+    let home = Home::new();
+    let repo = home.root.join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    let mut record = human("root", ts(0, 0), "local repository");
+    record["cwd"] = json!(repo.to_str().unwrap());
+    home.top("root", &[record]);
+    let mut texts = Texts::default();
+    for remote in ["a.test/team/app", "b.test/team/app"] {
+        fs::write(
+            repo.join(".git/config"),
+            format!("[remote \"origin\"]\nurl = https://{remote}.git\n"),
+        )
+        .unwrap();
+        let data = build_query(
+            &home.options,
+            &mut EventCache::open(&home.options.cache).unwrap(),
+            &mut false,
+            &mut texts,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(
+            data.sessions["root"].repo_id,
+            Some(crate::RepoId::Remote(remote.into()))
+        );
+        assert_eq!(
+            published_repository_state(&home.options, "root").0,
+            Some(crate::RepoId::Remote(remote.into()))
+        );
+    }
+}
+
+#[test]
+fn sidecar_repository_directory_scopes_runtime_and_facts_only_invalidation() {
+    let home = Home::new();
+    home.top("root", &[human("root", ts(0, 0), "parent")]);
+    let mut records = vec![
+        user("root", ts(0, 1), "child"),
+        assistant("root", ts(0, 2), vec![text("answer")]),
+    ];
+    for record in &mut records {
+        record["cwd"] = json!("/work/proj");
+    }
+    home.agent("root", "child", "spawn", &records);
+    home.write(
+        "claude/projects/-work-proj/root/subagents/agent-child.meta.json",
+        &json!({"toolUseId":"spawn","worktreePath":"/work/sidecar"}).to_string(),
+    );
+    let options = Options {
+        facts: Some(home.root.join("sidecar-facts.json")),
+        ..home.options.clone()
+    };
+    let mut facts = crate::local_runtime_facts(&home.options).unwrap();
+    for cwd in ["/work/proj", "/work/sidecar"] {
+        facts.repos.insert(cwd.into(), Some("proj".into()));
+        facts
+            .repo_ids
+            .insert(cwd.into(), crate::RepoId::Remote("a.test/team/app".into()));
+    }
+    publish_repository_facts(&options, &facts);
+    drain_repository_catalog(&options);
+    let (_, rows) = read_catalog(&home);
+    let child = rows.iter().find(|row| row.key == "child").unwrap();
+    let runtime = crate::native_evidence::RuntimeObservations::new(&options)
+        .scope(child)
+        .unwrap();
+    let initial = published_repository_state(&options, "child");
+    let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
+    let path = home
+        .root
+        .join("claude/projects/-work-proj/root/subagents/agent-child.jsonl");
+    let (cwd, dependency): (String, String) = db.query_row(
+        "SELECT f.cwd,d.native_id FROM files f JOIN catalog_native_dependencies d ON d.source_path=f.path WHERE f.path=?1 AND d.harness='runtime:repo'",
+        [path.to_string_lossy().as_ref()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(cwd, "/work/proj");
+    assert_eq!(dependency, "/work/sidecar");
+    let stamp = stamp_of(&path);
+    let changed = crate::RepoId::Remote("b.test/team/app".into());
+    facts
+        .repo_ids
+        .insert("/work/sidecar".into(), changed.clone());
+    publish_repository_facts(&options, &facts);
+    assert_ne!(
+        crate::native_evidence::RuntimeObservations::new(&options)
+            .scope(child)
+            .unwrap(),
+        runtime,
+        "sidecar repository facts participate in the runtime fence"
+    );
+    let queued: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_catalog_invalidations WHERE source_path=?1)",
+            [path.to_string_lossy().as_ref()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        queued,
+        "facts-only change queues the sidecar-selected source"
+    );
+    drain_repository_catalog(&options);
+    assert_eq!(stamp_of(&path), stamp, "native log is unchanged");
+    let (published, seq) = published_repository_state(&options, "child");
+    assert_eq!(published, Some(changed));
+    assert!(seq > initial.1);
+    let (_, rows) = read_catalog(&home);
+    let child = rows.iter().find(|row| row.key == "child").unwrap();
+    assert_eq!(
+        child.query.as_ref().unwrap()["runtime"].as_str(),
+        Some(
+            crate::native_evidence::RuntimeObservations::new(&options)
+                .scope(child)
+                .unwrap()
+                .as_str()
+        )
+    );
+}
+
 #[test]
 fn a_catalog_row_carries_the_repository_identity_recorded_in_facts() {
     let home = Home::new();

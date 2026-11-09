@@ -192,7 +192,7 @@ impl RuntimeObservations {
                 .ok_or_else(|| io::Error::other("runtime observation unavailable"));
         };
         let mut cwd = connection
-            .prepare("SELECT cwd FROM files WHERE path=?1")
+            .prepare("SELECT native_id FROM catalog_native_dependencies WHERE source_path=?1 AND harness='runtime:repo'")
             .map_err(io::Error::other)?;
         for source in &row.sources {
             let value = cwd

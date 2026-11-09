@@ -123,17 +123,36 @@ fn origin_url(config: &str) -> Option<String> {
     url.filter(|url| !url.is_empty())
 }
 
-/// The lines of `config` with each backslash-newline continuation joined.
+/// Join continuations outside comments. Quote state survives a continuation;
+/// a backslash in an unquoted comment never consumes the following line.
 fn logical_lines(config: &str) -> Vec<String> {
     let mut lines = Vec::new();
     let mut pending = String::new();
+    let mut quoted = false;
     for line in config.lines() {
-        pending.push_str(line);
-        let slashes = pending.chars().rev().take_while(|c| *c == '\\').count();
-        if slashes % 2 == 1 {
+        let mut escaped = false;
+        let mut comment = false;
+        for c in line.chars() {
+            pending.push(c);
+            if comment {
+                continue;
+            }
+            if escaped {
+                escaped = false;
+            } else {
+                match c {
+                    '\\' => escaped = true,
+                    '"' => quoted = !quoted,
+                    '#' | ';' if !quoted => comment = true,
+                    _ => {}
+                }
+            }
+        }
+        if escaped && !comment {
             pending.pop();
         } else {
             lines.push(std::mem::take(&mut pending));
+            quoted = false;
         }
     }
     if !pending.is_empty() {
@@ -851,6 +870,26 @@ mod tests {
         assert_eq!(
             url("[remote \"origin\"]\n\turl = https://a.test/first\n\turl = https://a.test/last\n"),
             some("https://a.test/last")
+        );
+    }
+
+    #[test]
+    fn comment_backslashes_do_not_continue_into_the_next_section() {
+        for comment in ["#", ";"] {
+            let config = format!(
+                "[remote \"origin\"]\nurl = https://a.test/x/y {comment} note \\\n[remote \"upstream\"]\nurl = https://b.test/other/repo\n"
+            );
+            assert_eq!(origin_url(&config).as_deref(), Some("https://a.test/x/y"));
+        }
+        assert_eq!(
+            origin_url("[remote \"origin\"]\nurl = \"https://a.test/x#y\\\n/z\"\n").as_deref(),
+            Some("https://a.test/x#y/z"),
+            "quoted comment characters still permit continuation"
+        );
+        assert_eq!(
+            origin_url("[remote \"origin\"]\nurl = \"https://a.test/x\\\\\" # note \\\n[remote \"upstream\"]\nurl = https://b.test/other/repo\n").as_deref(),
+            Some("https://a.test/x\\"),
+            "an escaped backslash does not escape the closing quote"
         );
     }
 

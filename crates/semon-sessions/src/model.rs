@@ -507,7 +507,6 @@ pub(crate) struct Texts {
     descriptions: HashMap<String, (DescriptionInputs, Description)>,
     prompt_caches: HashMap<PathBuf, (u64, Arc<crate::attachments::PromptCache>)>,
     repos: HashMap<String, Option<String>>,
-    repo_ids: HashMap<String, Option<crate::facts::RepoId>>,
 }
 
 impl Texts {
@@ -637,19 +636,6 @@ impl Texts {
                     .saturating_sub(value.map_or(0, |text| text.len()) + key.what.len() + 96);
             }
         }
-    }
-
-    fn repo_id(&mut self, cwd: &str) -> Option<crate::facts::RepoId> {
-        if let Some(id) = self.repo_ids.get(cwd) {
-            return id.clone();
-        }
-        let id = crate::repo::repo_id(cwd, crate::facts::env_home().as_deref().map(Path::new));
-        // Bounded like `repos`.
-        if self.repo_ids.len() >= REPO_CACHE_MAX {
-            self.repo_ids.clear();
-        }
-        self.repo_ids.insert(cwd.to_owned(), id.clone());
-        id
     }
 
     fn repo(&mut self, cwd: &str) -> Option<String> {
@@ -1088,6 +1074,22 @@ struct SourceFile {
     last: Option<i64>,
     /// The Codex `Semon-Parent` marker; never cached (it can carry a path).
     marker: Option<Marker>,
+}
+
+/// The repository directory selected by native metadata, including a Claude
+/// subagent's sidecar worktree. Shared with the durable dependency index.
+pub(crate) fn repository_dir(index: &FileIndex) -> Option<&str> {
+    index
+        .claude_sidecar
+        .as_ref()
+        .and_then(|sidecar| sidecar.metadata.cwd.as_deref())
+        .or_else(|| {
+            index
+                .codex_header
+                .as_ref()
+                .and_then(|header| header.metadata.cwd.as_deref())
+        })
+        .or(index.cwd.as_deref())
 }
 
 impl SourceFile {
@@ -2532,13 +2534,8 @@ impl<'a> Builder<'a> {
             let file = &self.files[*position];
             files.push((file.path.clone(), file.revision));
             metadata.push(format!("{:?}", file.role));
-            let cwd = match &file.role {
-                Role::Agent(meta) => meta.cwd.as_ref().or(file.summary.cwd.as_ref()),
-                Role::Codex(meta) => meta.cwd.as_ref().or(file.summary.cwd.as_ref()),
-                Role::Top { .. } | Role::Copilot => file.summary.cwd.as_ref(),
-            };
-            if let Some(cwd) = cwd {
-                repos.push((cwd.clone(), self.facts.recorded_repo(cwd)));
+            if let Some(cwd) = repository_dir(&file.summary) {
+                repos.push((cwd.to_owned(), self.facts.recorded_repo(cwd)));
             }
         }
         let reports: Vec<_> = self
@@ -2626,6 +2623,19 @@ impl<'a> Builder<'a> {
                 ),
             );
         }
+        // Repository identity is a current machine observation, independent of
+        // reusable descriptions. Read local Git metadata afresh so an origin
+        // change cannot be hidden by a long-lived Texts memo.
+        let repo_id = self.sessions[index]
+            .files
+            .last()
+            .and_then(|position| repository_dir(&self.files[*position].summary))
+            .and_then(|cwd| {
+                self.facts.recorded_repo_id(cwd).unwrap_or_else(|| {
+                    crate::repo::repo_id(cwd, crate::facts::env_home().as_deref().map(Path::new))
+                })
+            });
+        self.sessions[index].out.repo_id = repo_id;
     }
 
     /// Name, model, effort, tokens, repo, branch, start, last and busy.
@@ -2796,11 +2806,6 @@ impl<'a> Builder<'a> {
                 .recorded_repo(cwd)
                 .unwrap_or_else(|| self.texts.repo(cwd))
         });
-        let repo_id = cwd.as_deref().and_then(|cwd| {
-            self.facts
-                .recorded_repo_id(cwd)
-                .unwrap_or_else(|| self.texts.repo_id(cwd))
-        });
         let billing_messages: Vec<events::MessageUsage> = usage.values().cloned().collect();
         let mut cost = if harness == "codex" {
             let mut cost = crate::pricing::CostBuild::default();
@@ -2943,7 +2948,6 @@ impl<'a> Builder<'a> {
         out.role = repo.is_none();
         out.branch = repo.as_ref().and(branch);
         out.repo = repo;
-        out.repo_id = repo_id;
         if out.name.is_empty() {
             out.name = codex_task_title.unwrap_or_else(|| match session.kind {
                 SessKind::Lineage | SessKind::Copilot => title.unwrap_or(fallback_name),

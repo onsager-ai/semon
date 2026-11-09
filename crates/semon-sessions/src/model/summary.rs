@@ -145,7 +145,8 @@ pub(crate) struct CatalogRow {
     pub(crate) parent: Option<String>,
     pub(crate) parent_source: Option<String>,
     pub(crate) repo: Option<String>,
-    /// Not persisted in the Catalog: the change log's repository identity.
+    /// Persisted with the analytics digest in silver_session_state, never in
+    /// display metadata: a local remote is classed Path.
     #[serde(skip)]
     pub(crate) repo_id: Option<crate::facts::RepoId>,
     pub(crate) branch: Option<String>,

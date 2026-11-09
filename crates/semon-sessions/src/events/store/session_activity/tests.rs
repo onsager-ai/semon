@@ -868,7 +868,56 @@ fn a_change_of_repository_identity_alone_is_logged() {
         publish_row(&mut store, &next, projection);
         let after = count(&changes(&store.connection), &row.key, "changed");
         assert_eq!(after - before, logs, "{origin:?}");
+        let fresh = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+        let saved: Option<String> = fresh
+            .query_row(
+                "SELECT repo_id FROM silver_session_state WHERE session_key=?1",
+                [&row.key],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            saved.map(|json| serde_json::from_str::<crate::RepoId>(&json).unwrap()),
+            next.repo_id
+        );
     }
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn repository_identity_and_digest_roll_back_when_change_logging_fails() {
+    let root = scratch("change-log-repo-atomic");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
+    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let projection = row.session_activity.as_ref().unwrap();
+    let mut initial = row.clone();
+    initial.repo_id = Some(crate::RepoId::Remote("a.test/team/app".into()));
+    publish_row(&mut store, &initial, projection);
+    let before = digest(&store.connection, &row.key);
+    let logged = changes(&store.connection);
+    let mut changed = initial.clone();
+    changed.repo_id = Some(crate::RepoId::Path("/srv/private/app.git".into()));
+    store.connection.execute_batch("CREATE TEMP TRIGGER fail_change BEFORE INSERT ON main.silver_change BEGIN SELECT RAISE(ABORT,'change failure'); END;").unwrap();
+    let tx = store.connection.transaction().unwrap();
+    assert!(publish(&tx, &changed, projection).is_err());
+    tx.rollback().unwrap();
+    assert_eq!(digest(&store.connection, &row.key), before);
+    assert_eq!(changes(&store.connection), logged);
+    let fresh = Connection::open(crate::events::EventCache::path(&options.cache)).unwrap();
+    let saved: String = fresh
+        .query_row(
+            "SELECT repo_id FROM silver_session_state WHERE session_key=?1",
+            [&row.key],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<crate::RepoId>(&saved).unwrap(),
+        initial.repo_id.unwrap()
+    );
+    drop(fresh);
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }

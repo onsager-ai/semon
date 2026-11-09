@@ -275,8 +275,8 @@ fn note_session_state(
         .optional()?;
     if rewritten || stored.as_deref() != Some(digest.as_str()) {
         tx.execute(
-            "INSERT INTO silver_session_state VALUES(?1,?2) ON CONFLICT(session_key) DO UPDATE SET digest=excluded.digest",
-            params![row.key, digest],
+            "INSERT INTO silver_session_state(session_key,digest,repo_id) VALUES(?1,?2,?3) ON CONFLICT(session_key) DO UPDATE SET digest=excluded.digest,repo_id=excluded.repo_id",
+            params![row.key, digest, row.repo_id.as_ref().map(json).transpose()?],
         )?;
         log_change(tx, &row.key)?;
     }

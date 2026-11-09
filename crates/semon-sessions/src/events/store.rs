@@ -359,7 +359,8 @@ CREATE TABLE IF NOT EXISTS meta (
 ) STRICT;
 CREATE TABLE IF NOT EXISTS silver_session_state (
     session_key TEXT PRIMARY KEY,
-    digest TEXT NOT NULL
+    digest TEXT NOT NULL,
+    repo_id TEXT
 ) STRICT;
 CREATE TABLE IF NOT EXISTS silver_change (
     seq INTEGER PRIMARY KEY,
@@ -1368,7 +1369,7 @@ pub(crate) fn enqueue_facts(
         {
             let paths = {
                 let mut statement = tx
-                    .prepare("SELECT path FROM files WHERE cwd=?1")
+                    .prepare("SELECT source_path FROM catalog_native_dependencies WHERE harness='runtime:repo' AND native_id=?1")
                     .map_err(io::Error::other)?;
                 statement
                     .query_map([cwd], |row| row.get::<_, String>(0))
@@ -3576,7 +3577,7 @@ impl SqliteStore {
                             for source in &row.sources {
                                 let started = metadata_measurements.start();
                                 let path = source.path.to_string_lossy();
-                                transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%'",[path.as_ref()]).map_err(failure)?;
+                                transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness NOT LIKE 'lineage:%' AND harness NOT LIKE 'bridge:%' AND harness<>'runtime:repo'",[path.as_ref()]).map_err(failure)?;
                                 let parent = source.native_role.as_ref().and_then(|role| {
                                     role.pointer("/Agent/parent")
                                         .and_then(Value::as_str)
@@ -4646,7 +4647,7 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT generation,identity,metadata FROM session_activity_facts LIMIT 0",
         "SELECT generation,ordinal,metadata FROM session_activity_compactions LIMIT 0",
         "SELECT seq,session_key,kind FROM silver_change LIMIT 0",
-        "SELECT session_key,digest FROM silver_session_state LIMIT 0",
+        "SELECT session_key,digest,repo_id FROM silver_session_state LIMIT 0",
         "SELECT metadata FROM session_history_catalog LIMIT 0",
         "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
     ] {
@@ -6228,6 +6229,18 @@ fn write_index_changes_measured(
         transaction.execute(
             "INSERT OR IGNORE INTO catalog_native_dependencies VALUES(?1,'bridge:claude',?2)",
             params![path, id],
+        )?;
+    }
+    // Store the same effective directory the model uses, rather than only
+    // the cwd embedded in the log. Sidecar-only changes update this dependency.
+    transaction.execute(
+        "DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness='runtime:repo'",
+        [path],
+    )?;
+    if let Some(cwd) = crate::model::repository_dir(index) {
+        transaction.execute(
+            "INSERT INTO catalog_native_dependencies VALUES(?1,'runtime:repo',?2)",
+            params![path, cwd],
         )?;
     }
     measurements.record("dependencies", started, 1);
@@ -10436,6 +10449,11 @@ mod tests {
             (
                 "missing-silver-state-column",
                 "ALTER TABLE silver_session_state DROP COLUMN digest",
+                "malformed persistent state",
+            ),
+            (
+                "missing-silver-repo-id",
+                "ALTER TABLE silver_session_state DROP COLUMN repo_id",
                 "malformed persistent state",
             ),
             (
