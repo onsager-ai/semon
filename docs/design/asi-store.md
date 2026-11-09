@@ -94,8 +94,7 @@ Silver is today's ingest index and activity projection, run per namespace
   write nothing. `seq` is monotonic within an index **incarnation**, a random
   ID created whenever the index is created or rebuilt. Gold reads the changes
   and the session rows in one SQLite read transaction. A new incarnation
-  makes gold re-read that namespace in full. Labels written to the durable file
-  notify the gold writer directly.
+  makes gold re-read that namespace in full.
 - **Repository identity.** Sender facts gain, per repository root, a
   sanitized `repo_id`, or `unknown` (see [Gold model](#gold-model)). This
   changes the mirror facts contract directly.
@@ -153,17 +152,24 @@ tables.
   - It writes one new file per table, `gold/{table}/g{generation}.parquet`,
     holding the full rows of those sessions with a `_gen` column. Dimensions
     are rewritten whole, as `gold/dim_x/g{generation}.parquet`.
-  - It fsyncs those files, then writes `manifest.json` (the generation, file
-    lists, versions, each namespace's incarnation and `seq` checkpoint, and the
-    live map `session_uid → _gen`; removed sessions are dropped from it). It
-    fsyncs the manifest, renames it into place, and fsyncs the directory. A
-    crash leaves the previous generation.
+  - It writes the live map, `session_uid → _gen` with removed sessions
+    dropped, as a typed Parquet file `gold/live/g{generation}.parquet`, so the
+    manifest stays small at any number of sessions.
+  - It fsyncs those files, then writes `manifest.json`: the generation, file
+    lists with their compaction level, versions, each namespace's incarnation
+    and `seq` checkpoint, the durable revision checkpoint, and the live-map
+    file. It fsyncs the manifest, renames it into place, and fsyncs the
+    directory. A crash leaves the previous generation.
 - **Reading.** Each fact view keeps only live rows:
   `… semi join live on (session_uid, _gen)`.
-- **Compaction.** When dead rows exceed 30% or a table has more than 64 files,
-  the writer rewrites them into files of about 128 MB, sorted by namespace and
-  start time so that Parquet row-group statistics prune time ranges. Compaction
-  publishes as just another generation.
+- **Compaction** is tiered. Cycle files are level 0. When a table has more
+  than 32 level-0 files, the writer merges them into level-1 files of at most
+  128 MB, sorted by namespace and start time so that Parquet row-group
+  statistics prune time ranges. A level-1 file is rewritten only when more
+  than 30% of its rows are dead, together with its dead-row neighbours. Clean
+  level-1 files are never rewritten, so work grows with changes and not with
+  table size, and a second compaction run straight after the first is a no-op.
+  Compaction publishes as just another generation.
 - **Retirement.** A file leaves the store 10 minutes after the first
   published generation that no longer names it. Queries hold a snapshot for at
   most their deadline plus fetch time, well under that.
@@ -191,12 +197,22 @@ tables.
 - **Body columns** (`label.mechanism_text`, `adjudication.reason`,
   `lane.title` and the intervention text) are classed `body`. They never reach
   gold or Hub, and are readable only through `view` ([ASI query](asi-query.md)).
-- **Export.** Categorical columns are exported to `fact_label` on change.
+- **Export.** Every write increments a `revision` counter in the same
+  transaction. The gold manifest checkpoints the last exported revision, so a
+  crash can't lose a label. Each cycle exports the label and adjudication rows
+  above the checkpoint (categorical columns only) to `fact_label` generation
+  files. Labels are append-only, so `fact_label` isn't filtered by the session
+  live map, and labels on lanes or work items need no session at all.
   `semon asi backup PATH` copies the file with the SQLite online backup API.
 
 ## Hub export (phase 3)
 
-Hub holds the same layout per tenant. Export is coherent and idempotent:
+Hub holds the same layout per tenant, with one independent head per
+**publisher** (a store that exports namespaces). The tenant's views read the
+union of all publishers' current heads. Dimension tables use stable natural
+keys (model name, `repo_id`, tool name, date, `session_uid`) and no surrogate
+keys, so the union composes without renumbering, and duplicate rows across
+publishers collapse in the views. Export is coherent and idempotent:
 
 1. **Bind.** `semon hub claim --namespace M` binds the namespace to this
    store's publisher ID and increments its epoch. Hub accepts generations for
@@ -211,7 +227,9 @@ Hub holds the same layout per tenant. Export is coherent and idempotent:
    each file (column set, types, enums, token patterns on `path` columns, every
    row's namespace in the claimed set) and commits atomically. A wrong parent
    is `parent_mismatch` (409); the store fetches Hub's head and re-sends the
-   difference.
+   difference. A commit can add, remove or remap only objects and live-map
+   entries belonging to its own publisher and claimed namespaces. Hub validates
+   the publisher's complete resulting head before swapping it in.
 
 - **Paths.** A token is `pt1_` followed by the first 22 characters of
   base64url(HMAC-SHA256(key, canonical path)). The canonical path is the
@@ -255,7 +273,8 @@ data (1M rows per PR, 10M nightly, 100M weekly) plus the sanitized fixtures:
 | Dashboard views | p95 ≤ 500 ms |
 | Ad-hoc group-by over `fact_step` | p95 ≤ 2 s at 10M rows, ≤ 5 s at 100M |
 | FTS top 20 | p95 ≤ 500 ms |
-| Gold size and files | Recorded per 1M steps (Parquet, ZSTD); file count stays bounded by compaction |
+| Gold size and files | Recorded per 1M steps (Parquet, ZSTD); file count stays bounded under 100M-row sustained ingest |
+| Query setup (snapshot, live map, views) | ≤ 300 ms cold with 1M sessions |
 
 Runs record throughput, CPU, RSS, disk and spill. A run that misses a budget
 fails the scheduled job. For context, the measured workload of one heavy user
@@ -285,7 +304,8 @@ today is about 466 MB of logs in 2.5 months.
 - Incremental equals full refresh after: delayed tool results, a late earlier
   record, a rewrite, a session crossing midnight, a removed session, and an
   index rebuild (new incarnation).
-- Publication: a crash mid-cycle leaves the old generation; a file is retired
+- Publication: a crash mid-cycle leaves the old generation; a crash after a
+  label commit still exports that label; repeating a compaction is a no-op; a file is retired
   only 10 minutes after it leaves the live generation; compaction keeps the
   live rows identical; a version bump queues only stale sessions.
 - Spend: copied usage is not double-counted; the step-to-tool-call view
@@ -296,6 +316,7 @@ today is about 466 MB of logs in 2.5 months.
 - Hub export: no `body` column ever exported; `path` columns and local
   remotes are tokens; credentials are stripped from `repo_id`; foreign Parquet
   metadata is dropped; a stale publisher, a wrong parent and a retried upload
-  each behave as specified; an interrupted export leaves Hub on the old
+  each behave as specified; two publishers in one tenant compose, and neither
+  can remove the other's objects; an interrupted export leaves Hub on the old
   generation.
 - The performance budgets above.
