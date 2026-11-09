@@ -658,11 +658,10 @@ pub(crate) fn read_silver_changes<T>(
         |row| row.get(0),
     )?;
     let changes = {
-        let mut statement = tx
-            .prepare("SELECT seq,session_key,kind FROM silver_change WHERE seq>?1 ORDER BY seq")?;
-        let rows = statement.query_map([after], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })?;
+        let mut statement =
+            tx.prepare("SELECT seq,session_key,kind FROM silver_change WHERE seq>?1 ORDER BY seq")?;
+        let rows =
+            statement.query_map([after], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
         rows.collect::<rusqlite::Result<Vec<_>>>()?
     };
     let result = read(&tx, &incarnation, &changes)?;

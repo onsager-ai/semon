@@ -587,14 +587,36 @@ mod tests {
     #[test]
     fn origin_urls_become_sanitized_remote_ids() {
         for (url, want) in [
-            ("https://user:secret@GitHub.com/onsager-ai/semon.git", "github.com/onsager-ai/semon"),
-            ("https://github.com:8443/onsager-ai/semon", "github.com:8443/onsager-ai/semon"),
-            ("https://github.com:443/onsager-ai/semon.git", "github.com/onsager-ai/semon"),
-            ("ssh://git@github.com:22/onsager-ai/semon.git", "github.com/onsager-ai/semon"),
-            ("ssh://git@host.example:2222/team/app/", "host.example:2222/team/app"),
-            ("git@GitHub.com:onsager-ai/semon.git", "github.com/onsager-ai/semon"),
+            (
+                "https://user:secret@GitHub.com/onsager-ai/semon.git",
+                "github.com/onsager-ai/semon",
+            ),
+            (
+                "https://github.com:8443/onsager-ai/semon",
+                "github.com:8443/onsager-ai/semon",
+            ),
+            (
+                "https://github.com:443/onsager-ai/semon.git",
+                "github.com/onsager-ai/semon",
+            ),
+            (
+                "ssh://git@github.com:22/onsager-ai/semon.git",
+                "github.com/onsager-ai/semon",
+            ),
+            (
+                "ssh://git@host.example:2222/team/app/",
+                "host.example:2222/team/app",
+            ),
+            (
+                "git@GitHub.com:onsager-ai/semon.git",
+                "github.com/onsager-ai/semon",
+            ),
         ] {
-            assert_eq!(classify_origin(url), RepoId::Remote(want.to_owned()), "{url}");
+            assert_eq!(
+                classify_origin(url),
+                RepoId::Remote(want.to_owned()),
+                "{url}"
+            );
         }
     }
 
@@ -633,7 +655,10 @@ mod tests {
             "work/semon/.git/config",
             "[remote \"origin\"]\n\turl = /srv/git/semon.git\n",
         );
-        assert_eq!(id("work/semon"), Some(RepoId::Path("/srv/git/semon.git".into())));
+        assert_eq!(
+            id("work/semon"),
+            Some(RepoId::Path("/srv/git/semon.git".into()))
+        );
         scratch.file("work/semon/.git/config", "[core]\n\tbare = false\n");
         assert_eq!(id("work/semon"), Some(RepoId::Unknown), "no origin");
         scratch.dir("elsewhere/plain");
