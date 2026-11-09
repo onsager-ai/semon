@@ -450,6 +450,23 @@ fn step_facts_keep_private_tool_details_and_usage_ownership() {
     .unwrap();
     assert!(public.items[0].get("facts").is_none());
     assert!(public.items[0].get("target_path").is_none());
+    let copied = Projection::derive(
+        row.key.clone(),
+        vec![step.clone()],
+        &[(step.id.clone(), "other-session".into())].into_iter().collect(),
+        vec![],
+        vec![],
+        vec![],
+        crate::pricing::snapshot(),
+    );
+    let tx = store.connection.transaction().unwrap();
+    publish(&tx, row, &copied).unwrap();
+    tx.commit().unwrap();
+    let copied_page = read(&store.connection, row);
+    let copied_facts = step_facts(&store.connection, row, &copied_page.generation)
+        .unwrap()
+        .unwrap();
+    assert_eq!(copied_facts[0].2.usage_owner, UsageOwner::Copied);
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
