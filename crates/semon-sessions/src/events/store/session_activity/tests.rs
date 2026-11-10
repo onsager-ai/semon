@@ -3,9 +3,475 @@ use super::super::tests::{
 };
 use super::*;
 use crate::SqliteAnalyticsInput;
+use crate::analytics_writer::{AnalyticsWriterConfig, start_with_clock};
 use crate::events::session_activity::classify::Change;
 use crate::events::session_activity::{ActivityStepId, Ownership, TimedInput, UsageOwner};
-use semon_asi::{AnalyticsInput, Reconciliation, SessionChange};
+use arrow::{
+    array::{Array, ArrayRef, Int64Array, StringArray},
+    compute::cast,
+    datatypes::DataType,
+    util::display::array_value_to_string,
+};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use semon_asi::{AnalyticsInput, Clock, Reconciliation, SessionChange};
+use std::{
+    fs::File,
+    io::Write,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
+    time::Duration,
+};
+
+struct ManualClock(AtomicI64);
+
+impl ManualClock {
+    fn new(now: i64) -> Arc<Self> {
+        Arc::new(Self(AtomicI64::new(now)))
+    }
+
+    fn advance(&self, duration: i64) {
+        self.0.fetch_add(duration, Ordering::SeqCst);
+    }
+}
+
+impl Clock for ManualClock {
+    fn now_ms(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+fn append_claude_step(options: &crate::Options, suffix: &str) {
+    let path = options
+        .claude_home
+        .join("projects/-work-proj/native-cl-00.jsonl");
+    let record = serde_json::json!({
+        "type":"assistant", "uuid":format!("assistant-{suffix}"),
+        "sessionId":"native-cl-00", "timestamp":"2026-09-24T00:03:00Z",
+        "message":{"id":format!("message-{suffix}"), "role":"assistant",
+            "model":"claude-sonnet-4-5", "content":[{"type":"text","text":"Synthetic later step"}],
+            "usage":{"input_tokens":100,"output_tokens":25}}
+    });
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{record}"
+    )
+    .unwrap();
+}
+
+fn live_fact_rows(root: &std::path::Path, manifest: &semon_asi::Manifest) -> Vec<String> {
+    let live = semon_asi::read_live_map(root, manifest).unwrap();
+    let mut rows = Vec::new();
+    for file in manifest
+        .files
+        .iter()
+        .filter(|file| file.table.starts_with("fact_"))
+    {
+        let path = root.join("analytics").join(&file.path);
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap()).unwrap();
+        for batch in builder.build().unwrap() {
+            let batch = batch.unwrap();
+            let schema = batch.schema();
+            let (Ok(session), Ok(generation)) =
+                (schema.index_of("session_uid"), schema.index_of("_gen"))
+            else {
+                continue;
+            };
+            let sessions = batch
+                .column(session)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let generations = batch
+                .column(generation)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                if live.get(sessions.value(row)) != Some(&generations.value(row)) {
+                    continue;
+                }
+                let values = (0..batch.num_columns())
+                    .filter(|column| *column != generation)
+                    .map(|column| {
+                        // Timestamps carry a named time zone that arrow cannot
+                        // render without chrono-tz; compare their raw values.
+                        let array: ArrayRef = match batch.column(column).data_type() {
+                            DataType::Timestamp(..) => {
+                                cast(batch.column(column), &DataType::Int64).unwrap()
+                            }
+                            _ => batch.column(column).clone(),
+                        };
+                        array_value_to_string(array.as_ref(), row).unwrap()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|");
+                rows.push(format!("{}|{values}", file.table));
+            }
+        }
+    }
+    rows.sort();
+    rows
+}
+
+#[test]
+fn analytics_writer_publishes_fixture_rows_once_per_debounce_interval() {
+    let root = scratch("analytics-writer-publishes");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let store_root = root.join("analytics-store");
+    let clock = ManualClock::new(0);
+    let handle = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&clock),
+    );
+    for _ in 0..8 {
+        handle.notify();
+    }
+    handle.wait_for_publishes(1);
+    assert_eq!(handle.published(), 1);
+    let first = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_eq!(first.generation, 1);
+    handle.wait_for_idle_wait();
+    let idle_wait = handle.idle_waits();
+    for _ in 0..8 {
+        handle.notify();
+    }
+    handle.wait_for_idle_wait_after(idle_wait);
+    assert_eq!(handle.published(), 1);
+    clock.advance(2_000);
+    handle.notify();
+    handle.wait_for_publishes(2);
+    handle.wait_for_idle_wait();
+    let hold = handle.hold_publish();
+    clock.advance(2_000);
+    handle.notify();
+    handle.wait_for_publish_hold();
+    handle.notify();
+    drop(hold);
+    handle.wait_for_publishes(3);
+    handle.wait_for_idle_wait();
+    assert_eq!(handle.published(), 3);
+    clock.advance(2_000);
+    handle.wake_for_clock();
+    handle.wait_for_publishes(4);
+    let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_eq!(manifest.generation, 4);
+    assert!(manifest.checkpoints.contains_key("fixture-machine"));
+    assert!(
+        !semon_asi::read_live_map(&store_root, &manifest)
+            .unwrap()
+            .is_empty()
+    );
+    handle.stop_and_join();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_restart_resumes_from_the_checkpoint_with_only_the_delta() {
+    let root = scratch("analytics-writer-restart");
+    let (options, rows, slots) = catalog_native_fixture(&root, 2, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let store_root = root.join("analytics-store");
+    let first_clock = ManualClock::new(0);
+    let first = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&first_clock),
+    );
+    first.notify();
+    first.wait_for_publishes(1);
+    let before = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    first.stop_and_join();
+
+    append_claude_step(&options, "after-restart");
+    let (rows, slots) = catalog_fixture_projection(&options);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let second_clock = ManualClock::new(2_000);
+    let second = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&second_clock),
+    );
+    second.notify();
+    second.wait_for_publishes(1);
+    let after = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_ne!(after.checkpoints, before.checkpoints);
+    assert_eq!(after.generation, before.generation + 1);
+    let delta = after
+        .files
+        .iter()
+        .find(|file| file.generation == after.generation && file.table == "fact_session")
+        .unwrap();
+    assert_eq!(delta.rows, 1, "only the changed session is republished");
+    assert_eq!(
+        semon_asi::read_live_map(&store_root, &after).unwrap().len(),
+        2
+    );
+    second.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_refuses_a_broken_existing_index_then_recovers_on_notify() {
+    let root = scratch("analytics-writer-refusal");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+    rusqlite::Connection::open(&index)
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    let backup = root.join("index-before-refusal.sqlite3");
+    std::fs::copy(&index, &backup).unwrap();
+
+    let store_root = root.join("analytics-store");
+    let clock = ManualClock::new(0);
+    let handle = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&clock),
+    );
+    handle.notify();
+    handle.wait_for_publishes(1);
+    handle.wait_for_idle_wait();
+    let before = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+
+    rusqlite::Connection::open(&index)
+        .unwrap()
+        .execute("DELETE FROM meta WHERE key='incarnation'", [])
+        .unwrap();
+    let broken = std::fs::read(&index).unwrap();
+    clock.advance(2_000);
+    handle.notify();
+    handle.wait_for_input_attempts(2);
+    handle.wait_for_refusal();
+    assert_eq!(std::fs::read(&index).unwrap(), broken);
+    assert_eq!(
+        semon_asi::read_manifest(&store_root)
+            .unwrap()
+            .unwrap()
+            .checkpoints,
+        before.checkpoints
+    );
+
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", index.display()));
+    }
+    std::fs::copy(&backup, &index).unwrap();
+    clock.advance(2_000);
+    handle.notify();
+    handle.wait_for_publishes(2);
+    handle.wait_for_input_attempts(3);
+    assert_eq!(handle.input_attempts(), 3);
+    assert!(
+        semon_asi::read_manifest(&store_root)
+            .unwrap()
+            .unwrap()
+            .generation
+            > before.generation
+    );
+    handle.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_retires_during_sustained_publication() {
+    let root = scratch("analytics-writer-retirement");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let store_root = root.join("analytics-store");
+    let clock = ManualClock::new(0);
+    let mut config = AnalyticsWriterConfig::new("fixture-machine", &index, &store_root);
+    config.interval = Duration::from_secs(60);
+    let handle = start_with_clock(config, Arc::clone(&clock));
+    for published in 1..=11 {
+        handle.notify();
+        handle.wait_for_publishes(published);
+        handle.wait_for_idle_wait();
+        if published != 11 {
+            clock.advance(60_000);
+        }
+    }
+    handle.wait_for_retire_attempts(1);
+    handle.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_retires_while_a_publication_waits_for_a_one_hour_interval() {
+    let root = scratch("analytics-writer-hourly");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let clock = ManualClock::new(0);
+    let mut config =
+        AnalyticsWriterConfig::new("fixture-machine", &index, root.join("analytics-store"));
+    config.interval = Duration::from_secs(3_600);
+    let handle = start_with_clock(config, Arc::clone(&clock));
+    handle.notify();
+    handle.wait_for_publishes(1);
+    handle.wait_for_idle_wait();
+    clock.advance(1_000);
+    let previous_wait = handle.idle_waits();
+    handle.notify();
+    handle.wait_for_idle_wait_after(previous_wait);
+    clock.advance(599_000);
+    handle.wake_for_clock();
+    handle.wait_for_retire_attempts(1);
+    handle.wait_for_idle_wait();
+    assert_eq!(handle.published(), 1);
+    clock.advance(3_000_000);
+    handle.wake_for_clock();
+    handle.wait_for_publishes(2);
+    handle.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_second_failed_reload_latches_after_one_notification() {
+    let root = scratch("analytics-writer-reload-refusal");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let store_root = root.join("analytics-store");
+    let clock = ManualClock::new(0);
+    let handle = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&clock),
+    );
+    handle.notify();
+    handle.wait_for_publishes(1);
+    handle.wait_for_idle_wait();
+    let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    let dimension = manifest
+        .files
+        .iter()
+        .find(|file| file.table == "dim_session")
+        .unwrap();
+    std::fs::write(
+        store_root.join("analytics").join(&dimension.path),
+        b"corrupt synthetic parquet",
+    )
+    .unwrap();
+    clock.advance(2_000);
+    handle.notify();
+    // Publication refuses on the corrupt dimension, retaining Reload(Publish).
+    handle.wait_for_store_refusal(1);
+    let manifest_path = store_root.join("analytics/manifest.json");
+    std::fs::write(&manifest_path, b"corrupt synthetic manifest").unwrap();
+    handle.notify();
+    handle.wait_for_store_refusal(2);
+    // The first failed Reload consumes this notification. One new notification
+    // permits exactly one more Reload, whose refusal must latch again.
+    handle.notify();
+    handle.wait_for_store_refusal(3);
+    assert_eq!(handle.input_attempts(), 2);
+    assert_eq!(
+        std::fs::read(&manifest_path).unwrap(),
+        b"corrupt synthetic manifest"
+    );
+    handle.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_retries_after_the_index_cannot_be_opened() {
+    let root = scratch("analytics-writer-cannot-open");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    // A WAL index never blocks a reader, so make the operational failure by
+    // moving the index away: opening it read-only then reports CANTOPEN.
+    let moved = index.with_extension("moved");
+    std::fs::rename(&index, &moved).unwrap();
+    let store_root = root.join("analytics-store");
+    let clock = ManualClock::new(0);
+    let handle = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&clock),
+    );
+    handle.notify();
+    handle.wait_for_input_attempts(1);
+    handle.wait_for_status(crate::AnalyticsWriterStatus::Retrying { attempt: 1 });
+    std::fs::rename(&moved, &index).unwrap();
+    clock.advance(2_000);
+    handle.wake_for_clock();
+    handle.wait_for_publishes(1);
+    handle.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_incremental_live_rows_match_a_final_full_refresh() {
+    let root = scratch("analytics-writer-incremental");
+    let (options, rows, slots) = catalog_native_fixture(&root, 2, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let incremental_root = root.join("incremental-store");
+    let clock = ManualClock::new(0);
+    let incremental = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &incremental_root),
+        Arc::clone(&clock),
+    );
+    incremental.notify();
+    incremental.wait_for_publishes(1);
+    incremental.wait_for_idle_wait();
+
+    append_claude_step(&options, "incremental");
+    let (rows, slots) = catalog_fixture_projection(&options);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+    clock.advance(2_000);
+    incremental.notify();
+    incremental.wait_for_publishes(2);
+    let incremental_manifest = semon_asi::read_manifest(&incremental_root)
+        .unwrap()
+        .unwrap();
+    let incremental_rows = live_fact_rows(&incremental_root, &incremental_manifest);
+    incremental.stop_and_join();
+
+    let full_root = root.join("full-store");
+    let full = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &full_root),
+        ManualClock::new(0),
+    );
+    full.notify();
+    full.wait_for_publishes(1);
+    let full_manifest = semon_asi::read_manifest(&full_root).unwrap().unwrap();
+    let full_rows = live_fact_rows(&full_root, &full_manifest);
+    assert_eq!(incremental_rows, full_rows);
+    full.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
     page(

@@ -1910,7 +1910,10 @@ dependencies = [
 name = "semon-cli"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "libc",
+ "parquet",
+ "rusqlite",
  "semon-asi",
  "semon-push",
  "semon-sessions",
@@ -1938,7 +1941,10 @@ dependencies = [
 name = "semon-sessions"
 version = "0.1.0"
 dependencies = [
+ "arrow",
+ "getrandom 0.3.4",
  "libc",
+ "parquet",
  "reqwest",
  "rusqlite",
  "semon-asi",
