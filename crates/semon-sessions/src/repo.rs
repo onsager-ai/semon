@@ -23,6 +23,16 @@ const GIT_FILE_MAX: u64 = 4096;
 /// The most of a Git `config` that is read for the origin.
 const CONFIG_MAX: u64 = 64 * 1024;
 
+/// Git refuses an include chain deeper than ten files.
+const CONFIG_INCLUDE_MAX: usize = 10;
+
+/// A single identity lookup reads only a bounded include graph.
+const CONFIG_READ_MAX: usize = 32;
+const CONFIG_TOTAL_MAX: u64 = 256 * 1024;
+
+/// Conditional config matching must not turn an untrusted pattern into unbounded work.
+const WILDMATCH_MAX_STEPS: usize = 1_000;
+
 /// The repository `cwd` is in, by name: the directory holding the nearest
 /// `.git` below `home`. When that `.git` is a linked worktree's file, the
 /// directory of the main checkout it names (or, for a bare repository, the
@@ -68,8 +78,8 @@ pub(crate) fn repo_id(cwd: &str, home: Option<&Path>) -> Option<RepoId> {
         let Ok(metadata) = fs::symlink_metadata(&git) else {
             continue;
         };
-        let common = if metadata.is_dir() {
-            git
+        let (git_dir, common) = if metadata.is_dir() {
+            (git.clone(), git)
         } else if metadata.is_file() {
             let pointer = read_metadata(&git, GIT_FILE_MAX)?;
             let target = pointer
@@ -80,19 +90,534 @@ pub(crate) fn repo_id(cwd: &str, home: Option<&Path>) -> Option<RepoId> {
             match read_metadata(&target.join("commondir"), GIT_FILE_MAX)
                 .and_then(|value| normalize(&target.join(value.trim())))
             {
-                Some(common) => common,
+                Some(common) => (target, common),
                 // A submodule's or `--separate-git-dir` repository's own gitdir.
-                None => target,
+                None => (target.clone(), target),
             }
         } else {
             return None;
         };
-        let origin = read_metadata(&common.join("config"), CONFIG_MAX)
-            .and_then(|config| origin_url(&config))
+        let origin = effective_origin(&common, &git_dir)
             .map_or(RepoId::Unknown, |url| classify_origin(&url));
         return Some(origin);
     }
     None
+}
+
+/// The effective first fetch URL from the repository-only Git configuration.
+/// Includes are processed at their textual position; global and system config
+/// are intentionally outside this local identity observation.
+fn effective_origin(common: &Path, git_dir: &Path) -> Option<String> {
+    let mut state = ConfigState::default();
+    let mut stack = Vec::new();
+    let mut budget = ConfigBudget::default();
+    read_config(
+        &common.join("config"),
+        git_dir,
+        0,
+        &mut stack,
+        &mut budget,
+        &mut state,
+    );
+    if !state.resource_limited && !state.origin_seen && state.worktree_config {
+        let path = if git_dir == common {
+            common.join("config.worktree")
+        } else {
+            git_dir.join("config.worktree")
+        };
+        read_config(&path, git_dir, 0, &mut stack, &mut budget, &mut state);
+    }
+    (!state.resource_limited).then_some(state.origin).flatten()
+}
+
+#[derive(Default)]
+struct ConfigState {
+    origin: Option<String>,
+    origin_seen: bool,
+    resource_limited: bool,
+    worktree_config: bool,
+}
+
+#[derive(Default)]
+struct ConfigBudget {
+    files: usize,
+    bytes: u64,
+    stopped: bool,
+}
+
+#[derive(Default)]
+enum ConfigSection {
+    #[default]
+    Other,
+    Origin,
+    Include(Option<String>),
+    Extensions,
+}
+
+/// Read one config and its eligible includes. An unreadable include, a loop, or
+/// a chain beyond Git's limit is ignored rather than changing the identity.
+fn read_config(
+    path: &Path,
+    git_dir: &Path,
+    depth: usize,
+    stack: &mut Vec<PathBuf>,
+    budget: &mut ConfigBudget,
+    state: &mut ConfigState,
+) {
+    if state.origin_seen || state.resource_limited || budget.stopped {
+        return;
+    }
+    if depth > CONFIG_INCLUDE_MAX || stack.iter().any(|seen| seen == path) {
+        state.resource_limited = true;
+        return;
+    }
+    if budget.files == CONFIG_READ_MAX {
+        budget.stopped = true;
+        state.resource_limited = true;
+        return;
+    }
+    let Some(bytes) = metadata_len(path) else {
+        return;
+    };
+    let Some(total) = budget.bytes.checked_add(bytes) else {
+        budget.stopped = true;
+        state.resource_limited = true;
+        return;
+    };
+    if bytes > CONFIG_MAX {
+        state.resource_limited = true;
+        return;
+    }
+    if total > CONFIG_TOTAL_MAX {
+        budget.stopped = true;
+        state.resource_limited = true;
+        return;
+    }
+    let Some(config) = read_metadata(path, CONFIG_MAX) else {
+        return;
+    };
+    budget.files += 1;
+    budget.bytes = total;
+    stack.push(path.to_owned());
+    let mut section = ConfigSection::Other;
+    for line in logical_lines(config.strip_prefix('\u{feff}').unwrap_or(&config)) {
+        let mut body = line.trim_start();
+        if let Some(header) = body.strip_prefix('[')
+            && let Some((next, rest)) = config_section(header)
+        {
+            section = next;
+            body = rest.trim_start();
+        }
+        let Some((key, raw_value)) = body.split_once('=') else {
+            if matches!(&section, ConfigSection::Extensions)
+                && body.trim().eq_ignore_ascii_case("worktreeconfig")
+            {
+                state.worktree_config = true;
+            }
+            continue;
+        };
+        let key = key.trim();
+        let Some(value) = config_value(raw_value) else {
+            continue;
+        };
+        match &section {
+            ConfigSection::Origin if key.eq_ignore_ascii_case("url") => {
+                // `git remote get-url origin` takes the first expanded fetch URL.
+                state.origin_seen = true;
+                state.origin = (!value.is_empty()).then_some(value);
+                break;
+            }
+            ConfigSection::Include(condition) if key.eq_ignore_ascii_case("path") => {
+                match include_matches(condition.as_deref(), git_dir, path) {
+                    MatchResult::NoMatch => continue,
+                    MatchResult::Exhausted => {
+                        state.resource_limited = true;
+                        break;
+                    }
+                    MatchResult::Match => {}
+                }
+                if let Some(include) = include_path(path, &value) {
+                    read_config(&include, git_dir, depth + 1, stack, budget, state);
+                    if state.origin_seen || state.resource_limited {
+                        break;
+                    }
+                }
+            }
+            ConfigSection::Extensions if key.eq_ignore_ascii_case("worktreeconfig") => {
+                state.worktree_config = git_bool(&value);
+            }
+            _ => {}
+        }
+    }
+    stack.pop();
+}
+
+fn git_bool(value: &str) -> bool {
+    let value = value.trim();
+    match value.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" => true,
+        "false" | "no" | "off" | "" => false,
+        value => parse_git_integer(value).is_some_and(|value| value != 0),
+    }
+}
+
+fn parse_git_integer(value: &str) -> Option<i32> {
+    let (digits, multiplier) = match value.as_bytes().last()?.to_ascii_lowercase() {
+        b'k' => (&value[..value.len() - 1], 1_i64 << 10),
+        b'm' => (&value[..value.len() - 1], 1_i64 << 20),
+        b'g' => (&value[..value.len() - 1], 1_i64 << 30),
+        _ => (value, 1),
+    };
+    let (sign, digits) = match digits.as_bytes().first() {
+        Some(b'+') => (1_i64, &digits[1..]),
+        Some(b'-') => (-1_i64, &digits[1..]),
+        _ => (1, digits),
+    };
+    let (radix, digits) = if let Some(digits) = digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        (16, digits)
+    } else if digits.starts_with('0') && digits.len() > 1 {
+        (8, digits)
+    } else {
+        (10, digits)
+    };
+    let value = i64::from_str_radix(digits, radix).ok()?;
+    let value = value.checked_mul(sign)?.checked_mul(multiplier)?;
+    i32::try_from(value).ok()
+}
+
+/// Parse the section header after its opening bracket and return the section
+/// plus text following the closing bracket, which may hold an assignment.
+fn config_section(header: &str) -> Option<(ConfigSection, &str)> {
+    let name_end = header.find(|c: char| c.is_whitespace() || c == ']')?;
+    let (name, tail) = header.split_at(name_end);
+    if let Some(rest) = tail.strip_prefix(']') {
+        return Some((
+            if name.eq_ignore_ascii_case("include") {
+                ConfigSection::Include(None)
+            } else if name.eq_ignore_ascii_case("extensions") {
+                ConfigSection::Extensions
+            } else if name.split_once('.').is_some_and(|(section, subsection)| {
+                section.eq_ignore_ascii_case("remote") && subsection.eq_ignore_ascii_case("origin")
+            }) {
+                ConfigSection::Origin
+            } else {
+                ConfigSection::Other
+            },
+            rest,
+        ));
+    }
+    let mut chars = tail.trim_start().strip_prefix('"')?.chars();
+    let mut subsection = String::new();
+    loop {
+        match chars.next()? {
+            '"' => break,
+            '\\' => subsection.push(chars.next()?),
+            other => subsection.push(other),
+        }
+    }
+    let rest = chars.as_str().trim_start().strip_prefix(']')?;
+    let section = if name.eq_ignore_ascii_case("remote") && subsection == "origin" {
+        ConfigSection::Origin
+    } else if name.eq_ignore_ascii_case("includeif") {
+        ConfigSection::Include(Some(subsection))
+    } else {
+        ConfigSection::Other
+    };
+    Some((section, rest))
+}
+
+fn include_path(including: &Path, value: &str) -> Option<PathBuf> {
+    let path = if let Some(rest) = value.strip_prefix("~/") {
+        PathBuf::from(std::env::var_os("HOME")?).join(rest)
+    } else {
+        let value = Path::new(value);
+        if value.is_absolute() {
+            value.to_owned()
+        } else {
+            including.parent()?.join(value)
+        }
+    };
+    normalize(&path)
+}
+
+fn include_matches(condition: Option<&str>, git_dir: &Path, including: &Path) -> MatchResult {
+    let Some(condition) = condition else {
+        return MatchResult::Match;
+    };
+    let Some((kind, pattern)) = condition.split_once(':') else {
+        return MatchResult::NoMatch;
+    };
+    match kind.to_ascii_lowercase().as_str() {
+        "gitdir" | "gitdir/i" => {
+            if pattern.is_empty() {
+                return MatchResult::Match;
+            }
+            let insensitive = kind.eq_ignore_ascii_case("gitdir/i");
+            let Some(pattern) = include_pattern(pattern, including) else {
+                return MatchResult::NoMatch;
+            };
+            wildcard_match_result(&pattern, &git_dir.to_string_lossy(), insensitive)
+        }
+        "onbranch" => branch_name(git_dir).map_or(MatchResult::NoMatch, |branch| {
+            wildcard_match_result(&branch_pattern(pattern), &branch, false)
+        }),
+        _ => MatchResult::NoMatch,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum MatchResult {
+    Match,
+    NoMatch,
+    Exhausted,
+}
+
+fn include_pattern(pattern: &str, including: &Path) -> Option<String> {
+    let trailing_slash = pattern.ends_with('/');
+    let pattern = if let Some(rest) = pattern.strip_prefix("~/") {
+        PathBuf::from(std::env::var_os("HOME")?).join(rest)
+    } else if let Some(rest) = pattern.strip_prefix("./") {
+        including.parent()?.join(rest)
+    } else if Path::new(pattern).is_absolute() {
+        PathBuf::from(pattern)
+    } else {
+        return Some(with_trailing_glob(format!("**/{pattern}"), trailing_slash));
+    };
+    let mut pattern = pattern.to_string_lossy().into_owned();
+    if trailing_slash && !pattern.ends_with('/') {
+        pattern.push('/');
+    }
+    Some(with_trailing_glob(pattern, trailing_slash))
+}
+
+fn branch_pattern(pattern: &str) -> String {
+    with_trailing_glob(pattern.to_owned(), pattern.ends_with('/'))
+}
+
+fn with_trailing_glob(mut pattern: String, trailing_slash: bool) -> String {
+    if trailing_slash {
+        pattern.push_str("**");
+    }
+    pattern
+}
+
+fn branch_name(git_dir: &Path) -> Option<String> {
+    let head = read_metadata(&git_dir.join("HEAD"), GIT_FILE_MAX)?;
+    let reference = head.trim().strip_prefix("ref:")?.trim_start();
+    reference
+        .strip_prefix("refs/heads/")
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty())
+        .map(str::to_owned)
+}
+
+/// Git's `wildmatch.c` pathname rules for conditional config patterns. The
+/// bounded state walk fails closed when an adversarial pattern exceeds its work
+/// budget; config conditions never justify unbounded CPU.
+#[cfg(test)]
+fn wildcard_match(pattern: &str, value: &str, insensitive: bool) -> bool {
+    wildcard_match_result(pattern, value, insensitive) == MatchResult::Match
+}
+
+fn wildcard_match_result(pattern: &str, value: &str, insensitive: bool) -> MatchResult {
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let mut pending = vec![(0, 0)];
+    let mut seen = std::collections::BTreeSet::new();
+    let mut steps = 0;
+    while let Some((pattern_index, value_index)) = pending.pop() {
+        steps += 1;
+        if steps > WILDMATCH_MAX_STEPS {
+            return MatchResult::Exhausted;
+        }
+        if !seen.insert((pattern_index, value_index)) {
+            continue;
+        }
+        let Some(&token) = pattern.get(pattern_index) else {
+            if value_index == value.len() {
+                return MatchResult::Match;
+            }
+            continue;
+        };
+        match token {
+            b'\\' => {
+                let Some(&literal) = pattern.get(pattern_index + 1) else {
+                    continue;
+                };
+                if value
+                    .get(value_index)
+                    .is_some_and(|value| byte_eq(*value, literal, insensitive))
+                    && !wildmatch_push(&mut pending, (pattern_index + 2, value_index + 1))
+                {
+                    return MatchResult::Exhausted;
+                }
+            }
+            b'?' => {
+                if value.get(value_index).is_some_and(|value| *value != b'/')
+                    && !wildmatch_push(&mut pending, (pattern_index + 1, value_index + 1))
+                {
+                    return MatchResult::Exhausted;
+                }
+            }
+            b'[' => {
+                if let Some((end, matches)) = bracket_match(
+                    pattern,
+                    pattern_index,
+                    value.get(value_index).copied(),
+                    insensitive,
+                ) && matches
+                    && !wildmatch_push(&mut pending, (end, value_index + 1))
+                {
+                    return MatchResult::Exhausted;
+                }
+            }
+            b'*' => {
+                let run_end = pattern[pattern_index..]
+                    .iter()
+                    .position(|byte| *byte != b'*')
+                    .map_or(pattern.len(), |offset| pattern_index + offset);
+                let prior_is_slash = pattern_index == 0 || pattern[pattern_index - 1] == b'/';
+                let next_is_slash = pattern.get(run_end) == Some(&b'/');
+                let recursive = run_end - pattern_index >= 2 && prior_is_slash && next_is_slash;
+                let terminal_recursive =
+                    run_end - pattern_index >= 2 && prior_is_slash && run_end == pattern.len();
+                let next = if recursive { run_end + 1 } else { run_end };
+                if !wildmatch_push(&mut pending, (next, value_index)) {
+                    return MatchResult::Exhausted;
+                }
+                if recursive {
+                    for (offset, byte) in value[value_index..].iter().enumerate() {
+                        if *byte == b'/'
+                            && !wildmatch_push(&mut pending, (next, value_index + offset + 1))
+                        {
+                            return MatchResult::Exhausted;
+                        }
+                    }
+                } else if terminal_recursive {
+                    return MatchResult::Match;
+                } else {
+                    let end = value[value_index..]
+                        .iter()
+                        .position(|byte| *byte == b'/')
+                        .map_or(value.len(), |offset| value_index + offset);
+                    for offset in 0..end - value_index {
+                        if !wildmatch_push(&mut pending, (next, value_index + offset + 1)) {
+                            return MatchResult::Exhausted;
+                        }
+                    }
+                }
+            }
+            literal => {
+                if value
+                    .get(value_index)
+                    .is_some_and(|value| byte_eq(*value, literal, insensitive))
+                    && !wildmatch_push(&mut pending, (pattern_index + 1, value_index + 1))
+                {
+                    return MatchResult::Exhausted;
+                }
+            }
+        }
+    }
+    MatchResult::NoMatch
+}
+
+fn wildmatch_push(pending: &mut Vec<(usize, usize)>, state: (usize, usize)) -> bool {
+    if pending.len() == WILDMATCH_MAX_STEPS {
+        false
+    } else {
+        pending.push(state);
+        true
+    }
+}
+
+fn byte_eq(left: u8, right: u8, insensitive: bool) -> bool {
+    if insensitive {
+        left.eq_ignore_ascii_case(&right)
+    } else {
+        left == right
+    }
+}
+
+fn bracket_match(
+    pattern: &[u8],
+    start: usize,
+    value: Option<u8>,
+    insensitive: bool,
+) -> Option<(usize, bool)> {
+    let value = value.filter(|value| *value != b'/')?;
+    let mut index = start + 1;
+    let mut negated = false;
+    if matches!(pattern.get(index), Some(b'!') | Some(b'^')) {
+        negated = true;
+        index += 1;
+    }
+    let mut matched = false;
+    let mut first = true;
+    while let Some(&token) = pattern.get(index) {
+        if token == b']' && !first {
+            return Some((index + 1, matched != negated));
+        }
+        first = false;
+        if pattern.get(index..index + 2) == Some(b"[:") {
+            let class_start = index + 2;
+            let class_end = pattern[class_start..]
+                .windows(2)
+                .position(|window| window == b":]")
+                .map(|offset| class_start + offset)?;
+            let class = std::str::from_utf8(&pattern[class_start..class_end]).ok()?;
+            matched |= posix_class(class, value, insensitive)?;
+            index = class_end + 2;
+            continue;
+        }
+        let (begin, after_begin) = bracket_token(pattern, index)?;
+        index = after_begin;
+        if pattern.get(index) == Some(&b'-') && pattern.get(index + 1) != Some(&b']') {
+            let (end, after_end) = bracket_token(pattern, index + 1)?;
+            index = after_end;
+            let (value, begin, end) = if insensitive {
+                (
+                    value.to_ascii_lowercase(),
+                    begin.to_ascii_lowercase(),
+                    end.to_ascii_lowercase(),
+                )
+            } else {
+                (value, begin, end)
+            };
+            matched |= begin <= value && value <= end;
+        } else {
+            matched |= byte_eq(value, begin, insensitive);
+        }
+    }
+    None
+}
+
+fn posix_class(class: &str, value: u8, insensitive: bool) -> Option<bool> {
+    let alphabetic = value.is_ascii_alphabetic();
+    Some(match class {
+        "alnum" => value.is_ascii_alphanumeric(),
+        "alpha" => alphabetic,
+        "blank" => matches!(value, b' ' | b'\t'),
+        "cntrl" => value.is_ascii_control(),
+        "digit" => value.is_ascii_digit(),
+        "graph" => value.is_ascii_graphic(),
+        "lower" => value.is_ascii_lowercase() || insensitive && alphabetic,
+        "print" => value.is_ascii_graphic() || value == b' ',
+        "punct" => value.is_ascii_punctuation(),
+        "space" => value.is_ascii_whitespace(),
+        "upper" => value.is_ascii_uppercase() || insensitive && alphabetic,
+        "xdigit" => value.is_ascii_hexdigit(),
+        _ => return None,
+    })
+}
+
+fn bracket_token(pattern: &[u8], index: usize) -> Option<(u8, usize)> {
+    match pattern.get(index)? {
+        b'\\' => Some((*pattern.get(index + 1)?, index + 2)),
+        value => Some((*value, index + 1)),
+    }
 }
 
 /// The `url` of `[remote "origin"]` (also written `[remote.origin]`) in a Git
@@ -100,6 +625,7 @@ pub(crate) fn repo_id(cwd: &str, home: Option<&Path>) -> Option<RepoId> {
 /// and keys are case-insensitive, a quoted subsection is exact. A header may
 /// be followed by a comment or by an assignment, and a trailing backslash
 /// continues a line.
+#[cfg(test)]
 fn origin_url(config: &str) -> Option<String> {
     let mut origin = false;
     for line in logical_lines(config.strip_prefix('\u{feff}').unwrap_or(config)) {
@@ -162,6 +688,7 @@ fn logical_lines(config: &str) -> Vec<String> {
 
 /// Whether `header` (after the opening bracket) names `remote "origin"` and
 /// what follows its closing bracket. `None` for a malformed header.
+#[cfg(test)]
 fn origin_header(header: &str) -> Option<(bool, &str)> {
     let name_end = header.find(|c: char| c.is_whitespace() || c == ']')?;
     let (name, tail) = header.split_at(name_end);
@@ -370,9 +897,8 @@ fn worktree_owner(dir: &Path, git: &Path, home: Option<&Path>) -> Option<String>
         .map(str::to_owned)
 }
 
-/// Only bounded regular metadata, with no symbolic-link ancestor. Files
-/// named by untrusted pointers must not redirect reads through a symlink.
-fn read_metadata(path: &Path, max: u64) -> Option<String> {
+/// Metadata length for a regular file with no symbolic-link ancestor.
+fn metadata_len(path: &Path) -> Option<u64> {
     if path.ancestors().any(|part| {
         fs::symlink_metadata(part)
             .ok()
@@ -380,6 +906,14 @@ fn read_metadata(path: &Path, max: u64) -> Option<String> {
     }) {
         return None;
     }
+    let metadata = fs::symlink_metadata(path).ok()?;
+    metadata.is_file().then_some(metadata.len())
+}
+
+/// Only bounded regular metadata, with no symbolic-link ancestor. Files
+/// named by untrusted pointers must not redirect reads through a symlink.
+fn read_metadata(path: &Path, max: u64) -> Option<String> {
+    metadata_len(path)?;
     let mut text = String::new();
     crate::events::open_regular(path)?
         .take(max + 1)
@@ -854,6 +1388,422 @@ mod tests {
         assert_eq!(id("work/semon"), Some(RepoId::Unknown), "no origin");
         scratch.dir("elsewhere/plain");
         assert_eq!(id("elsewhere/plain"), None, "not in a repository");
+    }
+
+    #[test]
+    fn repository_origin_uses_includes_and_worktree_config() {
+        let scratch = Scratch::new();
+        semon(&scratch);
+        let id = |relative: &str| repo_id(&scratch.0.join(relative).to_string_lossy(), None);
+        let remote = |host: &str| Some(RepoId::Remote(format!("{host}/team/app")));
+        scratch.file("work/semon/.git/worktrees/x/commondir", "../..\n");
+
+        scratch.file("work/semon/.git/config", "[include]\npath = origin.conf\n");
+        scratch.file(
+            "work/semon/.git/origin.conf",
+            "[remote \"origin\"]\nurl = https://included.test/team/app.git\n",
+        );
+        assert_eq!(id("work/semon"), remote("included.test"));
+        scratch.file(
+            "work/semon/.git/config",
+            "[includeIf \"gitdir:\"]\npath = all.conf\n[remote \"origin\"]\nurl = https://fallback.test/team/app.git\n",
+        );
+        scratch.file(
+            "work/semon/.git/all.conf",
+            "[remote \"origin\"]\nurl = https://all.test/team/app.git\n",
+        );
+        assert_eq!(id("work/semon"), remote("all.test"));
+        scratch.file("work/semon/.git/config", "[include]\npath = origin.conf\n");
+        scratch.file(
+            "work/semon/.git/origin.conf",
+            "[remote \"origin\"]\nurl = https://changed.test/team/app.git\n",
+        );
+        assert_eq!(id("work/semon"), remote("changed.test"));
+
+        let worktree_git = scratch.0.join("work/semon/.git/worktrees/x");
+        scratch.file(
+            "work/semon/.git/config",
+            &format!(
+                "[includeIf \"gitdir:{}\"]\npath = worktree.conf\n[includeIf \"gitdir/i:{}\"]\npath = insensitive.conf\n[remote \"origin\"]\nurl = https://common.test/team/app.git\n",
+                worktree_git.display(),
+                worktree_git.to_string_lossy().to_ascii_uppercase(),
+            ),
+        );
+        scratch.file(
+            "work/semon/.git/worktree.conf",
+            "[remote \"origin\"]\nurl = https://linked.test/team/app.git\n",
+        );
+        scratch.file(
+            "work/semon/.git/insensitive.conf",
+            "[remote \"origin\"]\nurl = https://insensitive.test/team/app.git\n",
+        );
+        assert_eq!(id("work/semon-wt-x"), remote("linked.test"));
+        assert_eq!(id("work/semon"), remote("common.test"));
+
+        scratch.file("work/semon/.git/config", "[extensions]\nworktreeConfig\n");
+        scratch.file(
+            "work/semon/.git/worktrees/x/config.worktree",
+            "[remote \"origin\"]\nurl = https://worktree.test/team/app.git\n",
+        );
+        assert_eq!(id("work/semon-wt-x"), remote("worktree.test"));
+        assert_eq!(id("work/semon"), Some(RepoId::Unknown));
+        scratch.file(
+            "work/semon/.git/config",
+            "[remote \"origin\"]\nurl = https://common.test/team/app.git\n",
+        );
+        assert_eq!(id("work/semon-wt-x"), remote("common.test"));
+    }
+
+    #[test]
+    fn worktree_config_accepts_git_booleans() {
+        let scratch = Scratch::new();
+        semon(&scratch);
+        scratch.file("work/semon/.git/worktrees/x/commondir", "../..\n");
+        scratch.file(
+            "work/semon/.git/worktrees/x/config.worktree",
+            "[remote \"origin\"]\nurl = https://worktree.test/team/app.git\n",
+        );
+        let id = || repo_id(&scratch.0.join("work/semon-wt-x").to_string_lossy(), None);
+        for value in ["2", "-1", "01", "1k", "1m", "1g", "0x1", " 1"] {
+            scratch.file(
+                "work/semon/.git/config",
+                &format!("[extensions]\nworktreeConfig = {value}\n"),
+            );
+            assert_eq!(id(), Some(RepoId::Remote("worktree.test/team/app".into())));
+        }
+        scratch.file(
+            "work/semon/.git/config",
+            "[extensions]\nworktreeConfig = 1\nworktreeConfig = 0\n",
+        );
+        assert_eq!(id(), Some(RepoId::Unknown));
+        for value in ["08", "2147483648"] {
+            scratch.file(
+                "work/semon/.git/config",
+                &format!("[extensions]\nworktreeConfig = {value}\n"),
+            );
+            assert_eq!(id(), Some(RepoId::Unknown));
+        }
+    }
+
+    #[test]
+    fn malformed_config_text_and_missing_includes_are_skipped() {
+        let scratch = Scratch::new();
+        semon(&scratch);
+        let id = || repo_id(&scratch.0.join("work/semon").to_string_lossy(), None);
+        scratch.file(
+            "work/semon/.git/config",
+            "# example = \"unterminated\n; example = \\q\n[core] # example = \"unterminated\n[include]\npath = missing.conf\n[remote \"origin\"]\nurl = https://valid.test/team/app.git\n",
+        );
+        assert_eq!(id(), Some(RepoId::Remote("valid.test/team/app".into())));
+
+        scratch.file(
+            "work/semon/.git/config",
+            "[include]\npath = oversized.conf\n[remote \"origin\"]\nurl = https://later.test/team/app.git\n",
+        );
+        scratch.file(
+            "work/semon/.git/oversized.conf",
+            &"x".repeat(CONFIG_MAX as usize + 1),
+        );
+        assert_eq!(id(), Some(RepoId::Unknown));
+    }
+
+    #[test]
+    fn repository_origin_skips_include_cycles_and_deep_chains() {
+        let scratch = Scratch::new();
+        semon(&scratch);
+        let id = |relative: &str| repo_id(&scratch.0.join(relative).to_string_lossy(), None);
+        scratch.file(
+            "work/semon/.git/config",
+            "[include]\npath = a.conf\n[remote \"origin\"]\nurl = https://base.test/team/app.git\n",
+        );
+        scratch.file(
+            "work/semon/.git/a.conf",
+            "[include]\npath = b.conf\n[remote \"origin\"]\nurl = https://a.test/team/app.git\n",
+        );
+        scratch.file(
+            "work/semon/.git/b.conf",
+            "[include]\npath = a.conf\n[remote \"origin\"]\nurl = https://b.test/team/app.git\n",
+        );
+        assert_eq!(id("work/semon"), Some(RepoId::Unknown));
+
+        for index in 0..=CONFIG_INCLUDE_MAX {
+            let next = index + 1;
+            scratch.file(
+                &format!("work/semon/.git/{index}.conf"),
+                &format!("[include]\npath = {next}.conf\n"),
+            );
+        }
+        scratch.file(
+            "work/semon/.git/config",
+            "[include]\npath = 0.conf\n[remote \"origin\"]\nurl = https://base.test/team/app.git\n",
+        );
+        scratch.file(
+            &format!("work/semon/.git/{}.conf", CONFIG_INCLUDE_MAX + 1),
+            "[remote \"origin\"]\nurl = https://too-deep.test/team/app.git\n",
+        );
+        assert_eq!(id("work/semon"), Some(RepoId::Unknown));
+        scratch.file(
+            "work/semon/.git/config",
+            "[broken\n[remote \"origin\"]\nurl = https://base.test/team/app.git\n",
+        );
+        assert_eq!(
+            id("work/semon"),
+            Some(RepoId::Remote("base.test/team/app".into()))
+        );
+        scratch.file(
+            "work/semon/.git/config",
+            "[remote \"origin\"]\nurl = \"unterminated\n[remote \"origin\"]\nurl = https://base.test/team/app.git\n",
+        );
+        assert_eq!(
+            id("work/semon"),
+            Some(RepoId::Remote("base.test/team/app".into()))
+        );
+    }
+
+    #[test]
+    fn onbranch_include_reads_head() {
+        let scratch = Scratch::new();
+        semon(&scratch);
+        scratch.file(
+            "work/semon/.git/config",
+            "[includeIf \"onbranch:feature/*\"]\npath = branch.conf\n",
+        );
+        scratch.file(
+            "work/semon/.git/HEAD",
+            "ref:   refs/heads/feature/origin  \n",
+        );
+        scratch.file(
+            "work/semon/.git/branch.conf",
+            "[remote \"origin\"]\nurl = https://branch.test/team/app.git\n",
+        );
+        assert_eq!(
+            repo_id(&scratch.0.join("work/semon").to_string_lossy(), None),
+            Some(RepoId::Remote("branch.test/team/app".into()))
+        );
+    }
+
+    #[test]
+    fn conditional_include_patterns_preserve_trailing_slashes_and_components() {
+        let scratch = Scratch::new();
+        semon(&scratch);
+        let repo = scratch.0.join("work/semon");
+        scratch.file(
+            "work/semon/.git/config",
+            &format!(
+                "[includeIf \"gitdir:{}/\"]\npath = trailing.conf\n[includeIf \"gitdir:work/*\"]\npath = crosses-component.conf\n",
+                repo.display()
+            ),
+        );
+        scratch.file(
+            "work/semon/.git/trailing.conf",
+            "[remote \"origin\"]\nurl = https://trailing.test/team/app.git\n",
+        );
+        scratch.file(
+            "work/semon/.git/crosses-component.conf",
+            "[remote \"origin\"]\nurl = https://crossed.test/team/app.git\n",
+        );
+        assert_eq!(
+            repo_id(&repo.to_string_lossy(), None),
+            Some(RepoId::Remote("trailing.test/team/app".into()))
+        );
+        assert!(!wildcard_match("**/work/*", "/tmp/work/child/.git", false));
+        assert!(!wildcard_match("work/*", "/tmp/work/child/.git", false));
+        assert!(wildcard_match(
+            "/repos/[[:digit:]]/.git",
+            "/repos/7/.git",
+            false
+        ));
+        assert!(!wildcard_match(
+            "/tmp/project/x/../.git",
+            "/tmp/project/.git",
+            false
+        ));
+
+        scratch.file(
+            "work/semon/.git/config",
+            "[includeIf \"onbranch:feature/\"]\npath = branch.conf\n",
+        );
+        scratch.file(
+            "work/semon/.git/HEAD",
+            "ref: refs/heads/feature/deep/name\n",
+        );
+        scratch.file(
+            "work/semon/.git/branch.conf",
+            "[remote \"origin\"]\nurl = https://branch.test/team/app.git\n",
+        );
+        assert_eq!(
+            repo_id(&repo.to_string_lossy(), None),
+            Some(RepoId::Remote("branch.test/team/app".into()))
+        );
+    }
+
+    #[test]
+    fn wildmatch_follows_git_pathname_rules_with_a_work_budget() {
+        assert!(wildcard_match("**/.git", "/repos/a/.git", false));
+        assert!(wildcard_match("/repos/**/.git", "/repos/a/b/.git", false));
+        assert!(wildcard_match("/repos/**", "/repos/a/b/.git", false));
+        assert!(wildcard_match(
+            "/repos/**foo/.git",
+            "/repos/foo/.git",
+            false
+        ));
+        assert!(!wildcard_match(
+            "/repos/**foo/.git",
+            "/repos/a/bfoo/.git",
+            false
+        ));
+        assert!(wildcard_match(
+            "/repos/project[0-9]/.git",
+            "/repos/project7/.git",
+            false
+        ));
+        assert!(!wildcard_match(
+            "/repos/project[0-9]/.git",
+            "/repos/projectx/.git",
+            false
+        ));
+        assert!(wildcard_match("[!x]", "a", false));
+        assert!(wildcard_match("[^x]", "a", false));
+        assert!(wildcard_match("[]]", "]", false));
+        assert!(wildcard_match("a\\?", "a?", false));
+        assert!(wildcard_match("[[:digit:]]", "7", false));
+        assert!(wildcard_match("[[:alpha:]]", "z", false));
+        assert!(wildcard_match("[[:alnum:]]", "7", false));
+        assert!(wildcard_match("[[:lower:]]", "z", false));
+        assert!(wildcard_match("[[:upper:]]", "Z", false));
+        assert!(wildcard_match("[[:space:]]", " ", false));
+        assert!(wildcard_match("[[:punct:]]", "!", false));
+        assert!(wildcard_match("[[:xdigit:]]", "f", false));
+        assert!(wildcard_match("[[:blank:]]", "\t", false));
+        assert!(wildcard_match("[[:cntrl:]]", "\u{7f}", false));
+        assert!(wildcard_match("[[:graph:]]", "!", false));
+        assert!(wildcard_match("[[:print:]]", " ", false));
+        assert!(wildcard_match("[[:upper:]]", "a", true));
+        assert!(wildcard_match("[a-z]", "A", true));
+        assert!(!wildcard_match("[[:unknown:]]", "x", false));
+        assert!(!wildcard_match("[abc", "a", false));
+
+        let pattern = "*a".repeat(2_000) + "b";
+        assert!(!wildcard_match(&pattern, &"a".repeat(2_000), false));
+    }
+
+    #[test]
+    fn include_if_matcher_budget_refuses_identity() {
+        let scratch = Scratch::new();
+        let name = "a".repeat(64) + "b";
+        scratch.dir(&name);
+        scratch.file(
+            &format!("{name}/.git/config"),
+            &format!(
+                "[includeIf \"gitdir:*{}\"]\npath = ignored.conf\n[remote \"origin\"]\nurl = https://later.test/team/app.git\n",
+                "a".repeat(64) + "b/.git"
+            ),
+        );
+        let pattern = format!("**/*{}", "a".repeat(64) + "b/.git");
+        let git_dir = scratch.0.join(&name).join(".git");
+        assert_eq!(
+            wildcard_match_result(&pattern, &git_dir.to_string_lossy(), false),
+            MatchResult::Exhausted
+        );
+        assert_eq!(
+            repo_id(&scratch.0.join(&name).to_string_lossy(), None),
+            Some(RepoId::Unknown)
+        );
+    }
+
+    #[test]
+    fn expanded_config_uses_the_first_origin_url() {
+        let scratch = Scratch::new();
+        semon(&scratch);
+        let id = || repo_id(&scratch.0.join("work/semon").to_string_lossy(), None);
+        scratch.file(
+            "work/semon/.git/config",
+            "[include]\npath = a.conf\n[remote \"origin\"]\nurl = https://local.test/team/app.git\n[include]\npath = a.conf\n",
+        );
+        scratch.file(
+            "work/semon/.git/a.conf",
+            "[remote \"origin\"]\nurl = https://included.test/team/app.git\n",
+        );
+        assert_eq!(id(), Some(RepoId::Remote("included.test/team/app".into())));
+        scratch.file(
+            "work/semon/.git/config",
+            "[remote \"origin\"]\nurl = https://local.test/team/app.git\n[include]\npath = a.conf\n",
+        );
+        assert_eq!(id(), Some(RepoId::Remote("local.test/team/app".into())));
+        scratch.file(
+            "work/semon/.git/config",
+            "[remote \"origin\"]\nurl =\n[include]\npath = a.conf\n",
+        );
+        assert_eq!(id(), Some(RepoId::Unknown));
+    }
+
+    #[test]
+    fn include_read_budget_skips_excess_siblings_and_bytes() {
+        let scratch = Scratch::new();
+        semon(&scratch);
+        let includes = (0..=CONFIG_READ_MAX)
+            .map(|index| format!("[include]\npath = {index}.conf\n"))
+            .chain(std::iter::once(
+                "[remote \"origin\"]\nurl = https://later.test/team/app.git\n".to_owned(),
+            ))
+            .collect::<String>();
+        scratch.file("work/semon/.git/config", &includes);
+        for index in 0..=CONFIG_READ_MAX {
+            scratch.file(
+                &format!("work/semon/.git/{index}.conf"),
+                "[core]\nbare = false\n",
+            );
+        }
+        assert_eq!(
+            repo_id(&scratch.0.join("work/semon").to_string_lossy(), None),
+            Some(RepoId::Unknown)
+        );
+        let git_dir = scratch.0.join("work/semon/.git");
+        let mut state = ConfigState::default();
+        let mut stack = Vec::new();
+        let mut budget = ConfigBudget::default();
+        read_config(
+            &git_dir.join("config"),
+            &git_dir,
+            0,
+            &mut stack,
+            &mut budget,
+            &mut state,
+        );
+        assert_eq!(budget.files, CONFIG_READ_MAX);
+        assert!(budget.stopped);
+
+        let includes = (0..=4)
+            .map(|index| format!("[include]\npath = bytes-{index}.conf\n"))
+            .collect::<String>();
+        scratch.file("work/semon/.git/config", &includes);
+        for index in 0..4 {
+            scratch.file(
+                &format!("work/semon/.git/bytes-{index}.conf"),
+                &format!("# {}\n", "x".repeat((CONFIG_MAX - 4096) as usize - 3)),
+            );
+        }
+        scratch.file(
+            "work/semon/.git/bytes-4.conf",
+            &format!("# {}\n", "x".repeat(CONFIG_MAX as usize - 3)),
+        );
+        assert_eq!(
+            repo_id(&scratch.0.join("work/semon").to_string_lossy(), None),
+            Some(RepoId::Unknown)
+        );
+        let mut state = ConfigState::default();
+        let mut stack = Vec::new();
+        let mut budget = ConfigBudget::default();
+        read_config(
+            &git_dir.join("config"),
+            &git_dir,
+            0,
+            &mut stack,
+            &mut budget,
+            &mut state,
+        );
+        assert_eq!(budget.files, 5);
+        assert!(budget.stopped);
     }
 
     #[test]
