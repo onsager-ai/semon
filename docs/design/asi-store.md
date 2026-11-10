@@ -226,11 +226,15 @@ tables.
   becomes the authoritative producer store's single writer: push, Viewer, MCP,
   or receive for an explicitly transferred replica namespace. Other processes only
   read. Imported receiver heads are admitted publications, not locally rebuilt indexes.
-- **Cycle.** At most every 2 s, the writer reads the index change log and
-  recomputes every touched session **whole**. It doesn't patch tails: a
-  following step can change an earlier step's duration, and a late record can
-  change older rows. Per-cycle work is proportional to the touched sessions'
-  size; CI measures the cost without assuming a latency for large sessions.
+- **Cycle.** The caller schedules discovery at a 2 s cadence and chooses an
+  input budget. `publish_cycle` publishes one bounded chunk as one `Update` and
+  generation, then returns its generation and completion flag. The caller may
+  drain further chunks immediately, yield between them, or stop and resume at
+  the next tick; 2 s is neither a transaction deadline nor a promise to finish a
+  cold inventory in one cycle. The writer service is a separate delivery slice.
+  Recompute touched sessions **whole**: a following step can change an earlier
+  step's duration, and a late record can change older rows. No session is split
+  to meet a budget; CI measures the cost of the exceptional oversize session.
   - It writes one new file per table, `analytics/{table}/g{generation}.parquet`,
     holding the full rows of those sessions with a `_gen` column. Dimensions
     are rewritten whole, as `analytics/dim_x/g{generation}.parquet`.
@@ -242,8 +246,8 @@ tables.
     dropped, as a typed Parquet file `analytics/live/g{generation}.parquet`, so the
     manifest stays small at any number of sessions.
   - It fsyncs those files, then writes `manifest.json`: the generation, file
-    lists with their compaction level, versions, each namespace's incarnation
-    and `seq` checkpoint, the durable revision checkpoint, and the live-map
+    lists with their compaction level, versions, each namespace's opaque
+    resumable input checkpoint, the durable revision checkpoint, and the live-map
     file. It fsyncs the manifest, renames it into place, and fsyncs the
     directory. A crash leaves the previous generation.
 - **Reading.** Each fact view keeps only live rows:
@@ -272,11 +276,13 @@ tables.
   must not replace a complete generation with a fragment. Re-derive at the origin
   when raw returns. A format mismatch refuses exactly; preserve or export frozen
   facts and custody, with no automatic reset or multi-version exception.
-- **Namespace reconciliation.** A `ReplaceNamespace` batch is a complete
-  inventory for its namespace. Every already-live session UID with that exact
-  encoded namespace component followed by `/` that the batch does not mention
-  is marked `source_missing`, retaining its rows and recorded versions; other
-  namespaces are untouched. A later `SourceRestored` clears the marker.
+- **Namespace reconciliation.** Only the final inventory chunk carries
+  `ReplaceNamespace { session_uids }`. This set contains the complete current
+  namespace inventory, independently of the sessions admitted in that chunk.
+  Every already-live session UID with that exact encoded namespace component
+  followed by `/` absent from the set is marked `source_missing`, retaining its
+  rows and recorded versions; other namespaces are untouched. Partial inventory
+  chunks never infer absence. A later `SourceRestored` clears the marker.
 - **Federated publication.** #555's immutable objects, `expected_parent` and
   namespace claim epochs publish complete admitted heads. Receiver imports carry
   per-origin heads and source, activity and transcript generations separately;
@@ -291,6 +297,76 @@ tables.
   generation reuses its complete activity; a changed generation clears the
   missing state only after a complete activity publication contains every
   previously witnessed identity and stores the full source vector.
+
+
+### Resumable admitted input
+
+`AnalyticsInput::read_admitted(checkpoint, budget)` returns one `AdmittedBatch`:
+namespace, opaque next checkpoint, ordered whole-session changes, reconciliation,
+and `complete`. `InputBudget` limits journal entries examined (and therefore
+sessions) and admitted steps; defaults are 64 entries and 8,192 steps. Both limits
+must be positive. Multiple entries for one session in the bounded journal page
+collapse to its last entry, ordered by that sequence. A first session exceeding
+the step limit is returned whole, alone; otherwise the next session is deferred
+without advancing past its entry. `Pending`, `SourceMissing`, `SourceRestored`
+and `Removed` retain their existing admission and custody meanings.
+
+The SQLite adapter uses the durable silver journal as the inventory traversal:
+every current Catalog/activity identity has a journal entry in this incarnation.
+It does not allocate every Catalog key or every change since the checkpoint.
+For a cold read or changed incarnation it captures the current maximum sequence
+**S**, traverses entries from zero through S in bounded pages, and reads the
+current complete evidence for each selected session in that page's transaction.
+Historical removals during this inventory traversal are observations, not deletion
+instructions: an absent identity stays pending until final UID reconciliation.
+Revisiting a session is harmless whole-session replacement. Only the final page
+through S queries the complete UID set (current Catalog union retained activity
+identities), in the same transaction as its session reads. It emits
+`ReplaceNamespace` and changes the checkpoint to incremental sequence S.
+
+Chunks use separate read transactions. Every changed identity after S is replayed
+from S as incremental whole-session replacement or an explicit `Removed`; this
+includes new keys, late records, availability changes and removals during the
+inventory. `complete` is true only when the returned incremental cursor reaches
+the current journal maximum in that read transaction. Thus the final inventory
+chunk can carry reconciliation while still reporting incomplete, requiring
+incremental catch-up. Incremental reads keep paging to the current maximum;
+changes after a completed read belong to the next discovery cycle.
+
+Correctness follows per identity: one unchanged since S is visited by inventory
+and retains exactly its final admitted evidence; one changed after S is visited
+again by replay, whose last observation supplies its complete current state or
+removal. A pending generation retains the prior admitted rows in both paths.
+Final UID reconciliation covers all current identities, including those first
+added after S, so it cannot mark a retained current identity absent merely because
+its replay is still pending. Once catch-up reports complete, live facts and their
+referenced dimensions equal a one-shot read at that final transaction, starting
+from the same retained facts and applying the same explicit removals. Physical
+generation numbers and unreferenced retained dimensions can differ. Later source
+writes require another cycle; a permanently advancing journal can keep catch-up
+incomplete, but each call still returns bounded work.
+
+The adapter strictly validates the checkpoint format, namespace binding,
+incarnation syntax, nonnegative sequences, phase/cursor ordering and actual
+journal sequence anchors before using a same-incarnation cursor. Unknown fields,
+invalid phase combinations, out-of-range or nonexistent anchors are
+`InvalidQuery`, never a successful empty read. A valid checkpoint from a different
+incarnation starts a new inventory from zero; it never completes the abandoned
+incarnation's reconciliation. The checkpoint is an internal cursor, not an
+authentication token. It is opaque to `semon-asi` and is committed only with the
+chunk's manifest. Error, stop or restart resumes from that committed cursor;
+a failed publication re-reads the same range. No partial inventory can infer
+source absence. Explicit source-availability observations remain effective.
+
+Input memory is bounded by the selected journal page and step budget plus one
+whole oversize session (including its evidence/projection). The final UID set
+requires O(namespace sessions) strings, not StepFacts. Existing store live maps
+and complete dimension merging remain O(store sessions/dimensions); this change
+does not bound those publication structures or the size of a single session.
+Inventory may traverse historical journal entries more than once per session;
+its total cost is proportional to journal history, but no call loads that history
+into an unbounded vector. Journal retention must preserve these anchors for the
+incarnation; pruning/resequencing requires a new incarnation contract.
 
 
 ## Durable state

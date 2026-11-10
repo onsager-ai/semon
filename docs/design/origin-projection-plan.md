@@ -11,8 +11,9 @@ and FTS work; this lane does not edit those stack branches.
 `semon-sessions` implements the trait over its internal activity readers. Read
 index incarnation, change sequence, catalog, complete admitted activity generation,
 StepFacts and provenance in one SQLite read transaction. The adapter owns strict
-incarnation/sequence checkpoint encoding and validation; incarnation changes cause
-a full namespace read. A pending or unavailable generation is distinct from an
+incarnation/snapshot/cursor checkpoint encoding and validation; incarnation
+changes restart a bounded namespace inventory. Each chunk has its own coherent
+read transaction; chunks do not share a long-lived transaction. A pending or unavailable generation is distinct from an
 empty admitted session or an explicit removal.
 
 The ASI session UID is `(configured machine namespace, native harness, native
@@ -109,9 +110,25 @@ one key refuse the cycle without advancing the checkpoint. Distinct price
 versions remain separate SCD2 rows. See the [store contract](asi-store.md) for
 the complete key and observation merge contract.
 
-A `ReplaceNamespace` inventory marks any prior live session under that exact
-encoded namespace component followed by `/` which it does not mention as
-`source_missing`; rows remain live and other namespaces are untouched. The
+The admitted input now takes a caller-selected positive session/journal and step
+budget (defaults: 64 journal entries and 8,192 admitted steps). Inventory traverses
+the silver journal through its starting sequence S in bounded pages, preserving
+whole-session atomicity and allowing a single oversize session. Partial chunks
+publish independently and checkpoint their cursor. Only the final inventory
+chunk carries `ReplaceNamespace { session_uids }`, with the complete current UID
+set, not merely that chunk's changes. It marks prior live sessions absent from
+that exact namespace inventory as `source_missing`; rows remain live and other
+namespaces are untouched. Catch-up replays changes after S, including sessions
+added, removed or changed between inventory chunks. Completion means the cursor
+has caught the current journal maximum. Crash/restart uses the manifest cursor;
+an incarnation change abandons partial inventory and starts over. See the
+[resumable input contract](asi-store.md#resumable-admitted-input) for validation,
+consistency proof and the remaining O(sessions) UID/live-map/dimension costs.
+
+`publish_cycle` accepts the budget, writes one chunk as one generation and returns
+completion to its caller. The caller may drain or yield between chunks; the 2 s
+discovery cadence does not require an entire inventory in one tick. The lifecycle
+writer is separate work, and this delivery remains only part of #557. The
 adapter and publisher share `semon-asi`'s canonical UID component encoder. A
 later `SourceRestored` clears the marker.
 
