@@ -9,9 +9,10 @@ use std::{collections::BTreeMap, path::Path};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use semon_asi::input::{
     Activity, AdmittedBatch, AdmittedSession, AnalyticsInput, BillingUsage, Compaction,
-    ContextBand, Coverage, Model, ParentMethod, Price, PriceUnit, RateKind, Reconciliation,
-    RecordedCost, RecordedVersions, Repo, Role, Session, SessionChange, Source, SourceWitness,
-    Status, Step, ToolCall, Trigger, UNKNOWN_REPO_KEY, UsageOwner, WasteKind, encode_component,
+    ContextBand, Coverage, InputBudget, Model, ParentMethod, Price, PriceUnit, RateKind,
+    Reconciliation, RecordedCost, RecordedVersions, Repo, Role, Session, SessionChange, Source,
+    SourceWitness, Status, Step, ToolCall, Trigger, UNKNOWN_REPO_KEY, UsageOwner, WasteKind,
+    encode_component,
 };
 
 use crate::{
@@ -24,12 +25,29 @@ use crate::{
 ///
 /// The namespace is supplied by the owner that configured the index.  It is
 /// not inferred from paths or host state.
+///
+/// The silver journal is append-only within an index incarnation. Any pruning
+/// or resequencing must change the incarnation so readers restart inventory.
+/// Sequence numbers may have gaps; replay does not require contiguity.
+/// Each replay drain captures a fixed journal endpoint (after inventory, for a
+/// cold read), so ongoing source writes cannot keep that drain open forever.
 pub struct SqliteAnalyticsInput {
     namespace: String,
     connection: Connection,
 }
 
 impl SqliteAnalyticsInput {
+    /// A replay endpoint in committed state predates a newly captured writer
+    /// chain. Finish it before starting a fresh drain for that request. The
+    /// checkpoint format remains adapter-owned; actual reads validate anchors
+    /// and restart inventory if the index incarnation changed.
+    pub(crate) fn resumes_replay(checkpoint: Option<&str>) -> rusqlite::Result<bool> {
+        Ok(checkpoint
+            .map(decode_checkpoint)
+            .transpose()?
+            .is_some_and(|checkpoint| matches!(checkpoint.cursor, Cursor::Replay { .. })))
+    }
+
     pub fn open(index: &Path, namespace: impl Into<String>) -> rusqlite::Result<Self> {
         let connection = Connection::open_with_flags(
             index,
@@ -50,152 +68,297 @@ impl SqliteAnalyticsInput {
 impl AnalyticsInput for SqliteAnalyticsInput {
     type Error = rusqlite::Error;
 
-    fn read_admitted(&mut self, checkpoint: Option<&str>) -> rusqlite::Result<AdmittedBatch> {
+    fn read_admitted(
+        &mut self,
+        checkpoint: Option<&str>,
+        budget: InputBudget,
+    ) -> rusqlite::Result<AdmittedBatch> {
+        if budget.max_sessions == 0 || budget.max_steps == 0 {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let previous = checkpoint.map(decode_checkpoint).transpose()?;
         let namespace = self.namespace.clone();
-        crate::events::store::read_silver_changes(
+        if previous
+            .as_ref()
+            .is_some_and(|previous| previous.namespace != namespace)
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        crate::events::store::read_silver_snapshot(
             &mut self.connection,
-            checkpoint
-                .map(decode_checkpoint)
-                .transpose()?
-                .map_or(0, |(_, sequence)| sequence),
-            |tx, incarnation, changes| {
-                let previous = checkpoint.map(decode_checkpoint).transpose()?;
-                let full = previous.is_none_or(|(old, _)| old != incarnation);
-                let mut changed = BTreeMap::<String, String>::new();
-                if full {
-                    let mut statement = tx.prepare(
-                        "SELECT session_key FROM session_catalog WHERE lifecycle='current' \
-                         UNION SELECT session_key FROM session_activity_projections \
-                         ORDER BY session_key",
-                    )?;
-                    for key in statement.query_map([], |row| row.get::<_, String>(0))? {
-                        changed.insert(key?, "changed".into());
+            |tx, incarnation, current| {
+                let previous = match previous {
+                    Some(previous) if previous.incarnation == incarnation => {
+                        Some(validate_cursor(tx, previous.cursor, current)?)
+                    }
+                    _ => None,
+                };
+                let (snapshot, after_key, through_key, after_sequence, endpoint) = match previous {
+                    Some(Cursor::Inventory {
+                        snapshot,
+                        after,
+                        through,
+                    }) => (Some(snapshot), Some(after), Some(through), 0, current),
+                    Some(Cursor::Replay { after, through }) => (None, None, None, after, through),
+                    Some(Cursor::Incremental { after }) => (None, None, None, after, current),
+                    None => (Some(current), None, maximum_inventory_key(tx)?, 0, current),
+                };
+                let limit = i64::try_from(budget.max_sessions)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?;
+                let selected = if snapshot.is_some() {
+                    if through_key.is_some() {
+                        inventory_keys(tx, after_key.as_deref(), through_key.as_deref(), limit)?
+                            .into_iter()
+                            .map(|key| (key, 0, "changed".to_owned()))
+                            .collect()
+                    } else {
+                        Vec::new()
                     }
                 } else {
-                    for (_, key, kind) in changes {
-                        changed.insert(key.clone(), kind.clone());
+                    journal_page(tx, after_sequence, endpoint, limit)?
+                };
+                let mut changes = Vec::new();
+                let mut cursor_key = after_key;
+                let mut cursor_sequence = after_sequence;
+                let mut steps = 0usize;
+                for (key, sequence, kind) in selected {
+                    let next = read_session(tx, &namespace, &key, &kind)?;
+                    let next_steps = next
+                        .iter()
+                        .map(|change| match change {
+                            SessionChange::Admitted(session) => session.steps.len(),
+                            _ => 0,
+                        })
+                        .sum::<usize>();
+                    if !changes.is_empty() && next_steps > budget.max_steps.saturating_sub(steps) {
+                        break;
+                    }
+                    changes.extend(next);
+                    cursor_key = Some(key);
+                    cursor_sequence = sequence;
+                    steps = steps.saturating_add(next_steps);
+                    if steps >= budget.max_steps {
+                        break;
                     }
                 }
-
-                let mut result = Vec::with_capacity(changed.len());
-                for (key, kind) in changed {
-                    let identity = session_identity(tx, &key)?;
-                    let uid = session_uid(&namespace, &identity);
-                    if kind != "changed" && kind != "removed" {
-                        return Err(rusqlite::Error::InvalidQuery);
+                let finished_inventory = snapshot.is_some()
+                    && (through_key.is_none()
+                        || inventory_keys(tx, cursor_key.as_deref(), through_key.as_deref(), 1)?
+                            .is_empty());
+                let reconciliation = if finished_inventory {
+                    Reconciliation::ReplaceNamespace {
+                        session_uids: inventory_uids(tx, &namespace)?,
                     }
-                    let Some(row) = catalog_row(tx, &key)? else {
-                        if kind == "removed" {
-                            result.push(SessionChange::Removed { session_uid: uid });
-                        } else {
-                            result.push(SessionChange::Pending { session_uid: uid });
-                        }
-                        continue;
-                    };
-                    // A Catalog row is still a live identity.  A `removed`
-                    // journal entry may only delete an identity that is no
-                    // longer in Catalog; while replacement activity is pending,
-                    // retain the previous admitted facts.
-                    if kind == "removed" {
-                        result.push(SessionChange::Pending { session_uid: uid });
-                        continue;
-                    }
-                    if row.lifecycle != CatalogLifecycle::Current {
-                        result.push(SessionChange::SourceMissing {
-                            session_uid: uid,
-                            retained_at_origin: true,
-                        });
-                        continue;
-                    }
-                    match crate::events::store::session_activity::source_missing(tx, &key)? {
-                        Some(true) => {
-                            result.push(SessionChange::SourceMissing {
-                                session_uid: uid,
-                                retained_at_origin: true,
-                            });
-                            continue;
-                        }
-                        None => {
-                            result.push(SessionChange::Pending { session_uid: uid });
-                            continue;
-                        }
-                        Some(false) => {}
-                    }
-                    let price = crate::pricing::snapshot();
-                    let Some(header) = crate::events::store::session_activity::page(
-                        tx,
-                        &row,
-                        None,
-                        &price.fingerprint,
-                        0,
-                        0,
-                    )?
-                    else {
-                        result.push(SessionChange::Pending { session_uid: uid });
-                        continue;
-                    };
-                    let Some(facts) = crate::events::store::session_activity::step_facts(
-                        tx,
-                        &row,
-                        &header.generation,
-                    )?
-                    else {
-                        result.push(SessionChange::Pending { session_uid: uid });
-                        continue;
-                    };
-                    let steps = read_steps(
-                        tx,
-                        &row,
-                        &header.generation,
-                        &price.fingerprint,
-                        header.total,
-                    )?;
-                    if steps.len() != facts.len() {
-                        return Err(rusqlite::Error::InvalidQuery);
-                    }
-                    let witness = source_witness(tx, &key)?;
-                    let prices = prices(tx, &key, &header.generation, &price.fingerprint)?;
-                    let Some(session) = admitted(
-                        tx,
-                        &namespace,
-                        AdmittedEvidence {
-                            row,
-                            witness,
-                            price_version: price.fingerprint.clone(),
-                            generation: &header.generation,
-                            steps,
-                            facts,
-                            prices,
-                        },
-                    )?
-                    else {
-                        // An unrepresentable anchor withholds this whole
-                        // generation, retaining prior facts without blocking
-                        // unrelated sessions or claiming source restoration.
-                        result.push(SessionChange::Pending { session_uid: uid });
-                        continue;
-                    };
-                    result.push(SessionChange::SourceRestored { session_uid: uid });
-                    result.push(SessionChange::Admitted(Box::new(session)));
-                }
-                let sequence = tx.query_row(
-                    "SELECT COALESCE(MAX(seq),0) FROM silver_change",
-                    [],
-                    |row| row.get(0),
-                )?;
-                Ok(AdmittedBatch {
-                    namespace,
-                    checkpoint: encode_checkpoint(incarnation, sequence),
-                    reconciliation: if full {
-                        Reconciliation::ReplaceNamespace
-                    } else {
-                        Reconciliation::Incremental
+                } else {
+                    Reconciliation::Incremental
+                };
+                let phase = match snapshot {
+                    Some(snapshot) if !finished_inventory => Cursor::Inventory {
+                        snapshot,
+                        through: through_key.ok_or(rusqlite::Error::InvalidQuery)?,
+                        after: cursor_key.ok_or(rusqlite::Error::InvalidQuery)?,
                     },
-                    changes: result,
+                    Some(snapshot) => replay_cursor(snapshot, endpoint),
+                    None => replay_cursor(cursor_sequence, endpoint),
+                };
+                let complete = matches!(&phase, Cursor::Incremental { .. });
+                Ok(AdmittedBatch {
+                    checkpoint: encode_checkpoint(&Checkpoint {
+                        namespace: namespace.clone(),
+                        incarnation: incarnation.into(),
+                        cursor: phase,
+                    })?,
+                    namespace,
+                    complete,
+                    reconciliation,
+                    changes,
                 })
             },
         )
     }
+}
+
+fn maximum_inventory_key(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Option<String>> {
+    tx.query_row(
+        "SELECT session_key FROM session_catalog WHERE lifecycle='current' \
+         UNION SELECT session_key FROM session_activity_projections ORDER BY session_key DESC LIMIT 1",
+        [], |row| row.get(0),
+    ).optional()
+}
+
+fn inventory_keys(
+    tx: &rusqlite::Transaction<'_>,
+    after: Option<&str>,
+    through: Option<&str>,
+    limit: i64,
+) -> rusqlite::Result<Vec<String>> {
+    // Put range predicates in both UNION arms so SQLite can merge ordered
+    // index scans and stop at LIMIT instead of materializing the inventory.
+    let lower = if after.is_some() {
+        " AND session_key>?1"
+    } else {
+        ""
+    };
+    let upper = if through.is_some() {
+        " AND session_key<=?2"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT session_key FROM session_catalog WHERE lifecycle='current'{lower}{upper} \
+         UNION SELECT session_key FROM session_activity_projections WHERE 1{lower}{upper} \
+         ORDER BY session_key LIMIT ?3",
+    );
+    let mut statement = tx.prepare(&sql)?;
+    statement
+        .query_map(params![after, through, limit], |row| row.get(0))?
+        .collect()
+}
+
+fn journal_page(
+    tx: &rusqlite::Transaction<'_>,
+    after: i64,
+    through: i64,
+    limit: i64,
+) -> rusqlite::Result<Vec<(String, i64, String)>> {
+    let mut statement = tx.prepare(
+        "SELECT seq,session_key,kind FROM silver_change \
+         WHERE seq>?1 AND seq<=?2 ORDER BY seq LIMIT ?3",
+    )?;
+    let mut selected = BTreeMap::new();
+    for entry in statement.query_map(params![after, through, limit], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })? {
+        let (sequence, key, kind) = entry?;
+        selected.insert(key, (sequence, kind));
+    }
+    let mut ordered: Vec<_> = selected
+        .into_iter()
+        .map(|(key, (sequence, kind))| (key, sequence, kind))
+        .collect();
+    ordered.sort_by_key(|(_, sequence, _)| *sequence);
+    Ok(ordered)
+}
+
+fn inventory_uids(
+    tx: &rusqlite::Transaction<'_>,
+    namespace: &str,
+) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+    let mut statement = tx.prepare(
+        "SELECT session_key FROM session_catalog WHERE lifecycle='current' \
+         UNION SELECT session_key FROM session_activity_projections",
+    )?;
+    let mut uids = std::collections::BTreeSet::new();
+    for key in statement.query_map([], |row| row.get::<_, String>(0))? {
+        // Catalog metadata supplies never-admitted Pending identities; the
+        // native identity ledger supplies removed/retained activity identities.
+        // Neither path reads StepFacts or native source bodies here.
+        uids.insert(session_uid(namespace, &session_identity(tx, &key?)?));
+    }
+    Ok(uids)
+}
+
+fn read_session(
+    tx: &rusqlite::Transaction<'_>,
+    namespace: &str,
+    key: &str,
+    kind: &str,
+) -> rusqlite::Result<Vec<SessionChange>> {
+    let mut result = Vec::new();
+    let identity = session_identity(tx, key)?;
+    let uid = session_uid(namespace, &identity);
+    if kind != "changed" && kind != "removed" {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let Some(row) = catalog_row(tx, key)? else {
+        if kind == "removed" {
+            result.push(SessionChange::Removed { session_uid: uid });
+        } else {
+            result.push(SessionChange::Pending { session_uid: uid });
+        }
+        return Ok(result);
+    };
+    // A Catalog row is still a live identity.  A `removed`
+    // journal entry may only delete an identity that is no
+    // longer in Catalog; while replacement activity is pending,
+    // retain the previous admitted facts.
+    if kind == "removed" {
+        result.push(SessionChange::Pending { session_uid: uid });
+        return Ok(result);
+    }
+    if row.lifecycle != CatalogLifecycle::Current {
+        result.push(SessionChange::SourceMissing {
+            session_uid: uid,
+            retained_at_origin: true,
+        });
+        return Ok(result);
+    }
+    match crate::events::store::session_activity::source_missing(tx, key)? {
+        Some(true) => {
+            result.push(SessionChange::SourceMissing {
+                session_uid: uid,
+                retained_at_origin: true,
+            });
+            return Ok(result);
+        }
+        None => {
+            result.push(SessionChange::Pending { session_uid: uid });
+            return Ok(result);
+        }
+        Some(false) => {}
+    }
+    let price = crate::pricing::snapshot();
+    let Some(header) =
+        crate::events::store::session_activity::page(tx, &row, None, &price.fingerprint, 0, 0)?
+    else {
+        result.push(SessionChange::Pending { session_uid: uid });
+        return Ok(result);
+    };
+    let Some(facts) =
+        crate::events::store::session_activity::step_facts(tx, &row, &header.generation)?
+    else {
+        result.push(SessionChange::Pending { session_uid: uid });
+        return Ok(result);
+    };
+    let steps = read_steps(
+        tx,
+        &row,
+        &header.generation,
+        &price.fingerprint,
+        header.total,
+    )?;
+    if steps.len() != facts.len() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let witness = source_witness(tx, key)?;
+    let prices = prices(tx, key, &header.generation, &price.fingerprint)?;
+    let Some(session) = admitted(
+        tx,
+        namespace,
+        AdmittedEvidence {
+            row,
+            witness,
+            price_version: price.fingerprint.clone(),
+            generation: &header.generation,
+            steps,
+            facts,
+            prices,
+        },
+    )?
+    else {
+        // An unrepresentable anchor withholds this whole
+        // generation, retaining prior facts without blocking
+        // unrelated sessions or claiming source restoration.
+        result.push(SessionChange::Pending { session_uid: uid });
+        return Ok(result);
+    };
+    result.push(SessionChange::SourceRestored { session_uid: uid });
+    result.push(SessionChange::Admitted(Box::new(session)));
+    Ok(result)
 }
 
 fn prices(
@@ -251,28 +414,107 @@ fn prices(
         .collect()
 }
 
-fn decode_checkpoint(value: &str) -> rusqlite::Result<(String, i64)> {
-    let Some((incarnation, sequence)) = value.rsplit_once(':') else {
-        return Err(rusqlite::Error::InvalidQuery);
-    };
-    if incarnation.len() != 32
-        || !incarnation.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || sequence
-            .parse::<i64>()
-            .ok()
-            .filter(|sequence| *sequence >= 0)
-            .is_none()
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Checkpoint {
+    namespace: String,
+    incarnation: String,
+    cursor: Cursor,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+enum Cursor {
+    Inventory {
+        snapshot: i64,
+        through: String,
+        after: String,
+    },
+    Incremental {
+        after: i64,
+    },
+    Replay {
+        after: i64,
+        through: i64,
+    },
+}
+
+fn replay_cursor(after: i64, through: i64) -> Cursor {
+    if after == through {
+        Cursor::Incremental { after }
+    } else {
+        Cursor::Replay { after, through }
+    }
+}
+
+fn decode_checkpoint(value: &str) -> rusqlite::Result<Checkpoint> {
+    let checkpoint: Checkpoint =
+        serde_json::from_str(value).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    if checkpoint.incarnation.len() != 32
+        || !checkpoint
+            .incarnation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !match &checkpoint.cursor {
+            Cursor::Inventory {
+                snapshot,
+                through,
+                after,
+            } => *snapshot >= 0 && after < through,
+            Cursor::Incremental { after } => *after >= 0,
+            Cursor::Replay { after, through } => *after >= 0 && after < through,
+        }
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    Ok((
-        incarnation.into(),
-        sequence.parse().expect("validated sequence"),
-    ))
+    Ok(checkpoint)
 }
 
-fn encode_checkpoint(incarnation: &str, sequence: i64) -> String {
-    format!("{incarnation}:{sequence}")
+fn validate_cursor(
+    tx: &rusqlite::Transaction<'_>,
+    cursor: Cursor,
+    current: i64,
+) -> rusqlite::Result<Cursor> {
+    let (sequence, endpoint) = match &cursor {
+        Cursor::Inventory {
+            snapshot,
+            through,
+            after,
+        } => {
+            for key in [after, through] {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 \
+                     UNION ALL SELECT 1 FROM session_activity_projections WHERE session_key=?1 \
+                     UNION ALL SELECT 1 FROM silver_session_identity WHERE session_key=?1)",
+                    [key],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+            }
+            (*snapshot, *snapshot)
+        }
+        Cursor::Incremental { after } => (*after, *after),
+        Cursor::Replay { after, through } => (*after, *through),
+    };
+    for anchor in [sequence, endpoint] {
+        if anchor > current
+            || (anchor != 0
+                && !tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM silver_change WHERE seq=?1)",
+                    [anchor],
+                    |row| row.get::<_, bool>(0),
+                )?)
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    Ok(cursor)
+}
+
+fn encode_checkpoint(checkpoint: &Checkpoint) -> rusqlite::Result<String> {
+    serde_json::to_string(checkpoint).map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 fn catalog_row(tx: &rusqlite::Transaction<'_>, key: &str) -> rusqlite::Result<Option<CatalogRow>> {

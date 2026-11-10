@@ -271,22 +271,50 @@ tables.
   file. Analytics input opens refuse symlinks with SQLite NOFOLLOW; regular-file
   replacement by the same user is outside this boundary, since that user can
   already edit the state files. Each waiter owns a request generation and outcome;
-  success requires that generation's publication and compaction, never an
-  intermediate Idle or manifest reload. SIGINT/SIGTERM cancels a CLI watch wait,
-  then joins the writer and is re-raised. Watch exits on refresh/publication failure.
+  success requires that generation's complete input publication and final
+  compaction, never a partial chunk, intermediate Idle or manifest reload.
+  SIGINT/SIGTERM cancels a CLI watch wait, then joins the writer and is re-raised.
+  Watch exits on refresh/publication failure.
   A busy lock is observable as a no-writer state; unsupported input latches a refusal
   without changing the index or a checkpoint, until a later notification retries.
   Store refusals also latch until a new notification; each refusal consumes only
-  the notification snapshot captured before its operation, preserving notifications
-  received during that operation.
+  the initiating notification generation retained across its entire recovery
+  chain, preserving notifications received during backoff or a later chunk.
+  A new chain owns generations `(consumed, captured]`, capturing the earliest
+  unsettled waiter above `consumed`; only notification-only work coalesces to
+  the latest notification. Two waiters queued before selection therefore have
+  separate chains, failure budgets and successful publications as well.
+  Successful chunks advance the scheduling watermark `consumed` through the
+  captured generation while deferring request settlement until final compaction.
+  This watermark does not end the chain or reset its counters.
+  Notification counters saturate at u64::MAX, an unreachable process-lifetime
+  bound of more than 1.8e19 requests; settlement at exhaustion is unspecified.
 - **Local custody.** The generated Parquet can contain typed local-path
   fields. It remains local-only; a governed export is a separate operation and
   is not part of materialization.
-- **Cycle.** By default at most once every 2 s (the caller selects the interval), the writer reads the index change log and
-  recomputes every touched session **whole**. It doesn't patch tails: a
-  following step can change an earlier step's duration, and a late record can
-  change older rows. Per-cycle work is proportional to the touched sessions'
-  size; CI measures the cost without assuming a latency for large sessions.
+- **Cycle.** The caller selects an interval (2 s by default) and an input
+  budget. `publish_cycle` publishes one bounded chunk as one `Update` and
+  generation, then returns its generation and completion flag. The caller may
+  drain further chunks immediately, yield between them, or stop and resume at
+  the next tick; 2 s is neither a transaction deadline nor a promise to finish a
+  cold inventory in one cycle. The existing local writer selects its budget via
+  `AnalyticsWriterConfig.input_budget` and schedules each incomplete chunk at the
+  next interval without requiring another external notification. The explicit CLI
+  accepts positive `--batch-sessions` and `--batch-steps` limits up to
+  `min(usize::MAX, i64::MAX)`, validated before opening or creating state. One-shot
+  materialization uses zero spacing between chunks and exits after the first
+  fresh drain and its final bounded compaction; watch uses a minimum spacing
+  of 2 s between chunk attempts. If a new chain inherits a persisted unfinished
+  replay endpoint, it first finishes that replay and compaction, then runs one
+  fresh drain whose endpoint is captured after the request registered. Completing
+  the inherited endpoint alone never settles the new request. The adapter owns
+  checkpoint inspection; semon-asi still treats checkpoints as opaque.
+  A continuously advancing source cannot extend that drain's captured replay
+  endpoint. Later writes require another request. Cancellation stops the wait;
+  joining stops future chunks, preserving the last published checkpoint.
+  Recompute touched sessions **whole**: a following step can change an earlier
+  step's duration, and a late record can change older rows. No session is split
+  to meet a budget; CI measures the cost of the exceptional oversize session.
   - It writes one new file per table, `analytics/{table}/g{generation}.parquet`,
     holding the full rows of those sessions with a `_gen` column. Dimensions
     are rewritten whole, as `analytics/dim_x/g{generation}.parquet`.
@@ -298,27 +326,63 @@ tables.
     dropped, as a typed Parquet file `analytics/live/g{generation}.parquet`, so the
     manifest stays small at any number of sessions.
   - It fsyncs those files, then writes `manifest.json`: the generation, file
-    lists with their compaction level, versions, each namespace's incarnation
-    and `seq` checkpoint, the durable revision checkpoint, and the live-map
+    lists with their compaction level, versions, each namespace's opaque
+    resumable input checkpoint, the durable revision checkpoint, and the live-map
     file. It fsyncs the manifest, renames it into place, and fsyncs the
     directory. A crash leaves the previous generation.
   - The local service coalesces catalog-publication notifications. Operational
     classification covers direct store I/O, Parquet `External` I/O, and SQLite
     busy/locked/I/O/full/cannot-open errors. These retry with bounded exponential
-    backoff, with at most three operational failures per request before visible
-    refusal carrying the last error (up to 1s/2s backoffs plus publication spacing).
-    The failure budget belongs to the recovery chain. Successful Open, Retire or
-    Compact clears it; retirement that interrupts publication saves and restores
-    that publication's counters separately. Reload success does not reset the
-    budget; a new Catalog notification permits a fresh attempt after refusal.
-    Parquet page-read I/O can surface as an Arrow error after losing its typed I/O
-    source; it fails safe by latching `Refused` until the next notification, like structural errors. A store error requires manifest reload
-    before its operation resumes. A successful reload preserves the retry attempt;
-    only success of the resumed operation clears it. Every publication attempt
-    advances the cycle deadline, including an error after a visible rename.
+    backoff, with at most three operational failures per active chain before
+    visible refusal carrying the last error (1s/2s backoffs plus publication
+    spacing). One publication chain includes any required Open, Reload and
+    compaction recovery operations. Success of a barrier, chunk or intermediate
+    compaction preserves its attempt and failure counts. The bound is cumulative
+    over that chain, not reset by a successful operation within it.
+    Periodic retirement uses an independent maintenance chain and budget. It
+    suspends the publication Chain whole, then restores it whole on success;
+    maintenance failures neither spend nor reset its publication counters. Thus
+    retirement retries can add failures to the overall request wait. A terminal
+    retirement refusal also terminates the suspended request explicitly.
+    All identity, kind, attempt/failure counters, endpoint origin, operation and
+    completion state live in a Chain record. Success after final fresh-drain
+    compaction, terminal refusal, NoWriter, owning-waiter cancellation and shutdown
+    drop the appropriate record; the next chain starts at 0/0. NoWriter retains
+    only a 30 s scheduling cooldown. A refused/cancelled operation can retain a
+    required recovery barrier, but no request identity or counters.
+    Cancellation retains only a pending manifest reload after a store error;
+    clean pending work leaves retirement enabled without another notification.
+    Parquet page-read I/O can surface as an Arrow error after losing its typed
+    I/O source; it latches Refused like structural errors. A store error requires
+    manifest reload before its operation resumes, since a rename may already be
+    visible. Reload success preserves the chain's counters. Every publication
+    attempt advances the minimum-spacing deadline, including a rename-visible
+    error. Cancellation during I/O lets that operation finish, then drops the
+    owning chain before selecting another operation; shutdown schedules no work.
     It uses the activity rules target and current pricing-snapshot fingerprint
     as writer targets; these do not assert that untouched rows have uniformly
     refreshed versions.
+
+The writer's pure transition table is the authority for chain ownership:
+
+| Event | Active/suspended record | Outcome |
+| --- | --- | --- |
+| Capture | Create earliest-waiter chain at 0/0; an active chain keeps its capture | No settlement |
+| Open or Reload success | Same publication record and counters, next operation | No settlement |
+| Chunk success | Same record, record completion, select compaction | Advance `consumed`, defer settlement |
+| Intermediate compaction success | Same record, next chunk | No settlement |
+| Inherited drain compaction success | Same record, require a fresh drain | No settlement |
+| Final fresh drain compaction success | Drop publication record | Settle its captured generation Idle |
+| Operational failure | Increment active record only; retry at 1s/2s | Third failure drops record and refuses its generation |
+| Structural refusal | Drop active and any suspended record | Refuse captured generation |
+| NoWriter | Drop record; retain 30 s cooldown only | Settle captured generation NoWriter |
+| Retirement interrupt | Suspend whole publication record; create maintenance record at 0/0 | No settlement |
+| Retirement success | Drop maintenance record; restore whole suspended record | No settlement |
+| Terminal retirement refusal | Drop maintenance and suspended publication records | Refuse their captured generation |
+| Owning waiter cancellation | Drop active and suspended records; retain needed recovery barrier | Withdraw its demand |
+| Shutdown | Drop active and suspended records | Stop without scheduling another operation |
+| Later request arrival | Active record unchanged | Later generation remains pending |
+
 - **Reading.** Each fact view keeps only live rows:
   `… semi join live on (session_uid, _gen)`.
 - **Compaction** is tiered. Cycle files are level 0. When a table has more
@@ -351,11 +415,13 @@ tables.
   must not replace a complete generation with a fragment. Re-derive at the origin
   when raw returns. A format mismatch refuses exactly; preserve or export frozen
   facts and custody, with no automatic reset or multi-version exception.
-- **Namespace reconciliation.** A `ReplaceNamespace` batch is a complete
-  inventory for its namespace. Every already-live session UID with that exact
-  encoded namespace component followed by `/` that the batch does not mention
-  is marked `source_missing`, retaining its rows and recorded versions; other
-  namespaces are untouched. A later `SourceRestored` clears the marker.
+- **Namespace reconciliation.** Only the final inventory chunk carries
+  `ReplaceNamespace { session_uids }`. This set contains the complete current
+  namespace inventory, independently of the sessions admitted in that chunk.
+  Every already-live session UID with that exact encoded namespace component
+  followed by `/` absent from the set is marked `source_missing`, retaining its
+  rows and recorded versions; other namespaces are untouched. Partial inventory
+  chunks never infer absence. A later `SourceRestored` clears the marker.
 - **Federated publication.** #555's immutable objects, `expected_parent` and
   namespace claim epochs publish complete admitted heads. Receiver imports carry
   per-origin heads and source, activity and transcript generations separately;
@@ -370,6 +436,97 @@ tables.
   generation reuses its complete activity; a changed generation clears the
   missing state only after a complete activity publication contains every
   previously witnessed identity and stores the full source vector.
+
+### Resumable admitted input
+
+`AnalyticsInput::read_admitted(checkpoint, budget)` returns one `AdmittedBatch`:
+namespace, opaque next checkpoint, ordered whole-session changes, reconciliation,
+and `complete`. `InputBudget` limits selected inventory sessions or incremental
+journal entries, and admitted steps; defaults are 64 sessions/entries and 8,192
+steps. Both limits must be positive. Multiple entries for one session in an
+incremental journal page collapse to its last entry, ordered by that sequence. A first session exceeding
+the step limit is returned whole, alone; otherwise the next session is deferred
+without advancing past its entry. `Pending`, `SourceMissing`, `SourceRestored`
+and `Removed` retain their existing admission and custody meanings.
+
+For a cold read or changed incarnation the SQLite adapter captures the current
+maximum journal sequence **S** and maximum current inventory key **K**. It pages
+current Catalog union retained activity keys in binary key order, through K,
+using an exclusive last-key cursor. Each page reads the current complete evidence
+for its selected sessions in that page's transaction. Metadata-only Catalog rows
+are visited as `Pending`, even when they have never had admitted activity and
+therefore have no silver journal entry. No page allocates all Catalog keys or all
+changes since a checkpoint. A disappearing key need not be visited: only the
+final page queries the complete current UID set (current Catalog union retained
+activity identities). That page emits `ReplaceNamespace` and changes the
+checkpoint to replay after S, with endpoint **E** equal to the journal maximum
+in that final inventory transaction. The UID set is independent of the key bound
+K: it includes identities first added while inventory was running.
+
+Chunks use separate read transactions. Every changed identity after S through E
+is replayed as incremental whole-session replacement or an explicit `Removed`; this
+includes new keys, late records, availability changes and removals during the
+inventory. `complete` is true when the returned cursor reaches E. Thus the final
+inventory chunk can carry reconciliation while still reporting incomplete,
+requiring bounded replay from S through E. A new incremental drain captures E
+in its first read; intermediate replay checkpoints retain both `after` and
+`through` so separate transactions, retries and process restarts keep the same
+endpoint. The completed checkpoint retains only `after=E`; the next request
+captures a new endpoint. Writes after E belong to that next drain. Whole-session
+readers still use current evidence and can observe a newer replacement early;
+this is not a historical SQLite snapshot at E.
+
+Correctness follows per identity: one unchanged since S is visited by inventory
+and retains exactly its final admitted evidence; one changed after S is visited
+again by replay, whose last observation supplies its complete current state or
+removal. A pending generation retains the prior admitted rows in both paths.
+Final UID reconciliation covers all current identities, including those first
+added after S, so it cannot mark a retained current identity absent merely because
+its replay is still pending. If source writes have quiesced by endpoint capture,
+once replay reports complete, live facts and their referenced dimensions equal
+a one-shot read at that final transaction, starting from the same retained facts and applying the same explicit removals. Physical
+generation numbers and unreferenced retained dimensions can differ. The oracle
+must use the same frozen evidence: an empty store cannot recreate an admitted
+generation observed by an earlier chunk if that generation later becomes
+unavailable or `Pending`. Retaining that evidence is the existing custody rule.
+With writes continuing beyond E, sessions already passed can change again;
+the request does not claim a one-shot snapshot of those later writes. The next
+drain replays them. A permanently advancing journal therefore cannot keep a
+request open by moving its endpoint. Each call remains budgeted, and finite
+replay through E terminates without discarding the later journal suffix.
+
+The adapter strictly validates the checkpoint format, namespace binding,
+incarnation syntax, nonnegative sequences, ordered replay endpoints, inventory
+key bounds and actual journal/key anchors before using a same-incarnation cursor. Inventory key anchors
+may outlive current membership through retained Catalog or native identity rows;
+a removal does not make a valid cursor skip or fail. Unknown fields,
+invalid phase combinations, out-of-range or nonexistent anchors are
+`InvalidQuery`, never a successful empty read. A valid checkpoint from a different
+incarnation starts a new inventory from zero; it never completes the abandoned
+incarnation's reconciliation. The checkpoint is opaque to `semon-asi` and is
+committed only with the chunk's manifest. Error, stop or restart resumes from
+that committed cursor; a failed publication re-reads the same range. No partial
+inventory can infer source absence. Explicit source-availability observations
+remain effective.
+
+Checkpoints are writer-owned manifest state, not authenticated claims. Validation
+rejects malformed or inconsistent cursors, including sequences ahead of the
+current journal maximum; it cannot distinguish an edited, otherwise valid cursor
+from one the writer produced. Same-user tampering with that manifest, or with the
+configured namespace/index binding, is outside this trust boundary.
+
+Input memory is bounded by the selected key/journal page and step budget plus one
+whole oversize session (including its evidence/projection). The final UID set
+requires O(namespace sessions) strings, not StepFacts. Existing store live maps
+and complete dimension merging remain O(store sessions/dimensions); this change
+does not bound those publication structures or the size of a single session.
+Inventory traverses Catalog/activity keys, not journal history. The silver journal
+is append-only within an incarnation: production never deletes or rewrites its
+rows. Any pruning or resequencing MUST change the incarnation, restarting
+inventory rather than silently skipping changes. Sequence numbers may have gaps;
+replay does not require contiguity. Native identity/Catalog anchors
+are retained on ordinary removal. Explicit operator purges may refuse an affected
+checkpoint; this read-only adapter never recreates deleted data or resets custody.
 
 
 ## Durable state
