@@ -272,7 +272,7 @@ fn run<C: Clock + Send + Sync + 'static>(
 ) {
     let mut store = None;
     let mut retry = None;
-    let mut retry_attempt = 0;
+    let mut retry_attempt: u32 = 0;
     let mut next_cycle = 0;
     let mut next_retirement = clock.now_ms() + duration_ms(RETIREMENT_CADENCE);
     let mut refused = false;
