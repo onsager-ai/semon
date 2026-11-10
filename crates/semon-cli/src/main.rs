@@ -205,8 +205,13 @@ fn parse_analytics_args(
                 let limit = value()?
                     .parse::<usize>()
                     .ok()
-                    .filter(|limit| *limit > 0)
-                    .ok_or_else(|| format!("{argument} requires a positive integer"))?;
+                    .filter(|limit| *limit > 0 && i64::try_from(*limit).is_ok())
+                    .ok_or_else(|| {
+                        format!(
+                            "{argument} requires a positive integer no greater than {}",
+                            i64::MAX
+                        )
+                    })?;
                 if argument == "--batch-sessions" {
                     input_budget.max_sessions = limit;
                 } else {
@@ -1042,7 +1047,7 @@ fn analytics_usage() -> String {
     "Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--copilot-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
      Refreshes the local native Catalog, then explicitly materializes its analytics store.\n\
      Catalog refresh is complete; --since/--all do not bound analytics input.\n\
-     Batch limits default to 64 sessions/journal entries and 8192 steps; an oversize session stays whole.\n\
+     Batch limits are positive integers up to 9223372036854775807; defaults are 64 sessions/journal entries and 8192 steps. An oversize session stays whole.\n\
      One-shot drains immediately through a fixed replay endpoint; later changes belong to the next request.\n\
      --watch refreshes and publishes every 2 s; failures exit visibly. Ctrl-C/SIGTERM stops the wait."
         .to_owned()
@@ -1060,8 +1065,9 @@ fn usage() -> String {
          The agent read surface over native session evidence: list_sessions, get_session, get_session_activity, read_transcript,\n\
          stalls. `semon query` alone lists each tool's arguments.\n\
          \n\
-         Usage: semon analytics materialize [--watch] [--since DURATION | --all] [home options as for sessions]\n\
+         Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [home options as for sessions]\n\
          Explicitly refreshes the local native Catalog and materializes local-only analytics. Nothing starts this writer by default.\n\
+         Batch limits default to 64 sessions/journal entries and 8192 steps; an oversize session stays whole.\n\
          \n\
          Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
          The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener. Both read\n\
@@ -1087,6 +1093,34 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn analytics_batch_limits_accept_the_sqlite_boundary_and_refuse_larger_values() {
+        // usize is the in-memory budget type; SQLite LIMIT is signed i64.
+        let largest = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
+        for flag in ["--batch-sessions", "--batch-steps"] {
+            let limit = largest.to_string();
+            let args =
+                parse_analytics_args(["materialize", flag, &limit].map(str::to_owned).into_iter())
+                    .unwrap();
+            let actual = if flag == "--batch-sessions" {
+                args.input_budget.max_sessions
+            } else {
+                args.input_budget.max_steps
+            };
+            assert_eq!(actual, largest);
+            for refused in ["9223372036854775808", "18446744073709551615"] {
+                assert!(
+                    parse_analytics_args(
+                        ["materialize", flag, refused]
+                            .map(str::to_owned)
+                            .into_iter()
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
 
     #[test]
     fn archive_prune_requires_explicit_retention_and_valid_days() {

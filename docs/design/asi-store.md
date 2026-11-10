@@ -280,10 +280,14 @@ tables.
   Store refusals also latch until a new notification; each refusal consumes only
   the initiating notification generation retained across its entire recovery
   chain, preserving notifications received during backoff or a later chunk.
-  Those later requests start a new chain with a fresh failure budget. Successful
-  chunks do not consume or reset the active request's three-failure budget.
+  A new chain owns generations `(consumed, captured]`, capturing the earliest
+  unsettled waiter above `consumed`; only notification-only work coalesces to
+  the latest notification. Two waiters queued before selection therefore have
+  separate chains, failure budgets and successful publications as well.
+  Successful chunks do not consume or reset the active request's three-failure
+  budget.
   Notification counters saturate at u64::MAX, an unreachable process-lifetime
-  bound of more than 1.8e19 requests.
+  bound of more than 1.8e19 requests; settlement at exhaustion is unspecified.
 - **Local custody.** The generated Parquet can contain typed local-path
   fields. It remains local-only; a governed export is a separate operation and
   is not part of materialization.
@@ -295,7 +299,8 @@ tables.
   cold inventory in one cycle. The existing local writer selects its budget via
   `AnalyticsWriterConfig.input_budget` and schedules each incomplete chunk at the
   next interval without requiring another external notification. The explicit CLI
-  accepts positive `--batch-sessions` and `--batch-steps` limits. One-shot
+  accepts positive `--batch-sessions` and `--batch-steps` limits up to i64::MAX,
+  validated before opening or creating state. One-shot
   materialization uses zero spacing between chunks and exits after the first
   complete drain and its final bounded compaction; watch retains 2 s spacing.
   A continuously advancing source cannot extend that drain's captured replay

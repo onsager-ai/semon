@@ -274,6 +274,20 @@ fn materialize_refuses_zero_or_invalid_batch_budgets_before_creating_state() {
 }
 
 #[test]
+fn materialize_refuses_batch_limits_above_sqlite_maximum_before_creating_state() {
+    let home = fixture::Fixture::new();
+    for flag in ["--batch-sessions", "--batch-steps"] {
+        let result = materialize_with(&home, &[flag, "9223372036854775808"]);
+        assert!(!result.status.success());
+        assert!(
+            String::from_utf8_lossy(&result.stderr)
+                .contains("requires a positive integer no greater than 9223372036854775807")
+        );
+        assert!(!home.root.join("state").exists());
+    }
+}
+
+#[test]
 fn materialize_refuses_an_unsupported_index_without_changing_its_bytes() {
     let home = fixture::Fixture::new();
     let index = home.root.join("state/index.sqlite3");
@@ -355,7 +369,15 @@ fn usage_lists_materialize() {
         .arg("--help")
         .output()
         .unwrap();
-    assert!(String::from_utf8_lossy(&output.stderr).contains("analytics materialize"));
+    let help = String::from_utf8_lossy(&output.stderr);
+    for expected in [
+        "analytics materialize",
+        "--batch-sessions N",
+        "--batch-steps N",
+        "64 sessions/journal entries and 8192 steps",
+    ] {
+        assert!(help.contains(expected), "missing {expected}: {help}");
+    }
 }
 
 #[test]

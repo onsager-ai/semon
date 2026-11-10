@@ -185,7 +185,7 @@ impl Handle {
     /// Records a successful catalog publication. Notifications coalesce.
     pub fn notify(&self) {
         let mut state = lock(&self.shared.state);
-        // Saturation requires over 1.8e19 requests in one process lifetime.
+        // Exhaustion at >1.8e19 requests is unreachable; settlement then is unspecified.
         state.notifications = state.notifications.saturating_add(1);
         self.shared.changed.notify_all();
     }
@@ -719,12 +719,13 @@ fn run<C: Clock + Send + Sync + 'static>(
     let mut publication_complete = false;
     let mut scheduler = Scheduler::new(clock.now_ms());
 
-    while let Some((operation, notification)) =
-        next_operation(&shared, &clock, &mut scheduler, store.is_some())
-    {
-        // Keep the selected request fixed through all chunks and recovery.
-        // Later notifications must get their own publication and outcome.
-        let notification = *chain_notification.get_or_insert(notification);
+    while let Some((operation, notification)) = next_operation(
+        &shared,
+        &clock,
+        &mut scheduler,
+        store.is_some(),
+        &mut chain_notification,
+    ) {
         match operation {
             Operation::Open => match Store::open_with_clock(&config.store_root, Arc::clone(&clock))
             {
@@ -938,6 +939,7 @@ fn next_operation<C: Clock>(
     clock: &C,
     scheduler: &mut Scheduler,
     has_store: bool,
+    chain_notification: &mut Option<u64>,
 ) -> Option<(Operation, u64)> {
     let mut state = lock(&shared.state);
     loop {
@@ -956,7 +958,10 @@ fn next_operation<C: Clock>(
             }
             state.status = AnalyticsWriterStatus::Running;
             shared.changed.notify_all();
-            return Some((operation, state.notifications));
+            let captured = *chain_notification.get_or_insert_with(|| {
+                capture_generation(state.consumed, state.notifications, &state.requests)
+            });
+            return Some((operation, captured));
         }
         #[cfg(test)]
         {
@@ -984,6 +989,24 @@ fn next_operation<C: Clock>(
             }
         }
     }
+}
+
+// A new chain owns (consumed, captured], ending at the earliest unsettled
+// waiter; notification-only work coalesces up to the latest notification.
+// next_operation retains this capture through every retry and chunk, so both
+// success and terminal failure can settle/consume only the owned generations.
+fn capture_generation(
+    consumed: u64,
+    notifications: u64,
+    requests: &BTreeMap<u64, Option<AnalyticsWriterStatus>>,
+) -> u64 {
+    requests
+        .range((
+            std::ops::Bound::Excluded(consumed),
+            std::ops::Bound::Unbounded,
+        ))
+        .find_map(|(&generation, outcome)| outcome.is_none().then_some(generation))
+        .unwrap_or(notifications)
 }
 
 fn retry_operation(
@@ -1157,6 +1180,23 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn chain_capture_ends_at_the_earliest_unsettled_waiter() {
+        let mut requests = BTreeMap::from([(1, None), (2, None)]);
+        assert_eq!(capture_generation(0, 2, &requests), 1);
+        requests.insert(1, Some(AnalyticsWriterStatus::Idle));
+        assert_eq!(capture_generation(1, 2, &requests), 2);
+        // Notification-only work beyond a waiter remains for the next chain.
+        assert_eq!(capture_generation(1, 7, &requests), 2);
+        requests.insert(2, Some(AnalyticsWriterStatus::Stopped));
+        assert_eq!(capture_generation(1, 7, &requests), 7);
+        requests.insert(4, None);
+        assert_eq!(capture_generation(1, 7, &requests), 4);
+        requests.remove(&4); // Cancelled waiters no longer split notification work.
+        assert_eq!(capture_generation(1, 7, &requests), 7);
+        assert_eq!(capture_generation(7, 7, &requests), 7);
     }
 
     #[test]
@@ -1520,6 +1560,130 @@ mod tests {
         fn now_ms(&self) -> i64 {
             self.0.load(Ordering::Acquire)
         }
+    }
+
+    // Register A and B before the worker exists, removing thread-start races
+    // from tests of initial capture rather than just requests during backoff.
+    fn start_with_two_queued_requests(
+        config: AnalyticsWriterConfig,
+        clock: Arc<ManualClock>,
+    ) -> Handle {
+        let shared = Arc::new(Shared::new());
+        {
+            let mut state = lock(&shared.state);
+            state.notifications = 2;
+            state.requests = BTreeMap::from([(1, None), (2, None)]);
+        }
+        let worker_shared = Arc::clone(&shared);
+        let thread = thread::spawn(move || run(config, clock, worker_shared, None));
+        Handle {
+            shared,
+            thread: Some(thread),
+        }
+    }
+
+    #[test]
+    fn requests_queued_before_first_operation_have_independent_failure_budgets() {
+        let root = temp_root("requests-already-queued-failure");
+        let cache = root.join("index.json");
+        let clock = Arc::new(ManualClock(std::sync::atomic::AtomicI64::new(0)));
+        let handle = start_with_two_queued_requests(
+            AnalyticsWriterConfig::new(
+                "machine",
+                crate::events::EventCache::path(&cache),
+                root.join("store"),
+            ),
+            Arc::clone(&clock),
+        );
+        for (attempt, now) in [(1, 2_000), (2, 4_000)] {
+            wait_until(&handle, |state| {
+                state.input_attempts == attempt
+                    && state.status
+                        == AnalyticsWriterStatus::Retrying {
+                            attempt: attempt as u32,
+                        }
+            });
+            clock.0.store(now, Ordering::Release);
+            handle.wake_for_clock();
+        }
+        wait_until(&handle, |state| {
+            matches!(
+                state.requests[&1].as_ref(),
+                Some(AnalyticsWriterStatus::Refused { .. })
+            )
+        });
+        {
+            let state = lock(&handle.shared.state);
+            assert_eq!(state.input_attempts, 3);
+            assert_eq!(state.consumed, 1);
+            let Some(AnalyticsWriterStatus::Refused { reason }) = &state.requests[&1] else {
+                panic!("A must exhaust its own budget");
+            };
+            assert!(reason.contains("after 3 failures"));
+            assert!(state.requests[&2].is_none(), "B did not initiate A's chain");
+        }
+        for (attempts, attempt, now) in [(4, 1, 6_000), (5, 2, 8_000)] {
+            clock.0.store(now, Ordering::Release);
+            handle.wake_for_clock();
+            wait_until(&handle, |state| {
+                state.input_attempts == attempts
+                    && state.status == AnalyticsWriterStatus::Retrying { attempt }
+            });
+            assert!(lock(&handle.shared.state).requests[&2].is_none());
+        }
+        drop(crate::events::EventCache::open_scoped(&cache).unwrap());
+        clock.0.store(10_000, Ordering::Release);
+        handle.wake_for_clock();
+        wait_until(&handle, |state| {
+            state.requests[&2] == Some(AnalyticsWriterStatus::Idle)
+        });
+        {
+            let state = lock(&handle.shared.state);
+            assert!(matches!(
+                state.requests[&1].as_ref(),
+                Some(AnalyticsWriterStatus::Refused { .. })
+            ));
+            assert_eq!(state.consumed, 2);
+            assert_eq!(state.input_attempts, 6);
+            assert_eq!(state.published, 1);
+        }
+        handle.stop_and_join();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn requests_queued_before_first_operation_require_separate_successful_publications() {
+        let root = temp_root("requests-already-queued-success");
+        let cache = root.join("index.json");
+        drop(crate::events::EventCache::open_scoped(&cache).unwrap());
+        let clock = Arc::new(ManualClock(std::sync::atomic::AtomicI64::new(0)));
+        let handle = start_with_two_queued_requests(
+            AnalyticsWriterConfig::new(
+                "machine",
+                crate::events::EventCache::path(&cache),
+                root.join("store"),
+            ),
+            Arc::clone(&clock),
+        );
+        handle.wait_for_publishes(1);
+        handle.wait_for_idle_wait();
+        {
+            let state = lock(&handle.shared.state);
+            assert_eq!(state.requests[&1], Some(AnalyticsWriterStatus::Idle));
+            assert!(
+                state.requests[&2].is_none(),
+                "A's publication must not settle B"
+            );
+            assert_eq!(state.consumed, 1);
+        }
+        clock.0.store(2_000, Ordering::Release);
+        handle.wake_for_clock();
+        wait_until(&handle, |state| {
+            state.requests[&2] == Some(AnalyticsWriterStatus::Idle)
+        });
+        assert_eq!(handle.published(), 2);
+        handle.stop_and_join();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

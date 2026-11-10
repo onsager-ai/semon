@@ -151,13 +151,19 @@ separate operation. Writer ownership is acquired before namespace creation or
 Catalog refresh; contention returns `analytics writer busy` without changing the
 index or namespace. Corrupt or unsupported indexes are refused unchanged.
 Catalog refresh is complete; `--since`/`--all` do not bound analytics input.
-Each request waits for publication and compaction; operational failures exhaust
-a three-failure budget (up to 1s/2s backoffs plus publication spacing) and report
-the last error. `--watch` exits on refresh or publication failure and cancels its
+`--batch-sessions N` limits sessions or journal entries per chunk (default 64),
+and `--batch-steps N` limits admitted steps (default 8192). Both limits must be
+positive integers no greater than 9223372036854775807; a session exceeding the
+step budget stays whole. One-shot runs drain chunks immediately through a fixed
+journal endpoint; later writes belong to the next request. Watch spaces chunks
+by 2 s. Each request waits for all chunks and final compaction; operational
+failures exhaust a three-failure budget (up to 1s/2s backoffs plus publication
+spacing) and report the last error. `--watch` exits on refresh or publication failure and cancels its
 wait on SIGINT/SIGTERM before joining the writer and re-raising the signal.
 
 ```sh
 semon analytics materialize --all
+semon analytics materialize --all --batch-sessions 16 --batch-steps 4096
 semon analytics materialize --watch --since 7d
 ```
 
