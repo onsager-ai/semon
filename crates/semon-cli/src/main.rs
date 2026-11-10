@@ -102,6 +102,7 @@ struct QueryArgs {
 struct MaterializeArgs {
     home: HomeArgs,
     watch: bool,
+    input_budget: semon_sessions::InputBudget,
 }
 
 struct PushArgs {
@@ -188,6 +189,7 @@ fn parse_analytics_args(
     }
     let mut home = HomeArgs::default();
     let mut watch = false;
+    let mut input_budget = semon_sessions::InputBudget::default();
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -199,6 +201,23 @@ fn parse_analytics_args(
         }
         match argument.as_str() {
             "--watch" => watch = true,
+            "--batch-sessions" | "--batch-steps" => {
+                let limit = value()?
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|limit| *limit > 0 && i64::try_from(*limit).is_ok())
+                    .ok_or_else(|| {
+                        format!(
+                            "{argument} requires a positive integer no greater than {}",
+                            usize::try_from(i64::MAX).unwrap_or(usize::MAX)
+                        )
+                    })?;
+                if argument == "--batch-sessions" {
+                    input_budget.max_sessions = limit;
+                } else {
+                    input_budget.max_steps = limit;
+                }
+            }
             "-h" | "--help" => return Err(analytics_usage()),
             _ => {
                 return Err(format!(
@@ -214,7 +233,11 @@ fn parse_analytics_args(
                 .into(),
         );
     }
-    Ok(MaterializeArgs { home, watch })
+    Ok(MaterializeArgs {
+        home,
+        watch,
+        input_budget,
+    })
 }
 
 fn parse_sessions_args(
@@ -672,11 +695,18 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
         Some(namespace) => namespace,
         None => semon_sessions::load_or_create_analytics_namespace(state_dir)?,
     };
-    let writer = owner.start(semon_sessions::AnalyticsWriterConfig::new(
+    let mut config = semon_sessions::AnalyticsWriterConfig::new(
         namespace.clone(),
         index_path,
         store_root.clone(),
-    ));
+    );
+    config.input_budget = args.input_budget;
+    // One-shot materialization drains bounded chunks immediately. Watch keeps
+    // the default spacing so each continuation yields to native discovery.
+    if !args.watch {
+        config.interval = std::time::Duration::ZERO;
+    }
+    let writer = owner.start(config);
 
     let stop = semon_push::Stop::new();
     if args.watch {
@@ -1014,10 +1044,12 @@ fn query_usage() -> String {
 }
 
 fn analytics_usage() -> String {
-    "Usage: semon analytics materialize [--watch] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--copilot-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
+    "Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--copilot-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
      Refreshes the local native Catalog, then explicitly materializes its analytics store.\n\
      Catalog refresh is complete; --since/--all do not bound analytics input.\n\
-     --watch refreshes and publishes every 2 s; failures exit visibly. Ctrl-C/SIGTERM stops the wait."
+     Batch limits are positive integers up to min(usize::MAX, i64::MAX) for this build; defaults are 64 sessions/journal entries and 8192 steps. An oversize session stays whole.\n\
+     One-shot finishes inherited replay, then drains immediately through a fresh endpoint; later changes belong to the next request.\n\
+     --watch uses a minimum spacing of 2 s between chunk attempts; failures exit visibly. Ctrl-C/SIGTERM stops the wait."
         .to_owned()
 }
 
@@ -1033,8 +1065,9 @@ fn usage() -> String {
          The agent read surface over native session evidence: list_sessions, get_session, get_session_activity, read_transcript,\n\
          stalls. `semon query` alone lists each tool's arguments.\n\
          \n\
-         Usage: semon analytics materialize [--watch] [--since DURATION | --all] [home options as for sessions]\n\
+         Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [home options as for sessions]\n\
          Explicitly refreshes the local native Catalog and materializes local-only analytics. Nothing starts this writer by default.\n\
+         Batch limits default to 64 sessions/journal entries and 8192 steps; an oversize session stays whole. Limits are positive and at most min(usize::MAX, i64::MAX).\n\
          \n\
          Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
          The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener. Both read\n\
@@ -1060,6 +1093,34 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn analytics_batch_limits_accept_the_sqlite_boundary_and_refuse_larger_values() {
+        // usize is the in-memory budget type; SQLite LIMIT is signed i64.
+        let largest = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
+        for flag in ["--batch-sessions", "--batch-steps"] {
+            let limit = largest.to_string();
+            let args =
+                parse_analytics_args(["materialize", flag, &limit].map(str::to_owned).into_iter())
+                    .unwrap();
+            let actual = if flag == "--batch-sessions" {
+                args.input_budget.max_sessions
+            } else {
+                args.input_budget.max_steps
+            };
+            assert_eq!(actual, largest);
+            for refused in ["9223372036854775808", "18446744073709551615"] {
+                assert!(
+                    parse_analytics_args(
+                        ["materialize", flag, refused]
+                            .map(str::to_owned)
+                            .into_iter()
+                    )
+                    .is_err()
+                );
+            }
+        }
+    }
 
     #[test]
     fn archive_prune_requires_explicit_retention_and_valid_days() {

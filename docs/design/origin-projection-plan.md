@@ -11,8 +11,9 @@ and FTS work; this lane does not edit those stack branches.
 `semon-sessions` implements the trait over its internal activity readers. Read
 index incarnation, change sequence, catalog, complete admitted activity generation,
 StepFacts and provenance in one SQLite read transaction. The adapter owns strict
-incarnation/sequence checkpoint encoding and validation; incarnation changes cause
-a full namespace read. A pending or unavailable generation is distinct from an
+incarnation/snapshot/cursor checkpoint encoding and validation; incarnation
+changes restart a bounded namespace inventory. Each chunk has its own coherent
+read transaction; chunks do not share a long-lived transaction. A pending or unavailable generation is distinct from an
 empty admitted session or an explicit removal.
 
 The ASI session UID is `(configured machine namespace, native harness, native
@@ -110,24 +111,32 @@ The writer coalesces notifications into at-most-one cycle per
 interval, opens a fresh read-only `SqliteAnalyticsInput` for each cycle, and
 uses the current native activity-rules version and pricing snapshot fingerprint
 as manifest targets. It preserves the adapter's admitted input boundary:
-bounded input lands separately and is not a limit added by the writer.
+the adapter bounds inventory and incremental chunks using the configured input
+budget. The writer schedules continuation at the same interval until input
+completion, and a materialize request waits for that completion and its final
+compaction.
 
 Lock contention is an observable no-writer state. Unsupported or integrity input
 refuses visibly without mutating the SQLite index, advancing its checkpoint,
 resetting state or deleting data; a later notification makes one fresh read
 attempt. Direct store I/O and Parquet `External` I/O back off, as do operational
-SQLite busy/locked/I/O/full/cannot-open errors. Three operational failures exhaust
-the request budget with the last error (up to 1s/2s backoffs plus publication
-spacing). The budget belongs to the recovery chain: successful Open, Retire or
-Compact clears it, while retirement that interrupts publication saves and restores
-that publication's counters separately. Successful reloads preserve the budget.
-A new Catalog publication notification permits a fresh attempt after refusal.
-Parquet page-read I/O surfaced as an Arrow error latches refusal until the next notification; the writer does not
-recover its lost typed I/O source. A store error reloads the manifest before
-retry because a rename may already have published the generation. Reload success
-preserves the resumed operation's retry count. Every publication attempt advances
-the interval deadline, including rename-visible failures. Refusals consume only
-the pre-operation notification snapshot, leaving later notifications pending.
+SQLite busy/locked/I/O/full/cannot-open errors. A publication chain allows three
+operational failures across Open, Reload, chunks and compaction recovery, with
+1s/2s backoffs plus minimum publication spacing. Successful operations within
+that chain do not reset its counters. Periodic retirement has an independent
+maintenance chain and budget, suspending/restoring the entire publication record;
+its failures can add to the request wait but never spend/reset publication counters.
+Terminal retirement refusal explicitly ends the suspended request as well.
+Every terminal outcome drops the owned Chain; later requests start at 0/0.
+Parquet page-read I/O surfaced as an Arrow error latches refusal until the next
+notification; the writer does not recover its lost typed I/O source. A store
+error reloads the manifest before retry because a rename may already be visible.
+A successful chunk advances `consumed` but defers settlement until final fresh
+input completion and compaction. A new chain finishing an inherited persisted
+replay endpoint must then complete a fresh drain before settling its request.
+Every publication attempt advances the minimum-spacing deadline, including
+rename-visible failures. Refusals consume only the chain's captured generation,
+leaving later notifications pending.
 The service attempts bounded compaction once after publication. Its slow
 retirement cadence can run ahead of an interval-gated publication while keeping
 that publication pending, but cannot bypass recovery barriers. Shutdown never
@@ -159,9 +168,46 @@ one key refuse the cycle without advancing the checkpoint. Distinct price
 versions remain separate SCD2 rows. See the [store contract](asi-store.md) for
 the complete key and observation merge contract.
 
-A `ReplaceNamespace` inventory marks any prior live session under that exact
-encoded namespace component followed by `/` which it does not mention as
-`source_missing`; rows remain live and other namespaces are untouched. The
+The admitted input now takes a caller-selected positive session/journal and step
+budget (defaults: 64 sessions/journal entries and 8,192 admitted steps). Inventory
+pages Catalog/activity keys through its starting maximum key, recording sequence
+S for catch-up. Metadata-only `Pending` identities need no journal entry.
+The silver journal is append-only within an incarnation; production does not
+prune or rewrite its rows. Any pruning or resequencing MUST change the
+incarnation so readers restart inventory. Sequence gaps are allowed, and cursors
+ahead of the current journal maximum are refused.
+Whole-session atomicity allows a single oversize session. Partial chunks
+publish independently and checkpoint their cursor. Only the final inventory
+chunk carries `ReplaceNamespace { session_uids }`, with the complete current UID
+set, not merely that chunk's changes. It marks prior live sessions absent from
+that exact namespace inventory as `source_missing`; rows remain live and other
+namespaces are untouched. Catch-up replays changes after S, including sessions
+added, removed or changed between inventory chunks. Completion means the cursor
+has caught a fixed replay endpoint: the journal maximum at final inventory,
+or at the first read of a new incremental drain. Replay checkpoints retain that
+endpoint across reads/retries/restarts. Later writes belong to the next drain;
+current whole-session readers can observe newer evidence early. A continuously
+advancing journal cannot extend a request forever. One-shot equivalence at the
+final read assumes writes have quiesced by endpoint capture; otherwise the next
+drain reconciles the later suffix. Crash/restart uses the manifest cursor;
+an incarnation change abandons partial inventory and starts over. See the
+[resumable input contract](asi-store.md#resumable-admitted-input) for validation,
+consistency proof and the remaining O(sessions) UID/live-map/dimension costs.
+
+`publish_cycle` accepts the budget, writes one chunk as one generation and returns
+completion to its caller. The caller may drain or yield between chunks; the 2 s
+discovery cadence does not require an entire inventory in one tick. The existing
+local writer selects `AnalyticsWriterConfig.input_budget` and continues incomplete
+chunks at its configured interval, including after recovery, without another
+external notification. Each request keeps its initiating notification generation
+through retries, chunks and final compaction; later requests cannot inherit its
+failures or settle from its earlier publication. Successful chunks retain the
+publication chain's finite operational failure budget. The CLI accepts
+`--batch-sessions` and `--batch-steps`; one-shot uses zero chunk spacing and exits
+after a fresh complete drain plus final bounded compaction (finishing any inherited
+replay first). Watch uses a minimum spacing of 2 s between chunk attempts.
+Cancellation stops the waiter, then joins the writer without flushing the rest
+of the inventory. This delivery remains only part of #557. The
 adapter and publisher share `semon-asi`'s canonical UID component encoder. A
 later `SourceRestored` clears the marker.
 

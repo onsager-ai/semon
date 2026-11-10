@@ -33,11 +33,11 @@ pub use governance::{
     serialize_governed_row,
 };
 pub use input::{
-    ANALYTICS_TRANSFORM_VERSION, AdmittedBatch, AdmittedSession, AnalyticsInput, Reconciliation,
-    SessionChange,
+    ANALYTICS_TRANSFORM_VERSION, AdmittedBatch, AdmittedSession, AnalyticsInput, InputBudget,
+    Reconciliation, SessionChange,
 };
 pub use projection::{Cell, ProjectedSession, Row, project};
-pub use publish::{PublishError, publish_cycle};
+pub use publish::{PublishError, PublishProgress, publish_cycle};
 pub use store::{
     Clock, FileEntry, Manifest, RETIREMENT_DELAY_MS, SourceMissing, Store, SystemClock, TableBatch,
     Update, Versions, read_live_map, read_manifest,

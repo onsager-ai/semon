@@ -110,7 +110,7 @@ pub struct Manifest {
     pub files: Vec<FileEntry>,
     /// Relative path of the live map; absent before the first publish.
     pub live_map: Option<String>,
-    /// Opaque per-namespace checkpoint (index incarnation and `seq`).
+    /// Opaque per-namespace input checkpoint (incarnation, snapshot and cursor).
     pub checkpoints: BTreeMap<String, String>,
     /// Last durable revision exported to `fact_label`.
     pub durable_revision: u64,

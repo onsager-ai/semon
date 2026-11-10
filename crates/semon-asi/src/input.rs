@@ -2,8 +2,9 @@
 //!
 //! The analytics store consumes this contract without knowing how native
 //! sessions are indexed.  Implementors own their opaque checkpoints and must
-//! return one coherent read snapshot: a change and the session evidence it
-//! names can never come from different SQLite snapshots.
+//! return bounded resumable chunks. Each chunk is a coherent read snapshot:
+//! a change and its evidence never come from different SQLite snapshots.
+//! Only a completed inventory may reconcile absent namespace identities.
 
 use std::collections::BTreeMap;
 
@@ -31,38 +32,67 @@ pub fn encode_component(value: &str) -> String {
     encoded
 }
 
-/// Reads one namespace of admitted activity evidence.
+/// Caller-selected work per chunk. Both limits must be positive.
 ///
-/// `checkpoint` is deliberately opaque to `semon-asi`.  An implementation
-/// encodes its index incarnation and sequence there; when its incarnation
-/// changes it returns a full namespace batch instead of interpreting a prior
-/// sequence in the new index.
+/// `max_sessions` bounds inventory keys, or incremental journal entries
+/// including repeated entries for the same identity. A session is never split: the first session
+/// exceeding `max_steps` is returned whole and alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputBudget {
+    pub max_sessions: usize,
+    pub max_steps: usize,
+}
+
+impl Default for InputBudget {
+    fn default() -> Self {
+        Self {
+            max_sessions: 64,
+            max_steps: 8_192,
+        }
+    }
+}
+
+/// Reads one namespace of admitted activity evidence, one bounded chunk at a time.
+///
+/// The adapter owns strict validation of the opaque checkpoint, including its
+/// incarnation, inventory snapshot and cursor. A changed incarnation restarts
+/// inventory. Changes during inventory must be replayed before reporting
+/// completion. Replay captures a fixed endpoint, so writes after that endpoint
+/// belong to the next drain. Only the final inventory chunk supplies the
+/// complete UID set.
 pub trait AnalyticsInput {
     type Error;
 
-    fn read_admitted(&mut self, checkpoint: Option<&str>) -> Result<AdmittedBatch, Self::Error>;
+    fn read_admitted(
+        &mut self,
+        checkpoint: Option<&str>,
+        budget: InputBudget,
+    ) -> Result<AdmittedBatch, Self::Error>;
 }
 
-/// A coherent incremental input read for one namespace.
+/// A coherent bounded input read for one namespace.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AdmittedBatch {
     pub namespace: String,
-    /// Implementation-defined incarnation and sequence checkpoint.
+    /// Adapter-owned next cursor; publish atomically with the chunk's facts.
     pub checkpoint: String,
-    /// A new index incarnation replaces the complete namespace inventory.
-    /// Consumers must reconcile absent prior sessions by marking their retained
-    /// rows source-missing rather than treating the batch as another incremental
-    /// patch.
+    /// True when inventory and replay have reached this drain's fixed endpoint.
+    /// A caller may yield between incomplete chunks and resume from its manifest.
+    pub complete: bool,
     pub reconciliation: Reconciliation,
-    /// Changed sessions, explicit removals, and availability observations in
-    /// sequence order.  An admitted session with no steps is still `Admitted`.
+    /// Changes in journal sequence order. An admitted session with no steps is
+    /// still `Admitted`; no session is admitted twice in a chunk.
     pub changes: Vec<SessionChange>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reconciliation {
     Incremental,
-    ReplaceNamespace,
+    /// Only the final inventory chunk reconciles absence. This is the complete
+    /// current namespace UID inventory, not just the changes in that chunk.
+    ReplaceNamespace {
+        session_uids: std::collections::BTreeSet<String>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
