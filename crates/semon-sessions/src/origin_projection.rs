@@ -266,7 +266,7 @@ fn encode_checkpoint(incarnation: &str, sequence: i64) -> String {
 }
 
 fn catalog_row(tx: &rusqlite::Transaction<'_>, key: &str) -> rusqlite::Result<Option<CatalogRow>> {
-    let row = tx
+    let row: Option<CatalogRow> = tx
         .query_row(
             "SELECT metadata FROM session_catalog WHERE session_key=?1",
             [key],
