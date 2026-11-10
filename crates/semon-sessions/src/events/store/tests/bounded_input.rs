@@ -871,6 +871,49 @@ fn bounded_writer_continues_one_chunk_per_interval_without_fresh_notifications()
 }
 
 #[test]
+fn bounded_writer_request_waits_for_complete_inventory() {
+    let (root, options, _, _native) = fixture("bounded-writer-request", 4);
+    let store_root = root.join("writer-store");
+    let time = Arc::new(clock());
+    let mut config = crate::AnalyticsWriterConfig::new(
+        NAMESPACE,
+        crate::events::EventCache::path(&options.cache),
+        &store_root,
+    );
+    config.input_budget = budget(1, 8_192);
+    let handle = crate::analytics_writer::start_with_clock(config, Arc::clone(&time));
+    std::thread::scope(|scope| {
+        let waiter = scope.spawn(|| handle.publish_and_wait());
+        for count in 1..=4 {
+            if count > 1 {
+                time.0
+                    .store(100 + (count - 1) as i64 * 2_000, Ordering::SeqCst);
+                handle.wake_for_clock();
+            }
+            handle.wait_for_publishes(count);
+            handle.wait_for_idle_wait();
+            if count < 4 {
+                assert_eq!(
+                    handle.unsettled_requests(),
+                    1,
+                    "partial publication and compaction must not settle materialization"
+                );
+            }
+        }
+        assert_eq!(waiter.join().unwrap(), crate::AnalyticsWriterStatus::Idle);
+    });
+    let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_eq!(
+        semon_asi::read_live_map(&store_root, &manifest)
+            .unwrap()
+            .len(),
+        4
+    );
+    handle.stop_and_join();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bounded_empty_inventory_completes_and_checkpoints_zero() {
     let (root, options, _, _native) = fixture("bounded-empty", 0);
     let mut input = ObservedInput::open(&options);

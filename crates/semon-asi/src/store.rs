@@ -206,7 +206,7 @@ impl<C: Clock> Store<C> {
     /// Takes the writer lock and discards files of a generation that never committed.
     pub fn open_with_clock(root: &Path, clock: C) -> Result<Self> {
         let analytics = root.join(ANALYTICS_DIR);
-        create_durable_dir(&analytics)?;
+        create_durable_dir(root)?;
         let lock = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -217,6 +217,7 @@ impl<C: Clock> Store<C> {
             Err(TryLockError::WouldBlock) => return Err(Error::WriterBusy),
             Err(TryLockError::Error(error)) => return Err(error.into()),
         }
+        create_durable_dir(&analytics)?;
         let manifest = read_manifest_in(&analytics)?.unwrap_or_else(Manifest::empty);
         let live = match &manifest.live_map {
             Some(path) => read_live_map_file(&analytics.join(path))?,

@@ -84,24 +84,49 @@ observing the new physical witness as pending.
 
 ## Integration after the storage stack merges
 
-`semon-sessions::analytics_writer` now supplies the first local lifecycle
-primitive for this plan. A caller explicitly starts it with a configured
-namespace, read-only SQLite index path and analytics store root; no Viewer, MCP,
-push/receive or CLI path starts it, and the owner still needs to choose the host
-configuration and enablement surface. It coalesces catalog-publication
-notifications into at-most-one cycle per interval, opens a fresh read-only
-`SqliteAnalyticsInput` for each cycle, and uses the current native activity-rules
-version and pricing snapshot fingerprint as manifest targets. It preserves the
-adapter's admitted input boundary: the adapter bounds inventory and incremental
-chunks using the configured input budget, and the writer schedules continuation
-at the same interval until the input reports completion.
+`semon analytics materialize` is the explicit local lifecycle entry point for
+this plan. It drains the native Catalog/activity producer used by the Viewer
+with strict index opening (no recovery fallback), then starts `semon-sessions::analytics_writer` against
+that read-only SQLite index. Nothing starts the writer by default: Viewer, MCP,
+push and receive remain disabled as hosts. The first materialize writes a random
+`origin-` namespace to `<index parent>/analytics-namespace`, and later runs reuse
+it. Deleting that state directory starts a new namespace with new session IDs;
+there is no automatic reconciliation. Rename or transfer is a later explicit
+operator workflow. The CLI's `--watch` repeats Catalog refresh and notification
+until stopped; it exits visibly on refresh or publication failure. It acquires
+the store lock before namespace creation or writable Catalog refresh. Namespace
+validity and missing-file/store ambiguity are checked read-only before store
+opening and crash recovery, so namespace refusal preserves all crash leftovers.
+Existing index validation is read-only and precedes analytics state creation, so
+corrupt and unsupported indexes are refused unchanged. Namespace loading refuses
+symlinks and non-regular files and reads at most the expected length plus one.
+The index path is trusted to be the user's own state file; each analytics input
+open refuses symlinks with SQLite NOFOLLOW. Another regular file swapped by the
+same user is outside this boundary, because that user can already edit the state.
+Each wait has its own request generation and outcome: success is settled only
+after that request's publication and compaction, never at an intermediate Idle
+or successful manifest reload. Later requests cannot inherit a previous outcome.
+SIGINT/SIGTERM cancels pending waits, joins the writer, and is then re-raised.
+The writer coalesces notifications into at-most-one cycle per
+interval, opens a fresh read-only `SqliteAnalyticsInput` for each cycle, and
+uses the current native activity-rules version and pricing snapshot fingerprint
+as manifest targets. It preserves the adapter's admitted input boundary:
+the adapter bounds inventory and incremental chunks using the configured input
+budget. The writer schedules continuation at the same interval until input
+completion, and a materialize request waits for that completion and its final
+compaction.
 
 Lock contention is an observable no-writer state. Unsupported or integrity input
 refuses visibly without mutating the SQLite index, advancing its checkpoint,
 resetting state or deleting data; a later notification makes one fresh read
 attempt. Direct store I/O and Parquet `External` I/O back off, as do operational
-SQLite busy/locked/I/O/full/cannot-open errors. Parquet page-read I/O surfaced as
-an Arrow error latches refusal until the next notification; the writer does not
+SQLite busy/locked/I/O/full/cannot-open errors. Three operational failures exhaust
+the request budget with the last error (up to 1s/2s backoffs plus publication
+spacing). The budget belongs to the recovery chain: successful Open, Retire or
+Compact clears it, while retirement that interrupts publication saves and restores
+that publication's counters separately. Successful reloads preserve the budget.
+A new Catalog publication notification permits a fresh attempt after refusal.
+Parquet page-read I/O surfaced as an Arrow error latches refusal until the next notification; the writer does not
 recover its lost typed I/O source. A store error reloads the manifest before
 retry because a rename may already have published the generation. Reload success
 preserves the resumed operation's retry count. Every publication attempt advances

@@ -222,19 +222,42 @@ Analytics is published as immutable files, plus a map of which file holds each
 session's current rows. This is the merge-on-read pattern used by lakehouse
 tables.
 
-- **Writer.** The first Semon process that needs analytics takes `analytics.lock` and
-  becomes the authoritative producer store's single writer: push, Viewer, MCP,
-  or receive for an explicitly transferred replica namespace. Other processes only
+- **Writer.** An explicitly invoked local materializer takes `analytics.lock` and
+  becomes the authoritative producer store's single writer. Other processes only
   read. Imported receiver heads are admitted publications, not locally rebuilt indexes.
-  The local `semon-sessions` writer service is an explicit lifecycle primitive:
-  its namespace is caller-supplied, it opens a separate read-only index connection
-  per cycle, and it is not enabled or started by a host yet. Its store-root helper
-  uses `<index parent>/analytics-store`, never a path inside the SQLite index file. A busy
-  lock is observable as a no-writer state; unsupported input latches a refusal
+  The local `semon-sessions` writer service is an explicit lifecycle primitive.
+  `semon analytics materialize` is its only enablement surface: Viewer, MCP,
+  push and receive do not start it. On the first materialize, it creates a
+  random `origin-` namespace in `<index parent>/analytics-namespace`; later
+  materializations reuse that value. If the state directory is deleted, the
+  next materialize has new session UIDs and no automatic reconciliation.
+  Rename or transfer is a later explicit operator workflow. The writer opens a
+  separate read-only index connection per cycle, and its store-root helper uses
+  `<index parent>/analytics-store`, never a path inside the SQLite index file.
+  A present store with a missing namespace file refuses instead of silently
+  forking those identities.
+  The CLI checks namespace validity and missing-file/store ambiguity read-only
+  before opening the store, so refusal preserves crash leftovers. It validates
+  an existing index read-only, then acquires writer ownership before recovery,
+  namespace creation or writable refresh, and drains the Viewer's native
+  Catalog/activity producer with strict opening and no recovery fallback.
+  Namespace loading refuses symlinks and non-regular files and reads at most the
+  expected length plus one. The index path must be the user's own trusted state
+  file. Analytics input opens refuse symlinks with SQLite NOFOLLOW; regular-file
+  replacement by the same user is outside this boundary, since that user can
+  already edit the state files. Each waiter owns a request generation and outcome;
+  success requires that generation's complete input publication and final
+  compaction, never a partial chunk, intermediate Idle or manifest reload.
+  SIGINT/SIGTERM cancels a CLI watch wait, then joins the writer and is re-raised.
+  Watch exits on refresh/publication failure.
+  A busy lock is observable as a no-writer state; unsupported input latches a refusal
   without changing the index or a checkpoint, until a later notification retries.
   Store refusals also latch until a new notification; each refusal consumes only
   the notification snapshot captured before its operation, preserving notifications
   received during that operation.
+- **Local custody.** The generated Parquet can contain typed local-path
+  fields. It remains local-only; a governed export is a separate operation and
+  is not part of materialization.
 - **Cycle.** The caller selects an interval (2 s by default) and an input
   budget. `publish_cycle` publishes one bounded chunk as one `Update` and
   generation, then returns its generation and completion flag. The caller may
@@ -264,9 +287,14 @@ tables.
   - The local service coalesces catalog-publication notifications. Operational
     classification covers direct store I/O, Parquet `External` I/O, and SQLite
     busy/locked/I/O/full/cannot-open errors. These retry with bounded exponential
-    backoff. Parquet page-read I/O can surface as an Arrow error after losing its
-    typed I/O source; it fails safe by latching `Refused` until the next
-    notification, like structural errors. A store error requires manifest reload
+    backoff, with at most three operational failures per request before visible
+    refusal carrying the last error (up to 1s/2s backoffs plus publication spacing).
+    The failure budget belongs to the recovery chain. Successful Open, Retire or
+    Compact clears it; retirement that interrupts publication saves and restores
+    that publication's counters separately. Reload success does not reset the
+    budget; a new Catalog notification permits a fresh attempt after refusal.
+    Parquet page-read I/O can surface as an Arrow error after losing its typed I/O
+    source; it fails safe by latching `Refused` until the next notification, like structural errors. A store error requires manifest reload
     before its operation resumes. A successful reload preserves the retry attempt;
     only success of the resumed operation clears it. Every publication attempt
     advances the cycle deadline, including an error after a visible rename.
