@@ -57,11 +57,10 @@ pub fn load_or_create_analytics_namespace(state_dir: &Path) -> Result<String, St
             temporary.display()
         )
     })?;
-    let write = (|| {
-        file.write_all(namespace.as_bytes())
-            .and_then(|()| file.write_all(b"\n"))
-            .and_then(|()| file.sync_all())
-    })();
+    let write = file
+        .write_all(namespace.as_bytes())
+        .and_then(|()| file.write_all(b"\n"))
+        .and_then(|()| file.sync_all());
     drop(file);
     if let Err(error) = write {
         let _ = fs::remove_file(&temporary);
