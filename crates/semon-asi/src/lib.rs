@@ -5,6 +5,9 @@ pub mod governance;
 pub mod input;
 pub mod projection;
 pub mod schema;
+pub mod store;
+
+mod parquet_io;
 
 pub use error::{Error, Result};
 pub use governance::{
@@ -19,3 +22,7 @@ pub use input::{
     SessionChange,
 };
 pub use projection::{Cell, ProjectedSession, Row, project};
+pub use store::{
+    Clock, FileEntry, Manifest, RETIREMENT_DELAY_MS, SourceMissing, Store, SystemClock, TableBatch,
+    Update, Versions, read_live_map, read_manifest,
+};
