@@ -174,7 +174,7 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                         continue;
                     };
                     result.push(SessionChange::SourceRestored { session_uid: uid });
-                    result.push(SessionChange::Admitted(session));
+                    result.push(SessionChange::Admitted(Box::new(session)));
                 }
                 let sequence = tx.query_row(
                     "SELECT COALESCE(MAX(seq),0) FROM silver_change",

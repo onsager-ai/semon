@@ -47,7 +47,7 @@ pub enum Reconciliation {
 #[derive(Clone, Debug, PartialEq)]
 pub enum SessionChange {
     /// The whole current admitted generation for one session.
-    Admitted(AdmittedSession),
+    Admitted(Box<AdmittedSession>),
     /// The index observed a change but has no currently admitted generation.
     /// Consumers retain the prior published facts.
     Pending { session_uid: String },
