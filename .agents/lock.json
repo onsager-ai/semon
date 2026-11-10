@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "manifest_sha256": "11a752d1fd1a951aad8c4d0bc6120485000e6e4716689295996c3dc6fd39b812",
+  "manifest_sha256": "a4d9d50f2cd3744d2d352b5c76d5b256d724ddfef164f9d73667f24c2d5204d6",
   "block_sha256": "1439c3ccca8e357299cad3e45d87db923b7ac76fc0ebb671d72984001bd6ab85",
   "resolved_skills": [
     "ci-triage",
@@ -218,12 +218,12 @@
       "mode": "100755"
     },
     ".githooks/README.md": {
-      "sha256": "c4fdadeee8d6079b7442da1ca1757f3986fad0f141ea43bc8f4f1f3c6b2d7a5b",
+      "sha256": "915de38a96822e1e32ecd63532924d40583570b2986a1acc2003cfe1130e1bf5",
       "owner": "hooks",
       "mode": "100644"
     },
     ".github/workflows/agent-config.yml": {
-      "sha256": "60dca4b2ee7022d76732df2654190e246cdd510f9e6adef3941e3d9b602e3cb2",
+      "sha256": "f7567d8a59bfe33c6962a5f36fce118ec0bef385be0f70770effcc6717353f8d",
       "owner": "tooling",
       "mode": "100644"
     }
