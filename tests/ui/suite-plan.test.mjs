@@ -70,6 +70,7 @@ test('the workflow matrix and functional condition reach every declared group', 
   const functional = JSON.parse(workflow.match(/contains\(fromJSON\('([^']+)'\)/)[1]);
   assert.deepEqual(functional.sort(), Object.keys(GROUPS).sort());
   assert.equal(new Set(matrix).size, matrix.length);
+  assert.equal(matrix.length, 11);
   assert.ok(functional.every((group) => matrix.includes(group)));
   assert.ok(
     [
