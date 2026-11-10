@@ -590,7 +590,7 @@ fn generation_of(name: &str) -> Option<u64> {
 
 /// Generation numbers only grow, and the writer lock is held, so a file of a later
 /// generation than the manifest's is the leftover of a publish that never committed.
-fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
+pub(crate) fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
     match fs::remove_file(analytics.join(MANIFEST_TMP)) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
@@ -619,4 +619,515 @@ fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()> {
         sync_dir(&analytics.join(dir))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{DIM_PRICE, DIM_REPO, FACT_LABEL, FACT_SESSION, FACT_STEP};
+    use crate::testutil::{
+        FACT_TABLES, TestClock, all_rows, live_steps, replace_column, rows_of, sample, update,
+        update_all,
+    };
+
+    const S1: &str = "m1/claude/s1";
+    const S2: &str = "m1/claude/s2";
+
+    fn open(dir: &Path, clock: &Arc<TestClock>) -> Store<Arc<TestClock>> {
+        Store::open_with_clock(dir, clock.clone()).unwrap()
+    }
+
+    fn g2_bytes(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut files = Vec::new();
+        for table in ["fact_step", "fact_session", "live"] {
+            let path = dir.join(format!("analytics/{table}/g2.parquet"));
+            files.push((table.to_owned(), fs::read(path).unwrap()));
+        }
+        files
+    }
+
+    #[test]
+    fn rejects_invalid_enum_before_writing_generation() {
+        for (table, column, invalid) in [
+            (&FACT_STEP, "usage_owner", "Exclusive"),
+            (&DIM_PRICE, "unit", "token"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = open(dir.path(), &TestClock::new(0));
+            let batch = sample(table, &[(S1, 1)], "a", 0);
+            let batch = replace_column(&batch, column, Arc::new(StringArray::from(vec![invalid])));
+            let update = Update {
+                tables: vec![TableBatch { table, batch }],
+                touched_sessions: vec![S1.to_owned()],
+                ..Update::default()
+            };
+            assert!(store.publish(&update).is_err());
+            assert_eq!(store.manifest().generation, 0);
+            assert!(!store.analytics_dir().join(table.name).exists());
+        }
+    }
+
+    #[test]
+    fn publish_writes_files_live_map_and_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        assert_eq!(
+            store.publish(&update(&[(S1, 2), (S2, 1)], "a", 0)).unwrap(),
+            1
+        );
+
+        let manifest = read_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(&manifest, store.manifest());
+        assert_eq!(manifest.generation, 1);
+        assert_eq!(manifest.live_map.as_deref(), Some("live/g1.parquet"));
+        let step = manifest.files_of("fact_step").next().unwrap();
+        assert_eq!(step.path, "fact_step/g1.parquet");
+        assert_eq!((step.level, step.rows), (0, 3));
+        assert_eq!((step.min_row_gen, step.max_row_gen), (1, 1));
+        let on_disk = fs::metadata(dir.path().join("analytics").join(&step.path)).unwrap();
+        assert_eq!(step.bytes, on_disk.len());
+        assert!(
+            dir.path()
+                .join("analytics/fact_session/g1.parquet")
+                .is_file()
+        );
+
+        let live = read_live_map(dir.path(), &manifest).unwrap();
+        assert_eq!(
+            live,
+            HashMap::from([(S1.to_owned(), 1), (S2.to_owned(), 1)])
+        );
+    }
+
+    #[test]
+    fn a_later_generation_supersedes_and_removes_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        store
+            .publish(&update(&[(S1, 2), (S2, 2)], "old", 0))
+            .unwrap();
+        let mut next = update(&[(S1, 3)], "new", 0);
+        next.removed_sessions.push(S2.to_owned());
+        next.checkpoints
+            .insert("m1".to_owned(), "inc1:7".to_owned());
+        store.publish(&next).unwrap();
+
+        let live = live_steps(&store);
+        assert_eq!(live.len(), 3);
+        assert!(live.iter().all(|(session, generation, step)| {
+            session == S1 && *generation == 2 && step.ends_with(":new")
+        }));
+        assert_eq!(store.manifest().checkpoints["m1"], "inc1:7");
+        assert_eq!(store.live_map().len(), 1);
+    }
+
+    #[test]
+    fn unpublished_files_are_stamped_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(1_000);
+        let mut store = open(dir.path(), &clock);
+        store.publish(&update(&[(S1, 1)], "a", 0)).unwrap();
+        assert!(store.manifest().unpublished.is_empty());
+        clock.advance(5);
+        store.publish(&update(&[(S1, 1)], "b", 0)).unwrap();
+        // Generation 1's live map is dropped; its fact files stay named (level 0).
+        assert_eq!(
+            store.manifest().unpublished,
+            BTreeMap::from([("live/g1.parquet".to_owned(), 1_005)])
+        );
+    }
+
+    #[test]
+    fn unpublication_is_stamped_when_the_generation_is_published_not_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(1_000);
+        let mut store = open(dir.path(), &clock);
+        store.publish(&update(&[(S1, 1)], "a", 0)).unwrap();
+
+        let staged = store.stage(&update(&[(S1, 1)], "b", 0)).unwrap();
+        clock.advance(7_000);
+        store.install(staged).unwrap();
+        assert_eq!(
+            store.manifest().unpublished,
+            BTreeMap::from([("live/g1.parquet".to_owned(), 8_000)])
+        );
+    }
+
+    #[test]
+    fn a_crash_before_the_manifest_rename_leaves_the_old_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = open(dir.path(), &clock);
+        store.publish(&update(&[(S1, 2)], "old", 0)).unwrap();
+        let before = live_steps(&store);
+
+        // Everything of generation 2 is on disk, but the manifest is not renamed.
+        let staged = store.stage(&update(&[(S1, 5)], "new", 0)).unwrap();
+        assert_eq!(staged.manifest.generation, 2);
+        assert!(dir.path().join("analytics/fact_step/g2.parquet").is_file());
+        assert!(dir.path().join("analytics/live/g2.parquet").is_file());
+        assert_eq!(read_manifest(dir.path()).unwrap().unwrap().generation, 1);
+        drop(staged);
+        drop(store);
+
+        let mut store = open(dir.path(), &clock);
+        assert_eq!(store.manifest().generation, 1);
+        assert_eq!(live_steps(&store), before);
+        assert!(!dir.path().join("analytics/fact_step/g2.parquet").exists());
+        assert!(!dir.path().join("analytics/live/g2.parquet").exists());
+        assert_eq!(store.publish(&update(&[(S1, 1)], "again", 0)).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_failure_before_the_rename_keeps_the_old_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        store.publish(&update(&[(S1, 2)], "old", 0)).unwrap();
+        let before = live_steps(&store);
+
+        store.fault = Some(Fault::BeforeRename);
+        assert!(matches!(
+            store.publish(&update(&[(S1, 5)], "new", 0)),
+            Err(Error::Io(_))
+        ));
+        assert_eq!(store.manifest().generation, 1);
+        assert_eq!(read_manifest(dir.path()).unwrap().unwrap().generation, 1);
+        assert_eq!(live_steps(&store), before);
+        assert_eq!(store.publish(&update(&[(S1, 1)], "again", 0)).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_failure_after_the_rename_still_publishes_and_the_number_is_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = open(dir.path(), &clock);
+        store.publish(&update(&[(S1, 2)], "one", 0)).unwrap();
+
+        // The directory fsync after the rename fails: the error is reported, but
+        // generation 2 is visible to readers and to this writer.
+        store.fault = Some(Fault::AfterRename);
+        assert!(matches!(
+            store.publish(&update(&[(S1, 3)], "two", 0)),
+            Err(Error::Io(_))
+        ));
+        assert_eq!(store.manifest().generation, 2);
+        let visible = read_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(&visible, store.manifest());
+        let reader_rows = rows_of(
+            &dir.path().join("analytics"),
+            &visible,
+            &read_live_map(dir.path(), &visible).unwrap(),
+            &FACT_STEP,
+        )
+        .unwrap();
+        let reader_files = g2_bytes(dir.path());
+
+        // Continuing: the next publish takes generation 3 and leaves generation 2 alone.
+        assert_eq!(store.publish(&update(&[(S1, 4)], "three", 0)).unwrap(), 3);
+        assert_eq!(g2_bytes(dir.path()), reader_files);
+        assert_eq!(
+            rows_of(
+                &dir.path().join("analytics"),
+                &visible,
+                &read_live_map(dir.path(), &visible).unwrap(),
+                &FACT_STEP,
+            )
+            .unwrap(),
+            reader_rows
+        );
+        drop(store);
+
+        // Reopening after such a failure behaves the same.
+        let mut store = open(dir.path(), &clock);
+        assert_eq!(store.manifest().generation, 3);
+        assert_eq!(store.publish(&update(&[(S1, 1)], "four", 0)).unwrap(), 4);
+        assert_eq!(g2_bytes(dir.path()), reader_files);
+    }
+
+    #[test]
+    fn a_failed_publication_followed_by_a_reopen_keeps_the_visible_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = open(dir.path(), &clock);
+        store.publish(&update(&[(S1, 2)], "one", 0)).unwrap();
+        store.fault = Some(Fault::AfterRename);
+        assert!(store.publish(&update(&[(S1, 3)], "two", 0)).is_err());
+        let reader_files = g2_bytes(dir.path());
+        drop(store);
+
+        let mut store = open(dir.path(), &clock);
+        assert_eq!(store.manifest().generation, 2);
+        assert_eq!(g2_bytes(dir.path()), reader_files);
+        assert_eq!(store.publish(&update(&[(S1, 1)], "three", 0)).unwrap(), 3);
+    }
+
+    #[test]
+    fn retirement_waits_ten_minutes_after_unpublication() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(1_000_000);
+        let mut store = open(dir.path(), &clock);
+        store.publish(&update(&[(S1, 1)], "a", 0)).unwrap();
+        store.publish(&update(&[(S1, 1)], "b", 0)).unwrap();
+        let old_live = dir.path().join("analytics/live/g1.parquet");
+        let current_live = dir.path().join("analytics/live/g2.parquet");
+
+        clock.advance(RETIREMENT_DELAY_MS - 1);
+        assert!(store.retire().unwrap().is_empty());
+        assert!(old_live.is_file());
+
+        clock.advance(1);
+        assert_eq!(store.retire().unwrap(), vec!["live/g1.parquet".to_owned()]);
+        assert!(!old_live.exists());
+        assert!(current_live.is_file());
+        assert!(store.manifest().unpublished.is_empty());
+        assert_eq!(
+            read_manifest(dir.path()).unwrap().as_ref(),
+            Some(store.manifest())
+        );
+        assert!(store.retire().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_older_snapshot_stays_readable_until_its_files_are_retired() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = open(dir.path(), &clock);
+        store.publish(&update_all(&[(S1, 2)], "old", 0)).unwrap();
+        let snapshot = read_manifest(dir.path()).unwrap().unwrap();
+        let analytics = dir.path().join("analytics");
+        let live = read_live_map(dir.path(), &snapshot).unwrap();
+        let before = rows_of(&analytics, &snapshot, &live, &FACT_STEP).unwrap();
+
+        store.publish(&update_all(&[(S1, 3)], "new", 0)).unwrap();
+        assert_eq!(
+            rows_of(&analytics, &snapshot, &live, &FACT_STEP).unwrap(),
+            before
+        );
+
+        clock.advance(RETIREMENT_DELAY_MS - 1);
+        store.retire().unwrap();
+        assert_eq!(
+            rows_of(&analytics, &snapshot, &live, &FACT_STEP).unwrap(),
+            before
+        );
+
+        // The snapshot's live map was unpublished by the second generation.
+        clock.advance(1);
+        store.retire().unwrap();
+        assert!(read_live_map(dir.path(), &snapshot).is_err());
+        let current = read_manifest(dir.path()).unwrap().unwrap();
+        assert!(read_live_map(dir.path(), &current).is_ok());
+    }
+
+    #[test]
+    fn a_second_writer_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let store = open(dir.path(), &clock);
+        assert!(matches!(
+            Store::open_with_clock(dir.path(), clock.clone()),
+            Err(Error::WriterBusy)
+        ));
+        drop(store);
+        assert!(Store::open_with_clock(dir.path(), clock).is_ok());
+    }
+
+    #[test]
+    fn a_session_row_outside_the_touched_set_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        let mut stray = update(&[(S1, 1)], "a", 0);
+        stray.touched_sessions.clear();
+        assert!(matches!(store.publish(&stray), Err(Error::Invalid(_))));
+        assert_eq!(store.manifest().generation, 0);
+    }
+
+    #[test]
+    fn an_unsupported_schema_version_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        store.publish(&update(&[(S1, 1)], "a", 0)).unwrap();
+        drop(store);
+        let path = dir.path().join("analytics/manifest.json");
+        let text = fs::read_to_string(&path).unwrap();
+        let current = format!("\"schema_version\": {ASI_SCHEMA_VERSION}");
+        assert!(
+            text.contains(&current),
+            "the manifest records the schema version"
+        );
+        fs::write(&path, text.replace(&current, "\"schema_version\": 99")).unwrap();
+        assert!(matches!(read_manifest(dir.path()), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn a_batch_must_match_its_declared_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        let mut wrong = update(&[(S1, 1)], "a", 0);
+        wrong.tables.truncate(1);
+        wrong.tables[0].table = &FACT_SESSION;
+        assert!(matches!(store.publish(&wrong), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn replacing_a_dimension_replaces_every_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        let dimension = |rows: usize, tag: &str| Update {
+            tables: vec![TableBatch {
+                table: &DIM_REPO,
+                batch: sample(&DIM_REPO, &[("repo", rows)], tag, 0),
+            }],
+            ..Update::default()
+        };
+        store.publish(&dimension(2, "v1")).unwrap();
+        store.publish(&dimension(3, "v2")).unwrap();
+
+        let files: Vec<_> = store.manifest().files_of("dim_repo").collect();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "dim_repo/g2.parquet");
+        assert!(
+            store
+                .manifest()
+                .unpublished
+                .contains_key("dim_repo/g1.parquet")
+        );
+        let rows = rows_of(
+            store.analytics_dir(),
+            store.manifest(),
+            store.live_map(),
+            &DIM_REPO,
+        )
+        .unwrap();
+        assert_eq!(rows.values().sum::<usize>(), 3);
+        assert!(
+            rows.keys()
+                .all(|row| row.contains(":v2|") && !row.contains(":v1|"))
+        );
+    }
+
+    #[test]
+    fn source_missing_sessions_persist_and_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = open(dir.path(), &clock);
+        let mut first = update(&[(S1, 1), (S2, 1)], "a", 0);
+        first
+            .source_missing
+            .insert(S1.to_owned(), SourceMissing { detected_at: 42 });
+        store.publish(&first).unwrap();
+        drop(store);
+
+        let mut store = open(dir.path(), &clock);
+        assert_eq!(
+            store.manifest().source_missing,
+            BTreeMap::from([(S1.to_owned(), SourceMissing { detected_at: 42 })])
+        );
+        let on_disk = read_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(on_disk.source_missing, store.manifest().source_missing);
+
+        // A later publish keeps the mark; it must name a live session.
+        store.publish(&update(&[(S2, 1)], "b", 0)).unwrap();
+        assert!(store.manifest().source_missing.contains_key(S1));
+        let mut stray = update(&[(S2, 1)], "c", 0);
+        stray.source_missing.insert(
+            "m1/claude/nobody".to_owned(),
+            SourceMissing { detected_at: 1 },
+        );
+        assert!(matches!(store.publish(&stray), Err(Error::Invalid(_))));
+
+        let mut restored = update(&[(S2, 1)], "d", 0);
+        restored.source_restored.push(S1.to_owned());
+        store.publish(&restored).unwrap();
+        assert!(store.manifest().source_missing.is_empty());
+
+        let mut again = update(&[(S1, 1)], "e", 0);
+        again
+            .source_missing
+            .insert(S1.to_owned(), SourceMissing { detected_at: 9 });
+        store.publish(&again).unwrap();
+        let mut removed = update(&[(S2, 1)], "f", 0);
+        removed.removed_sessions.push(S1.to_owned());
+        store.publish(&removed).unwrap();
+        assert!(store.manifest().source_missing.is_empty());
+    }
+
+    #[test]
+    fn equal_token_totals_with_different_billing_inputs_stay_distinct() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        let batch = sample(&FACT_STEP, &[(S1, 3)], "a", 0);
+        let ints = |values: [i64; 3]| -> arrow::array::ArrayRef {
+            Arc::new(Int64Array::from(values.to_vec()))
+        };
+        let texts = |values: [Option<&str>; 3]| -> arrow::array::ArrayRef {
+            Arc::new(StringArray::from(values.to_vec()))
+        };
+        // Each row bills 100 cache-write tokens, split differently.
+        let batch = replace_column(&batch, "cache_write_5m_tokens", ints([100, 0, 100]));
+        let batch = replace_column(&batch, "cache_write_1h_tokens", ints([0, 100, 0]));
+        let batch = replace_column(&batch, "web_search_requests", ints([0, 0, 2]));
+        let batch = replace_column(
+            &batch,
+            "speed",
+            texts([Some("standard"), Some("standard"), Some("fast")]),
+        );
+        let mut update = update(&[(S1, 3)], "a", 0);
+        update.tables[0].batch = batch;
+        store.publish(&update).unwrap();
+
+        let rows = rows_of(
+            store.analytics_dir(),
+            store.manifest(),
+            store.live_map(),
+            &FACT_STEP,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        let file = store.manifest().files_of("fact_step").next().unwrap();
+        let read =
+            crate::parquet_io::read_batches(&store.analytics_dir().join(&file.path), None).unwrap();
+        let five = crate::parquet_io::int_column(&read[0], "cache_write_5m_tokens").unwrap();
+        let hour = crate::parquet_io::int_column(&read[0], "cache_write_1h_tokens").unwrap();
+        let searches = crate::parquet_io::int_column(&read[0], "web_search_requests").unwrap();
+        let speed = crate::parquet_io::string_column(&read[0], "speed").unwrap();
+        let seen: Vec<(i64, i64, i64, &str)> = (0..3)
+            .map(|row| {
+                (
+                    five.value(row),
+                    hour.value(row),
+                    searches.value(row),
+                    speed.value(row),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                (100, 0, 0, "standard"),
+                (0, 100, 0, "standard"),
+                (100, 0, 2, "fast")
+            ]
+        );
+    }
+
+    #[test]
+    fn every_fact_table_publishes_and_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path(), &TestClock::new(0));
+        store
+            .publish(&update_all(&[(S1, 2), (S2, 1)], "a", 0))
+            .unwrap();
+        let rows = all_rows(&store, &FACT_TABLES);
+        assert_eq!(rows.len(), 6);
+        assert!(rows.iter().all(|table| !table.is_empty()));
+        let labels = rows_of(
+            store.analytics_dir(),
+            store.manifest(),
+            store.live_map(),
+            &FACT_LABEL,
+        )
+        .unwrap();
+        assert_eq!(labels.values().sum::<usize>(), 1);
+    }
 }

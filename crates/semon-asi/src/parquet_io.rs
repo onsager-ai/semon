@@ -25,6 +25,13 @@ pub(crate) struct Written {
     pub memory: u64,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Parquet files this thread has opened for reading, for tests that assert a run
+    /// reads nothing.
+    pub(crate) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// A Parquet file being written. `finish` fsyncs it.
 pub(crate) struct OutFile {
     writer: ArrowWriter<File>,
@@ -60,6 +67,15 @@ impl OutFile {
         Ok(())
     }
 
+    /// Bytes of the completed row groups; the footer is not included.
+    pub(crate) fn size(&self) -> u64 {
+        self.writer.bytes_written() as u64
+    }
+
+    pub(crate) fn rows(&self) -> u64 {
+        self.rows
+    }
+
     pub(crate) fn finish(self) -> Result<Written> {
         self.writer.close()?;
         self.sync.sync_all()?;
@@ -79,6 +95,8 @@ pub(crate) fn write_file(path: &Path, batch: &RecordBatch) -> Result<Written> {
 
 /// Reads every batch of a file, or only the named top-level columns.
 pub(crate) fn read_batches(path: &Path, columns: Option<&[&str]>) -> Result<Vec<RecordBatch>> {
+    #[cfg(test)]
+    READS.with(|reads| reads.set(reads.get() + 1));
     let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?;
     let builder = match columns {
         Some(names) => {
