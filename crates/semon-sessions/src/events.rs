@@ -1413,6 +1413,7 @@ pub(crate) struct EventCache {
     unpersisted: BTreeSet<String>,
     /// Native custody and its verification cache live across bounded scans.
     archive: Option<Archive>,
+    archive_rebuild: Option<Vec<crate::archive::NativeSource>>,
 }
 
 /// How often an index without its store tries to open it again.
@@ -2212,17 +2213,69 @@ impl EventCache {
     /// Admits every scanned native prefix, including unchanged ones so lost
     /// custody is repaired. Intact chains use the verification cache. A failure is
     /// reported and retried by the next full scan; it does not stop the read.
-    pub(crate) fn archive_consumed(&mut self, cache: &Path, seen: &BTreeSet<String>) {
+    pub(crate) fn archive_consumed(&mut self, options: &crate::Options, seen: &BTreeSet<String>) {
         let archive = self
             .archive
-            .get_or_insert_with(|| Archive::new(crate::archive::standalone_dir(cache)));
+            .get_or_insert_with(|| Archive::new(crate::archive::standalone_dir(&options.cache)));
         for key in seen {
             let Some(file) = self.files.get(key) else {
                 continue;
             };
-            let consumed = (file.ledger.offset, file.ledger.prefix);
-            let admitted = LogFile::open(Path::new(key))
-                .and_then(|mut log| archive.admit(key, &mut log, consumed.0, &consumed.1));
+            let path = Path::new(key);
+            let binding = [
+                crate::InputRoot::Claude,
+                crate::InputRoot::Codex,
+                crate::InputRoot::Copilot,
+            ]
+            .into_iter()
+            .find_map(|root| {
+                let relative = path.strip_prefix(root.home(options)).ok()?.to_str()?;
+                crate::is_input_path(root.as_str(), relative).then(|| (root, relative.to_owned()))
+            });
+            let Some((root, relative)) = binding else {
+                continue;
+            };
+            let native_id = match root {
+                crate::InputRoot::Codex => file
+                    .index
+                    .as_ref()
+                    .and_then(|index| index.codex_header.as_ref())
+                    .and_then(|header| header.native_id(path)),
+                crate::InputRoot::Claude => {
+                    path.file_stem().and_then(|stem| stem.to_str()).map(|stem| {
+                        if crate::native_sidecar::agent_path(path) {
+                            stem.strip_prefix("agent-").unwrap_or(stem)
+                        } else {
+                            stem
+                        }
+                        .to_owned()
+                    })
+                }
+                crate::InputRoot::Copilot => relative.split('/').nth(1).map(str::to_owned),
+            };
+            let Some(native_id) = native_id else { continue };
+            let sidecar = file
+                .index
+                .as_ref()
+                .and_then(|index| index.claude_sidecar.clone());
+            if crate::native_sidecar::agent_path(path)
+                && !sidecar
+                    .as_ref()
+                    .is_some_and(|sidecar| sidecar.current(path))
+            {
+                continue;
+            }
+            let native = crate::archive::NativeSource {
+                home: root.home(options).clone(),
+                root: root.as_str().to_owned(),
+                path: relative,
+                native_id,
+                ledger: file.ledger.clone(),
+                sidecar,
+                chain_id: String::new(),
+            };
+            let admitted =
+                LogFile::open(path).and_then(|mut log| archive.admit_native(&mut log, &native));
             match admitted {
                 Ok(_) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -2552,6 +2605,27 @@ impl EventCache {
         self.store
             .as_ref()
             .is_some_and(|store| store.tree_repair_pending().unwrap_or(true))
+    }
+
+    pub(crate) fn archive_rebuild_sources(
+        &mut self,
+        options: &crate::Options,
+    ) -> io::Result<Vec<crate::archive::NativeSource>> {
+        if self.archive_rebuild.is_none() {
+            let sources = if options.facts.is_none() && self.session_catalog_generation().is_none()
+            {
+                Archive::new(crate::archive::standalone_dir(&options.cache))
+                    .missing_sources(options)?
+            } else {
+                Vec::new()
+            };
+            self.archive_rebuild = Some(sources);
+        }
+        Ok(self
+            .archive_rebuild
+            .as_ref()
+            .expect("archive rebuild captured")
+            .clone())
     }
 
     pub(crate) fn indexed_stat(&self, path: &Path) -> Option<Stat> {
@@ -2956,6 +3030,117 @@ pub(crate) fn scan_postgres_file(
         .clone();
     let append = !cache.replaced.contains(path.to_string_lossy().as_ref());
     Ok((ledger, (*index).clone(), append))
+}
+
+/// Rebuild through the same complete-line fold and proof capture as native input.
+/// The ledger is the admitted historical witness, never the temporary's stat.
+pub(crate) fn scan_archive(
+    options: &crate::Options,
+    native: &crate::archive::NativeSource,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+) -> io::Result<Arc<FileIndex>> {
+    let path = native.full_path();
+    let key = path.to_string_lossy().into_owned();
+    let _source_lock = crate::source_change::SourceLock::acquire(options, &key, false)?;
+    Archive::new(crate::archive::standalone_dir(&options.cache)).with_native(native, |file| {
+        let recorded = cache.recorded(&key);
+        if recorded.as_ref() == Some(&native.ledger)
+            && let Base::Found(index) = cache.base(&key, &native.ledger)?
+        {
+            cache.files.insert(
+                key.clone(),
+                CachedFile {
+                    ledger: native.ledger.clone(),
+                    index: Some(Arc::clone(&index)),
+                },
+            );
+            return Ok(index);
+        }
+        if recorded.is_some() && recorded.as_ref() != Some(&native.ledger) {
+            return Err(io::Error::other(
+                "archive source differs from committed index generation",
+            ));
+        }
+        let harness = native.root.as_str();
+        let mut index = FileIndex::default();
+        if harness == "codex" {
+            index.native_usage_observations = Some(Vec::new());
+            let mut line = Vec::new();
+            BufReader::new(&mut *file).read_until(b'\n', &mut line)?;
+            index.codex_header = Some(
+                serde_json::from_slice::<Value>(&line)
+                    .ok()
+                    .as_ref()
+                    .map(crate::native_header::CodexHeader::from_record)
+                    .unwrap_or_default(),
+            );
+            if index
+                .codex_header
+                .as_ref()
+                .and_then(|header| header.native_id(&path))
+                .as_deref()
+                != Some(native.native_id.as_str())
+            {
+                return Err(io::Error::other("archive native identity mismatch"));
+            }
+        }
+        index.claude_sidecar = native.sidecar.clone();
+        if harness != "copilot" {
+            index.tree_summary = Some(crate::native_tree::Summary::repair(file, 0, harness)?.0);
+            index.marker_index = Some(crate::native_marker::Index::repair(file, 0)?);
+        }
+        index.handoff_index = Some(crate::native_handoff::Index::repair(file, 0)?);
+        index.dirty_rows = Some(DirtyRows::begin(&index));
+        let (offset, parsed, _) = parse(file, 0, harness, &mut index, None, None)?;
+        index.dirty_rows = None;
+        let captured = crate::source_chunks::capture(file, offset, 0)?;
+        if offset != native.ledger.offset
+            || captured.prefix != native.ledger.prefix
+            || captured.tail != native.ledger.tail
+            || captured.parsed != parsed
+        {
+            return Err(io::Error::other("archive consumed-prefix proof mismatch"));
+        }
+        index.source_chunks = Some(Arc::new(captured.chunks));
+        if index
+            .marker_index
+            .as_ref()
+            .is_some_and(|markers| !markers.valid(&native.ledger) || markers.verify(file).is_err())
+            || index.handoff_index.as_ref().is_some_and(|handoffs| {
+                !handoffs.valid(&native.ledger) || handoffs.verify(file).is_err()
+            })
+        {
+            return Err(io::Error::other("archive native metadata proof mismatch"));
+        }
+        if cache.commit(&key, recorded.as_ref(), None, &native.ledger, &index) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "archive index commit conflict",
+            ));
+        }
+        if cache.store.is_some() && !cache.unpersisted.contains(&key) {
+            store::native_usage::checkpoint(&mut index);
+            if let Some(store) = cache.store.as_ref()
+                && let Some((stored, metadata)) = store
+                    .load_tree(&key, &native.ledger.stat)
+                    .map_err(|error| io::Error::other(error.to_string()))?
+                && stored == native.ledger
+            {
+                index.tree_summary = Some(metadata.summary);
+            }
+        }
+        let index = Arc::new(index);
+        cache.files.insert(
+            key.clone(),
+            CachedFile {
+                ledger: native.ledger.clone(),
+                index: Some(Arc::clone(&index)),
+            },
+        );
+        *dirty = true;
+        Ok(index)
+    })
 }
 
 pub(crate) fn scan_file(
@@ -3462,7 +3647,7 @@ pub(crate) fn scan_file(
 /// the offset they end at. A last line without its newline is left for the
 /// next read.
 fn parse(
-    file: &mut LogFile,
+    file: &mut (impl Read + Seek),
     from: u64,
     harness: &str,
     index: &mut FileIndex,
@@ -9636,6 +9821,77 @@ mod tests {
         format!("{snapshot:?}")
     }
 
+    #[test]
+    fn archived_native_parsers_equal_cold_claude_codex_and_copilot() {
+        use serde_json::json;
+
+        let cases: [(&str, &str, Vec<Value>); 3] = [
+            (
+                "claude",
+                "projects/project/session.jsonl",
+                vec![
+                    json!({"type":"user","uuid":"prompt","message":{"role":"user","content":"synthetic prompt"}}),
+                    claude_tool("call"),
+                ],
+            ),
+            (
+                "codex",
+                "sessions/rollout-session.jsonl",
+                vec![
+                    json!({"type":"session_meta","payload":{"id":"session","cwd":"/synthetic"}}),
+                    json!({"type":"event_msg","payload":{"type":"user_message","message":"synthetic prompt"}}),
+                ],
+            ),
+            (
+                "copilot",
+                "session-state/session/events.jsonl",
+                vec![
+                    json!({"type":"session.start","data":{"sessionId":"session"}}),
+                    json!({"type":"user.message","data":{"content":"synthetic prompt"}}),
+                ],
+            ),
+        ];
+        for (harness, relative, records) in cases {
+            let root = scratch(harness);
+            let options = crate::Options {
+                cache: root.join("index.json"),
+                claude_home: root.join("claude"),
+                codex_home: root.join("codex"),
+                copilot_home: root.join("copilot"),
+                facts: None,
+                ..crate::Options::default()
+            };
+            let input_root = crate::InputRoot::parse(harness).unwrap();
+            let path = input_root.home(&options).join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            write_lines(&path, &records);
+            let mut before_cache = EventCache::default();
+            let before = scan_file(&path, harness, &mut before_cache, &mut false).unwrap();
+            let expected = index_snapshot(&before);
+            let chunks = before.source_chunks.clone();
+            let ledger = before_cache.files[&path.to_string_lossy().into_owned()]
+                .ledger
+                .clone();
+            before_cache.archive_consumed(
+                &options,
+                &BTreeSet::from([path.to_string_lossy().into_owned()]),
+            );
+            fs::remove_file(&path).unwrap();
+            let archive = Archive::new(crate::archive::standalone_dir(&options.cache));
+            let sources = archive.missing_sources(&options).unwrap();
+            assert_eq!(sources.len(), 1, "{harness}");
+            let mut after_cache = EventCache::default();
+            let after = scan_archive(&options, &sources[0], &mut after_cache, &mut false).unwrap();
+            assert_eq!(expected, index_snapshot(&after), "{harness}");
+            assert_eq!(chunks, after.source_chunks);
+            assert_eq!(
+                after_cache.files[&path.to_string_lossy().into_owned()].ledger,
+                ledger
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     /// What a cold, in-memory read of `path` indexes: the oracle every
     /// persisted index must equal.
     fn cold(path: &Path) -> String {
@@ -10518,7 +10774,14 @@ mod archive_tests {
         let root = std::env::temp_dir().join(name);
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
-        let path = root.join("a.jsonl");
+        let options = crate::Options {
+            claude_home: root.join("claude"),
+            cache: root.join("index.json"),
+            facts: None,
+            ..crate::Options::default()
+        };
+        let path = options.claude_home.join("projects/project/a.jsonl");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
         let consumed = b"{\"a\":1}\n{\"b\":2}\n";
         // The log was rewritten after the index read it.
         fs::write(&path, b"{\"changed\":true}\n{\"b\":2}\n").unwrap();
@@ -10544,12 +10807,14 @@ mod archive_tests {
         );
         let archive = Archive::new(root.join("archive"));
         let seen = BTreeSet::from([key.clone()]);
-        cache.archive_consumed(&root.join("index.json"), &seen);
+        cache.archive_consumed(&options, &seen);
         assert!(archive.chains(&key).unwrap().is_empty());
 
         // The log holds the consumed bytes again: the next scan admits it.
         fs::write(&path, consumed).unwrap();
-        cache.archive_consumed(&root.join("index.json"), &seen);
+        cache.files.get_mut(&key).unwrap().ledger.stat = Stat::of(&path).unwrap();
+        cache.files.get_mut(&key).unwrap().ledger.tail = Sha256::digest(consumed).into();
+        cache.archive_consumed(&options, &seen);
         assert_eq!(archive.chains(&key).unwrap().len(), 1);
         fs::remove_dir_all(root).unwrap();
     }

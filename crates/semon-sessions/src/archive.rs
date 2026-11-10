@@ -53,6 +53,13 @@ pub const NATIVE_REDACTOR: &str = "none";
 const SOURCES: &str = "sources.log";
 const MANIFEST: &str = "manifest.json";
 const LOCK: &str = ".lock";
+const CLOCK: &str = "clock.json";
+
+#[derive(Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveClock {
+    high_water: u64,
+}
 const LEVEL: i32 = 3;
 const METADATA_MAX: u64 = 64 << 20;
 const BUFFER: usize = 1 << 20;
@@ -71,6 +78,8 @@ pub fn standalone_dir(cache: &Path) -> PathBuf {
 pub struct Chain {
     /// Random; names the chain's file, `<chain_id>.zst`.
     pub chain_id: String,
+    /// Immutable Unix seconds when this chain first entered custody.
+    pub admitted_at: u64,
     /// Plain bytes the chain holds.
     pub length: u64,
     /// SHA-256 (lowercase hex) of those bytes.
@@ -94,6 +103,37 @@ struct Manifest {
     /// be attributed, whatever happens to `sources.log`.
     source: String,
     chains: Vec<Chain>,
+    native: Option<NativeSource>,
+    /// Exact chain dependencies of durable seal/index custody markers.
+    references: BTreeMap<String, String>,
+}
+
+/// Admission binds bytes to the configured native identity and original ledger.
+/// It is custody metadata, not a new filesystem observation or runtime grant.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeSource {
+    pub(crate) home: PathBuf,
+    pub(crate) root: String,
+    pub(crate) path: String,
+    pub(crate) native_id: String,
+    pub(crate) ledger: crate::events::Ledger,
+    pub(crate) sidecar: Option<crate::native_sidecar::ClaudeSidecar>,
+    pub(crate) chain_id: String,
+}
+
+impl NativeSource {
+    pub(crate) fn full_path(&self) -> PathBuf {
+        self.home.join(&self.path)
+    }
+
+    pub(crate) fn allowed(&self, options: &crate::Options) -> bool {
+        crate::InputRoot::parse(&self.root).is_some_and(|root| {
+            root.home(options) == &self.home
+                && crate::is_input_path(&self.root, &self.path)
+                && self.path.ends_with(".jsonl")
+        })
+    }
 }
 
 /// One line of `sources.log`.
@@ -118,6 +158,8 @@ struct Known {
     sources: BTreeMap<String, String>,
     /// Bytes of `sources.log` read: up to the end of its last whole line.
     read: u64,
+    /// Descriptor observation of the journal whose complete tail we consumed.
+    journal: Option<crate::events::Stat>,
     /// Verified chains, invalidated by a change to the file or manifest.
     verified: BTreeMap<String, Verified>,
     active_prefixes: usize,
@@ -177,6 +219,39 @@ impl Verification {
 
 /// Holds the archive's advisory lock until dropped.
 struct Guard(#[allow(dead_code)] fs::File);
+
+pub(crate) struct NativeRead {
+    pub(crate) file: fs::File,
+    guard: Option<Guard>,
+    temporary: PathBuf,
+    source: PathBuf,
+    chain: PathBuf,
+    witness: crate::events::Stat,
+}
+
+impl NativeRead {
+    pub(crate) fn release_lock(&mut self) {
+        drop(self.guard.take());
+    }
+
+    pub(crate) fn verify(&self) -> io::Result<()> {
+        match fs::symlink_metadata(&self.source) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+            Ok(_) => return Err(invalid("native source reappeared during archive read")),
+        }
+        if crate::events::Stat::of(&self.chain)? != self.witness {
+            return Err(invalid("archive chain changed during read"));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for NativeRead {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.temporary);
+    }
+}
 
 impl Archive {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
@@ -256,6 +331,7 @@ impl Archive {
         redactor_version: &str,
     ) -> io::Result<Option<Chain>> {
         let _guard = self.lock(true)?;
+        let admitted_at = self.admission_time()?;
         let (dir, mut manifest) = self.open_source(source)?;
         let chain_id = random_id()?;
         let temporary = dir.join(format!("{chain_id}.zst.tmp"));
@@ -307,6 +383,7 @@ impl Archive {
         sync_dir(&dir)?;
         let chain = Chain {
             chain_id,
+            admitted_at,
             length,
             sha256,
             stored_bytes,
@@ -337,10 +414,41 @@ impl Archive {
         offset: u64,
         prefix: &[u8; 32],
     ) -> io::Result<bool> {
+        self.admit_inner(source, log, offset, prefix, None)
+    }
+
+    pub(crate) fn admit_native(
+        &self,
+        log: &mut crate::sealed::LogFile,
+        native: &NativeSource,
+    ) -> io::Result<bool> {
+        let path = native.full_path();
+        let before = crate::events::Stat::from_metadata(&log.metadata()?)?;
+        if !same_generation(&native.ledger, before) {
+            return Ok(false);
+        }
+        self.admit_inner(
+            &path.to_string_lossy(),
+            log,
+            native.ledger.offset,
+            &native.ledger.prefix,
+            Some(native),
+        )
+    }
+
+    fn admit_inner(
+        &self,
+        source: &str,
+        log: &mut (impl Read + Seek),
+        offset: u64,
+        prefix: &[u8; 32],
+        native: Option<&NativeSource>,
+    ) -> io::Result<bool> {
         if offset == 0 {
             return Ok(true);
         }
         let _guard = self.lock(true)?;
+        self.admission_time()?;
         let (dir, mut manifest) = self.open_source(source)?;
         // Another Archive may have superseded this source's old chain.
         {
@@ -357,13 +465,17 @@ impl Archive {
         {
             if held.length == offset && held.sha256 == hex(prefix) {
                 self.release_prefix(&held.chain_id);
-                return Ok(true);
-            }
-            if held.length > offset {
-                if self.matches_prefix(&dir, &held, offset, prefix)? {
-                    return Ok(true);
+                let previous = manifest.native.clone();
+                let bound = bind_native(&mut manifest, native, &held)?;
+                if manifest.native != previous {
+                    publish(&dir, MANIFEST, &manifest)?;
                 }
+                return Ok(bound);
+            }
+            if held.length > offset && self.matches_prefix(&dir, &held, offset, prefix)? {
+                return Ok(true);
             } else if held.length < offset
+                && !manifest.references.values().any(|id| id == &held.chain_id)
                 && let Some(resume) = &held.resume
             {
                 // The chain continues the log when the log's bytes up to its
@@ -372,10 +484,18 @@ impl Archive {
                 let checked = copy_range(log, resume, held.length, offset, &mut io::sink());
                 match checked {
                     Ok((hasher, mark)) if hasher.digest() == *prefix && agrees(&held, mark) => {
-                        let extended =
-                            extend(&dir, &mut manifest, &held, resume, log, offset, prefix)?;
-                        if extended && let Some(chain) = manifest.chains.last() {
-                            self.remember(&dir, chain)?;
+                        let witness = self.known().verified[&held.chain_id].observation.file;
+                        let extended = extend(
+                            &dir,
+                            &mut manifest,
+                            (&held, witness),
+                            log,
+                            offset,
+                            prefix,
+                            native,
+                        )?;
+                        if extended && let Some(chain) = manifest.chains.last().cloned() {
+                            self.remember(&dir, &chain)?;
                         }
                         return Ok(extended);
                     }
@@ -388,11 +508,275 @@ impl Archive {
         if let Some(chain) = manifest.chains.last() {
             self.release_prefix(&chain.chain_id);
         }
-        let begun = begin(&dir, &mut manifest, log, offset, prefix)?;
-        if begun && let Some(chain) = manifest.chains.last() {
-            self.remember(&dir, chain)?;
+        let begun = begin(&dir, &mut manifest, log, offset, prefix, native)?;
+        if begun && let Some(chain) = manifest.chains.last().cloned() {
+            self.remember(&dir, &chain)?;
         }
         Ok(begun)
+    }
+
+    /// Discover only sources admitted under these exact configured native roots.
+    pub(crate) fn missing_sources(
+        &self,
+        options: &crate::Options,
+    ) -> io::Result<Vec<NativeSource>> {
+        if !self.dir.join(SOURCES).try_exists()? {
+            return Ok(Vec::new());
+        }
+        let _guard = self.lock(false)?;
+        let mut known = self.known();
+        self.refresh(&mut known)?;
+        let mut sources = Vec::new();
+        for (source, id) in &known.sources {
+            let manifest = read_manifest(&self.dir.join(id))?;
+            if let Some(native) = manifest.native {
+                if native.full_path().to_string_lossy() != source.as_str() {
+                    return Err(invalid("an archive native source binding"));
+                }
+                if native.allowed(options) {
+                    match fs::symlink_metadata(native.full_path()) {
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                            sources.push(native)
+                        }
+                        Err(error) => return Err(error),
+                        Ok(_) => {}
+                    }
+                }
+            }
+        }
+        Ok(sources)
+    }
+
+    pub(crate) fn admitted_source(
+        &self,
+        path: &Path,
+        ledger: &crate::events::Ledger,
+    ) -> io::Result<Option<NativeSource>> {
+        if !self.dir.exists() {
+            return Ok(None);
+        }
+        let _guard = self.lock(false)?;
+        let Some(id) = self.lookup_locked(&path.to_string_lossy())? else {
+            return Ok(None);
+        };
+        let manifest = read_manifest(&self.dir.join(id))?;
+        Ok(manifest
+            .native
+            .filter(|native| native.full_path() == path && &native.ledger == ledger))
+    }
+
+    pub(crate) fn open_native(&self, native: &NativeSource) -> io::Result<NativeRead> {
+        let guard = self.lock(false)?;
+        let source = native.full_path();
+        let id = self
+            .lookup_locked(&source.to_string_lossy())?
+            .ok_or_else(|| invalid("a missing archive native source"))?;
+        let dir = self.dir.join(id);
+        let manifest = read_manifest(&dir)?;
+        if manifest.native.as_ref() != Some(native) {
+            return Err(invalid("an archive native generation changed"));
+        }
+        let chain = manifest
+            .chains
+            .iter()
+            .find(|chain| chain.chain_id == native.chain_id)
+            .ok_or_else(|| invalid("a missing native custody chain"))?;
+        if !self.trusted(&dir, chain) {
+            return Err(invalid("an unverified native custody chain"));
+        }
+        let temporary = self.dir.join(format!("{}.read.tmp", random_id()?));
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(&temporary)?;
+        let mut read = NativeRead {
+            file,
+            guard: Some(guard),
+            temporary,
+            source,
+            chain: dir.join(format!("{}.zst", chain.chain_id)),
+            witness: Verification::observed(&dir, chain)?.file,
+        };
+        let copied = io::copy(
+            &mut open_chain(&dir, chain)?.take(native.ledger.offset),
+            &mut read.file,
+        )?;
+        if copied != native.ledger.offset {
+            return Err(invalid("archive prefix is incomplete"));
+        }
+        let captured = crate::source_chunks::capture(&mut read.file, copied, 0)?;
+        if captured.prefix != native.ledger.prefix || captured.tail != native.ledger.tail {
+            return Err(invalid("archive prefix differs from admitted ledger"));
+        }
+        read.file.seek(SeekFrom::Start(0))?;
+        read.verify()?;
+        Ok(read)
+    }
+
+    /// Keep retention excluded through verification, parsing and index commit.
+    /// A private temporary provides seek without restoring a native pathname.
+    pub(crate) fn with_native<T>(
+        &self,
+        native: &NativeSource,
+        operation: impl FnOnce(&mut fs::File) -> io::Result<T>,
+    ) -> io::Result<T> {
+        let mut read = self.open_native(native)?;
+        let value = operation(&mut read.file)?;
+        read.verify()?;
+        Ok(value)
+    }
+
+    /// Register an exact durable dependency before publishing its external marker.
+    /// A crash can over-retain custody, never leave a marker unprotected.
+    pub(crate) fn protect(&self, source: &str, chain_id: &str, owner: String) -> io::Result<()> {
+        let _guard = self.lock(true)?;
+        let (dir, mut manifest) = self.open_source(source)?;
+        if !manifest
+            .chains
+            .iter()
+            .any(|chain| chain.chain_id == chain_id)
+        {
+            return Err(invalid("a missing referenced custody chain"));
+        }
+        manifest
+            .references
+            .insert(format!("{owner}:{chain_id}"), chain_id.to_owned());
+        publish(&dir, MANIFEST, &manifest)
+    }
+
+    /// Bind the ordinary retention marker to the admitted standalone chain.
+    pub(crate) fn protect_index(
+        &self,
+        path: &Path,
+        proof: &crate::SessionSourceProof,
+    ) -> io::Result<Option<String>> {
+        if !self.dir.exists() {
+            return Ok(None);
+        }
+        let source = path.to_string_lossy();
+        let _guard = self.lock(true)?;
+        let Some(id) = self.lookup_locked(&source)? else {
+            return Ok(None);
+        };
+        let dir = self.dir.join(id);
+        let mut manifest = read_manifest(&dir)?;
+        let Some(native) = &manifest.native else {
+            return Ok(None);
+        };
+        if native.ledger.stat
+            != (crate::events::Stat {
+                dev: proof.dev,
+                ino: proof.ino,
+                size: proof.size,
+                modified_ns: proof.modified_ns,
+                changed_ns: proof.changed_ns,
+            })
+            || native.root != proof.source.root
+            || native.path != proof.source.path
+            || native.native_id != proof.source.native_id
+            || native.ledger.offset != proof.source.offset
+            || native.ledger.prefix != proof.source.prefix_sha256
+            || native.ledger.tail != proof.source.tail_sha256
+        {
+            return Ok(None);
+        }
+        let chain_id = native.chain_id.clone();
+        manifest
+            .references
+            .insert(format!("index:{source}:{chain_id}"), chain_id.clone());
+        publish(&dir, MANIFEST, &manifest)?;
+        Ok(Some(chain_id))
+    }
+
+    /// Caller holds the exclusive archive lock. Persist the time before custody
+    /// publication so a crash can only postpone retention, never age fresh bytes.
+    fn clock(&self) -> io::Result<ArchiveClock> {
+        if !self.dir.join(CLOCK).try_exists()? && self.dir.join(SOURCES).try_exists()? {
+            return Err(invalid(
+                "archive clock state is missing; retention and admission refused",
+            ));
+        }
+        read_json(&self.dir.join(CLOCK))
+    }
+
+    fn admission_time(&self) -> io::Result<u64> {
+        let mut clock = self.clock()?;
+        let observed = archive_now();
+        if observed > clock.high_water || !self.dir.join(CLOCK).try_exists()? {
+            clock.high_water = observed.max(clock.high_water);
+            publish(&self.dir, CLOCK, &clock)?;
+        }
+        Ok(clock.high_water)
+    }
+
+    /// Explicit maintenance only. Unset retention does not even open the archive.
+    pub fn prune(&self, retention_days: Option<u64>) -> io::Result<usize> {
+        self.prune_at(retention_days, archive_now())
+    }
+
+    fn prune_at(&self, retention_days: Option<u64>, now: u64) -> io::Result<usize> {
+        let Some(days) = retention_days else {
+            return Ok(0);
+        };
+        let window = days
+            .checked_mul(86400)
+            .ok_or_else(|| invalid("archive retention days overflow"))?;
+        if !self.dir.exists() {
+            return Ok(0);
+        }
+        let _guard = self.lock(true)?;
+        let clock = self.clock()?;
+        if now < clock.high_water {
+            return Err(invalid(
+                "archive retention refused: clock moved backward before the recorded high-water time; no chains deleted",
+            ));
+        }
+        let sources = {
+            let mut known = self.known();
+            self.refresh(&mut known)?;
+            known.sources.clone()
+        };
+        let mut removed = 0;
+        for (source, id) in sources {
+            let dir = self.dir.join(id);
+            let mut manifest = read_manifest(&dir)?;
+            if !manifest.source.is_empty() && manifest.source != source {
+                return Err(invalid("an archive source manifest mismatch"));
+            }
+            let expired: Vec<_> = manifest
+                .chains
+                .iter()
+                .filter(|chain| {
+                    now.saturating_sub(chain.admitted_at) > window
+                        && !manifest.references.values().any(|id| id == &chain.chain_id)
+                        && !manifest
+                            .native
+                            .as_ref()
+                            .is_some_and(|native| native.chain_id == chain.chain_id)
+                })
+                .cloned()
+                .collect();
+            // Withdraw the manifest first; interruption can leave unreferenced
+            // bytes behind but cannot leave a manifest naming deleted bytes.
+            manifest
+                .chains
+                .retain(|chain| !expired.iter().any(|old| old.chain_id == chain.chain_id));
+            if !expired.is_empty() {
+                publish(&dir, MANIFEST, &manifest)?;
+            }
+            for chain in expired {
+                fs::remove_file(dir.join(format!("{}.zst", chain.chain_id)))?;
+                self.known().remove_verified(&chain.chain_id);
+                removed += 1;
+            }
+            sync_dir(&dir)?;
+        }
+        publish(&self.dir, CLOCK, &ArchiveClock { high_water: now })?;
+        Ok(removed)
     }
 
     /// Trust only the file and manifest previously checked. Missing files
@@ -515,10 +899,18 @@ impl Archive {
     fn refresh(&self, known: &mut Known) -> io::Result<()> {
         let mut file = match crate::open_input(&self.dir.join(SOURCES)) {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound && known.journal.is_none() => {
+                return Ok(());
+            }
             Err(error) => return Err(error),
         };
-        if file.metadata()?.len() < known.read {
+        let observed = crate::events::Stat::from_metadata(&file.metadata()?)?;
+        if let Some(previous) = known.journal
+            && (previous.dev, previous.ino) != (observed.dev, observed.ino)
+        {
+            return Err(invalid("archive source journal identity changed"));
+        }
+        if observed.size < known.read {
             *known = Known::default();
         }
         file.seek(SeekFrom::Start(known.read))?;
@@ -549,6 +941,7 @@ impl Archive {
             known.sources.entry(record.source).or_insert(record.id);
         }
         known.read += whole as u64;
+        known.journal = Some(observed);
         Ok(())
     }
 
@@ -606,16 +999,23 @@ impl Archive {
         .map_err(io::Error::other)?;
         line.push(b'\n');
         let path = self.dir.join(SOURCES);
-        let created = !path.exists();
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+        let created = !path.try_exists()?;
+        #[cfg(test)]
+        if let Some(hook) = BEFORE_REGISTER_OPEN.with(|hook| hook.borrow_mut().take()) {
+            hook();
         }
-        let mut file = options.open(&path)?;
+        let mut file = crate::read_path::open_state(&path)?;
         let mut known = self.known();
+        let observed = crate::events::Stat::from_metadata(&file.metadata()?)?;
+        if known.journal.is_some_and(|expected| expected != observed)
+            || (known.journal.is_none() && observed.size != 0)
+            || crate::events::Stat::from_metadata(&crate::open_input(&path)?.metadata()?)?
+                != observed
+        {
+            return Err(invalid(
+                "archive source journal changed before registration",
+            ));
+        }
         // Cut off a torn final line, then append.
         file.set_len(known.read)?;
         file.seek(SeekFrom::Start(known.read))?;
@@ -625,6 +1025,7 @@ impl Archive {
             sync_dir(&self.dir)?;
         }
         known.read += line.len() as u64;
+        known.journal = Some(crate::events::Stat::from_metadata(&file.metadata()?)?);
         known.sources.insert(source.to_owned(), id.clone());
         Ok(id)
     }
@@ -643,10 +1044,8 @@ impl Archive {
             }
             Err(error) => return Err(error),
         }
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.dir.join(LOCK))?;
+        let path = self.dir.join(LOCK);
+        let file = crate::read_path::open_state(&path)?;
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
@@ -659,8 +1058,71 @@ impl Archive {
                 return Err(io::Error::last_os_error());
             }
         }
+        let held = crate::events::Stat::from_metadata(&file.metadata()?)?;
+        let named = crate::events::Stat::from_metadata(&crate::open_input(&path)?.metadata()?)?;
+        if (held.dev, held.ino) != (named.dev, named.ino) {
+            return Err(invalid("archive lock identity changed"));
+        }
         Ok(Guard(file))
     }
+}
+
+fn archive_now() -> u64 {
+    #[cfg(test)]
+    if let Some(now) = TEST_NOW.with(std::cell::Cell::get) {
+        return now;
+    }
+    u64::try_from(crate::model::now_ms()).unwrap_or(0) / 1000
+}
+
+// Bounded index checkpoints synthesize only size. Custody may extend that
+// prefix, while discovery still requires the complete physical generation.
+fn same_generation(ledger: &crate::events::Ledger, physical: crate::events::Stat) -> bool {
+    physical == ledger.stat
+        || (ledger.stat.size == ledger.offset
+            && physical.size >= ledger.offset
+            && crate::events::Stat {
+                size: ledger.stat.size,
+                ..physical
+            } == ledger.stat)
+}
+
+fn bind_native(
+    manifest: &mut Manifest,
+    native: Option<&NativeSource>,
+    chain: &Chain,
+) -> io::Result<bool> {
+    if let Some(native) = native {
+        // An incomplete checkpoint or EOF record cannot stand for the whole
+        // indexed generation. Keep its bytes without advertising a rebuild.
+        if native.ledger.offset != chain.length || hex(&native.ledger.prefix) != chain.sha256 {
+            return Ok(false);
+        }
+        let physical = crate::events::Stat::of(&native.full_path())?;
+        if !same_generation(&native.ledger, physical) {
+            return Ok(false);
+        }
+        if native.ledger.offset == physical.size {
+            if let Some(previous) = &manifest.native
+                && previous.chain_id != chain.chain_id
+            {
+                manifest.references.insert(
+                    format!("index-source:{}", previous.chain_id),
+                    previous.chain_id.clone(),
+                );
+            }
+            let mut native = native.clone();
+            native.chain_id = chain.chain_id.clone();
+            manifest.native = Some(native);
+        } else if manifest
+            .native
+            .as_ref()
+            .is_some_and(|held| held.chain_id == chain.chain_id)
+        {
+            manifest.native = None;
+        }
+    }
+    Ok(true)
 }
 
 /// Starts a new chain from the first `offset` bytes of `log`; `false` when
@@ -671,6 +1133,7 @@ fn begin(
     log: &mut (impl Read + Seek),
     offset: u64,
     prefix: &[u8; 32],
+    native: Option<&NativeSource>,
 ) -> io::Result<bool> {
     let chain_id = random_id()?;
     let temporary = dir.join(format!("{chain_id}.zst.tmp"));
@@ -698,12 +1161,23 @@ fn begin(
     sync_dir(dir)?;
     manifest.chains.push(Chain {
         chain_id,
+        admitted_at: read_json::<ArchiveClock>(
+            dir.parent()
+                .expect("archive source parent")
+                .join(CLOCK)
+                .as_path(),
+        )?
+        .high_water,
         length: offset,
         sha256: hex(prefix),
         stored_bytes,
         redactor_version: NATIVE_REDACTOR.to_owned(),
         resume: Some(hasher.resume()),
     });
+    let chain = manifest.chains.last().expect("new chain").clone();
+    if !bind_native(manifest, native, &chain)? {
+        return Ok(false);
+    }
     publish(dir, MANIFEST, manifest)?;
     Ok(true)
 }
@@ -714,15 +1188,24 @@ fn begin(
 fn extend(
     dir: &Path,
     manifest: &mut Manifest,
-    held: &Chain,
-    resume: &PrefixState,
+    trusted: (&Chain, crate::events::Stat),
     log: &mut (impl Read + Seek),
     offset: u64,
     prefix: &[u8; 32],
+    native: Option<&NativeSource>,
 ) -> io::Result<bool> {
-    let mut file = fs::OpenOptions::new()
-        .write(true)
-        .open(dir.join(format!("{}.zst", held.chain_id)))?;
+    let (held, witness) = trusted;
+    let path = dir.join(format!("{}.zst", held.chain_id));
+    #[cfg(test)]
+    if let Some(hook) = BEFORE_EXTEND_OPEN.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
+    let mut file = crate::read_path::open_update(&path)?;
+    if crate::events::Stat::from_metadata(&file.metadata()?)? != witness
+        || crate::events::Stat::from_metadata(&crate::open_input(&path)?.metadata()?)? != witness
+    {
+        return Err(invalid("archive chain changed before extension"));
+    }
     if file.metadata()?.len() < held.stored_bytes {
         return Err(invalid("an archive chain shorter than its manifest"));
     }
@@ -730,7 +1213,13 @@ fn extend(
     file.set_len(held.stored_bytes)?;
     file.seek(SeekFrom::End(0))?;
     let mut encoder = zstd::stream::write::Encoder::new(file, LEVEL)?;
-    let copied = copy_range(log, resume, held.length, offset, &mut encoder);
+    let copied = copy_range(
+        log,
+        held.resume.as_ref().expect("extendible chain"),
+        held.length,
+        offset,
+        &mut encoder,
+    );
     let hasher = match copied {
         Ok((hasher, mark)) if hasher.digest() == *prefix && agrees(held, mark) => hasher,
         other => {
@@ -748,6 +1237,20 @@ fn extend(
     last.sha256 = hex(prefix);
     last.stored_bytes = file.metadata()?.len();
     last.resume = Some(hasher.resume());
+    let chain = last.clone();
+    if native.is_none()
+        && manifest
+            .native
+            .as_ref()
+            .is_some_and(|source| source.chain_id == chain.chain_id)
+    {
+        return Err(invalid(
+            "native chain extension requires its source binding",
+        ));
+    }
+    if !bind_native(manifest, native, &chain)? {
+        return Ok(false);
+    }
     publish(dir, MANIFEST, manifest)?;
     Ok(true)
 }
@@ -883,6 +1386,35 @@ fn read_manifest(dir: &Path) -> io::Result<Manifest> {
             return Err(invalid("an archive manifest that is not what was written"));
         }
     }
+    if manifest
+        .references
+        .values()
+        .any(|id| !seen.contains(id.as_str()))
+    {
+        return Err(invalid("a missing referenced archive chain"));
+    }
+    if let Some(native) = &manifest.native {
+        let chain = manifest
+            .chains
+            .iter()
+            .find(|chain| chain.chain_id == native.chain_id);
+        if !crate::is_input_path(&native.root, &native.path)
+            || !native.path.ends_with(".jsonl")
+            || native.native_id.is_empty()
+            || native.native_id.len() > 256
+            || native.ledger.offset != native.ledger.stat.size
+            || native.full_path().to_string_lossy() != manifest.source
+            || native
+                .sidecar
+                .as_ref()
+                .is_some_and(|sidecar| !sidecar.valid())
+            || chain.is_none_or(|chain| {
+                chain.length != native.ledger.offset || chain.sha256 != hex(&native.ledger.prefix)
+            })
+        {
+            return Err(invalid("an invalid native archive binding"));
+        }
+    }
     Ok(manifest)
 }
 
@@ -963,6 +1495,9 @@ fn publish(dir: &Path, name: &str, value: &impl Serialize) -> io::Result<()> {
 
 #[cfg(test)]
 thread_local! {
+    static TEST_NOW: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    static BEFORE_REGISTER_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static BEFORE_EXTEND_OPEN: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static VERIFIED_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static PREFIX_CAPACITY_WORK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static DURING_JOURNAL_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };

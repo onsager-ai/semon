@@ -5,6 +5,22 @@ use std::{
 
 use super::*;
 
+struct Clock(Option<u64>);
+
+impl Clock {
+    fn at(now: u64) -> Self {
+        Self(TEST_NOW.with(|clock| clock.replace(Some(now))))
+    }
+    fn set(&self, now: u64) {
+        TEST_NOW.with(|clock| clock.set(Some(now)));
+    }
+}
+impl Drop for Clock {
+    fn drop(&mut self) {
+        TEST_NOW.with(|clock| clock.set(self.0));
+    }
+}
+
 struct Scratch(PathBuf);
 
 impl Drop for Scratch {
@@ -69,6 +85,331 @@ fn manifest_path(archive: &Archive, source: &str) -> PathBuf {
 }
 
 #[test]
+fn discovery_without_registered_sources_does_not_create_archive_state() {
+    let (_scratch, archive) = archive();
+    let options = crate::Options::default();
+    assert!(archive.missing_sources(&options).unwrap().is_empty());
+    assert!(!archive.dir.exists());
+    fs::create_dir_all(&archive.dir).unwrap();
+    assert!(archive.missing_sources(&options).unwrap().is_empty());
+    assert_eq!(fs::read_dir(&archive.dir).unwrap().count(), 0);
+}
+
+#[test]
+fn retention_is_explicit_and_uses_admission_age_and_exact_dependencies() {
+    let _clock = Clock::at(200_000);
+    let (scratch, archive) = archive();
+    let native = scratch.0.join("native.jsonl");
+    fs::write(&native, b"native bytes remain").unwrap();
+    let expired = preserve(&archive, "source", b"old unreferenced\n", "none").unwrap();
+    let seal = preserve(&archive, "source", b"sealed custody\n", "none").unwrap();
+    let index = preserve(&archive, "source", b"indexed custody\n", "none").unwrap();
+    let boundary = preserve(&archive, "source", b"exact boundary\n", "none").unwrap();
+    let recent = preserve(&archive, "source", b"recent\n", "none").unwrap();
+    let path = manifest_path(&archive, "source");
+    let mut manifest = read_manifest(path.parent().unwrap()).unwrap();
+    for chain in &mut manifest.chains {
+        chain.admitted_at = if chain.chain_id == recent.chain_id {
+            200_000
+        } else if chain.chain_id == boundary.chain_id {
+            113_600
+        } else {
+            1
+        };
+    }
+    publish(path.parent().unwrap(), MANIFEST, &manifest).unwrap();
+    archive
+        .protect("source", &seal.chain_id, "seal:original".into())
+        .unwrap();
+    archive
+        .protect("source", &index.chain_id, "index:original".into())
+        .unwrap();
+    let before = fs::read(&path).unwrap();
+    assert_eq!(archive.prune_at(None, 200_000).unwrap(), 0);
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(archive.prune_at(Some(1), 200_000).unwrap(), 1);
+    let remaining = archive.chains("source").unwrap();
+    assert!(
+        !remaining
+            .iter()
+            .any(|chain| chain.chain_id == expired.chain_id)
+    );
+    for chain in [&seal, &index, &boundary, &recent] {
+        assert!(remaining.iter().any(|held| held.chain_id == chain.chain_id));
+    }
+    assert_eq!(fs::read(native).unwrap(), b"native bytes remain");
+    assert_eq!(archive.prune_at(Some(1), 200_000).unwrap(), 0);
+    archive.verify("source").unwrap();
+}
+
+#[test]
+fn missing_native_binding_is_exact_verified_and_retention_protected() {
+    let (scratch, archive) = archive();
+    let options = crate::Options {
+        claude_home: scratch.0.join("claude"),
+        cache: scratch.0.join("index.json"),
+        facts: None,
+        ..crate::Options::default()
+    };
+    let path = options.claude_home.join("projects/project/native.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let bytes = b"{\"type\":\"user\"}\n";
+    fs::write(&path, bytes).unwrap();
+    let native = NativeSource {
+        home: options.claude_home.clone(),
+        root: "claude".into(),
+        path: "projects/project/native.jsonl".into(),
+        native_id: "native".into(),
+        ledger: crate::events::Ledger {
+            stat: crate::events::Stat::of(&path).unwrap(),
+            offset: bytes.len() as u64,
+            prefix: digest(bytes),
+            tail: digest(bytes),
+        },
+        sidecar: None,
+        chain_id: String::new(),
+    };
+    assert!(
+        archive
+            .admit_native(&mut crate::sealed::LogFile::open(&path).unwrap(), &native)
+            .unwrap()
+    );
+    let manifest = manifest_path(&archive, &path.to_string_lossy());
+    let before = crate::events::Stat::of(&manifest).unwrap();
+    let _clock = Clock::at(
+        read_json::<ArchiveClock>(&archive.dir.join(CLOCK))
+            .unwrap()
+            .high_water,
+    );
+    FAIL_BEFORE_RENAME.with(|fail| fail.set(true));
+    assert!(
+        archive
+            .admit_native(&mut crate::sealed::LogFile::open(&path).unwrap(), &native)
+            .unwrap()
+    );
+    assert_eq!(crate::events::Stat::of(&manifest).unwrap(), before);
+    FAIL_BEFORE_RENAME
+        .with(|fail| assert!(fail.replace(false), "unchanged admission must not publish"));
+    assert!(archive.missing_sources(&options).unwrap().is_empty());
+    fs::remove_file(&path).unwrap();
+    let missing = archive.missing_sources(&options).unwrap();
+    assert_eq!(missing.len(), 1);
+    let wrong_roots = crate::Options {
+        claude_home: scratch.0.join("other"),
+        ..options.clone()
+    };
+    assert!(archive.missing_sources(&wrong_roots).unwrap().is_empty());
+    assert_eq!(archive.prune_at(Some(0), u64::MAX).unwrap(), 0);
+    archive
+        .with_native(&missing[0], |file| {
+            let mut read = Vec::new();
+            file.read_to_end(&mut read)?;
+            assert_eq!(read, bytes);
+            Ok(())
+        })
+        .unwrap();
+    fs::write(&path, bytes).unwrap();
+    assert!(
+        archive.open_native(&missing[0]).is_err(),
+        "present native path wins"
+    );
+    fs::remove_file(&path).unwrap();
+    let chain = archive.chains(&path.to_string_lossy()).unwrap().remove(0);
+    fs::write(
+        chain_file(&archive, &path.to_string_lossy(), &chain),
+        b"damaged",
+    )
+    .unwrap();
+    assert!(archive.open_native(&missing[0]).is_err());
+}
+
+#[test]
+fn clock_rollback_clamps_admission_and_refuses_retention_without_deletion() {
+    let clock = Clock::at(2_000_000);
+    let (_scratch, archive) = archive();
+    let first = preserve(&archive, "first", b"first\n", "none").unwrap();
+    clock.set(1_000_000);
+    let fresh = preserve(&archive, "fresh", b"fresh\n", "none").unwrap();
+    assert_eq!(fresh.admitted_at, first.admitted_at);
+    let state = fs::read(archive.dir.join(CLOCK)).unwrap();
+    let restarted = Archive::new(archive.dir.clone());
+    let error = restarted.prune(Some(7)).unwrap_err();
+    assert!(error.to_string().contains("clock moved backward"));
+    assert_eq!(fs::read(archive.dir.join(CLOCK)).unwrap(), state);
+    assert_eq!(archive.chains("first").unwrap(), [first]);
+    assert_eq!(
+        archive.chains("fresh").unwrap(),
+        std::slice::from_ref(&fresh)
+    );
+    clock.set(2_003_600);
+    assert_eq!(archive.prune(Some(7)).unwrap(), 0);
+    assert_eq!(archive.chains("fresh").unwrap(), [fresh]);
+    let recorded: ArchiveClock = read_json(&archive.dir.join(CLOCK)).unwrap();
+    assert_eq!(recorded.high_water, 2_003_600);
+    clock.set(2_003_599);
+    assert!(archive.prune(Some(0)).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn source_journal_and_lock_symlinks_are_refused_without_touching_targets() {
+    use std::os::unix::fs::symlink;
+    let (scratch, archive) = archive();
+    let target = scratch.0.join("victim");
+    let bytes = b"victim must remain unchanged\n";
+    fs::write(&target, bytes).unwrap();
+    fs::create_dir_all(&archive.dir).unwrap();
+    symlink(&target, archive.dir.join(SOURCES)).unwrap();
+    assert!(
+        archive
+            .preserve("source", &mut Cursor::new(b"data\n"), "none")
+            .is_err()
+    );
+    assert_eq!(fs::read(&target).unwrap(), bytes);
+    fs::remove_file(archive.dir.join(SOURCES)).unwrap();
+    preserve(&archive, "existing", b"existing\n", "none").unwrap();
+    let journal = archive.dir.join(SOURCES);
+    let swap = journal.clone();
+    let victim = target.clone();
+    BEFORE_REGISTER_OPEN.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            fs::remove_file(&swap).unwrap();
+            symlink(victim, swap).unwrap();
+        }))
+    });
+    assert!(
+        archive
+            .preserve("new", &mut Cursor::new(b"new\n"), "none")
+            .is_err()
+    );
+    assert_eq!(fs::read(&target).unwrap(), bytes);
+    fs::remove_file(journal).unwrap();
+    fs::remove_file(archive.dir.join(LOCK)).unwrap();
+    symlink(&target, archive.dir.join(LOCK)).unwrap();
+    assert!(archive.chains("existing").is_err());
+    assert_eq!(fs::read(target).unwrap(), bytes);
+}
+
+#[cfg(unix)]
+#[test]
+fn chain_extension_refuses_swapped_symlinks_regular_files_and_fifos() {
+    use std::{
+        os::unix::fs::symlink,
+        time::{Duration, Instant},
+    };
+    for replacement in ["symlink", "regular", "fifo"] {
+        let (scratch, archive) = archive();
+        assert!(admit(&archive, b"first\n", 6));
+        let held = archive.chains("native").unwrap().remove(0);
+        let path = chain_file(&archive, "native", &held);
+        let victim = scratch.0.join("victim");
+        let bytes = b"victim must remain unchanged\n";
+        fs::write(&victim, bytes).unwrap();
+        let swap = path.clone();
+        let target = victim.clone();
+        BEFORE_EXTEND_OPEN.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&swap, swap.with_extension("kept")).unwrap();
+                match replacement {
+                    "symlink" => symlink(target, swap).unwrap(),
+                    "regular" => {
+                        fs::hard_link(target, swap).unwrap();
+                    }
+                    "fifo" => assert!(
+                        std::process::Command::new("mkfifo")
+                            .arg(swap)
+                            .status()
+                            .unwrap()
+                            .success()
+                    ),
+                    _ => unreachable!(),
+                }
+            }))
+        });
+        let started = Instant::now();
+        assert!(
+            archive
+                .admit(
+                    "native",
+                    &mut Cursor::new(b"first\nsecond\n"),
+                    13,
+                    &digest(b"first\nsecond\n")
+                )
+                .is_err(),
+            "{replacement}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(5), "{replacement}");
+        BEFORE_EXTEND_OPEN.with(|hook| assert!(hook.borrow().is_none()));
+        assert_eq!(fs::read(&victim).unwrap(), bytes, "{replacement}");
+        assert_eq!(archive.chains("native").unwrap(), [held]);
+    }
+}
+
+#[test]
+fn bounded_native_checkpoints_extend_custody_without_advertising_incomplete_sources() {
+    let (scratch, archive) = archive();
+    let options = crate::Options {
+        claude_home: scratch.0.join("claude"),
+        cache: scratch.0.join("index.json"),
+        facts: None,
+        ..crate::Options::default()
+    };
+    let path = options.claude_home.join("projects/project/native.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let bytes = b"first\nsecond\nthird\n";
+    fs::write(&path, bytes).unwrap();
+    let physical = crate::events::Stat::of(&path).unwrap();
+    for offset in [6, 13, bytes.len()] {
+        let prefix = &bytes[..offset];
+        let native = NativeSource {
+            home: options.claude_home.clone(),
+            root: "claude".into(),
+            path: "projects/project/native.jsonl".into(),
+            native_id: "native".into(),
+            ledger: crate::events::Ledger {
+                stat: crate::events::Stat {
+                    size: offset as u64,
+                    ..physical
+                },
+                offset: offset as u64,
+                prefix: digest(prefix),
+                tail: digest(prefix),
+            },
+            sidecar: None,
+            chain_id: String::new(),
+        };
+        assert!(
+            archive
+                .admit_native(&mut crate::sealed::LogFile::open(&path).unwrap(), &native)
+                .unwrap()
+        );
+        let chains = archive.chains(&path.to_string_lossy()).unwrap();
+        assert_eq!(chains.len(), 1);
+        assert_eq!(chains[0].length, offset as u64);
+        let manifest = read_manifest(
+            manifest_path(&archive, &path.to_string_lossy())
+                .parent()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest.native.is_some(), offset == bytes.len());
+    }
+}
+
+#[test]
+fn chain_admission_time_survives_extension_and_reuse() {
+    let (_scratch, archive) = archive();
+    assert!(admit(&archive, b"first\n", 6));
+    let path = manifest_path(&archive, "native");
+    let mut manifest = read_manifest(path.parent().unwrap()).unwrap();
+    manifest.chains[0].admitted_at = 17;
+    publish(path.parent().unwrap(), MANIFEST, &manifest).unwrap();
+    assert!(admit(&archive, b"first\nsecond\n", 13));
+    assert!(admit(&archive, b"first\nsecond\n", 13));
+    assert_eq!(archive.chains("native").unwrap()[0].admitted_at, 17);
+}
+
+#[test]
 fn a_preserved_chain_holds_the_bytes_and_the_redactor_version() {
     let (_scratch, archive) = archive();
     let bytes = lines(300_000, 1);
@@ -112,6 +453,7 @@ fn a_preserved_chain_holds_the_bytes_and_the_redactor_version() {
 
 #[test]
 fn a_failure_before_the_rename_leaves_the_last_manifest() {
+    let _clock = Clock::at(2_000_000);
     let (_scratch, archive) = archive();
     let kept = preserve(&archive, "s", &lines(5_000, 1), "1").unwrap();
     let before = fs::read(manifest_path(&archive, "s")).unwrap();
@@ -242,6 +584,7 @@ fn bytes_that_are_not_the_consumed_prefix_are_not_admitted() {
 
 #[test]
 fn a_failed_extension_is_retried_from_the_last_manifest() {
+    let _clock = Clock::at(2_000_000);
     let (_scratch, archive) = archive();
     let log = lines(200_000, 1);
     assert!(admit(&archive, &log, 50_000));

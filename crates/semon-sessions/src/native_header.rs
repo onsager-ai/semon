@@ -339,7 +339,7 @@ mod tests {
             .unwrap();
         let mut marker: Value = serde_json::from_str(&encoded).unwrap();
         let header = home.header_text();
-        assert_eq!(marker["version"], 6);
+        assert_eq!(marker["version"], 7);
         connection
             .execute(
                 "UPDATE meta SET value=value || ' ' WHERE key=?1",

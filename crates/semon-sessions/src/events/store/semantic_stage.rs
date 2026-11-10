@@ -2317,6 +2317,9 @@ impl SqliteStore {
                     archived_index(&tx, &path)
                         .map_err(failure)?
                         .is_some_and(|proof| proof.matches(expected))
+                        || standalone_archive_source(&tx, &path, expected)
+                            .map_err(failure)?
+                            .is_some()
                 }
                 (Err(error), None) if error.kind() == io::ErrorKind::NotFound => true,
                 _ => false,
@@ -2575,6 +2578,7 @@ fn acknowledge_source(c: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
         (Ok(stat), None) => withdrawn && negative.as_ref().is_some_and(|w| w.stat == stat),
         (Err(e), Some(ledger)) if e.kind() == io::ErrorKind::NotFound => {
             archived_index(c, path)?.is_some_and(|proof| proof.matches(ledger))
+                || standalone_archive_source(c, path, ledger)?.is_some()
         }
         (Err(e), None) if e.kind() == io::ErrorKind::NotFound => true,
         _ => false,

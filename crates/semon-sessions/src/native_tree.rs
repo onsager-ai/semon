@@ -1,6 +1,6 @@
 //! Content-free native tree facts observed by the Session Event Index parser.
 //! Raw activity strings and historical tool/usage accounting retain the CLI contract.
-use crate::{Marker, Tokens, ToolCall, claude_usage, events, field, sealed::LogFile};
+use crate::{Marker, Tokens, ToolCall, claude_usage, events, field};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -217,7 +217,7 @@ impl Summary {
 
     /// Repair metadata for a preexisting native ledger, without replaying events.
     pub(crate) fn repair(
-        file: &mut LogFile,
+        file: &mut (impl Read + Seek),
         consumed: u64,
         harness: &str,
     ) -> io::Result<(Self, [u8; 32])> {

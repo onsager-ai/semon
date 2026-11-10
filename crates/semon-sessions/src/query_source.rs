@@ -19,6 +19,7 @@ struct Proof {
     ledger: Ledger,
     generation: String,
     chunks: ProofChunks,
+    archive: Option<Mutex<crate::archive::NativeRead>>,
 }
 
 enum ProofChunks {
@@ -88,6 +89,7 @@ impl Sources {
         }
     }
 
+    #[cfg(any(test, feature = "postgres"))]
     pub(crate) fn capture(
         options: &Options,
         sources: impl Iterator<Item = (CatalogSource, Option<Arc<crate::source_chunks::Chunks>>)>,
@@ -96,6 +98,33 @@ impl Sources {
             options,
             sources.map(|(source, chunks)| (source, chunks.map(ProofChunks::Complete))),
             true,
+            None,
+        )
+    }
+
+    pub(crate) fn capture_scanned(
+        options: &Options,
+        sources: impl Iterator<
+            Item = (
+                CatalogSource,
+                Option<Arc<crate::source_chunks::Chunks>>,
+                bool,
+            ),
+        >,
+    ) -> io::Result<Self> {
+        let sources: Vec<_> = sources.collect();
+        let archived = sources
+            .iter()
+            .filter(|(_, _, archived)| *archived)
+            .map(|(source, _, _)| source.path.clone())
+            .collect();
+        Self::capture_inner(
+            options,
+            sources
+                .into_iter()
+                .map(|(source, chunks, _)| (source, chunks.map(ProofChunks::Complete))),
+            true,
+            Some(&archived),
         )
     }
 
@@ -140,15 +169,17 @@ impl Sources {
             };
             proofs.push((source, Some(chunks)));
         }
-        Self::capture_inner(options, proofs.into_iter(), false)
+        Self::capture_inner(options, proofs.into_iter(), false, None)
     }
 
     fn capture_inner(
         options: &Options,
         sources: impl Iterator<Item = (CatalogSource, Option<ProofChunks>)>,
         require_references: bool,
+        archived: Option<&BTreeSet<PathBuf>>,
     ) -> io::Result<Self> {
         let mut captured = Self::new(options);
+        let archive = crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache));
         for (source, chunks) in sources {
             let chunks = chunks
                 .filter(|chunks| match chunks {
@@ -206,6 +237,26 @@ impl Sources {
                 },
                 generation,
                 chunks,
+                archive: if options.facts.is_none()
+                    && archived.is_none_or(|paths| paths.contains(&source.path))
+                    && !source.path.try_exists()?
+                {
+                    archive
+                        .admitted_source(&source.path, &crate::source_carrier::ledger(&source))?
+                        .map(|native| {
+                            if !native.allowed(options) || native.native_id != source.native_id {
+                                return Err(unavailable());
+                            }
+                            let mut read = archive.open_native(&native)?;
+                            // The private copy is immutable; subsequent reads still
+                            // fence the named chain and native source reappearance.
+                            read.release_lock();
+                            Ok(Mutex::new(read))
+                        })
+                        .transpose()?
+                } else {
+                    None
+                },
             };
             if let Some(reference) = &proof.source {
                 captured.paths.insert(
@@ -288,7 +339,7 @@ impl Sources {
                 Ok((source.clone(), Some(ProofChunks::Focused(Box::new(proof)))))
             })
             .collect::<io::Result<Vec<_>>>()?;
-        Self::capture_inner(options, proofs.into_iter(), false)
+        Self::capture_inner(options, proofs.into_iter(), false, None)
     }
 
     pub(crate) fn reader(&self) -> Records<'_> {
@@ -465,6 +516,18 @@ impl Records<'_> {
         path: &Path,
         record: &crate::native_record::Record,
     ) -> io::Result<Vec<u8>> {
+        if let Some(archive) = self
+            .sources
+            .proofs
+            .get(path)
+            .and_then(|proof| proof.archive.as_ref())
+        {
+            let mut read = archive.lock().map_err(|_| unavailable())?;
+            read.verify()?;
+            let bytes = record.read(&mut read.file)?;
+            read.verify()?;
+            return Ok(bytes);
+        }
         self.with_evidence(path, record, |file| record.read(file))
     }
 
@@ -473,6 +536,17 @@ impl Records<'_> {
         path: &Path,
         record: &crate::native_record::Record,
     ) -> io::Result<()> {
+        if let Some(archive) = self
+            .sources
+            .proofs
+            .get(path)
+            .and_then(|proof| proof.archive.as_ref())
+        {
+            let mut read = archive.lock().map_err(|_| unavailable())?;
+            read.verify()?;
+            record.verify(&mut read.file)?;
+            return read.verify();
+        }
         self.with_evidence(path, record, |file| record.verify(file))
     }
 
@@ -626,6 +700,9 @@ impl Records<'_> {
     }
 
     fn verify(&self, path: &Path, proof: &Proof) -> io::Result<()> {
+        if let Some(archive) = &proof.archive {
+            return archive.lock().map_err(|_| unavailable())?.verify();
+        }
         if self.provider.is_some()
             && (matches!(self.mode, crate::SessionSourceReadMode::ProviderOnly)
                 || self.pinned_provider(path)?)
@@ -740,6 +817,9 @@ impl Records<'_> {
             return Err(unavailable());
         }
         for (path, proof) in &self.sources.proofs {
+            if let Some(archive) = &proof.archive {
+                archive.lock().map_err(|_| unavailable())?.verify()?;
+            }
             if let ProofChunks::Focused(chunks) = &proof.chunks {
                 chunks
                     .clear_cache()
@@ -878,6 +958,31 @@ impl Records<'_> {
                 || self.pinned_provider(path)?)
         {
             return self.provider_range(path, proof, offset, max, prepare);
+        }
+        if let Some(archive) = &proof.archive {
+            let mut read = archive.lock().map_err(|_| unavailable())?;
+            read.verify()?;
+            let first = usize::try_from(offset / crate::source_chunks::SIZE as u64)
+                .map_err(|_| unavailable())?;
+            let end = offset + max as u64;
+            let last = usize::try_from((end - 1) / crate::source_chunks::SIZE as u64)
+                .map_err(|_| unavailable())?;
+            let mut bytes = Vec::with_capacity(max);
+            for index in first..=last {
+                let part = proof.chunks.read(&mut read.file, index)?;
+                let start = index as u64 * crate::source_chunks::SIZE as u64;
+                let lo = offset.saturating_sub(start) as usize;
+                let hi = (end - start).min(part.len() as u64) as usize;
+                bytes.extend_from_slice(&part[lo..hi]);
+            }
+            read.verify()?;
+            return Ok(SessionSourceRange {
+                generation: proof.generation.clone(),
+                length: proof.ledger.offset,
+                offset,
+                bytes: bytes.into(),
+                cached: false,
+            });
         }
         let mut prepared = Some(self.prepared.lock().map_err(|_| unavailable())?);
         let cached_file = prepared
@@ -1260,6 +1365,7 @@ mod tests {
                     },
                     generation: generation.clone(),
                     chunks: ProofChunks::Complete(Arc::new(captured.chunks)),
+                    archive: None,
                 },
             );
             (sources, reference, generation)

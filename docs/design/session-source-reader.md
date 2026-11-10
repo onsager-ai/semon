@@ -329,6 +329,28 @@ paths remains unknown at read admission. Producer retry refuses that scheduling
 hint and continues with its ordinary fallback, preserving every durable source
 claim and the native allowlist.
 
+## Standalone archive index input
+
+Standalone admission persists the configured root, allowlisted relative path,
+native identity, consumed ledger and exact chain in the archive manifest. When
+that native file is absent and the derived Catalog is missing, discovery includes
+this admitted source for rebuild. An existing Catalog still reconciles native
+disappearance into retained history; archive custody does not keep its native
+membership current. Each producer captures its rebuild inputs before scanning,
+so deletion during preparation still fails the publication fence. The
+Event Index verifies and replays the archived complete prefix with the same
+parser, preserving its historical ledger. Producer record reads pin a verified
+private seekable copy under the archive lock; subsequent reads still reject
+native reappearance or a changed named chain. This supplies no runtime or
+control authority and does not restore files into native homes. Hosted/provider
+authorization remains independent.
+
+Index retention markers use format 7 and carry the optional exact standalone
+chain ID. The archive registers its matching dependency before the SQLite marker
+commits. Seal custody uses the same manifest reference mechanism before publishing
+`custody.json`; a crash can conservatively retain unused bytes. Explicit archive
+pruning cannot retire any registered chain or current native source binding.
+
 ## Current Semon storage contract
 
 The Event Index initializes schema 35 with parser/cache version 30 in one

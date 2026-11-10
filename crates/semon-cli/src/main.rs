@@ -22,6 +22,10 @@ enum Command {
     Receive(ReceiveArgs),
     Query(QueryArgs),
     Mcp(HomeArgs),
+    ArchivePrune {
+        cache: PathBuf,
+        retention_days: Option<u64>,
+    },
 }
 
 /// The agent homes, `/proc`, cache and facts `semon sessions` reads, or
@@ -126,10 +130,41 @@ fn parse_args() -> Result<Command, String> {
         Some("receive") => parse_receive_args(arguments).map(Command::Receive),
         Some("query") => parse_query_args(arguments).map(Command::Query),
         Some("mcp") => parse_mcp_args(arguments).map(Command::Mcp),
+        Some("archive") => parse_archive_args(arguments),
         Some("-h" | "--help") => Err(usage()),
         Some(command) => Err(format!("unknown command: {command}\n{}", usage())),
         None => Err(usage()),
     }
+}
+
+fn parse_archive_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
+    if arguments.next().as_deref() != Some("prune") {
+        return Err("archive requires prune [--retention-days N] [--cache PATH]".into());
+    }
+    let mut cache = semon_sessions::Options::default().cache;
+    let mut retention_days = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--cache" => cache = arguments.next().ok_or("--cache requires a value")?.into(),
+            "--retention-days" => {
+                let value = arguments
+                    .next()
+                    .ok_or("--retention-days requires a value")?;
+                let days: u64 = value
+                    .parse()
+                    .map_err(|_| "--retention-days requires a nonnegative integer")?;
+                days.checked_mul(86400)
+                    .ok_or("--retention-days is too large")?;
+                retention_days = Some(days);
+            }
+            "-h" | "--help" => return Err(usage()),
+            _ => return Err(format!("unknown archive prune argument: {argument}")),
+        }
+    }
+    Ok(Command::ArchivePrune {
+        cache,
+        retention_days,
+    })
 }
 
 fn parse_sessions_args(
@@ -522,6 +557,23 @@ fn run(command: Command) -> Result<(), String> {
         Command::Receive(args) => run_receive(args),
         Command::Query(args) => run_query(args),
         Command::Mcp(home) => run_mcp(&home),
+        Command::ArchivePrune {
+            cache,
+            retention_days,
+        } => {
+            let archive = semon_sessions::archive::Archive::new(
+                semon_sessions::archive::standalone_dir(&cache),
+            );
+            let removed = archive
+                .prune(retention_days)
+                .map_err(|error| error.to_string())?;
+            if retention_days.is_none() {
+                println!("Archive retention is unset; no chains deleted (keep indefinitely).");
+            } else {
+                println!("Deleted {removed} unreferenced archive chains.");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -847,6 +899,9 @@ fn usage() -> String {
          (docs/mirror-protocol.md), appending as they grow. The token file must be mode 0600. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s.\n\
          \n\
+         Usage: semon archive prune [--retention-days N] [--cache PATH]\n\
+         Explicit archive maintenance. Omit retention to keep every chain indefinitely; native logs are never deleted.\n\
+         \n\
          Usage: semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--max-bytes SIZE]\n\
          Usage: semon receive token (add NAME | revoke NAME | list) --dir DIR\n\
          A mirror-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
@@ -859,6 +914,39 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_prune_requires_explicit_retention_and_valid_days() {
+        assert!(matches!(
+            parse_archive_args(["prune"].map(str::to_owned).into_iter()).unwrap(),
+            Command::ArchivePrune {
+                retention_days: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_archive_args(
+                ["prune", "--retention-days", "30"]
+                    .map(str::to_owned)
+                    .into_iter()
+            )
+            .unwrap(),
+            Command::ArchivePrune {
+                retention_days: Some(30),
+                ..
+            }
+        ));
+        for value in ["-1", "invalid", "18446744073709551615"] {
+            assert!(
+                parse_archive_args(
+                    ["prune", "--retention-days", value]
+                        .map(str::to_owned)
+                        .into_iter()
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn paused_find_refuses_stale_and_malformed_cli_calls_before_initialization() {
