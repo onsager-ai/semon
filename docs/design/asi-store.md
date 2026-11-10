@@ -284,8 +284,9 @@ tables.
   unsettled waiter above `consumed`; only notification-only work coalesces to
   the latest notification. Two waiters queued before selection therefore have
   separate chains, failure budgets and successful publications as well.
-  Successful chunks do not consume or reset the active request's three-failure
-  budget.
+  Successful chunks advance the scheduling watermark `consumed` through the
+  captured generation while deferring request settlement until final compaction.
+  This watermark does not end the chain or reset its counters.
   Notification counters saturate at u64::MAX, an unreachable process-lifetime
   bound of more than 1.8e19 requests; settlement at exhaustion is unspecified.
 - **Local custody.** The generated Parquet can contain typed local-path
@@ -299,10 +300,15 @@ tables.
   cold inventory in one cycle. The existing local writer selects its budget via
   `AnalyticsWriterConfig.input_budget` and schedules each incomplete chunk at the
   next interval without requiring another external notification. The explicit CLI
-  accepts positive `--batch-sessions` and `--batch-steps` limits up to i64::MAX,
-  validated before opening or creating state. One-shot
+  accepts positive `--batch-sessions` and `--batch-steps` limits up to
+  `min(usize::MAX, i64::MAX)`, validated before opening or creating state. One-shot
   materialization uses zero spacing between chunks and exits after the first
-  complete drain and its final bounded compaction; watch retains 2 s spacing.
+  fresh drain and its final bounded compaction; watch uses a minimum spacing
+  of 2 s between chunk attempts. If a new chain inherits a persisted unfinished
+  replay endpoint, it first finishes that replay and compaction, then runs one
+  fresh drain whose endpoint is captured after the request registered. Completing
+  the inherited endpoint alone never settles the new request. The adapter owns
+  checkpoint inspection; semon-asi still treats checkpoints as opaque.
   A continuously advancing source cannot extend that drain's captured replay
   endpoint. Later writes require another request. Cancellation stops the wait;
   joining stops future chunks, preserving the last published checkpoint.
@@ -327,20 +333,54 @@ tables.
   - The local service coalesces catalog-publication notifications. Operational
     classification covers direct store I/O, Parquet `External` I/O, and SQLite
     busy/locked/I/O/full/cannot-open errors. These retry with bounded exponential
-    backoff, with at most three operational failures per request before visible
-    refusal carrying the last error (up to 1s/2s backoffs plus publication spacing).
-    The failure budget belongs to the recovery chain. Successful Open, Retire or
-    Compact clears it; retirement that interrupts publication saves and restores
-    that publication's counters separately. Reload success does not reset the
-    budget; a new Catalog notification permits a fresh attempt after refusal.
-    Parquet page-read I/O can surface as an Arrow error after losing its typed I/O
-    source; it fails safe by latching `Refused` until the next notification, like structural errors. A store error requires manifest reload
-    before its operation resumes. A successful reload preserves the retry attempt;
-    only success of the resumed operation clears it. Every publication attempt
-    advances the cycle deadline, including an error after a visible rename.
+    backoff, with at most three operational failures per active chain before
+    visible refusal carrying the last error (1s/2s backoffs plus publication
+    spacing). One publication chain includes any required Open, Reload and
+    compaction recovery operations. Success of a barrier, chunk or intermediate
+    compaction preserves its attempt and failure counts. The bound is cumulative
+    over that chain, not reset by a successful operation within it.
+    Periodic retirement uses an independent maintenance chain and budget. It
+    suspends the publication Chain whole, then restores it whole on success;
+    maintenance failures neither spend nor reset its publication counters. Thus
+    retirement retries can add failures to the overall request wait. A terminal
+    retirement refusal also terminates the suspended request explicitly.
+    All identity, kind, attempt/failure counters, endpoint origin, operation and
+    completion state live in a Chain record. Success after final fresh-drain
+    compaction, terminal refusal, NoWriter, owning-waiter cancellation and shutdown
+    drop the appropriate record; the next chain starts at 0/0. NoWriter retains
+    only a 30 s scheduling cooldown. A refused/cancelled operation can retain a
+    required recovery barrier, but no request identity or counters.
+    Parquet page-read I/O can surface as an Arrow error after losing its typed
+    I/O source; it latches Refused like structural errors. A store error requires
+    manifest reload before its operation resumes, since a rename may already be
+    visible. Reload success preserves the chain's counters. Every publication
+    attempt advances the minimum-spacing deadline, including a rename-visible
+    error. Cancellation during I/O lets that operation finish, then drops the
+    owning chain before selecting another operation; shutdown schedules no work.
     It uses the activity rules target and current pricing-snapshot fingerprint
     as writer targets; these do not assert that untouched rows have uniformly
     refreshed versions.
+
+The writer's pure transition table is the authority for chain ownership:
+
+| Event | Active/suspended record | Outcome |
+| --- | --- | --- |
+| Capture | Create earliest-waiter chain at 0/0; an active chain keeps its capture | No settlement |
+| Open or Reload success | Same publication record and counters, next operation | No settlement |
+| Chunk success | Same record, record completion, select compaction | Advance `consumed`, defer settlement |
+| Intermediate compaction success | Same record, next chunk | No settlement |
+| Inherited drain compaction success | Same record, require a fresh drain | No settlement |
+| Final fresh drain compaction success | Drop publication record | Settle its captured generation Idle |
+| Operational failure | Increment active record only; retry at 1s/2s | Third failure drops record and refuses its generation |
+| Structural refusal | Drop active and any suspended record | Refuse captured generation |
+| NoWriter | Drop record; retain 30 s cooldown only | Settle captured generation NoWriter |
+| Retirement interrupt | Suspend whole publication record; create maintenance record at 0/0 | No settlement |
+| Retirement success | Drop maintenance record; restore whole suspended record | No settlement |
+| Terminal retirement refusal | Drop maintenance and suspended publication records | Refuse their captured generation |
+| Owning waiter cancellation | Drop active and suspended records; retain needed recovery barrier | Withdraw its demand |
+| Shutdown | Drop active and suspended records | Stop without scheduling another operation |
+| Later request arrival | Active record unchanged | Later generation remains pending |
+
 - **Reading.** Each fact view keeps only live rows:
   `… semi join live on (session_uid, _gen)`.
 - **Compaction** is tiered. Cycle files are level 0. When a table has more

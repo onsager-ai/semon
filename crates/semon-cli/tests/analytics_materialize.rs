@@ -279,10 +279,10 @@ fn materialize_refuses_batch_limits_above_sqlite_maximum_before_creating_state()
     for flag in ["--batch-sessions", "--batch-steps"] {
         let result = materialize_with(&home, &[flag, "9223372036854775808"]);
         assert!(!result.status.success());
-        assert!(
-            String::from_utf8_lossy(&result.stderr)
-                .contains("requires a positive integer no greater than 9223372036854775807")
-        );
+        assert!(String::from_utf8_lossy(&result.stderr).contains(&format!(
+            "requires a positive integer no greater than {}",
+            usize::try_from(i64::MAX).unwrap_or(usize::MAX)
+        )));
         assert!(!home.root.join("state").exists());
     }
 }
@@ -375,6 +375,7 @@ fn usage_lists_materialize() {
         "--batch-sessions N",
         "--batch-steps N",
         "64 sessions/journal entries and 8192 steps",
+        "min(usize::MAX, i64::MAX)",
     ] {
         assert!(help.contains(expected), "missing {expected}: {help}");
     }

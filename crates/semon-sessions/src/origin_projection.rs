@@ -37,6 +37,17 @@ pub struct SqliteAnalyticsInput {
 }
 
 impl SqliteAnalyticsInput {
+    /// A replay endpoint in committed state predates a newly captured writer
+    /// chain. Finish it before starting a fresh drain for that request. The
+    /// checkpoint format remains adapter-owned; actual reads validate anchors
+    /// and restart inventory if the index incarnation changed.
+    pub(crate) fn resumes_replay(checkpoint: Option<&str>) -> rusqlite::Result<bool> {
+        Ok(checkpoint
+            .map(decode_checkpoint)
+            .transpose()?
+            .is_some_and(|checkpoint| matches!(checkpoint.cursor, Cursor::Replay { .. })))
+    }
+
     pub fn open(index: &Path, namespace: impl Into<String>) -> rusqlite::Result<Self> {
         let connection = Connection::open_with_flags(
             index,

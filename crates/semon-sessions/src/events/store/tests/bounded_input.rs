@@ -1111,6 +1111,168 @@ fn bounded_writer_error_between_chunks_belongs_to_its_request() {
 }
 
 #[test]
+fn bounded_writer_new_request_finishes_inherited_replay_then_publishes_sequence_21() {
+    let (root, options, rows, native) = fixture("bounded-inherited-request", 4);
+    let store_root = root.join("writer-store");
+    let current: i64 = native
+        .connection
+        .query_row("SELECT max(seq) FROM silver_change", [], |row| row.get(0))
+        .unwrap();
+    assert!(current <= 12);
+    for sequence in current + 1..=12 {
+        native
+            .connection
+            .execute(
+                "INSERT INTO silver_change(seq,session_key,kind) VALUES(?1,?2,'changed')",
+                params![sequence, rows[0].key],
+            )
+            .unwrap();
+    }
+    let mut seeded = Store::open_with_clock(&store_root, clock()).unwrap();
+    drain(
+        &mut seeded,
+        &mut ObservedInput::open(&options),
+        InputBudget::default(),
+    );
+    drop(seeded);
+    for sequence in 13..=20 {
+        let row = if sequence == 13 { &rows[0] } else { &rows[1] };
+        native
+            .connection
+            .execute(
+                "INSERT INTO silver_change(seq,session_key,kind) VALUES(?1,?2,'changed')",
+                params![sequence, row.key],
+            )
+            .unwrap();
+    }
+    let metadata: String = native
+        .connection
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key=?1",
+            [&rows[1].key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let time = Arc::new(clock());
+    let mut config = crate::AnalyticsWriterConfig::new(
+        NAMESPACE,
+        crate::events::EventCache::path(&options.cache),
+        &store_root,
+    );
+    config.input_budget = budget(1, 8_192);
+    let handle = crate::analytics_writer::start_with_clock(config, Arc::clone(&time));
+    std::thread::scope(|scope| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let handle_ref = &handle;
+        let first = scope.spawn(move || {
+            handle_ref.publish_and_wait_until(|| std::time::Instant::now() >= deadline)
+        });
+        handle.wait_for_publishes(1);
+        handle.wait_for_idle_wait();
+        let checkpoint = semon_asi::read_manifest(&store_root)
+            .unwrap()
+            .unwrap()
+            .checkpoints[NAMESPACE]
+            .clone();
+        let cursor: Value = serde_json::from_str(&checkpoint).unwrap();
+        assert_eq!(
+            cursor["cursor"],
+            serde_json::json!({"phase":"replay", "after":13, "through":20})
+        );
+        native
+            .connection
+            .execute(
+                "UPDATE session_catalog SET metadata='{}' WHERE session_key=?1",
+                [&rows[1].key],
+            )
+            .unwrap();
+        time.0.store(2_100, Ordering::SeqCst);
+        handle.wake_for_clock();
+        assert!(matches!(
+            first.join().unwrap(),
+            crate::AnalyticsWriterStatus::Refused { .. }
+        ));
+        native
+            .connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1 WHERE session_key=?2",
+                params![metadata, rows[1].key],
+            )
+            .unwrap();
+        // Change a session already passed by A. Only journal entry 21 can
+        // deliver this replacement; inherited entries 14..20 name another UID.
+        let metadata: String = native
+            .connection
+            .query_row(
+                "SELECT metadata FROM session_catalog WHERE session_key=?1",
+                [&rows[0].key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut metadata: Value = serde_json::from_str(&metadata).unwrap();
+        metadata["branch"] = serde_json::json!("seq-21");
+        native
+            .connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1 WHERE session_key=?2",
+                params![metadata.to_string(), rows[0].key],
+            )
+            .unwrap();
+        native
+            .connection
+            .execute(
+                "INSERT INTO silver_change(seq,session_key,kind) VALUES(21,?1,'changed')",
+                [&rows[0].key],
+            )
+            .unwrap();
+        let second = scope.spawn(move || {
+            handle_ref.publish_and_wait_until(|| std::time::Instant::now() >= deadline)
+        });
+        handle.wait_for_requests(1);
+        for count in 2..=9 {
+            time.0.store(100 + count as i64 * 2_000, Ordering::SeqCst);
+            handle.wake_for_clock();
+            handle.wait_for_publishes(count);
+            handle.wait_for_idle_wait();
+            if count < 9 {
+                assert_eq!(handle.unsettled_requests(), 1);
+            }
+            if count == 8 {
+                let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+                let cursor: Value = serde_json::from_str(&manifest.checkpoints[NAMESPACE]).unwrap();
+                assert_eq!(
+                    cursor["cursor"],
+                    serde_json::json!({"phase":"incremental", "after":20})
+                );
+            }
+        }
+        assert_eq!(second.join().unwrap(), crate::AnalyticsWriterStatus::Idle);
+    });
+    handle.stop_and_join();
+    let store = Store::open_with_clock(&store_root, clock()).unwrap();
+    let cursor: Value = serde_json::from_str(&store.manifest().checkpoints[NAMESPACE]).unwrap();
+    assert_eq!(
+        cursor["cursor"],
+        serde_json::json!({"phase":"incremental", "after":21})
+    );
+    assert!(
+        live_rows(&store)["dim_session"]
+            .keys()
+            .any(|row| row.iter().any(|value| value.as_deref() == Some("seq-21")))
+    );
+    let mut expected = Store::open_with_clock(&root.join("expected"), clock()).unwrap();
+    drain(
+        &mut expected,
+        &mut ObservedInput::open(&options),
+        InputBudget::default(),
+    );
+    assert_eq!(live_rows(&store), live_rows(&expected));
+    drop(store);
+    drop(expected);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bounded_writer_cancellation_mid_drain_preserves_the_partial_checkpoint() {
     let (root, options, _, _native) = fixture("bounded-writer-cancel", 4);
     let store_root = root.join("writer-store");

@@ -153,13 +153,24 @@ index or namespace. Corrupt or unsupported indexes are refused unchanged.
 Catalog refresh is complete; `--since`/`--all` do not bound analytics input.
 `--batch-sessions N` limits sessions or journal entries per chunk (default 64),
 and `--batch-steps N` limits admitted steps (default 8192). Both limits must be
-positive integers no greater than 9223372036854775807; a session exceeding the
-step budget stays whole. One-shot runs drain chunks immediately through a fixed
-journal endpoint; later writes belong to the next request. Watch spaces chunks
-by 2 s. Each request waits for all chunks and final compaction; operational
-failures exhaust a three-failure budget (up to 1s/2s backoffs plus publication
-spacing) and report the last error. `--watch` exits on refresh or publication failure and cancels its
-wait on SIGINT/SIGTERM before joining the writer and re-raising the signal.
+positive integers no greater than `min(usize::MAX, i64::MAX)` for the build
+(9223372036854775807 on a 64-bit build); a session exceeding the step budget
+stays whole. One-shot runs drain chunks immediately through an endpoint captured
+for that request. An inherited unfinished replay is completed first, then a
+fresh drain runs before success; writes after that fresh endpoint belong to the
+next request. Watch uses a minimum spacing of 2 s between chunk attempts.
+
+A publication chain owns its request generation, progress and a budget of three
+operational failures across opening the store, reload barriers, chunks and
+compaction. Success within that chain never resets the budget; retries wait
+1s/2s plus publication spacing. Periodic retirement has its own maintenance
+chain and three-failure budget, suspending and restoring the entire publication
+chain. Its retries can add failures to the overall wait; they neither spend nor
+reset the publication budget. Terminal refusal, NoWriter, owning-waiter
+cancellation and shutdown drop the chain. The next chain starts at zero.
+Each request waits for all required chunks and final compaction. `--watch` exits
+on refresh or publication failure and cancels its wait on SIGINT/SIGTERM before
+joining the writer and re-raising the signal.
 
 ```sh
 semon analytics materialize --all

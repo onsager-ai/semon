@@ -209,7 +209,7 @@ fn parse_analytics_args(
                     .ok_or_else(|| {
                         format!(
                             "{argument} requires a positive integer no greater than {}",
-                            i64::MAX
+                            usize::try_from(i64::MAX).unwrap_or(usize::MAX)
                         )
                     })?;
                 if argument == "--batch-sessions" {
@@ -1047,9 +1047,9 @@ fn analytics_usage() -> String {
     "Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--copilot-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
      Refreshes the local native Catalog, then explicitly materializes its analytics store.\n\
      Catalog refresh is complete; --since/--all do not bound analytics input.\n\
-     Batch limits are positive integers up to 9223372036854775807; defaults are 64 sessions/journal entries and 8192 steps. An oversize session stays whole.\n\
-     One-shot drains immediately through a fixed replay endpoint; later changes belong to the next request.\n\
-     --watch refreshes and publishes every 2 s; failures exit visibly. Ctrl-C/SIGTERM stops the wait."
+     Batch limits are positive integers up to min(usize::MAX, i64::MAX) for this build; defaults are 64 sessions/journal entries and 8192 steps. An oversize session stays whole.\n\
+     One-shot finishes inherited replay, then drains immediately through a fresh endpoint; later changes belong to the next request.\n\
+     --watch uses a minimum spacing of 2 s between chunk attempts; failures exit visibly. Ctrl-C/SIGTERM stops the wait."
         .to_owned()
 }
 
@@ -1067,7 +1067,7 @@ fn usage() -> String {
          \n\
          Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [home options as for sessions]\n\
          Explicitly refreshes the local native Catalog and materializes local-only analytics. Nothing starts this writer by default.\n\
-         Batch limits default to 64 sessions/journal entries and 8192 steps; an oversize session stays whole.\n\
+         Batch limits default to 64 sessions/journal entries and 8192 steps; an oversize session stays whole. Limits are positive and at most min(usize::MAX, i64::MAX).\n\
          \n\
          Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
          The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener. Both read\n\

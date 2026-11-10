@@ -120,18 +120,23 @@ Lock contention is an observable no-writer state. Unsupported or integrity input
 refuses visibly without mutating the SQLite index, advancing its checkpoint,
 resetting state or deleting data; a later notification makes one fresh read
 attempt. Direct store I/O and Parquet `External` I/O back off, as do operational
-SQLite busy/locked/I/O/full/cannot-open errors. Three operational failures exhaust
-the request budget with the last error (up to 1s/2s backoffs plus publication
-spacing). The budget belongs to the recovery chain: successful Open, Retire or
-Compact clears it, while retirement that interrupts publication saves and restores
-that publication's counters separately. Successful reloads preserve the budget.
-A new Catalog publication notification permits a fresh attempt after refusal.
-Parquet page-read I/O surfaced as an Arrow error latches refusal until the next notification; the writer does not
-recover its lost typed I/O source. A store error reloads the manifest before
-retry because a rename may already have published the generation. Reload success
-preserves the resumed operation's retry count. Every publication attempt advances
-the interval deadline, including rename-visible failures. Refusals consume only
-the pre-operation notification snapshot, leaving later notifications pending.
+SQLite busy/locked/I/O/full/cannot-open errors. A publication chain allows three
+operational failures across Open, Reload, chunks and compaction recovery, with
+1s/2s backoffs plus minimum publication spacing. Successful operations within
+that chain do not reset its counters. Periodic retirement has an independent
+maintenance chain and budget, suspending/restoring the entire publication record;
+its failures can add to the request wait but never spend/reset publication counters.
+Terminal retirement refusal explicitly ends the suspended request as well.
+Every terminal outcome drops the owned Chain; later requests start at 0/0.
+Parquet page-read I/O surfaced as an Arrow error latches refusal until the next
+notification; the writer does not recover its lost typed I/O source. A store
+error reloads the manifest before retry because a rename may already be visible.
+A successful chunk advances `consumed` but defers settlement until final fresh
+input completion and compaction. A new chain finishing an inherited persisted
+replay endpoint must then complete a fresh drain before settling its request.
+Every publication attempt advances the minimum-spacing deadline, including
+rename-visible failures. Refusals consume only the chain's captured generation,
+leaving later notifications pending.
 The service attempts bounded compaction once after publication. Its slow
 retirement cadence can run ahead of an interval-gated publication while keeping
 that publication pending, but cannot bypass recovery barriers. Shutdown never
@@ -197,9 +202,10 @@ chunks at its configured interval, including after recovery, without another
 external notification. Each request keeps its initiating notification generation
 through retries, chunks and final compaction; later requests cannot inherit its
 failures or settle from its earlier publication. Successful chunks retain the
-request's finite operational failure budget. The CLI accepts `--batch-sessions`
-and `--batch-steps`; one-shot uses zero chunk spacing and exits after the first
-complete drain plus final bounded compaction. Watch uses the default 2 s spacing.
+publication chain's finite operational failure budget. The CLI accepts
+`--batch-sessions` and `--batch-steps`; one-shot uses zero chunk spacing and exits
+after a fresh complete drain plus final bounded compaction (finishing any inherited
+replay first). Watch uses a minimum spacing of 2 s between chunk attempts.
 Cancellation stops the waiter, then joins the writer without flushing the rest
 of the inventory. This delivery remains only part of #557. The
 adapter and publisher share `semon-asi`'s canonical UID component encoder. A

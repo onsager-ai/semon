@@ -29,8 +29,9 @@ use crate::{SqliteAnalyticsInput, events::session_activity::ACTIVITY_RULES_VERSI
 /// The minimum spacing between requested publication cycles by default.
 pub const DEFAULT_ANALYTICS_WRITER_INTERVAL: Duration = Duration::from_secs(2);
 
-/// A request refuses after three operational failures, with 1s/2s backoffs.
-const REQUEST_FAILURE_LIMIT: u32 = 3;
+/// Each active chain refuses after three operational failures, with 1s/2s backoffs.
+/// Successful operations within the chain never reset these counters.
+const CHAIN_FAILURE_LIMIT: u32 = 3;
 
 const NO_WRITER_RETRY: Duration = Duration::from_secs(30);
 const MAX_RETRY: Duration = Duration::from_secs(30);
@@ -98,6 +99,7 @@ struct State {
     consumed: u64,
     status: AnalyticsWriterStatus,
     requests: BTreeMap<u64, Option<AnalyticsWriterStatus>>,
+    cancelled: Vec<u64>,
     #[cfg(test)]
     published: u64,
     #[cfg(test)]
@@ -134,6 +136,7 @@ impl Shared {
                 consumed: 0,
                 status: AnalyticsWriterStatus::Idle,
                 requests: BTreeMap::new(),
+                cancelled: Vec::new(),
                 #[cfg(test)]
                 published: 0,
                 #[cfg(test)]
@@ -205,8 +208,9 @@ impl Handle {
         self.publish_and_wait_until(|| false)
     }
 
-    /// Cancellation is checked every 20 ms while waiting. The caller then stops
-    /// and joins the writer; an operation already in progress finishes first.
+    /// Cancellation is checked every 20 ms while waiting and withdraws the
+    /// owning chain before another operation is selected. An operation already
+    /// in progress finishes first. The caller can then stop and join the writer.
     pub fn publish_and_wait_until(&self, cancelled: impl Fn() -> bool) -> AnalyticsWriterStatus {
         let mut state = lock(&self.shared.state);
         state.notifications = state.notifications.saturating_add(1);
@@ -221,6 +225,8 @@ impl Handle {
             }
             if state.stop || cancelled() {
                 state.requests.remove(&target);
+                state.cancelled.push(target);
+                self.shared.changed.notify_all();
                 return AnalyticsWriterStatus::Stopped;
             }
             let (next, _) = self
@@ -535,30 +541,241 @@ impl Resume {
     }
 }
 
-#[derive(Debug)]
-struct Scheduler {
-    pending: Option<Operation>,
-    // A paused publication owns its retry attempt and total failure budget.
-    publication_after_retirement: Option<(u32, u32)>,
-    refused: Option<Operation>,
-    next_cycle: i64,
-    next_retirement: i64,
-    retry_at: Option<i64>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChainKind {
+    Publication,
+    Maintenance,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EndpointOrigin {
+    Uninspected,
+    Inherited,
+    Fresh,
+}
+
+/// The only owner of request identity, progress and recovery counters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct Chain {
+    captured_generation: u64,
+    kind: ChainKind,
     attempt: u32,
     failures: u32,
+    endpoint_origin: EndpointOrigin,
+    operation: Operation,
+    retry_at: Option<i64>,
+    drain_complete: bool,
+}
+
+impl Chain {
+    fn new(captured_generation: u64, kind: ChainKind, operation: Operation) -> Self {
+        Self {
+            captured_generation,
+            kind,
+            attempt: 0,
+            failures: 0,
+            endpoint_origin: EndpointOrigin::Uninspected,
+            operation,
+            retry_at: None,
+            drain_complete: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ChainEvent {
+    Capture {
+        generation: u64,
+        kind: ChainKind,
+        operation: Operation,
+    },
+    Endpoint {
+        inherited: bool,
+    },
+    Published {
+        complete: bool,
+    },
+    Succeeded(Operation),
+    Failed {
+        resume: Operation,
+        operational: bool,
+    },
+    NoWriter,
+    SuspendForRetirement,
+    Cancel {
+        generation: u64,
+    },
+    Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ChainEffect {
+    Unchanged,
+    Idle,
+    Progress(u64),
+    Retrying(u32),
+    Success(u64),
+    Refused {
+        generation: u64,
+        exhausted: Option<u32>,
+    },
+    NoWriter(u64),
+    Cancelled(u64),
+    Stopped,
+}
+
+#[derive(Clone, Debug)]
+struct Scheduler {
+    active: Option<Chain>,
+    suspended: Option<Chain>,
+    // A refused/cancelled operation can require a reload barrier for the next
+    // request. This latch carries no identity, progress or recovery counters.
+    refused: Option<Operation>,
+    cooldown_until: Option<i64>,
+    next_cycle: i64,
+    next_retirement: i64,
 }
 
 impl Scheduler {
     fn new(now: i64) -> Self {
         Self {
-            pending: None,
-            publication_after_retirement: None,
+            active: None,
+            suspended: None,
             refused: None,
+            cooldown_until: None,
             next_cycle: now,
             next_retirement: now.saturating_add(duration_ms(RETIREMENT_CADENCE)),
-            retry_at: None,
-            attempt: 0,
-            failures: 0,
+        }
+    }
+
+    /// Pure transition table; no I/O, locks or request-map mutation. Successful
+    /// operations preserve counters. Only dropping a chain ends its budget.
+    fn transition(&mut self, event: ChainEvent, now: i64) -> ChainEffect {
+        match event {
+            ChainEvent::Capture {
+                generation,
+                kind,
+                operation,
+            } => {
+                if self.active.is_some() {
+                    return ChainEffect::Unchanged;
+                }
+                self.active = Some(Chain::new(generation, kind, operation));
+                ChainEffect::Idle
+            }
+            ChainEvent::Endpoint { inherited } => {
+                let chain = self.active.as_mut().expect("active input chain");
+                if chain.endpoint_origin == EndpointOrigin::Uninspected {
+                    chain.endpoint_origin = if inherited {
+                        EndpointOrigin::Inherited
+                    } else {
+                        EndpointOrigin::Fresh
+                    };
+                }
+                ChainEffect::Idle
+            }
+            ChainEvent::Published { complete } => {
+                let chain = self.active.as_mut().expect("active publication chain");
+                chain.drain_complete = complete;
+                chain.operation = Operation::Compact;
+                chain.retry_at = None;
+                ChainEffect::Progress(chain.captured_generation)
+            }
+            ChainEvent::Succeeded(operation) => {
+                let chain = self.active.as_mut().expect("active operation chain");
+                chain.retry_at = None;
+                match operation {
+                    Operation::Open if chain.kind == ChainKind::Publication => {
+                        chain.operation = Operation::Publish;
+                    }
+                    Operation::Open => {
+                        self.active = None;
+                    }
+                    Operation::Reload(resume) => {
+                        chain.operation = resume.operation();
+                    }
+                    Operation::Compact => {
+                        if chain.drain_complete && chain.endpoint_origin == EndpointOrigin::Fresh {
+                            let generation = chain.captured_generation;
+                            self.active = None;
+                            return ChainEffect::Success(generation);
+                        }
+                        if chain.drain_complete {
+                            // A previous chain captured that endpoint before this
+                            // request registered. Finish it, then capture our own.
+                            chain.endpoint_origin = EndpointOrigin::Fresh;
+                        }
+                        chain.drain_complete = false;
+                        chain.operation = Operation::Publish;
+                    }
+                    Operation::Retire => {
+                        self.active = self.suspended.take();
+                        self.next_retirement = now.saturating_add(duration_ms(RETIREMENT_CADENCE));
+                    }
+                    Operation::Publish => unreachable!("publication carries completion"),
+                }
+                ChainEffect::Idle
+            }
+            ChainEvent::Failed {
+                resume,
+                operational,
+            } => {
+                let chain = self.active.as_mut().expect("active failed chain");
+                chain.operation = resume;
+                if operational {
+                    chain.attempt += 1;
+                    chain.failures += 1;
+                    if chain.failures < CHAIN_FAILURE_LIMIT {
+                        chain.retry_at = Some(now.saturating_add(retry_delay(chain.attempt)));
+                        return ChainEffect::Retrying(chain.attempt);
+                    }
+                }
+                let chain = self.active.take().expect("terminal failed chain");
+                // A failed retirement also ends the suspended request explicitly;
+                // it must never later revive with its previous counters.
+                self.suspended = None;
+                self.refused = Some(resume);
+                ChainEffect::Refused {
+                    generation: chain.captured_generation,
+                    exhausted: operational.then_some(chain.failures),
+                }
+            }
+            ChainEvent::NoWriter => {
+                let chain = self.active.take().expect("open chain");
+                self.suspended = None;
+                self.refused = None;
+                self.cooldown_until = Some(now.saturating_add(duration_ms(NO_WRITER_RETRY)));
+                ChainEffect::NoWriter(chain.captured_generation)
+            }
+            ChainEvent::SuspendForRetirement => {
+                let chain = self.active.take().expect("publication to suspend");
+                let generation = chain.captured_generation;
+                self.suspended = Some(chain);
+                self.active = Some(Chain::new(
+                    generation,
+                    ChainKind::Maintenance,
+                    Operation::Retire,
+                ));
+                ChainEffect::Idle
+            }
+            ChainEvent::Cancel { generation } => {
+                if self
+                    .active
+                    .as_ref()
+                    .is_some_and(|chain| chain.captured_generation == generation)
+                {
+                    let chain = self.active.take().expect("cancelled active chain");
+                    self.refused = Some(chain.operation);
+                    self.suspended = None;
+                    return ChainEffect::Cancelled(generation);
+                }
+                ChainEffect::Unchanged
+            }
+            ChainEvent::Shutdown => {
+                self.active = None;
+                self.suspended = None;
+                ChainEffect::Stopped
+            }
         }
     }
 
@@ -567,20 +784,19 @@ impl Scheduler {
         now: i64,
         has_notification: bool,
         has_store: bool,
+        generation: u64,
     ) -> Option<Operation> {
-        if let Some(refused) = self.refused {
-            if !has_notification {
+        if self.cooldown_until.is_some_and(|deadline| now < deadline) {
+            return None;
+        }
+        self.cooldown_until = None;
+        if self.active.is_none() {
+            if self.refused.is_some() && !has_notification {
                 return None;
             }
-            self.refused = None;
-            self.failures = 0;
-            self.pending = Some(refused);
-        }
-        // Leave fresh publication demand in the notification count until its
-        // interval is due, so it cannot hide an earlier retirement deadline.
-        // An already pending operation belongs to a required recovery chain.
-        if self.pending.is_none() {
-            self.pending = Some(if !has_store {
+            let operation = if let Some(operation) = self.refused.take() {
+                operation
+            } else if !has_store {
                 Operation::Open
             } else if now >= self.next_retirement {
                 Operation::Retire
@@ -588,123 +804,74 @@ impl Scheduler {
                 Operation::Publish
             } else {
                 return None;
-            });
+            };
+            let kind = if has_notification
+                && !matches!(
+                    operation,
+                    Operation::Retire | Operation::Reload(Resume::Retire)
+                ) {
+                ChainKind::Publication
+            } else {
+                ChainKind::Maintenance
+            };
+            self.transition(
+                ChainEvent::Capture {
+                    generation,
+                    kind,
+                    operation,
+                },
+                now,
+            );
         }
-        let operation = self.pending.expect("selected pending operation");
-        if operation == Operation::Publish
+        let chain = self.active.as_ref().expect("selected chain");
+        if chain.kind == ChainKind::Publication
+            && chain.operation == Operation::Publish
             && now < self.next_cycle
             && now >= self.next_retirement
-            && self.retry_at.is_none_or(|deadline| now >= deadline)
+            && chain.retry_at.is_none_or(|deadline| now >= deadline)
         {
-            self.publication_after_retirement = Some((self.attempt, self.failures));
-            self.attempt = 0;
-            self.failures = 0;
-            self.retry_at = None;
-            self.pending = Some(Operation::Retire);
-            return Some(Operation::Retire);
+            self.transition(ChainEvent::SuspendForRetirement, now);
         }
-        let due = match operation {
-            Operation::Publish => self.retry_at.unwrap_or(now).max(self.next_cycle),
-            _ => self.retry_at.unwrap_or(now),
+        let chain = self.active.as_ref().expect("due chain");
+        let due = if chain.operation == Operation::Publish {
+            chain.retry_at.unwrap_or(now).max(self.next_cycle)
+        } else {
+            chain.retry_at.unwrap_or(now)
         };
-        (now >= due).then_some(operation)
+        (now >= due).then_some(chain.operation)
     }
 
     fn deadline(&self, has_notification: bool, has_store: bool) -> Option<i64> {
-        if self.refused.is_some() && !has_notification {
-            return None;
+        if let Some(deadline) = self.cooldown_until {
+            return Some(deadline);
         }
-        if let Some(operation) = self.pending {
-            return Some(match operation {
-                Operation::Publish => self
+        if let Some(chain) = &self.active {
+            return Some(if chain.operation == Operation::Publish {
+                chain
                     .retry_at
                     .unwrap_or(self.next_cycle)
                     .max(self.next_cycle)
-                    .min(self.retry_at.unwrap_or(0).max(self.next_retirement)),
-                _ => self.retry_at.unwrap_or(0),
+                    .min(self.next_retirement.max(chain.retry_at.unwrap_or(0)))
+            } else {
+                chain.retry_at.unwrap_or(0)
             });
+        }
+        if self.refused.is_some() && !has_notification {
+            return None;
         }
         if !has_store {
             return Some(0);
         }
-        if has_notification {
-            Some(self.next_cycle.min(self.next_retirement))
+        Some(if has_notification {
+            self.next_cycle.min(self.next_retirement)
         } else {
-            Some(self.next_retirement)
-        }
-    }
-
-    fn succeeded(&mut self, operation: Operation, now: i64) {
-        self.pending = match operation {
-            Operation::Open | Operation::Compact | Operation::Retire => None,
-            Operation::Reload(after) => Some(after.operation()),
-            Operation::Publish => Some(Operation::Compact),
-        };
-        if operation == Operation::Retire {
-            self.next_retirement = now.saturating_add(duration_ms(RETIREMENT_CADENCE));
-        }
-        self.retry_at = None;
-        // Reload is only a barrier: the operation it resumes has not recovered.
-        if !matches!(operation, Operation::Reload(_)) {
-            self.attempt = 0;
-        }
-        // These complete their operation chain; publication success still has
-        // compaction to settle. A paused publication restores its own counters.
-        if matches!(
-            operation,
-            Operation::Open | Operation::Retire | Operation::Compact
-        ) {
-            self.failures = 0;
-        }
-        if operation == Operation::Retire
-            && let Some((attempt, failures)) = self.publication_after_retirement.take()
-        {
-            self.pending = Some(Operation::Publish);
-            self.attempt = attempt;
-            self.failures = failures;
-        }
+            self.next_retirement
+        })
     }
 
     fn publication_attempted(&mut self, now: i64, interval: Duration) {
-        // Even an error may follow a visible manifest rename. Conservatively
-        // space every attempt, including input failures, before any reload.
+        // Even an error may follow a visible manifest rename.
         self.next_cycle = now.saturating_add(duration_ms(interval));
-    }
-
-    fn compacted(&mut self, complete: bool, now: i64) {
-        let failures = self.failures;
-        self.succeeded(Operation::Compact, now);
-        if !complete {
-            self.pending = Some(Operation::Publish);
-            // A successful chunk is progress within the same request, not a
-            // fresh request with a fresh operational failure budget.
-            self.failures = failures;
-        }
-    }
-
-    fn retry(&mut self, operation: Operation, now: i64) -> u32 {
-        self.pending = Some(operation);
-        self.refused = None;
-        self.attempt = self.attempt.saturating_add(1);
-        self.retry_at = Some(now.saturating_add(retry_delay(self.attempt)));
-        self.attempt
-    }
-
-    fn refuse(&mut self, operation: Operation) {
-        self.pending = None;
-        self.refused = Some(operation);
-        self.retry_at = None;
-        // A terminal maintenance failure also ends the paused publication's
-        // request. Recovery on a later notification owns a fresh budget.
-        if let Some(counters) = &mut self.publication_after_retirement {
-            *counters = (0, 0);
-        }
-    }
-
-    fn no_writer(&mut self, now: i64) {
-        self.pending = Some(Operation::Open);
-        self.retry_at = Some(now.saturating_add(duration_ms(NO_WRITER_RETRY)));
-        self.attempt = 0;
     }
 }
 
@@ -714,117 +881,84 @@ fn run<C: Clock + Send + Sync + 'static>(
     shared: Arc<Shared>,
     mut store: Option<Store<Arc<C>>>,
 ) {
-    let mut publication = None;
-    let mut chain_notification = None;
-    let mut publication_complete = false;
     let mut scheduler = Scheduler::new(clock.now_ms());
-
-    while let Some((operation, notification)) = next_operation(
-        &shared,
-        &clock,
-        &mut scheduler,
-        store.is_some(),
-        &mut chain_notification,
-    ) {
-        match operation {
+    while let Some(operation) = next_operation(&shared, &clock, &mut scheduler, store.is_some()) {
+        let (event, reason) = match operation {
             Operation::Open => match Store::open_with_clock(&config.store_root, Arc::clone(&clock))
             {
                 Ok(opened) => {
                     store = Some(opened);
-                    scheduler.succeeded(operation, clock.now_ms());
-                    chain_notification = None;
-                    set_status(&shared, AnalyticsWriterStatus::Idle);
+                    (ChainEvent::Succeeded(operation), None)
                 }
-                Err(StoreError::WriterBusy) => {
-                    scheduler.no_writer(clock.now_ms());
-                    consume_notification(&shared, notification);
-                    settle(&shared, notification, AnalyticsWriterStatus::NoWriter);
-                    chain_notification = None;
-                    set_status(&shared, AnalyticsWriterStatus::NoWriter);
-                }
-                Err(error) if error.is_operational() => {
-                    retry_operation(
-                        &shared,
-                        &mut scheduler,
-                        operation,
-                        clock.now_ms(),
-                        notification,
-                        error.to_string(),
-                    );
-                }
-                Err(error) => refuse_operation(
-                    &shared,
-                    &mut scheduler,
-                    operation,
-                    notification,
-                    error.to_string(),
+                Err(StoreError::WriterBusy) => (ChainEvent::NoWriter, None),
+                Err(error) => (
+                    ChainEvent::Failed {
+                        resume: operation,
+                        operational: error.is_operational(),
+                    },
+                    Some(error.to_string()),
                 ),
             },
             Operation::Publish => {
-                publication.get_or_insert(notification);
                 #[cfg(test)]
                 publish_started(&shared);
-                let result = match SqliteAnalyticsInput::open(
-                    &config.index_path,
-                    config.namespace.clone(),
-                ) {
-                    Ok(mut input) => publish_cycle(
+                let result = (|| {
+                    let mut input =
+                        SqliteAnalyticsInput::open(&config.index_path, config.namespace.clone())
+                            .map_err(PublishError::Input)?;
+                    if scheduler
+                        .active
+                        .as_ref()
+                        .expect("input chain")
+                        .endpoint_origin
+                        == EndpointOrigin::Uninspected
+                    {
+                        let inherited = SqliteAnalyticsInput::resumes_replay(
+                            store
+                                .as_ref()
+                                .expect("opened store")
+                                .manifest()
+                                .checkpoints
+                                .get(&config.namespace)
+                                .map(String::as_str),
+                        )
+                        .map_err(PublishError::Input)?;
+                        scheduler.transition(ChainEvent::Endpoint { inherited }, clock.now_ms());
+                    }
+                    publish_cycle(
                         store.as_mut().expect("opened store"),
                         &mut input,
                         &config.namespace,
                         target_versions(),
                         config.input_budget,
-                    ),
-                    Err(error) => Err(PublishError::Input(error)),
-                };
+                    )
+                })();
                 scheduler.publication_attempted(clock.now_ms(), config.interval);
-                consume_notification(&shared, notification);
                 match result {
                     Ok(progress) => {
-                        publication_complete = progress.complete;
-                        scheduler.succeeded(operation, clock.now_ms());
                         #[cfg(test)]
                         published(&shared);
-                        set_status(&shared, AnalyticsWriterStatus::Idle);
+                        (
+                            ChainEvent::Published {
+                                complete: progress.complete,
+                            },
+                            None,
+                        )
                     }
-                    Err(PublishError::Input(error)) if is_input_operational(&error) => {
-                        retry_operation(
-                            &shared,
-                            &mut scheduler,
-                            operation,
-                            clock.now_ms(),
-                            notification,
-                            error.to_string(),
-                        );
-                    }
-                    Err(PublishError::Input(error)) => {
-                        refuse_operation(
-                            &shared,
-                            &mut scheduler,
-                            operation,
-                            notification,
-                            error.to_string(),
-                        );
-                    }
-                    Err(PublishError::Store(error)) if error.is_operational() => {
-                        retry_operation(
-                            &shared,
-                            &mut scheduler,
-                            Operation::Reload(Resume::Publish),
-                            clock.now_ms(),
-                            notification,
-                            error.to_string(),
-                        );
-                    }
-                    Err(PublishError::Store(error)) => {
-                        refuse_operation(
-                            &shared,
-                            &mut scheduler,
-                            Operation::Reload(Resume::Publish),
-                            notification,
-                            error.to_string(),
-                        );
-                    }
+                    Err(PublishError::Input(error)) => (
+                        ChainEvent::Failed {
+                            resume: operation,
+                            operational: is_input_operational(&error),
+                        },
+                        Some(error.to_string()),
+                    ),
+                    Err(PublishError::Store(error)) => (
+                        ChainEvent::Failed {
+                            resume: Operation::Reload(Resume::Publish),
+                            operational: error.is_operational(),
+                        },
+                        Some(error.to_string()),
+                    ),
                 }
             }
             Operation::Compact => {
@@ -835,33 +969,13 @@ fn run<C: Clock + Send + Sync + 'static>(
                     .expect("opened store")
                     .compact(&config.compaction_policy)
                 {
-                    Ok(_) => {
-                        scheduler.compacted(
-                            publication.is_none() || publication_complete,
-                            clock.now_ms(),
-                        );
-                        if publication_complete && let Some(target) = publication.take() {
-                            settle(&shared, target, AnalyticsWriterStatus::Idle);
-                        }
-                        if publication.is_none() {
-                            chain_notification = None;
-                        }
-                        set_status(&shared, AnalyticsWriterStatus::Idle);
-                    }
-                    Err(error) if error.is_operational() => retry_operation(
-                        &shared,
-                        &mut scheduler,
-                        Operation::Reload(Resume::Compact),
-                        clock.now_ms(),
-                        notification,
-                        error.to_string(),
-                    ),
-                    Err(error) => refuse_operation(
-                        &shared,
-                        &mut scheduler,
-                        Operation::Reload(Resume::Compact),
-                        notification,
-                        error.to_string(),
+                    Ok(_) => (ChainEvent::Succeeded(operation), None),
+                    Err(error) => (
+                        ChainEvent::Failed {
+                            resume: Operation::Reload(Resume::Compact),
+                            operational: error.is_operational(),
+                        },
+                        Some(error.to_string()),
                     ),
                 }
             }
@@ -869,59 +983,30 @@ fn run<C: Clock + Send + Sync + 'static>(
                 #[cfg(test)]
                 retirement_started(&shared);
                 match store.as_mut().expect("opened store").retire() {
-                    Ok(_) => {
-                        scheduler.succeeded(operation, clock.now_ms());
-                        if publication.is_none() {
-                            chain_notification = None;
-                        }
-                        set_status(&shared, AnalyticsWriterStatus::Idle);
-                    }
-                    Err(error) if error.is_operational() => retry_operation(
-                        &shared,
-                        &mut scheduler,
-                        Operation::Reload(Resume::Retire),
-                        clock.now_ms(),
-                        notification,
-                        error.to_string(),
-                    ),
-                    Err(error) => refuse_operation(
-                        &shared,
-                        &mut scheduler,
-                        Operation::Reload(Resume::Retire),
-                        notification,
-                        error.to_string(),
+                    Ok(_) => (ChainEvent::Succeeded(operation), None),
+                    Err(error) => (
+                        ChainEvent::Failed {
+                            resume: Operation::Reload(Resume::Retire),
+                            operational: error.is_operational(),
+                        },
+                        Some(error.to_string()),
                     ),
                 }
             }
             Operation::Reload(_) => match store.as_mut().expect("opened store").reload_manifest() {
-                Ok(()) => {
-                    scheduler.succeeded(operation, clock.now_ms());
-                    set_status(&shared, AnalyticsWriterStatus::Idle);
-                }
-                Err(error) if error.is_operational() => {
-                    retry_operation(
-                        &shared,
-                        &mut scheduler,
-                        operation,
-                        clock.now_ms(),
-                        notification,
-                        error.to_string(),
-                    );
-                }
-                Err(error) => refuse_operation(
-                    &shared,
-                    &mut scheduler,
-                    operation,
-                    notification,
-                    error.to_string(),
+                Ok(()) => (ChainEvent::Succeeded(operation), None),
+                Err(error) => (
+                    ChainEvent::Failed {
+                        resume: operation,
+                        operational: error.is_operational(),
+                    },
+                    Some(error.to_string()),
                 ),
             },
-        }
-        if scheduler.refused.is_some() {
-            publication = None;
-            chain_notification = None;
-            publication_complete = false;
-        }
+        };
+        let effect = scheduler.transition(event, clock.now_ms());
+        apply_effect(&mut lock(&shared.state), effect, reason.as_deref());
+        shared.changed.notify_all();
     }
     set_status(&shared, AnalyticsWriterStatus::Stopped);
 }
@@ -939,16 +1024,24 @@ fn next_operation<C: Clock>(
     clock: &C,
     scheduler: &mut Scheduler,
     has_store: bool,
-    chain_notification: &mut Option<u64>,
-) -> Option<(Operation, u64)> {
+) -> Option<Operation> {
     let mut state = lock(&shared.state);
     loop {
         if state.stop {
+            let effect = scheduler.transition(ChainEvent::Shutdown, clock.now_ms());
+            apply_effect(&mut state, effect, None);
             return None;
+        }
+        for generation in std::mem::take(&mut state.cancelled) {
+            let effect = scheduler.transition(ChainEvent::Cancel { generation }, clock.now_ms());
+            apply_effect(&mut state, effect, None);
         }
         let now = clock.now_ms();
         let has_notification = state.notifications != state.consumed;
-        if let Some(operation) = scheduler.operation_due(now, has_notification, has_store) {
+        let generation = capture_generation(state.consumed, state.notifications, &state.requests);
+        if let Some(operation) =
+            scheduler.operation_due(now, has_notification, has_store, generation)
+        {
             #[cfg(test)]
             {
                 state.waiting = false;
@@ -958,10 +1051,7 @@ fn next_operation<C: Clock>(
             }
             state.status = AnalyticsWriterStatus::Running;
             shared.changed.notify_all();
-            let captured = *chain_notification.get_or_insert_with(|| {
-                capture_generation(state.consumed, state.notifications, &state.requests)
-            });
-            return Some((operation, captured));
+            return Some(operation);
         }
         #[cfg(test)]
         {
@@ -973,10 +1063,9 @@ fn next_operation<C: Clock>(
         }
         match scheduler.deadline(has_notification, has_store) {
             Some(deadline) if deadline > now => {
-                let remaining = (deadline - now).max(1) as u64;
                 let (next, _) = shared
                     .changed
-                    .wait_timeout(state, Duration::from_millis(remaining))
+                    .wait_timeout(state, Duration::from_millis((deadline - now).max(1) as u64))
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 state = next;
             }
@@ -991,10 +1080,8 @@ fn next_operation<C: Clock>(
     }
 }
 
-// A new chain owns (consumed, captured], ending at the earliest unsettled
-// waiter; notification-only work coalesces up to the latest notification.
-// next_operation retains this capture through every retry and chunk, so both
-// success and terminal failure can settle/consume only the owned generations.
+// A chain owns (consumed, captured], ending at the earliest unsettled waiter;
+// notification-only work coalesces up to the latest notification.
 fn capture_generation(
     consumed: u64,
     notifications: u64,
@@ -1009,44 +1096,54 @@ fn capture_generation(
         .unwrap_or(notifications)
 }
 
-fn retry_operation(
-    shared: &Shared,
-    scheduler: &mut Scheduler,
-    operation: Operation,
-    now: i64,
-    notification: u64,
-    reason: String,
-) {
-    scheduler.failures += 1;
-    if scheduler.failures >= REQUEST_FAILURE_LIMIT {
-        refuse_operation(
-            shared,
-            scheduler,
-            operation,
-            notification,
-            format!(
-                "operational retry budget exhausted after {} failures: {reason}",
-                scheduler.failures
-            ),
-        );
-    } else {
-        let attempt = scheduler.retry(operation, now);
-        set_status(shared, AnalyticsWriterStatus::Retrying { attempt });
+fn apply_effect(state: &mut State, effect: ChainEffect, reason: Option<&str>) {
+    let (generation, outcome) = match effect {
+        ChainEffect::Unchanged => return,
+        ChainEffect::Idle => {
+            state.status = AnalyticsWriterStatus::Idle;
+            return;
+        }
+        ChainEffect::Progress(generation) => {
+            state.consumed = state.consumed.max(generation);
+            state.status = AnalyticsWriterStatus::Idle;
+            return;
+        }
+        ChainEffect::Retrying(attempt) => {
+            state.status = AnalyticsWriterStatus::Retrying { attempt };
+            return;
+        }
+        ChainEffect::Success(generation) => (generation, AnalyticsWriterStatus::Idle),
+        ChainEffect::Refused {
+            generation,
+            exhausted,
+        } => {
+            let reason = reason.expect("failed operation reason");
+            let reason = match exhausted {
+                Some(failures) => format!(
+                    "operational retry budget exhausted after {failures} failures: {reason}"
+                ),
+                None => reason.to_owned(),
+            };
+            (generation, AnalyticsWriterStatus::Refused { reason })
+        }
+        ChainEffect::NoWriter(generation) => (generation, AnalyticsWriterStatus::NoWriter),
+        ChainEffect::Cancelled(generation) => {
+            state.consumed = state.consumed.max(generation);
+            state.status = AnalyticsWriterStatus::Idle;
+            return;
+        }
+        ChainEffect::Stopped => {
+            state.status = AnalyticsWriterStatus::Stopped;
+            return;
+        }
+    };
+    state.consumed = state.consumed.max(generation);
+    for (_, request) in state.requests.range_mut(..=generation) {
+        if request.is_none() {
+            *request = Some(outcome.clone());
+        }
     }
-}
-
-fn refuse_operation(
-    shared: &Shared,
-    scheduler: &mut Scheduler,
-    operation: Operation,
-    notification: u64,
-    reason: String,
-) {
-    consume_notification(shared, notification);
-    scheduler.refuse(operation);
-    let outcome = AnalyticsWriterStatus::Refused { reason };
-    settle(shared, notification, outcome.clone());
-    set_status(shared, outcome);
+    state.status = outcome;
 }
 
 fn is_input_operational(error: &SqliteError) -> bool {
@@ -1080,21 +1177,6 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 fn set_status(shared: &Shared, status: AnalyticsWriterStatus) {
     lock(&shared.state).status = status;
     shared.changed.notify_all();
-}
-
-fn settle(shared: &Shared, generation: u64, outcome: AnalyticsWriterStatus) {
-    let mut state = lock(&shared.state);
-    for (_, request) in state.requests.range_mut(..=generation) {
-        if request.is_none() {
-            *request = Some(outcome.clone());
-        }
-    }
-    shared.changed.notify_all();
-}
-
-fn consume_notification(shared: &Shared, notification: u64) {
-    let mut state = lock(&shared.state);
-    state.consumed = notification;
 }
 
 #[cfg(test)]
@@ -1200,266 +1282,410 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_refusals_consume_only_the_selected_notification() {
-        for operation in [
-            Operation::Open,
-            Operation::Publish,
-            Operation::Reload(Resume::Publish),
-            Operation::Reload(Resume::Compact),
-            Operation::Reload(Resume::Retire),
-        ] {
-            for notified_during_work in [false, true] {
-                let shared = Shared::new();
-                let mut scheduler = Scheduler::new(0);
-                lock(&shared.state).notifications = 1;
-                let snapshot = lock(&shared.state).notifications;
-                if notified_during_work {
-                    lock(&shared.state).notifications += 1;
-                }
-                refuse_operation(
-                    &shared,
-                    &mut scheduler,
-                    operation,
-                    snapshot,
-                    "invalid".into(),
-                );
-                let state = lock(&shared.state);
-                assert_eq!(state.consumed, snapshot);
-                let has_notification = state.notifications != state.consumed;
-                assert_eq!(has_notification, notified_during_work);
-                assert_eq!(
-                    scheduler.operation_due(
-                        1_000_000,
-                        has_notification,
-                        operation != Operation::Open
-                    ),
-                    notified_during_work.then_some(operation),
-                );
-                if !notified_during_work {
-                    assert_eq!(scheduler.deadline(false, true), None);
-                    assert!(matches!(
-                        state.status,
-                        AnalyticsWriterStatus::Refused { .. }
-                    ));
-                }
-            }
+    fn active_chain_transition_table() {
+        struct Case {
+            name: &'static str,
+            active: Option<Chain>,
+            suspended: Option<Chain>,
+            event: ChainEvent,
+            expected_active: Option<Chain>,
+            expected_suspended: Option<Chain>,
+            effect: ChainEffect,
         }
-    }
-
-    #[test]
-    fn scheduler_backoff_survives_successful_reloads_until_the_operation_succeeds() {
-        for resume in [Resume::Publish, Resume::Compact, Resume::Retire] {
-            let shared = Shared::new();
-            let mut scheduler = Scheduler::new(0);
-            let mut now = 0;
-            let reload = Operation::Reload(resume);
-            for (index, delay) in [1_000, 2_000].into_iter().enumerate() {
-                let attempt = index as u32 + 1;
-                retry_operation(
-                    &shared,
-                    &mut scheduler,
-                    reload,
-                    now,
-                    0,
-                    "synthetic I/O".into(),
-                );
-                assert_eq!(
-                    lock(&shared.state).status,
-                    AnalyticsWriterStatus::Retrying { attempt }
-                );
-                assert_eq!(scheduler.deadline(true, true), Some(now + delay));
-                assert_eq!(scheduler.operation_due(now + delay - 1, true, true), None);
-                now += delay;
-                assert_eq!(scheduler.operation_due(now, true, true), Some(reload));
-                scheduler.succeeded(reload, now);
-                assert_eq!(scheduler.attempt, attempt);
-                assert_eq!(
-                    scheduler.operation_due(now, false, true),
-                    Some(resume.operation())
-                );
-            }
-            scheduler.succeeded(resume.operation(), now);
-            assert_eq!(scheduler.attempt, 0);
-            assert_eq!(scheduler.retry(reload, now), 1);
-        }
-    }
-
-    #[test]
-    fn operational_budget_exhausts_across_reloads_with_last_error() {
-        let shared = Shared::new();
-        lock(&shared.state).requests.insert(1, None);
-        let mut scheduler = Scheduler::new(0);
-        for attempt in 1..=REQUEST_FAILURE_LIMIT {
-            retry_operation(
-                &shared,
-                &mut scheduler,
-                Operation::Reload(Resume::Publish),
-                0,
-                1,
-                format!("synthetic failure {attempt}"),
-            );
-            if attempt < REQUEST_FAILURE_LIMIT {
-                scheduler.succeeded(Operation::Reload(Resume::Publish), 0);
-                assert!(lock(&shared.state).requests[&1].is_none());
-            }
-        }
-        let state = lock(&shared.state);
-        let Some(AnalyticsWriterStatus::Refused { reason }) = &state.requests[&1] else {
-            panic!("request did not fail");
+        let open = Chain::new(1, ChainKind::Publication, Operation::Open);
+        let publish = Chain {
+            operation: Operation::Publish,
+            endpoint_origin: EndpointOrigin::Fresh,
+            ..open.clone()
         };
-        assert!(reason.contains("budget exhausted"));
-        assert!(reason.contains("synthetic failure 3"));
-        assert!(scheduler.refused.is_some());
+        let failed = Chain {
+            attempt: 2,
+            failures: 2,
+            retry_at: Some(2_000),
+            ..publish.clone()
+        };
+        let compact = Chain {
+            operation: Operation::Compact,
+            retry_at: None,
+            drain_complete: true,
+            ..failed.clone()
+        };
+        let inherited = Chain {
+            endpoint_origin: EndpointOrigin::Inherited,
+            ..compact.clone()
+        };
+        let maintenance = Chain::new(1, ChainKind::Maintenance, Operation::Retire);
+        let maintenance_failed = Chain {
+            attempt: 2,
+            failures: 2,
+            retry_at: Some(2_000),
+            ..maintenance.clone()
+        };
+        let failed_open = Chain {
+            operation: Operation::Open,
+            ..failed.clone()
+        };
+        let reload = Chain {
+            operation: Operation::Reload(Resume::Publish),
+            ..failed.clone()
+        };
+        let cases = vec![
+            Case {
+                name: "capture starts at zero",
+                active: None,
+                suspended: None,
+                event: ChainEvent::Capture {
+                    generation: 1,
+                    kind: ChainKind::Publication,
+                    operation: Operation::Open,
+                },
+                expected_active: Some(open.clone()),
+                expected_suspended: None,
+                effect: ChainEffect::Idle,
+            },
+            Case {
+                name: "arrival does not extend captured ownership",
+                active: Some(failed.clone()),
+                suspended: None,
+                event: ChainEvent::Capture {
+                    generation: 2,
+                    kind: ChainKind::Publication,
+                    operation: Operation::Publish,
+                },
+                expected_active: Some(failed.clone()),
+                expected_suspended: None,
+                effect: ChainEffect::Unchanged,
+            },
+            Case {
+                name: "first operational failure",
+                active: Some(publish.clone()),
+                suspended: None,
+                event: ChainEvent::Failed {
+                    resume: Operation::Reload(Resume::Publish),
+                    operational: true,
+                },
+                expected_active: Some(Chain {
+                    attempt: 1,
+                    failures: 1,
+                    retry_at: Some(1_000),
+                    operation: Operation::Reload(Resume::Publish),
+                    ..publish.clone()
+                }),
+                expected_suspended: None,
+                effect: ChainEffect::Retrying(1),
+            },
+            Case {
+                name: "third failure drops the record",
+                active: Some(failed.clone()),
+                suspended: None,
+                event: ChainEvent::Failed {
+                    resume: Operation::Publish,
+                    operational: true,
+                },
+                expected_active: None,
+                expected_suspended: None,
+                effect: ChainEffect::Refused {
+                    generation: 1,
+                    exhausted: Some(3),
+                },
+            },
+            Case {
+                name: "structural refusal drops the record",
+                active: Some(publish.clone()),
+                suspended: None,
+                event: ChainEvent::Failed {
+                    resume: Operation::Publish,
+                    operational: false,
+                },
+                expected_active: None,
+                expected_suspended: None,
+                effect: ChainEffect::Refused {
+                    generation: 1,
+                    exhausted: None,
+                },
+            },
+            Case {
+                name: "open success preserves publication budget",
+                active: Some(failed_open.clone()),
+                suspended: None,
+                event: ChainEvent::Succeeded(Operation::Open),
+                expected_active: Some(Chain {
+                    retry_at: None,
+                    ..failed.clone()
+                }),
+                expected_suspended: None,
+                effect: ChainEffect::Idle,
+            },
+            Case {
+                name: "reload barrier preserves publication budget",
+                active: Some(reload),
+                suspended: None,
+                event: ChainEvent::Succeeded(Operation::Reload(Resume::Publish)),
+                expected_active: Some(Chain {
+                    retry_at: None,
+                    ..failed.clone()
+                }),
+                expected_suspended: None,
+                effect: ChainEffect::Idle,
+            },
+            Case {
+                name: "chunk advances progress but keeps budget",
+                active: Some(failed.clone()),
+                suspended: None,
+                event: ChainEvent::Published { complete: false },
+                expected_active: Some(Chain {
+                    operation: Operation::Compact,
+                    retry_at: None,
+                    ..failed.clone()
+                }),
+                expected_suspended: None,
+                effect: ChainEffect::Progress(1),
+            },
+            Case {
+                name: "partial compaction continues same chain",
+                active: Some(Chain {
+                    drain_complete: false,
+                    ..compact.clone()
+                }),
+                suspended: None,
+                event: ChainEvent::Succeeded(Operation::Compact),
+                expected_active: Some(Chain {
+                    retry_at: None,
+                    ..failed.clone()
+                }),
+                expected_suspended: None,
+                effect: ChainEffect::Idle,
+            },
+            Case {
+                name: "final compaction drops successful chain",
+                active: Some(compact.clone()),
+                suspended: None,
+                event: ChainEvent::Succeeded(Operation::Compact),
+                expected_active: None,
+                expected_suspended: None,
+                effect: ChainEffect::Success(1),
+            },
+            Case {
+                name: "inherited endpoint requires a fresh drain",
+                active: Some(inherited),
+                suspended: None,
+                event: ChainEvent::Succeeded(Operation::Compact),
+                expected_active: Some(Chain {
+                    retry_at: None,
+                    ..failed.clone()
+                }),
+                expected_suspended: None,
+                effect: ChainEffect::Idle,
+            },
+            Case {
+                name: "no writer drops failed opens",
+                active: Some(failed_open),
+                suspended: None,
+                event: ChainEvent::NoWriter,
+                expected_active: None,
+                expected_suspended: None,
+                effect: ChainEffect::NoWriter(1),
+            },
+            Case {
+                name: "retirement suspends the whole record",
+                active: Some(failed.clone()),
+                suspended: None,
+                event: ChainEvent::SuspendForRetirement,
+                expected_active: Some(maintenance.clone()),
+                expected_suspended: Some(failed.clone()),
+                effect: ChainEffect::Idle,
+            },
+            Case {
+                name: "retirement restores exactly the saved record",
+                active: Some(maintenance_failed.clone()),
+                suspended: Some(failed.clone()),
+                event: ChainEvent::Succeeded(Operation::Retire),
+                expected_active: Some(failed.clone()),
+                expected_suspended: None,
+                effect: ChainEffect::Idle,
+            },
+            Case {
+                name: "retirement refusal terminates the suspended request",
+                active: Some(maintenance_failed),
+                suspended: Some(failed.clone()),
+                event: ChainEvent::Failed {
+                    resume: Operation::Reload(Resume::Retire),
+                    operational: true,
+                },
+                expected_active: None,
+                expected_suspended: None,
+                effect: ChainEffect::Refused {
+                    generation: 1,
+                    exhausted: Some(3),
+                },
+            },
+            Case {
+                name: "owning waiter cancellation drops both records",
+                active: Some(maintenance.clone()),
+                suspended: Some(failed.clone()),
+                event: ChainEvent::Cancel { generation: 1 },
+                expected_active: None,
+                expected_suspended: None,
+                effect: ChainEffect::Cancelled(1),
+            },
+            Case {
+                name: "other waiter cancellation leaves ownership alone",
+                active: Some(failed.clone()),
+                suspended: None,
+                event: ChainEvent::Cancel { generation: 2 },
+                expected_active: Some(failed.clone()),
+                expected_suspended: None,
+                effect: ChainEffect::Unchanged,
+            },
+            Case {
+                name: "shutdown drops active and suspended records",
+                active: Some(maintenance),
+                suspended: Some(failed),
+                event: ChainEvent::Shutdown,
+                expected_active: None,
+                expected_suspended: None,
+                effect: ChainEffect::Stopped,
+            },
+        ];
+        for case in cases {
+            let mut scheduler = Scheduler::new(0);
+            scheduler.active = case.active;
+            scheduler.suspended = case.suspended;
+            assert_eq!(
+                scheduler.transition(case.event, 0),
+                case.effect,
+                "{}",
+                case.name
+            );
+            assert_eq!(scheduler.active, case.expected_active, "{}", case.name);
+            assert_eq!(
+                scheduler.suspended, case.expected_suspended,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn chunk_watermark_defers_settlement_and_terminal_outcomes_preserve_later_waiters() {
+        let shared = Shared::new();
+        let mut state = lock(&shared.state);
+        state.notifications = 2;
+        state.requests = BTreeMap::from([(1, None), (2, None)]);
+        apply_effect(&mut state, ChainEffect::Progress(1), None);
         assert_eq!(state.consumed, 1);
-    }
-
-    #[test]
-    fn request_failure_budget_survives_successful_chunks_and_their_compaction() {
-        let shared = Shared::new();
-        lock(&shared.state).requests.insert(1, None);
-        let mut scheduler = Scheduler::new(0);
-        for failure in 1..REQUEST_FAILURE_LIMIT {
-            retry_operation(
-                &shared,
-                &mut scheduler,
-                Operation::Publish,
-                0,
-                1,
-                "input I/O".into(),
-            );
-            scheduler.succeeded(Operation::Publish, 0);
-            scheduler.compacted(false, 0);
-            assert_eq!(scheduler.failures, failure);
-            assert_eq!(scheduler.pending, Some(Operation::Publish));
-            assert!(lock(&shared.state).requests[&1].is_none());
-        }
-        scheduler.succeeded(Operation::Publish, 0);
-        retry_operation(
-            &shared,
-            &mut scheduler,
-            Operation::Reload(Resume::Compact),
-            0,
-            1,
-            "final compaction I/O".into(),
+        assert!(state.requests.values().all(Option::is_none));
+        apply_effect(
+            &mut state,
+            ChainEffect::Refused {
+                generation: 1,
+                exhausted: Some(3),
+            },
+            Some("last operation"),
         );
-        let state = lock(&shared.state);
-        let Some(AnalyticsWriterStatus::Refused { reason }) = &state.requests[&1] else {
-            panic!("successful chunks reset the request's failure budget");
-        };
-        assert!(reason.contains("after 3 failures: final compaction I/O"));
+        assert!(
+            matches!(state.requests[&1].as_ref(), Some(AnalyticsWriterStatus::Refused { reason }) if reason.contains("after 3 failures: last operation"))
+        );
+        assert!(state.requests[&2].is_none());
+        let first_outcome = state.requests[&1].clone();
+        apply_effect(&mut state, ChainEffect::Success(2), None);
+        assert_eq!(state.requests[&1], first_outcome);
+        assert_eq!(state.requests[&2], Some(AnalyticsWriterStatus::Idle));
+        assert_eq!(state.consumed, 2);
     }
 
     #[test]
-    fn successful_maintenance_gives_the_next_request_a_fresh_failure_budget() {
-        for operation in [Operation::Open, Operation::Retire, Operation::Compact] {
-            let shared = Shared::new();
+    fn terminal_transitions_give_the_next_chain_zero_counters() {
+        for terminal in [
+            ChainEvent::Failed {
+                resume: Operation::Open,
+                operational: true,
+            },
+            ChainEvent::Failed {
+                resume: Operation::Open,
+                operational: false,
+            },
+            ChainEvent::NoWriter,
+            ChainEvent::Cancel { generation: 1 },
+            ChainEvent::Shutdown,
+        ] {
             let mut scheduler = Scheduler::new(0);
-            let recovery = match operation {
-                Operation::Open => Operation::Open,
-                Operation::Retire => Operation::Reload(Resume::Retire),
-                Operation::Compact => Operation::Reload(Resume::Compact),
-                _ => unreachable!(),
-            };
-            for _ in 0..2 {
-                retry_operation(
-                    &shared,
-                    &mut scheduler,
-                    recovery,
-                    0,
-                    0,
-                    "maintenance I/O".into(),
-                );
-                if matches!(recovery, Operation::Reload(_)) {
-                    scheduler.succeeded(recovery, 0);
-                }
-            }
-            assert_eq!(scheduler.failures, 2);
-            scheduler.succeeded(operation, 0);
-            assert_eq!(scheduler.failures, 0);
-            lock(&shared.state).requests.insert(1, None);
-            for failure in 1..=REQUEST_FAILURE_LIMIT {
-                retry_operation(
-                    &shared,
-                    &mut scheduler,
-                    Operation::Reload(Resume::Publish),
-                    0,
-                    1,
-                    format!("request failure {failure}"),
-                );
-                if failure < REQUEST_FAILURE_LIMIT {
-                    assert!(lock(&shared.state).requests[&1].is_none());
-                    scheduler.succeeded(Operation::Reload(Resume::Publish), 0);
-                }
-            }
-            let state = lock(&shared.state);
-            let Some(AnalyticsWriterStatus::Refused { reason }) = &state.requests[&1] else {
-                panic!("request did not exhaust its fresh budget");
-            };
-            assert!(reason.contains("after 3 failures: request failure 3"));
+            scheduler.active = Some(Chain {
+                attempt: 2,
+                failures: 2,
+                ..Chain::new(1, ChainKind::Publication, Operation::Open)
+            });
+            scheduler.transition(terminal, 0);
+            assert!(scheduler.active.is_none());
+            scheduler.transition(
+                ChainEvent::Capture {
+                    generation: 2,
+                    kind: ChainKind::Publication,
+                    operation: Operation::Open,
+                },
+                30_000,
+            );
+            assert_eq!(
+                scheduler.transition(
+                    ChainEvent::Failed {
+                        resume: Operation::Open,
+                        operational: true
+                    },
+                    30_000
+                ),
+                ChainEffect::Retrying(1)
+            );
+            let chain = scheduler.active.unwrap();
+            assert_eq!(
+                (
+                    chain.captured_generation,
+                    chain.attempt,
+                    chain.failures,
+                    chain.retry_at
+                ),
+                (2, 1, 1, Some(31_000))
+            );
         }
     }
 
     #[test]
-    fn interrupted_publication_restores_its_own_failure_budget_after_retirement() {
-        let shared = Shared::new();
-        lock(&shared.state).requests.insert(1, None);
+    fn successful_open_and_chunks_do_not_discard_two_publication_failures() {
         let mut scheduler = Scheduler::new(0);
-        let reload_publish = Operation::Reload(Resume::Publish);
-        scheduler.publication_attempted(0, Duration::from_secs(3_600));
-        retry_operation(
-            &shared,
-            &mut scheduler,
-            reload_publish,
+        scheduler.transition(
+            ChainEvent::Capture {
+                generation: 1,
+                kind: ChainKind::Publication,
+                operation: Operation::Open,
+            },
             0,
-            1,
-            "publication I/O".into(),
         );
-        scheduler.succeeded(reload_publish, 1_000);
-        assert_eq!(
-            scheduler.operation_due(600_000, false, true),
-            Some(Operation::Retire)
-        );
-        assert_eq!(scheduler.publication_after_retirement, Some((1, 1)));
-        assert_eq!(scheduler.failures, 0);
-        for _ in 0..2 {
-            retry_operation(
-                &shared,
-                &mut scheduler,
-                Operation::Reload(Resume::Retire),
-                600_000,
-                1,
-                "retirement I/O".into(),
+        for now in [0, 1_000] {
+            scheduler.transition(
+                ChainEvent::Failed {
+                    resume: Operation::Open,
+                    operational: true,
+                },
+                now,
             );
-            scheduler.succeeded(Operation::Reload(Resume::Retire), 600_000);
         }
-        scheduler.succeeded(Operation::Retire, 600_000);
-        assert_eq!(scheduler.pending, Some(Operation::Publish));
-        assert_eq!(scheduler.attempt, 1);
-        assert_eq!(scheduler.failures, 1);
-        retry_operation(
-            &shared,
-            &mut scheduler,
-            reload_publish,
-            3_600_000,
-            1,
-            "publication I/O again".into(),
+        scheduler.transition(ChainEvent::Succeeded(Operation::Open), 3_000);
+        scheduler.transition(ChainEvent::Endpoint { inherited: false }, 3_000);
+        scheduler.transition(ChainEvent::Published { complete: false }, 3_000);
+        scheduler.transition(ChainEvent::Succeeded(Operation::Compact), 3_000);
+        assert_eq!(
+            scheduler.transition(
+                ChainEvent::Failed {
+                    resume: Operation::Reload(Resume::Publish),
+                    operational: true
+                },
+                5_000
+            ),
+            ChainEffect::Refused {
+                generation: 1,
+                exhausted: Some(3)
+            }
         );
-        assert_eq!(scheduler.failures, 2);
-        assert!(lock(&shared.state).requests[&1].is_none());
-        scheduler.succeeded(reload_publish, 3_602_000);
-        retry_operation(
-            &shared,
-            &mut scheduler,
-            reload_publish,
-            3_602_000,
-            1,
-            "publication I/O last".into(),
-        );
-        let state = lock(&shared.state);
-        let Some(AnalyticsWriterStatus::Refused { reason }) = &state.requests[&1] else {
-            panic!("publication lost its earlier failure");
-        };
-        assert!(reason.contains("after 3 failures: publication I/O last"));
+        assert!(scheduler.active.is_none());
     }
 
     fn wait_until(handle: &Handle, predicate: impl Fn(&State) -> bool) {
@@ -1839,243 +2065,179 @@ mod tests {
     }
 
     #[test]
-    fn scheduler_deadlines_saturate_for_an_extreme_interval() {
+    fn scheduler_spaces_recovery_and_preserves_retirement_deadlines() {
+        let mut scheduler = Scheduler::new(0);
+        assert_eq!(
+            scheduler.operation_due(0, true, true, 1),
+            Some(Operation::Publish)
+        );
+        scheduler.publication_attempted(0, Duration::from_secs(3_600));
+        assert_eq!(
+            scheduler.transition(
+                ChainEvent::Failed {
+                    resume: Operation::Reload(Resume::Publish),
+                    operational: true
+                },
+                0
+            ),
+            ChainEffect::Retrying(1)
+        );
+        assert_eq!(scheduler.operation_due(999, true, true, 2), None);
+        assert_eq!(
+            scheduler.operation_due(1_000, true, true, 2),
+            Some(Operation::Reload(Resume::Publish))
+        );
+        scheduler.transition(
+            ChainEvent::Succeeded(Operation::Reload(Resume::Publish)),
+            1_000,
+        );
+        let publication = scheduler.active.clone().unwrap();
+        assert_eq!(scheduler.operation_due(1_000, true, true, 2), None);
+        assert_eq!(scheduler.deadline(true, true), Some(600_000));
+        assert_eq!(
+            scheduler.operation_due(600_000, true, true, 2),
+            Some(Operation::Retire)
+        );
+        assert_eq!(scheduler.suspended, Some(publication.clone()));
+        for now in [600_000, 601_000] {
+            scheduler.transition(
+                ChainEvent::Failed {
+                    resume: Operation::Reload(Resume::Retire),
+                    operational: true,
+                },
+                now,
+            );
+        }
+        scheduler.transition(
+            ChainEvent::Succeeded(Operation::Reload(Resume::Retire)),
+            603_000,
+        );
+        scheduler.transition(ChainEvent::Succeeded(Operation::Retire), 603_000);
+        assert_eq!(scheduler.active, Some(publication));
+        assert_eq!(scheduler.deadline(true, true), Some(1_203_000));
+        for now in [1_203_000, 1_803_000, 2_403_000, 3_003_000] {
+            assert_eq!(
+                scheduler.operation_due(now, true, true, 2),
+                Some(Operation::Retire)
+            );
+            scheduler.transition(ChainEvent::Succeeded(Operation::Retire), now);
+        }
+        assert_eq!(
+            scheduler.operation_due(3_600_000, true, true, 2),
+            Some(Operation::Publish)
+        );
+        assert_eq!(scheduler.active.as_ref().unwrap().captured_generation, 1);
+        assert_eq!(
+            scheduler.transition(
+                ChainEvent::Failed {
+                    resume: Operation::Publish,
+                    operational: true
+                },
+                3_600_000
+            ),
+            ChainEffect::Retrying(2)
+        );
+        assert_eq!(
+            scheduler.transition(
+                ChainEvent::Failed {
+                    resume: Operation::Publish,
+                    operational: true
+                },
+                3_602_000
+            ),
+            ChainEffect::Refused {
+                generation: 1,
+                exhausted: Some(3)
+            }
+        );
+    }
+
+    #[test]
+    fn no_writer_cooldown_and_refusal_cannot_share_a_chain_budget() {
+        let mut scheduler = Scheduler::new(0);
+        assert_eq!(
+            scheduler.operation_due(0, true, false, 1),
+            Some(Operation::Open)
+        );
+        for now in [0, 1_000] {
+            scheduler.transition(
+                ChainEvent::Failed {
+                    resume: Operation::Open,
+                    operational: true,
+                },
+                now,
+            );
+        }
+        assert_eq!(
+            scheduler.transition(ChainEvent::NoWriter, 3_000),
+            ChainEffect::NoWriter(1)
+        );
+        assert_eq!(scheduler.operation_due(32_999, true, false, 2), None);
+        assert_eq!(scheduler.deadline(true, false), Some(33_000));
+        assert_eq!(
+            scheduler.operation_due(33_000, true, false, 2),
+            Some(Operation::Open)
+        );
+        assert_eq!(
+            scheduler.transition(
+                ChainEvent::Failed {
+                    resume: Operation::Open,
+                    operational: true
+                },
+                33_000
+            ),
+            ChainEffect::Retrying(1)
+        );
+        assert_eq!(scheduler.active.as_ref().unwrap().failures, 1);
+    }
+
+    #[test]
+    fn scheduler_deadlines_saturate_and_waits_remain_in_the_future() {
         let mut scheduler = Scheduler::new(i64::MAX - 1);
         scheduler.publication_attempted(i64::MAX - 1, Duration::MAX);
         assert_eq!(scheduler.next_cycle, i64::MAX);
-        assert_eq!(scheduler.operation_due(i64::MAX - 1, true, true), None);
-    }
-
-    #[test]
-    fn scheduler_spaces_a_publish_that_fails_after_installing_a_visible_head() {
-        // Store's cfg(test) fault hook is private to semon-asi. Model its
-        // rename-visible error contract without files, threads or wall time.
-        struct StoreDouble(u64);
-        impl StoreDouble {
-            fn publish(&mut self) -> Result<u64, StoreError> {
-                self.0 += 1;
-                Err(StoreError::Io(std::io::Error::other("post-rename fsync")))
-            }
-        }
-        let mut store = StoreDouble(0);
-        let mut scheduler = Scheduler::new(0);
-        assert_eq!(
-            scheduler.operation_due(0, true, true),
-            Some(Operation::Publish)
-        );
-        let error = store.publish().unwrap_err();
-        scheduler.publication_attempted(0, DEFAULT_ANALYTICS_WRITER_INTERVAL);
-        assert!(error.is_operational());
-        let reload = Operation::Reload(Resume::Publish);
-        scheduler.retry(reload, 0);
-        assert_eq!(store.0, 1, "the failed attempt installed a visible head");
-        assert_eq!(scheduler.operation_due(999, true, true), None);
-        assert_eq!(scheduler.operation_due(1_000, false, true), Some(reload));
-        scheduler.succeeded(reload, 1_000);
-        assert_eq!(scheduler.operation_due(1_000, false, true), None);
-        assert_eq!(scheduler.deadline(false, true), Some(2_000));
-        assert_eq!(scheduler.operation_due(1_999, false, true), None);
-        assert_eq!(
-            scheduler.operation_due(2_000, false, true),
-            Some(Operation::Publish)
-        );
-    }
-
-    #[test]
-    fn scheduler_retires_before_a_notified_publication_with_a_one_hour_interval() {
-        let mut scheduler = Scheduler::new(0);
-        scheduler.publication_attempted(0, Duration::from_secs(3_600));
-        scheduler.succeeded(Operation::Publish, 0);
-        scheduler.succeeded(Operation::Compact, 0);
-        // Demand stays in the shell's notification count while publication is
-        // interval-gated; do not commit pending to Publish and hide retirement.
-        assert_eq!(scheduler.operation_due(1_000, true, true), None);
-        assert_eq!(scheduler.deadline(true, true), Some(600_000));
-        assert_eq!(scheduler.operation_due(599_999, true, true), None);
-        assert_eq!(
-            scheduler.operation_due(600_000, true, true),
-            Some(Operation::Retire)
-        );
-        scheduler.succeeded(Operation::Retire, 600_000);
-        assert_eq!(scheduler.next_cycle, 3_600_000);
-        assert_eq!(scheduler.operation_due(600_000, true, true), None);
-        assert_eq!(scheduler.deadline(true, true), Some(1_200_000));
-        for now in (1_200_000..=3_600_000).step_by(600_000) {
-            assert_eq!(
-                scheduler.operation_due(now, true, true),
-                Some(Operation::Retire)
-            );
-            scheduler.succeeded(Operation::Retire, now);
-        }
-        assert_eq!(
-            scheduler.operation_due(3_600_000, true, true),
-            Some(Operation::Publish)
-        );
-    }
-
-    #[test]
-    fn scheduler_preserves_reload_refusal_and_retry_barriers_when_retirement_is_due() {
-        for resume in [Resume::Publish, Resume::Compact, Resume::Retire] {
-            let mut scheduler = Scheduler::new(0);
-            let reload = Operation::Reload(resume);
-            scheduler.refuse(reload);
-            assert_eq!(scheduler.operation_due(600_000, false, true), None);
-            assert_eq!(scheduler.deadline(false, true), None);
-            assert_eq!(scheduler.operation_due(600_000, true, true), Some(reload));
-            scheduler.retry(reload, 600_000);
-            assert_eq!(scheduler.operation_due(600_999, true, true), None);
-            assert_eq!(scheduler.deadline(true, true), Some(601_000));
-            assert_eq!(scheduler.operation_due(601_000, true, true), Some(reload));
-            scheduler.succeeded(reload, 601_000);
-            assert_eq!(
-                scheduler.operation_due(601_000, false, true),
-                Some(resume.operation())
-            );
-        }
-    }
-
-    #[test]
-    fn scheduler_successful_open_and_maintenance_keep_publication_demand() {
-        for operation in [Operation::Open, Operation::Compact, Operation::Retire] {
-            let mut scheduler = Scheduler::new(0);
-            scheduler.succeeded(operation, 0);
-            assert_eq!(
-                scheduler.operation_due(0, true, true),
-                Some(Operation::Publish)
-            );
-        }
-        for resume in [Resume::Publish, Resume::Compact, Resume::Retire] {
-            let mut scheduler = Scheduler::new(0);
-            scheduler.succeeded(Operation::Reload(resume), 0);
-            assert_eq!(
-                scheduler.operation_due(0, true, true),
-                Some(resume.operation())
-            );
-            scheduler.succeeded(resume.operation(), 0);
-            if resume == Resume::Publish {
-                scheduler.succeeded(Operation::Compact, 0);
-            }
-            assert_eq!(
-                scheduler.operation_due(0, true, true),
-                Some(Operation::Publish)
-            );
-        }
-    }
-
-    #[test]
-    fn scheduler_retirement_refusal_gives_recovery_a_fresh_publication_budget() {
-        let mut scheduler = Scheduler::new(0);
-        scheduler.publication_attempted(0, Duration::from_secs(3_600));
-        let reload_publish = Operation::Reload(Resume::Publish);
-        assert_eq!(scheduler.retry(reload_publish, 0), 1);
-        scheduler.failures = 2;
-        assert_eq!(
-            scheduler.operation_due(1_000, false, true),
-            Some(reload_publish)
-        );
-        scheduler.succeeded(reload_publish, 1_000);
-        assert_eq!(scheduler.operation_due(1_000, false, true), None);
-        assert_eq!(scheduler.deadline(false, true), Some(600_000));
-        assert_eq!(
-            scheduler.operation_due(600_000, false, true),
-            Some(Operation::Retire)
-        );
-        assert_eq!(scheduler.publication_after_retirement, Some((1, 2)));
-        let reload_retire = Operation::Reload(Resume::Retire);
-        assert_eq!(scheduler.retry(reload_retire, 600_000), 1);
-        scheduler.refuse(reload_retire);
-        assert_eq!(scheduler.publication_after_retirement, Some((0, 0)));
-        assert_eq!(scheduler.operation_due(700_000, false, true), None);
-        assert_eq!(scheduler.deadline(false, true), None);
-        assert_eq!(
-            scheduler.operation_due(700_000, true, true),
-            Some(reload_retire)
-        );
-        scheduler.succeeded(reload_retire, 700_000);
-        assert_eq!(
-            scheduler.operation_due(700_000, false, true),
-            Some(Operation::Retire)
-        );
-        scheduler.succeeded(Operation::Retire, 700_000);
-        assert_eq!(scheduler.pending, Some(Operation::Publish));
-        assert_eq!(scheduler.attempt, 0);
-        assert_eq!(scheduler.failures, 0);
-        assert_eq!(scheduler.operation_due(700_000, false, true), None);
-        assert_eq!(scheduler.deadline(false, true), Some(1_300_000));
-        // Retirement keeps the publication pending. The terminal refusal above
-        // ended its old request; this notification owns fresh retry counters.
-        for now in [1_300_000, 1_900_000, 2_500_000, 3_100_000] {
-            assert_eq!(
-                scheduler.operation_due(now, false, true),
-                Some(Operation::Retire)
-            );
-            scheduler.succeeded(Operation::Retire, now);
-        }
-        assert_eq!(
-            scheduler.operation_due(3_600_000, false, true),
-            Some(Operation::Publish)
-        );
-        scheduler.publication_attempted(3_600_000, Duration::from_secs(3_600));
-        assert_eq!(scheduler.retry(reload_publish, 3_600_000), 1);
-        assert_eq!(scheduler.retry_at, Some(3_601_000));
-    }
-
-    #[test]
-    fn scheduler_wait_deadlines_are_future_or_absent_after_selecting_no_work() {
-        let operations = [
-            None,
-            Some(Operation::Open),
-            Some(Operation::Publish),
-            Some(Operation::Compact),
-            Some(Operation::Retire),
-            Some(Operation::Reload(Resume::Publish)),
-            Some(Operation::Reload(Resume::Compact)),
-            Some(Operation::Reload(Resume::Retire)),
-        ];
-        for operation in operations {
-            for refused in [false, true] {
-                for retry_at in [None, Some(900_000)] {
-                    for has_notification in [false, true] {
-                        for has_store in [false, true] {
-                            for now in [0, 599_999, 600_000, 899_999, 900_000, 3_599_999, 3_600_000]
-                            {
-                                let mut scheduler = Scheduler::new(0);
-                                scheduler.next_cycle = 3_600_000;
-                                scheduler.retry_at = retry_at;
-                                if refused {
-                                    scheduler.refused = operation;
-                                } else {
-                                    scheduler.pending = operation;
-                                }
-                                if scheduler
-                                    .operation_due(now, has_notification, has_store)
-                                    .is_none()
-                                {
-                                    assert!(
-                                        scheduler
-                                            .deadline(has_notification, has_store)
-                                            .is_none_or(|deadline| deadline > now),
-                                        "{scheduler:?} at {now}"
-                                    );
-                                }
-                            }
+        assert_eq!(scheduler.operation_due(i64::MAX - 1, true, true, 1), None);
+        for operation in [
+            Operation::Open,
+            Operation::Publish,
+            Operation::Compact,
+            Operation::Retire,
+            Operation::Reload(Resume::Publish),
+            Operation::Reload(Resume::Compact),
+            Operation::Reload(Resume::Retire),
+        ] {
+            for retry_at in [None, Some(900_000)] {
+                for has_notification in [false, true] {
+                    for now in [0, 599_999, 600_000, 899_999, 900_000, 3_599_999, 3_600_000] {
+                        let mut scheduler = Scheduler::new(0);
+                        scheduler.next_cycle = 3_600_000;
+                        let kind = if matches!(
+                            operation,
+                            Operation::Retire | Operation::Reload(Resume::Retire)
+                        ) {
+                            ChainKind::Maintenance
+                        } else {
+                            ChainKind::Publication
+                        };
+                        scheduler.active = Some(Chain {
+                            retry_at,
+                            ..Chain::new(1, kind, operation)
+                        });
+                        if scheduler
+                            .operation_due(now, has_notification, true, 2)
+                            .is_none()
+                        {
+                            assert!(
+                                scheduler
+                                    .deadline(has_notification, true)
+                                    .is_none_or(|deadline| deadline > now),
+                                "{scheduler:?} at {now}"
+                            );
                         }
                     }
                 }
             }
         }
-    }
-
-    #[test]
-    fn scheduler_no_writer_deadline_cannot_be_bypassed_by_notifications() {
-        let mut scheduler = Scheduler::new(0);
-        scheduler.no_writer(10);
-        assert_eq!(scheduler.operation_due(30_009, true, false), None);
-        assert_eq!(scheduler.deadline(true, false), Some(30_010));
-        assert_eq!(
-            scheduler.operation_due(30_010, true, false),
-            Some(Operation::Open)
-        );
     }
 
     #[test]
