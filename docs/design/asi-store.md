@@ -223,6 +223,10 @@ tables.
   - It writes one new file per table, `analytics/{table}/g{generation}.parquet`,
     holding the full rows of those sessions with a `_gen` column. Dimensions
     are rewritten whole, as `analytics/dim_x/g{generation}.parquet`.
+    Their next state comes only from the currently named dimension files: replace
+    touched or removed `dim_session` rows, then merge the newly projected
+    dimensions. Fact files are never scanned to retain dimensions. Unreferenced
+    dimension entries remain; bounded pruning is deferred maintenance.
   - It writes the live map, `session_uid → _gen` with removed sessions
     dropped, as a typed Parquet file `analytics/live/g{generation}.parquet`, so the
     manifest stays small at any number of sessions.
@@ -257,6 +261,11 @@ tables.
   must not replace a complete generation with a fragment. Re-derive at the origin
   when raw returns. A format mismatch refuses exactly; preserve or export frozen
   facts and custody, with no automatic reset or multi-version exception.
+- **Namespace reconciliation.** A `ReplaceNamespace` batch is a complete
+  inventory for its namespace. Every already-live session UID with that exact
+  namespace prefix that the batch does not mention is marked `source_missing`,
+  retaining its rows and recorded versions; other namespaces are untouched. A
+  later `SourceRestored` clears the marker.
 - **Federated publication.** #555's immutable objects, `expected_parent` and
   namespace claim epochs publish complete admitted heads. Receiver imports carry
   per-origin heads and source, activity and transcript generations separately;

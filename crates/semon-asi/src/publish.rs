@@ -6,7 +6,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use arrow::array::{
     Array, ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray, TimestampMillisecondArray,
@@ -15,7 +14,7 @@ use arrow::record_batch::RecordBatch;
 
 use crate::error::Error;
 use crate::input::{ANALYTICS_TRANSFORM_VERSION, AnalyticsInput, SessionChange};
-use crate::parquet_io::{int_column, read_batches, string_column};
+use crate::parquet_io::read_batches;
 use crate::projection::{Cell, Row, project};
 use crate::schema::{Kind, TABLES, Table, Type};
 use crate::store::{Clock, SourceMissing, Store, TableBatch, Update, Versions};
@@ -49,7 +48,9 @@ impl<E: std::error::Error + 'static> std::error::Error for PublishError<E> {
 ///
 /// `versions` are the writer's current targets. They are manifest metadata,
 /// not a claim that every retained session has those recorded versions. The
-/// transform target is always the current pure projection version.
+/// transform target is always the current pure projection version. A
+/// `ReplaceNamespace` batch marks prior live sessions absent from its complete
+/// namespace inventory source-missing; it retains their facts.
 pub fn publish_cycle<C: Clock, I: AnalyticsInput>(
     store: &mut Store<C>,
     input: &mut I,
@@ -86,12 +87,15 @@ fn update_for_batch<C: Clock>(
     let mut removed = BTreeSet::new();
     let mut source_missing = BTreeMap::new();
     let mut source_restored = BTreeSet::new();
+    let mut mentioned = BTreeSet::new();
+    let mut currently_missing = store.manifest().source_missing.keys().cloned().collect();
 
     // ReplaceNamespace is a complete input inventory, but only an explicit
     // Removed change authorizes dropping already-published facts.
     for change in batch.changes {
         match change {
             SessionChange::Admitted(session) => {
+                mentioned.insert(session.session_uid.clone());
                 if !touched.insert(session.session_uid.clone()) {
                     return Err(Error::invalid("input admits a session more than once"));
                 }
@@ -107,27 +111,30 @@ fn update_for_batch<C: Clock>(
                     }
                 }
             }
-            SessionChange::Pending { .. } => {}
+            SessionChange::Pending { session_uid } => {
+                mentioned.insert(session_uid);
+            }
             SessionChange::SourceMissing {
                 session_uid,
                 retained_at_origin: _,
-            } if store.live_map().contains_key(&session_uid) => {
-                source_restored.remove(&session_uid);
-                source_missing.insert(
-                    session_uid,
-                    SourceMissing {
-                        detected_at: SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map_or(0, |elapsed| elapsed.as_millis() as i64),
-                    },
+            } => {
+                mentioned.insert(session_uid.clone());
+                mark_source_missing(
+                    store,
+                    &session_uid,
+                    &mut currently_missing,
+                    &mut source_missing,
+                    &mut source_restored,
                 );
             }
-            SessionChange::SourceMissing { .. } => {}
             SessionChange::SourceRestored { session_uid } => {
+                mentioned.insert(session_uid.clone());
+                currently_missing.remove(&session_uid);
                 source_missing.remove(&session_uid);
                 source_restored.insert(session_uid);
             }
             SessionChange::Removed { session_uid } => {
+                mentioned.insert(session_uid.clone());
                 removed.insert(session_uid);
             }
         }
@@ -141,7 +148,22 @@ fn update_for_batch<C: Clock>(
         source_restored.remove(session);
     }
 
-    let mut tables = dimension_updates(store, &dimensions, &facts, &touched, &removed)?;
+    if batch.reconciliation == crate::input::Reconciliation::ReplaceNamespace {
+        let namespace_prefix = format!("{}/", batch.namespace);
+        for session_uid in store.live_map().keys() {
+            if session_uid.starts_with(&namespace_prefix) && !mentioned.contains(session_uid) {
+                mark_source_missing(
+                    store,
+                    session_uid,
+                    &mut currently_missing,
+                    &mut source_missing,
+                    &mut source_restored,
+                );
+            }
+        }
+    }
+
+    let mut tables = dimension_updates(store, &dimensions, &touched, &removed)?;
     for table in TABLES {
         if table.kind == Kind::Session
             && let Some(rows) = facts.remove(table.name)
@@ -166,44 +188,42 @@ fn update_for_batch<C: Clock>(
     })
 }
 
+fn mark_source_missing<C: Clock>(
+    store: &Store<C>,
+    session_uid: &str,
+    currently_missing: &mut BTreeSet<String>,
+    source_missing: &mut BTreeMap<String, SourceMissing>,
+    source_restored: &mut BTreeSet<String>,
+) {
+    if store.live_map().contains_key(session_uid)
+        && currently_missing.insert(session_uid.to_owned())
+    {
+        source_restored.remove(session_uid);
+        source_missing.insert(
+            session_uid.to_owned(),
+            SourceMissing {
+                detected_at: store.now_ms(),
+            },
+        );
+    }
+}
+
 fn dimension_updates<C: Clock>(
     store: &Store<C>,
     additions: &BTreeMap<&'static str, Vec<Row>>,
-    facts: &BTreeMap<&'static str, Vec<Row>>,
     touched: &BTreeSet<String>,
     removed: &BTreeSet<String>,
 ) -> crate::Result<Vec<TableBatch>> {
-    let current_sessions = dimension_rows(store, crate::schema::table("dim_session").unwrap())?;
-    let retained_sessions = without_sessions(current_sessions, touched, removed)?;
-    let complete_sessions = merge_dimension_rows(
-        crate::schema::table("dim_session").unwrap(),
-        retained_sessions,
-        additions.get("dim_session").cloned().unwrap_or_default(),
-    )?;
-    let steps = complete_fact_rows(store, "fact_step", facts, touched, removed)?;
-    let tools = complete_fact_rows(store, "fact_tool_call", facts, touched, removed)?;
-    let session_facts = complete_fact_rows(store, "fact_session", facts, touched, removed)?;
-
     let mut updates = Vec::new();
     for table in TABLES {
         if table.kind != Kind::Dimension {
             continue;
         }
         let current = dimension_rows(store, table)?;
-        let retained = match table.name {
-            "dim_session" => without_sessions(current.clone(), touched, removed)?,
-            "dim_machine" => rows_for_keys(current.clone(), &complete_sessions, "machine_key")?,
-            "dim_harness" => rows_for_keys(current.clone(), &complete_sessions, "harness_key")?,
-            "dim_repo" => rows_for_keys(current.clone(), &complete_sessions, "repo_key")?,
-            "dim_tool" => rows_for_keys(current.clone(), &tools, "tool_key")?,
-            "dim_model" => rows_for_keys(current.clone(), &steps, "model_key")?,
-            "dim_price" => rows_for_keys(current.clone(), &steps, "price_version")?,
-            "dim_date" => {
-                let mut facts = steps.clone();
-                facts.extend(session_facts.clone());
-                rows_for_keys(current.clone(), &facts, "date_key")?
-            }
-            _ => return Err(Error::invalid(format!("unknown dimension {}", table.name))),
+        let retained = if table.name == "dim_session" {
+            without_sessions(current.clone(), touched, removed)?
+        } else {
+            current.clone()
         };
         let complete = merge_dimension_rows(
             table,
@@ -220,52 +240,11 @@ fn dimension_updates<C: Clock>(
     Ok(updates)
 }
 
-fn complete_fact_rows<C: Clock>(
-    store: &Store<C>,
-    name: &str,
-    additions: &BTreeMap<&'static str, Vec<Row>>,
-    touched: &BTreeSet<String>,
-    removed: &BTreeSet<String>,
-) -> crate::Result<Vec<Row>> {
-    let table = crate::schema::table(name)
-        .ok_or_else(|| Error::invalid(format!("unknown fact table {name}")))?;
-    let mut rows = live_rows_without_sessions(store, table, touched, removed)?;
-    if let Some(added) = additions.get(name) {
-        rows.extend(added.clone());
-    }
-    Ok(rows)
-}
-
 fn dimension_rows<C: Clock>(store: &Store<C>, table: &'static Table) -> crate::Result<Vec<Row>> {
     let mut rows = Vec::new();
     for file in store.manifest().files_of(table.name) {
         for batch in read_batches(&store.analytics_dir().join(&file.path), None)? {
             rows.extend(batch_to_rows(table, &batch)?);
-        }
-    }
-    Ok(rows)
-}
-
-fn live_rows_without_sessions<C: Clock>(
-    store: &Store<C>,
-    table: &'static Table,
-    touched: &BTreeSet<String>,
-    removed: &BTreeSet<String>,
-) -> crate::Result<Vec<Row>> {
-    let mut rows = Vec::new();
-    for file in store.manifest().files_of(table.name) {
-        for batch in read_batches(&store.analytics_dir().join(&file.path), None)? {
-            let sessions = string_column(&batch, "session_uid")?;
-            let generations = int_column(&batch, "_gen")?;
-            for (index, row) in batch_to_rows(table, &batch)?.into_iter().enumerate() {
-                let session = sessions.value(index);
-                if store.live_map().get(session) == Some(&generations.value(index))
-                    && !touched.contains(session)
-                    && !removed.contains(session)
-                {
-                    rows.push(row);
-                }
-            }
         }
     }
     Ok(rows)
@@ -284,18 +263,6 @@ fn without_sessions(
             };
             !touched.contains(session) && !removed.contains(session)
         })
-        .collect::<Vec<_>>())
-}
-
-fn rows_for_keys(rows: Vec<Row>, references: &[Row], key: &str) -> crate::Result<Vec<Row>> {
-    let keys: Vec<&Cell> = references
-        .iter()
-        .filter_map(|row| row.get(key))
-        .filter(|cell| !matches!(cell, Cell::Integer(None)))
-        .collect();
-    Ok(rows
-        .into_iter()
-        .filter(|row| row.get(key).is_some_and(|value| keys.contains(&value)))
         .collect::<Vec<_>>())
 }
 
@@ -473,9 +440,9 @@ mod tests {
         Price, PriceUnit, RateKind, Reconciliation, RecordedCost, RecordedVersions, Repo, Role,
         Session, SourceWitness, Status, Step, ToolCall, UsageOwner,
     };
-    use crate::schema::DIM_TOOL;
-    use crate::store::{Fault, Store, read_manifest};
-    use crate::testutil::{TestClock, all_rows, live_steps};
+    use crate::schema::{DIM_REPO, DIM_TOOL, FACT_SESSION, FACT_STEP, FACT_TOOL_CALL, Kind};
+    use crate::store::{Fault, Store, read_live_map, read_manifest};
+    use crate::testutil::{FACT_TABLES, TestClock, all_rows, live_steps, update};
 
     const NAMESPACE: &str = "m";
 
@@ -624,6 +591,15 @@ mod tests {
         Store::open_with_clock(dir, TestClock::new(100)).unwrap()
     }
 
+    fn remote_session(id: &str, local_path: &str) -> AdmittedSession {
+        let mut admitted = session(id, Some("step"), "shell");
+        admitted.session.repo.key = "repo-remote".into();
+        admitted.session.repo.repo_id = Some("example/remote".into());
+        admitted.session.repo.local_path = Some(local_path.into());
+        admitted.session.repo.display_name = "remote".into();
+        admitted
+    }
+
     #[test]
     fn first_publication_includes_empty_sessions_and_checkpoint() {
         let dir = tempfile::tempdir().unwrap();
@@ -743,9 +719,87 @@ mod tests {
     }
 
     #[test]
-    fn replace_namespace_retains_absent_sessions_without_explicit_removal() {
+    fn source_missing_keeps_its_first_detection_until_a_restore() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = open(dir.path());
+        let clock = TestClock::new(100);
+        let mut store = Store::open_with_clock(dir.path(), clock.clone()).unwrap();
+        let mut input = QueuedInput::new([
+            batch(
+                "inc:1",
+                Reconciliation::ReplaceNamespace,
+                vec![SessionChange::Admitted(Box::new(session(
+                    "one",
+                    Some("step"),
+                    "shell",
+                )))],
+            ),
+            batch(
+                "inc:2",
+                Reconciliation::Incremental,
+                vec![SessionChange::SourceMissing {
+                    session_uid: "m/codex/one".into(),
+                    retained_at_origin: true,
+                }],
+            ),
+            batch(
+                "inc:3",
+                Reconciliation::Incremental,
+                vec![SessionChange::SourceMissing {
+                    session_uid: "m/codex/one".into(),
+                    retained_at_origin: true,
+                }],
+            ),
+            batch(
+                "inc:4",
+                Reconciliation::Incremental,
+                vec![SessionChange::SourceRestored {
+                    session_uid: "m/codex/one".into(),
+                }],
+            ),
+            batch(
+                "inc:5",
+                Reconciliation::Incremental,
+                vec![SessionChange::SourceMissing {
+                    session_uid: "m/codex/one".into(),
+                    retained_at_origin: true,
+                }],
+            ),
+        ]);
+
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        assert_eq!(
+            store.manifest().source_missing["m/codex/one"].detected_at,
+            100
+        );
+
+        clock.advance(100);
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        assert_eq!(
+            store.manifest().source_missing["m/codex/one"].detected_at,
+            100
+        );
+
+        clock.advance(100);
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        assert!(store.manifest().source_missing.is_empty());
+
+        clock.advance(100);
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        assert_eq!(
+            store.manifest().source_missing["m/codex/one"].detected_at,
+            400
+        );
+    }
+
+    #[test]
+    fn replace_namespace_marks_absent_sessions_missing_without_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(100);
+        let mut store = Store::open_with_clock(dir.path(), clock.clone()).unwrap();
+        store
+            .publish(&update(&[("other/codex/one", 1)], "other", 0))
+            .unwrap();
         let mut input = QueuedInput::new([
             batch(
                 "old:1",
@@ -764,6 +818,25 @@ mod tests {
                     "shell",
                 )))],
             ),
+            batch(
+                "new:2",
+                Reconciliation::ReplaceNamespace,
+                vec![SessionChange::Admitted(Box::new(session(
+                    "one",
+                    Some("newer"),
+                    "shell",
+                )))],
+            ),
+            batch(
+                "inc:3",
+                Reconciliation::Incremental,
+                vec![
+                    SessionChange::SourceRestored {
+                        session_uid: "m/codex/frozen".into(),
+                    },
+                    SessionChange::Admitted(Box::new(session("frozen", Some("frozen"), "git"))),
+                ],
+            ),
         ]);
 
         publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
@@ -774,6 +847,78 @@ mod tests {
                 .iter()
                 .any(|(_, _, step)| step == "m/codex/frozen/s/frozen")
         );
+        assert_eq!(
+            store.manifest().source_missing["m/codex/frozen"].detected_at,
+            100
+        );
+        assert!(
+            !store
+                .manifest()
+                .source_missing
+                .contains_key("other/codex/one")
+        );
+
+        clock.advance(100);
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        assert_eq!(
+            store.manifest().source_missing["m/codex/frozen"].detected_at,
+            100
+        );
+
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        assert!(
+            !store
+                .manifest()
+                .source_missing
+                .contains_key("m/codex/frozen")
+        );
+    }
+
+    #[test]
+    fn matching_remote_repositories_deduplicate_within_one_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path());
+        let mut input = QueuedInput::new([batch(
+            "inc:1",
+            Reconciliation::ReplaceNamespace,
+            vec![
+                SessionChange::Admitted(Box::new(remote_session("one", "/work/one"))),
+                SessionChange::Admitted(Box::new(remote_session("two", "/work/two"))),
+            ],
+        )]);
+
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        let repos = dimension_rows(&store, &DIM_REPO).unwrap();
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0]["repo_path"], Cell::Text(None));
+    }
+
+    #[test]
+    fn matching_remote_repositories_stay_stable_across_cycles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path());
+        let mut input = QueuedInput::new([
+            batch(
+                "inc:1",
+                Reconciliation::ReplaceNamespace,
+                vec![SessionChange::Admitted(Box::new(remote_session(
+                    "one",
+                    "/work/one",
+                )))],
+            ),
+            batch(
+                "inc:2",
+                Reconciliation::Incremental,
+                vec![SessionChange::Admitted(Box::new(remote_session(
+                    "two",
+                    "/work/two",
+                )))],
+            ),
+        ]);
+
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        assert_eq!(dimension_rows(&store, &DIM_REPO).unwrap().len(), 1);
     }
 
     #[test]
@@ -816,6 +961,41 @@ mod tests {
     }
 
     #[test]
+    fn empty_cycle_does_not_read_fact_files_for_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path());
+        let mut input = QueuedInput::new([
+            batch(
+                "inc:1",
+                Reconciliation::ReplaceNamespace,
+                vec![SessionChange::Admitted(Box::new(session(
+                    "one",
+                    Some("step"),
+                    "shell",
+                )))],
+            ),
+            batch("inc:2", Reconciliation::Incremental, Vec::new()),
+        ]);
+
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        let fact_files: Vec<_> = store
+            .manifest()
+            .files
+            .iter()
+            .filter(|file| {
+                crate::schema::table(&file.table).is_some_and(|table| table.kind == Kind::Session)
+            })
+            .map(|file| store.analytics_dir().join(&file.path))
+            .collect();
+        assert!(!fact_files.is_empty());
+        for file in fact_files {
+            std::fs::remove_file(file).unwrap();
+        }
+
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+    }
+
+    #[test]
     fn checkpoint_moves_only_with_a_successful_publish() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path());
@@ -842,13 +1022,19 @@ mod tests {
 
         publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
         let before = store.manifest().clone();
+        let before_live = store.live_map().clone();
+        let before_checkpoints = before.checkpoints.clone();
         store.fault = Some(Fault::BeforeRename);
         assert!(matches!(
             publish_cycle(&mut store, &mut input, NAMESPACE, versions()),
             Err(PublishError::Store(_))
         ));
         assert_eq!(store.manifest(), &before);
-        assert_eq!(read_manifest(dir.path()).unwrap().as_ref(), Some(&before));
+        assert_eq!(store.live_map(), &before_live);
+        let on_disk = read_manifest(dir.path()).unwrap().unwrap();
+        assert_eq!(on_disk, before);
+        assert_eq!(on_disk.checkpoints, before_checkpoints);
+        assert_eq!(read_live_map(dir.path(), &on_disk).unwrap(), before_live);
     }
 
     #[test]
@@ -902,11 +1088,21 @@ mod tests {
         )
         .unwrap();
         publish_cycle(&mut full, &mut full_input, NAMESPACE, versions()).unwrap();
-        assert_eq!(comparable_rows(&incremental), comparable_rows(&full));
+        // Compare live facts and the dimensions those live sessions and facts
+        // reference. Incremental publication deliberately retains unreferenced
+        // dimension rows for bounded maintenance rather than pruning them here.
+        assert_eq!(
+            comparable_fact_rows(&incremental),
+            comparable_fact_rows(&full)
+        );
+        assert_eq!(
+            referenced_dimension_rows(&incremental),
+            referenced_dimension_rows(&full)
+        );
     }
 
-    fn comparable_rows(store: &Store<Arc<TestClock>>) -> Vec<BTreeMap<String, usize>> {
-        all_rows(store, &TABLES)
+    fn comparable_fact_rows(store: &Store<Arc<TestClock>>) -> Vec<BTreeMap<String, usize>> {
+        all_rows(store, &FACT_TABLES)
             .into_iter()
             .map(|rows| {
                 rows.into_iter()
@@ -914,6 +1110,100 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    fn referenced_dimension_rows(
+        store: &Store<Arc<TestClock>>,
+    ) -> BTreeMap<&'static str, Vec<Row>> {
+        let sessions: Vec<Row> = dimension_rows(
+            store,
+            crate::schema::table("dim_session").unwrap(),
+        )
+        .unwrap()
+        .into_iter()
+        .filter(|row| {
+            matches!(
+                row.get("session_uid"),
+                Some(Cell::Text(Some(session_uid))) if store.live_map().contains_key(session_uid)
+            )
+        })
+        .collect();
+        let steps = live_rows(store, &FACT_STEP);
+        let tools = live_rows(store, &FACT_TOOL_CALL);
+        let session_facts = live_rows(store, &FACT_SESSION);
+        let mut dimensions = BTreeMap::new();
+        dimensions.insert("dim_session", sessions.clone());
+        dimensions.insert(
+            "dim_machine",
+            dimensions_for_keys(store, "dim_machine", &sessions, "machine_key"),
+        );
+        dimensions.insert(
+            "dim_harness",
+            dimensions_for_keys(store, "dim_harness", &sessions, "harness_key"),
+        );
+        dimensions.insert(
+            "dim_repo",
+            dimensions_for_keys(store, "dim_repo", &sessions, "repo_key"),
+        );
+        dimensions.insert(
+            "dim_tool",
+            dimensions_for_keys(store, "dim_tool", &tools, "tool_key"),
+        );
+        dimensions.insert(
+            "dim_model",
+            dimensions_for_keys(store, "dim_model", &steps, "model_key"),
+        );
+        dimensions.insert(
+            "dim_price",
+            dimensions_for_keys(store, "dim_price", &steps, "price_version"),
+        );
+        let mut dated = steps;
+        dated.extend(session_facts);
+        dimensions.insert(
+            "dim_date",
+            dimensions_for_keys(store, "dim_date", &dated, "date_key"),
+        );
+        dimensions
+    }
+
+    fn dimensions_for_keys(
+        store: &Store<Arc<TestClock>>,
+        dimension: &str,
+        references: &[Row],
+        key: &str,
+    ) -> Vec<Row> {
+        let keys: Vec<&Cell> = references
+            .iter()
+            .filter_map(|row| row.get(key))
+            .filter(|cell| !matches!(cell, Cell::Integer(None)))
+            .collect();
+        dimension_rows(store, crate::schema::table(dimension).unwrap())
+            .unwrap()
+            .into_iter()
+            .filter(|row| row.get(key).is_some_and(|value| keys.contains(&value)))
+            .collect()
+    }
+
+    fn live_rows(store: &Store<Arc<TestClock>>, table: &'static Table) -> Vec<Row> {
+        let mut rows = Vec::new();
+        for file in store.manifest().files_of(table.name) {
+            for batch in read_batches(&store.analytics_dir().join(&file.path), None).unwrap() {
+                let sessions = crate::parquet_io::string_column(&batch, "session_uid").unwrap();
+                let generations = crate::parquet_io::int_column(&batch, "_gen").unwrap();
+                rows.extend(
+                    batch_to_rows(table, &batch)
+                        .unwrap()
+                        .into_iter()
+                        .enumerate()
+                        .filter_map(|(index, row)| {
+                            (store.live_map().get(sessions.value(index))
+                                == Some(&generations.value(index)))
+                            .then_some(row)
+                        }),
+                );
+            }
+        }
+        rows
     }
 
     fn row_without_generation(row: &str) -> String {

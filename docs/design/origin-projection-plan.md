@@ -92,8 +92,14 @@ the marker. Missing markers must refer to live sessions.
 
 Dimensions replace whole tables. Omission retains the previous dimension; an
 explicitly empty typed batch clears it. Build complete dimension state including
-entries needed by frozen sessions. Clarify `Versions` documentation: manifest
-versions are writer targets, while untouched sessions retain recorded versions.
+entries needed by frozen sessions from the named dimension files only, never by
+scanning facts. Retain unreferenced dimensions until bounded maintenance can
+prune them. Clarify `Versions` documentation: manifest versions are writer
+targets, while untouched sessions retain recorded versions.
+
+A `ReplaceNamespace` inventory marks any prior live session under that exact
+namespace prefix which it does not mention as `source_missing`; rows remain live
+and other namespaces are untouched. A later `SourceRestored` clears the marker.
 
 A reader loads the manifest once, its matching live map and exactly its named
 files. Filter session facts by `(session_uid, _gen)`; labels are append-only.

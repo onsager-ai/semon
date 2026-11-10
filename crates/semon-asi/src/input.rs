@@ -30,8 +30,9 @@ pub struct AdmittedBatch {
     /// Implementation-defined incarnation and sequence checkpoint.
     pub checkpoint: String,
     /// A new index incarnation replaces the complete namespace inventory.
-    /// Consumers must reconcile absent prior sessions rather than treating the
-    /// batch as another incremental patch.
+    /// Consumers must reconcile absent prior sessions by marking their retained
+    /// rows source-missing rather than treating the batch as another incremental
+    /// patch.
     pub reconciliation: Reconciliation,
     /// Changed sessions, explicit removals, and availability observations in
     /// sequence order.  An admitted session with no steps is still `Admitted`.
