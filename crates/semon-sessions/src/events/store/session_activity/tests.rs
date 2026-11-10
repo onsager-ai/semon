@@ -112,7 +112,7 @@ fn same_stem_claude_native_ids_admit_distinct_portable_anchors() {
 
 #[test]
 fn copied_native_compactions_collapse_or_withhold_only_the_conflicting_session() {
-    for conflict in ["none", "timestamp", "step"] {
+    for conflict in ["none", "timestamp", "step", "unknown-first", "unknown-last"] {
         let root = scratch(&format!("analytics-copied-compaction-{conflict}"));
         let (options, rows, _) = catalog_native_fixture(&root, 2, false);
         let original = &rows
@@ -172,16 +172,36 @@ fn copied_native_compactions_collapse_or_withhold_only_the_conflicting_session()
                 .unwrap();
             serde_json::from_str(&metadata).unwrap()
         };
-        let first = persisted(0);
+        let mut first = persisted(0);
         assert!(!first["step_id"].is_null());
         // Which contributor persisted first is an ingest detail. Make the two
         // native facts agree on their step so only the injected conflict differs.
         let mut second = persisted(1);
-        second["step_id"] = if conflict == "step" {
-            serde_json::Value::Null
-        } else {
-            first["step_id"].clone()
-        };
+        second["step_id"] = first["step_id"].clone();
+        if conflict == "step" {
+            let activity = read(&store.connection, row);
+            second["step_id"] = activity
+                .steps
+                .iter()
+                .map(|step| serde_json::to_value(&step.id).unwrap())
+                .find(|id| *id != first["step_id"])
+                .expect("the disjoint contributor has a different known step");
+            assert!(!second["step_id"].is_null());
+            assert_ne!(first["step_id"], second["step_id"]);
+        }
+        let known_timestamp = first["timestamp"].clone();
+        if conflict == "unknown-first" {
+            first["timestamp"] = serde_json::Value::Null;
+        } else if conflict == "unknown-last" {
+            second["timestamp"] = serde_json::Value::Null;
+        }
+        store
+            .connection
+            .execute(
+                "UPDATE session_activity_compactions SET metadata=?2 WHERE session_key=?1 AND ordinal=0",
+                params![row.key, first.to_string()],
+            )
+            .unwrap();
         store
             .connection
             .execute(
@@ -196,7 +216,7 @@ fn copied_native_compactions_collapse_or_withhold_only_the_conflicting_session()
             SessionChange::Admitted(session) if session.session_uid == uid => Some(session),
             _ => None,
         });
-        if conflict == "none" {
+        if matches!(conflict, "none" | "unknown-first" | "unknown-last") {
             let session =
                 session.expect("identical native facts collapse without blocking admission");
             assert_eq!(session.compactions.len(), 1);
@@ -205,6 +225,10 @@ fn copied_native_compactions_collapse_or_withhold_only_the_conflicting_session()
                 format!("{uid}/c/compact-shared")
             );
             assert!(session.compactions[0].step_uid.is_some());
+            assert_eq!(
+                serde_json::to_value(session.compactions[0].timestamp).unwrap(),
+                known_timestamp
+            );
             let projected = semon_asi::project(session).unwrap();
             assert_eq!(projected.tables["fact_compaction"].len(), 1);
             assert_eq!(projected.tables["fact_step"].len(), session.steps.len());
@@ -220,6 +244,103 @@ fn copied_native_compactions_collapse_or_withhold_only_the_conflicting_session()
         assert!(batch.changes.iter().any(|change| matches!(
             change, SessionChange::Admitted(session) if session.session.native_session_id == "native-cx-01"
         )), "another session is admitted even when a compaction identity conflicts");
+        drop(input);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn copied_timestampless_compactions_merge_unknown_and_known_steps_in_either_order() {
+    for known_first in [false, true] {
+        let root = scratch(&format!("analytics-compatible-compaction-{known_first}"));
+        let (options, rows, _) = catalog_native_fixture(&root, 2, false);
+        let original = &rows
+            .iter()
+            .find(|row| row.harness == "claude")
+            .unwrap()
+            .sources[0]
+            .path;
+        let prefix = fs::read_to_string(original).unwrap();
+        let user = prefix.lines().next().unwrap();
+        let compact = serde_json::json!({
+            "type":"system", "subtype":"compact_boundary", "uuid":"compact-shared",
+            "sessionId":"native-cl-00",
+            "compactMetadata":{"trigger":"auto","preTokens":155000}
+        });
+        // No usage in this contributor: without time, its compaction cannot
+        // acquire the other contributor's step from cross-source offsets.
+        let separator = serde_json::json!({
+            "type":"user", "uuid":"user-separator", "sessionId":"native-cl-00",
+            "timestamp":"2026-09-24T00:01:45Z",
+            "message":{"role":"user","content":"Synthetic continuation"}
+        });
+        let mut distinct = compact.clone();
+        distinct["uuid"] = serde_json::json!("compact-distinct");
+        fs::write(
+            original,
+            format!("{user}\n{compact}\n{separator}\n{distinct}\n"),
+        )
+        .unwrap();
+        same_stem_contributor(&options, Some("compact-shared"));
+        let copy = options
+            .claude_home
+            .join("projects/-work-proj-copy/native-cl-00.jsonl");
+        let text = fs::read_to_string(&copy).unwrap();
+        let assistant = text.lines().nth(1).unwrap();
+        fs::write(&copy, format!("{compact}\n{assistant}\n")).unwrap();
+        if !known_first {
+            // '-' sorts before '/', '0' after it. Change only the directory
+            // order so the real producer persists each ordering of the pair.
+            let later = options.claude_home.join("projects/-work-proj0-copy");
+            fs::rename(copy.parent().unwrap(), later).unwrap();
+        }
+        let (rows, slots) = catalog_fixture_projection(&options);
+        let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+        assert_eq!(row.sources.len(), 2);
+        let path = crate::events::EventCache::path(&options.cache);
+        let (mut store, _) = opened(&path);
+        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+        let physical: Vec<crate::events::session_activity::Compaction> = store
+            .connection
+            .prepare("SELECT metadata FROM session_activity_compactions WHERE session_key=?1 ORDER BY ordinal")
+            .unwrap()
+            .query_map([&row.key], |record| record.get::<_, String>(0))
+            .unwrap()
+            .map(|record| serde_json::from_str(&record.unwrap()).unwrap())
+            .collect();
+        assert_eq!(physical.len(), 3, "both real contributors are persisted");
+        assert_eq!(physical[0].step_id.is_some(), known_first);
+        assert_eq!(
+            physical[if known_first { 1 } else { 2 }].step_id.is_some(),
+            !known_first
+        );
+        assert!(physical.iter().all(|compact| compact.timestamp.is_none()));
+        let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        let batch = input.read_admitted(None).unwrap();
+        let uid = "fixture-machine/claude/native-cl-00";
+        let session = batch
+            .changes
+            .iter()
+            .find_map(|change| match change {
+                SessionChange::Admitted(session) if session.session_uid == uid => Some(session),
+                _ => None,
+            })
+            .expect("compatible unknown/known associations admit the session");
+        assert_eq!(session.compactions.len(), 2);
+        assert_eq!(
+            session.compactions[0].compaction_uid,
+            format!("{uid}/c/compact-shared")
+        );
+        assert_eq!(
+            session.compactions[0].step_uid.as_deref(),
+            Some("fixture-machine/claude/native-cl-00/s/claude/message-contributor")
+        );
+        assert_eq!(session.compactions[0].timestamp, None);
+        assert_eq!(
+            session.compactions[1].compaction_uid,
+            format!("{uid}/c/compact-distinct")
+        );
         drop(input);
         drop(store);
         fs::remove_dir_all(root).unwrap();

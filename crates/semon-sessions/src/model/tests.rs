@@ -6111,6 +6111,154 @@ fn local_ancestry_is_exact_and_environment_overrides_it_without_retaining_other_
 }
 
 #[test]
+fn catalog_parent_provenance_distinguishes_native_agreement_from_observed_ownership() {
+    use semon_asi::input::{AnalyticsInput, ParentMethod, Role, SessionChange};
+
+    for (source, native, observed) in [
+        ("environment", Some("parent"), "parent"),
+        ("marker", Some("parent"), "parent"),
+        ("ancestry", None, "parent"),
+        ("environment", None, "parent"),
+        ("marker", None, "parent"),
+        ("environment", Some("native"), "parent"),
+        ("marker", Some("native"), "parent"),
+    ] {
+        let home = Home::new();
+        for id in ["parent", "native"] {
+            home.codex(id, json!({}), &[codex_user(ts(10, 0), "parent")]);
+        }
+        let prompt = if source == "marker" {
+            "Semon-Parent: codex:parent:launch\nWork"
+        } else {
+            "Work"
+        };
+        let records = [
+            codex_user(ts(10, 1), prompt),
+            codex_line(ts(10, 1), "turn_context", json!({"model":"gpt-6-sol"})),
+            codex_reply(ts(10, 2), "Finished"),
+            codex_line(
+                ts(10, 2),
+                "token_usage_record",
+                json!({
+                    "thread_id":"child", "session_id":"child", "turn_id":"turn-child",
+                    "response_id":"response-child", "usage":{
+                        "input_tokens":10, "output_tokens":5, "total_tokens":15,
+                        "cached_input_tokens":0, "cache_write_input_tokens":0,
+                        "reasoning_output_tokens":0
+                    }
+                }),
+            ),
+        ];
+        let mut meta = json!({});
+        if let Some(parent) = native {
+            meta["parent_thread_id"] = json!(parent);
+        }
+        home.codex("child", meta, &records);
+        let mut facts = crate::Facts {
+            version: crate::FACTS_VERSION,
+            hostname: "machine".into(),
+            codex_locks: BTreeMap::from([("parent".into(), 10), ("child".into(), 20)]),
+            ..Default::default()
+        };
+        if source == "ancestry" {
+            facts.process_ancestors.insert(20, vec![10]);
+        } else if source == "environment" {
+            facts.runs.insert(
+                20,
+                BTreeMap::from([("SEMON_PARENT".into(), "codex:parent:launch".into())]),
+            );
+        }
+        let facts_path = home.root.join("facts.json");
+        crate::write_facts(&facts_path, &facts).unwrap();
+        let options = Options {
+            facts: Some(facts_path),
+            ..home.options.clone()
+        };
+        let check = |native_owned: bool| {
+            // Exercise relation derivation and its persisted Catalog publication,
+            // then staged Query replay and the actual admitted ASI input.
+            observe_catalog(
+                &options,
+                &mut EventCache::open_scoped(&options.cache).unwrap(),
+                &mut false,
+                &mut Texts::default(),
+                NOW,
+            )
+            .unwrap();
+            let query = home.build_at(&options, NOW);
+            let (_, rows) = read_catalog(&home);
+            let row = rows.iter().find(|row| row.key == "child").unwrap();
+            let expected_source = (!native_owned).then_some(source);
+            assert_eq!(row.parent.as_deref(), Some(observed));
+            assert_eq!(row.parent_source.as_deref(), expected_source);
+            assert_eq!(
+                query.sessions["child"].parent_source.as_deref(),
+                expected_source
+            );
+            let mut input =
+                crate::SqliteAnalyticsInput::open(&EventCache::path(&options.cache), "machine")
+                    .unwrap();
+            let batch = input.read_admitted(None).unwrap();
+            let session = batch
+                .changes
+                .iter()
+                .find_map(|change| match change {
+                    SessionChange::Admitted(session)
+                        if session.session.native_session_id == "child" =>
+                    {
+                        Some(&session.session)
+                    }
+                    _ => None,
+                })
+                .expect("the real Codex receipt admits the child");
+            assert_eq!(
+                session.parent_method,
+                if native_owned {
+                    ParentMethod::Native
+                } else {
+                    ParentMethod::None
+                }
+            );
+            assert_eq!(
+                session.role,
+                if native_owned {
+                    Role::Worker
+                } else {
+                    Role::Solo
+                }
+            );
+            assert_eq!(
+                session.parent_session_uid.as_deref(),
+                native_owned.then_some("machine/codex/parent")
+            );
+            if source != "ancestry" {
+                let links: Value = serde_json::from_slice(
+                    &fs::read(options.cache.with_extension("parent-links.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(links["codex:child"]["call"], "launch");
+            }
+            let tree = crate::collect(&options, "").unwrap();
+            let parent = tree.iter().find(|node| node.id == observed).unwrap();
+            let child = parent
+                .children
+                .iter()
+                .find(|node| node.id == "child")
+                .unwrap();
+            assert_eq!(child.parent_source.as_deref(), expected_source);
+        };
+        check(native == Some(observed));
+        check(native == Some(observed));
+        if native.is_some_and(|parent| parent != observed) {
+            // A new native header agrees with the retained observed link. Its
+            // prior observed provenance must not survive relation-stage reuse.
+            home.codex("child", json!({"parent_thread_id":observed}), &records);
+            check(true);
+        }
+    }
+}
+
+#[test]
 fn process_ancestry_links_every_harness_pair_and_survives_process_exit() {
     for (parent_harness, child_harness) in
         [("claude", "codex"), ("codex", "claude"), ("codex", "codex")]

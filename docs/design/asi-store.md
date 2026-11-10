@@ -60,8 +60,11 @@ recorded native parent links use the same identity rule.
 The origin adapter exports `parent_method = native` only for resolved native
 Catalog parentage (`parent_source` absent). Catalog's observed `ancestry`,
 `environment` (`SEMON_PARENT`) and `marker` (`Semon-Parent` in prompt text) links
-are not native lineage. They also do not establish the workspace-and-time
-inference described by `workspace`. The current ASI methods cannot represent
+set `parent_source` only when they establish or replace the parent. Agreement
+with an existing native parent leaves native provenance intact; a marker-only
+Codex spawn still records `marker`. These observed links are not native lineage.
+They also do not establish the workspace-and-time inference described by
+`workspace`. The current ASI methods cannot represent
 these sources, so the adapter omits their parent UID and uses `none`; it treats
 unknown source values the same way. An absent parent also uses `none`.
 Only native parentage promotes a `codex-run` to worker; otherwise it remains
@@ -100,9 +103,10 @@ solo. A native `subagent` kind independently establishes worker status.
   Invalid persisted data and database errors still fail the read.
 
 - **Repeated compaction identity.** Copied contributors can carry the same
-  native compaction ID. Identical timestamp and associated step UID collapse
-  to one fact, retaining first occurrence in persisted ordinal order. A
-  conflicting timestamp or step UID makes the whole session generation
+  native compaction ID. Compatible timestamps and associated step UIDs collapse
+  to one fact, retaining first occurrence in persisted ordinal order. Missing
+  values are unknown and merge with known values in either contributor order.
+  Two different known timestamps or step UIDs make the whole session generation
   `Pending`, with the same retention and batch isolation as an unrepresentable
   anchor. Physical compaction rows must still match the header's declared count
   and contiguous ordinals before deduplication; missing rows fail integrity.

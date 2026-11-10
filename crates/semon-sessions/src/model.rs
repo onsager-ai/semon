@@ -3223,6 +3223,7 @@ impl<'a> Builder<'a> {
         }
         for (child, spawner, _, _) in &spawns {
             self.sessions[*child].parent = *spawner;
+            self.sessions[*child].out.parent_source = None;
             if spawner.is_none() {
                 self.sessions[*child].out.lane = true;
             }
@@ -3915,15 +3916,22 @@ impl<'a> Builder<'a> {
         runs.sort_by_key(|position| (self.files[*position].first, *position));
         for position in runs {
             let (spawner, call, ambiguous) = self.codex_spawner(position)?;
-            spawns.push((self.of_file[position], spawner, call, ambiguous));
+            let source = match &self.files[position].role {
+                Role::Codex(meta) if meta.parent_thread.is_none() && spawner.is_some() => {
+                    Some("marker".to_owned())
+                }
+                _ => None,
+            };
+            spawns.push((self.of_file[position], spawner, call, ambiguous, source));
         }
-        for (child, spawner, _, _) in &spawns {
+        for (child, spawner, _, _, source) in &spawns {
             self.sessions[*child].parent = *spawner;
+            self.sessions[*child].out.parent_source.clone_from(source);
             if spawner.is_none() {
                 self.sessions[*child].out.lane = true;
             }
         }
-        for (child, spawner, call, ambiguous) in spawns {
+        for (child, spawner, call, ambiguous, _) in spawns {
             let state = self.sessions[child]
                 .out
                 .turn_lifecycle
@@ -4672,10 +4680,12 @@ impl<'a> Builder<'a> {
             else {
                 continue;
             };
-            self.sessions[child].out.parent_source = Some(link.source);
             if self.sessions[child].parent == Some(parent) {
                 continue;
             }
+            // Agreement can enrich native evidence without owning lineage.
+            // Marker-only Codex spawns already carry their observed source.
+            self.sessions[child].out.parent_source = Some(link.source);
             self.sessions[child].parent = Some(parent);
             self.sessions[child].out.lane = false;
             let call = link.call.as_deref().and_then(|id| self.find_in(parent, id));

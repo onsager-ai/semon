@@ -249,7 +249,9 @@ fn emit_catalog_publish_attempt(
 // the per-database storage version stamp (current stores do not run storage
 // DDL), the ledger epoch on source ledgers and published sources, and compact
 // activity summaries for bounded family publication.
-pub(crate) const SCHEMA_VERSION: i64 = 46;
+// v47: Catalog parent_source names only the observed evidence owning a link;
+// agreement with native lineage leaves it absent, including staged endpoints.
+pub(crate) const SCHEMA_VERSION: i64 = 47;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -10742,7 +10744,7 @@ mod tests {
 
     #[test]
     fn obsolete_producer_contracts_are_refused_without_mutation() {
-        for schema in [44, 45] {
+        for schema in [44, 45, 46] {
             let root = scratch("obsolete-contract");
             let path = root.join("index.sqlite3");
             let (mut store, _) = opened(&path);

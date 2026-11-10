@@ -23,6 +23,10 @@ continuation lineage uses its recorded owner when the Catalog key is one of that
 lineage's native IDs; any other multi-ID row is unavailable rather than guessed.
 `codex-run` is a worker when its recorded native parent resolves; otherwise its
 role remains solo. Native Catalog parent links have no `parent_source`.
+An agreeing environment/marker observation preserves that native provenance;
+`parent_source` records observed evidence only when it establishes or replaces
+the parent, including marker-only Codex spawns. Catalog projector 9 and SQLite
+schema 47 fence this producer contract; older indexes are refused unchanged.
 Observed `ancestry`, `environment` and `marker` links, and unknown source values,
 are omitted from ASI parentage (`parent_method = none`): they prove neither
 native lineage nor workspace/time inference. See the [parent mapping](asi-store.md#identity).
@@ -35,6 +39,10 @@ StepFacts/compaction evidence under the same admitted generation. Native IDs tak
 precedence; byte offsets and activity/compaction row ordinals never substitute
 for record ordinals. Validated filename stems keep fallback anchors stable on
 relocation; duplicate or ambiguous source contributors refuse projection.
+Repeated compaction IDs merge unknown timestamps/step associations with known
+values in either order, preserving first persisted ordinal position. Different
+known values withhold only that session as `Pending`. Raw row counts and
+contiguous ordinals are validated before deduplication.
 Copy recorded labels, triggers, cost components
 and pricing fingerprint; do not classify or price again. Preserve all billing
 inputs and unknown values. `dim_price` must describe the exact snapshot that

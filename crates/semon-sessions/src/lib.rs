@@ -1147,6 +1147,7 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
         i64::try_from(now.saturating_mul(1000)).unwrap_or(i64::MAX),
     );
     for (child, link) in links {
+        let agrees = parents.get(&child) == Some(&link.parent);
         parents.insert(child.clone(), link.parent.clone());
         let via_tool = if let (Some(call), Some(summary)) =
             (link.call.as_ref(), summaries.get(&link.parent))
@@ -1159,7 +1160,7 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
             None
         };
         if let Some(node) = flat.get_mut(&child) {
-            node.parent_source = Some(link.source);
+            node.parent_source = (!agrees).then_some(link.source);
             node.unlinked = false;
             if via_tool.is_some() {
                 node.via_tool = via_tool;

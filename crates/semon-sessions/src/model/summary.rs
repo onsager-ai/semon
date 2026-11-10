@@ -143,6 +143,8 @@ pub(crate) struct CatalogRow {
     pub(crate) presentation_kind: Option<String>,
     pub(crate) native_ids: Vec<String>,
     pub(crate) parent: Option<String>,
+    /// Observed evidence that established the parent, absent for native
+    /// lineage even when an environment or marker observation agrees.
     pub(crate) parent_source: Option<String>,
     pub(crate) repo: Option<String>,
     /// Persisted with the analytics digest in silver_session_state, never in
@@ -212,7 +214,7 @@ pub(crate) struct CatalogSource {
     pub(crate) native_role: Option<Value>,
 }
 
-pub(crate) const CATALOG_VERSION: u32 = 8;
+pub(crate) const CATALOG_VERSION: u32 = 9;
 
 pub(super) fn source(file: &super::SourceFile) -> CatalogSource {
     let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;

@@ -311,8 +311,10 @@ session ids, call ids, the evidence source and an observation time, never prompt
 text or handoff paths. At most 4,096 links are retained (oldest observed first
 on overflow); reads are capped at 1 MiB. This makes live ancestry/environment
 links survive process exit. The model/tree's `parent_source` identifies marker,
-environment or ancestry evidence. Deleting this cache is safe, but a live-only
-link can be rediscovered only while its processes still exist.
+environment or ancestry evidence that established or replaced a parent. It stays
+absent when observed evidence agrees with an existing native parent. Deleting
+this cache is safe, but a live-only link can be rediscovered only while its
+processes still exist.
 
 Mirrored facts include optional `process_ancestors` and the strictly validated
 `SEMON_PARENT` allowlist entry, so receiving machines use observed facts rather

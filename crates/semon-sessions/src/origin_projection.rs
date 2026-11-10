@@ -514,7 +514,7 @@ fn read_compactions(
         return Err(rusqlite::Error::InvalidQuery);
     }
     let mut compactions: Vec<Compaction> = Vec::new();
-    let mut identities = BTreeMap::new();
+    let mut identities: BTreeMap<String, usize> = BTreeMap::new();
     for compact in native_compactions {
         let native_record = compact
             .native_record
@@ -532,9 +532,23 @@ fn read_compactions(
             timestamp: compact.timestamp,
         };
         if let Some(&index) = identities.get(&projected.compaction_uid) {
-            if compactions[index] != projected {
+            let existing = &mut compactions[index];
+            if existing
+                .step_uid
+                .as_ref()
+                .zip(projected.step_uid.as_ref())
+                .is_some_and(|(first, next)| first != next)
+                || existing
+                    .timestamp
+                    .zip(projected.timestamp)
+                    .is_some_and(|(first, next)| first != next)
+            {
                 return Ok(None);
             }
+            // Missing evidence is compatible with a known value in either
+            // contributor order; retain the first persisted ordinal position.
+            existing.step_uid = existing.step_uid.take().or(projected.step_uid);
+            existing.timestamp = existing.timestamp.or(projected.timestamp);
         } else {
             // Retain the first occurrence in persisted ordinal order.
             identities.insert(projected.compaction_uid.clone(), compactions.len());
