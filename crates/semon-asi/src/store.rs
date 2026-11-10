@@ -242,6 +242,23 @@ impl<C: Clock> Store<C> {
         &self.live
     }
 
+    /// Reloads the published manifest and its matching live map while retaining
+    /// this process's writer lock.
+    ///
+    /// A directory fsync failure can be reported after the manifest rename has
+    /// made a generation visible. Writers use this before retrying such an
+    /// operation so they do not publish from a stale checkpoint.
+    pub fn reload_manifest(&mut self) -> Result<()> {
+        let manifest = read_manifest_in(&self.analytics)?.unwrap_or_else(Manifest::empty);
+        let live = match &manifest.live_map {
+            Some(path) => read_live_map_file(&self.analytics.join(path))?,
+            None => HashMap::new(),
+        };
+        self.manifest = manifest;
+        self.live = live;
+        Ok(())
+    }
+
     pub fn analytics_dir(&self) -> &Path {
         &self.analytics
     }

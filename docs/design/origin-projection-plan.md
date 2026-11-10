@@ -83,6 +83,25 @@ observing the new physical witness as pending.
 
 ## Integration after the storage stack merges
 
+`semon-sessions::analytics_writer` now supplies the first local lifecycle
+primitive for this plan. A caller explicitly starts it with a configured
+namespace, read-only SQLite index path and analytics store root; no Viewer, MCP,
+push/receive or CLI path starts it, and the owner still needs to choose the host
+configuration and enablement surface. It coalesces catalog-publication
+notifications into at-most-one cycle per interval, opens a fresh read-only
+`SqliteAnalyticsInput` for each cycle, and uses the current native activity-rules
+version and pricing snapshot fingerprint as manifest targets. It preserves the
+adapter's admitted input boundary: bounded cold/full input remains outstanding
+work, not a limit added by the writer.
+
+Lock contention is an observable no-writer state. Unsupported or integrity input
+refuses visibly without mutating the SQLite index, advancing its checkpoint,
+resetting state or deleting data; a later notification makes one fresh read
+attempt. Transient I/O backs off, and a store error reloads the manifest before
+retry because a rename may already have published the generation. The service
+attempts bounded compaction once after publication and retires only on its slow
+maintenance cadence, never on shutdown.
+
 Rebase onto main after #578–#581 land, then integrate the publisher and local
 consumer lifecycle. Publication uses `Update`: checkpoints merge by namespace;
 every touched session supplies all its fact rows, including a valid empty result.

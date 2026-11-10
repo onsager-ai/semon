@@ -226,6 +226,12 @@ tables.
   becomes the authoritative producer store's single writer: push, Viewer, MCP,
   or receive for an explicitly transferred replica namespace. Other processes only
   read. Imported receiver heads are admitted publications, not locally rebuilt indexes.
+  The local `semon-sessions` writer service is an explicit lifecycle primitive:
+  its namespace is caller-supplied, it opens a separate read-only index connection
+  per cycle, and it is not enabled or started by a host yet. Its store-root helper
+  places the store beside the SQLite index, never inside the index file. A busy
+  lock is observable as a no-writer state; unsupported input latches a refusal
+  without changing the index or a checkpoint, until a later notification retries.
 - **Cycle.** At most every 2 s, the writer reads the index change log and
   recomputes every touched session **whole**. It doesn't patch tails: a
   following step can change an earlier step's duration, and a late record can
@@ -246,6 +252,11 @@ tables.
     and `seq` checkpoint, the durable revision checkpoint, and the live-map
     file. It fsyncs the manifest, renames it into place, and fsyncs the
     directory. A crash leaves the previous generation.
+  - The local service coalesces catalog-publication notifications, retries
+    transient I/O with bounded backoff, and reloads the manifest before retrying
+    a store error that may have followed its rename. It uses the activity rules
+    target and current pricing-snapshot fingerprint as writer targets; these do
+    not assert that untouched rows have uniformly refreshed versions.
 - **Reading.** Each fact view keeps only live rows:
   `… semi join live on (session_uid, _gen)`.
 - **Compaction** is tiered. Cycle files are level 0. When a table has more
@@ -256,9 +267,12 @@ tables.
   level-1 files are never rewritten, so work grows with changes and not with
   table size, and a second compaction run straight after the first is a no-op.
   Compaction publishes as just another generation.
+  The local service makes at most one bounded compaction attempt after a
+  successful publish.
 - **Retirement.** A file leaves the store 10 minutes after the first
   published generation that no longer names it. Queries hold a snapshot for at
-  most their deadline plus fetch time, well under that.
+  most their deadline plus fetch time, well under that. The local service only
+  considers retirement on a slow maintenance cadence and never during shutdown.
 - **Full refresh.** The same pure projection rebuilds origin analytics from an
   available admitted index. CI compares incremental and full-refresh live rows.
   Imported frozen heads may be the only surviving facts and are not assumed

@@ -15,10 +15,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod analytics;
+pub mod analytics_writer;
 mod causal_trace;
 mod origin_projection;
 mod overview;
 mod overview_repair;
+pub use analytics_writer::{
+    AnalyticsWriterConfig, AnalyticsWriterHandle, AnalyticsWriterStatus, Handle,
+    analytics_store_root, start, start_analytics_writer,
+};
 pub use causal_trace::session_causal_trace;
 pub(crate) use causal_trace::session_causal_trace_with_gate;
 pub use origin_projection::SqliteAnalyticsInput;
