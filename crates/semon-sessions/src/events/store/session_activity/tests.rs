@@ -473,6 +473,221 @@ fn analytics_writer_incremental_live_rows_match_a_final_full_refresh() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn stale_rules_stay_pending_until_native_catalog_refresh_republishes() {
+    let root = scratch("analytics-rules-refresh");
+    let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+    let row_key = rows
+        .iter()
+        .find(|row| row.harness == "claude")
+        .unwrap()
+        .key
+        .clone();
+    let index = crate::events::EventCache::path(&options.cache);
+    let store_root = root.join("analytics-store");
+    let clock = ManualClock::new(0);
+    let writer = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&clock),
+    );
+    writer.notify();
+    writer.wait_for_publishes(1);
+    let initial_manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    let initial_rows = live_fact_rows(&store_root, &initial_manifest);
+
+    let mut input = SqliteAnalyticsInput::open(&index, "fixture-machine").unwrap();
+    let admitted = input.read_admitted(None, InputBudget::default()).unwrap();
+    let uid = admitted
+        .changes
+        .iter()
+        .find_map(|change| match change {
+            SessionChange::Admitted(session) if session.session.native_session_id == row_key => {
+                Some(session.session_uid.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    drop(input);
+    rusqlite::Connection::open(&index)
+        .unwrap()
+        .execute(
+            "UPDATE session_activity_projections SET rules_version=0 WHERE session_key=?1",
+            [&row_key],
+        )
+        .unwrap();
+
+    // A Catalog metadata change supplies the normal `silver_change` while
+    // leaving the stale activity header in place, so the writer itself must
+    // consume the Pending transition.
+    let (mut pending_rows, pending_slots) = catalog_fixture_projection(&options);
+    let pending_row = pending_rows
+        .iter_mut()
+        .find(|row| row.key == row_key)
+        .unwrap();
+    pending_row.name = "rules refresh pending".into();
+    pending_row.session_activity = None;
+    let (mut cache, _) = opened(&index);
+    assert_eq!(
+        catalog_write(
+            &mut cache,
+            &pending_rows,
+            &pending_slots,
+            false,
+            CatalogWriter::Auto
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
+    drop(cache);
+
+    let mut pending_input = SqliteAnalyticsInput::open(&index, "fixture-machine").unwrap();
+    let pending = pending_input
+        .read_admitted(None, InputBudget::default())
+        .unwrap();
+    assert!(pending.changes.contains(&SessionChange::Pending {
+        session_uid: uid.clone()
+    }));
+    drop(pending_input);
+    clock.advance(2_000);
+    writer.notify();
+    writer.wait_for_publishes(2);
+    let retained_manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_eq!(
+        live_fact_rows(&store_root, &retained_manifest),
+        initial_rows
+    );
+
+    crate::refresh_analytics_catalog(&options, || false).unwrap();
+    let mut refreshed_input = SqliteAnalyticsInput::open(&index, "fixture-machine").unwrap();
+    let refreshed = refreshed_input
+        .read_admitted(None, InputBudget::default())
+        .unwrap();
+    assert!(refreshed.changes.iter().any(|change| {
+        matches!(change, SessionChange::Admitted(session)
+            if session.session_uid == uid
+                && session.versions.rules == crate::events::session_activity::ACTIVITY_RULES_VERSION)
+    }));
+    drop(refreshed_input);
+
+    clock.advance(2_000);
+    writer.notify();
+    writer.wait_for_publishes(3);
+    let refreshed_manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    let refreshed_rows = live_fact_rows(&store_root, &refreshed_manifest);
+    writer.stop_and_join();
+
+    let full_root = root.join("full-store");
+    let full = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &full_root),
+        ManualClock::new(0),
+    );
+    full.notify();
+    full.wait_for_publishes(1);
+    let full_manifest = semon_asi::read_manifest(&full_root).unwrap().unwrap();
+    assert_eq!(refreshed_rows, live_fact_rows(&full_root, &full_manifest));
+    full.stop_and_join();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn native_catalog_rules_refresh_skips_never_derivable_sessions_and_drains_rounds() {
+    let root = scratch("rules-repair-rounds");
+    let (options, rows, _) = catalog_native_fixture(&root, 68, true);
+    let index = crate::events::EventCache::path(&options.cache);
+    // `append_claude_step` extends native-cl-00, so only that session's Catalog
+    // source cohort moves away from its stored activity witness.
+    let mismatched_key = rows
+        .iter()
+        .find(|row| row.sources[0].path.ends_with("native-cl-00.jsonl"))
+        .unwrap()
+        .key
+        .clone();
+    let missing_key = rows
+        .iter()
+        .find(|row| row.harness == "claude" && row.key != mismatched_key)
+        .unwrap()
+        .key
+        .clone();
+    let mismatched_path = rows
+        .iter()
+        .find(|row| row.key == mismatched_key)
+        .unwrap()
+        .sources[0]
+        .path
+        .to_string_lossy()
+        .into_owned();
+    let missing_path = rows
+        .iter()
+        .find(|row| row.key == missing_key)
+        .unwrap()
+        .sources[0]
+        .path
+        .to_string_lossy()
+        .into_owned();
+
+    append_claude_step(&options, "rules-never-derivable");
+    let (mut pending_rows, pending_slots) = catalog_fixture_projection(&options);
+    pending_rows
+        .iter_mut()
+        .find(|row| row.key == mismatched_key)
+        .unwrap()
+        .session_activity = None;
+    let (mut store, _) = opened(&index);
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &pending_rows,
+            &pending_slots,
+            false,
+            CatalogWriter::Auto
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
+    let changed = store
+        .connection
+        .execute(
+            "UPDATE session_activity_projections SET rules_version=0",
+            [],
+        )
+        .unwrap();
+    assert!(changed > 66);
+    store
+        .connection
+        .execute(
+            "DELETE FROM session_activity_projections WHERE session_key=?1",
+            [&missing_key],
+        )
+        .unwrap();
+    let before = repairs(&store.connection).unwrap();
+    assert_eq!(before.len(), 64);
+    assert!(!before.contains(&missing_path));
+    assert!(!before.contains(&mismatched_path));
+    drop(store);
+
+    // More than 64 repairable sessions are stale, so qualification needs more
+    // than one repair round; the never-derivable ones must not block it.
+    crate::refresh_analytics_catalog(&options, || false).unwrap();
+
+    let (store, _) = opened(&index);
+    let stale_repairable: i64 = store
+        .connection
+        .query_row(
+            "SELECT COUNT(*) FROM session_activity_projections WHERE session_key NOT IN (?1,?2) AND rules_version<>?3",
+            params![missing_key, mismatched_key, crate::events::session_activity::ACTIVITY_RULES_VERSION],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale_repairable, 0);
+    let after = repairs(&store.connection).unwrap();
+    assert!(!after.contains(&missing_path));
+    assert!(!after.contains(&mismatched_path));
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
     page(
         c,
@@ -1570,7 +1785,7 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
 #[test]
 fn activity_pages_require_exact_sources_generation_rules_and_prices() {
     let root = scratch("activity-generation");
-    let (options, rows, slots) = catalog_native_fixture(&root, 2, true);
+    let (options, rows, _slots) = catalog_native_fixture(&root, 2, true);
     let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
     let row = rows.iter().find(|row| row.harness == "claude").unwrap();
     let initial = read(&store.connection, row);
@@ -1612,22 +1827,61 @@ fn activity_pages_require_exact_sources_generation_rules_and_prices() {
             .unwrap()
             .contains(&row.sources[0].path.to_string_lossy().into_owned())
     );
+    // If the source changes but no replacement activity is derivable, retain
+    // the stale generation as Pending without repeatedly requeueing it. The
+    // new Catalog source cohort is the durable proof that this rules repair
+    // already reached its only possible re-derivation attempt.
+    append_claude_step(&options, "rules-no-replacement");
+    let (mut pending_rows, pending_slots) = catalog_fixture_projection(&options);
+    pending_rows
+        .iter_mut()
+        .find(|candidate| candidate.key == row.key)
+        .unwrap()
+        .session_activity = None;
     assert_eq!(
-        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto)
-            .unwrap()
-            .0,
+        catalog_write(
+            &mut store,
+            &pending_rows,
+            &pending_slots,
+            false,
+            CatalogWriter::Auto
+        )
+        .unwrap()
+        .0,
         Outcome::Written
     );
-    assert_eq!(read(&store.connection, row), initial);
+    assert!(
+        repairs(&store.connection).unwrap().is_empty(),
+        "a stale generation with no replacement must not keep Catalog qualification pending"
+    );
+    let (restored_rows, restored_slots) = catalog_fixture_projection(&options);
+    let restored = restored_rows
+        .iter()
+        .find(|candidate| candidate.key == row.key)
+        .unwrap();
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &restored_rows,
+            &restored_slots,
+            false,
+            CatalogWriter::Auto
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
+    let restored_page = read(&store.connection, restored);
+    assert_eq!(restored_page.total, initial.total + 1);
     store
         .connection
         .execute(
             "UPDATE session_activity_steps SET pricing_fingerprint='mixed-price' WHERE session_key=?1 AND generation=?2 AND ordinal=0",
-            params![row.key, initial.generation],
+            params![restored.key, restored_page.generation],
         )
         .unwrap();
     assert!(
-        step_facts(&store.connection, row, &initial.generation)
+        step_facts(&store.connection, restored, &restored_page.generation)
             .unwrap()
             .is_none()
     );
