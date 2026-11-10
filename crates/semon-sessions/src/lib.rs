@@ -21,8 +21,7 @@ mod origin_projection;
 mod overview;
 mod overview_repair;
 pub use analytics_writer::{
-    AnalyticsWriterConfig, AnalyticsWriterHandle, AnalyticsWriterStatus, Handle,
-    analytics_store_root, start, start_analytics_writer,
+    AnalyticsWriterConfig, AnalyticsWriterStatus, Handle, analytics_store_root, start,
 };
 pub use causal_trace::session_causal_trace;
 pub(crate) use causal_trace::session_causal_trace_with_gate;

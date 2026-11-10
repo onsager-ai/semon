@@ -229,7 +229,7 @@ tables.
   The local `semon-sessions` writer service is an explicit lifecycle primitive:
   its namespace is caller-supplied, it opens a separate read-only index connection
   per cycle, and it is not enabled or started by a host yet. Its store-root helper
-  places the store beside the SQLite index, never inside the index file. A busy
+  uses `<index parent>/analytics-store`, never a path inside the SQLite index file. A busy
   lock is observable as a no-writer state; unsupported input latches a refusal
   without changing the index or a checkpoint, until a later notification retries.
 - **Cycle.** At most every 2 s, the writer reads the index change log and

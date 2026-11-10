@@ -249,7 +249,15 @@ impl<C: Clock> Store<C> {
     /// made a generation visible. Writers use this before retrying such an
     /// operation so they do not publish from a stale checkpoint.
     pub fn reload_manifest(&mut self) -> Result<()> {
-        let manifest = read_manifest_in(&self.analytics)?.unwrap_or_else(Manifest::empty);
+        let manifest = match read_manifest_in(&self.analytics)? {
+            Some(manifest) => manifest,
+            None if self.manifest.generation == 0 => Manifest::empty(),
+            None => {
+                return Err(Error::invalid(
+                    "published analytics manifest disappeared; preserve or export the store before recovery",
+                ));
+            }
+        };
         let live = match &manifest.live_map {
             Some(path) => read_live_map_file(&self.analytics.join(path))?,
             None => HashMap::new(),
@@ -907,6 +915,13 @@ mod tests {
             store.live_map(),
             &read_live_map(dir.path(), &expected).unwrap()
         );
+
+        std::fs::remove_file(dir.path().join("analytics/manifest.json")).unwrap();
+        let before_manifest = store.manifest().clone();
+        let before_live = store.live_map().clone();
+        assert!(matches!(store.reload_manifest(), Err(Error::Invalid(_))));
+        assert_eq!(store.manifest(), &before_manifest);
+        assert_eq!(store.live_map(), &before_live);
     }
 
     #[test]

@@ -87,6 +87,16 @@ struct State {
     published: u64,
     #[cfg(test)]
     input_attempts: u64,
+    #[cfg(test)]
+    retire_attempts: u64,
+    #[cfg(test)]
+    idle_waits: u64,
+    #[cfg(test)]
+    waiting: bool,
+    #[cfg(test)]
+    hold_publish: bool,
+    #[cfg(test)]
+    publish_held: bool,
 }
 
 struct Shared {
@@ -98,6 +108,20 @@ struct Shared {
 pub struct Handle {
     shared: Arc<Shared>,
     thread: Option<JoinHandle<()>>,
+}
+
+#[cfg(test)]
+pub(crate) struct PublishHold {
+    shared: Arc<Shared>,
+}
+
+#[cfg(test)]
+impl Drop for PublishHold {
+    fn drop(&mut self) {
+        let mut state = lock(&self.shared.state);
+        state.hold_publish = false;
+        self.shared.changed.notify_all();
+    }
 }
 
 impl Handle {
@@ -161,6 +185,81 @@ impl Handle {
     }
 
     #[cfg(test)]
+    pub(crate) fn wait_for_retire_attempts(&self, expected: u64) {
+        let mut state = lock(&self.shared.state);
+        while state.retire_attempts < expected && !state.stop {
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        assert!(
+            state.retire_attempts >= expected,
+            "writer stopped before retirement"
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_idle_wait(&self) {
+        let mut state = lock(&self.shared.state);
+        while !(state.waiting && state.status == AnalyticsWriterStatus::Idle) && !state.stop {
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        assert!(state.waiting && state.status == AnalyticsWriterStatus::Idle);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn idle_waits(&self) -> u64 {
+        lock(&self.shared.state).idle_waits
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_idle_wait_after(&self, previous: u64) {
+        let mut state = lock(&self.shared.state);
+        while state.idle_waits <= previous && !state.stop {
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        assert!(state.idle_waits > previous);
+    }
+
+    #[cfg(test)]
+    /// Lets an injected test clock wake a deadline wait after advancing time.
+    pub(crate) fn wake_for_clock(&self) {
+        self.shared.changed.notify_one();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_publish(&self) -> PublishHold {
+        let mut state = lock(&self.shared.state);
+        state.hold_publish = true;
+        PublishHold {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_publish_hold(&self) {
+        let mut state = lock(&self.shared.state);
+        while !state.publish_held && !state.stop {
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        assert!(state.publish_held);
+    }
+
+    #[cfg(test)]
     pub(crate) fn wait_for_refusal(&self) {
         let mut state = lock(&self.shared.state);
         while !matches!(state.status, AnalyticsWriterStatus::Refused { .. }) && !state.stop {
@@ -215,9 +314,8 @@ pub fn start(config: AnalyticsWriterConfig) -> Handle {
     start_with_clock(config, Arc::new(semon_asi::SystemClock))
 }
 
-/// Starts a writer with an injected clock. Public for deterministic consumers
-/// and tests; production callers normally use [`start_analytics_writer`].
-pub fn start_with_clock<C>(config: AnalyticsWriterConfig, clock: Arc<C>) -> Handle
+/// Starts a writer with an injected clock for deterministic crate tests.
+pub(crate) fn start_with_clock<C>(config: AnalyticsWriterConfig, clock: Arc<C>) -> Handle
 where
     C: Clock + Send + Sync + 'static,
 {
@@ -231,6 +329,16 @@ where
             published: 0,
             #[cfg(test)]
             input_attempts: 0,
+            #[cfg(test)]
+            retire_attempts: 0,
+            #[cfg(test)]
+            idle_waits: 0,
+            #[cfg(test)]
+            waiting: false,
+            #[cfg(test)]
+            hold_publish: false,
+            #[cfg(test)]
+            publish_held: false,
         }),
         changed: Condvar::new(),
     });
@@ -246,23 +354,144 @@ where
     }
 }
 
-/// Descriptive alias for callers that prefer the expanded name.
-pub type AnalyticsWriterHandle = Handle;
-
-/// Descriptive crate-root spelling for callers that prefer it.
-pub fn start_analytics_writer(config: AnalyticsWriterConfig) -> Handle {
-    start(config)
-}
-
-#[derive(Clone, Copy)]
-enum Work {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Operation {
     Open,
+    Reload(Resume),
     Publish,
     Compact,
     Retire,
-    ReloadPublish,
-    ReloadCompact,
-    ReloadRetire,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Resume {
+    Publish,
+    Compact,
+    Retire,
+}
+
+impl Resume {
+    fn operation(self) -> Operation {
+        match self {
+            Self::Publish => Operation::Publish,
+            Self::Compact => Operation::Compact,
+            Self::Retire => Operation::Retire,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct Scheduler {
+    pending: Option<Operation>,
+    refused: Option<Operation>,
+    next_cycle: i64,
+    next_retirement: i64,
+    retry_at: Option<i64>,
+    attempt: u32,
+}
+
+impl Scheduler {
+    fn new(now: i64) -> Self {
+        Self {
+            pending: None,
+            refused: None,
+            next_cycle: now,
+            next_retirement: now + duration_ms(RETIREMENT_CADENCE),
+            retry_at: None,
+            attempt: 0,
+        }
+    }
+
+    fn operation_due(
+        &mut self,
+        now: i64,
+        has_notification: bool,
+        has_store: bool,
+    ) -> Option<Operation> {
+        if let Some(refused) = self.refused {
+            if !has_notification {
+                return None;
+            }
+            self.refused = None;
+            self.pending = Some(refused);
+        }
+        if self.pending.is_none() {
+            self.pending = Some(if !has_store {
+                Operation::Open
+            } else if now >= self.next_retirement {
+                Operation::Retire
+            } else if has_notification {
+                Operation::Publish
+            } else {
+                return None;
+            });
+        }
+        let operation = self.pending.expect("selected pending operation");
+        let due = match operation {
+            Operation::Publish => self.retry_at.unwrap_or(now).max(self.next_cycle),
+            _ => self.retry_at.unwrap_or(now),
+        };
+        (now >= due).then_some(operation)
+    }
+
+    fn deadline(&self, has_notification: bool, has_store: bool) -> Option<i64> {
+        if self.refused.is_some() && !has_notification {
+            return None;
+        }
+        if let Some(operation) = self.pending {
+            return Some(match operation {
+                Operation::Publish => self
+                    .retry_at
+                    .unwrap_or(self.next_cycle)
+                    .max(self.next_cycle),
+                _ => self.retry_at.unwrap_or(0),
+            });
+        }
+        if !has_store {
+            return Some(0);
+        }
+        if has_notification {
+            Some(self.next_cycle.min(self.next_retirement))
+        } else {
+            Some(self.next_retirement)
+        }
+    }
+
+    fn succeeded(&mut self, operation: Operation, now: i64, interval: Duration) {
+        self.pending = match operation {
+            Operation::Open | Operation::Compact | Operation::Retire => None,
+            Operation::Reload(after) => Some(after.operation()),
+            Operation::Publish => Some(Operation::Compact),
+        };
+        if operation == Operation::Publish {
+            self.next_cycle = now + duration_ms(interval);
+        }
+        if operation == Operation::Retire {
+            self.next_retirement = now + duration_ms(RETIREMENT_CADENCE);
+        }
+        self.retry_at = None;
+        self.attempt = 0;
+    }
+
+    fn retry(&mut self, operation: Operation, now: i64) -> u32 {
+        self.pending = Some(operation);
+        self.refused = None;
+        self.attempt = self.attempt.saturating_add(1);
+        self.retry_at = Some(now + retry_delay(self.attempt));
+        self.attempt
+    }
+
+    fn refuse(&mut self, operation: Operation) {
+        self.pending = None;
+        self.refused = Some(operation);
+        self.retry_at = None;
+    }
+
+    fn no_writer(&mut self, now: i64) {
+        self.pending = Some(Operation::Open);
+        self.retry_at = Some(now + duration_ms(NO_WRITER_RETRY));
+        self.attempt = 0;
+    }
 }
 
 fn run<C: Clock + Send + Sync + 'static>(
@@ -271,102 +500,33 @@ fn run<C: Clock + Send + Sync + 'static>(
     shared: Arc<Shared>,
 ) {
     let mut store = None;
-    let mut retry = None;
-    let mut retry_attempt: u32 = 0;
-    let mut next_cycle = 0;
-    let mut next_retirement = clock.now_ms() + duration_ms(RETIREMENT_CADENCE);
-    let mut refused = false;
+    let mut scheduler = Scheduler::new(clock.now_ms());
 
-    loop {
-        let now = clock.now_ms();
-        let work = if refused {
-            if has_notification(&shared) {
-                refused = false;
-                Some(if store.is_some() {
-                    Work::Publish
-                } else {
-                    Work::Open
-                })
-            } else {
-                None
-            }
-        } else if let Some((when, work)) = retry {
-            (now >= when).then_some(work)
-        } else if store.is_none() {
-            Some(Work::Open)
-        } else if has_notification(&shared) && now >= next_cycle {
-            Some(Work::Publish)
-        } else if now >= next_retirement {
-            Some(Work::Retire)
-        } else {
-            None
-        };
-
-        let Some(work) = work else {
-            let deadline = retry.map(|(when, _)| when).unwrap_or_else(|| {
-                if refused {
-                    return now.saturating_add(duration_ms(NO_WRITER_RETRY));
-                }
-                if store.is_none() {
-                    now + duration_ms(NO_WRITER_RETRY)
-                } else if has_notification(&shared) {
-                    next_cycle
-                } else {
-                    next_retirement
-                }
-            });
-            if wait_until(&shared, &clock, deadline) {
-                break;
-            }
-            continue;
-        };
-
-        if stopped(&shared) {
-            break;
-        }
-        set_status(&shared, AnalyticsWriterStatus::Running);
-        retry = None;
-
-        match work {
-            Work::Open => match Store::open_with_clock(&config.store_root, Arc::clone(&clock)) {
+    while let Some((operation, notification)) =
+        next_operation(&shared, &clock, &mut scheduler, store.is_some())
+    {
+        match operation {
+            Operation::Open => match Store::open_with_clock(&config.store_root, Arc::clone(&clock))
+            {
                 Ok(opened) => {
                     store = Some(opened);
-                    retry_attempt = 0;
+                    scheduler.succeeded(operation, clock.now_ms(), config.interval);
                     set_status(&shared, AnalyticsWriterStatus::Idle);
                 }
                 Err(StoreError::WriterBusy) => {
+                    scheduler.no_writer(clock.now_ms());
                     set_status(&shared, AnalyticsWriterStatus::NoWriter);
-                    retry = Some((now + duration_ms(NO_WRITER_RETRY), Work::Open));
                 }
-                Err(error) if is_refusal(&error) => {
-                    set_status(
-                        &shared,
-                        AnalyticsWriterStatus::Refused {
-                            reason: error.to_string(),
-                        },
-                    );
-                    wait_for_notification(&shared);
-                    refused = true;
+                Err(error) if error.is_operational() => {
+                    retry_operation(&shared, &mut scheduler, operation, clock.now_ms());
                 }
-                Err(_error) => {
-                    retry_attempt = retry_attempt.saturating_add(1);
-                    set_status(
-                        &shared,
-                        AnalyticsWriterStatus::Retrying {
-                            attempt: retry_attempt,
-                        },
-                    );
-                    retry = Some((now + retry_delay(retry_attempt), Work::Open));
+                Err(error) => {
+                    refuse_operation(&shared, &mut scheduler, operation, error.to_string())
                 }
             },
-            Work::Publish => {
+            Operation::Publish => {
                 #[cfg(test)]
-                {
-                    let mut state = lock(&shared.state);
-                    state.input_attempts += 1;
-                    shared.changed.notify_all();
-                }
-                let notification = notification_count(&shared);
+                publish_started(&shared);
                 let result = match SqliteAnalyticsInput::open(
                     &config.index_path,
                     config.namespace.clone(),
@@ -381,146 +541,96 @@ fn run<C: Clock + Send + Sync + 'static>(
                 };
                 match result {
                     Ok(_) => {
+                        consume_notification(&shared, notification);
                         #[cfg(test)]
-                        {
-                            let mut state = lock(&shared.state);
-                            state.published += 1;
-                            shared.changed.notify_all();
-                        }
-                        consume(&shared, notification);
-                        retry_attempt = 0;
-                        next_cycle = now + duration_ms(config.interval);
-                        next_retirement = now + duration_ms(RETIREMENT_CADENCE);
+                        published(&shared);
+                        scheduler.succeeded(operation, clock.now_ms(), config.interval);
                         set_status(&shared, AnalyticsWriterStatus::Idle);
-                        retry = Some((now, Work::Compact));
                     }
-                    Err(PublishError::Input(error)) if is_input_refusal(&error) => {
-                        consume(&shared, notification);
-                        set_status(
-                            &shared,
-                            AnalyticsWriterStatus::Refused {
-                                reason: error.to_string(),
-                            },
-                        );
-                        refused = true;
+                    Err(PublishError::Input(error)) if is_input_operational(&error) => {
+                        consume_notification(&shared, notification);
+                        retry_operation(&shared, &mut scheduler, operation, clock.now_ms());
                     }
-                    Err(PublishError::Store(error)) if is_refusal(&error) => {
-                        set_status(
-                            &shared,
-                            AnalyticsWriterStatus::Refused {
-                                reason: error.to_string(),
-                            },
-                        );
-                        wait_for_notification(&shared);
-                        refused = true;
+                    Err(PublishError::Input(error)) => {
+                        consume_notification(&shared, notification);
+                        refuse_operation(&shared, &mut scheduler, operation, error.to_string());
                     }
-                    Err(error) => {
-                        retry_attempt = retry_attempt.saturating_add(1);
-                        set_status(
+                    Err(PublishError::Store(error)) if error.is_operational() => {
+                        consume_notification(&shared, notification);
+                        retry_operation(
                             &shared,
-                            AnalyticsWriterStatus::Retrying {
-                                attempt: retry_attempt,
-                            },
+                            &mut scheduler,
+                            Operation::Reload(Resume::Publish),
+                            clock.now_ms(),
                         );
-                        let retry_work = if matches!(error, PublishError::Store(_)) {
-                            Work::ReloadPublish
-                        } else {
-                            Work::Publish
-                        };
-                        retry = Some((now + retry_delay(retry_attempt), retry_work));
+                    }
+                    Err(PublishError::Store(error)) => {
+                        consume_notification(&shared, notification);
+                        refuse_operation(
+                            &shared,
+                            &mut scheduler,
+                            Operation::Reload(Resume::Publish),
+                            error.to_string(),
+                        );
                     }
                 }
             }
-            Work::Compact => match store
+            Operation::Compact => match store
                 .as_mut()
                 .expect("opened store")
                 .compact(&config.compaction_policy)
             {
                 Ok(_) => {
-                    retry_attempt = 0;
+                    scheduler.succeeded(operation, clock.now_ms(), config.interval);
                     set_status(&shared, AnalyticsWriterStatus::Idle);
                 }
-                Err(error) if is_refusal(&error) => {
-                    set_status(
-                        &shared,
-                        AnalyticsWriterStatus::Refused {
-                            reason: error.to_string(),
-                        },
-                    );
-                    wait_for_notification(&shared);
-                    refused = true;
-                }
-                Err(_error) => {
-                    retry_attempt = retry_attempt.saturating_add(1);
-                    set_status(
-                        &shared,
-                        AnalyticsWriterStatus::Retrying {
-                            attempt: retry_attempt,
-                        },
-                    );
-                    retry = Some((now + retry_delay(retry_attempt), Work::ReloadCompact));
-                }
+                Err(error) if error.is_operational() => retry_operation(
+                    &shared,
+                    &mut scheduler,
+                    Operation::Reload(Resume::Compact),
+                    clock.now_ms(),
+                ),
+                Err(error) => refuse_operation(
+                    &shared,
+                    &mut scheduler,
+                    Operation::Reload(Resume::Compact),
+                    error.to_string(),
+                ),
             },
-            Work::Retire => match store.as_mut().expect("opened store").retire() {
-                Ok(_) => {
-                    next_retirement = now + duration_ms(RETIREMENT_CADENCE);
-                    retry_attempt = 0;
-                    set_status(&shared, AnalyticsWriterStatus::Idle);
-                }
-                Err(error) if is_refusal(&error) => {
-                    set_status(
+            Operation::Retire => {
+                #[cfg(test)]
+                retirement_started(&shared);
+                match store.as_mut().expect("opened store").retire() {
+                    Ok(_) => {
+                        scheduler.succeeded(operation, clock.now_ms(), config.interval);
+                        set_status(&shared, AnalyticsWriterStatus::Idle);
+                    }
+                    Err(error) if error.is_operational() => retry_operation(
                         &shared,
-                        AnalyticsWriterStatus::Refused {
-                            reason: error.to_string(),
-                        },
-                    );
-                    wait_for_notification(&shared);
-                    refused = true;
-                }
-                Err(_error) => {
-                    retry_attempt = retry_attempt.saturating_add(1);
-                    set_status(
+                        &mut scheduler,
+                        Operation::Reload(Resume::Retire),
+                        clock.now_ms(),
+                    ),
+                    Err(error) => refuse_operation(
                         &shared,
-                        AnalyticsWriterStatus::Retrying {
-                            attempt: retry_attempt,
-                        },
-                    );
-                    retry = Some((now + retry_delay(retry_attempt), Work::ReloadRetire));
-                }
-            },
-            Work::ReloadPublish | Work::ReloadCompact | Work::ReloadRetire => {
-                let after_reload = match work {
-                    Work::ReloadPublish => Work::Publish,
-                    Work::ReloadCompact => Work::Compact,
-                    Work::ReloadRetire => Work::Retire,
-                    _ => unreachable!("matched reload work"),
-                };
-                match store.as_mut().expect("opened store").reload_manifest() {
-                    Ok(()) => {
-                        retry = Some((now, after_reload));
-                    }
-                    Err(error) if is_refusal(&error) => {
-                        set_status(
-                            &shared,
-                            AnalyticsWriterStatus::Refused {
-                                reason: error.to_string(),
-                            },
-                        );
-                        wait_for_notification(&shared);
-                        refused = true;
-                    }
-                    Err(_error) => {
-                        retry_attempt = retry_attempt.saturating_add(1);
-                        set_status(
-                            &shared,
-                            AnalyticsWriterStatus::Retrying {
-                                attempt: retry_attempt,
-                            },
-                        );
-                        retry = Some((now + retry_delay(retry_attempt), work));
-                    }
+                        &mut scheduler,
+                        Operation::Reload(Resume::Retire),
+                        error.to_string(),
+                    ),
                 }
             }
+            Operation::Reload(_) => match store.as_mut().expect("opened store").reload_manifest() {
+                Ok(()) => {
+                    scheduler.succeeded(operation, clock.now_ms(), config.interval);
+                    set_status(&shared, AnalyticsWriterStatus::Idle);
+                }
+                Err(error) if error.is_operational() => {
+                    retry_operation(&shared, &mut scheduler, operation, clock.now_ms());
+                }
+                Err(error) => {
+                    refuse_operation(&shared, &mut scheduler, operation, error.to_string())
+                }
+            },
         }
     }
     set_status(&shared, AnalyticsWriterStatus::Stopped);
@@ -534,28 +644,81 @@ fn target_versions() -> Versions {
     }
 }
 
-fn is_input_refusal(error: &SqliteError) -> bool {
-    matches!(error, SqliteError::InvalidQuery)
-        || matches!(
-            error.sqlite_error_code(),
-            Some(code)
-                if !matches!(
-                    code,
-                    ErrorCode::DatabaseBusy
-                        | ErrorCode::DatabaseLocked
-                        | ErrorCode::SystemIoFailure
-                        | ErrorCode::CannotOpen
-                )
-        )
+fn next_operation<C: Clock>(
+    shared: &Shared,
+    clock: &C,
+    scheduler: &mut Scheduler,
+    has_store: bool,
+) -> Option<(Operation, u64)> {
+    let mut state = lock(&shared.state);
+    loop {
+        if state.stop {
+            return None;
+        }
+        let now = clock.now_ms();
+        let has_notification = state.notifications != state.consumed;
+        if let Some(operation) = scheduler.operation_due(now, has_notification, has_store) {
+            #[cfg(test)]
+            {
+                state.waiting = false;
+            }
+            state.status = AnalyticsWriterStatus::Running;
+            shared.changed.notify_all();
+            return Some((operation, state.notifications));
+        }
+        #[cfg(test)]
+        {
+            state.waiting = true;
+            if state.status == AnalyticsWriterStatus::Idle {
+                state.idle_waits += 1;
+            }
+            shared.changed.notify_all();
+        }
+        match scheduler.deadline(has_notification, has_store) {
+            Some(deadline) if deadline > now => {
+                let remaining = (deadline - now).max(1) as u64;
+                let (next, _) = shared
+                    .changed
+                    .wait_timeout(state, Duration::from_millis(remaining))
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                state = next;
+            }
+            Some(_) => continue,
+            None => {
+                state = shared
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+        }
+    }
 }
 
-fn is_refusal(error: &StoreError) -> bool {
+fn retry_operation(shared: &Shared, scheduler: &mut Scheduler, operation: Operation, now: i64) {
+    let attempt = scheduler.retry(operation, now);
+    set_status(shared, AnalyticsWriterStatus::Retrying { attempt });
+}
+
+fn refuse_operation(
+    shared: &Shared,
+    scheduler: &mut Scheduler,
+    operation: Operation,
+    reason: String,
+) {
+    scheduler.refuse(operation);
+    set_status(shared, AnalyticsWriterStatus::Refused { reason });
+}
+
+fn is_input_operational(error: &SqliteError) -> bool {
     matches!(
-        error,
-        StoreError::Invalid(_)
-            | StoreError::Json(_)
-            | StoreError::Parquet(_)
-            | StoreError::Arrow(_)
+        error.sqlite_error_code(),
+        Some(
+            ErrorCode::DatabaseBusy
+                | ErrorCode::DatabaseLocked
+                | ErrorCode::SystemIoFailure
+                | ErrorCode::DiskFull
+                | ErrorCode::CannotOpen
+        )
     )
 }
 
@@ -579,40 +742,39 @@ fn set_status(shared: &Shared, status: AnalyticsWriterStatus) {
     shared.changed.notify_all();
 }
 
-fn stopped(shared: &Shared) -> bool {
-    lock(&shared.state).stop
-}
-
-fn notification_count(shared: &Shared) -> u64 {
-    lock(&shared.state).notifications
-}
-
-fn has_notification(shared: &Shared) -> bool {
-    let state = lock(&shared.state);
-    state.notifications != state.consumed
-}
-
-fn consume(shared: &Shared, notification: u64) {
+fn consume_notification(shared: &Shared, notification: u64) {
     let mut state = lock(&shared.state);
     state.consumed = notification;
 }
 
-fn wait_for_notification(shared: &Shared) {
+#[cfg(test)]
+fn publish_started(shared: &Shared) {
     let mut state = lock(&shared.state);
-    state.consumed = state.notifications;
+    state.input_attempts += 1;
+    state.publish_held = state.hold_publish;
+    shared.changed.notify_all();
+    while state.hold_publish && !state.stop {
+        state = shared
+            .changed
+            .wait(state)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    state.publish_held = false;
+    shared.changed.notify_all();
 }
 
-fn wait_until<C: Clock>(shared: &Shared, clock: &C, deadline: i64) -> bool {
+#[cfg(test)]
+fn published(shared: &Shared) {
     let mut state = lock(&shared.state);
-    while !state.stop && clock.now_ms() < deadline {
-        let remaining = (deadline - clock.now_ms()).max(1) as u64;
-        let (next, _) = shared
-            .changed
-            .wait_timeout(state, Duration::from_millis(remaining))
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state = next;
-    }
-    state.stop
+    state.published += 1;
+    shared.changed.notify_all();
+}
+
+#[cfg(test)]
+fn retirement_started(shared: &Shared) {
+    let mut state = lock(&shared.state);
+    state.retire_attempts += 1;
+    shared.changed.notify_all();
 }
 
 #[cfg(test)]

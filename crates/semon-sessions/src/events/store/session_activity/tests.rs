@@ -19,6 +19,7 @@ use std::{
         Arc,
         atomic::{AtomicI64, Ordering},
     },
+    time::Duration,
 };
 
 struct ManualClock(AtomicI64);
@@ -126,15 +127,31 @@ fn analytics_writer_publishes_fixture_rows_once_per_debounce_interval() {
     assert_eq!(handle.published(), 1);
     let first = semon_asi::read_manifest(&store_root).unwrap().unwrap();
     assert_eq!(first.generation, 1);
+    handle.wait_for_idle_wait();
+    let idle_wait = handle.idle_waits();
     for _ in 0..8 {
         handle.notify();
     }
+    handle.wait_for_idle_wait_after(idle_wait);
     assert_eq!(handle.published(), 1);
     clock.advance(2_000);
     handle.notify();
     handle.wait_for_publishes(2);
+    handle.wait_for_idle_wait();
+    let hold = handle.hold_publish();
+    clock.advance(2_000);
+    handle.notify();
+    handle.wait_for_publish_hold();
+    handle.notify();
+    drop(hold);
+    handle.wait_for_publishes(3);
+    handle.wait_for_idle_wait();
+    assert_eq!(handle.published(), 3);
+    clock.advance(2_000);
+    handle.wake_for_clock();
+    handle.wait_for_publishes(4);
     let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
-    assert_eq!(manifest.generation, 2);
+    assert_eq!(manifest.generation, 4);
     assert!(manifest.checkpoints.contains_key("fixture-machine"));
     assert!(
         !semon_asi::read_live_map(&store_root, &manifest)
@@ -192,6 +209,125 @@ fn analytics_writer_restart_resumes_from_the_checkpoint_with_only_the_delta() {
         2
     );
     second.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_refuses_a_broken_existing_index_then_recovers_on_notify() {
+    let root = scratch("analytics-writer-refusal");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+    rusqlite::Connection::open(&index)
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    let backup = root.join("index-before-refusal.sqlite3");
+    std::fs::copy(&index, &backup).unwrap();
+
+    let store_root = root.join("analytics-store");
+    let clock = ManualClock::new(0);
+    let handle = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&clock),
+    );
+    handle.notify();
+    handle.wait_for_publishes(1);
+    handle.wait_for_idle_wait();
+    let before = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+
+    rusqlite::Connection::open(&index)
+        .unwrap()
+        .execute("DELETE FROM meta WHERE key='incarnation'", [])
+        .unwrap();
+    let broken = std::fs::read(&index).unwrap();
+    clock.advance(2_000);
+    handle.notify();
+    handle.wait_for_input_attempts(2);
+    handle.wait_for_refusal();
+    assert_eq!(std::fs::read(&index).unwrap(), broken);
+    assert_eq!(
+        semon_asi::read_manifest(&store_root)
+            .unwrap()
+            .unwrap()
+            .checkpoints,
+        before.checkpoints
+    );
+
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", index.display()));
+    }
+    std::fs::copy(&backup, &index).unwrap();
+    clock.advance(2_000);
+    handle.notify();
+    handle.wait_for_publishes(2);
+    handle.wait_for_input_attempts(3);
+    assert_eq!(handle.input_attempts(), 3);
+    assert!(
+        semon_asi::read_manifest(&store_root)
+            .unwrap()
+            .unwrap()
+            .generation
+            > before.generation
+    );
+    handle.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_retires_during_sustained_publication() {
+    let root = scratch("analytics-writer-retirement");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let store_root = root.join("analytics-store");
+    let clock = ManualClock::new(0);
+    let mut config = AnalyticsWriterConfig::new("fixture-machine", &index, &store_root);
+    config.interval = Duration::from_secs(60);
+    let handle = start_with_clock(config, Arc::clone(&clock));
+    for published in 1..=11 {
+        handle.notify();
+        handle.wait_for_publishes(published);
+        handle.wait_for_idle_wait();
+        if published != 11 {
+            clock.advance(60_000);
+        }
+    }
+    handle.wait_for_retire_attempts(1);
+    handle.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_retries_an_operational_sqlite_busy_error() {
+    let root = scratch("analytics-writer-busy");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let lock = rusqlite::Connection::open(&index).unwrap();
+    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let store_root = root.join("analytics-store");
+    let clock = ManualClock::new(0);
+    let handle = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&clock),
+    );
+    handle.notify();
+    handle.wait_for_input_attempts(1);
+    handle.wait_for_status(crate::AnalyticsWriterStatus::Retrying { attempt: 1 });
+    lock.execute_batch("ROLLBACK").unwrap();
+    clock.advance(1_000);
+    handle.notify();
+    handle.wait_for_publishes(1);
+    handle.stop_and_join();
     std::fs::remove_dir_all(root).unwrap();
 }
 
