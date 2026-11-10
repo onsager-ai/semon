@@ -8239,7 +8239,7 @@ mod tests {
             store.connection.query_row(
                 "SELECT json_extract(metadata,'$.activity_analytics.family.member_sessions') FROM session_catalog WHERE session_key=?1",
                 ["native-cx-01"],
-                |row| row.get::<_, usize>(0),
+                |row| row.get::<_, i64>(0),
             ).unwrap()
         };
         assert_eq!(
