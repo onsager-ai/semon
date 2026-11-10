@@ -3,7 +3,12 @@
 #[path = "../../../tests/support/native_home_cli.rs"]
 mod fixture;
 
-use std::process::Output;
+use std::{
+    collections::BTreeSet,
+    fs,
+    path::{Path, PathBuf},
+    process::Output,
+};
 
 use serde_json::Value;
 
@@ -28,15 +33,36 @@ fn materialize(home: &fixture::Fixture) -> Output {
         .unwrap()
 }
 
+fn recursive_listing(root: &Path) -> BTreeSet<PathBuf> {
+    fn visit(root: &Path, directory: &Path, entries: &mut BTreeSet<PathBuf>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            entries.insert(path.strip_prefix(root).unwrap().to_owned());
+            if entry.file_type().unwrap().is_dir() {
+                visit(root, &path, entries);
+            }
+        }
+    }
+
+    let mut entries = BTreeSet::new();
+    if root.exists() {
+        visit(root, root, &mut entries);
+    }
+    entries
+}
+
 #[test]
 fn coverage_reads_the_published_live_rows_in_text_and_json() {
     let home = fixture::Fixture::new();
+    let state = home.root.join("state");
     let materialized = materialize(&home);
     assert!(
         materialized.status.success(),
         "{}",
         String::from_utf8_lossy(&materialized.stderr)
     );
+    let before_coverage = recursive_listing(&state);
 
     let text = coverage(&home, false);
     assert!(
@@ -48,6 +74,7 @@ fn coverage_reads_the_published_live_rows_in_text_and_json() {
     assert!(text.contains("PUBLISHED live-row coverage"));
     assert!(text.contains("writer TARGETS:"));
     assert!(text.contains("source-missing UIDs: 0"));
+    assert_eq!(recursive_listing(&state), before_coverage);
 
     let json = coverage(&home, true);
     assert!(
@@ -55,6 +82,7 @@ fn coverage_reads_the_published_live_rows_in_text_and_json() {
         "{}",
         String::from_utf8_lossy(&json.stderr)
     );
+    assert_eq!(recursive_listing(&state), before_coverage);
     let report: Value = serde_json::from_slice(&json.stdout).unwrap();
     assert_eq!(report["scope"], "PUBLISHED live-row coverage");
     assert_eq!(report["source_missing_uids"], 0);
@@ -74,6 +102,8 @@ fn coverage_reads_the_published_live_rows_in_text_and_json() {
 #[test]
 fn coverage_refuses_a_missing_store_without_creating_state() {
     let home = fixture::Fixture::new();
+    let state = home.root.join("state");
+    let before_coverage = recursive_listing(&state);
     let output = coverage(&home, false);
     assert!(!output.status.success());
     assert!(
@@ -81,6 +111,5 @@ fn coverage_refuses_a_missing_store_without_creating_state() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!home.root.join("state").exists());
-    assert!(!home.root.join("semon-state").exists());
+    assert_eq!(recursive_listing(&state), before_coverage);
 }

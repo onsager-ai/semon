@@ -77,6 +77,7 @@ pub fn read(root: &Path) -> Result<Option<CoverageReport>> {
     };
     validate_live_map(root, &manifest)?;
     let live = read_live_map(root, &manifest)?;
+    validate_source_missing(&manifest, &live)?;
     let mut groups = BTreeMap::new();
     for entry in manifest.files_of(FACT_SESSION.name) {
         let path = published_file(root, &entry.path, FACT_SESSION.name)?;
@@ -99,8 +100,34 @@ pub fn read(root: &Path) -> Result<Option<CoverageReport>> {
 }
 
 fn validate_live_map(root: &Path, manifest: &Manifest) -> Result<()> {
-    if let Some(path) = &manifest.live_map {
-        published_file(root, path, "live")?;
+    match &manifest.live_map {
+        Some(path) => {
+            published_file(root, path, "live")?;
+        }
+        None if manifest.generation > 0
+            || manifest
+                .files
+                .iter()
+                .any(|file| file.table.starts_with("fact_")) =>
+        {
+            return Err(Error::invalid(
+                "published manifest has facts or a generation but no live-map reference",
+            ));
+        }
+        None => {}
+    }
+    Ok(())
+}
+
+fn validate_source_missing(manifest: &Manifest, live: &HashMap<String, i64>) -> Result<()> {
+    if let Some(uid) = manifest
+        .source_missing
+        .keys()
+        .find(|uid| !live.contains_key(uid.as_str()))
+    {
+        return Err(Error::invalid(format!(
+            "source-missing UID {uid} is not live in the published live map"
+        )));
     }
     Ok(())
 }
@@ -259,18 +286,25 @@ mod tests {
             text(rows.iter().map(|row| row.computation.to_owned()).collect()),
         );
         for (column, values) in [
-            ("step_count", rows.iter().map(|row| row.steps).collect()),
+            (
+                "step_count",
+                rows.iter().map(|row| row.steps).collect::<Vec<_>>(),
+            ),
             (
                 "exclusive_step_count",
-                rows.iter().map(|row| row.exclusive_steps).collect(),
+                rows.iter()
+                    .map(|row| row.exclusive_steps)
+                    .collect::<Vec<_>>(),
             ),
             (
                 "unknown_step_count",
-                rows.iter().map(|row| row.unknown_steps).collect(),
+                rows.iter().map(|row| row.unknown_steps).collect::<Vec<_>>(),
             ),
             (
                 "unclassified_step_count",
-                rows.iter().map(|row| row.unclassified_steps).collect(),
+                rows.iter()
+                    .map(|row| row.unclassified_steps)
+                    .collect::<Vec<_>>(),
             ),
         ] {
             batch = replace_column(
@@ -403,5 +437,93 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn accepts_an_empty_manifest_without_a_live_map() {
+        let directory = tempfile::tempdir().unwrap();
+        let analytics = directory.path().join("analytics");
+        std::fs::create_dir(&analytics).unwrap();
+        std::fs::write(
+            analytics.join("manifest.json"),
+            serde_json::to_vec(&Manifest::empty()).unwrap(),
+        )
+        .unwrap();
+
+        let report = read(directory.path()).unwrap().unwrap();
+        assert_eq!(report.manifest_generation, 0);
+        assert!(report.groups.is_empty());
+    }
+
+    #[test]
+    fn refuses_published_facts_without_a_live_map() {
+        let directory = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = Store::open_with_clock(directory.path(), clock).unwrap();
+        store
+            .publish(&update(
+                &[Row {
+                    session_uid: "origin/a",
+                    transform: 1,
+                    rules: 1,
+                    price: "price",
+                    taxonomy: None,
+                    source: "complete",
+                    computation: "current",
+                    steps: 1,
+                    exclusive_steps: 1,
+                    unknown_steps: 0,
+                    unclassified_steps: 0,
+                }],
+                Versions::default(),
+            ))
+            .unwrap();
+        let mut manifest = read_manifest(directory.path()).unwrap().unwrap();
+        manifest.live_map = None;
+        std::fs::write(
+            directory.path().join("analytics/manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let error = read(directory.path()).unwrap_err();
+        assert!(error.to_string().contains("no live-map reference"));
+    }
+
+    #[test]
+    fn refuses_source_missing_uids_that_are_not_live() {
+        let directory = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = Store::open_with_clock(directory.path(), clock).unwrap();
+        store
+            .publish(&update(
+                &[Row {
+                    session_uid: "origin/a",
+                    transform: 1,
+                    rules: 1,
+                    price: "price",
+                    taxonomy: None,
+                    source: "complete",
+                    computation: "current",
+                    steps: 1,
+                    exclusive_steps: 1,
+                    unknown_steps: 0,
+                    unclassified_steps: 0,
+                }],
+                Versions::default(),
+            ))
+            .unwrap();
+        let mut manifest = read_manifest(directory.path()).unwrap().unwrap();
+        manifest
+            .source_missing
+            .insert("origin/not-live".into(), SourceMissing { detected_at: 12 });
+        std::fs::write(
+            directory.path().join("analytics/manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let error = read(directory.path()).unwrap_err();
+        assert!(error.to_string().contains("origin/not-live is not live"));
     }
 }
