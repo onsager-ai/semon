@@ -291,14 +291,7 @@ fn deduplicate_dimension_rows(table: &Table, rows: Vec<Row>) -> crate::Result<Ve
         match dimension_row_position(table, &unique, &row)? {
             Some(index) if unique[index] == row => {}
             Some(index) if table.name == "dim_price" => {
-                if unique[index].get("usd_per_unit") != row.get("usd_per_unit") {
-                    return Err(Error::invalid(
-                        "conflicting dim_price rates for one logical key",
-                    ));
-                }
-                if price_observation_order(&row)? < price_observation_order(&unique[index])? {
-                    unique[index] = row;
-                }
+                merge_price_observation(&mut unique[index], &row)?;
             }
             Some(_) => {
                 return Err(Error::invalid(format!(
@@ -346,10 +339,37 @@ fn dimension_row_position(
         .position(|row| row.get(table.columns[0].name) == Some(key)))
 }
 
-// Fetch time is excluded from price_version. Retain the first observation of
-// an unchanged rate, including its valid_to. Break timestamp ties consistently
-// so the result does not depend on admission order.
-fn price_observation_order(row: &Row) -> crate::Result<(i64, i64, Option<i64>)> {
+// Fetch time is excluded from price_version. Merge each bound independently so
+// observations commute across batches and publication cycles. Once closed, an
+// interval cannot be reopened by an observation that still considers it current.
+fn merge_price_observation(current: &mut Row, observation: &Row) -> crate::Result<()> {
+    if current.get("usd_per_unit") != observation.get("usd_per_unit")
+        || current.get("unit") != observation.get("unit")
+    {
+        return Err(Error::invalid(
+            "conflicting dim_price rates for one logical key",
+        ));
+    }
+    let (learned_at, valid_from, valid_to) = price_observation_timestamps(current)?;
+    let (other_learned_at, other_valid_from, other_valid_to) =
+        price_observation_timestamps(observation)?;
+    let valid_to = match (valid_to, other_valid_to) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    };
+    current.insert(
+        "learned_at",
+        Cell::Timestamp(Some(learned_at.min(other_learned_at))),
+    );
+    current.insert(
+        "valid_from",
+        Cell::Timestamp(Some(valid_from.min(other_valid_from))),
+    );
+    current.insert("valid_to", Cell::Timestamp(valid_to));
+    Ok(())
+}
+
+fn price_observation_timestamps(row: &Row) -> crate::Result<(i64, i64, Option<i64>)> {
     match (
         row.get("learned_at"),
         row.get("valid_from"),
@@ -673,6 +693,42 @@ mod tests {
         price.valid_from = learned_at;
         price.usd_per_unit = rate;
         admitted
+    }
+
+    fn publish_price_observations(observations: &[AdmittedSession], per_cycle: usize) -> Vec<Row> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path());
+        let mut input = QueuedInput::new(observations.chunks(per_cycle).enumerate().map(
+            |(index, observations)| {
+                batch(
+                    &format!("inc:{index}"),
+                    Reconciliation::Incremental,
+                    observations
+                        .iter()
+                        .cloned()
+                        .map(|session| SessionChange::Admitted(Box::new(session)))
+                        .collect(),
+                )
+            },
+        ));
+        while !input.batches.is_empty() {
+            let before_rows = dimension_rows(&store, &DIM_PRICE).unwrap();
+            let before_files: Vec<_> = store.manifest().files_of("dim_price").cloned().collect();
+            publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+            if dimension_rows(&store, &DIM_PRICE).unwrap() == before_rows {
+                assert_eq!(
+                    store
+                        .manifest()
+                        .files_of("dim_price")
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                    before_files,
+                    "unchanged price state must not publish a dimension batch",
+                );
+            }
+        }
+        assert_eq!(store.live_map().len(), observations.len());
+        dimension_rows(&store, &DIM_PRICE).unwrap()
     }
 
     #[test]
@@ -1038,6 +1094,69 @@ mod tests {
     }
 
     #[test]
+    fn shared_local_repositories_deduplicate_within_and_across_cycles() {
+        for separate_cycles in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = open(dir.path());
+            // The adapter has mapped both checkouts to their shared origin path.
+            let changes = ["one", "two"].map(|id| {
+                let mut admitted = session(id, Some("step"), "shell");
+                admitted.session.repo = Repo {
+                    key: "local-base".into(),
+                    repo_id: None,
+                    local_path: Some("/srv/base.git".into()),
+                    display_name: "local".into(),
+                };
+                SessionChange::Admitted(Box::new(admitted))
+            });
+            let batches = if separate_cycles {
+                changes
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, change)| {
+                        batch(
+                            &format!("inc:{index}"),
+                            Reconciliation::Incremental,
+                            vec![change],
+                        )
+                    })
+                    .collect()
+            } else {
+                vec![batch(
+                    "inc:1",
+                    Reconciliation::ReplaceNamespace,
+                    changes.into(),
+                )]
+            };
+            let mut input = QueuedInput::new(batches);
+            publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+            let first_repo_files: Vec<_> = store.manifest().files_of("dim_repo").cloned().collect();
+            if separate_cycles {
+                publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+            }
+            let repos = dimension_rows(&store, &DIM_REPO).unwrap();
+            assert_eq!(repos.len(), 1);
+            assert_eq!(repos[0]["repo_key"], Cell::Text(Some("local-base".into())));
+            assert_eq!(
+                repos[0]["repo_path"],
+                Cell::Text(Some("/srv/base.git".into()))
+            );
+            assert_eq!(repos[0]["repo_id"], Cell::Text(None));
+            assert_eq!(repos[0]["display_name"], Cell::Text(Some("local".into())));
+            assert_eq!(
+                store
+                    .manifest()
+                    .files_of("dim_repo")
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                first_repo_files,
+            );
+            assert_eq!(store.live_map().len(), 2);
+            assert_eq!(live_steps(&store).len(), 2);
+        }
+    }
+
+    #[test]
     fn unchanged_price_rates_keep_the_first_observation_in_either_order() {
         for separate_cycles in [false, true] {
             for reverse in [false, true] {
@@ -1160,24 +1279,106 @@ mod tests {
     }
 
     #[test]
-    fn price_observation_timestamp_ties_are_deterministic() {
-        let admitted = priced_session("one", 100, 1.0);
-        let original = project(&admitted).unwrap().tables["dim_price"][0].clone();
-        let mut later_validity = original.clone();
-        later_validity.insert("valid_from", Cell::Timestamp(Some(150)));
-        let mut later_end = original.clone();
-        later_end.insert("valid_to", Cell::Timestamp(Some(200)));
-        for later in [later_validity, later_end] {
-            for rows in [
-                vec![original.clone(), later.clone()],
-                vec![later, original.clone()],
-            ] {
+    fn price_intervals_stay_closed_with_older_or_tied_open_observations() {
+        for open_learned_at in [50, 100, 150] {
+            let mut closed = priced_session("closed", 100, 1.0);
+            closed.prices[0].valid_to = Some(200);
+            let mut open = priced_session("open", open_learned_at, 1.0);
+            open.prices[0].valid_from = 100;
+            let mut expected = project(&closed).unwrap().tables["dim_price"][0].clone();
+            expected.insert(
+                "learned_at",
+                Cell::Timestamp(Some(open_learned_at.min(100))),
+            );
+            for observations in [[closed.clone(), open.clone()], [open, closed]] {
+                for per_cycle in [1, 2] {
+                    assert_eq!(
+                        publish_price_observations(&observations, per_cycle),
+                        vec![expected.clone()],
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn price_closures_keep_the_earlier_end_in_either_order() {
+        let mut earlier_end = priced_session("earlier-end", 200, 1.0);
+        earlier_end.prices[0].valid_from = 100;
+        earlier_end.prices[0].valid_to = Some(250);
+        let mut later_end = priced_session("later-end", 100, 1.0);
+        later_end.prices[0].valid_to = Some(300);
+        let mut expected = project(&later_end).unwrap().tables["dim_price"][0].clone();
+        expected.insert("valid_to", Cell::Timestamp(Some(250)));
+        for observations in [
+            [earlier_end.clone(), later_end.clone()],
+            [later_end, earlier_end],
+        ] {
+            for per_cycle in [1, 2] {
                 assert_eq!(
-                    deduplicate_dimension_rows(&DIM_PRICE, rows).unwrap(),
-                    vec![original.clone()],
+                    publish_price_observations(&observations, per_cycle),
+                    vec![expected.clone()],
                 );
             }
         }
+    }
+
+    #[test]
+    fn price_intervals_remain_open_when_every_observation_is_open() {
+        let mut early_learned = priced_session("early-learned", 50, 1.0);
+        early_learned.prices[0].valid_from = 150;
+        let early_validity = priced_session("early-validity", 100, 1.0);
+        let mut expected = project(&early_validity).unwrap().tables["dim_price"][0].clone();
+        expected.insert("learned_at", Cell::Timestamp(Some(50)));
+        for observations in [
+            [early_learned.clone(), early_validity.clone()],
+            [early_validity, early_learned],
+        ] {
+            for per_cycle in [1, 2] {
+                assert_eq!(
+                    publish_price_observations(&observations, per_cycle),
+                    vec![expected.clone()],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn price_observation_permutations_agree_within_and_across_cycles() {
+        let mut first = priced_session("first", 200, 1.0);
+        first.prices[0].valid_from = 100;
+        first.prices[0].valid_to = Some(300);
+        let mut second = priced_session("second", 50, 1.0);
+        second.prices[0].valid_from = 150;
+        let mut third = priced_session("third", 150, 1.0);
+        third.prices[0].valid_from = 80;
+        third.prices[0].valid_to = Some(250);
+        let observations = [first, second, third];
+        let mut expected = project(&observations[0]).unwrap().tables["dim_price"][0].clone();
+        expected.insert("learned_at", Cell::Timestamp(Some(50)));
+        expected.insert("valid_from", Cell::Timestamp(Some(80)));
+        expected.insert("valid_to", Cell::Timestamp(Some(250)));
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let ordered = order.map(|index| observations[index].clone());
+            for per_cycle in [1, 2, 3] {
+                assert_eq!(
+                    publish_price_observations(&ordered, per_cycle),
+                    vec![expected.clone()],
+                );
+            }
+        }
+        assert_eq!(
+            deduplicate_dimension_rows(&DIM_PRICE, vec![expected.clone(), expected.clone()])
+                .unwrap(),
+            vec![expected],
+        );
     }
 
     #[test]

@@ -613,7 +613,7 @@ fn repo(tx: &rusqlite::Transaction<'_>, row: &CatalogRow) -> rusqlite::Result<Re
         Some(RepoId::Remote(id)) => Ok(Repo {
             key: id.clone(),
             repo_id: Some(id.clone()),
-            local_path: row.repo.clone(),
+            local_path: None,
             // A remote identity can contain path separators, which are valid
             // in its Key-class field but forbidden by the display-name
             // contract. Keep the display label deliberately non-identifying.
@@ -629,13 +629,13 @@ fn repo(tx: &rusqlite::Transaction<'_>, row: &CatalogRow) -> rusqlite::Result<Re
                 |record| record.get(0),
             )?,
             repo_id: None,
-            local_path: row.repo.clone(),
+            local_path: Some(path.clone()),
             display_name: "local".into(),
         }),
         Some(RepoId::Unknown) | None => Ok(Repo {
             key: UNKNOWN_REPO_KEY.into(),
             repo_id: None,
-            local_path: row.repo.clone(),
+            local_path: None,
             display_name: "unknown".into(),
         }),
     }
@@ -904,6 +904,67 @@ mod tests {
             "sources": []
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn repository_dimensions_depend_on_identity_not_checkout() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE silver_repo_identity(\
+                    repo_path TEXT PRIMARY KEY, repo_key TEXT NOT NULL UNIQUE\
+                 ) STRICT;\
+                 INSERT INTO silver_repo_identity VALUES('/srv/base.git','local-base');\
+                 INSERT INTO silver_repo_identity VALUES('file:///srv/base.git','local-file');",
+            )
+            .unwrap();
+        let tx = transaction(&mut connection);
+        for (identity, key, repo_id, local_path, display_name) in [
+            (
+                Some(RepoId::Path("/srv/base.git".into())),
+                "local-base",
+                None,
+                Some("/srv/base.git"),
+                "local",
+            ),
+            (
+                Some(RepoId::Path("file:///srv/base.git".into())),
+                "local-file",
+                None,
+                Some("file:///srv/base.git"),
+                "local",
+            ),
+            (
+                Some(RepoId::Remote("example.test/team/base".into())),
+                "example.test/team/base",
+                Some("example.test/team/base"),
+                None,
+                "remote repository",
+            ),
+            (
+                Some(RepoId::Unknown),
+                UNKNOWN_REPO_KEY,
+                None,
+                None,
+                "unknown",
+            ),
+            (None, UNKNOWN_REPO_KEY, None, None, "unknown"),
+        ] {
+            let mut one = catalog_row("one", "codex", "one", None, "session");
+            one.repo = Some("/work/one".into());
+            one.repo_id = identity.clone();
+            let mut two = catalog_row("two", "codex", "two", None, "session");
+            two.repo = Some("/work/two".into());
+            two.repo_id = identity;
+            let expected = Repo {
+                key: key.into(),
+                repo_id: repo_id.map(str::to_owned),
+                local_path: local_path.map(str::to_owned),
+                display_name: display_name.into(),
+            };
+            assert_eq!(repo(&tx, &one).unwrap(), expected);
+            assert_eq!(repo(&tx, &two).unwrap(), expected);
+        }
     }
 
     #[test]

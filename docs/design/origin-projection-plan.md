@@ -98,13 +98,16 @@ prune them. Clarify `Versions` documentation: manifest versions are writer
 targets, while untouched sessions retain recorded versions.
 
 Shared repository keys (remote identities and `unknown`) carry no machine-local
-path; only a repository with its own local identity projects `repo_path`.
+path; only a repository with its own local identity projects `repo_path`, using
+the path identity its key is bound to rather than a per-checkout path.
 Price dimensions merge by logical rate key, including price version and all rate
-selectors. An unchanged rate retains its first learned observation and that
-row's validity interval, independent of arrival order; conflicting rates under
+selectors. An unchanged rate merges the minimum `learned_at`, minimum `valid_from`
+and minimum non-null `valid_to` independently; the end is null only when every
+observation is open. Closed intervals never reopen, independent of arrival order
+or batch boundaries; conflicting rates under
 one key refuse the cycle without advancing the checkpoint. Distinct price
 versions remain separate SCD2 rows. See the [store contract](asi-store.md) for
-the complete key and timestamp tie ordering.
+the complete key and observation merge contract.
 
 A `ReplaceNamespace` inventory marks any prior live session under that exact
 encoded namespace component followed by `/` which it does not mention as

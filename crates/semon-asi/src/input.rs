@@ -185,6 +185,8 @@ pub enum Status {
 pub struct Repo {
     pub key: String,
     pub repo_id: Option<String>,
+    /// The path identity the key is bound to; identical for every session with
+    /// the same key; None for remote and unknown.
     pub local_path: Option<String>,
     pub display_name: String,
 }
