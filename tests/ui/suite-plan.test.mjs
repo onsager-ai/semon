@@ -61,10 +61,12 @@ test('the workflow matrix and functional condition reach every declared group', 
     new URL('../../.github/workflows/ui.yml', import.meta.url),
     'utf8',
   );
-  const matrix = workflow
-    .match(/suite: \[([^\]]+)\]/)[1]
-    .split(',')
-    .map((s) => s.trim());
+  const matrixLine = workflow.match(/^        suite: (.+)$/m)[1];
+  const matrix = [
+    ...matrixLine.matchAll(
+      /"((?:navigation|transcript|shell|interaction|accessibility|live|order-phone|order-desktop-light|order-desktop-dark|performance|transport))"/g,
+    ),
+  ].map(([, suite]) => suite);
   const functional = JSON.parse(workflow.match(/contains\(fromJSON\('([^']+)'\)/)[1]);
   assert.deepEqual(functional.sort(), Object.keys(GROUPS).sort());
   assert.equal(new Set(matrix).size, matrix.length);
