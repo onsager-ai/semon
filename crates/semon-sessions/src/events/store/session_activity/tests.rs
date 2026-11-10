@@ -3,9 +3,55 @@ use super::super::tests::{
 };
 use super::*;
 use crate::SqliteAnalyticsInput;
+use crate::analytics_writer::{AnalyticsWriterConfig, start};
 use crate::events::session_activity::classify::Change;
 use crate::events::session_activity::{ActivityStepId, Ownership, TimedInput, UsageOwner};
 use semon_asi::{AnalyticsInput, Reconciliation, SessionChange};
+use std::{
+    thread,
+    time::{Duration, Instant},
+};
+
+fn wait_for_writer_manifest(root: &std::path::Path) -> semon_asi::Manifest {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        if let Some(manifest) = semon_asi::read_manifest(root).unwrap() {
+            return manifest;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "analytics writer did not publish"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn analytics_writer_publishes_admitted_fixture_rows() {
+    let root = scratch("analytics-writer-publishes");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let store_root = root.join("analytics-store");
+    let handle = start(AnalyticsWriterConfig::new(
+        "fixture-machine",
+        &index,
+        &store_root,
+    ));
+    handle.notify();
+    let manifest = wait_for_writer_manifest(&store_root);
+    assert!(manifest.checkpoints.contains_key("fixture-machine"));
+    assert!(
+        !semon_asi::read_live_map(&store_root, &manifest)
+            .unwrap()
+            .is_empty()
+    );
+    handle.stop_and_join();
+    fs::remove_dir_all(root).unwrap();
+}
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
     page(
