@@ -12,7 +12,7 @@ use std::{
 use serde_json::{Value, json};
 
 use super::*;
-use crate::ViewerCore;
+use crate::{ViewerCore, model::SlotKind};
 
 #[test]
 fn staged_io_json_is_original_io_shape_with_only_additive_stage() {

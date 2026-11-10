@@ -621,10 +621,9 @@ pub(super) fn session(
 ) -> Result<Option<Value>, QueryError> {
     let mut args = args.clone();
     args["_session"] = Value::Bool(true);
-    read_inner(options, key, &args, provider, mode, now, None)
+    read_inner(options, key, &args, provider, mode, now)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn read_inner(
     options: &Options,
     key: &str,

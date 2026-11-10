@@ -302,6 +302,15 @@ mod tests {
             None,
             "a response needs no answer"
         );
+        let resources = ask(
+            &mut query,
+            r#"{"jsonrpc":"2.0","id":4,"method":"resources/list"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resources,
+            json!({"jsonrpc":"2.0","id":4,"result":{"resources":[]}})
+        );
         let mut code = |line: &str| {
             let reply = handle(&mut query, line.as_bytes()).unwrap();
             (reply["id"].clone(), reply["error"]["code"].as_i64())
@@ -320,15 +329,6 @@ mod tests {
         assert_eq!(
             code(r#"{"jsonrpc":"2.0","id":3}"#),
             (json!(3), Some(INVALID_REQUEST))
-        );
-        let resources = ask(
-            &mut query,
-            r#"{"jsonrpc":"2.0","id":4,"method":"resources/list"}"#,
-        )
-        .unwrap();
-        assert_eq!(
-            resources,
-            json!({"jsonrpc":"2.0","id":4,"result":{"resources":[]}})
         );
         assert_eq!(
             code(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope"}}"#),

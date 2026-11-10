@@ -22,7 +22,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     Options,
-    model::{SessionFacts, SlotKind, Transcript, now_ms},
+    model::{SessionFacts, Transcript, now_ms},
     native_evidence::SessionSources,
     tx,
     union::{Owner, QueryRead},
