@@ -16,10 +16,12 @@ use serde_json::Value;
 
 mod analytics;
 mod causal_trace;
+mod origin_projection;
 mod overview;
 mod overview_repair;
 pub use causal_trace::session_causal_trace;
 pub(crate) use causal_trace::session_causal_trace_with_gate;
+pub use origin_projection::SqliteAnalyticsInput;
 pub(crate) use overview::session_home_details_with_gate;
 pub use overview::{
     OverviewSource, overview_source_key, session_home_details_with_mode, session_overview_reply,

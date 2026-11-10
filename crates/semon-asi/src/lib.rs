@@ -2,6 +2,7 @@
 
 pub mod error;
 pub mod governance;
+pub mod input;
 pub mod schema;
 
 pub use error::{Error, Result};
@@ -12,3 +13,4 @@ pub use governance::{
     project_derived_row, provider_egress_allowed, sensitivity_floor, serialize_coverage_witness,
     serialize_governed_row,
 };
+pub use input::{AdmittedBatch, AdmittedSession, AnalyticsInput, SessionChange};
