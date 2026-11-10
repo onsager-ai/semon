@@ -235,7 +235,7 @@ tables.
   Store refusals also latch until a new notification; each refusal consumes only
   the notification snapshot captured before its operation, preserving notifications
   received during that operation.
-- **Cycle.** At most every 2 s, the writer reads the index change log and
+- **Cycle.** By default at most once every 2 s (the caller selects the interval), the writer reads the index change log and
   recomputes every touched session **whole**. It doesn't patch tails: a
   following step can change an earlier step's duration, and a late record can
   change older rows. Per-cycle work is proportional to the touched sessions'

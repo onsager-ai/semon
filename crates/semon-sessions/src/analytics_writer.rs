@@ -439,7 +439,7 @@ impl Scheduler {
             publication_after_retirement: None,
             refused: None,
             next_cycle: now,
-            next_retirement: now + duration_ms(RETIREMENT_CADENCE),
+            next_retirement: now.saturating_add(duration_ms(RETIREMENT_CADENCE)),
             retry_at: None,
             attempt: 0,
         }
@@ -522,7 +522,7 @@ impl Scheduler {
             Operation::Publish => Some(Operation::Compact),
         };
         if operation == Operation::Retire {
-            self.next_retirement = now + duration_ms(RETIREMENT_CADENCE);
+            self.next_retirement = now.saturating_add(duration_ms(RETIREMENT_CADENCE));
         }
         self.retry_at = None;
         // Reload is only a barrier: the operation it resumes has not recovered.
@@ -540,14 +540,14 @@ impl Scheduler {
     fn publication_attempted(&mut self, now: i64, interval: Duration) {
         // Even an error may follow a visible manifest rename. Conservatively
         // space every attempt, including input failures, before any reload.
-        self.next_cycle = now + duration_ms(interval);
+        self.next_cycle = now.saturating_add(duration_ms(interval));
     }
 
     fn retry(&mut self, operation: Operation, now: i64) -> u32 {
         self.pending = Some(operation);
         self.refused = None;
         self.attempt = self.attempt.saturating_add(1);
-        self.retry_at = Some(now + retry_delay(self.attempt));
+        self.retry_at = Some(now.saturating_add(retry_delay(self.attempt)));
         self.attempt
     }
 
@@ -559,7 +559,7 @@ impl Scheduler {
 
     fn no_writer(&mut self, now: i64) {
         self.pending = Some(Operation::Open);
-        self.retry_at = Some(now + duration_ms(NO_WRITER_RETRY));
+        self.retry_at = Some(now.saturating_add(duration_ms(NO_WRITER_RETRY)));
         self.attempt = 0;
     }
 }
@@ -965,6 +965,14 @@ mod tests {
             assert_eq!(scheduler.attempt, 0);
             assert_eq!(scheduler.retry(reload, now), 1);
         }
+    }
+
+    #[test]
+    fn scheduler_deadlines_saturate_for_an_extreme_interval() {
+        let mut scheduler = Scheduler::new(i64::MAX - 1);
+        scheduler.publication_attempted(i64::MAX - 1, Duration::MAX);
+        assert_eq!(scheduler.next_cycle, i64::MAX);
+        assert_eq!(scheduler.operation_due(i64::MAX - 1, true, true), None);
     }
 
     #[test]
