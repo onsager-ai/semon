@@ -127,7 +127,7 @@ test('infrastructure has one foundation owner and touch checks have one browser 
     assert.ok(foundation.includes(`tests/ui/checks/${file}.test.mjs`), file);
   assert.match(foundation, /npm --prefix tests\/ui ci --no-audit --no-fund/);
   assert.match(build, /needs: foundation/);
-  assert.match(checks, /needs: build/);
+  assert.match(checks, /needs: \[classify, build\]/);
   assert.doesNotMatch(checks, /name: Browser-check infrastructure regression tests/);
   assert.match(checks, /name: Install pinned UI consumer tooling/);
   assert.doesNotMatch(foundation, /tap-hit\.test\.mjs/);
