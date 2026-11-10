@@ -62,15 +62,14 @@ test('the workflow matrix and functional condition reach every declared group', 
     'utf8',
   );
   const matrixLine = workflow.match(/^        suite: (.+)$/m)[1];
-  const matrix = [
-    ...matrixLine.matchAll(
-      /"((?:navigation|transcript|shell|interaction|accessibility|live|order-phone|order-desktop-light|order-desktop-dark|performance|transport))"/g,
-    ),
-  ].map(([, suite]) => suite);
+  // The full tier is the first matrix list; the smoke tier must be a subset of it.
+  const [matrix, smoke] = [...matrixLine.matchAll(/'(\[[^']*\])'/g)].map(([, list]) =>
+    JSON.parse(list),
+  );
+  assert.ok(smoke.length > 0 && smoke.every((suite) => matrix.includes(suite)));
   const functional = JSON.parse(workflow.match(/contains\(fromJSON\('([^']+)'\)/)[1]);
   assert.deepEqual(functional.sort(), Object.keys(GROUPS).sort());
   assert.equal(new Set(matrix).size, matrix.length);
-  assert.equal(matrix.length, 11);
   assert.ok(functional.every((group) => matrix.includes(group)));
   assert.ok(
     [

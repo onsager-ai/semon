@@ -430,10 +430,7 @@ jobs:
         run: |
           test "$CLASSIFIER_RESULT" = success
           case "$VIEWER_TIER" in
-            full)
-              test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
-              ;;
-            smoke)
+            full|smoke)
               test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
               ;;
             none)
