@@ -8,35 +8,9 @@ use duckdb::{Config, Connection, params_from_iter};
 use serde_json::{Value, json};
 
 use super::{Column, DATA_NOTICE, Failure, QueryResult, Request, ast};
+use crate::reference::SEMANTIC_VIEWS;
 use crate::schema::{ASI_SCHEMA_VERSION, Kind, TABLES, Type};
 use crate::store::{Manifest, read_manifest};
-
-pub struct SemanticView {
-    pub name: &'static str,
-    pub sql: &'static str,
-}
-
-/// Versioned together with the query engine; reusable by the schema surface.
-/// Spend is at step grain, never multiplied by a tool-call join. Missing prices
-/// remain visible as a count, and never silently contribute zero spend.
-pub const SEMANTIC_VIEWS: &[SemanticView] = &[
-    SemanticView {
-        name: "cost_by_day",
-        sql: "SELECT date_key, repo_key, model_key, price_version, sum(usd_est) FILTER (WHERE price_status = 'priced') AS usd_est, count(*) FILTER (WHERE price_status = 'unpriced') AS unpriced_steps FROM fact_step WHERE usage_owner = 'exclusive' GROUP BY ALL",
-    },
-    SemanticView {
-        name: "step_failure",
-        sql: "SELECT s.*, coalesce(t.tool_calls, 0) AS tool_calls FROM fact_step s LEFT JOIN (SELECT step_uid, count(*) AS tool_calls FROM fact_tool_call GROUP BY step_uid) t USING (step_uid) WHERE s.ok = false",
-    },
-    SemanticView {
-        name: "lane_session",
-        sql: "SELECT lane_root_uid, session_uid, parent_session_uid, role, repo_key, status, started_at, ended_at FROM dim_session",
-    },
-    SemanticView {
-        name: "current_label",
-        sql: "SELECT * FROM fact_label QUALIFY row_number() OVER (PARTITION BY target_type, target_uid, field ORDER BY starts_with(labeller, 'human:') DESC, revision DESC, created_at DESC, label_id DESC) = 1",
-    },
-];
 
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
