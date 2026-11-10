@@ -7,6 +7,10 @@
 
 use std::collections::BTreeMap;
 
+/// Version of the pure ASI projection. It is independent of the native Event
+/// Index parser/cache version.
+pub const ANALYTICS_TRANSFORM_VERSION: u32 = 1;
+
 /// Reads one namespace of admitted activity evidence.
 ///
 /// `checkpoint` is deliberately opaque to `semon-asi`.  An implementation
@@ -25,9 +29,19 @@ pub struct AdmittedBatch {
     pub namespace: String,
     /// Implementation-defined incarnation and sequence checkpoint.
     pub checkpoint: String,
+    /// A new index incarnation replaces the complete namespace inventory.
+    /// Consumers must reconcile absent prior sessions rather than treating the
+    /// batch as another incremental patch.
+    pub reconciliation: Reconciliation,
     /// Changed sessions, explicit removals, and availability observations in
     /// sequence order.  An admitted session with no steps is still `Admitted`.
     pub changes: Vec<SessionChange>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reconciliation {
+    Incremental,
+    ReplaceNamespace,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -39,7 +53,13 @@ pub enum SessionChange {
     Pending { session_uid: String },
     /// The last admitted source cohort is unavailable.  This does not touch or
     /// remove the prior facts; it only records source availability.
-    SourceMissing { session_uid: String },
+    SourceMissing {
+        session_uid: String,
+        /// True when SQLite retains a complete admitted generation at the
+        /// origin. It does not assert this analytics store has ever published
+        /// that session: consumers only mark existing live rows missing.
+        retained_at_origin: bool,
+    },
     /// The source cohort is complete again.  The accompanying admitted change,
     /// if any, owns replacement rows.
     SourceRestored { session_uid: String },
@@ -57,9 +77,10 @@ pub struct AdmittedSession {
     pub session: Session,
     pub steps: Vec<Step>,
     pub compactions: Vec<Compaction>,
-    /// The exact historical price rows referenced by `steps`.  It is empty
-    /// only when every step is unpriced; callers must not fill it from current
-    /// rates.
+    /// Every projected step carried a complete StepFacts usage observation.
+    pub usage_complete: bool,
+    /// The exact historical price rows referenced by `steps`. It is empty only
+    /// when every step is unpriced; callers must not fill it from current rates.
     pub prices: Vec<Price>,
 }
 
@@ -181,7 +202,7 @@ pub struct BillingUsage {
     pub cache_read_tokens: u64,
     pub cache_write_5m_tokens: u64,
     pub cache_write_1h_tokens: u64,
-    pub reasoning_tokens: u64,
+    pub reasoning_tokens: Option<u64>,
     pub web_search_requests: u64,
     pub speed: Option<String>,
     pub service_tier: Option<String>,

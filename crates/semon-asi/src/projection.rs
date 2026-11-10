@@ -190,7 +190,10 @@ fn step_row(session: &AdmittedSession, step: &Step, timestamp: Option<i64>) -> R
             "cache_write_1h_tokens",
             int_u64(step.billing.cache_write_1h_tokens)?,
         ),
-        ("reasoning_tokens", int_u64(step.billing.reasoning_tokens)?),
+        (
+            "reasoning_tokens",
+            int_opt_u64(step.billing.reasoning_tokens)?,
+        ),
         (
             "web_search_requests",
             int_u64(step.billing.web_search_requests)?,
@@ -211,6 +214,22 @@ fn step_row(session: &AdmittedSession, step: &Step, timestamp: Option<i64>) -> R
         ("model_ms", int_opt_u64(step.model_ms)?),
         ("tool_ms", int_opt_u64(step.tool_ms)?),
         ("usd_est", float(step.cost.usd_est)),
+        (
+            "input_usd",
+            float(step.cost.components.get("input").copied()),
+        ),
+        (
+            "cache_read_usd",
+            float(step.cost.components.get("cache_read").copied()),
+        ),
+        (
+            "cache_write_usd",
+            float(step.cost.components.get("cache_write").copied()),
+        ),
+        (
+            "output_usd",
+            float(step.cost.components.get("output").copied()),
+        ),
         (
             "price_status",
             text(if step.cost.usd_est.is_some() {
@@ -242,6 +261,8 @@ fn session_row(session: &AdmittedSession) -> Result<Row> {
     let priced = sum_float(exclusive.iter().filter_map(|step| step.cost.usd_est));
     let all_priced = exclusive.iter().all(|step| step.cost.usd_est.is_some());
     let model_ms = complete_sum(session.steps.iter().map(|step| step.model_ms))?;
+    let reasoning_tokens =
+        complete_sum(exclusive.iter().map(|step| step.billing.reasoning_tokens))?;
     let failure_count = session
         .steps
         .iter()
@@ -273,10 +294,7 @@ fn session_row(session: &AdmittedSession) -> Result<Row> {
             "cache_write_1h_tokens",
             token(|step| step.billing.cache_write_1h_tokens)?,
         ),
-        (
-            "reasoning_tokens",
-            token(|step| step.billing.reasoning_tokens)?,
-        ),
+        ("reasoning_tokens", int_opt_u64(reasoning_tokens)?),
         (
             "web_search_requests",
             token(|step| step.billing.web_search_requests)?,
@@ -287,7 +305,25 @@ fn session_row(session: &AdmittedSession) -> Result<Row> {
         ("model_ms", int_opt_u64(model_ms)?),
         ("step_count", int_u64(session.steps.len() as u64)?),
         ("failure_count", int_u64(failure_count as u64)?),
-        ("usage_complete", boolean(Some(true))),
+        ("usage_complete", boolean(Some(session.usage_complete))),
+        ("source_status", text("complete")),
+        ("computation_status", text("current")),
+        (
+            "exclusive_step_count",
+            int_u64(session.versions.coverage.exclusive_step_count)?,
+        ),
+        (
+            "unknown_step_count",
+            int_u64(session.versions.coverage.unknown_step_count)?,
+        ),
+        (
+            "unclassified_step_count",
+            int_u64(session.versions.coverage.unclassified_step_count)?,
+        ),
+        (
+            "taxonomy_version",
+            int_opt(session.versions.taxonomy.map(i64::from)),
+        ),
         (
             "transform_version",
             int_u64(u64::from(session.versions.transform))?,
@@ -697,6 +733,7 @@ mod tests {
             },
             steps,
             compactions: Vec::new(),
+            usage_complete: true,
             prices: vec![Price {
                 price_version: "historical-price".into(),
                 provider: "openai".into(),

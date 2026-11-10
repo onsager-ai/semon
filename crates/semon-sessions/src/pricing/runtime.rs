@@ -37,6 +37,176 @@ pub(crate) struct EffectiveTable {
     providers: BTreeMap<String, BTreeMap<String, Row>>,
 }
 
+/// A rate from the exact effective table which priced an admitted generation.
+/// It is a read model, never a request to calculate a new valuation.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RecordedRate {
+    pub(crate) fingerprint: String,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) kind: &'static str,
+    pub(crate) tier: Option<String>,
+    pub(crate) speed: Option<String>,
+    pub(crate) threshold_tokens: Option<u64>,
+    pub(crate) unit: &'static str,
+    pub(crate) usd_per_unit: f64,
+    pub(crate) learned_at: i64,
+}
+
+struct RateContext<'a> {
+    fingerprint: &'a str,
+    provider: &'a str,
+    model: &'a str,
+    speed: Option<&'a str>,
+    learned_at: i64,
+}
+
+/// Serialize the full effective table with the activity generation.  A later
+/// reader must use this payload rather than the mutable process-global table.
+pub(crate) fn recorded_snapshot(table: &EffectiveTable) -> String {
+    serde_json::to_string(table).expect("effective pricing table serializes")
+}
+
+/// Read an exact recorded table. Invalid snapshots fail rather than falling
+/// back to a current rate table.
+pub(crate) fn recorded_rates(snapshot: &str) -> Result<Vec<RecordedRate>, serde_json::Error> {
+    let table: EffectiveTable = serde_json::from_str(snapshot)?;
+    table.validate().map_err(serde_json::Error::io)?;
+    let mut fingerprinted = table.clone();
+    fingerprinted.seal().map_err(serde_json::Error::io)?;
+    if fingerprinted.fingerprint != table.fingerprint {
+        return Err(serde_json::Error::io(invalid(
+            "pricing snapshot fingerprint mismatch",
+        )));
+    }
+    let learned_at = i64::try_from(table.fetched_at)
+        .ok()
+        .and_then(|seconds| seconds.checked_mul(1_000))
+        .unwrap_or(0);
+    let mut rates = Vec::new();
+    for (provider, models) in &table.providers {
+        for (model, row) in models {
+            let context = RateContext {
+                fingerprint: &table.fingerprint,
+                provider,
+                model,
+                speed: None,
+                learned_at,
+            };
+            append_rates(&mut rates, &context, row.price, None);
+            if let Some(fast) = row.price.fast {
+                let price = match fast {
+                    FastPrice::Rates { rates: fast } => Price {
+                        input: fast.input,
+                        output: fast.output,
+                        cache_read: fast.cache_read,
+                        cache_write_5m: fast.cache_write_5m,
+                        cache_write_1h: fast.cache_write_1h,
+                        long_context: fast.long_context,
+                        fast: None,
+                        web_search_per_1k: row.price.web_search_per_1k,
+                    },
+                    FastPrice::Multiplier { multiplier } => scaled(row.price, multiplier),
+                };
+                append_rates(
+                    &mut rates,
+                    &RateContext {
+                        speed: Some("fast"),
+                        ..context
+                    },
+                    price,
+                    None,
+                );
+            }
+        }
+    }
+    Ok(rates)
+}
+
+fn scaled(mut price: Price, multiplier: f64) -> Price {
+    price.input = price.input.map(|rate| rate * multiplier);
+    price.output = price.output.map(|rate| rate * multiplier);
+    price.cache_read = price.cache_read.map(|rate| rate * multiplier);
+    price.cache_write_5m = price.cache_write_5m.map(|rate| rate * multiplier);
+    price.cache_write_1h = price.cache_write_1h.map(|rate| rate * multiplier);
+    price.long_context = price.long_context.map(|mut tier| {
+        tier.input = tier.input.map(|rate| rate * multiplier);
+        tier.output = tier.output.map(|rate| rate * multiplier);
+        tier.cache_read = tier.cache_read.map(|rate| rate * multiplier);
+        tier.cache_write_5m = tier.cache_write_5m.map(|rate| rate * multiplier);
+        tier.cache_write_1h = tier.cache_write_1h.map(|rate| rate * multiplier);
+        tier
+    });
+    price.fast = None;
+    price
+}
+
+fn append_rates(
+    rates: &mut Vec<RecordedRate>,
+    context: &RateContext<'_>,
+    price: Price,
+    tier: Option<&LongContextPrice>,
+) {
+    let (price, tier_name, threshold) = match tier {
+        Some(tier) => (
+            Price {
+                input: tier.input,
+                output: tier.output,
+                cache_read: tier.cache_read,
+                cache_write_5m: tier.cache_write_5m,
+                cache_write_1h: tier.cache_write_1h,
+                long_context: None,
+                fast: None,
+                web_search_per_1k: price.web_search_per_1k,
+            },
+            Some("long_context".into()),
+            Some(tier.threshold_tokens),
+        ),
+        None => (price, None, None),
+    };
+    for (kind, rate) in [
+        ("input", price.input),
+        ("output", price.output),
+        ("cache_read", price.cache_read),
+        ("cache_write_5m", price.cache_write_5m),
+        ("cache_write_1h", price.cache_write_1h),
+    ] {
+        if let Some(usd_per_unit) = rate {
+            rates.push(RecordedRate {
+                fingerprint: context.fingerprint.into(),
+                provider: context.provider.into(),
+                model: context.model.into(),
+                kind,
+                tier: tier_name.clone(),
+                speed: context.speed.map(Into::into),
+                threshold_tokens: threshold,
+                unit: "mtok",
+                usd_per_unit,
+                learned_at: context.learned_at,
+            });
+        }
+    }
+    if let Some(rate) = price.web_search_per_1k {
+        rates.push(RecordedRate {
+            fingerprint: context.fingerprint.into(),
+            provider: context.provider.into(),
+            model: context.model.into(),
+            kind: "web_search_request",
+            tier: tier_name,
+            speed: context.speed.map(Into::into),
+            threshold_tokens: threshold,
+            unit: "request",
+            usd_per_unit: rate / 1_000.0,
+            learned_at: context.learned_at,
+        });
+    }
+    if tier.is_none()
+        && let Some(long) = price.long_context
+    {
+        append_rates(rates, context, price, Some(&long));
+    }
+}
+
 // Bump when model alias or provider resolution rules change.
 const LOOKUP_RULES_VERSION: u32 = 2;
 
@@ -1563,6 +1733,43 @@ mod tests {
             super::super::calculate_cost_with(&[message], &[], |_| Some(p)).usd,
             None
         );
+    }
+
+    #[test]
+    fn recorded_snapshot_keeps_historical_rates_after_a_later_table_changes() {
+        let before = table(fixture());
+        let snapshot = recorded_snapshot(&before);
+        let old_input = recorded_rates(&snapshot)
+            .unwrap()
+            .into_iter()
+            .find(|rate| {
+                rate.provider == "openai"
+                    && rate.model == "gpt-6.1-sol"
+                    && rate.kind == "input"
+                    && rate.speed.is_none()
+                    && rate.tier.is_none()
+            })
+            .unwrap();
+
+        let mut changed = fixture();
+        changed["openai"]["models"]["gpt-6.1-sol"]["cost"]["input"] = Value::from(99.0);
+        let after = table(changed);
+        assert_ne!(before.fingerprint, after.fingerprint);
+
+        let historical = recorded_rates(&snapshot)
+            .unwrap()
+            .into_iter()
+            .find(|rate| {
+                rate.provider == "openai"
+                    && rate.model == "gpt-6.1-sol"
+                    && rate.kind == "input"
+                    && rate.speed.is_none()
+                    && rate.tier.is_none()
+            })
+            .unwrap();
+        assert_eq!(historical.fingerprint, before.fingerprint);
+        assert_eq!(historical.usd_per_unit, old_input.usd_per_unit);
+        assert_ne!(historical.usd_per_unit, 99.0);
     }
 
     struct Offline(io::Result<Vec<u8>>);

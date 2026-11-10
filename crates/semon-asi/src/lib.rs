@@ -14,5 +14,8 @@ pub use governance::{
     project_derived_row, provider_egress_allowed, sensitivity_floor, serialize_coverage_witness,
     serialize_governed_row,
 };
-pub use input::{AdmittedBatch, AdmittedSession, AnalyticsInput, SessionChange};
+pub use input::{
+    ANALYTICS_TRANSFORM_VERSION, AdmittedBatch, AdmittedSession, AnalyticsInput, Reconciliation,
+    SessionChange,
+};
 pub use projection::{Cell, ProjectedSession, Row, project};

@@ -249,7 +249,7 @@ fn emit_catalog_publish_attempt(
 // the per-database storage version stamp (current stores do not run storage
 // DDL), the ledger epoch on source ledgers and published sources, and compact
 // activity summaries for bounded family publication.
-pub(crate) const SCHEMA_VERSION: i64 = 43;
+pub(crate) const SCHEMA_VERSION: i64 = 45;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -361,6 +361,15 @@ CREATE TABLE IF NOT EXISTS silver_session_state (
     session_key TEXT PRIMARY KEY,
     digest TEXT NOT NULL,
     repo_id TEXT
+) STRICT;
+CREATE TABLE IF NOT EXISTS silver_session_identity (
+    session_key TEXT PRIMARY KEY,
+    harness TEXT NOT NULL,
+    native_session_id TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS silver_repo_identity (
+    repo_path TEXT PRIMARY KEY,
+    repo_key TEXT NOT NULL UNIQUE
 ) STRICT;
 CREATE TABLE IF NOT EXISTS silver_change (
     seq INTEGER PRIMARY KEY,
@@ -4644,12 +4653,14 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT usage_ready FROM native_usage_sources LIMIT 0",
         "SELECT tree_root FROM native_tree_repairs LIMIT 0",
         "SELECT source_generation FROM session_slot_projections LIMIT 0",
-        "SELECT source_generation,generation,rules_version,pricing_fingerprint,total,summary,preview FROM session_activity_projections LIMIT 0",
+        "SELECT source_generation,generation,rules_version,pricing_fingerprint,pricing_snapshot,total,summary,preview FROM session_activity_projections LIMIT 0",
         "SELECT generation,ordinal,metadata,waste_kind,waste_category,empty_search FROM session_activity_steps LIMIT 0",
         "SELECT generation,identity,metadata FROM session_activity_facts LIMIT 0",
         "SELECT generation,ordinal,metadata FROM session_activity_compactions LIMIT 0",
         "SELECT seq,session_key,kind FROM silver_change LIMIT 0",
         "SELECT session_key,digest,repo_id FROM silver_session_state LIMIT 0",
+        "SELECT session_key,harness,native_session_id FROM silver_session_identity LIMIT 0",
+        "SELECT repo_path,repo_key FROM silver_repo_identity LIMIT 0",
         "SELECT metadata FROM session_history_catalog LIMIT 0",
         "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
     ] {

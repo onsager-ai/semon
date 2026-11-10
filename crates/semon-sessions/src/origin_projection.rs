@@ -9,9 +9,9 @@ use std::{collections::BTreeMap, path::Path};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use semon_asi::input::{
     Activity, AdmittedBatch, AdmittedSession, AnalyticsInput, BillingUsage, Compaction,
-    ContextBand, Coverage, Model, ParentMethod, RecordedCost, RecordedVersions, Repo, Role,
-    Session, SessionChange, Source, SourceWitness, Status, Step, ToolCall, Trigger, UsageOwner,
-    WasteKind,
+    ContextBand, Coverage, Model, ParentMethod, Price, PriceUnit, RateKind, Reconciliation,
+    RecordedCost, RecordedVersions, Repo, Role, Session, SessionChange, Source, SourceWitness,
+    Status, Step, ToolCall, Trigger, UsageOwner, WasteKind,
 };
 
 use crate::{
@@ -62,7 +62,9 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                 let mut changed = BTreeMap::<String, String>::new();
                 if full {
                     let mut statement = tx.prepare(
-                        "SELECT session_key FROM session_activity_projections ORDER BY session_key",
+                        "SELECT session_key FROM session_catalog WHERE lifecycle='current' \
+                         UNION SELECT session_key FROM session_activity_projections \
+                         ORDER BY session_key",
                     )?;
                     for key in statement.query_map([], |row| row.get::<_, String>(0))? {
                         changed.insert(key?, "changed".into());
@@ -84,16 +86,22 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                         return Err(rusqlite::Error::InvalidQuery);
                     }
                     let Some(row) = catalog_row(tx, &key)? else {
-                        result.push(SessionChange::SourceMissing { session_uid: uid });
+                        result.push(SessionChange::Pending { session_uid: uid });
                         continue;
                     };
                     if row.lifecycle != CatalogLifecycle::Current {
-                        result.push(SessionChange::SourceMissing { session_uid: uid });
+                        result.push(SessionChange::SourceMissing {
+                            session_uid: uid,
+                            retained_at_origin: true,
+                        });
                         continue;
                     }
                     match crate::events::store::session_activity::source_missing(tx, &key)? {
                         Some(true) => {
-                            result.push(SessionChange::SourceMissing { session_uid: uid });
+                            result.push(SessionChange::SourceMissing {
+                                session_uid: uid,
+                                retained_at_origin: true,
+                            });
                             continue;
                         }
                         None => {
@@ -135,16 +143,20 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                         return Err(rusqlite::Error::InvalidQuery);
                     }
                     let witness = source_witness(tx, &key)?;
+                    let prices = prices(tx, &key, &header.generation, &price.fingerprint)?;
                     result.push(SessionChange::SourceRestored { session_uid: uid });
                     result.push(SessionChange::Admitted(admitted(
                         tx,
                         &namespace,
-                        row,
-                        witness,
-                        price.fingerprint.clone(),
-                        &header.generation,
-                        steps,
-                        facts,
+                        AdmittedEvidence {
+                            row,
+                            witness,
+                            price_version: price.fingerprint.clone(),
+                            generation: &header.generation,
+                            steps,
+                            facts,
+                            prices,
+                        },
                     )?));
                 }
                 let sequence = tx.query_row(
@@ -155,11 +167,69 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                 Ok(AdmittedBatch {
                     namespace,
                     checkpoint: encode_checkpoint(incarnation, sequence),
+                    reconciliation: if full {
+                        Reconciliation::ReplaceNamespace
+                    } else {
+                        Reconciliation::Incremental
+                    },
                     changes: result,
                 })
             },
         )
     }
+}
+
+fn prices(
+    tx: &rusqlite::Transaction<'_>,
+    key: &str,
+    generation: &str,
+    fingerprint: &str,
+) -> rusqlite::Result<Vec<Price>> {
+    let snapshot: String = tx.query_row(
+        "SELECT pricing_snapshot FROM session_activity_projections \
+         WHERE session_key=?1 AND generation=?2 AND pricing_fingerprint=?3",
+        params![key, generation, fingerprint],
+        |row| row.get(0),
+    )?;
+    let rates = crate::pricing::runtime::recorded_rates(&snapshot)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
+    rates
+        .into_iter()
+        .map(|rate| {
+            if rate.fingerprint != fingerprint {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let rate_kind = match rate.kind {
+                "input" => RateKind::Input,
+                "output" => RateKind::Output,
+                "cache_read" => RateKind::CacheRead,
+                "cache_write_5m" => RateKind::CacheWrite5m,
+                "cache_write_1h" => RateKind::CacheWrite1h,
+                "web_search_request" => RateKind::WebSearchRequest,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            let unit = match rate.unit {
+                "mtok" => PriceUnit::Mtok,
+                "request" => PriceUnit::Request,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            Ok(Price {
+                price_version: rate.fingerprint,
+                provider: rate.provider,
+                model: rate.model,
+                rate_kind,
+                tier: rate.tier,
+                speed: rate.speed,
+                service_tier: None,
+                threshold_tokens: rate.threshold_tokens,
+                unit,
+                usd_per_unit: rate.usd_per_unit,
+                valid_from: rate.learned_at,
+                valid_to: None,
+                learned_at: rate.learned_at,
+            })
+        })
+        .collect()
 }
 
 fn decode_checkpoint(value: &str) -> rusqlite::Result<(String, i64)> {
@@ -216,9 +286,14 @@ fn session_identity(
     tx: &rusqlite::Transaction<'_>,
     key: &str,
 ) -> rusqlite::Result<(String, String)> {
-    Ok(catalog_row(tx, key)?
-        .map(|row| (row.harness, row.key))
-        .unwrap_or_else(|| ("unknown".into(), key.into())))
+    if let Some(row) = catalog_row(tx, key)? {
+        return Ok((row.harness, row.key));
+    }
+    tx.query_row(
+        "SELECT harness,native_session_id FROM silver_session_identity WHERE session_key=?1",
+        [key],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
 }
 
 fn source_witness(tx: &rusqlite::Transaction<'_>, key: &str) -> rusqlite::Result<CatalogRow> {
@@ -256,21 +331,44 @@ fn read_steps(
     Ok(steps)
 }
 
-fn admitted(
-    tx: &rusqlite::Transaction<'_>,
-    namespace: &str,
+struct AdmittedEvidence<'a> {
     row: CatalogRow,
     witness: CatalogRow,
     price_version: String,
-    generation: &str,
+    generation: &'a str,
     steps: Vec<native_activity::ActivityStep>,
     facts: Vec<(
         u64,
         native_activity::ActivityStepId,
         native_activity::StepFacts,
     )>,
+    prices: Vec<Price>,
+}
+
+fn admitted(
+    tx: &rusqlite::Transaction<'_>,
+    namespace: &str,
+    evidence: AdmittedEvidence<'_>,
 ) -> rusqlite::Result<AdmittedSession> {
+    let AdmittedEvidence {
+        row,
+        witness,
+        price_version,
+        generation,
+        steps,
+        facts,
+        prices,
+    } = evidence;
     if row.key != witness.key || steps.len() != facts.len() {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    if facts
+        .iter()
+        .enumerate()
+        .any(|(expected, (ordinal, id, _))| {
+            *ordinal != expected as u64 || id != &steps[expected].id
+        })
+    {
         return Err(rusqlite::Error::InvalidQuery);
     }
     let session_uid = session_uid(namespace, &(row.harness.clone(), row.key.clone()));
@@ -278,7 +376,7 @@ fn admitted(
     if fact_by_id.len() != steps.len() {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let repo = repo(&row);
+    let repo = repo(tx, &row)?;
     let projected_steps = steps
         .iter()
         .map(|step| {
@@ -294,7 +392,7 @@ fn admitted(
         .count() as u64;
     let unknown = projected_steps
         .iter()
-        .filter(|step| step.timestamp.is_none())
+        .filter(|step| step.timestamp.is_none() || step.billing.split_unknown)
         .count() as u64;
     let unclassified = projected_steps
         .iter()
@@ -319,7 +417,7 @@ fn admitted(
                 .collect(),
         },
         versions: RecordedVersions {
-            transform: crate::events::CACHE_VERSION,
+            transform: semon_asi::ANALYTICS_TRANSFORM_VERSION,
             rules: native_activity::ACTIVITY_RULES_VERSION,
             price: price_version,
             taxonomy: None,
@@ -331,12 +429,13 @@ fn admitted(
                 unclassified_step_count: unclassified,
             },
         },
-        session: session_input(namespace, &session_uid, &row, repo),
+        session: session_input(tx, namespace, &session_uid, &row, repo)?,
         steps: projected_steps,
         compactions,
-        // A later current-format index column records the exact table.  Until
-        // then the adapter does not synthesize dim_price from live rates.
-        prices: Vec::new(),
+        usage_complete: projected_steps
+            .iter()
+            .all(|step| !step.billing.split_unknown),
+        prices,
     })
 }
 
@@ -378,17 +477,27 @@ fn read_compactions(
     Ok(compactions)
 }
 
-fn session_input(namespace: &str, _uid: &str, row: &CatalogRow, repo: Repo) -> Session {
+fn session_input(
+    tx: &rusqlite::Transaction<'_>,
+    namespace: &str,
+    _uid: &str,
+    row: &CatalogRow,
+    repo: Repo,
+) -> rusqlite::Result<Session> {
     let parent_session_uid = row
         .parent
-        .as_ref()
-        .map(|parent| session_uid(namespace, &(row.harness.clone(), parent.clone())));
+        .as_deref()
+        .filter(|parent| *parent != "you")
+        .map(|parent| {
+            session_identity(tx, parent).map(|identity| session_uid(namespace, &identity))
+        })
+        .transpose()?;
     let parent_method = if parent_session_uid.is_some() {
         ParentMethod::Native
     } else {
         ParentMethod::None
     };
-    Session {
+    Ok(Session {
         machine: namespace.into(),
         harness: row.harness.clone(),
         native_session_id: row.key.clone(),
@@ -402,40 +511,41 @@ fn session_input(namespace: &str, _uid: &str, row: &CatalogRow, repo: Repo) -> S
         lane_root_uid: None,
         repo,
         branch: row.branch.clone(),
-        status: if row.last.is_some() {
-            Status::Ended
-        } else {
-            Status::Unknown
-        },
+        // Catalog's last observation is not an end-of-session proof.
+        status: Status::Unknown,
         started_at: row.start,
-        ended_at: row.last,
+        ended_at: None,
         reported_usd: row.cost.usd,
-    }
+    })
 }
 
-fn repo(row: &CatalogRow) -> Repo {
+fn repo(tx: &rusqlite::Transaction<'_>, row: &CatalogRow) -> rusqlite::Result<Repo> {
     match row.repo_id.as_ref() {
-        Some(RepoId::Remote(id)) => Repo {
+        Some(RepoId::Remote(id)) => Ok(Repo {
             key: id.clone(),
             repo_id: Some(id.clone()),
             local_path: row.repo.clone(),
             display_name: id.clone(),
-        },
-        Some(RepoId::Path(path)) => Repo {
-            // The current index does not yet retain the stable random local
-            // ID required by dim_repo.  Keep the path in its typed field and
-            // make the missing key explicit instead of using the path as one.
-            key: "unknown".into(),
+        }),
+        Some(RepoId::Path(path)) => Ok(Repo {
+            // Bind the existing native path identity to the origin-owned,
+            // opaque local key. The raw path remains in the typed path field
+            // and never becomes a Key-class value.
+            key: tx.query_row(
+                "SELECT repo_key FROM silver_repo_identity WHERE repo_path=?1",
+                [path],
+                |record| record.get(0),
+            )?,
             repo_id: None,
-            local_path: Some(path.clone()),
-            display_name: "unknown".into(),
-        },
-        Some(RepoId::Unknown) | None => Repo {
+            local_path: row.repo.clone(),
+            display_name: "local".into(),
+        }),
+        Some(RepoId::Unknown) | None => Ok(Repo {
             key: "unknown".into(),
             repo_id: None,
             local_path: row.repo.clone(),
             display_name: "unknown".into(),
-        },
+        }),
     }
 }
 
@@ -465,7 +575,7 @@ fn step_input(
             cache_read_tokens: fact.billing.cache_read,
             cache_write_5m_tokens: fact.billing.cache_write_5m,
             cache_write_1h_tokens: fact.billing.cache_write_1h,
-            reasoning_tokens: step.tokens.output.saturating_sub(fact.billing.output),
+            reasoning_tokens: None,
             web_search_requests: fact.billing.web_search_requests,
             speed: fact.billing.speed.clone(),
             service_tier: fact.billing.service_tier.clone(),
@@ -500,10 +610,8 @@ fn step_input(
         activity: step.activity.map(activity),
         waste_kind: step.waste.map(waste),
         trigger: step.trigger.map(trigger),
-        ok: {
-            let outcomes: Vec<_> = fact.tool_calls.iter().filter_map(|call| call.ok).collect();
-            (!outcomes.is_empty()).then(|| outcomes.into_iter().all(|ok| ok))
-        },
+        ok: (!fact.tool_calls.is_empty() && fact.tool_calls.iter().all(|call| call.ok.is_some()))
+            .then(|| fact.tool_calls.iter().all(|call| call.ok == Some(true))),
         tool_calls: fact.tool_calls.iter().map(tool_call).collect(),
     }
 }
@@ -609,4 +717,87 @@ fn hex_bytes(bytes: &[u8]) -> String {
         encoded.push_str(&format!("{byte:02x}"));
     }
     encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::{Connection, params};
+
+    use super::*;
+
+    fn transaction(connection: &mut Connection) -> rusqlite::Transaction<'_> {
+        connection.transaction().unwrap()
+    }
+
+    #[test]
+    fn recorded_price_snapshot_is_required_to_match_the_published_header() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session_activity_projections(\
+                    session_key TEXT PRIMARY KEY, generation TEXT NOT NULL,\
+                    pricing_fingerprint TEXT NOT NULL, pricing_snapshot TEXT NOT NULL\
+                 ) STRICT;",
+            )
+            .unwrap();
+        let table = crate::pricing::snapshot();
+        let snapshot = crate::pricing::runtime::recorded_snapshot(&table);
+        connection
+            .execute(
+                "INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4)",
+                params!["synthetic", "g1", table.fingerprint, snapshot],
+            )
+            .unwrap();
+
+        let prices = {
+            let tx = transaction(&mut connection);
+            prices(&tx, "synthetic", "g1", &table.fingerprint).unwrap()
+        };
+        assert!(!prices.is_empty());
+        assert!(
+            prices
+                .iter()
+                .all(|price| price.price_version == table.fingerprint)
+        );
+
+        connection
+            .execute(
+                "UPDATE session_activity_projections SET pricing_fingerprint='partial'",
+                [],
+            )
+            .unwrap();
+        let partial = {
+            let tx = transaction(&mut connection);
+            prices(&tx, "synthetic", "g1", "partial")
+        };
+        assert!(partial.is_err());
+    }
+
+    #[test]
+    fn removal_identity_uses_the_persisted_native_identity() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY, metadata TEXT NOT NULL) STRICT;\
+                 CREATE TABLE silver_session_identity(\
+                    session_key TEXT PRIMARY KEY, harness TEXT NOT NULL, native_session_id TEXT NOT NULL\
+                 ) STRICT;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO silver_session_identity VALUES(?1,?2,?3)",
+                params!["retired-key", "codex", "native/session"],
+            )
+            .unwrap();
+        let identity = {
+            let tx = transaction(&mut connection);
+            session_identity(&tx, "retired-key").unwrap()
+        };
+        assert_eq!(identity, ("codex".into(), "native/session".into()));
+        assert_eq!(
+            session_uid("machine", &identity),
+            "machine/codex/native%2Fsession"
+        );
+    }
 }

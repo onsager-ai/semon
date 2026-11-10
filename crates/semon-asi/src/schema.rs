@@ -9,7 +9,7 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
 /// Bumped on any change to a table, column, type, class or enum set. A store whose
 /// manifest carries another version is refused (asi-store.md, Version bumps).
-pub const ASI_SCHEMA_VERSION: u32 = 2;
+pub const ASI_SCHEMA_VERSION: u32 = 3;
 
 /// Name of the generation column the writer appends to every file.
 pub const GEN_COLUMN: &str = "_gen";
@@ -277,6 +277,8 @@ const TARGET_TYPE: &[&str] = &["session", "turn", "step", "compaction", "lane", 
 const ROLE: &[&str] = &["manager", "worker", "reviewer", "solo", "unknown"];
 const PARENT_METHOD: &[&str] = &["native", "workspace", "none"];
 const STATUS: &[&str] = &["active", "ended", "unknown"];
+const SOURCE_STATUS: &[&str] = &["complete", "missing"];
+const COMPUTATION_STATUS: &[&str] = &["current", "pending", "failed", "frozen"];
 const RATE_KIND: &[&str] = &[
     "input",
     "output",
@@ -324,10 +326,10 @@ pub static FACT_STEP: Table = Table {
             "tokens",
             "Input tokens written to the 1-hour cache.",
         ),
-        num(
+        num_opt(
             "reasoning_tokens",
             "tokens",
-            "Reasoning tokens, when reported separately.",
+            "Reasoning tokens, when the harness reported them separately.",
         ),
         num(
             "web_search_requests",
@@ -377,6 +379,22 @@ pub static FACT_STEP: Table = Table {
             "usd",
             "Estimate under price_version; null when unpriced.",
         ),
+        real_opt(
+            "input_usd",
+            "usd",
+            "Recorded uncached-input cost component.",
+        ),
+        real_opt(
+            "cache_read_usd",
+            "usd",
+            "Recorded cache-read cost component.",
+        ),
+        real_opt(
+            "cache_write_usd",
+            "usd",
+            "Recorded cache-write cost component.",
+        ),
+        real_opt("output_usd", "usd", "Recorded output cost component."),
         en(
             "price_status",
             PRICE_STATUS,
@@ -474,10 +492,10 @@ pub static FACT_SESSION: Table = Table {
             "tokens",
             "1-hour cache-write tokens, exclusive usage.",
         ),
-        num(
+        num_opt(
             "reasoning_tokens",
             "tokens",
-            "Reasoning tokens over exclusive usage.",
+            "Reasoning tokens over exclusive usage, when complete.",
         ),
         num(
             "web_search_requests",
@@ -503,6 +521,36 @@ pub static FACT_SESSION: Table = Table {
         num("step_count", "steps", "Steps in the session."),
         num("failure_count", "steps", "Steps with ok = false."),
         flag("usage_complete", "True when every step reported its usage."),
+        en(
+            "source_status",
+            SOURCE_STATUS,
+            "Source cohort status at publication.",
+        ),
+        en(
+            "computation_status",
+            COMPUTATION_STATUS,
+            "Recorded computation status at publication.",
+        ),
+        num(
+            "exclusive_step_count",
+            "steps",
+            "Exclusive steps represented by this row.",
+        ),
+        num(
+            "unknown_step_count",
+            "steps",
+            "Steps with unknown recorded values.",
+        ),
+        num(
+            "unclassified_step_count",
+            "steps",
+            "Steps with no deterministic activity label.",
+        ),
+        num_opt(
+            "taxonomy_version",
+            "",
+            "Taxonomy version when categorical labels were admitted.",
+        ),
         num(
             "transform_version",
             "",

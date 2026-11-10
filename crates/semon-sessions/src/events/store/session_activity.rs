@@ -16,7 +16,7 @@ pub(super) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_activity_projections (
  session_key TEXT PRIMARY KEY, generation TEXT NOT NULL,
  source_generation TEXT NOT NULL, rules_version INTEGER NOT NULL,
- pricing_fingerprint TEXT NOT NULL, total INTEGER NOT NULL,
+ pricing_fingerprint TEXT NOT NULL, pricing_snapshot TEXT NOT NULL, total INTEGER NOT NULL,
  compactions INTEGER NOT NULL, thrash INTEGER NOT NULL, summary TEXT NOT NULL,
  preview TEXT NOT NULL
 ) STRICT;
@@ -47,6 +47,7 @@ pub(crate) struct Projection {
     // Kept outside Catalog JSON and keyed by the same exact native step identity.
     inputs: BTreeMap<activity::ActivityStepId, Usage>,
     facts: BTreeMap<activity::ActivityStepId, activity::StepFacts>,
+    pricing_snapshot: String,
 }
 
 impl Projection {
@@ -77,6 +78,7 @@ impl Projection {
                 }
             }
         }
+        let pricing_snapshot = crate::pricing::runtime::recorded_snapshot(&table);
         let mut activity = activity::derive(key, usage, shared, signals, table);
         let observations = activity::apply_observations(&mut activity, observations);
         let facts = derive_facts(
@@ -91,6 +93,7 @@ impl Projection {
             activity,
             inputs,
             facts,
+            pricing_snapshot,
         }
     }
 }
@@ -438,7 +441,7 @@ fn write_activity(
         put.execute(params![row.key, generation, fact.identity, json(fact)?])?;
     }
     tx.execute("INSERT INTO session_activity_sources VALUES(?1,?2) ON CONFLICT(session_key) DO UPDATE SET metadata=excluded.metadata", params![row.key,json(row)?])?;
-    tx.execute("INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,rules_version=excluded.rules_version,pricing_fingerprint=excluded.pricing_fingerprint,total=excluded.total,compactions=excluded.compactions,thrash=excluded.thrash,summary=excluded.summary,preview=excluded.preview",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint,activity.steps.len() as i64,activity.compactions.len() as i64,activity.aggregate.thrash,json(&activity::analytics::Analytics::of(activity))?,json(&activity::analytics::Preview::of(&activity.steps))?])?;
+    tx.execute("INSERT INTO session_activity_projections VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,source_generation=excluded.source_generation,rules_version=excluded.rules_version,pricing_fingerprint=excluded.pricing_fingerprint,pricing_snapshot=excluded.pricing_snapshot,total=excluded.total,compactions=excluded.compactions,thrash=excluded.thrash,summary=excluded.summary,preview=excluded.preview",params![row.key,generation,sources,activity.rules_version,activity.pricing_fingerprint,projection.pricing_snapshot,activity.steps.len() as i64,activity.compactions.len() as i64,activity.aggregate.thrash,json(&activity::analytics::Analytics::of(activity))?,json(&activity::analytics::Preview::of(&activity.steps))?])?;
     Ok(true)
 }
 
@@ -640,6 +643,18 @@ fn note_session_state(
     row: &crate::model::summary::CatalogRow,
     changed: bool,
 ) -> rusqlite::Result<()> {
+    if let Some(crate::facts::RepoId::Path(path)) = row.repo_id.as_ref() {
+        tx.execute(
+            "INSERT INTO silver_repo_identity(repo_path,repo_key) \
+             SELECT ?1,'local:' || lower(hex(randomblob(16))) \
+             WHERE NOT EXISTS(SELECT 1 FROM silver_repo_identity WHERE repo_path=?1)",
+            [path],
+        )?;
+    }
+    tx.execute(
+        "INSERT INTO silver_session_identity(session_key,harness,native_session_id) VALUES(?1,?2,?3) ON CONFLICT(session_key) DO UPDATE SET harness=excluded.harness,native_session_id=excluded.native_session_id",
+        params![row.key, row.harness, row.key],
+    )?;
     let digest = analytics_digest(tx, row)?;
     let stored: Option<String> = tx
         .query_row(
@@ -710,6 +725,12 @@ pub(super) fn remove_mismatched(
         params![row.key, sources],
     )?;
     if removed > 0 {
+        // A removal has to keep its exact native identity after Catalog rows
+        // are no longer available, so consumers can remove the prior UID.
+        tx.execute(
+            "INSERT INTO silver_session_identity(session_key,harness,native_session_id) VALUES(?1,?2,?3) ON CONFLICT(session_key) DO UPDATE SET harness=excluded.harness,native_session_id=excluded.native_session_id",
+            params![row.key, row.harness, row.key],
+        )?;
         tx.execute(
             "INSERT INTO silver_change(session_key,kind) VALUES(?1,'removed')",
             [&row.key],
@@ -1200,7 +1221,7 @@ pub(super) fn reprice_step(
             params![key, next],
         )?;
         summary.pricing_fingerprint = table.fingerprint.clone();
-        tx.execute("UPDATE session_activity_projections SET pricing_fingerprint=?2,generation=?3,summary=?4,preview=?5 WHERE session_key=?1",params![key,table.fingerprint,next,json(&summary)?,json(&preview)?])?;
+        tx.execute("UPDATE session_activity_projections SET pricing_fingerprint=?2,pricing_snapshot=?3,generation=?4,summary=?5,preview=?6 WHERE session_key=?1",params![key,table.fingerprint,crate::pricing::runtime::recorded_snapshot(table),next,json(&summary)?,json(&preview)?])?;
         refresh_at_price(tx, &key, &table.fingerprint)?;
         tx.execute(
             "INSERT INTO silver_change(session_key,kind) VALUES(?1,'changed')",
