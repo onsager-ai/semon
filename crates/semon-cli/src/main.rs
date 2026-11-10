@@ -27,6 +27,8 @@ enum Command {
     Query(QueryArgs),
     #[cfg(feature = "asi-query")]
     AsiQuery(AsiQueryArgs),
+    #[cfg(feature = "asi-query")]
+    AsiInputError(serde_json::Value),
     Materialize(MaterializeArgs),
     Coverage(CoverageArgs),
     Mcp(HomeArgs),
@@ -364,7 +366,14 @@ fn parse_query_command(mut arguments: impl Iterator<Item = String>) -> Result<Co
     };
     #[cfg(feature = "asi-query")]
     if matches!(tool.as_str(), "sql" | "schema") {
-        return parse_asi_query_args(tool, arguments).map(Command::AsiQuery);
+        return Ok(match parse_asi_query_args(tool, arguments) {
+            Ok(args) => Command::AsiQuery(args),
+            Err(message) => Command::AsiInputError(asi_error(
+                "invalid_argument",
+                "Invalid query arguments",
+                &message,
+            )),
+        });
     }
     parse_query_args(std::iter::once(tool).chain(arguments)).map(Command::Query)
 }
@@ -506,11 +515,7 @@ fn parse_asi_query_args(
                 }
                 format = AsiFormat::Tsv;
             }
-            "--json" => {
-                return Err(
-                    "ASI query output is JSON by default; use sql --format tsv for TSV".into(),
-                );
-            }
+            "--json" => {}
             "-h" | "--help" => return Err(query_usage()),
             flag if flag.starts_with("--") => {
                 let key = flag[2..].replace('-', "_");
@@ -815,6 +820,11 @@ fn run(command: Command) -> Result<(), String> {
         Command::Query(args) => run_query(args),
         #[cfg(feature = "asi-query")]
         Command::AsiQuery(args) => run_asi_query(args),
+        #[cfg(feature = "asi-query")]
+        Command::AsiInputError(error) => {
+            println!("{error}");
+            Err("query arguments are invalid".into())
+        }
         Command::Materialize(args) => run_materialize(args),
         Command::Coverage(_) => unreachable!("coverage returns before pricing initialization"),
         Command::Mcp(home) => run_mcp(&home),
@@ -1376,12 +1386,16 @@ impl AsiMcp {
                 .and_then(|tables| tables.iter().find(|entry| entry["name"] == table.name))
                 .cloned()
                 .expect("generated ASI reference renders declared tables");
-            return Ok(
-                serde_json::json!({"asi_schema_version": reference["asi_schema_version"], "table": table}),
-            );
+            return Ok(serde_json::json!({
+                "asi_schema_version": reference["asi_schema_version"],
+                "table": table,
+                "data_notice": semon_asi::query::DATA_NOTICE,
+            }));
         }
-        serde_json::from_str(&semon_asi::reference::json())
-            .expect("generated ASI reference is valid JSON")
+        let mut reference: serde_json::Value = serde_json::from_str(&semon_asi::reference::json())
+            .expect("generated ASI reference is valid JSON");
+        reference["data_notice"] = serde_json::json!(semon_asi::query::DATA_NOTICE);
+        Ok(reference)
     }
 }
 
@@ -1482,6 +1496,7 @@ fn run_asi_query(args: AsiQueryArgs) -> Result<(), String> {
             columns
                 .iter()
                 .filter_map(|column| column["name"].as_str())
+                .map(tsv_text)
                 .collect::<Vec<_>>()
                 .join("\t")
         );
@@ -1509,6 +1524,11 @@ fn tsv_value(value: &serde_json::Value) -> String {
         serde_json::Value::String(value) => value.clone(),
         value => value.to_string(),
     };
+    tsv_text(&value)
+}
+
+#[cfg(feature = "asi-query")]
+fn tsv_text(value: &str) -> String {
     value.replace(['\t', '\n', '\r'], " ")
 }
 
@@ -1535,9 +1555,9 @@ fn run_mcp(home: &HomeArgs) -> Result<(), String> {
 }
 
 fn query_usage() -> String {
-    let mut query_tools = semon_sessions::query_tools();
+    let query_tools = semon_sessions::query_tools();
     #[cfg(feature = "asi-query")]
-    query_tools.extend(asi_tools());
+    let query_tools: Vec<_> = query_tools.into_iter().chain(asi_tools()).collect();
     let tools: Vec<String> = query_tools
         .iter()
         .map(|tool| {

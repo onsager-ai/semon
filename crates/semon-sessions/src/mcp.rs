@@ -211,7 +211,10 @@ fn call_with_extension(
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return Err((INVALID_PARAMS, "tools/call needs a tool name".into()));
     };
-    let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let (value, failed) = if query_tools().iter().any(|tool| tool.name == name) {
         match query.call(name, &arguments) {
             Ok(value) => (value, false),

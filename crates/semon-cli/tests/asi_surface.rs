@@ -116,19 +116,37 @@ fn cli_sql_json_tsv_and_typed_errors() {
         &[
             "query",
             "sql",
-            "SELECT 'a\tb\nc' AS value",
+            "SELECT 'a\tb\nc' AS \"d\te\nf\"",
             "--format",
             "tsv",
         ],
         cache.clone(),
     );
     assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stdout).unwrap(), "value\na b c\n");
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "d e f\na b c\n");
 
-    let output = cli(&["query", "sql", "SELECT getenv('HOME')"], cache);
+    let output = cli(&["query", "schema"], cache.clone());
+    assert!(output.status.success());
+    let schema: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(schema["tables"].as_array().is_some());
+    assert_eq!(schema["data_notice"], semon_asi::query::DATA_NOTICE);
+
+    let output = cli(&["query", "sql", "SELECT getenv('HOME')"], cache.clone());
     assert!(!output.status.success());
     let error: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(error["error"]["code"], "not_allowed");
+
+    for arguments in [
+        vec!["query", "sql"],
+        vec!["query", "sql", "SELECT 1", "--limit", "nope"],
+        vec!["query", "sql", "SELECT 1", "--params", "["],
+        vec!["query", "sql", "SELECT 1", "--params", "[{}]"],
+    ] {
+        let output = cli(&arguments, cache.clone());
+        assert!(!output.status.success(), "{arguments:?}");
+        let error: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(error["error"]["code"], "invalid_argument", "{arguments:?}");
+    }
 }
 
 #[test]
@@ -164,7 +182,25 @@ fn mcp_advertises_asi_tools_and_serves_schema_resource() {
         serde_json::from_str(resource["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
     assert!(schema["tables"].as_array().is_some());
 
-    let reply = server.request(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"sql","arguments":{"query":"SELECT getenv('HOME')"}}}));
+    let schema = server
+        .request(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"schema"}}));
+    let (schema, failed) = content(&schema);
+    assert!(!failed);
+    assert!(schema["tables"].as_array().is_some());
+    assert_eq!(schema["data_notice"], semon_asi::query::DATA_NOTICE);
+    let schema = server.request(json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"schema","arguments":{"table":"dim_session"}}}));
+    let (schema, failed) = content(&schema);
+    assert!(!failed);
+    assert_eq!(schema["table"]["name"], "dim_session");
+    assert_eq!(schema["data_notice"], semon_asi::query::DATA_NOTICE);
+
+    let reply = server
+        .request(json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"sql"}}));
+    let (error, failed) = content(&reply);
+    assert!(failed);
+    assert_eq!(error["error"]["code"], "invalid_argument");
+
+    let reply = server.request(json!({"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"sql","arguments":{"query":"SELECT getenv('HOME')"}}}));
     let (error, failed) = content(&reply);
     assert!(failed);
     assert_eq!(error["error"]["code"], "not_allowed");

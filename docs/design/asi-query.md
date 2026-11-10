@@ -221,7 +221,8 @@ proxy or body cache; categorical L1 facts remain valid analytics inputs.
 ## Errors
 
 MCP returns `isError: true` with `{"error":{"code","message","detail"}}`. The
-CLI prints the same object with `--json` and exits non-zero. Admission refusals
+CLI prints the same object on stdout and exits 1; ASI JSON is the default and
+`--json` is accepted but redundant. Admission refusals
 occur before body disclosure or query execution. They may append sanitized audit
 records; cancellation/source changes during a read publish no invalid partial page.
 
@@ -264,11 +265,13 @@ records; cancellation/source changes during a read publish no invalid partial pa
 
 - **MCP** advertises these beside the existing focused tools. `find`, with
   its retained schema, tests and pause notes, is removed.
-- **CLI:** `semon query sql|schema|search|view`, with flags derived from the
-  tool schemas as today. Output is compact JSON by default; `sql --format tsv`
-  writes a tab-delimited header and rows, with tab, newline and carriage-return
-  characters in values replaced by spaces. Query failures write the same error
-  envelope as JSON and exit 1; successful commands exit 0.
+- **CLI:** the current local commands are `semon query sql|schema`; `search`
+  and `view` arrive with their follow-up surfaces. Output is compact JSON by
+  default; `--json` is accepted but redundant. `sql --format tsv` writes a
+  tab-delimited header and rows, with tab, newline and carriage-return
+  characters in column names and values replaced by spaces. Query failures write
+  the same error envelope as JSON on stdout and exit 1; successful commands exit
+  0.
 - **Viewer:** `POST /api/asi/sql`, `POST /api/asi/search`,
   `GET /api/asi/schema` and `POST /api/asi/view`, behind authentication,
   Origin/Host/CSRF checks and per-user/machine/namespace grants. Bodies, search

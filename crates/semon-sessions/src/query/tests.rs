@@ -5457,6 +5457,8 @@ fn shared_virtual_and_unsent_owners_preserve_complete_native_results() {
     }
 }
 
+mod recovery_tests;
+
 fn project_activity(value: &mut Value) {
     match value {
         Value::Object(object) => {
