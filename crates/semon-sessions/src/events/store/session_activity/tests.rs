@@ -314,8 +314,91 @@ fn analytics_writer_retires_during_sustained_publication() {
 }
 
 #[test]
-fn analytics_writer_retries_an_operational_sqlite_busy_error() {
-    let root = scratch("analytics-writer-busy");
+fn analytics_writer_retires_while_a_publication_waits_for_a_one_hour_interval() {
+    let root = scratch("analytics-writer-hourly");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let clock = ManualClock::new(0);
+    let mut config =
+        AnalyticsWriterConfig::new("fixture-machine", &index, root.join("analytics-store"));
+    config.interval = Duration::from_secs(3_600);
+    let handle = start_with_clock(config, Arc::clone(&clock));
+    handle.notify();
+    handle.wait_for_publishes(1);
+    handle.wait_for_idle_wait();
+    clock.advance(1_000);
+    let previous_wait = handle.idle_waits();
+    handle.notify();
+    handle.wait_for_idle_wait_after(previous_wait);
+    clock.advance(599_000);
+    handle.wake_for_clock();
+    handle.wait_for_retire_attempts(1);
+    handle.wait_for_idle_wait();
+    assert_eq!(handle.published(), 1);
+    clock.advance(3_000_000);
+    handle.wake_for_clock();
+    handle.wait_for_publishes(2);
+    handle.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_second_failed_reload_latches_after_one_notification() {
+    let root = scratch("analytics-writer-reload-refusal");
+    let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let store_root = root.join("analytics-store");
+    let clock = ManualClock::new(0);
+    let handle = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&clock),
+    );
+    handle.notify();
+    handle.wait_for_publishes(1);
+    handle.wait_for_idle_wait();
+    let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    let dimension = manifest
+        .files
+        .iter()
+        .find(|file| file.table == "dim_session")
+        .unwrap();
+    std::fs::write(
+        store_root.join("analytics").join(&dimension.path),
+        b"corrupt synthetic parquet",
+    )
+    .unwrap();
+    clock.advance(2_000);
+    handle.notify();
+    // Publication refuses on the corrupt dimension, retaining Reload(Publish).
+    handle.wait_for_store_refusal(1);
+    let manifest_path = store_root.join("analytics/manifest.json");
+    std::fs::write(&manifest_path, b"corrupt synthetic manifest").unwrap();
+    handle.notify();
+    handle.wait_for_store_refusal(2);
+    // The first failed Reload consumes this notification. One new notification
+    // permits exactly one more Reload, whose refusal must latch again.
+    handle.notify();
+    handle.wait_for_store_refusal(3);
+    assert_eq!(handle.input_attempts(), 2);
+    assert_eq!(
+        std::fs::read(&manifest_path).unwrap(),
+        b"corrupt synthetic manifest"
+    );
+    handle.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_retries_after_the_index_cannot_be_opened() {
+    let root = scratch("analytics-writer-cannot-open");
     let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
     let index = crate::events::EventCache::path(&options.cache);
     let (mut cache, _) = opened(&index);
@@ -336,8 +419,8 @@ fn analytics_writer_retries_an_operational_sqlite_busy_error() {
     handle.wait_for_input_attempts(1);
     handle.wait_for_status(crate::AnalyticsWriterStatus::Retrying { attempt: 1 });
     std::fs::rename(&moved, &index).unwrap();
-    clock.advance(1_000);
-    handle.notify();
+    clock.advance(2_000);
+    handle.wake_for_clock();
     handle.wait_for_publishes(1);
     handle.stop_and_join();
     std::fs::remove_dir_all(root).unwrap();
@@ -360,6 +443,7 @@ fn analytics_writer_incremental_live_rows_match_a_final_full_refresh() {
     );
     incremental.notify();
     incremental.wait_for_publishes(1);
+    incremental.wait_for_idle_wait();
 
     append_claude_step(&options, "incremental");
     let (rows, slots) = catalog_fixture_projection(&options);

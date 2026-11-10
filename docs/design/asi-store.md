@@ -232,6 +232,9 @@ tables.
   uses `<index parent>/analytics-store`, never a path inside the SQLite index file. A busy
   lock is observable as a no-writer state; unsupported input latches a refusal
   without changing the index or a checkpoint, until a later notification retries.
+  Store refusals also latch until a new notification; each refusal consumes only
+  the notification snapshot captured before its operation, preserving notifications
+  received during that operation.
 - **Cycle.** At most every 2 s, the writer reads the index change log and
   recomputes every touched session **whole**. It doesn't patch tails: a
   following step can change an earlier step's duration, and a late record can
@@ -252,11 +255,18 @@ tables.
     and `seq` checkpoint, the durable revision checkpoint, and the live-map
     file. It fsyncs the manifest, renames it into place, and fsyncs the
     directory. A crash leaves the previous generation.
-  - The local service coalesces catalog-publication notifications, retries
-    transient I/O with bounded backoff, and reloads the manifest before retrying
-    a store error that may have followed its rename. It uses the activity rules
-    target and current pricing-snapshot fingerprint as writer targets; these do
-    not assert that untouched rows have uniformly refreshed versions.
+  - The local service coalesces catalog-publication notifications. Operational
+    classification covers direct store I/O, Parquet `External` I/O, and SQLite
+    busy/locked/I/O/full/cannot-open errors. These retry with bounded exponential
+    backoff. Parquet page-read I/O can surface as an Arrow error after losing its
+    typed I/O source; it fails safe by latching `Refused` until the next
+    notification, like structural errors. A store error requires manifest reload
+    before its operation resumes. A successful reload preserves the retry attempt;
+    only success of the resumed operation clears it. Every publication attempt
+    advances the cycle deadline, including an error after a visible rename.
+    It uses the activity rules target and current pricing-snapshot fingerprint
+    as writer targets; these do not assert that untouched rows have uniformly
+    refreshed versions.
 - **Reading.** Each fact view keeps only live rows:
   `… semi join live on (session_uid, _gen)`.
 - **Compaction** is tiered. Cycle files are level 0. When a table has more
@@ -273,6 +283,9 @@ tables.
   published generation that no longer names it. Queries hold a snapshot for at
   most their deadline plus fetch time, well under that. The local service only
   considers retirement on a slow maintenance cadence and never during shutdown.
+  Due retirement can precede a publication waiting for its interval, preserving
+  publication demand and its retry count. Reload, refusal and retry deadlines
+  remain barriers; waiting uses the earliest eligible deadline.
 - **Full refresh.** The same pure projection rebuilds origin analytics from an
   available admitted index. CI compares incremental and full-refresh live rows.
   Imported frozen heads may be the only surviving facts and are not assumed

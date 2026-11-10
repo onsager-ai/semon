@@ -4,6 +4,11 @@
 //! supplied by the caller, and each cycle opens a fresh read-only SQLite input.
 //! The store root derived by [`analytics_store_root`] is a sibling of the SQLite
 //! index, never a path inside the index file.
+//!
+//! Operational retries cover direct store I/O, Parquet `External` I/O, and
+//! SQLite busy/locked/I/O/full/cannot-open errors. Parquet page-read I/O can
+//! surface as an Arrow error after losing its typed I/O source; it fails safe
+//! by latching `Refused` until the next notification, like structural errors.
 
 use std::{
     path::{Path, PathBuf},
@@ -88,6 +93,8 @@ struct State {
     #[cfg(test)]
     input_attempts: u64,
     #[cfg(test)]
+    store_attempts: u64,
+    #[cfg(test)]
     retire_attempts: u64,
     #[cfg(test)]
     idle_waits: u64,
@@ -102,6 +109,36 @@ struct State {
 struct Shared {
     state: Mutex<State>,
     changed: Condvar,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(State {
+                stop: false,
+                notifications: 0,
+                consumed: 0,
+                status: AnalyticsWriterStatus::Idle,
+                #[cfg(test)]
+                published: 0,
+                #[cfg(test)]
+                input_attempts: 0,
+                #[cfg(test)]
+                store_attempts: 0,
+                #[cfg(test)]
+                retire_attempts: 0,
+                #[cfg(test)]
+                idle_waits: 0,
+                #[cfg(test)]
+                waiting: false,
+                #[cfg(test)]
+                hold_publish: false,
+                #[cfg(test)]
+                publish_held: false,
+            }),
+            changed: Condvar::new(),
+        }
+    }
 }
 
 /// An owned local writer thread. Dropping it stops and joins the thread.
@@ -234,6 +271,9 @@ impl Handle {
     #[cfg(test)]
     /// Lets an injected test clock wake a deadline wait after advancing time.
     pub(crate) fn wake_for_clock(&self) {
+        // Serialize the wake with predicate evaluation and entering the wait,
+        // just like notify(), even though the clock itself is independent.
+        let _state = lock(&self.shared.state);
         self.shared.changed.notify_one();
     }
 
@@ -269,6 +309,28 @@ impl Handle {
                 .wait(state)
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
         }
+        assert!(matches!(
+            state.status,
+            AnalyticsWriterStatus::Refused { .. }
+        ));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_store_refusal(&self, expected: u64) {
+        let mut state = lock(&self.shared.state);
+        while !(state.store_attempts >= expected
+            && state.waiting
+            && matches!(state.status, AnalyticsWriterStatus::Refused { .. }))
+            && !state.stop
+        {
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        assert_eq!(state.store_attempts, expected);
+        assert!(state.waiting);
         assert!(matches!(
             state.status,
             AnalyticsWriterStatus::Refused { .. }
@@ -319,29 +381,7 @@ pub(crate) fn start_with_clock<C>(config: AnalyticsWriterConfig, clock: Arc<C>) 
 where
     C: Clock + Send + Sync + 'static,
 {
-    let shared = Arc::new(Shared {
-        state: Mutex::new(State {
-            stop: false,
-            notifications: 0,
-            consumed: 0,
-            status: AnalyticsWriterStatus::Idle,
-            #[cfg(test)]
-            published: 0,
-            #[cfg(test)]
-            input_attempts: 0,
-            #[cfg(test)]
-            retire_attempts: 0,
-            #[cfg(test)]
-            idle_waits: 0,
-            #[cfg(test)]
-            waiting: false,
-            #[cfg(test)]
-            hold_publish: false,
-            #[cfg(test)]
-            publish_held: false,
-        }),
-        changed: Condvar::new(),
-    });
+    let shared = Arc::new(Shared::new());
     let worker_shared = Arc::clone(&shared);
     let thread = thread::Builder::new()
         // Rust's standard library has no portable thread-priority API.
@@ -383,6 +423,8 @@ impl Resume {
 #[derive(Debug)]
 struct Scheduler {
     pending: Option<Operation>,
+    // A recovery publication paused for due retirement, with its retry count.
+    publication_after_retirement: Option<u32>,
     refused: Option<Operation>,
     next_cycle: i64,
     next_retirement: i64,
@@ -394,6 +436,7 @@ impl Scheduler {
     fn new(now: i64) -> Self {
         Self {
             pending: None,
+            publication_after_retirement: None,
             refused: None,
             next_cycle: now,
             next_retirement: now + duration_ms(RETIREMENT_CADENCE),
@@ -415,18 +458,32 @@ impl Scheduler {
             self.refused = None;
             self.pending = Some(refused);
         }
+        // Leave fresh publication demand in the notification count until its
+        // interval is due, so it cannot hide an earlier retirement deadline.
+        // An already pending operation belongs to a required recovery chain.
         if self.pending.is_none() {
             self.pending = Some(if !has_store {
                 Operation::Open
             } else if now >= self.next_retirement {
                 Operation::Retire
-            } else if has_notification {
+            } else if has_notification && now >= self.next_cycle {
                 Operation::Publish
             } else {
                 return None;
             });
         }
         let operation = self.pending.expect("selected pending operation");
+        if operation == Operation::Publish
+            && now < self.next_cycle
+            && now >= self.next_retirement
+            && self.retry_at.is_none_or(|deadline| now >= deadline)
+        {
+            self.publication_after_retirement = Some(self.attempt);
+            self.attempt = 0;
+            self.retry_at = None;
+            self.pending = Some(Operation::Retire);
+            return Some(Operation::Retire);
+        }
         let due = match operation {
             Operation::Publish => self.retry_at.unwrap_or(now).max(self.next_cycle),
             _ => self.retry_at.unwrap_or(now),
@@ -443,7 +500,8 @@ impl Scheduler {
                 Operation::Publish => self
                     .retry_at
                     .unwrap_or(self.next_cycle)
-                    .max(self.next_cycle),
+                    .max(self.next_cycle)
+                    .min(self.retry_at.unwrap_or(0).max(self.next_retirement)),
                 _ => self.retry_at.unwrap_or(0),
             });
         }
@@ -457,20 +515,32 @@ impl Scheduler {
         }
     }
 
-    fn succeeded(&mut self, operation: Operation, now: i64, interval: Duration) {
+    fn succeeded(&mut self, operation: Operation, now: i64) {
         self.pending = match operation {
             Operation::Open | Operation::Compact | Operation::Retire => None,
             Operation::Reload(after) => Some(after.operation()),
             Operation::Publish => Some(Operation::Compact),
         };
-        if operation == Operation::Publish {
-            self.next_cycle = now + duration_ms(interval);
-        }
         if operation == Operation::Retire {
             self.next_retirement = now + duration_ms(RETIREMENT_CADENCE);
         }
         self.retry_at = None;
-        self.attempt = 0;
+        // Reload is only a barrier: the operation it resumes has not recovered.
+        if !matches!(operation, Operation::Reload(_)) {
+            self.attempt = 0;
+        }
+        if operation == Operation::Retire
+            && let Some(attempt) = self.publication_after_retirement.take()
+        {
+            self.pending = Some(Operation::Publish);
+            self.attempt = attempt;
+        }
+    }
+
+    fn publication_attempted(&mut self, now: i64, interval: Duration) {
+        // Even an error may follow a visible manifest rename. Conservatively
+        // space every attempt, including input failures, before any reload.
+        self.next_cycle = now + duration_ms(interval);
     }
 
     fn retry(&mut self, operation: Operation, now: i64) -> u32 {
@@ -510,7 +580,7 @@ fn run<C: Clock + Send + Sync + 'static>(
             {
                 Ok(opened) => {
                     store = Some(opened);
-                    scheduler.succeeded(operation, clock.now_ms(), config.interval);
+                    scheduler.succeeded(operation, clock.now_ms());
                     set_status(&shared, AnalyticsWriterStatus::Idle);
                 }
                 Err(StoreError::WriterBusy) => {
@@ -520,9 +590,13 @@ fn run<C: Clock + Send + Sync + 'static>(
                 Err(error) if error.is_operational() => {
                     retry_operation(&shared, &mut scheduler, operation, clock.now_ms());
                 }
-                Err(error) => {
-                    refuse_operation(&shared, &mut scheduler, operation, error.to_string())
-                }
+                Err(error) => refuse_operation(
+                    &shared,
+                    &mut scheduler,
+                    operation,
+                    notification,
+                    error.to_string(),
+                ),
             },
             Operation::Publish => {
                 #[cfg(test)]
@@ -539,24 +613,28 @@ fn run<C: Clock + Send + Sync + 'static>(
                     ),
                     Err(error) => Err(PublishError::Input(error)),
                 };
+                scheduler.publication_attempted(clock.now_ms(), config.interval);
+                consume_notification(&shared, notification);
                 match result {
                     Ok(_) => {
-                        consume_notification(&shared, notification);
+                        scheduler.succeeded(operation, clock.now_ms());
                         #[cfg(test)]
                         published(&shared);
-                        scheduler.succeeded(operation, clock.now_ms(), config.interval);
                         set_status(&shared, AnalyticsWriterStatus::Idle);
                     }
                     Err(PublishError::Input(error)) if is_input_operational(&error) => {
-                        consume_notification(&shared, notification);
                         retry_operation(&shared, &mut scheduler, operation, clock.now_ms());
                     }
                     Err(PublishError::Input(error)) => {
-                        consume_notification(&shared, notification);
-                        refuse_operation(&shared, &mut scheduler, operation, error.to_string());
+                        refuse_operation(
+                            &shared,
+                            &mut scheduler,
+                            operation,
+                            notification,
+                            error.to_string(),
+                        );
                     }
                     Err(PublishError::Store(error)) if error.is_operational() => {
-                        consume_notification(&shared, notification);
                         retry_operation(
                             &shared,
                             &mut scheduler,
@@ -565,11 +643,11 @@ fn run<C: Clock + Send + Sync + 'static>(
                         );
                     }
                     Err(PublishError::Store(error)) => {
-                        consume_notification(&shared, notification);
                         refuse_operation(
                             &shared,
                             &mut scheduler,
                             Operation::Reload(Resume::Publish),
+                            notification,
                             error.to_string(),
                         );
                     }
@@ -581,7 +659,7 @@ fn run<C: Clock + Send + Sync + 'static>(
                 .compact(&config.compaction_policy)
             {
                 Ok(_) => {
-                    scheduler.succeeded(operation, clock.now_ms(), config.interval);
+                    scheduler.succeeded(operation, clock.now_ms());
                     set_status(&shared, AnalyticsWriterStatus::Idle);
                 }
                 Err(error) if error.is_operational() => retry_operation(
@@ -594,6 +672,7 @@ fn run<C: Clock + Send + Sync + 'static>(
                     &shared,
                     &mut scheduler,
                     Operation::Reload(Resume::Compact),
+                    notification,
                     error.to_string(),
                 ),
             },
@@ -602,7 +681,7 @@ fn run<C: Clock + Send + Sync + 'static>(
                 retirement_started(&shared);
                 match store.as_mut().expect("opened store").retire() {
                     Ok(_) => {
-                        scheduler.succeeded(operation, clock.now_ms(), config.interval);
+                        scheduler.succeeded(operation, clock.now_ms());
                         set_status(&shared, AnalyticsWriterStatus::Idle);
                     }
                     Err(error) if error.is_operational() => retry_operation(
@@ -615,21 +694,26 @@ fn run<C: Clock + Send + Sync + 'static>(
                         &shared,
                         &mut scheduler,
                         Operation::Reload(Resume::Retire),
+                        notification,
                         error.to_string(),
                     ),
                 }
             }
             Operation::Reload(_) => match store.as_mut().expect("opened store").reload_manifest() {
                 Ok(()) => {
-                    scheduler.succeeded(operation, clock.now_ms(), config.interval);
+                    scheduler.succeeded(operation, clock.now_ms());
                     set_status(&shared, AnalyticsWriterStatus::Idle);
                 }
                 Err(error) if error.is_operational() => {
                     retry_operation(&shared, &mut scheduler, operation, clock.now_ms());
                 }
-                Err(error) => {
-                    refuse_operation(&shared, &mut scheduler, operation, error.to_string())
-                }
+                Err(error) => refuse_operation(
+                    &shared,
+                    &mut scheduler,
+                    operation,
+                    notification,
+                    error.to_string(),
+                ),
             },
         }
     }
@@ -661,6 +745,9 @@ fn next_operation<C: Clock>(
             #[cfg(test)]
             {
                 state.waiting = false;
+                if matches!(operation, Operation::Open | Operation::Reload(_)) {
+                    state.store_attempts += 1;
+                }
             }
             state.status = AnalyticsWriterStatus::Running;
             shared.changed.notify_all();
@@ -703,8 +790,10 @@ fn refuse_operation(
     shared: &Shared,
     scheduler: &mut Scheduler,
     operation: Operation,
+    notification: u64,
     reason: String,
 ) {
+    consume_notification(shared, notification);
     scheduler.refuse(operation);
     set_status(shared, AnalyticsWriterStatus::Refused { reason });
 }
@@ -795,6 +884,354 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    #[test]
+    fn scheduler_refusals_consume_only_the_selected_notification() {
+        for operation in [
+            Operation::Open,
+            Operation::Publish,
+            Operation::Reload(Resume::Publish),
+            Operation::Reload(Resume::Compact),
+            Operation::Reload(Resume::Retire),
+        ] {
+            for notified_during_work in [false, true] {
+                let shared = Shared::new();
+                let mut scheduler = Scheduler::new(0);
+                lock(&shared.state).notifications = 1;
+                let snapshot = lock(&shared.state).notifications;
+                if notified_during_work {
+                    lock(&shared.state).notifications += 1;
+                }
+                refuse_operation(
+                    &shared,
+                    &mut scheduler,
+                    operation,
+                    snapshot,
+                    "invalid".into(),
+                );
+                let state = lock(&shared.state);
+                assert_eq!(state.consumed, snapshot);
+                let has_notification = state.notifications != state.consumed;
+                assert_eq!(has_notification, notified_during_work);
+                assert_eq!(
+                    scheduler.operation_due(
+                        1_000_000,
+                        has_notification,
+                        operation != Operation::Open
+                    ),
+                    notified_during_work.then_some(operation),
+                );
+                if !notified_during_work {
+                    assert_eq!(scheduler.deadline(false, true), None);
+                    assert!(matches!(
+                        state.status,
+                        AnalyticsWriterStatus::Refused { .. }
+                    ));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scheduler_backoff_survives_successful_reloads_until_the_operation_succeeds() {
+        for resume in [Resume::Publish, Resume::Compact, Resume::Retire] {
+            let shared = Shared::new();
+            let mut scheduler = Scheduler::new(0);
+            let mut now = 0;
+            let reload = Operation::Reload(resume);
+            for (index, delay) in [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000]
+                .into_iter()
+                .enumerate()
+            {
+                let attempt = index as u32 + 1;
+                retry_operation(&shared, &mut scheduler, reload, now);
+                assert_eq!(
+                    lock(&shared.state).status,
+                    AnalyticsWriterStatus::Retrying { attempt }
+                );
+                assert_eq!(scheduler.deadline(true, true), Some(now + delay));
+                assert_eq!(scheduler.operation_due(now + delay - 1, true, true), None);
+                now += delay;
+                assert_eq!(scheduler.operation_due(now, true, true), Some(reload));
+                scheduler.succeeded(reload, now);
+                assert_eq!(scheduler.attempt, attempt);
+                assert_eq!(
+                    scheduler.operation_due(now, false, true),
+                    Some(resume.operation())
+                );
+            }
+            scheduler.succeeded(resume.operation(), now);
+            assert_eq!(scheduler.attempt, 0);
+            assert_eq!(scheduler.retry(reload, now), 1);
+        }
+    }
+
+    #[test]
+    fn scheduler_spaces_a_publish_that_fails_after_installing_a_visible_head() {
+        // Store's cfg(test) fault hook is private to semon-asi. Model its
+        // rename-visible error contract without files, threads or wall time.
+        struct StoreDouble(u64);
+        impl StoreDouble {
+            fn publish(&mut self) -> Result<u64, StoreError> {
+                self.0 += 1;
+                Err(StoreError::Io(std::io::Error::other("post-rename fsync")))
+            }
+        }
+        let mut store = StoreDouble(0);
+        let mut scheduler = Scheduler::new(0);
+        assert_eq!(
+            scheduler.operation_due(0, true, true),
+            Some(Operation::Publish)
+        );
+        let error = store.publish().unwrap_err();
+        scheduler.publication_attempted(0, DEFAULT_ANALYTICS_WRITER_INTERVAL);
+        assert!(error.is_operational());
+        let reload = Operation::Reload(Resume::Publish);
+        scheduler.retry(reload, 0);
+        assert_eq!(store.0, 1, "the failed attempt installed a visible head");
+        assert_eq!(scheduler.operation_due(999, true, true), None);
+        assert_eq!(scheduler.operation_due(1_000, false, true), Some(reload));
+        scheduler.succeeded(reload, 1_000);
+        assert_eq!(scheduler.operation_due(1_000, false, true), None);
+        assert_eq!(scheduler.deadline(false, true), Some(2_000));
+        assert_eq!(scheduler.operation_due(1_999, false, true), None);
+        assert_eq!(
+            scheduler.operation_due(2_000, false, true),
+            Some(Operation::Publish)
+        );
+    }
+
+    #[test]
+    fn scheduler_retires_before_a_notified_publication_with_a_one_hour_interval() {
+        let mut scheduler = Scheduler::new(0);
+        scheduler.publication_attempted(0, Duration::from_secs(3_600));
+        scheduler.succeeded(Operation::Publish, 0);
+        scheduler.succeeded(Operation::Compact, 0);
+        // Demand stays in the shell's notification count while publication is
+        // interval-gated; do not commit pending to Publish and hide retirement.
+        assert_eq!(scheduler.operation_due(1_000, true, true), None);
+        assert_eq!(scheduler.deadline(true, true), Some(600_000));
+        assert_eq!(scheduler.operation_due(599_999, true, true), None);
+        assert_eq!(
+            scheduler.operation_due(600_000, true, true),
+            Some(Operation::Retire)
+        );
+        scheduler.succeeded(Operation::Retire, 600_000);
+        assert_eq!(scheduler.next_cycle, 3_600_000);
+        assert_eq!(scheduler.operation_due(600_000, true, true), None);
+        assert_eq!(scheduler.deadline(true, true), Some(1_200_000));
+        for now in (1_200_000..=3_600_000).step_by(600_000) {
+            assert_eq!(
+                scheduler.operation_due(now, true, true),
+                Some(Operation::Retire)
+            );
+            scheduler.succeeded(Operation::Retire, now);
+        }
+        assert_eq!(
+            scheduler.operation_due(3_600_000, true, true),
+            Some(Operation::Publish)
+        );
+    }
+
+    #[test]
+    fn scheduler_preserves_reload_refusal_and_retry_barriers_when_retirement_is_due() {
+        for resume in [Resume::Publish, Resume::Compact, Resume::Retire] {
+            let mut scheduler = Scheduler::new(0);
+            let reload = Operation::Reload(resume);
+            scheduler.refuse(reload);
+            assert_eq!(scheduler.operation_due(600_000, false, true), None);
+            assert_eq!(scheduler.deadline(false, true), None);
+            assert_eq!(scheduler.operation_due(600_000, true, true), Some(reload));
+            scheduler.retry(reload, 600_000);
+            assert_eq!(scheduler.operation_due(600_999, true, true), None);
+            assert_eq!(scheduler.deadline(true, true), Some(601_000));
+            assert_eq!(scheduler.operation_due(601_000, true, true), Some(reload));
+            scheduler.succeeded(reload, 601_000);
+            assert_eq!(
+                scheduler.operation_due(601_000, false, true),
+                Some(resume.operation())
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_successful_open_and_maintenance_keep_publication_demand() {
+        for operation in [Operation::Open, Operation::Compact, Operation::Retire] {
+            let mut scheduler = Scheduler::new(0);
+            scheduler.succeeded(operation, 0);
+            assert_eq!(
+                scheduler.operation_due(0, true, true),
+                Some(Operation::Publish)
+            );
+        }
+        for resume in [Resume::Publish, Resume::Compact, Resume::Retire] {
+            let mut scheduler = Scheduler::new(0);
+            scheduler.succeeded(Operation::Reload(resume), 0);
+            assert_eq!(
+                scheduler.operation_due(0, true, true),
+                Some(resume.operation())
+            );
+            scheduler.succeeded(resume.operation(), 0);
+            if resume == Resume::Publish {
+                scheduler.succeeded(Operation::Compact, 0);
+            }
+            assert_eq!(
+                scheduler.operation_due(0, true, true),
+                Some(Operation::Publish)
+            );
+        }
+    }
+
+    #[test]
+    fn scheduler_retirement_preserves_a_waiting_recovery_publication_and_its_backoff() {
+        let mut scheduler = Scheduler::new(0);
+        scheduler.publication_attempted(0, Duration::from_secs(3_600));
+        let reload_publish = Operation::Reload(Resume::Publish);
+        assert_eq!(scheduler.retry(reload_publish, 0), 1);
+        assert_eq!(
+            scheduler.operation_due(1_000, false, true),
+            Some(reload_publish)
+        );
+        scheduler.succeeded(reload_publish, 1_000);
+        assert_eq!(scheduler.operation_due(1_000, false, true), None);
+        assert_eq!(scheduler.deadline(false, true), Some(600_000));
+        assert_eq!(
+            scheduler.operation_due(600_000, false, true),
+            Some(Operation::Retire)
+        );
+        assert_eq!(scheduler.publication_after_retirement, Some(1));
+        let reload_retire = Operation::Reload(Resume::Retire);
+        assert_eq!(scheduler.retry(reload_retire, 600_000), 1);
+        scheduler.refuse(reload_retire);
+        assert_eq!(scheduler.operation_due(700_000, false, true), None);
+        assert_eq!(scheduler.deadline(false, true), None);
+        assert_eq!(
+            scheduler.operation_due(700_000, true, true),
+            Some(reload_retire)
+        );
+        scheduler.succeeded(reload_retire, 700_000);
+        assert_eq!(
+            scheduler.operation_due(700_000, false, true),
+            Some(Operation::Retire)
+        );
+        scheduler.succeeded(Operation::Retire, 700_000);
+        assert_eq!(scheduler.pending, Some(Operation::Publish));
+        assert_eq!(scheduler.attempt, 1);
+        assert_eq!(scheduler.operation_due(700_000, false, true), None);
+        assert_eq!(scheduler.deadline(false, true), Some(1_300_000));
+        // Repeated retirement never forgets the publication or resets its retry
+        // progression. Complete the later maintenance cycles before publishing.
+        for now in [1_300_000, 1_900_000, 2_500_000, 3_100_000] {
+            assert_eq!(
+                scheduler.operation_due(now, false, true),
+                Some(Operation::Retire)
+            );
+            scheduler.succeeded(Operation::Retire, now);
+        }
+        assert_eq!(
+            scheduler.operation_due(3_600_000, false, true),
+            Some(Operation::Publish)
+        );
+        scheduler.publication_attempted(3_600_000, Duration::from_secs(3_600));
+        assert_eq!(scheduler.retry(reload_publish, 3_600_000), 2);
+        assert_eq!(scheduler.retry_at, Some(3_602_000));
+    }
+
+    #[test]
+    fn scheduler_wait_deadlines_are_future_or_absent_after_selecting_no_work() {
+        let operations = [
+            None,
+            Some(Operation::Open),
+            Some(Operation::Publish),
+            Some(Operation::Compact),
+            Some(Operation::Retire),
+            Some(Operation::Reload(Resume::Publish)),
+            Some(Operation::Reload(Resume::Compact)),
+            Some(Operation::Reload(Resume::Retire)),
+        ];
+        for operation in operations {
+            for refused in [false, true] {
+                for retry_at in [None, Some(900_000)] {
+                    for has_notification in [false, true] {
+                        for has_store in [false, true] {
+                            for now in [0, 599_999, 600_000, 899_999, 900_000, 3_599_999, 3_600_000]
+                            {
+                                let mut scheduler = Scheduler::new(0);
+                                scheduler.next_cycle = 3_600_000;
+                                scheduler.retry_at = retry_at;
+                                if refused {
+                                    scheduler.refused = operation;
+                                } else {
+                                    scheduler.pending = operation;
+                                }
+                                if scheduler
+                                    .operation_due(now, has_notification, has_store)
+                                    .is_none()
+                                {
+                                    assert!(
+                                        scheduler
+                                            .deadline(has_notification, has_store)
+                                            .is_none_or(|deadline| deadline > now),
+                                        "{scheduler:?} at {now}"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scheduler_no_writer_deadline_cannot_be_bypassed_by_notifications() {
+        let mut scheduler = Scheduler::new(0);
+        scheduler.no_writer(10);
+        assert_eq!(scheduler.operation_due(30_009, true, false), None);
+        assert_eq!(scheduler.deadline(true, false), Some(30_010));
+        assert_eq!(
+            scheduler.operation_due(30_010, true, false),
+            Some(Operation::Open)
+        );
+    }
+
+    #[test]
+    fn corrupt_or_unsupported_manifest_open_refuses_once_per_notification() {
+        for unsupported in [false, true] {
+            let root = temp_root(if unsupported {
+                "unsupported-manifest"
+            } else {
+                "corrupt-manifest"
+            });
+            fs::create_dir_all(root.join("analytics")).unwrap();
+            let bytes = if unsupported {
+                let mut manifest = semon_asi::Manifest::empty();
+                manifest.schema_version += 1;
+                serde_json::to_vec(&manifest).unwrap()
+            } else {
+                b"invalid synthetic manifest".to_vec()
+            };
+            fs::write(root.join("analytics/manifest.json"), &bytes).unwrap();
+            let handle = start(AnalyticsWriterConfig::new(
+                "machine",
+                root.join("index.sqlite3"),
+                &root,
+            ));
+            handle.wait_for_store_refusal(1);
+            handle.notify();
+            handle.wait_for_store_refusal(2);
+            assert!(matches!(
+                handle.status(),
+                AnalyticsWriterStatus::Refused { .. }
+            ));
+            assert_eq!(
+                fs::read(root.join("analytics/manifest.json")).unwrap(),
+                bytes
+            );
+            handle.stop_and_join();
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
