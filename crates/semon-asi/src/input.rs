@@ -34,8 +34,8 @@ pub fn encode_component(value: &str) -> String {
 
 /// Caller-selected work per chunk. Both limits must be positive.
 ///
-/// `max_sessions` also bounds journal entries examined, including repeated
-/// entries for the same identity. A session is never split: the first session
+/// `max_sessions` bounds inventory keys, or incremental journal entries
+/// including repeated entries for the same identity. A session is never split: the first session
 /// exceeding `max_steps` is returned whole and alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InputBudget {

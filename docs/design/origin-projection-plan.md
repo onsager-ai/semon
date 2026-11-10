@@ -113,8 +113,8 @@ the complete key and observation merge contract.
 The admitted input now takes a caller-selected positive session/journal and step
 budget (defaults: 64 sessions/journal entries and 8,192 admitted steps). Inventory
 pages Catalog/activity keys through its starting maximum key, recording sequence
-S for catch-up. Metadata-only `Pending` identities need no journal entry. Preserve
-whole-session atomicity and allowing a single oversize session. Partial chunks
+S for catch-up. Metadata-only `Pending` identities need no journal entry.
+Whole-session atomicity allows a single oversize session. Partial chunks
 publish independently and checkpoint their cursor. Only the final inventory
 chunk carries `ReplaceNamespace { session_uids }`, with the complete current UID
 set, not merely that chunk's changes. It marks prior live sessions absent from

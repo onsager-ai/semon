@@ -5,7 +5,7 @@ use std::sync::{
     atomic::{AtomicI64, Ordering},
 };
 
-use arrow::array::{Int64Array, StringArray};
+use arrow::array::{Int64Array, StringArray, TimestampMillisecondArray};
 use arrow::util::display::array_value_to_string;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use semon_asi::{
@@ -187,8 +187,17 @@ fn live_rows(store: &Store<TestClock>) -> Rows {
                         .zip(batch.columns())
                         .filter(|(field, _)| field.name() != "_gen")
                         .map(|(_, array)| {
-                            (!array.is_null(index))
-                                .then(|| array_value_to_string(array, index).unwrap())
+                            if array.is_null(index) {
+                                None
+                            } else if let Some(times) =
+                                array.as_any().downcast_ref::<TimestampMillisecondArray>()
+                            {
+                                // Arrow's optional chrono-tz feature is off;
+                                // compare the exact stored milliseconds.
+                                Some(times.value(index).to_string())
+                            } else {
+                                Some(array_value_to_string(array, index).unwrap())
+                            }
                         })
                         .collect();
                     *rows.entry(row).or_default() += 1;
@@ -390,10 +399,18 @@ fn bounded_inventory_replays_late_records_additions_and_removals() {
         .iter()
         .find(|row| row.harness == "claude" && store.live_map().contains_key(&uid(row)))
         .unwrap();
-    let removed = rows
+    let last_uid = input
+        .last
+        .as_ref()
+        .unwrap()
+        .changes
         .iter()
-        .find(|row| row.key != changed.key && store.live_map().contains_key(&uid(row)))
+        .find_map(|change| match change {
+            SessionChange::Admitted(session) => Some(&session.session_uid),
+            _ => None,
+        })
         .unwrap();
+    let removed = rows.iter().find(|row| uid(row) == *last_uid).unwrap();
     append_steps(changed, 2);
     let path = options
         .claude_home
@@ -404,6 +421,8 @@ fn bounded_inventory_replays_late_records_additions_and_removals() {
     ].join("\n") + "\n").unwrap();
     republish(&mut native, &options);
     remove_identity(&mut native, &removed.key);
+    let upper = rows.iter().max_by_key(|row| &row.key).unwrap();
+    remove_identity(&mut native, &upper.key);
     let mut final_inventory_was_incomplete = false;
     for _ in 0..64 {
         let progress = chunk(&mut store, &mut input, selected);
@@ -424,6 +443,7 @@ fn bounded_inventory_replays_late_records_additions_and_removals() {
     );
     assert!(input.removed.contains(&uid(removed)));
     assert!(!store.live_map().contains_key(&uid(removed)));
+    assert!(!store.live_map().contains_key(&uid(upper)));
     assert!(
         store
             .live_map()
@@ -450,19 +470,23 @@ fn bounded_inventory_incarnation_change_abandons_old_partial_reconciliation() {
     let mut input = ObservedInput::open(&options);
     let selected = budget(1, 8_192);
     assert!(!chunk(&mut store, &mut input, selected).complete);
+    assert!(!chunk(&mut store, &mut input, selected).complete);
     let old: Value = serde_json::from_str(&store.manifest().checkpoints[NAMESPACE]).unwrap();
     new_incarnation(&mut native);
     assert!(!chunk(&mut store, &mut input, selected).complete);
     let new: Value = serde_json::from_str(&store.manifest().checkpoints[NAMESPACE]).unwrap();
     assert_ne!(old["incarnation"], new["incarnation"]);
     assert_eq!(
-        old["cursor"]["after"], new["cursor"]["after"],
+        new["cursor"]["after"],
+        serde_json::json!("native-cl-00"),
         "restart begins at the first bounded journal page"
     );
+    assert_eq!(old["cursor"]["after"], serde_json::json!("native-cl-02"));
     assert_eq!(input.reconciliations, 0);
     assert!(store.manifest().source_missing.is_empty());
     drain(&mut store, &mut input, selected);
     assert_eq!(input.reconciliations, 1);
+    assert!(store.manifest().source_missing.is_empty());
     let mut expected = Store::open_with_clock(&root.join("expected"), clock()).unwrap();
     drain(
         &mut expected,
@@ -570,6 +594,56 @@ fn bounded_incremental_coalesces_duplicates_and_defers_without_skipping() {
 }
 
 #[test]
+fn bounded_pending_catalog_inventory_needs_no_journal_entries() {
+    let root = scratch("bounded-pending-only");
+    let (options, rows, slots) = catalog_native_fixture(&root, 4, false);
+    let mut pending = rows.clone();
+    for row in &mut pending {
+        row.session_activity = None;
+    }
+    let (mut native, _) = opened(&crate::events::EventCache::path(&options.cache));
+    catalog_write(&mut native, &pending, &slots, false, CatalogWriter::Auto).unwrap();
+    let journal: i64 = native
+        .connection
+        .query_row("SELECT count(*) FROM silver_change", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        journal, 0,
+        "the producer deliberately waits for query-ready activity"
+    );
+    let mut store = Store::open_with_clock(&root.join("store"), clock()).unwrap();
+    let mut input = ObservedInput::open(&options);
+    let mut seen = BTreeSet::new();
+    for page in 0..4 {
+        let progress = chunk(&mut store, &mut input, budget(1, 1));
+        let batch = input.last.as_ref().unwrap();
+        assert_eq!(progress.complete, page == 3);
+        assert_eq!(batch.changes.len(), 1);
+        let SessionChange::Pending { session_uid } = &batch.changes[0] else {
+            panic!("a never-admitted Catalog identity must be pending");
+        };
+        assert!(seen.insert(session_uid.clone()));
+        assert!(store.live_map().is_empty());
+        assert!(store.manifest().source_missing.is_empty());
+        if let Reconciliation::ReplaceNamespace { session_uids } = &batch.reconciliation {
+            assert_eq!(session_uids, &rows.iter().map(uid).collect());
+        }
+    }
+    assert_eq!(input.reconciliations, 1);
+    catalog_write(&mut native, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drain(&mut store, &mut input, budget(1, 1));
+    assert_eq!(store.live_map().len(), 4);
+    let mut expected = Store::open_with_clock(&root.join("expected"), clock()).unwrap();
+    drain(
+        &mut expected,
+        &mut ObservedInput::open(&options),
+        InputBudget::default(),
+    );
+    assert_eq!(live_rows(&store), live_rows(&expected));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bounded_empty_inventory_completes_and_checkpoints_zero() {
     let (root, options, _, _native) = fixture("bounded-empty", 0);
     let mut input = ObservedInput::open(&options);
@@ -638,6 +712,17 @@ fn bounded_input_refuses_malformed_forged_and_cross_namespace_cursors() {
         serde_json::json!({"phase":"incremental", "after":"1"}),
         serde_json::json!({"phase":"incremental", "after":1, "snapshot":current}),
         serde_json::json!({"phase":"incremental", "after":1, "extra":true}),
+    ] {
+        let mut forged = original.clone();
+        forged["cursor"] = cursor;
+        invalid.push(forged.to_string());
+    }
+    for cursor in [
+        serde_json::json!({"phase":"inventory", "snapshot":current, "through":"native-cx-03", "after":"native-cl-01"}),
+        serde_json::json!({"phase":"inventory", "snapshot":current, "through":"zzzz", "after":"native-cl-00"}),
+        serde_json::json!({"phase":"inventory", "snapshot":current, "through":"native-cl-00", "after":"native-cx-03"}),
+        serde_json::json!({"phase":"inventory", "snapshot":current+1, "through":"native-cx-03", "after":"native-cl-00"}),
+        serde_json::json!({"phase":"inventory", "snapshot":-1, "through":"native-cx-03", "after":"native-cl-00"}),
     ] {
         let mut forged = original.clone();
         forged["cursor"] = cursor;

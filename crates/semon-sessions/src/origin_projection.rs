@@ -68,52 +68,41 @@ impl AnalyticsInput for SqliteAnalyticsInput {
         crate::events::store::read_silver_snapshot(
             &mut self.connection,
             |tx, incarnation, current| {
-                let phase = match previous {
+                let previous = match previous {
                     Some(previous) if previous.incarnation == incarnation => {
-                        validate_cursor(tx, previous.cursor, current)?
+                        Some(validate_cursor(tx, previous.cursor, current)?)
                     }
-                    _ => Cursor::Inventory {
-                        snapshot: current,
-                        after: 0,
-                    },
+                    _ => None,
                 };
-                let (after, through, inventory) = match phase {
-                    Cursor::Inventory { snapshot, after } => (after, snapshot, true),
-                    Cursor::Incremental { after } => (after, current, false),
+                let (snapshot, after_key, through_key, after_sequence) = match previous {
+                    Some(Cursor::Inventory {
+                        snapshot,
+                        after,
+                        through,
+                    }) => (Some(snapshot), Some(after), Some(through), 0),
+                    Some(Cursor::Incremental { after }) => (None, None, None, after),
+                    None => (Some(current), None, maximum_inventory_key(tx)?, 0),
                 };
-                // LIMIT bounds journal allocation even when every entry names a
-                // different session. Coalesce only within this bounded page.
-                let mut statement = tx.prepare(
-                    "SELECT seq,session_key,kind FROM silver_change \
-                     WHERE seq>?1 AND seq<=?2 ORDER BY seq LIMIT ?3",
-                )?;
                 let limit = i64::try_from(budget.max_sessions)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
-                let mut selected = BTreeMap::new();
-                for entry in statement.query_map(params![after, through, limit], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })? {
-                    let (sequence, key, kind) = entry?;
-                    selected.insert(key, (sequence, kind));
-                }
-                let mut ordered: Vec<_> = selected.into_iter().collect();
-                ordered.sort_by_key(|(_, (sequence, _))| *sequence);
+                let selected = if snapshot.is_some() {
+                    if through_key.is_some() {
+                        inventory_keys(tx, after_key.as_deref(), through_key.as_deref(), limit)?
+                            .into_iter()
+                            .map(|key| (key, 0, "changed".to_owned()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    journal_page(tx, after_sequence, current, limit)?
+                };
                 let mut changes = Vec::new();
-                let mut cursor = after;
+                let mut cursor_key = after_key;
+                let mut cursor_sequence = after_sequence;
                 let mut steps = 0usize;
-                for (key, (sequence, kind)) in ordered {
-                    // Old removal records are not fresh deletion instructions
-                    // during inventory; final UID reconciliation owns absence.
-                    let next = read_session(
-                        tx,
-                        &namespace,
-                        &key,
-                        if inventory { "changed" } else { &kind },
-                    )?;
+                for (key, sequence, kind) in selected {
+                    let next = read_session(tx, &namespace, &key, &kind)?;
                     let next_steps = next
                         .iter()
                         .map(|change| match change {
@@ -125,13 +114,17 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                         break;
                     }
                     changes.extend(next);
-                    cursor = sequence;
+                    cursor_key = Some(key);
+                    cursor_sequence = sequence;
                     steps = steps.saturating_add(next_steps);
                     if steps >= budget.max_steps {
                         break;
                     }
                 }
-                let finished_inventory = inventory && cursor == through;
+                let finished_inventory = snapshot.is_some()
+                    && (through_key.is_none()
+                        || inventory_keys(tx, cursor_key.as_deref(), through_key.as_deref(), 1)?
+                            .is_empty());
                 let reconciliation = if finished_inventory {
                     Reconciliation::ReplaceNamespace {
                         session_uids: inventory_uids(tx, &namespace)?,
@@ -139,14 +132,18 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                 } else {
                     Reconciliation::Incremental
                 };
-                let phase = if inventory && !finished_inventory {
-                    Cursor::Inventory {
-                        snapshot: through,
-                        after: cursor,
-                    }
-                } else {
-                    Cursor::Incremental { after: cursor }
+                let phase = match snapshot {
+                    Some(snapshot) if !finished_inventory => Cursor::Inventory {
+                        snapshot,
+                        through: through_key.ok_or(rusqlite::Error::InvalidQuery)?,
+                        after: cursor_key.ok_or(rusqlite::Error::InvalidQuery)?,
+                    },
+                    Some(snapshot) => Cursor::Incremental { after: snapshot },
+                    None => Cursor::Incremental {
+                        after: cursor_sequence,
+                    },
                 };
+                let complete = matches!(&phase, Cursor::Incremental { after } if *after == current);
                 Ok(AdmittedBatch {
                     checkpoint: encode_checkpoint(&Checkpoint {
                         namespace: namespace.clone(),
@@ -154,7 +151,7 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                         cursor: phase,
                     })?,
                     namespace,
-                    complete: matches!(phase, Cursor::Incremental { after } if after == current),
+                    complete,
                     reconciliation,
                     changes,
                 })
@@ -163,27 +160,86 @@ impl AnalyticsInput for SqliteAnalyticsInput {
     }
 }
 
+fn maximum_inventory_key(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<Option<String>> {
+    tx.query_row(
+        "SELECT session_key FROM session_catalog WHERE lifecycle='current' \
+         UNION SELECT session_key FROM session_activity_projections ORDER BY session_key DESC LIMIT 1",
+        [], |row| row.get(0),
+    ).optional()
+}
+
+fn inventory_keys(
+    tx: &rusqlite::Transaction<'_>,
+    after: Option<&str>,
+    through: Option<&str>,
+    limit: i64,
+) -> rusqlite::Result<Vec<String>> {
+    // Put range predicates in both UNION arms so SQLite can merge ordered
+    // index scans and stop at LIMIT instead of materializing the inventory.
+    let lower = if after.is_some() {
+        " AND session_key>?1"
+    } else {
+        ""
+    };
+    let upper = if through.is_some() {
+        " AND session_key<=?2"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT session_key FROM session_catalog WHERE lifecycle='current'{lower}{upper} \
+         UNION SELECT session_key FROM session_activity_projections WHERE 1{lower}{upper} \
+         ORDER BY session_key LIMIT ?3",
+    );
+    let mut statement = tx.prepare(&sql)?;
+    statement
+        .query_map(params![after, through, limit], |row| row.get(0))?
+        .collect()
+}
+
+fn journal_page(
+    tx: &rusqlite::Transaction<'_>,
+    after: i64,
+    through: i64,
+    limit: i64,
+) -> rusqlite::Result<Vec<(String, i64, String)>> {
+    let mut statement = tx.prepare(
+        "SELECT seq,session_key,kind FROM silver_change \
+         WHERE seq>?1 AND seq<=?2 ORDER BY seq LIMIT ?3",
+    )?;
+    let mut selected = BTreeMap::new();
+    for entry in statement.query_map(params![after, through, limit], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })? {
+        let (sequence, key, kind) = entry?;
+        selected.insert(key, (sequence, kind));
+    }
+    let mut ordered: Vec<_> = selected
+        .into_iter()
+        .map(|(key, (sequence, kind))| (key, sequence, kind))
+        .collect();
+    ordered.sort_by_key(|(_, sequence, _)| *sequence);
+    Ok(ordered)
+}
+
 fn inventory_uids(
     tx: &rusqlite::Transaction<'_>,
     namespace: &str,
 ) -> rusqlite::Result<std::collections::BTreeSet<String>> {
     let mut statement = tx.prepare(
-        "SELECT i.harness,i.native_session_id FROM \
-         (SELECT session_key FROM session_catalog WHERE lifecycle='current' \
-          UNION SELECT session_key FROM session_activity_projections) AS inventory \
-         LEFT JOIN silver_session_identity i USING(session_key)",
+        "SELECT session_key FROM session_catalog WHERE lifecycle='current' \
+         UNION SELECT session_key FROM session_activity_projections",
     )?;
     let mut uids = std::collections::BTreeSet::new();
-    for identity in statement.query_map([], |row| {
-        Ok((
-            row.get::<_, Option<String>>(0)?,
-            row.get::<_, Option<String>>(1)?,
-        ))
-    })? {
-        let (Some(harness), Some(native_id)) = identity? else {
-            return Err(rusqlite::Error::InvalidQuery);
-        };
-        uids.insert(session_uid(namespace, &(harness, native_id)));
+    for key in statement.query_map([], |row| row.get::<_, String>(0))? {
+        // Catalog metadata supplies never-admitted Pending identities; the
+        // native identity ledger supplies removed/retained activity identities.
+        // Neither path reads StepFacts or native source bodies here.
+        uids.insert(session_uid(namespace, &session_identity(tx, &key?)?));
     }
     Ok(uids)
 }
@@ -348,11 +404,17 @@ struct Checkpoint {
     cursor: Cursor,
 }
 
-#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
 enum Cursor {
-    Inventory { snapshot: i64, after: i64 },
-    Incremental { after: i64 },
+    Inventory {
+        snapshot: i64,
+        through: String,
+        after: String,
+    },
+    Incremental {
+        after: i64,
+    },
 }
 
 fn decode_checkpoint(value: &str) -> rusqlite::Result<Checkpoint> {
@@ -363,9 +425,13 @@ fn decode_checkpoint(value: &str) -> rusqlite::Result<Checkpoint> {
             .incarnation
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || !match checkpoint.cursor {
-            Cursor::Inventory { snapshot, after } => after > 0 && after < snapshot,
-            Cursor::Incremental { after } => after >= 0,
+        || !match &checkpoint.cursor {
+            Cursor::Inventory {
+                snapshot,
+                through,
+                after,
+            } => *snapshot >= 0 && after < through,
+            Cursor::Incremental { after } => *after >= 0,
         }
     {
         return Err(rusqlite::Error::InvalidQuery);
@@ -378,21 +444,37 @@ fn validate_cursor(
     cursor: Cursor,
     current: i64,
 ) -> rusqlite::Result<Cursor> {
-    let anchors: &[i64] = match &cursor {
-        Cursor::Inventory { snapshot, after } => &[*snapshot, *after],
-        Cursor::Incremental { after } => &[*after],
-    };
-    for &anchor in anchors {
-        if anchor > current
-            || (anchor != 0
-                && !tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM silver_change WHERE seq=?1)",
-                    [anchor],
-                    |row| row.get::<_, bool>(0),
-                )?)
-        {
-            return Err(rusqlite::Error::InvalidQuery);
+    let sequence = match &cursor {
+        Cursor::Inventory {
+            snapshot,
+            through,
+            after,
+        } => {
+            for key in [after, through] {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_catalog WHERE session_key=?1 \
+                     UNION ALL SELECT 1 FROM session_activity_projections WHERE session_key=?1 \
+                     UNION ALL SELECT 1 FROM silver_session_identity WHERE session_key=?1)",
+                    [key],
+                    |row| row.get(0),
+                )?;
+                if !exists {
+                    return Err(rusqlite::Error::InvalidQuery);
+                }
+            }
+            *snapshot
         }
+        Cursor::Incremental { after } => *after,
+    };
+    if sequence > current
+        || (sequence != 0
+            && !tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM silver_change WHERE seq=?1)",
+                [sequence],
+                |row| row.get::<_, bool>(0),
+            )?)
+    {
+        return Err(rusqlite::Error::InvalidQuery);
     }
     Ok(cursor)
 }

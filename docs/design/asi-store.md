@@ -341,8 +341,11 @@ added after S, so it cannot mark a retained current identity absent merely becau
 its replay is still pending. Once catch-up reports complete, live facts and their
 referenced dimensions equal a one-shot read at that final transaction, starting
 from the same retained facts and applying the same explicit removals. Physical
-generation numbers and unreferenced retained dimensions can differ. Later source
-writes require another cycle; a permanently advancing journal can keep catch-up
+generation numbers and unreferenced retained dimensions can differ. The oracle
+must use the same frozen evidence: an empty store cannot recreate an admitted
+generation observed by an earlier chunk if that generation later becomes
+unavailable or `Pending`. Retaining that evidence is the existing custody rule.
+Later source writes require another cycle; a permanently advancing journal can keep catch-up
 incomplete, but each call still returns bounded work.
 
 The adapter strictly validates the checkpoint format, namespace binding,
