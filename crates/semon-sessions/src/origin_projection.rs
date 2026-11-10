@@ -486,20 +486,36 @@ fn read_compactions(
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
+    let declared: i64 = tx.query_row(
+        "SELECT compactions FROM session_activity_projections \
+         WHERE session_key=?1 AND generation=?2",
+        params![row.key, generation],
+        |record| record.get(0),
+    )?;
     let mut statement = tx.prepare(
         "SELECT ordinal,metadata FROM session_activity_compactions \
          WHERE session_key=?1 AND generation=?2 ORDER BY ordinal",
     )?;
     let mut records = statement.query(params![row.key, generation])?;
-    let mut compactions = Vec::new();
+    let mut native_compactions = Vec::new();
     while let Some(record) = records.next()? {
         let ordinal: i64 = record.get(0)?;
-        if ordinal != compactions.len() as i64 {
+        if ordinal != native_compactions.len() as i64 {
             return Err(rusqlite::Error::InvalidQuery);
         }
         let metadata: String = record.get(1)?;
         let compact: native_activity::Compaction =
             serde_json::from_str(&metadata).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        native_compactions.push(compact);
+    }
+    // Validate physical rows before collapsing repeated native identities.
+    // Contiguous surviving ordinals alone cannot detect a truncated tail.
+    if native_compactions.len() as i64 != declared {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    let mut compactions: Vec<Compaction> = Vec::new();
+    let mut identities = BTreeMap::new();
+    for compact in native_compactions {
         let native_record = compact
             .native_record
             .as_ref()
@@ -510,11 +526,20 @@ fn read_compactions(
         }) else {
             return Ok(None);
         };
-        compactions.push(Compaction {
+        let projected = Compaction {
             compaction_uid: format!("{session_uid}/c/{}", encode_component(&anchor)),
             step_uid: compact.step_id.as_ref().map(|id| step_uid(session_uid, id)),
             timestamp: compact.timestamp,
-        });
+        };
+        if let Some(&index) = identities.get(&projected.compaction_uid) {
+            if compactions[index] != projected {
+                return Ok(None);
+            }
+        } else {
+            // Retain the first occurrence in persisted ordinal order.
+            identities.insert(projected.compaction_uid.clone(), compactions.len());
+            compactions.push(projected);
+        }
     }
     Ok(Some(compactions))
 }
@@ -526,10 +551,15 @@ fn session_input(
     row: &CatalogRow,
     repo: Repo,
 ) -> rusqlite::Result<Session> {
-    let parent_session_uid = row
-        .parent
-        .as_deref()
-        .filter(|parent| *parent != "you")
+    // Native Catalog links have no parent_source. The observed-link producers
+    // set ancestry, environment or marker (Semon-Parent in prompt text). None
+    // proves native lineage or workspace/time inference; unknown sources are
+    // likewise omitted rather than mislabelled under the ASI parent methods.
+    let parent = match row.parent_source.as_deref() {
+        None => row.parent.as_deref().filter(|parent| *parent != "you"),
+        Some(_) => None,
+    };
+    let parent_session_uid = parent
         .map(|parent| {
             session_identity(tx, parent).map(|identity| session_uid(namespace, &identity))
         })
@@ -545,7 +575,7 @@ fn session_input(
         native_session_id: native_session_identity(row)?.1,
         role: match row.kind.as_str() {
             "subagent" => Role::Worker,
-            "codex-run" if parent_session_uid.is_some() => Role::Worker,
+            "codex-run" if parent_method == ParentMethod::Native => Role::Worker,
             "session" | "codex-run" => Role::Solo,
             _ => Role::Unknown,
         },
@@ -997,6 +1027,7 @@ mod tests {
             Some("machine/codex/parent-native")
         );
         assert_eq!(session.role, Role::Worker);
+        assert_eq!(session.parent_method, ParentMethod::Native);
         assert!(
             native_session_identity(&CatalogRow {
                 native_ids: vec!["one".into(), "two".into()],
@@ -1004,6 +1035,81 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn parent_methods_preserve_native_lineage_without_promoting_observed_links() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(
+            "CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY, metadata TEXT NOT NULL) STRICT;\
+             CREATE TABLE silver_session_identity(\
+                session_key TEXT PRIMARY KEY, harness TEXT NOT NULL, native_session_id TEXT NOT NULL\
+             ) STRICT;\
+             INSERT INTO silver_session_identity VALUES('parent-key','codex','parent-native');",
+        ).unwrap();
+        for (source, parent, method, role) in [
+            (None, Some("parent-key"), ParentMethod::Native, Role::Worker),
+            (
+                Some("ancestry"),
+                Some("parent-key"),
+                ParentMethod::None,
+                Role::Solo,
+            ),
+            (
+                Some("environment"),
+                Some("parent-key"),
+                ParentMethod::None,
+                Role::Solo,
+            ),
+            (
+                Some("marker"),
+                Some("parent-key"),
+                ParentMethod::None,
+                Role::Solo,
+            ),
+            (
+                Some("unknown"),
+                Some("parent-key"),
+                ParentMethod::None,
+                Role::Solo,
+            ),
+            (None, None, ParentMethod::None, Role::Solo),
+            (None, Some("you"), ParentMethod::None, Role::Solo),
+        ] {
+            let mut row = catalog_row("child", "codex", "child", parent, "codex-run");
+            row.parent_source = source.map(str::to_owned);
+            let tx = transaction(&mut connection);
+            let session = session_input(
+                &tx,
+                "machine",
+                "machine/codex/child",
+                &row,
+                Repo {
+                    key: "unknown".into(),
+                    repo_id: None,
+                    local_path: None,
+                    display_name: "unknown".into(),
+                },
+            )
+            .unwrap();
+            assert_eq!(session.parent_method, method, "{source:?}, {parent:?}");
+            assert_eq!(session.role, role, "{source:?}, {parent:?}");
+            assert_eq!(
+                session.parent_session_uid.as_deref(),
+                (method == ParentMethod::Native).then_some("machine/codex/parent-native"),
+                "unsupported parent evidence is not exported as native lineage"
+            );
+
+            // A native subagent kind establishes Worker independently of the
+            // parent's provenance; only codex-run promotion depends on it.
+            row.kind = "subagent".into();
+            assert_eq!(
+                session_input(&tx, "machine", "machine/codex/child", &row, session.repo)
+                    .unwrap()
+                    .role,
+                Role::Worker
+            );
+        }
     }
 
     #[test]

@@ -111,6 +111,181 @@ fn same_stem_claude_native_ids_admit_distinct_portable_anchors() {
 }
 
 #[test]
+fn copied_native_compactions_collapse_or_withhold_only_the_conflicting_session() {
+    for conflict in ["none", "timestamp", "step"] {
+        let root = scratch(&format!("analytics-copied-compaction-{conflict}"));
+        let (options, rows, _) = catalog_native_fixture(&root, 2, false);
+        let original = &rows
+            .iter()
+            .find(|row| row.harness == "claude")
+            .unwrap()
+            .sources[0]
+            .path;
+        let prefix = fs::read_to_string(original).unwrap();
+        let mut compact = serde_json::json!({
+            "type":"system", "subtype":"compact_boundary", "uuid":"compact-shared",
+            "sessionId":"native-cl-00", "timestamp":"2026-09-24T00:01:30Z",
+            "compactMetadata":{"trigger":"auto","preTokens":155000}
+        });
+        fs::write(original, format!("{prefix}{compact}\n")).unwrap();
+        let copy = options
+            .claude_home
+            .join("projects/-work-proj-copy/native-cl-00.jsonl");
+        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        if conflict == "timestamp" {
+            compact["timestamp"] = serde_json::json!("2026-09-24T00:01:31Z");
+        }
+        fs::write(copy, format!("{prefix}{compact}\n")).unwrap();
+        let (rows, slots) = catalog_fixture_projection(&options);
+        let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+        assert_eq!(row.sources.len(), 2);
+        let path = crate::events::EventCache::path(&options.cache);
+        let (mut store, _) = opened(&path);
+        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+        let declared: i64 = store
+            .connection
+            .query_row(
+                "SELECT compactions FROM session_activity_projections WHERE session_key=?1",
+                [&row.key],
+                |record| record.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            declared, 2,
+            "both physical contributors must reach the adapter"
+        );
+        if conflict == "step" {
+            let metadata: String = store.connection.query_row(
+                "SELECT metadata FROM session_activity_compactions WHERE session_key=?1 AND ordinal=1",
+                [&row.key], |record| record.get(0),
+            ).unwrap();
+            let mut compact: serde_json::Value = serde_json::from_str(&metadata).unwrap();
+            assert!(!compact["step_id"].is_null());
+            compact["step_id"] = serde_json::Value::Null;
+            store.connection.execute(
+                "UPDATE session_activity_compactions SET metadata=?2 WHERE session_key=?1 AND ordinal=1",
+                params![row.key, compact.to_string()],
+            ).unwrap();
+        }
+        let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        let batch = input.read_admitted(None).unwrap();
+        let uid = "fixture-machine/claude/native-cl-00";
+        let session = batch.changes.iter().find_map(|change| match change {
+            SessionChange::Admitted(session) if session.session_uid == uid => Some(session),
+            _ => None,
+        });
+        if conflict == "none" {
+            let session =
+                session.expect("identical native facts collapse without blocking admission");
+            assert_eq!(session.compactions.len(), 1);
+            assert_eq!(
+                session.compactions[0].compaction_uid,
+                format!("{uid}/c/compact-shared")
+            );
+            assert!(session.compactions[0].step_uid.is_some());
+            assert_eq!(
+                session.steps.len(),
+                1,
+                "copied native step IDs are already unique"
+            );
+            let projected = semon_asi::project(session).unwrap();
+            assert_eq!(projected.tables["fact_compaction"].len(), 1);
+            assert_eq!(projected.tables["fact_step"].len(), 1);
+            assert_eq!(projected.tables["fact_turn"].len(), 1);
+        } else {
+            assert!(session.is_none());
+            assert!(batch.changes.contains(&SessionChange::Pending {
+                session_uid: uid.into()
+            }));
+            assert!(!batch.changes.contains(&SessionChange::SourceRestored {
+                session_uid: uid.into()
+            }));
+        }
+        assert!(batch.changes.iter().any(|change| matches!(
+            change, SessionChange::Admitted(session) if session.session.native_session_id == "native-cx-01"
+        )), "another session is admitted even when a compaction identity conflicts");
+        drop(input);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn truncated_compaction_rows_fail_integrity_even_when_ordinals_remain_contiguous() {
+    for remove_all in [false, true] {
+        let root = scratch("analytics-truncated-compactions");
+        let (options, rows, _) = catalog_native_fixture(&root, 1, false);
+        let source = &rows[0].sources[0].path;
+        let mut records = fs::read_to_string(source).unwrap();
+        for (id, second) in [("compact-first", 30), ("compact-last", 32)] {
+            let compact = serde_json::json!({
+                "type":"system", "subtype":"compact_boundary", "uuid":id,
+                "sessionId":"native-cl-00", "timestamp":format!("2026-09-24T00:01:{second:02}Z"),
+                "compactMetadata":{"trigger":"auto","preTokens":155000}
+            });
+            records.push_str(&format!("{compact}\n"));
+            // Native ingest coalesces adjacent boundary/summary records.
+            // A real prompt separates these two independent compactions.
+            let prompt = serde_json::json!({
+                "type":"user", "uuid":format!("prompt-{id}"), "sessionId":"native-cl-00",
+                "timestamp":format!("2026-09-24T00:01:{:02}Z", second + 1),
+                "message":{"role":"user","content":"Synthetic continuation"}
+            });
+            records.push_str(&format!("{prompt}\n"));
+        }
+        fs::write(source, records).unwrap();
+        let (rows, slots) = catalog_fixture_projection(&options);
+        let path = crate::events::EventCache::path(&options.cache);
+        let (mut store, _) = opened(&path);
+        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+        let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        let complete = input.read_admitted(None).unwrap();
+        let session = complete
+            .changes
+            .iter()
+            .find_map(|change| match change {
+                SessionChange::Admitted(session) => Some(session),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(session.compactions.len(), 2);
+        assert_eq!(
+            session
+                .compactions
+                .iter()
+                .map(|compact| compact.compaction_uid.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "fixture-machine/claude/native-cl-00/c/compact-first",
+                "fixture-machine/claude/native-cl-00/c/compact-last"
+            ]
+        );
+        let removed = store
+            .connection
+            .execute(
+                if remove_all {
+                    "DELETE FROM session_activity_compactions WHERE session_key=?1"
+                } else {
+                    "DELETE FROM session_activity_compactions WHERE session_key=?1 AND ordinal=1"
+                },
+                [&rows[0].key],
+            )
+            .unwrap();
+        assert_eq!(removed, if remove_all { 2 } else { 1 });
+        assert!(
+            matches!(
+                input.read_admitted(None),
+                Err(rusqlite::Error::InvalidQuery)
+            ),
+            "truncated evidence cannot emit either Admitted or SourceRestored"
+        );
+        drop(input);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn ambiguous_record_anchor_is_pending_without_blocking_other_sessions() {
     use std::io::Write;
 

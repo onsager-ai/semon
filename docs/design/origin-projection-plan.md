@@ -22,7 +22,10 @@ parent links resolve through the recorded native identity. A multi-ID Claude
 continuation lineage uses its recorded owner when the Catalog key is one of that
 lineage's native IDs; any other multi-ID row is unavailable rather than guessed.
 `codex-run` is a worker when its recorded native parent resolves; otherwise its
-role remains solo.
+role remains solo. Native Catalog parent links have no `parent_source`.
+Observed `ancestry`, `environment` and `marker` links, and unknown source values,
+are omitted from ASI parentage (`parent_method = none`): they prove neither
+native lineage nor workspace/time inference. See the [parent mapping](asi-store.md#identity).
 
 Project steps, ordered tool calls, turns, sessions, compactions and dimensions
 from admitted SQLite evidence. Preserve native UID, lineage, source witness and

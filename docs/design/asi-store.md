@@ -57,6 +57,16 @@ native harness and the exact native session ID. A Catalog key is only a
 source-local disambiguator and must not replace that ID during a harness collision;
 recorded native parent links use the same identity rule.
 
+The origin adapter exports `parent_method = native` only for resolved native
+Catalog parentage (`parent_source` absent). Catalog's observed `ancestry`,
+`environment` (`SEMON_PARENT`) and `marker` (`Semon-Parent` in prompt text) links
+are not native lineage. They also do not establish the workspace-and-time
+inference described by `workspace`. The current ASI methods cannot represent
+these sources, so the adapter omits their parent UID and uses `none`; it treats
+unknown source values the same way. An absent parent also uses `none`.
+Only native parentage promotes a `codex-run` to worker; otherwise it remains
+solo. A native `subagent` kind independently establishes worker status.
+
 - **Namespace.** Each machine's sources use its configured machine name. A
   receiver binds each push token to the token's name, refuses a token named
   after itself, and reserves `local`.
@@ -88,6 +98,14 @@ recorded native parent links use the same identity rule.
   the batch. This is an admission limitation, not a source-missing observation
   or a removal. A later publication with representable evidence can be admitted.
   Invalid persisted data and database errors still fail the read.
+
+- **Repeated compaction identity.** Copied contributors can carry the same
+  native compaction ID. Identical timestamp and associated step UID collapse
+  to one fact, retaining first occurrence in persisted ordinal order. A
+  conflicting timestamp or step UID makes the whole session generation
+  `Pending`, with the same retention and batch isolation as an unrepresentable
+  anchor. Physical compaction rows must still match the header's declared count
+  and contiguous ordinals before deduplication; missing rows fail integrity.
 
 ## Raw
 
