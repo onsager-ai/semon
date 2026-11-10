@@ -155,6 +155,7 @@ pub(crate) struct Discovery {
     roots: std::vec::IntoIter<(InputRoot, String)>,
     stack: Vec<DiscoveryDir>,
     complete: bool,
+    archived: Option<std::vec::IntoIter<Input>>,
 }
 struct DiscoveryDir {
     root: InputRoot,
@@ -179,6 +180,7 @@ impl Default for Discovery {
             .into_iter(),
             stack: Vec::new(),
             complete: false,
+            archived: None,
         }
     }
 }
@@ -212,6 +214,25 @@ impl Discovery {
                 "Native discovery requires a positive budget",
             ));
         }
+        if self.archived.is_none() {
+            let sources = if options.facts.is_none() && !crate::catalog::sqlite_page_ready(options)?
+            {
+                crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache))
+                    .missing_sources(options)?
+            } else {
+                Vec::new()
+            };
+            self.archived = Some(
+                sources
+                    .into_iter()
+                    .map(|native| Input {
+                        root: InputRoot::parse(&native.root).expect("validated archive root"),
+                        path: native.path,
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter(),
+            );
+        }
         let mut page = DiscoveryPage {
             inputs: Vec::new(),
             examined: 0,
@@ -220,8 +241,18 @@ impl Discovery {
         while !self.complete && page.inputs.len() < sources && page.examined < entries {
             if self.stack.is_empty() {
                 let Some((root, relative)) = self.roots.next() else {
-                    self.complete = true;
-                    break;
+                    let Some(input) = self
+                        .archived
+                        .as_mut()
+                        .expect("archive discovery initialized")
+                        .next()
+                    else {
+                        self.complete = true;
+                        break;
+                    };
+                    page.examined += 1;
+                    page.inputs.push(input);
+                    continue;
                 };
                 page.examined += 1;
                 self.open(options, root, relative)?;

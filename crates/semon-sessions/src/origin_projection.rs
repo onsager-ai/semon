@@ -29,6 +29,8 @@ use crate::{
 /// The silver journal is append-only within an index incarnation. Any pruning
 /// or resequencing must change the incarnation so readers restart inventory.
 /// Sequence numbers may have gaps; replay does not require contiguity.
+/// Each replay drain captures a fixed journal endpoint (after inventory, for a
+/// cold read), so ongoing source writes cannot keep that drain open forever.
 pub struct SqliteAnalyticsInput {
     namespace: String,
     connection: Connection,
@@ -80,14 +82,15 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                     }
                     _ => None,
                 };
-                let (snapshot, after_key, through_key, after_sequence) = match previous {
+                let (snapshot, after_key, through_key, after_sequence, endpoint) = match previous {
                     Some(Cursor::Inventory {
                         snapshot,
                         after,
                         through,
-                    }) => (Some(snapshot), Some(after), Some(through), 0),
-                    Some(Cursor::Incremental { after }) => (None, None, None, after),
-                    None => (Some(current), None, maximum_inventory_key(tx)?, 0),
+                    }) => (Some(snapshot), Some(after), Some(through), 0, current),
+                    Some(Cursor::Replay { after, through }) => (None, None, None, after, through),
+                    Some(Cursor::Incremental { after }) => (None, None, None, after, current),
+                    None => (Some(current), None, maximum_inventory_key(tx)?, 0, current),
                 };
                 let limit = i64::try_from(budget.max_sessions)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
@@ -101,7 +104,7 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                         Vec::new()
                     }
                 } else {
-                    journal_page(tx, after_sequence, current, limit)?
+                    journal_page(tx, after_sequence, endpoint, limit)?
                 };
                 let mut changes = Vec::new();
                 let mut cursor_key = after_key;
@@ -144,12 +147,10 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                         through: through_key.ok_or(rusqlite::Error::InvalidQuery)?,
                         after: cursor_key.ok_or(rusqlite::Error::InvalidQuery)?,
                     },
-                    Some(snapshot) => Cursor::Incremental { after: snapshot },
-                    None => Cursor::Incremental {
-                        after: cursor_sequence,
-                    },
+                    Some(snapshot) => replay_cursor(snapshot, endpoint),
+                    None => replay_cursor(cursor_sequence, endpoint),
                 };
-                let complete = matches!(&phase, Cursor::Incremental { after } if *after == current);
+                let complete = matches!(&phase, Cursor::Incremental { .. });
                 Ok(AdmittedBatch {
                     checkpoint: encode_checkpoint(&Checkpoint {
                         namespace: namespace.clone(),
@@ -421,6 +422,18 @@ enum Cursor {
     Incremental {
         after: i64,
     },
+    Replay {
+        after: i64,
+        through: i64,
+    },
+}
+
+fn replay_cursor(after: i64, through: i64) -> Cursor {
+    if after == through {
+        Cursor::Incremental { after }
+    } else {
+        Cursor::Replay { after, through }
+    }
 }
 
 fn decode_checkpoint(value: &str) -> rusqlite::Result<Checkpoint> {
@@ -438,6 +451,7 @@ fn decode_checkpoint(value: &str) -> rusqlite::Result<Checkpoint> {
                 after,
             } => *snapshot >= 0 && after < through,
             Cursor::Incremental { after } => *after >= 0,
+            Cursor::Replay { after, through } => *after >= 0 && after < through,
         }
     {
         return Err(rusqlite::Error::InvalidQuery);
@@ -450,7 +464,7 @@ fn validate_cursor(
     cursor: Cursor,
     current: i64,
 ) -> rusqlite::Result<Cursor> {
-    let sequence = match &cursor {
+    let (sequence, endpoint) = match &cursor {
         Cursor::Inventory {
             snapshot,
             through,
@@ -468,19 +482,22 @@ fn validate_cursor(
                     return Err(rusqlite::Error::InvalidQuery);
                 }
             }
-            *snapshot
+            (*snapshot, *snapshot)
         }
-        Cursor::Incremental { after } => *after,
+        Cursor::Incremental { after } => (*after, *after),
+        Cursor::Replay { after, through } => (*after, *through),
     };
-    if sequence > current
-        || (sequence != 0
-            && !tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM silver_change WHERE seq=?1)",
-                [sequence],
-                |row| row.get::<_, bool>(0),
-            )?)
-    {
-        return Err(rusqlite::Error::InvalidQuery);
+    for anchor in [sequence, endpoint] {
+        if anchor > current
+            || (anchor != 0
+                && !tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM silver_change WHERE seq=?1)",
+                    [anchor],
+                    |row| row.get::<_, bool>(0),
+                )?)
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
     }
     Ok(cursor)
 }

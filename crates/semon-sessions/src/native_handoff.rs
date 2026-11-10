@@ -1,5 +1,5 @@
 //! Bounded launch-call locations; inputs are read from native evidence on demand.
-use crate::{events::Ledger, handoff, native_record::Record, sealed::LogFile};
+use crate::{events::Ledger, handoff, native_record::Record};
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use serde_json::Value;
 use std::{
@@ -121,7 +121,7 @@ impl Index {
         Ok(())
     }
 
-    pub(crate) fn repair(file: &mut LogFile, consumed: u64) -> io::Result<Self> {
+    pub(crate) fn repair(file: &mut (impl Read + Seek), consumed: u64) -> io::Result<Self> {
         file.seek(SeekFrom::Start(0))?;
         let mut reader = BufReader::new(file.take(consumed));
         let mut index = Self::default();
@@ -189,7 +189,7 @@ impl Index {
             })
     }
 
-    pub(crate) fn verify(&self, file: &mut LogFile) -> io::Result<()> {
+    pub(crate) fn verify(&self, file: &mut (impl Read + Seek)) -> io::Result<()> {
         let mut checked = std::collections::BTreeSet::new();
         for call in self.complete.iter().chain(&self.eof) {
             if checked.insert(&call.record) {

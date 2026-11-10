@@ -1,7 +1,7 @@
 //! Content-free locations of the first parent marker or preceding agent output.
 //! Prompt paths and marker text remain exclusively in the native source.
 pub(crate) use crate::native_record::Record;
-use crate::{Marker, events::Ledger, sealed::LogFile};
+use crate::{Marker, events::Ledger};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
@@ -55,7 +55,7 @@ impl Index {
 
     /// Repair only missing metadata in an existing consumed prefix; do not
     /// replay its event rows. New lines are observed by the event parser itself.
-    pub(crate) fn repair(file: &mut LogFile, consumed: u64) -> io::Result<Self> {
+    pub(crate) fn repair(file: &mut (impl Read + Seek), consumed: u64) -> io::Result<Self> {
         file.seek(SeekFrom::Start(0))?;
         let mut reader = BufReader::new(file.take(consumed));
         let mut index = Self::default();
@@ -95,7 +95,7 @@ impl Index {
 
     /// Verify selected bytes independently before commit, including an EOF
     /// record outside the complete-prefix proof and a repaired prefix locator.
-    pub(crate) fn verify(&self, file: &mut LogFile) -> io::Result<()> {
+    pub(crate) fn verify(&self, file: &mut (impl Read + Seek)) -> io::Result<()> {
         if let Some(record) = self.record() {
             record.verify(file)?;
         }

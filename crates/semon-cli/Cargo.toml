@@ -10,13 +10,20 @@ description = "Session discovery, synchronization, viewing, query and control CL
 name = "semon"
 path = "src/main.rs"
 
+[features]
+# The worker is opt-in: ordinary CLI builds avoid bundled DuckDB's C++ build.
+asi-query = ["dep:semon-asi", "semon-asi/query-engine"]
+
 [dependencies]
+semon-asi = { path = "../semon-asi", optional = true }
 semon-push = { path = "../semon-push" }
 semon-sessions = { path = "../semon-sessions" }
 serde_json.workspace = true
 
 [dev-dependencies]
 arrow = { version = "=58.4.1", default-features = false }
+libc.workspace = true
 parquet = { version = "=58.4.1", default-features = false, features = ["arrow", "zstd"] }
 rusqlite.workspace = true
 semon-asi = { path = "../semon-asi" }
+tempfile = "3.27.0"

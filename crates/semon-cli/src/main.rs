@@ -6,6 +6,10 @@ use std::{
 };
 
 fn main() -> ExitCode {
+    #[cfg(feature = "asi-query")]
+    if env::args().skip(1).eq(["asi", "query-worker"]) {
+        return ExitCode::from(semon_asi::query::worker_stdio() as u8);
+    }
     match parse_args().and_then(run) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -23,6 +27,10 @@ enum Command {
     Query(QueryArgs),
     Materialize(MaterializeArgs),
     Mcp(HomeArgs),
+    ArchivePrune {
+        cache: PathBuf,
+        retention_days: Option<u64>,
+    },
 }
 
 /// The agent homes, `/proc`, cache and facts `semon sessions` reads, or
@@ -94,6 +102,7 @@ struct QueryArgs {
 struct MaterializeArgs {
     home: HomeArgs,
     watch: bool,
+    input_budget: semon_sessions::InputBudget,
 }
 
 struct PushArgs {
@@ -134,10 +143,41 @@ fn parse_args() -> Result<Command, String> {
         Some("query") => parse_query_args(arguments).map(Command::Query),
         Some("analytics") => parse_analytics_args(arguments).map(Command::Materialize),
         Some("mcp") => parse_mcp_args(arguments).map(Command::Mcp),
+        Some("archive") => parse_archive_args(arguments),
         Some("-h" | "--help") => Err(usage()),
         Some(command) => Err(format!("unknown command: {command}\n{}", usage())),
         None => Err(usage()),
     }
+}
+
+fn parse_archive_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
+    if arguments.next().as_deref() != Some("prune") {
+        return Err("archive requires prune [--retention-days N] [--cache PATH]".into());
+    }
+    let mut cache = semon_sessions::Options::default().cache;
+    let mut retention_days = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--cache" => cache = arguments.next().ok_or("--cache requires a value")?.into(),
+            "--retention-days" => {
+                let value = arguments
+                    .next()
+                    .ok_or("--retention-days requires a value")?;
+                let days: u64 = value
+                    .parse()
+                    .map_err(|_| "--retention-days requires a nonnegative integer")?;
+                days.checked_mul(86400)
+                    .ok_or("--retention-days is too large")?;
+                retention_days = Some(days);
+            }
+            "-h" | "--help" => return Err(usage()),
+            _ => return Err(format!("unknown archive prune argument: {argument}")),
+        }
+    }
+    Ok(Command::ArchivePrune {
+        cache,
+        retention_days,
+    })
 }
 
 fn parse_analytics_args(
@@ -149,6 +189,7 @@ fn parse_analytics_args(
     }
     let mut home = HomeArgs::default();
     let mut watch = false;
+    let mut input_budget = semon_sessions::InputBudget::default();
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -160,6 +201,18 @@ fn parse_analytics_args(
         }
         match argument.as_str() {
             "--watch" => watch = true,
+            "--batch-sessions" | "--batch-steps" => {
+                let limit = value()?
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|limit| *limit > 0)
+                    .ok_or_else(|| format!("{argument} requires a positive integer"))?;
+                if argument == "--batch-sessions" {
+                    input_budget.max_sessions = limit;
+                } else {
+                    input_budget.max_steps = limit;
+                }
+            }
             "-h" | "--help" => return Err(analytics_usage()),
             _ => {
                 return Err(format!(
@@ -175,7 +228,11 @@ fn parse_analytics_args(
                 .into(),
         );
     }
-    Ok(MaterializeArgs { home, watch })
+    Ok(MaterializeArgs {
+        home,
+        watch,
+        input_budget,
+    })
 }
 
 fn parse_sessions_args(
@@ -570,6 +627,23 @@ fn run(command: Command) -> Result<(), String> {
         Command::Query(args) => run_query(args),
         Command::Materialize(args) => run_materialize(args),
         Command::Mcp(home) => run_mcp(&home),
+        Command::ArchivePrune {
+            cache,
+            retention_days,
+        } => {
+            let archive = semon_sessions::archive::Archive::new(
+                semon_sessions::archive::standalone_dir(&cache),
+            );
+            let removed = archive
+                .prune(retention_days)
+                .map_err(|error| error.to_string())?;
+            if retention_days.is_none() {
+                println!("Archive retention is unset; no chains deleted (keep indefinitely).");
+            } else {
+                println!("Deleted {removed} unreferenced archive chains.");
+            }
+            Ok(())
+        }
     }
 }
 
@@ -616,11 +690,18 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
         Some(namespace) => namespace,
         None => semon_sessions::load_or_create_analytics_namespace(state_dir)?,
     };
-    let writer = owner.start(semon_sessions::AnalyticsWriterConfig::new(
+    let mut config = semon_sessions::AnalyticsWriterConfig::new(
         namespace.clone(),
         index_path,
         store_root.clone(),
-    ));
+    );
+    config.input_budget = args.input_budget;
+    // One-shot materialization drains bounded chunks immediately. Watch keeps
+    // the default spacing so each continuation yields to native discovery.
+    if !args.watch {
+        config.interval = std::time::Duration::ZERO;
+    }
+    let writer = owner.start(config);
 
     let stop = semon_push::Stop::new();
     if args.watch {
@@ -958,9 +1039,11 @@ fn query_usage() -> String {
 }
 
 fn analytics_usage() -> String {
-    "Usage: semon analytics materialize [--watch] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--copilot-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
+    "Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--copilot-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
      Refreshes the local native Catalog, then explicitly materializes its analytics store.\n\
      Catalog refresh is complete; --since/--all do not bound analytics input.\n\
+     Batch limits default to 64 sessions/journal entries and 8192 steps; an oversize session stays whole.\n\
+     One-shot drains immediately through a fixed replay endpoint; later changes belong to the next request.\n\
      --watch refreshes and publishes every 2 s; failures exit visibly. Ctrl-C/SIGTERM stops the wait."
         .to_owned()
 }
@@ -989,6 +1072,9 @@ fn usage() -> String {
          (docs/mirror-protocol.md), appending as they grow. The token file must be mode 0600. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s.\n\
          \n\
+         Usage: semon archive prune [--retention-days N] [--cache PATH]\n\
+         Explicit archive maintenance. Omit retention to keep every chain indefinitely; native logs are never deleted.\n\
+         \n\
          Usage: semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--max-bytes SIZE]\n\
          Usage: semon receive token (add NAME | revoke NAME | list) --dir DIR\n\
          A mirror-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
@@ -1001,6 +1087,39 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_prune_requires_explicit_retention_and_valid_days() {
+        assert!(matches!(
+            parse_archive_args(["prune"].map(str::to_owned).into_iter()).unwrap(),
+            Command::ArchivePrune {
+                retention_days: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_archive_args(
+                ["prune", "--retention-days", "30"]
+                    .map(str::to_owned)
+                    .into_iter()
+            )
+            .unwrap(),
+            Command::ArchivePrune {
+                retention_days: Some(30),
+                ..
+            }
+        ));
+        for value in ["-1", "invalid", "18446744073709551615"] {
+            assert!(
+                parse_archive_args(
+                    ["prune", "--retention-days", value]
+                        .map(str::to_owned)
+                        .into_iter()
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn paused_find_refuses_stale_and_malformed_cli_calls_before_initialization() {

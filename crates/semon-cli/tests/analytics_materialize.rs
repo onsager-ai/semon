@@ -11,13 +11,89 @@ use std::{
 };
 
 fn materialize(home: &fixture::Fixture) -> Output {
+    materialize_with(home, &[])
+}
+
+fn materialize_with(home: &fixture::Fixture, arguments: &[&str]) -> Output {
     home.command(env!("CARGO_BIN_EXE_semon"))
         .args(["analytics", "materialize", "--all", "--proc-root"])
         .arg(home.root.join("empty-proc"))
         .arg("--cache")
         .arg(home.root.join("state/index.json"))
+        .args(arguments)
         .output()
         .unwrap()
+}
+
+// Compare every live fact and dimension, allowing physical generations and row
+// order to differ between a one-shot read and several bounded publications.
+fn live_rows(root: &Path) -> BTreeMap<String, Vec<Vec<String>>> {
+    use arrow::{
+        array::{Int64Array, StringArray},
+        compute::cast,
+        datatypes::DataType,
+    };
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    let manifest = semon_asi::read_manifest(root).unwrap().unwrap();
+    let live = semon_asi::read_live_map(root, &manifest).unwrap();
+    let mut result = BTreeMap::new();
+    for table in semon_asi::schema::TABLES {
+        if table.kind == semon_asi::schema::Kind::Append {
+            continue;
+        }
+        let mut rows = Vec::new();
+        for entry in manifest.files_of(table.name) {
+            let file = fs::File::open(root.join("analytics").join(&entry.path)).unwrap();
+            for batch in ParquetRecordBatchReaderBuilder::try_new(file)
+                .unwrap()
+                .build()
+                .unwrap()
+            {
+                let batch = batch.unwrap();
+                for row in 0..batch.num_rows() {
+                    if table.kind == semon_asi::schema::Kind::Session {
+                        let uids = batch
+                            .column_by_name("session_uid")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap();
+                        let generations = batch
+                            .column_by_name("_gen")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .unwrap();
+                        if live.get(uids.value(row)) != Some(&generations.value(row)) {
+                            continue;
+                        }
+                    }
+                    rows.push(
+                        batch
+                            .schema()
+                            .fields()
+                            .iter()
+                            .zip(batch.columns())
+                            .filter(|(field, _)| field.name() != "_gen")
+                            .map(|(_, array)| {
+                                let values = match array.data_type() {
+                                    DataType::Timestamp(..) => {
+                                        cast(array, &DataType::Int64).unwrap()
+                                    }
+                                    _ => array.clone(),
+                                };
+                                arrow::util::display::array_value_to_string(values.as_ref(), row)
+                                    .unwrap()
+                            })
+                            .collect(),
+                    );
+                }
+            }
+        }
+        rows.sort();
+        result.insert(table.name.to_owned(), rows);
+    }
+    result
 }
 
 // Read the published live view, excluding its physical generation column.
@@ -121,6 +197,80 @@ fn materialize_publishes_once_and_reuses_its_namespace() {
         namespace
     );
     assert_eq!(live_session_rows(&store), first_rows);
+}
+
+#[test]
+fn materialize_tiny_budget_drains_several_chunks_and_matches_one_shot_rows() {
+    let home = fixture::Fixture::new();
+    for index in 3..=5 {
+        let id = format!("00000000-0000-4000-8000-{index:012}");
+        let user = format!("batch-user-{index}");
+        let transcript = [
+            serde_json::json!({"type":"user", "uuid":user, "parentUuid":null,
+                "sessionId":id, "timestamp":"2026-10-03T08:16:44Z", "cwd":"/fixture/probe/work",
+                "message":{"role":"user", "content":"Synthetic bounded CLI fixture"}}),
+            serde_json::json!({"type":"assistant", "uuid":format!("batch-assistant-{index}"),
+                "parentUuid":user, "sessionId":id, "timestamp":"2026-10-03T08:16:45Z",
+                "message":{"id":format!("batch-message-{index}"), "role":"assistant",
+                    "model":"claude-sonnet-4-5", "content":[{"type":"text", "text":"Synthetic answer"}],
+                    "usage":{"input_tokens":10, "output_tokens":5}}}),
+        ].map(|record| record.to_string()).join("\n") + "\n";
+        home.write(
+            &format!("configured-claude/projects/fixture/{id}.jsonl"),
+            transcript.as_bytes(),
+        );
+    }
+    let first = materialize(&home);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let state = home.root.join("state");
+    let store = state.join("analytics-store");
+    let namespace = fs::read_to_string(state.join("analytics-namespace")).unwrap();
+    let expected = live_rows(&store);
+    assert_eq!(live_session_rows(&store).len(), 5);
+    assert_eq!(
+        semon_asi::read_manifest(&store)
+            .unwrap()
+            .unwrap()
+            .generation,
+        1
+    );
+    // Keep the same native index, namespace and source paths for both cold reads.
+    fs::rename(&store, state.join("one-shot-store")).unwrap();
+    let bounded = materialize_with(&home, &["--batch-sessions", "1", "--batch-steps", "1"]);
+    assert!(
+        bounded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&bounded.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("analytics-namespace")).unwrap(),
+        namespace
+    );
+    let manifest = semon_asi::read_manifest(&store).unwrap().unwrap();
+    assert!(
+        manifest.generation >= 5,
+        "one generation per bounded whole-session chunk"
+    );
+    assert_eq!(live_rows(&store), expected);
+}
+
+#[test]
+fn materialize_refuses_zero_or_invalid_batch_budgets_before_creating_state() {
+    let home = fixture::Fixture::new();
+    for arguments in [
+        ["--batch-sessions", "0"],
+        ["--batch-steps", "no"],
+        ["--batch-steps", "0"],
+    ] {
+        let result = materialize_with(&home, &arguments);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("requires a positive integer"));
+        assert!(!home.root.join("state").exists());
+    }
 }
 
 #[test]

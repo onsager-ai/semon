@@ -1064,6 +1064,7 @@ enum Role {
 type FileRevision = events::FileRevision;
 
 struct SourceFile {
+    archived: bool,
     revision: FileRevision,
     path: PathBuf,
     stamp: Stamp,
@@ -1306,6 +1307,9 @@ fn scan(
     if selected.is_none() {
         cache.begin_full_scan()?;
     }
+    // Existing catalogs retain disappeared sources through their lifecycle
+    // reconciliation. Enumerate custody only to rebuild a missing catalog.
+    let archived = cache.archive_rebuild_sources(options)?;
     let projects = options.claude_home.join("projects");
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1361,6 +1365,9 @@ fn scan(
         } else {
             continue;
         };
+        if archived.iter().any(|native| native.full_path() == path) && !path.try_exists()? {
+            continue;
+        }
         let id = match &role {
             Role::Agent(_) => stem.strip_prefix("agent-").unwrap_or(stem),
             _ => stem,
@@ -1396,6 +1403,7 @@ fn scan(
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
+            archived: false,
             revision: cache.revision(&path).expect("scanned file has a ledger"),
             stamp,
             id: id.to_owned(),
@@ -1422,6 +1430,9 @@ fn scan(
     }
     paths.retain(|path| machine.codex_rollout_is_current(options, path));
     for path in paths {
+        if archived.iter().any(|native| native.full_path() == path) && !path.try_exists()? {
+            continue;
+        }
         if outside(&path) {
             seen.insert(path.to_string_lossy().into_owned());
             continue;
@@ -1447,6 +1458,7 @@ fn scan(
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
+            archived: false,
             revision: cache.revision(&path).expect("scanned file has a ledger"),
             marker: None,
             stamp,
@@ -1478,6 +1490,9 @@ fn scan(
             .nth(1)
             .expect("allowlisted session identity")
             .to_owned();
+        if archived.iter().any(|native| native.full_path() == path) && !path.try_exists()? {
+            continue;
+        }
         let Some(_) = crate::copilot::header(&path, &id)? else {
             continue;
         };
@@ -1490,6 +1505,7 @@ fn scan(
         texts.generation(&path, stamp);
         seen.insert(path.to_string_lossy().into_owned());
         files.push(SourceFile {
+            archived: false,
             revision: cache.revision(&path).expect("scanned file"),
             stamp,
             id,
@@ -1500,6 +1516,83 @@ fn scan(
             path,
             summary,
         });
+    }
+    {
+        for native in archived {
+            let root = crate::InputRoot::parse(&native.root).expect("validated archive root");
+            if selected.is_some_and(|selected| {
+                !selected
+                    .iter()
+                    .any(|input| input.root == root && input.path == native.path)
+            }) {
+                continue;
+            }
+            let path = native.full_path();
+            if path.try_exists()?
+                || (root == crate::InputRoot::Codex
+                    && !machine.codex_rollout_is_current(options, &path))
+            {
+                continue;
+            }
+            let summary = events::scan_archive(options, &native, cache, dirty)?;
+            let role = match root {
+                crate::InputRoot::Codex => Role::Codex(
+                    summary
+                        .codex_header
+                        .as_ref()
+                        .ok_or_else(|| io::Error::other("archive Codex header unavailable"))?
+                        .metadata
+                        .clone(),
+                ),
+                crate::InputRoot::Copilot => Role::Copilot,
+                crate::InputRoot::Claude if crate::native_sidecar::agent_path(&path) => {
+                    let metadata = native
+                        .sidecar
+                        .as_ref()
+                        .map(|sidecar| sidecar.metadata.clone())
+                        .unwrap_or_default();
+                    Role::Agent(AgentMeta {
+                        parent: path
+                            .parent()
+                            .and_then(Path::parent)
+                            .and_then(Path::file_name)
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        tool_use_id: metadata.tool_use_id,
+                        label: metadata.label,
+                        model: metadata.model,
+                        cwd: metadata.cwd,
+                        branch: metadata.branch,
+                    })
+                }
+                crate::InputRoot::Claude => Role::Top {
+                    slug: path
+                        .parent()
+                        .and_then(Path::file_name)
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                },
+            };
+            seen.insert(path.to_string_lossy().into_owned());
+            files.push(SourceFile {
+                archived: true,
+                revision: cache.revision(&path).expect("archived source ledger"),
+                stamp: Stamp {
+                    dev: native.ledger.stat.dev,
+                    ino: native.ledger.stat.ino,
+                    size: native.ledger.stat.size,
+                    modified_ns: native.ledger.stat.modified_ns,
+                    changed_ns: native.ledger.stat.changed_ns,
+                },
+                id: native.native_id,
+                first: summary.first,
+                last: summary.last,
+                marker: None,
+                path,
+                role,
+                summary,
+            });
+        }
     }
     cache.flush_cold_writes()?;
     if let Some(selected) = selected {
@@ -1512,7 +1605,7 @@ fn scan(
     // producer's) archive just the sources they scanned, and only the
     // prefix the index consumed so far.
     if options.facts.is_none() {
-        cache.archive_consumed(&options.cache, &seen);
+        cache.archive_consumed(options, &seen);
     }
     cache.end_scan();
     texts
@@ -1521,12 +1614,39 @@ fn scan(
     Ok((files, skipped, cache.index_clone_duration()))
 }
 
-fn verify_sidecars(files: &[SourceFile]) -> io::Result<()> {
+fn verify_sidecars(files: &[SourceFile], options: &Options) -> io::Result<()> {
+    if files
+        .iter()
+        .all(|file| file.summary.claude_sidecar.is_none())
+    {
+        return Ok(());
+    }
+    let archived = if options.facts.is_none() && files.iter().any(|file| file.archived) {
+        crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache))
+            .missing_sources(options)?
+    } else {
+        Vec::new()
+    };
     if files.iter().any(|file| {
-        file.summary
-            .claude_sidecar
-            .as_ref()
-            .is_some_and(|sidecar| !sidecar.current(&file.path))
+        !(file.archived
+            && archived.iter().any(|native| {
+                native.full_path() == file.path
+                    && file.revision
+                        == (
+                            native.ledger.stat.dev,
+                            native.ledger.stat.ino,
+                            native.ledger.offset,
+                            native.ledger.prefix,
+                            native.ledger.tail,
+                            native.ledger.stat.changed_ns,
+                        )
+                    && native.sidecar == file.summary.claude_sidecar
+            }))
+            && file
+                .summary
+                .claude_sidecar
+                .as_ref()
+                .is_some_and(|sidecar| !sidecar.current(&file.path))
     }) {
         return Err(io::Error::new(
             io::ErrorKind::Interrupted,
@@ -7607,13 +7727,17 @@ pub(crate) fn prepare_semantic_index_sources(
         &facts,
         Some(inputs),
     )?;
-    verify_sidecars(&files)?;
+    verify_sidecars(&files, options)?;
     let claims = cache.catalog_claims(&paths)?;
-    let proofs = crate::query_source::Sources::capture(
+    let proofs = crate::query_source::Sources::capture_scanned(
         options,
-        files
-            .iter()
-            .map(|file| (summary::source(file), file.summary.source_chunks.clone())),
+        files.iter().map(|file| {
+            (
+                summary::source(file),
+                file.summary.source_chunks.clone(),
+                file.archived,
+            )
+        }),
     )?;
     let records = proofs.reader();
     records.verify_all()?;
@@ -7672,7 +7796,7 @@ pub(crate) fn prepare_semantic_index_sources(
         })
         .collect();
     records.finish()?;
-    verify_sidecars(&files)?;
+    verify_sidecars(&files, options)?;
     for withdrawal in &withdrawals {
         if !withdrawal.current()? {
             return Err(io::Error::other(
@@ -8010,6 +8134,7 @@ fn prepare_history_inner(
                 }
             };
             files.push(SourceFile {
+                archived: false,
                 revision: (
                     source.dev,
                     source.ino,
@@ -8221,7 +8346,11 @@ fn build_sources_inner(
         }
     }
     if history_records.is_none() {
-        measured!("sidecars_before", files.len(), verify_sidecars(&files)?);
+        measured!(
+            "sidecars_before",
+            files.len(),
+            verify_sidecars(&files, options)?
+        );
     }
     let started = measurements.start();
     let claims = if target == BuildTarget::Sources && history_records.is_none() {
@@ -8281,13 +8410,17 @@ fn build_sources_inner(
         MachineFacts::Recorded(facts) => facts.reported_runs.clone(),
     };
     measurements.record("reported_runs_collect", started, reported_runs.len());
-    let sources = files
-        .iter()
-        .map(|file| (summary::source(file), file.summary.source_chunks.clone()));
+    let sources = files.iter().map(|file| {
+        (
+            summary::source(file),
+            file.summary.source_chunks.clone(),
+            file.archived,
+        )
+    });
     let source_proofs = measured!(
         "source_capture",
         files.len(),
-        crate::query_source::Sources::capture(options, sources)?
+        crate::query_source::Sources::capture_scanned(options, sources)?
     );
     let source_records = source_proofs.reader();
     if history_records.is_none() {
@@ -8715,7 +8848,11 @@ fn build_sources_inner(
     #[cfg(feature = "test-hooks")]
     crate::test_hooks::run(options, "runtime_checked");
     if history_records.is_none() {
-        measured!("sidecars_after", files.len(), verify_sidecars(&files)?);
+        measured!(
+            "sidecars_after",
+            files.len(),
+            verify_sidecars(&files, options)?
+        );
     }
     if matches!(target, BuildTarget::Catalog | BuildTarget::Sources) && history_records.is_none() {
         measured!("source_finish", files.len(), source_records.finish()?);
@@ -8996,7 +9133,7 @@ fn build_sources_inner(
         hook();
     }
     if history_records.is_none() {
-        verify_sidecars(&files)?;
+        verify_sidecars(&files, options)?;
         source_records.finish()?;
     }
     drop(source_records);

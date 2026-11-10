@@ -2368,7 +2368,27 @@ fn activity_source_identity(
             if !crate::facts::MachineFacts::of(options).codex_rollout_is_current(options, &path) {
                 return Ok(None);
             }
-            let file = crate::sealed::LogFile::open(&path)?;
+            let mut archived = None;
+            let file: Box<dyn Read> = match crate::sealed::LogFile::open(&path) {
+                Ok(file) => Box::new(file),
+                Err(error)
+                    if options.facts.is_none() && error.kind() == io::ErrorKind::NotFound =>
+                {
+                    let archive = crate::archive::Archive::new(crate::archive::standalone_dir(
+                        &options.cache,
+                    ));
+                    let native = archive
+                        .missing_sources(options)?
+                        .into_iter()
+                        .find(|native| native.full_path() == path)
+                        .ok_or(error)?;
+                    let read = archive.open_native(&native)?;
+                    let file = read.file.try_clone()?;
+                    archived = Some(read);
+                    Box::new(file)
+                }
+                Err(error) => return Err(error),
+            };
             let mut reader = BufReader::new(file.take(65537));
             let mut line = Vec::new();
             reader.read_until(b'\n', &mut line)?;
@@ -2391,6 +2411,9 @@ fn activity_source_identity(
                 })
                 .and_then(|metadata| crate::field(metadata, "parent_thread_id"))
                 .map(str::to_owned);
+            if let Some(read) = archived {
+                read.verify()?;
+            }
             Ok(header.native_id(&path).map(|id| (id, parent)))
         }
         crate::InputRoot::Copilot => Ok(path

@@ -119,7 +119,32 @@ an append-only zstd copy of each native log under `archive/`, admitting only the
 prefix index has consumed. A rewrite starts a new chain and preserves the old
 one; index can read archived sources when native logs are gone. Existing origin
 retention is unchanged: indefinite by default, with optional
-`archive.retention_days`; native logs are never deleted by this design.
+`archive.retention_days`; native logs are never deleted by this design. This
+contract is carried by explicit maintenance, `semon archive prune
+--retention-days N [--cache PATH]`, with no configuration file or background
+deleter. Omitting the flag deletes nothing and reports indefinite retention.
+Age is immutable chain admission time, not file modification time; only chains
+strictly older than the window and without an exact chain dependency may retire.
+`archive/clock.json` records the highest admission or successful prune time.
+Admission clamps its timestamp to that durable high-water mark. Retention fails
+closed with an error and deletes nothing when the wall clock is behind the mark;
+a successful prune advances the mark only after completing its work. A clock
+already behind before the very first admission cannot be detected; that residual
+risk is accepted.
+The native source binding, index retention markers and seal custody certificates
+protect their named chain regardless of age. Custody registers each dependency
+before publishing its external marker; interrupted publication may over-retain
+bytes. Retiring a marker does not automatically release that custody reference.
+
+Standalone manifests bind the exact chain to the configured native root,
+allowlisted relative path, native ID, consumed-prefix ledger and observed Claude
+sidecar metadata. Missing-source discovery uses only bindings under the current
+configured roots; present native files retain precedence. Rebuilds verify the
+chain and consumed prefix, replay the same native parser and preserve the
+original ledger instead of assigning a temporary file's physical witness.
+Unconsumed suffixes are not archived or promoted to complete source custody.
+The current manifest requires admission times and dependency metadata; unsupported
+old manifests are refused without converting or deleting their bytes.
 
 An opt-in replica follows supported mirror and #572 custody, including preserving
 replaced bytes and redaction provenance. Before acknowledging `replace`, preserve
@@ -253,8 +278,12 @@ tables.
   A busy lock is observable as a no-writer state; unsupported input latches a refusal
   without changing the index or a checkpoint, until a later notification retries.
   Store refusals also latch until a new notification; each refusal consumes only
-  the notification snapshot captured before its operation, preserving notifications
-  received during that operation.
+  the initiating notification generation retained across its entire recovery
+  chain, preserving notifications received during backoff or a later chunk.
+  Those later requests start a new chain with a fresh failure budget. Successful
+  chunks do not consume or reset the active request's three-failure budget.
+  Notification counters saturate at u64::MAX, an unreachable process-lifetime
+  bound of more than 1.8e19 requests.
 - **Local custody.** The generated Parquet can contain typed local-path
   fields. It remains local-only; a governed export is a separate operation and
   is not part of materialization.
@@ -265,7 +294,13 @@ tables.
   the next tick; 2 s is neither a transaction deadline nor a promise to finish a
   cold inventory in one cycle. The existing local writer selects its budget via
   `AnalyticsWriterConfig.input_budget` and schedules each incomplete chunk at the
-  next interval without requiring another external notification.
+  next interval without requiring another external notification. The explicit CLI
+  accepts positive `--batch-sessions` and `--batch-steps` limits. One-shot
+  materialization uses zero spacing between chunks and exits after the first
+  complete drain and its final bounded compaction; watch retains 2 s spacing.
+  A continuously advancing source cannot extend that drain's captured replay
+  endpoint. Later writes require another request. Cancellation stops the wait;
+  joining stops future chunks, preserving the last published checkpoint.
   Recompute touched sessions **whole**: a following step can change an earlier
   step's duration, and a late record can change older rows. No session is split
   to meet a budget; CI measures the cost of the exceptional oversize session.
@@ -377,17 +412,22 @@ therefore have no silver journal entry. No page allocates all Catalog keys or al
 changes since a checkpoint. A disappearing key need not be visited: only the
 final page queries the complete current UID set (current Catalog union retained
 activity identities). That page emits `ReplaceNamespace` and changes the
-checkpoint to incremental sequence S. The UID set is independent of the key bound
+checkpoint to replay after S, with endpoint **E** equal to the journal maximum
+in that final inventory transaction. The UID set is independent of the key bound
 K: it includes identities first added while inventory was running.
 
-Chunks use separate read transactions. Every changed identity after S is replayed
-from S as incremental whole-session replacement or an explicit `Removed`; this
+Chunks use separate read transactions. Every changed identity after S through E
+is replayed as incremental whole-session replacement or an explicit `Removed`; this
 includes new keys, late records, availability changes and removals during the
-inventory. `complete` is true only when the returned incremental cursor reaches
-the current journal maximum in that read transaction. Thus the final inventory
-chunk can carry reconciliation while still reporting incomplete, requiring
-incremental catch-up. Incremental reads keep paging to the current maximum;
-changes after a completed read belong to the next discovery cycle.
+inventory. `complete` is true when the returned cursor reaches E. Thus the final
+inventory chunk can carry reconciliation while still reporting incomplete,
+requiring bounded replay from S through E. A new incremental drain captures E
+in its first read; intermediate replay checkpoints retain both `after` and
+`through` so separate transactions, retries and process restarts keep the same
+endpoint. The completed checkpoint retains only `after=E`; the next request
+captures a new endpoint. Writes after E belong to that next drain. Whole-session
+readers still use current evidence and can observe a newer replacement early;
+this is not a historical SQLite snapshot at E.
 
 Correctness follows per identity: one unchanged since S is visited by inventory
 and retains exactly its final admitted evidence; one changed after S is visited
@@ -395,19 +435,22 @@ again by replay, whose last observation supplies its complete current state or
 removal. A pending generation retains the prior admitted rows in both paths.
 Final UID reconciliation covers all current identities, including those first
 added after S, so it cannot mark a retained current identity absent merely because
-its replay is still pending. Once catch-up reports complete, live facts and their
-referenced dimensions equal a one-shot read at that final transaction, starting
-from the same retained facts and applying the same explicit removals. Physical
+its replay is still pending. If source writes have quiesced by endpoint capture,
+once replay reports complete, live facts and their referenced dimensions equal
+a one-shot read at that final transaction, starting from the same retained facts and applying the same explicit removals. Physical
 generation numbers and unreferenced retained dimensions can differ. The oracle
 must use the same frozen evidence: an empty store cannot recreate an admitted
 generation observed by an earlier chunk if that generation later becomes
 unavailable or `Pending`. Retaining that evidence is the existing custody rule.
-Later source writes require another cycle; a permanently advancing journal can keep catch-up
-incomplete, but each call still returns bounded work.
+With writes continuing beyond E, sessions already passed can change again;
+the request does not claim a one-shot snapshot of those later writes. The next
+drain replays them. A permanently advancing journal therefore cannot keep a
+request open by moving its endpoint. Each call remains budgeted, and finite
+replay through E terminates without discarding the later journal suffix.
 
 The adapter strictly validates the checkpoint format, namespace binding,
-incarnation syntax, nonnegative sequences, inventory key bounds and actual
-journal/key anchors before using a same-incarnation cursor. Inventory key anchors
+incarnation syntax, nonnegative sequences, ordered replay endpoints, inventory
+key bounds and actual journal/key anchors before using a same-incarnation cursor. Inventory key anchors
 may outlive current membership through retained Catalog or native identity rows;
 a removal does not make a valid cursor skip or fail. Unknown fields,
 invalid phase combinations, out-of-range or nonexistent anchors are

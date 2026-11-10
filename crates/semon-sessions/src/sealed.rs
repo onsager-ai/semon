@@ -1013,6 +1013,7 @@ pub fn record_custody(
     archive.with_verified_chain(source, chain, |bytes| {
         compare_segments(&dir, &manifest, bytes)
     })?;
+    archive.protect(source, &chain.chain_id, format!("seal:{}", dir.display()))?;
     let temporary = temporary_path(&dir, CUSTODY);
     let bytes = serde_json::to_vec(&Custody {
         generation: manifest.generation,

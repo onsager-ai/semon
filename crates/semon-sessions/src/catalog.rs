@@ -2811,6 +2811,65 @@ mod tests {
     }
 
     #[test]
+    fn standalone_archive_rebuilds_identical_index_rows_after_native_pruning() {
+        let mut fixture = Fixture::new();
+        fixture.options.facts = None;
+        let path = fixture.source("archived-origin");
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{}", json!({"type":"assistant","uuid":"answer","timestamp":"2026-10-01T00:00:01Z","message":{"id":"message","role":"assistant","model":"claude-opus-4-6","usage":{"input_tokens":10,"output_tokens":2},"content":[{"type":"tool_use","id":"call","name":"Bash","input":{"command":"true"}}]}})).unwrap();
+        writeln!(file, "{}", json!({"type":"user","uuid":"result","timestamp":"2026-10-01T00:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call","content":"done"}]}})).unwrap();
+        drop(file);
+        native_refresh(&fixture);
+        let db = EventCache::path(&fixture.options.cache);
+        let before = indexed_rows(&Connection::open(&db).unwrap(), path.to_str().unwrap());
+        assert!(before.len() > 3);
+        let archive =
+            crate::archive::Archive::new(crate::archive::standalone_dir(&fixture.options.cache));
+        assert_eq!(archive.chains(&path.to_string_lossy()).unwrap().len(), 1);
+        let proof = session_source_proof(
+            &fixture.options,
+            "",
+            "claude",
+            "projects/project/archived-origin.jsonl",
+        )
+        .unwrap()
+        .unwrap();
+        let ready = crate::source_projection_ready(
+            &fixture.options,
+            "claude",
+            "projects/project/archived-origin.jsonl",
+        )
+        .unwrap()
+        .unwrap();
+        crate::retain_source_event_index(&fixture.options, "", &proof, &ready).unwrap();
+        let connection = Connection::open(&db).unwrap();
+        let marker: String = connection
+            .query_row(
+                "SELECT value FROM meta WHERE key GLOB 'archive_event_index:*'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&marker).unwrap()["chain_id"],
+            archive.chains(&path.to_string_lossy()).unwrap()[0].chain_id
+        );
+        drop(connection);
+        fs::remove_file(&path).unwrap();
+        // Remove derived state only: force discovery and parsing from original custody.
+        fs::remove_file(&db).unwrap();
+        native_refresh(&fixture);
+        let after = indexed_rows(&Connection::open(&db).unwrap(), path.to_str().unwrap());
+        assert_eq!(before, after);
+        assert!(
+            !path.exists(),
+            "rebuild never restores or writes a native log"
+        );
+        archive.verify(&path.to_string_lossy()).unwrap();
+    }
+
+    #[test]
     fn archived_event_index_survives_absence_without_current_membership() {
         let fixture = Fixture::new();
         fixture.publish(2);
@@ -2981,7 +3040,7 @@ mod tests {
             )
             .unwrap();
         let mut marker: Value = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(marker["version"], 6);
+        assert_eq!(marker["version"], 7);
         marker["version"] = json!(4);
         marker
             .as_object_mut()
@@ -3122,7 +3181,7 @@ mod tests {
             )
             .unwrap();
         let mut marker: Value = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(marker["version"], 6);
+        assert_eq!(marker["version"], 7);
         marker["version"] = json!(5);
         marker
             .as_object_mut()

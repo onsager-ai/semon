@@ -65,6 +65,44 @@ the interrupt handle stops execution earlier where it can. DuckDB's
 the real memory ceiling. A runaway query therefore cannot take down the MCP
 server, the Viewer or Hub. Hub runs workers per tenant.
 
+### Engine and worker protocol
+
+The local engine is `semon-asi::query`, behind the `query-engine` Cargo feature.
+Build the worker with `cargo build -p semon-cli --features asi-query`. Ordinary
+builds do not compile bundled DuckDB. The existing `asi-duckdb` CI job tests and
+lints this feature and the CLI together; `duckdb-tests` includes `query-engine`.
+
+Trusted local callers use `query::run(semon_executable, store_root, request)`.
+It takes one of four kernel-released per-store query locks, launches
+`semon asi query-worker`, sends one JSON object on stdin, and receives one JSON
+result or error object on stdout. The internal request is
+`{"root":"absolute store directory","request":{"query":"SELECT ...","params":[],"limit":1000,"timeout_ms":2000,"max_bytes":1048576}}`.
+Unknown fields are refused. `max_bytes` is an internal response budget, bounded
+by 4 MiB; it does not add an input to the public tools. The runner clears the
+child environment, owns its scratch directory and OS limits, and kills/reaps
+it at the whole-request deadline. Each worker has its own process group, which
+is killed on deadline. The child inherits its admission lock through exec, so a
+slot remains occupied until the child actually exits even if the runner dies.
+On Linux the pre-exec path also installs `PR_SET_PDEATHSIG=SIGKILL` and checks
+that its parent PID still matches, covering death before or after registration.
+Other Unix platforms retain the inherited lock and resource limits but do not
+have this Linux parent-death guarantee. Worker stderr is not a data surface. The
+worker protocol is internal, not a network or authorization boundary; callers
+must already hold authority to read the selected local store. Unix process
+limits are required; unsupported platforms refuse explicitly.
+
+`query::FUNCTIONS` and `query::SEMANTIC_VIEWS` are the code-side definitions for
+the later generated schema surface. The pinned DuckDB JSON AST grammar refuses
+unknown nodes, expression classes/types and fields, including within CTEs,
+subqueries, filters and window expressions. It uses the bundled engine's latest
+serialization format rather than DuckDB's default storage compatibility format.
+The result's column types preserve decimal precision and nested child types;
+unsafe integers and decimals are strings, nested values are recursive JSON, and
+blobs are refused recursively. Timestamps/dates/times are strings of the native
+numeric value in the unit identified by their DuckDB type (dates are Unix days).
+This slice reads local analytics only; remote admission and coverage remain the
+responsibility of the federation slices.
+
 ### Limits
 
 | Limit | Default | Maximum | On exceed |

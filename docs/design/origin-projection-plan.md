@@ -178,7 +178,13 @@ set, not merely that chunk's changes. It marks prior live sessions absent from
 that exact namespace inventory as `source_missing`; rows remain live and other
 namespaces are untouched. Catch-up replays changes after S, including sessions
 added, removed or changed between inventory chunks. Completion means the cursor
-has caught the current journal maximum. Crash/restart uses the manifest cursor;
+has caught a fixed replay endpoint: the journal maximum at final inventory,
+or at the first read of a new incremental drain. Replay checkpoints retain that
+endpoint across reads/retries/restarts. Later writes belong to the next drain;
+current whole-session readers can observe newer evidence early. A continuously
+advancing journal cannot extend a request forever. One-shot equivalence at the
+final read assumes writes have quiesced by endpoint capture; otherwise the next
+drain reconciles the later suffix. Crash/restart uses the manifest cursor;
 an incarnation change abandons partial inventory and starts over. See the
 [resumable input contract](asi-store.md#resumable-admitted-input) for validation,
 consistency proof and the remaining O(sessions) UID/live-map/dimension costs.
@@ -188,7 +194,14 @@ completion to its caller. The caller may drain or yield between chunks; the 2 s
 discovery cadence does not require an entire inventory in one tick. The existing
 local writer selects `AnalyticsWriterConfig.input_budget` and continues incomplete
 chunks at its configured interval, including after recovery, without another
-external notification. This delivery remains only part of #557. The
+external notification. Each request keeps its initiating notification generation
+through retries, chunks and final compaction; later requests cannot inherit its
+failures or settle from its earlier publication. Successful chunks retain the
+request's finite operational failure budget. The CLI accepts `--batch-sessions`
+and `--batch-steps`; one-shot uses zero chunk spacing and exits after the first
+complete drain plus final bounded compaction. Watch uses the default 2 s spacing.
+Cancellation stops the waiter, then joins the writer without flushing the rest
+of the inventory. This delivery remains only part of #557. The
 adapter and publisher share `semon-asi`'s canonical UID component encoder. A
 later `SourceRestored` clears the marker.
 

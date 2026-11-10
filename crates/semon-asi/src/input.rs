@@ -57,7 +57,9 @@ impl Default for InputBudget {
 /// The adapter owns strict validation of the opaque checkpoint, including its
 /// incarnation, inventory snapshot and cursor. A changed incarnation restarts
 /// inventory. Changes during inventory must be replayed before reporting
-/// completion. Only the final inventory chunk supplies the complete UID set.
+/// completion. Replay captures a fixed endpoint, so writes after that endpoint
+/// belong to the next drain. Only the final inventory chunk supplies the
+/// complete UID set.
 pub trait AnalyticsInput {
     type Error;
 
@@ -74,7 +76,7 @@ pub struct AdmittedBatch {
     pub namespace: String,
     /// Adapter-owned next cursor; publish atomically with the chunk's facts.
     pub checkpoint: String,
-    /// True when inventory and replay have caught up to this read's snapshot.
+    /// True when inventory and replay have reached this drain's fixed endpoint.
     /// A caller may yield between incomplete chunks and resume from its manifest.
     pub complete: bool,
     pub reconciliation: Reconciliation,

@@ -11,6 +11,23 @@ use std::{
 
 #[cfg(unix)]
 pub(crate) fn open_input(path: &Path) -> io::Result<File> {
+    open_regular(path, libc::O_RDONLY)
+}
+
+/// Open archive state for update without following any path component.
+#[cfg(unix)]
+pub(crate) fn open_state(path: &Path) -> io::Result<File> {
+    open_regular(path, libc::O_RDWR | libc::O_CREAT)
+}
+
+/// Open an existing archive chain for update; never recreate missing custody.
+#[cfg(unix)]
+pub(crate) fn open_update(path: &Path) -> io::Result<File> {
+    open_regular(path, libc::O_RDWR)
+}
+
+#[cfg(unix)]
+fn open_regular(path: &Path, access: libc::c_int) -> io::Result<File> {
     use std::{
         ffi::CString,
         os::{
@@ -48,14 +65,14 @@ pub(crate) fn open_input(path: &Path) -> io::Result<File> {
         let name = CString::new(name.as_bytes())
             .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
         let last = index + 1 == components.len();
-        let flags = libc::O_RDONLY
+        let flags = if last { access } else { libc::O_RDONLY }
             | libc::O_CLOEXEC
             | libc::O_NOFOLLOW
             | libc::O_NONBLOCK
             | if last { 0 } else { libc::O_DIRECTORY };
         // SAFETY: directory owns a live descriptor, name is NUL-terminated,
-        // and no mode argument is needed because O_CREAT is not used.
-        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        // and the mode argument creates archive state owner-only when needed.
+        let fd = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags, 0o600) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -90,6 +107,48 @@ pub(crate) fn open_input(path: &Path) -> io::Result<File> {
     }
     let file = File::open(path)?;
     if !file.metadata()?.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn open_state(path: &Path) -> io::Result<File> {
+    let mut prefix = std::path::PathBuf::new();
+    for component in path.components() {
+        prefix.push(component);
+        match std::fs::symlink_metadata(&prefix) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound && prefix == path => {}
+            Err(error) => return Err(error),
+        }
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn open_update(path: &Path) -> io::Result<File> {
+    let original = open_input(path)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    if !file.metadata()?.is_file()
+        || crate::events::Stat::from_metadata(&original.metadata()?)?
+            != crate::events::Stat::from_metadata(&file.metadata()?)?
+    {
         return Err(io::ErrorKind::InvalidInput.into());
     }
     Ok(file)

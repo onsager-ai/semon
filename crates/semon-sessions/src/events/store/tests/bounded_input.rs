@@ -510,7 +510,7 @@ fn bounded_inventory_replays_new_session_behind_keyset_cursor() {
     }
     assert_eq!(input.reconciliations, 1);
     let cursor: Value = serde_json::from_str(&store.manifest().checkpoints[NAMESPACE]).unwrap();
-    assert_eq!(cursor["cursor"]["phase"], "incremental");
+    assert_eq!(cursor["cursor"]["phase"], "replay");
     assert_eq!(cursor["cursor"]["after"].as_i64(), Some(snapshot));
     let mut replayed_new = false;
     for _ in 0..16 {
@@ -790,6 +790,75 @@ fn bounded_incremental_coalesces_duplicates_and_defers_without_skipping() {
 }
 
 #[test]
+fn bounded_drain_finishes_at_its_endpoint_while_the_journal_keeps_advancing() {
+    let (root, options, rows, native) = fixture("bounded-moving-journal", 4);
+    let mut store = Store::open_with_clock(&root.join("store"), clock()).unwrap();
+    let mut input = ObservedInput::open(&options);
+    let selected = budget(1, 8_192);
+    assert!(!chunk(&mut store, &mut input, selected).complete);
+    for row in &rows {
+        native
+            .connection
+            .execute(
+                "INSERT INTO silver_change(session_key,kind) VALUES(?1,'changed')",
+                [&row.key],
+            )
+            .unwrap();
+    }
+    // Finish inventory and capture the replay endpoint after all changes that
+    // happened during inventory. Reopening the adapter preserves this bound.
+    for _ in 0..3 {
+        assert!(!chunk(&mut store, &mut input, selected).complete);
+    }
+    let checkpoint: Value = serde_json::from_str(&store.manifest().checkpoints[NAMESPACE]).unwrap();
+    let endpoint = checkpoint["cursor"]["through"].as_i64().unwrap();
+    assert_eq!(checkpoint["cursor"]["phase"], "replay");
+    for (page, row) in rows.iter().enumerate() {
+        native
+            .connection
+            .execute(
+                "INSERT INTO silver_change(session_key,kind) VALUES(?1,'changed')",
+                [&row.key],
+            )
+            .unwrap();
+        input = ObservedInput::open(&options);
+        assert_eq!(chunk(&mut store, &mut input, selected).complete, page == 3);
+    }
+    let checkpoint: Value = serde_json::from_str(&store.manifest().checkpoints[NAMESPACE]).unwrap();
+    assert_eq!(
+        checkpoint["cursor"],
+        serde_json::json!({"phase":"incremental", "after":endpoint})
+    );
+    // Writes beyond the bound are retained for a subsequent request, which
+    // captures a new endpoint and is finite even if more changes arrive.
+    assert_eq!(drain(&mut store, &mut input, selected), 4);
+    let expected = live_rows(&store);
+    for row in &rows {
+        native
+            .connection
+            .execute(
+                "INSERT INTO silver_change(session_key,kind) VALUES(?1,'changed')",
+                [&row.key],
+            )
+            .unwrap();
+    }
+    assert!(!chunk(&mut store, &mut input, selected).complete);
+    for (page, row) in rows.iter().enumerate().skip(1) {
+        native
+            .connection
+            .execute(
+                "INSERT INTO silver_change(session_key,kind) VALUES(?1,'changed')",
+                [&row.key],
+            )
+            .unwrap();
+        assert_eq!(chunk(&mut store, &mut input, selected).complete, page == 3);
+    }
+    assert_eq!(live_rows(&store), expected);
+    assert_eq!(drain(&mut store, &mut input, selected), 3);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bounded_pending_catalog_inventory_needs_no_journal_entries() {
     let root = scratch("bounded-pending-only");
     let (options, rows, slots) = catalog_native_fixture(&root, 4, false);
@@ -901,7 +970,7 @@ fn bounded_writer_continues_one_chunk_per_interval_without_fresh_notifications()
 
 #[test]
 fn bounded_writer_request_waits_for_complete_inventory() {
-    let (root, options, _, _native) = fixture("bounded-writer-request", 4);
+    let (root, options, _, _native) = fixture("bounded-writer-request", 6);
     let store_root = root.join("writer-store");
     let time = Arc::new(clock());
     let mut config = crate::AnalyticsWriterConfig::new(
@@ -919,21 +988,30 @@ fn bounded_writer_request_waits_for_complete_inventory() {
         let waiter = scope.spawn(move || {
             handle_ref.publish_and_wait_until(|| std::time::Instant::now() >= deadline)
         });
-        for count in 1..=4 {
+        for count in 1..=6 {
+            let compact_hold = (count == 6).then(|| handle.hold_compact());
             if count > 1 {
                 time.0
                     .store(100 + (count - 1) as i64 * 2_000, Ordering::SeqCst);
                 handle.wake_for_clock();
             }
             handle.wait_for_publishes(count);
-            handle.wait_for_idle_wait();
-            if count < 4 {
+            if count < 6 {
+                handle.wait_for_idle_wait();
                 assert_eq!(
                     handle.unsettled_requests(),
                     1,
                     "partial publication and compaction must not settle materialization"
                 );
+            } else {
+                handle.wait_for_compact_hold();
+                assert_eq!(
+                    handle.unsettled_requests(),
+                    1,
+                    "final compaction must settle first"
+                );
             }
+            drop(compact_hold);
         }
         assert_eq!(waiter.join().unwrap(), crate::AnalyticsWriterStatus::Idle);
     });
@@ -942,9 +1020,144 @@ fn bounded_writer_request_waits_for_complete_inventory() {
         semon_asi::read_live_map(&store_root, &manifest)
             .unwrap()
             .len(),
-        4
+        6
     );
     handle.stop_and_join();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bounded_writer_error_between_chunks_belongs_to_its_request() {
+    let (root, options, rows, native) = fixture("bounded-writer-error", 4);
+    let store_root = root.join("writer-store");
+    let time = Arc::new(clock());
+    let mut config = crate::AnalyticsWriterConfig::new(
+        NAMESPACE,
+        crate::events::EventCache::path(&options.cache),
+        &store_root,
+    );
+    config.input_budget = budget(1, 8_192);
+    let handle = crate::analytics_writer::start_with_clock(config, Arc::clone(&time));
+    let mut ordered: Vec<_> = rows.iter().collect();
+    ordered.sort_by(|left, right| left.key.cmp(&right.key));
+    let key = &ordered[1].key;
+    let metadata: String = native
+        .connection
+        .query_row(
+            "SELECT metadata FROM session_catalog WHERE session_key=?1",
+            [key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    std::thread::scope(|scope| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let handle_ref = &handle;
+        let first = scope.spawn(move || {
+            handle_ref.publish_and_wait_until(|| std::time::Instant::now() >= deadline)
+        });
+        handle.wait_for_publishes(1);
+        handle.wait_for_idle_wait();
+        let second = scope.spawn(move || {
+            handle_ref.publish_and_wait_until(|| std::time::Instant::now() >= deadline)
+        });
+        handle.wait_for_requests(2);
+        native
+            .connection
+            .execute(
+                "UPDATE session_catalog SET metadata='{}' WHERE session_key=?1",
+                [key],
+            )
+            .unwrap();
+        time.0.store(2_100, Ordering::SeqCst);
+        handle.wake_for_clock();
+        assert!(matches!(
+            first.join().unwrap(),
+            crate::AnalyticsWriterStatus::Refused { .. }
+        ));
+        assert_eq!(
+            handle.unsettled_requests(),
+            1,
+            "later request must keep its own outcome"
+        );
+        assert_eq!(handle.published(), 1);
+        native
+            .connection
+            .execute(
+                "UPDATE session_catalog SET metadata=?1 WHERE session_key=?2",
+                params![metadata, key],
+            )
+            .unwrap();
+        for count in 2..=4 {
+            time.0.store(100 + count as i64 * 2_000, Ordering::SeqCst);
+            handle.wake_for_clock();
+            handle.wait_for_publishes(count);
+            handle.wait_for_idle_wait();
+            if count < 4 {
+                assert_eq!(handle.unsettled_requests(), 1);
+            }
+        }
+        assert_eq!(second.join().unwrap(), crate::AnalyticsWriterStatus::Idle);
+    });
+    assert_eq!(handle.input_attempts(), 5);
+    handle.stop_and_join();
+    let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_eq!(
+        semon_asi::read_live_map(&store_root, &manifest)
+            .unwrap()
+            .len(),
+        4
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bounded_writer_cancellation_mid_drain_preserves_the_partial_checkpoint() {
+    let (root, options, _, _native) = fixture("bounded-writer-cancel", 4);
+    let store_root = root.join("writer-store");
+    let time = Arc::new(clock());
+    let mut config = crate::AnalyticsWriterConfig::new(
+        NAMESPACE,
+        crate::events::EventCache::path(&options.cache),
+        &store_root,
+    );
+    config.input_budget = budget(1, 8_192);
+    let handle = crate::analytics_writer::start_with_clock(config, time);
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let handle_ref = &handle;
+        let cancelled_ref = &cancelled;
+        let waiter = scope.spawn(move || {
+            handle_ref.publish_and_wait_until(|| {
+                cancelled_ref.load(Ordering::SeqCst) || std::time::Instant::now() >= deadline
+            })
+        });
+        handle.wait_for_publishes(1);
+        handle.wait_for_idle_wait();
+        cancelled.store(true, Ordering::SeqCst);
+        assert_eq!(
+            waiter.join().unwrap(),
+            crate::AnalyticsWriterStatus::Stopped
+        );
+        assert_eq!(handle.unsettled_requests(), 0);
+    });
+    handle.stop_and_join();
+    let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_eq!(manifest.generation, 1);
+    assert!(manifest.source_missing.is_empty());
+    let checkpoint: Value = serde_json::from_str(&manifest.checkpoints[NAMESPACE]).unwrap();
+    assert_eq!(checkpoint["cursor"]["phase"], "inventory");
+    let mut resumed = Store::open_with_clock(&store_root, clock()).unwrap();
+    assert_eq!(
+        drain(
+            &mut resumed,
+            &mut ObservedInput::open(&options),
+            budget(1, 8_192)
+        ),
+        3
+    );
+    assert_eq!(resumed.live_map().len(), 4);
+    drop(resumed);
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1017,6 +1230,13 @@ fn bounded_input_refuses_malformed_forged_and_cross_namespace_cursors() {
         serde_json::json!({"phase":"incremental", "after":"1"}),
         serde_json::json!({"phase":"incremental", "after":1, "snapshot":current}),
         serde_json::json!({"phase":"incremental", "after":1, "extra":true}),
+        serde_json::json!({"phase":"replay", "after":-1, "through":current}),
+        serde_json::json!({"phase":"replay", "after":current, "through":current}),
+        serde_json::json!({"phase":"replay", "after":current, "through":current-1}),
+        serde_json::json!({"phase":"replay", "after":current, "through":current+11}),
+        serde_json::json!({"phase":"replay", "after":current, "through":current+1}),
+        serde_json::json!({"phase":"replay", "after":current+1, "through":current+10}),
+        serde_json::json!({"phase":"replay", "after":0}),
     ] {
         let mut forged = original.clone();
         forged["cursor"] = cursor;
