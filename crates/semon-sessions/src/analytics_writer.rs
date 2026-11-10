@@ -312,17 +312,10 @@ impl Handle {
 
     #[cfg(test)]
     pub(crate) fn wait_for_retire_attempts(&self, expected: u64) {
-        let mut state = lock(&self.shared.state);
-        while state.retire_attempts < expected && !state.stop {
-            state = self
-                .shared
-                .changed
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-        }
-        assert!(
-            state.retire_attempts >= expected,
-            "writer stopped before retirement"
+        wait_for_test_state(
+            &self.shared,
+            |state| state.retire_attempts >= expected,
+            "retirement",
         );
     }
 
@@ -765,7 +758,10 @@ impl Scheduler {
                     .is_some_and(|chain| chain.captured_generation == generation)
                 {
                     let chain = self.active.take().expect("cancelled active chain");
-                    self.refused = Some(chain.operation);
+                    // Only a store error leaves a manifest reload barrier.
+                    // Clean pending work must not block maintenance without demand.
+                    self.refused =
+                        matches!(chain.operation, Operation::Reload(_)).then_some(chain.operation);
                     self.suspended = None;
                     return ChainEffect::Cancelled(generation);
                 }
@@ -1592,6 +1588,45 @@ mod tests {
         assert_eq!(state.requests[&1], first_outcome);
         assert_eq!(state.requests[&2], Some(AnalyticsWriterStatus::Idle));
         assert_eq!(state.consumed, 2);
+    }
+
+    #[test]
+    fn cancellation_retains_only_manifest_reload_barriers() {
+        for operation in [
+            Operation::Open,
+            Operation::Publish,
+            Operation::Compact,
+            Operation::Retire,
+            Operation::Reload(Resume::Publish),
+            Operation::Reload(Resume::Compact),
+            Operation::Reload(Resume::Retire),
+        ] {
+            let mut scheduler = Scheduler::new(0);
+            scheduler.active = Some(Chain::new(1, ChainKind::Publication, operation));
+            assert_eq!(
+                scheduler.transition(ChainEvent::Cancel { generation: 1 }, 0),
+                ChainEffect::Cancelled(1)
+            );
+            assert!(scheduler.active.is_none());
+            assert!(scheduler.suspended.is_none());
+            if matches!(operation, Operation::Reload(_)) {
+                assert_eq!(scheduler.refused, Some(operation));
+                assert_eq!(scheduler.operation_due(600_000, false, true, 1), None);
+                assert_eq!(scheduler.deadline(false, true), None);
+                assert_eq!(
+                    scheduler.operation_due(600_000, true, true, 2),
+                    Some(operation)
+                );
+                assert_eq!(scheduler.active.as_ref().unwrap().captured_generation, 2);
+            } else {
+                assert_eq!(scheduler.refused, None);
+                assert_eq!(scheduler.deadline(false, true), Some(600_000));
+                assert_eq!(
+                    scheduler.operation_due(600_000, false, true, 1),
+                    Some(Operation::Retire)
+                );
+            }
+        }
     }
 
     #[test]

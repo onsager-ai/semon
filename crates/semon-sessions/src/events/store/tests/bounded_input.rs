@@ -1273,7 +1273,7 @@ fn bounded_writer_new_request_finishes_inherited_replay_then_publishes_sequence_
 }
 
 #[test]
-fn bounded_writer_cancellation_mid_drain_preserves_the_partial_checkpoint() {
+fn bounded_writer_cancellation_between_chunks_allows_retirement_and_preserves_checkpoint() {
     let (root, options, _, _native) = fixture("bounded-writer-cancel", 4);
     let store_root = root.join("writer-store");
     let time = Arc::new(clock());
@@ -1283,7 +1283,7 @@ fn bounded_writer_cancellation_mid_drain_preserves_the_partial_checkpoint() {
         &store_root,
     );
     config.input_budget = budget(1, 8_192);
-    let handle = crate::analytics_writer::start_with_clock(config, time);
+    let handle = crate::analytics_writer::start_with_clock(config, Arc::clone(&time));
     let cancelled = std::sync::atomic::AtomicBool::new(false);
     std::thread::scope(|scope| {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -1303,6 +1303,13 @@ fn bounded_writer_cancellation_mid_drain_preserves_the_partial_checkpoint() {
         );
         assert_eq!(handle.unsettled_requests(), 0);
     });
+    // Keep the writer alive without another notification: cancellation of a
+    // coherent pending chunk must not disable the ten-minute maintenance cadence.
+    time.0.store(600_101, Ordering::SeqCst);
+    handle.wake_for_clock();
+    handle.wait_for_retire_attempts(1);
+    handle.wait_for_idle_wait();
+    assert_eq!(handle.published(), 1);
     handle.stop_and_join();
     let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
     assert_eq!(manifest.generation, 1);

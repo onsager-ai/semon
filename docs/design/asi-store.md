@@ -350,6 +350,8 @@ tables.
     drop the appropriate record; the next chain starts at 0/0. NoWriter retains
     only a 30 s scheduling cooldown. A refused/cancelled operation can retain a
     required recovery barrier, but no request identity or counters.
+    Cancellation retains only a pending manifest reload after a store error;
+    clean pending work leaves retirement enabled without another notification.
     Parquet page-read I/O can surface as an Arrow error after losing its typed
     I/O source; it latches Refused like structural errors. A store error requires
     manifest reload before its operation resumes, since a rename may already be
