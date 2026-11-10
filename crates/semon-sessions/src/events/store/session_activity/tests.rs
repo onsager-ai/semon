@@ -128,7 +128,7 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     let (options, _, _) = catalog_native_fixture(&root, 1, false);
     let missing_path = options
         .claude_home
-        .join("projects/-work-proj-copy/native-cl-00.jsonl");
+        .join("projects/-work-proj-copy/native-cl-00-continued.jsonl");
     fs::create_dir_all(missing_path.parent().unwrap()).unwrap();
     let missing_records = [
         serde_json::json!({
