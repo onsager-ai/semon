@@ -159,6 +159,23 @@ pub(crate) struct CatalogRow {
     pub(crate) sources: Vec<CatalogSource>,
 }
 
+impl CatalogRow {
+    /// The native identity of this Catalog owner.  Claude continuations can
+    /// contribute several native source IDs to one lineage; the lineage key is
+    /// the recorded root when it appears in that set.  Other multi-ID rows do
+    /// not establish a single native identity.
+    pub(crate) fn owner_native_id(&self) -> Option<&str> {
+        self.native_ids
+            .iter()
+            .find(|native_id| native_id.as_str() == self.key.as_str())
+            .map(String::as_str)
+            .or_else(|| match self.native_ids.as_slice() {
+                [native_id] => Some(native_id),
+                _ => None,
+            })
+    }
+}
+
 /// Shared qualification for exact native Query publication fields. These are
 /// recorded observations, never a grant of process or credential authority.
 pub(crate) fn query_observation_matches(

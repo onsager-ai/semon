@@ -597,6 +597,11 @@ fn analytics_digest(
     row: &crate::model::summary::CatalogRow,
 ) -> rusqlite::Result<String> {
     let state = row.overview.as_ref().map(|overview| overview.status());
+    // A complete activity header is only admitted for this exact source
+    // vector.  Publishing a new physical witness without activity must still
+    // journal the resulting Pending state.
+    let source_generation = crate::retention::source_generation(&row.sources)
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     let digest = format!(
         "{:x}",
         Sha256::digest(
@@ -611,6 +616,7 @@ fn analytics_digest(
                 &row.branch,
                 row.start,
                 row.last,
+                &source_generation,
                 state,
                 (
                     &row.name,
@@ -734,10 +740,7 @@ pub(super) fn remove_mismatched(
 }
 
 fn native_session_id(row: &crate::model::summary::CatalogRow) -> rusqlite::Result<&str> {
-    let [native_session_id] = row.native_ids.as_slice() else {
-        return Err(rusqlite::Error::InvalidQuery);
-    };
-    Ok(native_session_id)
+    row.owner_native_id().ok_or(rusqlite::Error::InvalidQuery)
 }
 
 pub(super) fn repairs(c: &Connection) -> rusqlite::Result<Vec<String>> {

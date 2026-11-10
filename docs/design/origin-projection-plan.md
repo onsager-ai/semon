@@ -18,9 +18,11 @@ empty admitted session or an explicit removal.
 The ASI session UID is `(configured machine namespace, native harness, native
 session ID)`, percent-encoded component-wise. The Catalog key only disambiguates
 source-local rows and is never substituted for the native ID: collisions and
-parent links resolve through the recorded native identity. A Catalog row with no
-single native identity is unavailable rather than guessed. `codex-run` is a
-worker when its recorded native parent resolves; otherwise its role remains solo.
+parent links resolve through the recorded native identity. A multi-ID Claude
+continuation lineage uses its recorded owner when the Catalog key is one of that
+lineage's native IDs; any other multi-ID row is unavailable rather than guessed.
+`codex-run` is a worker when its recorded native parent resolves; otherwise its
+role remains solo.
 
 Project steps, ordered tool calls, turns, sessions, compactions and dimensions
 from admitted SQLite evidence. Preserve native UID, lineage, source witness and
@@ -57,7 +59,10 @@ operator recovery may only proceed after independently establishing the retained
 source cohort and custody. A Catalog source-generation change publishes `Pending`
 until a complete replacement is admitted; it never emits a removal or deletes the
 previous complete facts. `Removed` is reserved for a Catalog identity that is no
-longer present.
+longer present. The source-admission transition is a `changed` journal entry in
+the same Catalog transaction even when no new activity rows are available, so
+incremental and full readers both retain the prior admitted generation while
+observing the new physical witness as pending.
 
 ## Integration after the storage stack merges
 

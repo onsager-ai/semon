@@ -310,10 +310,8 @@ fn session_identity(
 /// several source files contribute to it. Refuse an ambiguous catalog row
 /// rather than deriving an identifier from a key prefix.
 fn native_session_identity(row: &CatalogRow) -> rusqlite::Result<(String, String)> {
-    let [native_session_id] = row.native_ids.as_slice() else {
-        return Err(rusqlite::Error::InvalidQuery);
-    };
-    Ok((row.harness.clone(), native_session_id.clone()))
+    let native_session_id = row.owner_native_id().ok_or(rusqlite::Error::InvalidQuery)?;
+    Ok((row.harness.clone(), native_session_id.into()))
 }
 
 fn source_witness(tx: &rusqlite::Transaction<'_>, key: &str) -> rusqlite::Result<CatalogRow> {
@@ -403,7 +401,7 @@ fn admitted(
             let fact = fact_by_id
                 .get(&step.id)
                 .ok_or(rusqlite::Error::InvalidQuery)?;
-            Ok(step_input(&session_uid, step, fact, &price_version))
+            step_input(&session_uid, &row, step, fact, &price_version)
         })
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let exclusive = projected_steps
@@ -488,7 +486,7 @@ fn read_compactions(
         let metadata: String = record.get(1)?;
         let compact: native_activity::Compaction =
             serde_json::from_str(&metadata).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let anchor = format!("@{}:{}", compact.position.source, compact.position.offset);
+        let anchor = record_anchor(row, &compact.position)?;
         compactions.push(Compaction {
             compaction_uid: format!("{session_uid}/c/{}", encode_component(&anchor)),
             step_uid: compact.step_id.as_ref().map(|id| step_uid(session_uid, id)),
@@ -537,7 +535,9 @@ fn session_input(
         status: Status::Unknown,
         started_at: row.start,
         ended_at: None,
-        reported_usd: row.cost.usd,
+        // Catalog cost is Semon's recorded price estimate, not an admitted
+        // harness-reported run cost.
+        reported_usd: None,
     })
 }
 
@@ -576,16 +576,17 @@ fn repo(tx: &rusqlite::Transaction<'_>, row: &CatalogRow) -> rusqlite::Result<Re
 
 fn step_input(
     session_uid: &str,
+    row: &CatalogRow,
     step: &native_activity::ActivityStep,
     fact: &native_activity::StepFacts,
     price_version: &str,
-) -> Step {
+) -> rusqlite::Result<Step> {
     let step_uid = step_uid(session_uid, &step.id);
-    let turn = fact
-        .turn_id
-        .clone()
-        .unwrap_or_else(|| format!("@{}:{}", step.position.source, step.position.offset));
-    Step {
+    let turn = match &fact.turn_id {
+        Some(turn_id) => turn_id.clone(),
+        None => record_anchor(row, &step.position)?,
+    };
+    Ok(Step {
         step_uid: step_uid.clone(),
         turn_uid: format!("{session_uid}/t/{}", encode_component(&turn)),
         model: Model {
@@ -638,7 +639,49 @@ fn step_input(
         ok: (!fact.tool_calls.is_empty() && fact.tool_calls.iter().all(|call| call.ok.is_some()))
             .then(|| fact.tool_calls.iter().all(|call| call.ok == Some(true))),
         tool_calls: fact.tool_calls.iter().map(tool_call).collect(),
+    })
+}
+
+/// A fallback record identity is portable native evidence, never a local
+/// physical path.  The catalog binds the physical position to exactly one
+/// source; the exported anchor uses that native log's filename stem.
+fn record_anchor(
+    row: &CatalogRow,
+    position: &native_activity::SourcePosition,
+) -> rusqlite::Result<String> {
+    let source_path = Path::new(&position.source);
+    let matching = row
+        .sources
+        .iter()
+        .filter(|source| source.path == source_path)
+        .collect::<Vec<_>>();
+    let [source] = matching.as_slice() else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    let stem = source
+        .path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| {
+            (1..=128).contains(&stem.len())
+                && stem
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
+        .ok_or(rusqlite::Error::InvalidQuery)?;
+    // The ASI record-anchor contract names the file stem.  Two physical
+    // contributors with the same stem cannot be represented distinctly by
+    // that contract, so refuse rather than smuggle a path into a key.
+    if row
+        .sources
+        .iter()
+        .filter(|candidate| candidate.path.file_stem().and_then(|value| value.to_str()) == Some(stem))
+        .count()
+        != 1
+    {
+        return Err(rusqlite::Error::InvalidQuery);
     }
+    Ok(format!("@{stem}:{}", position.offset))
 }
 
 fn tool_call(call: &native_activity::ToolCallFact) -> ToolCall {
@@ -912,5 +955,94 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn claude_lineage_owner_identity_and_record_anchors_are_portable() {
+        let mut row = catalog_row("root", "claude", "root", None, "session");
+        row.native_ids = vec!["cleared".into(), "root".into()];
+        assert_eq!(
+            native_session_identity(&row).unwrap(),
+            ("claude".into(), "root".into()),
+            "the recorded lineage owner, not native-ID order, names the session"
+        );
+
+        let source = |path: &str, native_id: &str| crate::model::summary::CatalogSource {
+            path: path.into(),
+            native_id: native_id.into(),
+            dev: 1,
+            ino: 2,
+            size: 3,
+            modified_ns: 4,
+            changed_ns: None,
+            offset: 5,
+            prefix_sha256: [0; 32],
+            tail_sha256: [0; 32],
+            native_role: None,
+        };
+        row.sources = vec![source("/private/first-root/record.jsonl", "root")];
+        let first = record_anchor(
+            &row,
+            &native_activity::SourcePosition {
+                source: "/private/first-root/record.jsonl".into(),
+                offset: 12,
+            },
+        )
+        .unwrap();
+        row.sources = vec![source("/different/parent/record.jsonl", "root")];
+        let moved = record_anchor(
+            &row,
+            &native_activity::SourcePosition {
+                source: "/different/parent/record.jsonl".into(),
+                offset: 12,
+            },
+        )
+        .unwrap();
+        assert_eq!(first, "@record:12");
+        assert_eq!(first, moved, "source relocation must not change an ASI key");
+        let first_compaction_uid = format!("session/c/{}", encode_component(&first));
+        let moved_compaction_uid = format!("session/c/{}", encode_component(&moved));
+        assert_eq!(first_compaction_uid, moved_compaction_uid);
+        assert!(!first_compaction_uid.contains("private"));
+        assert!(!first_compaction_uid.contains("%2F"));
+
+        row.sources = vec![
+            source("/different/parent/record.jsonl", "root"),
+            source("/different/parent/cleared.jsonl", "cleared"),
+        ];
+        let cleared = record_anchor(
+            &row,
+            &native_activity::SourcePosition {
+                source: "/different/parent/cleared.jsonl".into(),
+                offset: 12,
+            },
+        )
+        .unwrap();
+        assert_eq!(cleared, "@cleared:12");
+        assert_ne!(first, cleared, "distinct native logs retain distinct anchors");
+    }
+
+    #[test]
+    fn computed_catalog_cost_is_not_reported_spend() {
+        let mut row = catalog_row("priced", "claude", "priced", None, "session");
+        row.cost.usd = Some(12.34);
+        let mut connection = Connection::open_in_memory().unwrap();
+        let session = {
+            let tx = transaction(&mut connection);
+            session_input(
+                &tx,
+                "machine",
+                "machine/claude/priced",
+                &row,
+                Repo {
+                    key: "unknown".into(),
+                    repo_id: None,
+                    local_path: None,
+                    display_name: "unknown".into(),
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(session.reported_usd, None);
     }
 }

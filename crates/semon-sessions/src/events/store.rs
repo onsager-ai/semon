@@ -6979,15 +6979,30 @@ mod tests {
                     payload["agent_path"] =
                         serde_json::json!(format!("native-cx-01/child-{position}"));
                 }
+                let mut records = vec![
+                        serde_json::json!({"type":"session_meta","timestamp":"2026-09-24T00:00:00Z","payload":payload}),
+                        serde_json::json!({"type":"turn_context","timestamp":"2026-09-24T00:00:00Z","payload":{"model":"gpt-6-sol"}}),
+                        serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Native Codex fixture"}]}}),
+                        serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Native Codex answer"}]}}),
+                    ];
+                if position > 1 {
+                    // A per-response native receipt is required for activity
+                    // admission.  The child also carries the recorded parent
+                    // marker above, exercising Codex worker lineage.
+                    records.push(serde_json::json!({
+                        "type":"token_usage_record", "timestamp":"2026-09-24T00:01:00Z",
+                        "payload":{
+                            "thread_id":id, "session_id":id,
+                            "turn_id":format!("turn-{id}"), "response_id":format!("response-{id}"),
+                            "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
+                        }
+                    }));
+                }
                 (
                     options
                         .codex_home
                         .join(format!("sessions/2026/09/24/rollout-{id}.jsonl")),
-                    vec![
-                        serde_json::json!({"type":"session_meta","timestamp":"2026-09-24T00:00:00Z","payload":payload}),
-                        serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Native Codex fixture"}]}}),
-                        serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Native Codex answer"}]}}),
-                    ],
+                    records,
                 )
             };
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -10453,7 +10468,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rebuilt_index_has_a_new_incarnation_and_an_empty_change_log() {
+    fn unsupported_index_refusal_preserves_its_incarnation_and_change_log() {
         let root = scratch("incarnation");
         let cache = root.join("index.json");
         let path = cache.with_extension("sqlite3");
@@ -10481,12 +10496,21 @@ mod tests {
         db.execute_batch("PRAGMA user_version=1; PRAGMA wal_checkpoint(TRUNCATE)")
             .unwrap();
         drop(db);
-        let producer = super::super::EventCache::open(&cache).unwrap();
-        drop(producer);
-        let (current, _) = opened(&path);
-        drop(current);
-        let second = incarnation(&path);
-        assert_ne!(second, first, "a rebuild is a new incarnation");
+        let retained = fs::read(&path).unwrap();
+        assert!(
+            super::super::EventCache::open(&cache).is_err(),
+            "opening an unsupported persistent format must refuse"
+        );
+        assert_eq!(fs::read(&path).unwrap(), retained, "refusal preserves custody");
+        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM silver_change", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "refusal must not reset retained journal state"
+        );
+        drop(reader);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -10711,16 +10735,32 @@ mod tests {
         assert!(initial.changes.iter().any(|change| {
             matches!(change, SessionChange::Pending { session_uid } if session_uid == &pending_uid)
         }));
-        assert!(initial.changes.iter().any(|change| {
-            matches!(change, SessionChange::Admitted(session) if session.steps.is_empty())
-        }));
-        assert!(initial.changes.iter().any(|change| {
-            matches!(change, SessionChange::Admitted(session)
-                if session.session.native_session_id == "native-cx-03"
-                    && session.session.role == semon_asi::input::Role::Worker
-                    && session.session.parent_session_uid.as_deref()
-                        == Some("fixture-machine/codex/native-cx-01"))
-        }));
+        let admitted_sessions = initial
+            .changes
+            .iter()
+            .filter_map(|change| match change {
+                SessionChange::Admitted(session) => Some(session),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            admitted_sessions
+                .iter()
+                .map(|session| session.session.native_session_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["native-cl-02", "native-cx-01", "native-cx-03"]),
+            "only the deliberately withheld Claude owner is pending"
+        );
+        assert!(admitted_sessions.iter().any(|session| {
+            session.session.native_session_id == "native-cx-01" && session.steps.is_empty()
+        }), "a qualified zero-step session is admitted, not pending");
+        assert!(admitted_sessions.iter().any(|session| {
+            session.session.native_session_id == "native-cx-03"
+                && !session.steps.is_empty()
+                && session.session.role == semon_asi::input::Role::Worker
+                && session.session.parent_session_uid.as_deref()
+                    == Some("fixture-machine/codex/native-cx-01")
+        }), "the native receipt and parent marker admit the Codex child as a worker");
 
         catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
         let admitted = input.read_admitted(Some(&initial.checkpoint)).unwrap();
@@ -10730,6 +10770,50 @@ mod tests {
         }));
         assert!(admitted.changes.iter().any(|change| {
             matches!(change, SessionChange::Admitted(session) if session.session_uid == pending_uid)
+        }));
+
+        // A changed physical witness without an activity publication is a
+        // live Pending transition.  It must be journaled so incremental and
+        // full readers agree while the previous complete generation remains
+        // retained in the index.
+        let source_only_key = rows
+            .iter()
+            .find(|row| row.native_ids[0] == "native-cx-03")
+            .unwrap()
+            .key
+            .clone();
+        let source_only_uid = "fixture-machine/codex/native-cx-03";
+        let mut source_only = rows.clone();
+        let source_only_row = source_only
+            .iter_mut()
+            .find(|row| row.key == source_only_key)
+            .unwrap();
+        source_only_row.sources[0].offset += 1;
+        source_only_row.session_activity = None;
+        catalog_write(
+            &mut store,
+            &source_only,
+            &slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap();
+        let pending = input.read_admitted(Some(&admitted.checkpoint)).unwrap();
+        assert!(pending.changes.iter().any(|change| {
+            matches!(change, SessionChange::Pending { session_uid } if session_uid == source_only_uid)
+        }));
+        let mut full = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        let full_pending = full.read_admitted(None).unwrap();
+        assert!(full_pending.changes.iter().any(|change| {
+            matches!(change, SessionChange::Pending { session_uid } if session_uid == source_only_uid)
+        }));
+        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+        let restored = input.read_admitted(Some(&pending.checkpoint)).unwrap();
+        assert!(restored.changes.iter().any(|change| {
+            matches!(change, SessionChange::SourceRestored { session_uid } if session_uid == source_only_uid)
+        }));
+        assert!(restored.changes.iter().any(|change| {
+            matches!(change, SessionChange::Admitted(session) if session.session_uid == source_only_uid)
         }));
 
         let live_removed_key = rows
@@ -10780,6 +10864,7 @@ mod tests {
         }));
 
         let checkpoint = removed.checkpoint;
+        drop(full);
         drop(input);
         drop(store);
         fs::remove_file(&path).unwrap();
