@@ -1263,7 +1263,7 @@ mod tests {
                     "display_name".into(),
                     Value::String("remote repository".into()),
                 ),
-                ("repo_path".into(), Value::String("/work/semon".into())),
+                ("repo_path".into(), Value::Null),
             ]),
         ] {
             assert!(project_derived_row(&grant, "dim_repo", &row).is_ok());

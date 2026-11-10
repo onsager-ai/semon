@@ -92,8 +92,28 @@ the marker. Missing markers must refer to live sessions.
 
 Dimensions replace whole tables. Omission retains the previous dimension; an
 explicitly empty typed batch clears it. Build complete dimension state including
-entries needed by frozen sessions. Clarify `Versions` documentation: manifest
-versions are writer targets, while untouched sessions retain recorded versions.
+entries needed by frozen sessions from the named dimension files only, never by
+scanning facts. Retain unreferenced dimensions until bounded maintenance can
+prune them. Clarify `Versions` documentation: manifest versions are writer
+targets, while untouched sessions retain recorded versions.
+
+Shared repository keys (remote identities and `unknown`) carry no machine-local
+path; only a repository with its own local identity projects `repo_path`, using
+the path identity its key is bound to rather than a per-checkout path.
+Price dimensions merge by logical rate key, including price version and all rate
+selectors. An unchanged rate merges the minimum `learned_at`, minimum `valid_from`
+and minimum non-null `valid_to` independently; the end is null only when every
+observation is open. Closed intervals never reopen, independent of arrival order
+or batch boundaries; conflicting rates under
+one key refuse the cycle without advancing the checkpoint. Distinct price
+versions remain separate SCD2 rows. See the [store contract](asi-store.md) for
+the complete key and observation merge contract.
+
+A `ReplaceNamespace` inventory marks any prior live session under that exact
+encoded namespace component followed by `/` which it does not mention as
+`source_missing`; rows remain live and other namespaces are untouched. The
+adapter and publisher share `semon-asi`'s canonical UID component encoder. A
+later `SourceRestored` clears the marker.
 
 A reader loads the manifest once, its matching live map and exactly its named
 files. Filter session facts by `(session_uid, _gen)`; labels are append-only.
