@@ -181,6 +181,9 @@ enum Work {
     Publish,
     Compact,
     Retire,
+    ReloadPublish,
+    ReloadCompact,
+    ReloadRetire,
 }
 
 fn run<C: Clock + Send + Sync + 'static>(
@@ -266,7 +269,7 @@ fn run<C: Clock + Send + Sync + 'static>(
                     wait_for_notification(&shared);
                     refused = true;
                 }
-                Err(error) => {
+                Err(_error) => {
                     retry_attempt = retry_attempt.saturating_add(1);
                     set_status(
                         &shared,
@@ -275,7 +278,6 @@ fn run<C: Clock + Send + Sync + 'static>(
                         },
                     );
                     retry = Some((now + retry_delay(retry_attempt), Work::Open));
-                    let _ = error;
                 }
             },
             Work::Publish => {
@@ -322,7 +324,6 @@ fn run<C: Clock + Send + Sync + 'static>(
                         refused = true;
                     }
                     Err(error) => {
-                        reload_after_store_error(store.as_mut(), &error);
                         retry_attempt = retry_attempt.saturating_add(1);
                         set_status(
                             &shared,
@@ -330,7 +331,12 @@ fn run<C: Clock + Send + Sync + 'static>(
                                 attempt: retry_attempt,
                             },
                         );
-                        retry = Some((now + retry_delay(retry_attempt), Work::Publish));
+                        let retry_work = if matches!(error, PublishError::Store(_)) {
+                            Work::ReloadPublish
+                        } else {
+                            Work::Publish
+                        };
+                        retry = Some((now + retry_delay(retry_attempt), retry_work));
                     }
                 }
             }
@@ -353,8 +359,7 @@ fn run<C: Clock + Send + Sync + 'static>(
                     wait_for_notification(&shared);
                     refused = true;
                 }
-                Err(error) => {
-                    reload_store(store.as_mut());
+                Err(_error) => {
                     retry_attempt = retry_attempt.saturating_add(1);
                     set_status(
                         &shared,
@@ -362,8 +367,7 @@ fn run<C: Clock + Send + Sync + 'static>(
                             attempt: retry_attempt,
                         },
                     );
-                    retry = Some((now + retry_delay(retry_attempt), Work::Compact));
-                    let _ = error;
+                    retry = Some((now + retry_delay(retry_attempt), Work::ReloadCompact));
                 }
             },
             Work::Retire => match store.as_mut().expect("opened store").retire() {
@@ -382,8 +386,7 @@ fn run<C: Clock + Send + Sync + 'static>(
                     wait_for_notification(&shared);
                     refused = true;
                 }
-                Err(error) => {
-                    reload_store(store.as_mut());
+                Err(_error) => {
                     retry_attempt = retry_attempt.saturating_add(1);
                     set_status(
                         &shared,
@@ -391,10 +394,42 @@ fn run<C: Clock + Send + Sync + 'static>(
                             attempt: retry_attempt,
                         },
                     );
-                    retry = Some((now + retry_delay(retry_attempt), Work::Retire));
-                    let _ = error;
+                    retry = Some((now + retry_delay(retry_attempt), Work::ReloadRetire));
                 }
             },
+            Work::ReloadPublish | Work::ReloadCompact | Work::ReloadRetire => {
+                let after_reload = match work {
+                    Work::ReloadPublish => Work::Publish,
+                    Work::ReloadCompact => Work::Compact,
+                    Work::ReloadRetire => Work::Retire,
+                    _ => unreachable!("matched reload work"),
+                };
+                match store.as_mut().expect("opened store").reload_manifest() {
+                    Ok(()) => {
+                        retry = Some((now, after_reload));
+                    }
+                    Err(error) if is_refusal(&error) => {
+                        set_status(
+                            &shared,
+                            AnalyticsWriterStatus::Refused {
+                                reason: error.to_string(),
+                            },
+                        );
+                        wait_for_notification(&shared);
+                        refused = true;
+                    }
+                    Err(_error) => {
+                        retry_attempt = retry_attempt.saturating_add(1);
+                        set_status(
+                            &shared,
+                            AnalyticsWriterStatus::Retrying {
+                                attempt: retry_attempt,
+                            },
+                        );
+                        retry = Some((now + retry_delay(retry_attempt), work));
+                    }
+                }
+            }
         }
     }
     set_status(&shared, AnalyticsWriterStatus::Stopped);
@@ -405,21 +440,6 @@ fn target_versions() -> Versions {
         transform: semon_asi::ANALYTICS_TRANSFORM_VERSION,
         rules: ACTIVITY_RULES_VERSION,
         price: crate::pricing::snapshot().fingerprint.clone(),
-    }
-}
-
-fn reload_after_store_error<C: Clock>(
-    store: Option<&mut Store<Arc<C>>>,
-    error: &PublishError<SqliteError>,
-) {
-    if matches!(error, PublishError::Store(_)) {
-        reload_store(store);
-    }
-}
-
-fn reload_store<C: Clock>(store: Option<&mut Store<Arc<C>>>) {
-    if let Some(store) = store {
-        let _ = store.reload_manifest();
     }
 }
 
