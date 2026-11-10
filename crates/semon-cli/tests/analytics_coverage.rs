@@ -113,3 +113,43 @@ fn coverage_refuses_a_missing_store_without_creating_state() {
     );
     assert_eq!(recursive_listing(&state), before_coverage);
 }
+
+#[test]
+fn coverage_refuses_symlinked_or_namespace_less_stores_without_mutation() {
+    let home = fixture::Fixture::new();
+    let state = home.root.join("state");
+    let materialized = materialize(&home);
+    assert!(
+        materialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&materialized.stderr)
+    );
+
+    let namespace = state.join("analytics-namespace");
+    let kept = home.root.join("kept-namespace");
+    fs::rename(&namespace, &kept).unwrap();
+    let before = recursive_listing(&state);
+    let output = coverage(&home, false);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("namespace"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(recursive_listing(&state), before);
+    fs::rename(&kept, &namespace).unwrap();
+
+    let store = state.join("analytics-store");
+    let moved = home.root.join("moved-store");
+    fs::rename(&store, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &store).unwrap();
+    let before = recursive_listing(&state);
+    let output = coverage(&home, false);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("not a real directory"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(recursive_listing(&state), before);
+}

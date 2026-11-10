@@ -184,6 +184,9 @@ recorded transform, rules, price and taxonomy versions plus source/computation
 status, and reports session and step coverage. The manifest versions are displayed
 as writer **TARGETS**, not as a claim that every session refreshed uniformly.
 Native pending, failed and frozen derivation state is not part of this report.
+Like the writer, it refuses a symlinked state or store directory and a store without its
+`analytics-namespace`. It holds the live map in memory, as the writer does, so its memory
+grows with the number of live sessions.
 
 ```sh
 semon analytics coverage

@@ -694,6 +694,7 @@ fn run_coverage(args: CoverageArgs) -> Result<(), String> {
             index_path.display()
         )
     })?;
+    admit_coverage_store(&index_path, &store_root)?;
     let report = semon_asi::coverage::read(&store_root)
         .map_err(|error| format!("analytics coverage: {error}"))?
         .ok_or_else(|| format!("no analytics store at {}", store_root.display()))?;
@@ -705,6 +706,46 @@ fn run_coverage(args: CoverageArgs) -> Result<(), String> {
     } else {
         print_coverage(&report);
     }
+    Ok(())
+}
+
+/// Coverage applies the writer's admission rules without taking its lock: the
+/// state directory and store directories must be real directories, and an
+/// existing store must carry its valid namespace file. Nothing is created.
+fn admit_coverage_store(
+    index_path: &std::path::Path,
+    store_root: &std::path::Path,
+) -> Result<(), String> {
+    let state_dir = index_path
+        .parent()
+        .ok_or_else(|| format!("analytics index has no parent: {}", index_path.display()))?;
+    for directory in [
+        state_dir.to_path_buf(),
+        store_root.to_path_buf(),
+        store_root.join("analytics"),
+    ] {
+        match std::fs::symlink_metadata(&directory) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "analytics coverage refuses {}: not a real directory",
+                    directory.display()
+                ));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(format!("no analytics store at {}", store_root.display()));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "analytics coverage cannot inspect {}: {error}",
+                    directory.display()
+                ));
+            }
+        }
+    }
+    semon_sessions::read_analytics_namespace(state_dir)
+        .map_err(|error| format!("analytics coverage: {error}"))?
+        .ok_or_else(|| format!("no analytics store at {}", store_root.display()))?;
     Ok(())
 }
 
