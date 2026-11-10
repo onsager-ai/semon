@@ -153,8 +153,7 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                     }
                     let witness = source_witness(tx, &key)?;
                     let prices = prices(tx, &key, &header.generation, &price.fingerprint)?;
-                    result.push(SessionChange::SourceRestored { session_uid: uid });
-                    result.push(SessionChange::Admitted(admitted(
+                    let Some(session) = admitted(
                         tx,
                         &namespace,
                         AdmittedEvidence {
@@ -166,7 +165,16 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                             facts,
                             prices,
                         },
-                    )?));
+                    )?
+                    else {
+                        // An unrepresentable anchor withholds this whole
+                        // generation, retaining prior facts without blocking
+                        // unrelated sessions or claiming source restoration.
+                        result.push(SessionChange::Pending { session_uid: uid });
+                        continue;
+                    };
+                    result.push(SessionChange::SourceRestored { session_uid: uid });
+                    result.push(SessionChange::Admitted(session));
                 }
                 let sequence = tx.query_row(
                     "SELECT COALESCE(MAX(seq),0) FROM silver_change",
@@ -363,11 +371,13 @@ struct AdmittedEvidence<'a> {
     prices: Vec<Price>,
 }
 
+/// `None` withholds only a generation whose anchors cannot be represented.
+/// Invalid persisted evidence and database failures remain errors.
 fn admitted(
     tx: &rusqlite::Transaction<'_>,
     namespace: &str,
     evidence: AdmittedEvidence<'_>,
-) -> rusqlite::Result<AdmittedSession> {
+) -> rusqlite::Result<Option<AdmittedSession>> {
     let AdmittedEvidence {
         row,
         witness,
@@ -395,15 +405,16 @@ fn admitted(
         return Err(rusqlite::Error::InvalidQuery);
     }
     let repo = repo(tx, &row)?;
-    let projected_steps = steps
-        .iter()
-        .map(|step| {
-            let fact = fact_by_id
-                .get(&step.id)
-                .ok_or(rusqlite::Error::InvalidQuery)?;
-            step_input(&session_uid, &row, step, fact, &price_version)
-        })
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut projected_steps = Vec::with_capacity(steps.len());
+    for step in &steps {
+        let fact = fact_by_id
+            .get(&step.id)
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        let Some(projected) = step_input(&session_uid, &row, step, fact, &price_version)? else {
+            return Ok(None);
+        };
+        projected_steps.push(projected);
+    }
     let exclusive = projected_steps
         .iter()
         .filter(|step| step.usage_owner == UsageOwner::Exclusive)
@@ -418,11 +429,14 @@ fn admitted(
         .count() as u64;
     let source_generation = crate::retention::source_generation(&witness.sources)
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
-    let compactions = read_compactions(tx, &session_uid, &row, generation, &price_version)?;
+    let Some(compactions) = read_compactions(tx, &session_uid, &row, generation, &price_version)?
+    else {
+        return Ok(None);
+    };
     let usage_complete = projected_steps
         .iter()
         .all(|step| !step.billing.split_unknown);
-    Ok(AdmittedSession {
+    Ok(Some(AdmittedSession {
         session_uid: session_uid.clone(),
         source_witness: SourceWitness {
             generation: source_generation,
@@ -455,7 +469,7 @@ fn admitted(
         compactions,
         usage_complete,
         prices,
-    })
+    }))
 }
 
 fn read_compactions(
@@ -464,7 +478,7 @@ fn read_compactions(
     row: &CatalogRow,
     generation: &str,
     price: &str,
-) -> rusqlite::Result<Vec<Compaction>> {
+) -> rusqlite::Result<Option<Vec<Compaction>>> {
     // The page reader establishes the source/rules/price admission for the
     // same generation before this companion-table read occurs.
     if crate::events::store::session_activity::page(tx, row, Some(generation), price, 0, 0)?
@@ -490,9 +504,11 @@ fn read_compactions(
             .native_record
             .as_ref()
             .ok_or(rusqlite::Error::InvalidQuery)?;
-        let anchor = match native_record.id.as_deref().filter(|id| !id.is_empty()) {
-            Some(id) => id.to_owned(),
+        let Some(anchor) = (match native_record.id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => Some(id.to_owned()),
             None => record_anchor(row, &compact.position, native_record.ordinal)?,
+        }) else {
+            return Ok(None);
         };
         compactions.push(Compaction {
             compaction_uid: format!("{session_uid}/c/{}", encode_component(&anchor)),
@@ -500,7 +516,7 @@ fn read_compactions(
             timestamp: compact.timestamp,
         });
     }
-    Ok(compactions)
+    Ok(Some(compactions))
 }
 
 fn session_input(
@@ -587,17 +603,31 @@ fn step_input(
     step: &native_activity::ActivityStep,
     fact: &native_activity::StepFacts,
     price_version: &str,
-) -> rusqlite::Result<Step> {
+) -> rusqlite::Result<Option<Step>> {
     let step_uid = step_uid(session_uid, &step.id);
-    let turn = match &fact.turn_id {
-        Some(turn_id) => turn_id.clone(),
-        None => record_anchor(
-            row,
-            &step.position,
-            fact.record_ordinal.ok_or(rusqlite::Error::InvalidQuery)?,
-        )?,
+    // Preserve the native initiating turn when available. Claude's persisted
+    // step identity is already its native message ID, so a step without an
+    // initiating UUID need not fall back to a physical source's record ordinal.
+    let native_id = fact
+        .turn_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .or(match &step.id {
+            native_activity::ActivityStepId::Claude(message) => Some(message.as_str()),
+            native_activity::ActivityStepId::Codex(_) => None,
+        });
+    let Some(turn) = (match native_id.filter(|id| !id.is_empty()) {
+        Some(id) => Some(id.to_owned()),
+        None => {
+            let Some(ordinal) = fact.record_ordinal else {
+                return Ok(None);
+            };
+            record_anchor(row, &step.position, ordinal)?
+        }
+    }) else {
+        return Ok(None);
     };
-    Ok(Step {
+    Ok(Some(Step {
         step_uid: step_uid.clone(),
         turn_uid: format!("{session_uid}/t/{}", encode_component(&turn)),
         model: Model {
@@ -650,18 +680,20 @@ fn step_input(
         ok: (!fact.tool_calls.is_empty() && fact.tool_calls.iter().all(|call| call.ok.is_some()))
             .then(|| fact.tool_calls.iter().all(|call| call.ok == Some(true))),
         tool_calls: fact.tool_calls.iter().map(tool_call).collect(),
-    })
+    }))
 }
 
 /// A fallback record identity is portable native evidence, never a local
 /// physical path.  The catalog binds the physical position to exactly one
 /// source; the exported anchor uses that native log's filename stem and the
 /// source-record ordinal persisted by ingest, never its byte offset.
+/// An unrepresentable stem returns `None`; a broken position/source binding
+/// remains an integrity error.
 fn record_anchor(
     row: &CatalogRow,
     position: &native_activity::SourcePosition,
     record_ordinal: u64,
-) -> rusqlite::Result<String> {
+) -> rusqlite::Result<Option<String>> {
     let source_path = Path::new(&position.source);
     let matching = row
         .sources
@@ -671,7 +703,7 @@ fn record_anchor(
     let [source] = matching.as_slice() else {
         return Err(rusqlite::Error::InvalidQuery);
     };
-    let stem = source
+    let Some(stem) = source
         .path
         .file_stem()
         .and_then(|stem| stem.to_str())
@@ -681,7 +713,9 @@ fn record_anchor(
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
         })
-        .ok_or(rusqlite::Error::InvalidQuery)?;
+    else {
+        return Ok(None);
+    };
     // The ASI record-anchor contract names the file stem.  Two physical
     // contributors with the same stem cannot be represented distinctly by
     // that contract, so refuse rather than smuggle a path into a key.
@@ -694,9 +728,9 @@ fn record_anchor(
         .count()
         != 1
     {
-        return Err(rusqlite::Error::InvalidQuery);
+        return Ok(None);
     }
-    Ok(format!("@{stem}:{record_ordinal}"))
+    Ok(Some(format!("@{stem}:{record_ordinal}")))
 }
 
 fn tool_call(call: &native_activity::ToolCallFact) -> ToolCall {
@@ -1004,6 +1038,7 @@ mod tests {
             },
             3,
         )
+        .unwrap()
         .unwrap();
         row.sources = vec![source("/different/parent/record.jsonl", "root")];
         let moved = record_anchor(
@@ -1014,6 +1049,7 @@ mod tests {
             },
             3,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(first, "@record:3");
         assert_eq!(first, moved, "source relocation must not change an ASI key");
@@ -1035,6 +1071,7 @@ mod tests {
             },
             3,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(cleared, "@cleared:3");
         assert_ne!(
@@ -1048,7 +1085,7 @@ mod tests {
         };
         row.sources.push(source("/another/record.jsonl", "root"));
         assert!(
-            record_anchor(&row, &position, 3).is_err(),
+            record_anchor(&row, &position, 3).unwrap().is_none(),
             "duplicate stems are ambiguous"
         );
         row.sources.pop();
@@ -1056,6 +1093,19 @@ mod tests {
         assert!(
             record_anchor(&row, &position, 3).is_err(),
             "duplicate contributors are ambiguous"
+        );
+        row.sources.pop();
+        assert!(
+            record_anchor(
+                &row,
+                &native_activity::SourcePosition {
+                    source: "/unwitnessed/record.jsonl".into(),
+                    offset: 900,
+                },
+                3,
+            )
+            .is_err(),
+            "a broken source binding remains an integrity error"
         );
         row.sources = vec![source("/different/parent/invalid stem.jsonl", "root")];
         assert!(
@@ -1067,7 +1117,8 @@ mod tests {
                 },
                 3
             )
-            .is_err()
+            .unwrap()
+            .is_none()
         );
     }
 

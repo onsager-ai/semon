@@ -68,14 +68,26 @@ recorded native parent links use the same identity rule.
   | Key | Components |
   | --- | --- |
   | `session_uid` | `{namespace}/{harness}/{native_session_id}` |
-  | `turn_uid` | `{session_uid}/t/{id}`, where `id` is the Codex `turn_id`, the Claude initiating record `uuid`, the handoff ID, or else a record anchor |
+  | `turn_uid` | `{session_uid}/t/{id}`, where `id` is the Codex `turn_id`, the Claude initiating record `uuid` (or the step's native `message.id` when no initiating UUID is recorded), the handoff ID, or else a record anchor |
   | `step_uid` | `{session_uid}/s/claude/{message_id}` or `{session_uid}/s/codex/{thread}/{session}/{turn}/{response}` (`ActivityStepId`) |
   | `compaction_uid` | `{session_uid}/c/{id}`, where `id` is the native record ID or else a record anchor |
 
 - **Record anchor.** `@{source}:{n}`, where `source` is the native log's file
   stem (which matches `^[A-Za-z0-9._\-]{1,128}$`) and `n` is the record's
   ordinal within that log. It is independent of paths, keys and how logs
-  interleave, and stable while the log's prefix is unchanged.
+  interleave, and stable while the log's prefix is unchanged. Native IDs are
+  preferred. The existing persisted Claude `ActivityStepId` supplies the native
+  message ID without changing the Event Index format. Same-stem contributors
+  cannot use the fallback to distinguish their records; no physical path or
+  byte offset may enter the anchor.
+
+  If a step or compaction has neither a usable native ID nor an unambiguous
+  record anchor, the origin input returns `SessionChange::Pending` for that
+  whole session generation. Consumers retain prior facts; the input emits no
+  `SourceRestored` for that session and still admits other eligible sessions in
+  the batch. This is an admission limitation, not a source-missing observation
+  or a removal. A later publication with representable evidence can be admitted.
+  Invalid persisted data and database errors still fail the read.
 
 ## Raw
 

@@ -20,6 +20,192 @@ fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
     .unwrap()
 }
 
+fn same_stem_contributor(options: &crate::Options, compaction_id: Option<&str>) {
+    let path = options
+        .claude_home
+        .join("projects/-work-proj-copy/native-cl-00.jsonl");
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut compact = serde_json::json!({
+        "type":"system", "subtype":"compact_boundary", "sessionId":"native-cl-00",
+        "timestamp":"2026-09-24T00:01:30Z",
+        "compactMetadata":{"trigger":"auto","preTokens":155000}
+    });
+    if let Some(id) = compaction_id {
+        compact["uuid"] = serde_json::json!(id);
+    }
+    let assistant = serde_json::json!({
+        "type":"assistant", "uuid":"assistant-contributor", "sessionId":"native-cl-00",
+        "timestamp":"2026-09-24T00:02:00Z",
+        "message":{"id":"message-contributor","role":"assistant","model":"claude-sonnet-4-5",
+            "content":[{"type":"text","text":"Synthetic continuation"}],
+            "usage":{"input_tokens":100,"output_tokens":25}}
+    });
+    fs::write(path, format!("{compact}\n{assistant}\n")).unwrap();
+}
+
+#[test]
+fn same_stem_claude_native_ids_admit_distinct_portable_anchors() {
+    let mut prior_anchors = None;
+    for label in ["native-anchors-first-root", "native-anchors-moved-root"] {
+        let root = scratch(label);
+        let (options, _, _) = catalog_native_fixture(&root, 1, false);
+        same_stem_contributor(&options, Some("compact-contributor"));
+        let (rows, slots) = catalog_fixture_projection(&options);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sources.len(), 2);
+        let path = crate::events::EventCache::path(&options.cache);
+        let (mut store, _) = opened(&path);
+        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+        let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        let batch = input.read_admitted(None).unwrap();
+        let session = batch
+            .changes
+            .iter()
+            .find_map(|change| match change {
+                SessionChange::Admitted(session) => Some(session),
+                _ => None,
+            })
+            .expect("same-stem contributors with native IDs must be admitted");
+        let uid = "fixture-machine/claude/native-cl-00";
+        let mut anchors: Vec<_> = session
+            .steps
+            .iter()
+            .map(|step| (step.step_uid.clone(), step.turn_uid.clone()))
+            .collect();
+        anchors.sort();
+        assert_eq!(
+            anchors,
+            vec![
+                (
+                    format!("{uid}/s/claude/message-contributor"),
+                    format!("{uid}/t/message-contributor")
+                ),
+                (
+                    format!("{uid}/s/claude/message-native-cl-00"),
+                    format!("{uid}/t/user-native-cl-00")
+                ),
+            ],
+            "prefer the initiating UUID, then the step's native message ID"
+        );
+        assert_eq!(session.compactions.len(), 1);
+        let compact_uid = session.compactions[0].compaction_uid.clone();
+        assert_eq!(compact_uid, format!("{uid}/c/compact-contributor"));
+        for anchor in anchors
+            .iter()
+            .flat_map(|(step, turn)| [step, turn])
+            .chain([&compact_uid])
+        {
+            assert!(!anchor.contains("%2F"));
+            assert!(!anchor.contains("projects"));
+            assert!(!anchor.contains(label));
+        }
+        let current = (anchors, compact_uid);
+        if let Some(prior) = &prior_anchors {
+            assert_eq!(&current, prior, "source relocation must preserve all UIDs");
+        }
+        prior_anchors = Some(current);
+        drop(input);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn ambiguous_record_anchor_is_pending_without_blocking_other_sessions() {
+    use std::io::Write;
+
+    let root = scratch("native-anchors-pending");
+    let (options, _, _) = catalog_native_fixture(&root, 1, false);
+    same_stem_contributor(&options, Some("compact-contributor"));
+    let healthy_path = options
+        .claude_home
+        .join("projects/-work-proj/native-cl-02.jsonl");
+    let mut healthy_record = serde_json::json!({
+        "type":"assistant", "uuid":"assistant-healthy", "sessionId":"native-cl-02",
+        "timestamp":"2026-09-24T00:03:00Z",
+        "message":{"id":"message-healthy","role":"assistant","model":"claude-sonnet-4-5",
+            "content":[{"type":"text","text":"Synthetic answer"}],
+            "usage":{"input_tokens":20,"output_tokens":10}}
+    });
+    fs::write(&healthy_path, format!("{healthy_record}\n")).unwrap();
+    let (rows, slots) = catalog_fixture_projection(&options);
+    assert_eq!(rows.len(), 2);
+    let path = crate::events::EventCache::path(&options.cache);
+    let (mut store, _) = opened(&path);
+    catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+    let first = input.read_admitted(None).unwrap();
+    let pending_uid = "fixture-machine/claude/native-cl-00";
+    assert!(first.changes.iter().any(|change| matches!(
+        change, SessionChange::Admitted(session) if session.session_uid == pending_uid
+    )));
+
+    // This generation has valid steps, but its compaction has no native ID
+    // and shares its filename stem with another physical contributor.
+    same_stem_contributor(&options, None);
+    healthy_record["uuid"] = serde_json::json!("assistant-healthy-next");
+    healthy_record["message"]["id"] = serde_json::json!("message-healthy-next");
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&healthy_path)
+            .unwrap(),
+        "{healthy_record}"
+    )
+    .unwrap();
+    let (rows, slots) = catalog_fixture_projection(&options);
+    catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    let batch = input.read_admitted(Some(&first.checkpoint)).unwrap();
+    assert_eq!(batch.reconciliation, Reconciliation::Incremental);
+    assert!(batch.changes.contains(&SessionChange::Pending {
+        session_uid: pending_uid.into()
+    }));
+    assert!(!batch.changes.contains(&SessionChange::SourceRestored {
+        session_uid: pending_uid.into()
+    }));
+    assert!(!batch.changes.iter().any(|change| matches!(
+        change, SessionChange::Admitted(session) if session.session_uid == pending_uid
+    )));
+    let healthy = batch
+        .changes
+        .iter()
+        .find_map(|change| match change {
+            SessionChange::Admitted(session) => Some(session),
+            _ => None,
+        })
+        .expect("the other changed session must still be admitted");
+    assert_eq!(healthy.session.native_session_id, "native-cl-02");
+    assert_eq!(healthy.steps.len(), 2);
+
+    // A fresh namespace read must also carry an explicit Pending inventory
+    // entry rather than silently omitting the unrepresentable session.
+    let full = input.read_admitted(None).unwrap();
+    assert!(full.changes.contains(&SessionChange::Pending {
+        session_uid: pending_uid.into()
+    }));
+    assert_eq!(
+        full.changes
+            .iter()
+            .filter(|change| matches!(change, SessionChange::Admitted(_)))
+            .count(),
+        1
+    );
+
+    same_stem_contributor(&options, Some("compact-contributor"));
+    let (rows, slots) = catalog_fixture_projection(&options);
+    catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    let restored = input.read_admitted(Some(&batch.checkpoint)).unwrap();
+    assert!(restored.changes.contains(&SessionChange::SourceRestored {
+        session_uid: pending_uid.into()
+    }));
+    assert!(restored.changes.iter().any(|change| matches!(
+        change, SessionChange::Admitted(session) if session.session_uid == pending_uid
+    )));
+    drop(input);
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn activity_catalog_publication_rolls_back_header_steps_and_catalog_together() {
     let root = scratch("activity-atomic");
@@ -128,7 +314,7 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     let (options, _, _) = catalog_native_fixture(&root, 1, false);
     let missing_path = options
         .claude_home
-        .join("projects/-work-proj-copy/native-cl-00-continued.jsonl");
+        .join("projects/-work-proj-copy/native-cl-00.jsonl");
     fs::create_dir_all(missing_path.parent().unwrap()).unwrap();
     let missing_records = [
         serde_json::json!({
