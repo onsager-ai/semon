@@ -78,8 +78,17 @@ live rows: delayed results, late records, rewrite, midnight crossing, removal,
 incarnation change, copied usage, mixed versions and source loss/restoration.
 Verify complete-cohort admission and preservation of recorded cost and unknowns.
 Use CI for compilation, Clippy, tests and repository gates; no local cargo/node
-builds, tests or project-wide typechecks. Check current thermal telemetry before
-and after CPU-bound work and stop at 85 °C; unavailable readings block that work.
+builds, tests or project-wide typechecks.
+
+- Before CPU-bound local work, run `thermal now`. Exit 75 means 85 °C or above,
+  or an unreadable sensor: stop and use CI. Exit 69 means an unsupported machine,
+  so the rule doesn't apply.
+- Run heavy commands as `thermal gate -- <cmd>`. It starts below 75 °C and kills
+  at 88 °C, or on two readings at or above 85 °C. `heat-gate`/`cargo-gate` still work.
+- Don't use ~/.cache/thermal-watch/temps.log any more; it's frozen and its service
+  is gone.
+- Unchanged: no local cargo/node test suites or project-wide typechecks; use CI.
+  Bounded reads, one file under about 10 MB.
 
 Open a draft PR from main with independently compilable work. Stack-dependent
 integration waits for merge. Obtain independent review and exact-head pull_request
