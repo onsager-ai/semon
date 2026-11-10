@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use rusqlite::Error as SqliteError;
+use rusqlite::{Error as SqliteError, ErrorCode};
 use semon_asi::{
     Clock, CompactionPolicy, Error as StoreError, PublishError, Store, Versions, publish_cycle,
 };
@@ -110,7 +110,11 @@ impl Handle {
 
     /// Stops future scheduling and joins without flushing, retirement, or a
     /// partially-started generation.
-    pub fn stop_and_join(&mut self) {
+    pub fn stop_and_join(mut self) {
+        self.shutdown();
+    }
+
+    fn shutdown(&mut self) {
         {
             let mut state = lock(&self.shared.state);
             state.stop = true;
@@ -124,7 +128,7 @@ impl Handle {
 
 impl Drop for Handle {
     fn drop(&mut self) {
-        self.stop_and_join();
+        self.shutdown();
     }
 }
 
@@ -421,6 +425,17 @@ fn reload_store<C: Clock>(store: Option<&mut Store<Arc<C>>>) {
 
 fn is_input_refusal(error: &SqliteError) -> bool {
     matches!(error, SqliteError::InvalidQuery)
+        || matches!(
+            error.sqlite_error_code(),
+            Some(code)
+                if !matches!(
+                    code,
+                    ErrorCode::DatabaseBusy
+                        | ErrorCode::DatabaseLocked
+                        | ErrorCode::SystemIoFailure
+                        | ErrorCode::CannotOpen
+                )
+        )
 }
 
 fn is_refusal(error: &StoreError) -> bool {
@@ -491,6 +506,53 @@ fn wait_until<C: Clock>(shared: &Shared, clock: &C, deadline: i64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        sync::atomic::{AtomicU64, Ordering},
+        time::Instant,
+    };
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    fn temp_root(name: &str) -> PathBuf {
+        let serial = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "semon-analytics-writer-{name}-{}-{serial}",
+            std::process::id(),
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn wait_for_status(handle: &Handle, expected: AnalyticsWriterStatus) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if handle.status() == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "writer status: {:?}",
+                handle.status()
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn wait_for_refusal(handle: &Handle) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if matches!(handle.status(), AnalyticsWriterStatus::Refused { .. }) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "writer status: {:?}",
+                handle.status()
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
 
     #[test]
     fn store_root_is_a_sibling_of_the_index() {
@@ -498,5 +560,36 @@ mod tests {
             analytics_store_root(Path::new("/state/sessions-index.sqlite3")),
             Some(PathBuf::from("/state/analytics-store")),
         );
+    }
+
+    #[test]
+    fn unsupported_index_refuses_without_mutating_it_or_checkpointing() {
+        let root = temp_root("unsupported");
+        let index = root.join("old.sqlite3");
+        rusqlite::Connection::open(&index).unwrap();
+        let bytes = fs::read(&index).unwrap();
+        let store_root = root.join("store");
+        let handle = start(AnalyticsWriterConfig::new("machine", &index, &store_root));
+        handle.notify();
+        wait_for_refusal(&handle);
+        assert_eq!(fs::read(&index).unwrap(), bytes);
+        assert!(semon_asi::read_manifest(&store_root).unwrap().is_none());
+        handle.stop_and_join();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn second_writer_reports_no_writer_and_stops() {
+        let root = temp_root("writer-lock");
+        let held = Store::open(&root).unwrap();
+        let handle = start(AnalyticsWriterConfig::new(
+            "machine",
+            root.join("index.sqlite3"),
+            &root,
+        ));
+        wait_for_status(&handle, AnalyticsWriterStatus::NoWriter);
+        handle.stop_and_join();
+        drop(held);
+        fs::remove_dir_all(root).unwrap();
     }
 }
