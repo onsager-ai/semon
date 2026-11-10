@@ -368,7 +368,6 @@ its total cost is proportional to journal history, but no call loads that histor
 into an unbounded vector. Journal retention must preserve these anchors for the
 incarnation; pruning/resequencing requires a new incarnation contract.
 
-
 ## Durable state
 
 `asi-durable.sqlite3` holds `label`, `adjudication`, `link`, `lane`,

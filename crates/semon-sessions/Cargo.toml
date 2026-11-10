@@ -32,3 +32,9 @@ test-hooks = []
 [[example]]
 name = "ui-account-server"
 required-features = ["test-ui-account-server"]
+
+[dev-dependencies]
+# Read real analytics publications in the bounded input integration tests.
+# Match semon-asi's pinned store-format libraries, without extra codecs.
+arrow = { version = "=58.4.1", default-features = false }
+parquet = { version = "=58.4.1", default-features = false, features = ["arrow", "zstd"] }

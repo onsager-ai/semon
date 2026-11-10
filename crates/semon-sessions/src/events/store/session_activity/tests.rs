@@ -5,7 +5,7 @@ use super::*;
 use crate::SqliteAnalyticsInput;
 use crate::events::session_activity::classify::Change;
 use crate::events::session_activity::{ActivityStepId, Ownership, TimedInput, UsageOwner};
-use semon_asi::{AnalyticsInput, Reconciliation, SessionChange};
+use semon_asi::{AnalyticsInput, InputBudget, Reconciliation, SessionChange};
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
     page(
@@ -57,7 +57,7 @@ fn same_stem_claude_native_ids_admit_distinct_portable_anchors() {
         let (mut store, _) = opened(&path);
         catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
         let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
-        let batch = input.read_admitted(None).unwrap();
+        let batch = input.read_admitted(None, InputBudget::default()).unwrap();
         let session = batch
             .changes
             .iter()
@@ -210,7 +210,7 @@ fn copied_native_compactions_collapse_or_withhold_only_the_conflicting_session()
             )
             .unwrap();
         let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
-        let batch = input.read_admitted(None).unwrap();
+        let batch = input.read_admitted(None, InputBudget::default()).unwrap();
         let uid = "fixture-machine/claude/native-cl-00";
         let session = batch.changes.iter().find_map(|change| match change {
             SessionChange::Admitted(session) if session.session_uid == uid => Some(session),
@@ -317,7 +317,7 @@ fn copied_timestampless_compactions_merge_unknown_and_known_steps_in_either_orde
         );
         assert!(physical.iter().all(|compact| compact.timestamp.is_none()));
         let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
-        let batch = input.read_admitted(None).unwrap();
+        let batch = input.read_admitted(None, InputBudget::default()).unwrap();
         let uid = "fixture-machine/claude/native-cl-00";
         let session = batch
             .changes
@@ -376,7 +376,7 @@ fn truncated_compaction_rows_fail_integrity_even_when_ordinals_remain_contiguous
         let (mut store, _) = opened(&path);
         catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
         let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
-        let complete = input.read_admitted(None).unwrap();
+        let complete = input.read_admitted(None, InputBudget::default()).unwrap();
         let session = complete
             .changes
             .iter()
@@ -411,7 +411,7 @@ fn truncated_compaction_rows_fail_integrity_even_when_ordinals_remain_contiguous
         assert_eq!(removed, if remove_all { 2 } else { 1 });
         assert!(
             matches!(
-                input.read_admitted(None),
+                input.read_admitted(None, InputBudget::default()),
                 Err(rusqlite::Error::InvalidQuery)
             ),
             "truncated evidence cannot emit either Admitted or SourceRestored"
@@ -446,7 +446,7 @@ fn ambiguous_record_anchor_is_pending_without_blocking_other_sessions() {
     let (mut store, _) = opened(&path);
     catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
     let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
-    let first = input.read_admitted(None).unwrap();
+    let first = input.read_admitted(None, InputBudget::default()).unwrap();
     let pending_uid = "fixture-machine/claude/native-cl-00";
     assert!(first.changes.iter().any(|change| matches!(
         change, SessionChange::Admitted(session) if session.session_uid == pending_uid
@@ -467,7 +467,9 @@ fn ambiguous_record_anchor_is_pending_without_blocking_other_sessions() {
     .unwrap();
     let (rows, slots) = catalog_fixture_projection(&options);
     catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
-    let batch = input.read_admitted(Some(&first.checkpoint)).unwrap();
+    let batch = input
+        .read_admitted(Some(&first.checkpoint), InputBudget::default())
+        .unwrap();
     assert_eq!(batch.reconciliation, Reconciliation::Incremental);
     assert!(batch.changes.contains(&SessionChange::Pending {
         session_uid: pending_uid.into()
@@ -491,7 +493,7 @@ fn ambiguous_record_anchor_is_pending_without_blocking_other_sessions() {
 
     // A fresh namespace read must also carry an explicit Pending inventory
     // entry rather than silently omitting the unrepresentable session.
-    let full = input.read_admitted(None).unwrap();
+    let full = input.read_admitted(None, InputBudget::default()).unwrap();
     assert!(full.changes.contains(&SessionChange::Pending {
         session_uid: pending_uid.into()
     }));
@@ -506,7 +508,9 @@ fn ambiguous_record_anchor_is_pending_without_blocking_other_sessions() {
     same_stem_contributor(&options, Some("compact-contributor"));
     let (rows, slots) = catalog_fixture_projection(&options);
     catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
-    let restored = input.read_admitted(Some(&batch.checkpoint)).unwrap();
+    let restored = input
+        .read_admitted(Some(&batch.checkpoint), InputBudget::default())
+        .unwrap();
     assert!(restored.changes.contains(&SessionChange::SourceRestored {
         session_uid: pending_uid.into()
     }));
@@ -699,8 +703,11 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     );
     let complete = read(&store.connection, row);
     let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
-    let first = input.read_admitted(None).unwrap();
-    assert_eq!(first.reconciliation, Reconciliation::ReplaceNamespace);
+    let first = input.read_admitted(None, InputBudget::default()).unwrap();
+    assert!(matches!(
+        first.reconciliation,
+        Reconciliation::ReplaceNamespace { .. }
+    ));
     let admitted_uid = first
         .changes
         .iter()
@@ -802,7 +809,9 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     );
 
     assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
-    let unavailable = input.read_admitted(Some(&checkpoint)).unwrap();
+    let unavailable = input
+        .read_admitted(Some(&checkpoint), InputBudget::default())
+        .unwrap();
     assert_eq!(unavailable.reconciliation, Reconciliation::Incremental);
     assert!(unavailable.changes.iter().any(|change| {
         matches!(change, SessionChange::SourceMissing { session_uid, retained_at_origin: true } if session_uid == &admitted_uid)
@@ -1077,7 +1086,9 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
         .unwrap();
     let witness: crate::model::summary::CatalogRow = serde_json::from_str(&witness).unwrap();
     assert_eq!(witness.sources, recovered.sources);
-    let restored = input.read_admitted(Some(&unavailable.checkpoint)).unwrap();
+    let restored = input
+        .read_admitted(Some(&unavailable.checkpoint), InputBudget::default())
+        .unwrap();
     assert!(restored.changes.iter().any(|change| {
         matches!(change, SessionChange::SourceRestored { session_uid } if session_uid == &admitted_uid)
     }));
