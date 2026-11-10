@@ -719,7 +719,7 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
     #[cfg(feature = "asi-query")]
-    let expected = [
+    let expected_tools = [
         "list_sessions",
         "get_session",
         "get_session_activity",
@@ -729,14 +729,14 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         "schema",
     ];
     #[cfg(not(feature = "asi-query"))]
-    let expected = [
+    let expected_tools = [
         "list_sessions",
         "get_session",
         "get_session_activity",
         "read_transcript",
         "stalls",
     ];
-    assert_eq!(names, expected);
+    assert_eq!(names, expected_tools);
     for tool in tools {
         let name = tool["name"].as_str().unwrap();
         assert!(

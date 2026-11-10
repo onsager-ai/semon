@@ -178,11 +178,6 @@ fn initialize(params: &Value, has_resources: bool) -> Value {
     })
 }
 
-#[cfg(test)]
-fn tools() -> Vec<Value> {
-    tools_with_extension(&NoExtension)
-}
-
 fn tools_with_extension(extension: &impl McpExtension) -> Vec<Value> {
     query_tools()
         .into_iter()
@@ -196,11 +191,6 @@ fn tools_with_extension(extension: &impl McpExtension) -> Vec<Value> {
             })
         })
         .collect()
-}
-
-#[cfg(test)]
-fn call(query: &mut Query, params: &Value) -> Result<Value, (i64, String)> {
-    call_with_extension(query, &mut NoExtension, params)
 }
 
 fn call_with_extension(

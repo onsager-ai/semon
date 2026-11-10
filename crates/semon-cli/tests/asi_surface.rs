@@ -141,6 +141,9 @@ fn cli_sql_json_tsv_and_typed_errors() {
         vec!["query", "sql", "SELECT 1", "--limit", "nope"],
         vec!["query", "sql", "SELECT 1", "--params", "["],
         vec!["query", "sql", "SELECT 1", "--params", "[{}]"],
+        vec!["query", "sql", "SELECT 1", "--machine", "/received/machine"],
+        vec!["query", "schema", "--machine", "/received/machine"],
+        vec!["query", "sql", "SELECT 1", "--claude-home", "/other/home"],
     ] {
         let output = cli(&arguments, cache.clone());
         assert!(!output.status.success(), "{arguments:?}");
@@ -181,6 +184,7 @@ fn mcp_advertises_asi_tools_and_serves_schema_resource() {
     let schema: Value =
         serde_json::from_str(resource["result"]["contents"][0]["text"].as_str().unwrap()).unwrap();
     assert!(schema["tables"].as_array().is_some());
+    assert_eq!(schema["data_notice"], semon_asi::query::DATA_NOTICE);
 
     let schema = server
         .request(json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"schema"}}));

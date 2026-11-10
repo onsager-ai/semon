@@ -113,15 +113,6 @@ pub(crate) struct Lines<'a> {
     pub(crate) bytes: u64,
 }
 
-/// The same bounded line cache can cross selected native session reads in one
-/// search. It contains no provider or credentials and never escapes the call.
-#[derive(Default)]
-pub(crate) struct LineCache {
-    recent: VecDeque<(LineKey, Option<Rc<Value>>)>,
-    pub(crate) bytes: u64,
-    failures: usize,
-}
-
 /// A source line: its file and byte offset.
 type LineKey = (PathBuf, u64);
 
@@ -130,26 +121,6 @@ impl<'a> Lines<'a> {
         Self {
             provider: Some(reader),
             ..Self::default()
-        }
-    }
-
-    pub(crate) fn provider_with_cache(
-        reader: &'a mut NativeLineReader<'a>,
-        cache: LineCache,
-    ) -> Self {
-        Self {
-            provider: Some(reader),
-            recent: cache.recent,
-            bytes: cache.bytes,
-            failures: cache.failures,
-            ..Self::default()
-        }
-    }
-    pub(crate) fn into_cache(self) -> LineCache {
-        LineCache {
-            recent: self.recent,
-            bytes: self.bytes,
-            failures: self.failures,
         }
     }
 
@@ -2081,6 +2052,7 @@ pub(crate) fn thought_secs(slots: &[Slot], index: usize) -> Option<i64> {
 
 /// Every string a value holds, one per line: a tool input's text, whatever
 /// its shape.
+#[cfg(test)]
 fn strings(value: &Value, out: &mut String) {
     match value {
         Value::String(text) => {
@@ -2095,10 +2067,11 @@ fn strings(value: &Value, out: &mut String) {
     }
 }
 
-/// A slot's text, whole, read back from its source line for search: the
-/// same parts a page shows (`text`, or a call's `in` and `out`), uncapped.
-/// A handoff's text is the model's (its brief, result and answer), so a
-/// handoff slot has none here; neither do markers.
+/// A slot's text, whole, read back from its source line for native pager
+/// integrity tests: the same parts a page shows (`text`, or a call's `in` and
+/// `out`), uncapped. A handoff's text is the model's (its brief, result and
+/// answer), so a handoff slot has none here; neither do markers.
+#[cfg(test)]
 pub(crate) fn slot_texts(lines: &mut Lines, slot: &Slot) -> Vec<(&'static str, String)> {
     let Some(file) = slot.file.as_deref() else {
         return Vec::new();

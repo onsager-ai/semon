@@ -612,9 +612,13 @@ fn source_backed_prompt_briefs_preserve_native_caps_and_completion_fences() {
         records.finish().is_err(),
         "completion must reject changed cached prompt bytes"
     );
-    for (name, args) in [("get_session", json!({"id":"lead"}))] {
-        assert_eq!(query.call_at(name, &args, NOW).unwrap_err().code, "io");
-    }
+    assert_eq!(
+        query
+            .call_at("get_session", &json!({"id":"lead"}), NOW)
+            .unwrap_err()
+            .code,
+        "io"
+    );
 }
 
 #[test]
@@ -711,9 +715,13 @@ fn native_tools_refuse_changed_bytes_even_with_indistinguishable_file_stamps() {
         crate::events::Stat::from_metadata(&fs::metadata(&path).unwrap()).unwrap(),
         stamp
     );
-    for (tool, args) in [("read_transcript", json!({"id":"lead"}))] {
-        assert_eq!(query.call_at(tool, &args, NOW).unwrap_err().code, "io");
-    }
+    assert_eq!(
+        query
+            .call_at("read_transcript", &json!({"id":"lead"}), NOW)
+            .unwrap_err()
+            .code,
+        "io"
+    );
 }
 
 #[test]

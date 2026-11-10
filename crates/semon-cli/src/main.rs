@@ -504,10 +504,17 @@ fn parse_asi_query_args(
                 .next()
                 .ok_or_else(|| format!("{argument} requires a value"))
         };
-        if home.take(&argument, &mut value)? {
-            continue;
-        }
         match argument.as_str() {
+            "--cache" => {
+                home.options.cache = value()?.into();
+                continue;
+            }
+            "--claude-home" | "--claude-json" | "--codex-home" | "--copilot-home"
+            | "--proc-root" | "--facts" | "--machine" | "--since" | "--all" => {
+                return Err(
+                    "ASI queries use the local analytics store; only --cache is supported".into(),
+                );
+            }
             "--format" => {
                 let selected = value()?;
                 if tool != "sql" || selected != "tsv" {
@@ -542,7 +549,10 @@ fn parse_asi_query_args(
                 if values.contains_key(key) {
                     return Err(format!("{tool}: {key} given twice"));
                 }
-                values.insert(key.to_owned(), serde_json::Value::String(positional));
+                values.insert(
+                    key.to_owned(),
+                    serde_json::Value::String(positional.to_owned()),
+                );
             }
         }
     }
@@ -564,7 +574,6 @@ fn parse_asi_query_args(
     {
         return Err("--params expects a JSON array of strings, numbers or nulls".into());
     }
-    home.check()?;
     Ok(AsiQueryArgs {
         home,
         tool,
@@ -1392,16 +1401,21 @@ impl AsiMcp {
                 "data_notice": semon_asi::query::DATA_NOTICE,
             }));
         }
-        let mut reference: serde_json::Value = serde_json::from_str(&semon_asi::reference::json())
-            .expect("generated ASI reference is valid JSON");
-        reference["data_notice"] = serde_json::json!(semon_asi::query::DATA_NOTICE);
-        Ok(reference)
+        Ok(asi_schema_reference())
     }
 }
 
 #[cfg(feature = "asi-query")]
 fn asi_error(code: &str, message: &str, detail: &str) -> serde_json::Value {
     serde_json::json!({"error": {"code": code, "message": message, "detail": detail}})
+}
+
+#[cfg(feature = "asi-query")]
+fn asi_schema_reference() -> serde_json::Value {
+    let mut reference: serde_json::Value = serde_json::from_str(&semon_asi::reference::json())
+        .expect("generated ASI reference is valid JSON");
+    reference["data_notice"] = serde_json::json!(semon_asi::query::DATA_NOTICE);
+    reference
 }
 
 #[cfg(feature = "asi-query")]
@@ -1446,7 +1460,8 @@ impl semon_sessions::McpExtension for AsiMcp {
                 "contents": [{
                     "uri": uri,
                     "mimeType": "application/json",
-                    "text": semon_asi::reference::json()
+                    "text": serde_json::to_string(&asi_schema_reference())
+                        .expect("schema reference serializes")
                 }]
             }))
         })
@@ -1582,11 +1597,18 @@ fn query_usage() -> String {
             line
         })
         .collect();
+    #[cfg(feature = "asi-query")]
+    let scope = "Native tools read log files within the window, --since (30d by default), or all of them with --all. A\n\
+         native tool since argument is --newer-than, a filter inside the window. ASI sql and schema read the\n\
+         local analytics store instead: they accept --cache and JSON is their default; native home, window and\n\
+         machine options are not supported.";
+    #[cfg(not(feature = "asi-query"))]
+    let scope = "Native tools read log files within the window, --since (30d by default), or all of them with --all. A\n\
+         native tool since argument is --newer-than, a filter inside the window.";
     format!(
-        "Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
-         The agent read surface: one tool's answer as JSON (one line with --json). It reads the log files modified\n\
-         within the window, --since (30d by default), or all of them with --all. A tool's own since argument is\n\
-         --newer-than, a filter inside the window. The tools:\n{}",
+        "Usage: semon query TOOL [ARGUMENTS]\n\
+         {scope}\n\
+         The tools:\n{}",
         tools.join("\n")
     )
 }

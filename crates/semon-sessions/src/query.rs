@@ -711,10 +711,6 @@ impl View {
         }
         row
     }
-
-    fn last(&self, id: &str) -> Option<i64> {
-        self.facts.get(id).and_then(|facts| facts.last)
-    }
 }
 
 fn session_fields(session: &crate::model::Session, machine: Option<&str>) -> Value {
