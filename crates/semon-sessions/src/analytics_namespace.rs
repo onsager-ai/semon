@@ -15,12 +15,13 @@ pub const ANALYTICS_NAMESPACE_FILE: &str = "analytics-namespace";
 const PREFIX: &str = "origin-";
 const RANDOM_BYTES: usize = 32;
 
-/// Loads the local origin namespace or creates it once, without replacing an
-/// existing value. A store without this file is ambiguous, so it is refused.
-pub fn load_or_create_analytics_namespace(state_dir: &Path) -> Result<String, String> {
+/// Decide the namespace read-only, before opening the store can recover files.
+/// `None` permits creation after acquiring writer ownership. A store without
+/// its namespace, or an invalid namespace file, is refused without mutation.
+pub fn read_analytics_namespace(state_dir: &Path) -> Result<Option<String>, String> {
     let path = state_dir.join(ANALYTICS_NAMESPACE_FILE);
     match fs::symlink_metadata(&path) {
-        Ok(_) => return load(&path),
+        Ok(_) => return load(&path).map(Some),
         Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
             return Err(format!(
                 "cannot inspect analytics namespace {}: {error}",
@@ -38,6 +39,17 @@ pub fn load_or_create_analytics_namespace(state_dir: &Path) -> Result<String, St
             manifest.display()
         ));
     }
+    Ok(None)
+}
+
+/// Loads the local origin namespace or creates it once, without replacing an
+/// existing value. The materializer first calls the read-only decision above,
+/// then acquires writer ownership before allowing creation here.
+pub fn load_or_create_analytics_namespace(state_dir: &Path) -> Result<String, String> {
+    if let Some(namespace) = read_analytics_namespace(state_dir)? {
+        return Ok(namespace);
+    }
+    let path = state_dir.join(ANALYTICS_NAMESPACE_FILE);
     fs::create_dir_all(state_dir).map_err(|error| {
         format!(
             "cannot create analytics namespace directory {}: {error}",

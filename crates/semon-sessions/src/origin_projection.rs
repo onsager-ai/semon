@@ -33,7 +33,9 @@ impl SqliteAnalyticsInput {
     pub fn open(index: &Path, namespace: impl Into<String>) -> rusqlite::Result<Self> {
         let connection = Connection::open_with_flags(
             index,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            OpenFlags::SQLITE_OPEN_READ_ONLY
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         if !crate::events::store::current(&connection)? {
             return Err(rusqlite::Error::InvalidQuery);

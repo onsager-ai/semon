@@ -514,8 +514,8 @@ impl Resume {
 #[derive(Debug)]
 struct Scheduler {
     pending: Option<Operation>,
-    // A recovery publication paused for due retirement, with its retry count.
-    publication_after_retirement: Option<u32>,
+    // A paused publication owns its retry attempt and total failure budget.
+    publication_after_retirement: Option<(u32, u32)>,
     refused: Option<Operation>,
     next_cycle: i64,
     next_retirement: i64,
@@ -572,8 +572,9 @@ impl Scheduler {
             && now >= self.next_retirement
             && self.retry_at.is_none_or(|deadline| now >= deadline)
         {
-            self.publication_after_retirement = Some(self.attempt);
+            self.publication_after_retirement = Some((self.attempt, self.failures));
             self.attempt = 0;
+            self.failures = 0;
             self.retry_at = None;
             self.pending = Some(Operation::Retire);
             return Some(Operation::Retire);
@@ -623,11 +624,20 @@ impl Scheduler {
         if !matches!(operation, Operation::Reload(_)) {
             self.attempt = 0;
         }
+        // These complete their operation chain; publication success still has
+        // compaction to settle. A paused publication restores its own counters.
+        if matches!(
+            operation,
+            Operation::Open | Operation::Retire | Operation::Compact
+        ) {
+            self.failures = 0;
+        }
         if operation == Operation::Retire
-            && let Some(attempt) = self.publication_after_retirement.take()
+            && let Some((attempt, failures)) = self.publication_after_retirement.take()
         {
             self.pending = Some(Operation::Publish);
             self.attempt = attempt;
+            self.failures = failures;
         }
     }
 
@@ -777,7 +787,6 @@ fn run<C: Clock + Send + Sync + 'static>(
                 {
                     Ok(_) => {
                         scheduler.succeeded(operation, clock.now_ms());
-                        scheduler.failures = 0;
                         settle(&shared, publication, AnalyticsWriterStatus::Idle);
                         set_status(&shared, AnalyticsWriterStatus::Idle);
                     }
@@ -1178,6 +1187,119 @@ mod tests {
         assert_eq!(state.consumed, 1);
     }
 
+    #[test]
+    fn successful_maintenance_gives_the_next_request_a_fresh_failure_budget() {
+        for operation in [Operation::Open, Operation::Retire, Operation::Compact] {
+            let shared = Shared::new();
+            let mut scheduler = Scheduler::new(0);
+            let recovery = match operation {
+                Operation::Open => Operation::Open,
+                Operation::Retire => Operation::Reload(Resume::Retire),
+                Operation::Compact => Operation::Reload(Resume::Compact),
+                _ => unreachable!(),
+            };
+            for _ in 0..2 {
+                retry_operation(
+                    &shared,
+                    &mut scheduler,
+                    recovery,
+                    0,
+                    0,
+                    "maintenance I/O".into(),
+                );
+                if matches!(recovery, Operation::Reload(_)) {
+                    scheduler.succeeded(recovery, 0);
+                }
+            }
+            assert_eq!(scheduler.failures, 2);
+            scheduler.succeeded(operation, 0);
+            assert_eq!(scheduler.failures, 0);
+            lock(&shared.state).requests.insert(1, None);
+            for failure in 1..=REQUEST_FAILURE_LIMIT {
+                retry_operation(
+                    &shared,
+                    &mut scheduler,
+                    Operation::Reload(Resume::Publish),
+                    0,
+                    1,
+                    format!("request failure {failure}"),
+                );
+                if failure < REQUEST_FAILURE_LIMIT {
+                    assert!(lock(&shared.state).requests[&1].is_none());
+                    scheduler.succeeded(Operation::Reload(Resume::Publish), 0);
+                }
+            }
+            let state = lock(&shared.state);
+            let Some(AnalyticsWriterStatus::Refused { reason }) = &state.requests[&1] else {
+                panic!("request did not exhaust its fresh budget");
+            };
+            assert!(reason.contains("after 3 failures: request failure 3"));
+        }
+    }
+
+    #[test]
+    fn interrupted_publication_restores_its_own_failure_budget_after_retirement() {
+        let shared = Shared::new();
+        lock(&shared.state).requests.insert(1, None);
+        let mut scheduler = Scheduler::new(0);
+        let reload_publish = Operation::Reload(Resume::Publish);
+        scheduler.publication_attempted(0, Duration::from_secs(3_600));
+        retry_operation(
+            &shared,
+            &mut scheduler,
+            reload_publish,
+            0,
+            1,
+            "publication I/O".into(),
+        );
+        scheduler.succeeded(reload_publish, 1_000);
+        assert_eq!(
+            scheduler.operation_due(600_000, false, true),
+            Some(Operation::Retire)
+        );
+        assert_eq!(scheduler.publication_after_retirement, Some((1, 1)));
+        assert_eq!(scheduler.failures, 0);
+        for _ in 0..2 {
+            retry_operation(
+                &shared,
+                &mut scheduler,
+                Operation::Reload(Resume::Retire),
+                600_000,
+                1,
+                "retirement I/O".into(),
+            );
+            scheduler.succeeded(Operation::Reload(Resume::Retire), 600_000);
+        }
+        scheduler.succeeded(Operation::Retire, 600_000);
+        assert_eq!(scheduler.pending, Some(Operation::Publish));
+        assert_eq!(scheduler.attempt, 1);
+        assert_eq!(scheduler.failures, 1);
+        retry_operation(
+            &shared,
+            &mut scheduler,
+            reload_publish,
+            3_600_000,
+            1,
+            "publication I/O again".into(),
+        );
+        assert_eq!(scheduler.failures, 2);
+        assert!(lock(&shared.state).requests[&1].is_none());
+        scheduler.succeeded(reload_publish, 3_602_000);
+        retry_operation(
+            &shared,
+            &mut scheduler,
+            reload_publish,
+            3_602_000,
+            1,
+            "publication I/O last".into(),
+        );
+        let state = lock(&shared.state);
+        let Some(AnalyticsWriterStatus::Refused { reason }) = &state.requests[&1] else {
+            panic!("publication lost its earlier failure");
+        };
+        assert!(reason.contains("after 3 failures: publication I/O last"));
+    }
+
     fn wait_until(handle: &Handle, predicate: impl Fn(&State) -> bool) {
         let mut state = lock(&handle.shared.state);
         while !predicate(&state) {
@@ -1234,6 +1356,30 @@ mod tests {
         });
         assert_eq!(handle.published(), 2);
         handle.stop_and_join();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_refuses_an_index_symlink_swapped_after_validation() {
+        let root = temp_root("index-symlink-swap");
+        let cache = root.join("index.json");
+        drop(crate::events::EventCache::open_scoped(&cache).unwrap());
+        let index = crate::events::EventCache::path(&cache);
+        let store_root = root.join("store");
+        let owner = Owner::acquire(&index, &store_root).unwrap();
+        let target = root.join("target.sqlite3");
+        fs::rename(&index, &target).unwrap();
+        let before = fs::read(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &index).unwrap();
+        let handle = owner.start(AnalyticsWriterConfig::new("machine", &index, &store_root));
+        assert!(matches!(
+            handle.publish_and_wait(),
+            AnalyticsWriterStatus::Refused { .. }
+        ));
+        handle.stop_and_join();
+        assert_eq!(fs::read(target).unwrap(), before);
+        assert!(semon_asi::read_manifest(&store_root).unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1494,7 +1640,7 @@ mod tests {
             scheduler.operation_due(600_000, false, true),
             Some(Operation::Retire)
         );
-        assert_eq!(scheduler.publication_after_retirement, Some(1));
+        assert_eq!(scheduler.publication_after_retirement, Some((1, 0)));
         let reload_retire = Operation::Reload(Resume::Retire);
         assert_eq!(scheduler.retry(reload_retire, 600_000), 1);
         scheduler.refuse(reload_retire);

@@ -93,10 +93,15 @@ it. Deleting that state directory starts a new namespace with new session IDs;
 there is no automatic reconciliation. Rename or transfer is a later explicit
 operator workflow. The CLI's `--watch` repeats Catalog refresh and notification
 until stopped; it exits visibly on refresh or publication failure. It acquires
-the store lock before namespace creation or writable Catalog refresh. Existing
-index validation is read-only and precedes any analytics state creation, so
+the store lock before namespace creation or writable Catalog refresh. Namespace
+validity and missing-file/store ambiguity are checked read-only before store
+opening and crash recovery, so namespace refusal preserves all crash leftovers.
+Existing index validation is read-only and precedes analytics state creation, so
 corrupt and unsupported indexes are refused unchanged. Namespace loading refuses
 symlinks and non-regular files and reads at most the expected length plus one.
+The index path is trusted to be the user's own state file; each analytics input
+open refuses symlinks with SQLite NOFOLLOW. Another regular file swapped by the
+same user is outside this boundary, because that user can already edit the state.
 Each wait has its own request generation and outcome: success is settled only
 after that request's publication and compaction, never at an intermediate Idle
 or successful manifest reload. Later requests cannot inherit a previous outcome.
@@ -113,9 +118,11 @@ resetting state or deleting data; a later notification makes one fresh read
 attempt. Direct store I/O and Parquet `External` I/O back off, as do operational
 SQLite busy/locked/I/O/full/cannot-open errors. Three operational failures exhaust
 the request budget with the last error (up to 1s/2s backoffs plus publication
-spacing); successful reloads do not reset that budget. A new Catalog publication
-notification permits a fresh attempt after refusal. Parquet page-read I/O surfaced as
-an Arrow error latches refusal until the next notification; the writer does not
+spacing). The budget belongs to the recovery chain: successful Open, Retire or
+Compact clears it, while retirement that interrupts publication saves and restores
+that publication's counters separately. Successful reloads preserve the budget.
+A new Catalog publication notification permits a fresh attempt after refusal.
+Parquet page-read I/O surfaced as an Arrow error latches refusal until the next notification; the writer does not
 recover its lost typed I/O source. A store error reloads the manifest before
 retry because a rename may already have published the generation. Reload success
 preserves the resumed operation's retry count. Every publication attempt advances

@@ -292,3 +292,107 @@ fn materialize_requires_the_existing_stores_namespace() {
     assert_eq!(fs::read(manifest).unwrap(), before);
     assert!(!state.join("analytics-namespace").exists());
 }
+
+#[test]
+fn materialize_namespace_refusal_preserves_crash_leftovers() {
+    for malformed in [false, true] {
+        let home = fixture::Fixture::new();
+        assert!(materialize(&home).status.success());
+        let state = home.root.join("state");
+        let analytics = state.join("analytics-store/analytics");
+        let manifest = analytics.join("manifest.json");
+        let before = fs::read(&manifest).unwrap();
+        let leftovers = [
+            analytics.join("manifest.json.tmp"),
+            analytics.join("fact_session/g999999.parquet"),
+            analytics.join("live/g999999.parquet"),
+        ];
+        for path in &leftovers {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, b"synthetic uncommitted bytes").unwrap();
+        }
+        let namespace = state.join("analytics-namespace");
+        if malformed {
+            fs::write(&namespace, b"malformed\n").unwrap();
+        } else {
+            fs::remove_file(&namespace).unwrap();
+        }
+        let output = materialize(&home);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("analytics namespace"));
+        assert_eq!(fs::read(manifest).unwrap(), before);
+        for path in &leftovers {
+            assert_eq!(fs::read(path).unwrap(), b"synthetic uncommitted bytes");
+        }
+        if malformed {
+            assert_eq!(fs::read(namespace).unwrap(), b"malformed\n");
+        } else {
+            assert!(!namespace.exists());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn materialize_refuses_a_symlinked_index_without_publishing() {
+    let target_home = fixture::Fixture::new();
+    assert!(materialize(&target_home).status.success());
+    let target = target_home.root.join("state/index.sqlite3");
+    let before = fs::read(&target).unwrap();
+    let home = fixture::Fixture::new();
+    let state = home.root.join("state");
+    fs::create_dir_all(&state).unwrap();
+    std::os::unix::fs::symlink(&target, state.join("index.sqlite3")).unwrap();
+    let output = materialize(&home);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("analytics writer refused"));
+    assert_eq!(fs::read(target).unwrap(), before);
+    assert!(
+        fs::symlink_metadata(state.join("index.sqlite3"))
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert!(!state.join("analytics-namespace").exists());
+    assert!(!state.join("analytics-store").exists());
+}
+
+#[test]
+fn analytics_input_validation_preserves_live_wal_entries_and_bytes() {
+    let home = fixture::Fixture::new();
+    assert!(materialize(&home).status.success());
+    let state = home.root.join("state");
+    let index = state.join("index.sqlite3");
+    let connection = rusqlite::Connection::open(&index).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; \
+        CREATE TABLE synthetic_validation_probe(value INTEGER); \
+        INSERT INTO synthetic_validation_probe VALUES(1); BEGIN; \
+        SELECT value FROM synthetic_validation_probe;",
+        )
+        .unwrap();
+    // Keep the WAL and its latest read mark live while validating another
+    // read-only connection. No checkpoint or writer shutdown occurs here.
+    assert!(fs::metadata(state.join("index.sqlite3-wal")).unwrap().len() > 32);
+    assert!(state.join("index.sqlite3-shm").exists());
+    let snapshot = || -> BTreeMap<std::ffi::OsString, Option<Vec<u8>>> {
+        fs::read_dir(&state)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let bytes = if entry.file_type().unwrap().is_file() {
+                    Some(fs::read(entry.path()).unwrap())
+                } else {
+                    None
+                };
+                (entry.file_name(), bytes)
+            })
+            .collect()
+    };
+    let before = snapshot();
+    let input = semon_sessions::SqliteAnalyticsInput::open(&index, "synthetic-validation").unwrap();
+    drop(input);
+    assert_eq!(snapshot(), before);
+    connection.execute_batch("ROLLBACK").unwrap();
+}

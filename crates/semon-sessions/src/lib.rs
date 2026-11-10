@@ -21,7 +21,7 @@ mod causal_trace;
 mod origin_projection;
 mod overview;
 mod overview_repair;
-pub use analytics_namespace::load_or_create_analytics_namespace;
+pub use analytics_namespace::{load_or_create_analytics_namespace, read_analytics_namespace};
 pub use analytics_writer::{
     AnalyticsWriterConfig, AnalyticsWriterStatus, Handle, analytics_store_root, start,
 };

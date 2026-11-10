@@ -610,8 +610,12 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
             index_path.display()
         )
     })?;
+    let namespace = semon_sessions::read_analytics_namespace(state_dir)?;
     let owner = semon_sessions::analytics_writer::Owner::acquire(&index_path, &store_root)?;
-    let namespace = semon_sessions::load_or_create_analytics_namespace(state_dir)?;
+    let namespace = match namespace {
+        Some(namespace) => namespace,
+        None => semon_sessions::load_or_create_analytics_namespace(state_dir)?,
+    };
     let writer = owner.start(semon_sessions::AnalyticsWriterConfig::new(
         namespace.clone(),
         index_path,

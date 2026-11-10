@@ -236,11 +236,16 @@ tables.
   `<index parent>/analytics-store`, never a path inside the SQLite index file.
   A present store with a missing namespace file refuses instead of silently
   forking those identities.
-  The CLI validates an existing index read-only, acquires writer ownership before
+  The CLI checks namespace validity and missing-file/store ambiguity read-only
+  before opening the store, so refusal preserves crash leftovers. It validates
+  an existing index read-only, then acquires writer ownership before recovery,
   namespace creation or writable refresh, and drains the Viewer's native
   Catalog/activity producer with strict opening and no recovery fallback.
   Namespace loading refuses symlinks and non-regular files and reads at most the
-  expected length plus one. Each waiter owns a request generation and outcome;
+  expected length plus one. The index path must be the user's own trusted state
+  file. Analytics input opens refuse symlinks with SQLite NOFOLLOW; regular-file
+  replacement by the same user is outside this boundary, since that user can
+  already edit the state files. Each waiter owns a request generation and outcome;
   success requires that generation's publication and compaction, never an
   intermediate Idle or manifest reload. SIGINT/SIGTERM cancels a CLI watch wait,
   then joins the writer and is re-raised. Watch exits on refresh/publication failure.
@@ -277,10 +282,12 @@ tables.
     busy/locked/I/O/full/cannot-open errors. These retry with bounded exponential
     backoff, with at most three operational failures per request before visible
     refusal carrying the last error (up to 1s/2s backoffs plus publication spacing).
-    Reload success does not reset this budget; a new Catalog notification permits
-    a fresh attempt after refusal. Parquet page-read I/O can surface as an Arrow
-    error after losing its typed I/O source; it fails safe by latching `Refused` until the next
-    notification, like structural errors. A store error requires manifest reload
+    The failure budget belongs to the recovery chain. Successful Open, Retire or
+    Compact clears it; retirement that interrupts publication saves and restores
+    that publication's counters separately. Reload success does not reset the
+    budget; a new Catalog notification permits a fresh attempt after refusal.
+    Parquet page-read I/O can surface as an Arrow error after losing its typed I/O
+    source; it fails safe by latching `Refused` until the next notification, like structural errors. A store error requires manifest reload
     before its operation resumes. A successful reload preserves the retry attempt;
     only success of the resumed operation clears it. Every publication attempt
     advances the cycle deadline, including an error after a visible rename.
