@@ -3,6 +3,9 @@
 pub mod error;
 pub mod governance;
 pub mod schema;
+pub mod store;
+
+mod parquet_io;
 
 pub use error::{Error, Result};
 pub use governance::{
@@ -11,4 +14,8 @@ pub use governance::{
     body_read_allowed, coverage_allowed, coverage_witness, evaluate, local_witness,
     project_derived_row, provider_egress_allowed, sensitivity_floor, serialize_coverage_witness,
     serialize_governed_row,
+};
+pub use store::{
+    Clock, FileEntry, Manifest, RETIREMENT_DELAY_MS, SourceMissing, Store, SystemClock, TableBatch,
+    Update, Versions, read_live_map, read_manifest,
 };
