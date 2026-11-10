@@ -5717,9 +5717,10 @@ mod tests {
     const HUNG_AFTER: Duration = Duration::from_secs(5);
 
     /// Cold Catalog completion must make worker-progress events eventually.
-    /// This is a hang guard, not a throughput budget: the test orders on each
-    /// completed worker rather than elapsed time.
+    /// This is a hang guard, not a throughput budget.
     const COLD_CATALOG_HANG_AFTER: Duration = Duration::from_secs(300);
+    /// Recheck persisted Catalog state even when no pool worker completes.
+    const COLD_CATALOG_RECHECK_AFTER: Duration = Duration::from_millis(50);
 
     /// Runs `read` on a thread of its own, and fails unless it answered
     /// within [`AT_ONCE`]. A read that waits on a held build fails the test
@@ -6813,9 +6814,11 @@ mod tests {
             // steps commit Index offsets and partial Catalog publications while
             // foreground reads remain responsive. Release it only after both
             // foreground reads have completed while it was held, then observe
-            // every completion from the refresh pool rather than polling time.
+            // every completion from the refresh pool, while rechecking the
+            // published Catalog when no completion arrives.
             drop(release);
             let background = Instant::now();
+            let deadline = background + COLD_CATALOG_HANG_AFTER;
             let connection =
                 rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             let mut observed: i64 = connection
@@ -6836,13 +6839,20 @@ mod tests {
                 }
                 let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
                 let body: Value = serde_json::from_slice(&page.body).unwrap();
-                if page.status == 200
-                    && body["completeness"]["state"] == "complete"
-                    && pool.running() == 0
-                {
+                let completeness = body["completeness"]["state"].as_str().unwrap_or("invalid");
+                if page.status == 200 && completeness == "complete" && pool.running() == 0 {
                     break;
                 }
-                finished = pool.wait_for_finished_after(finished, COLD_CATALOG_HANG_AFTER);
+                assert!(
+                    Instant::now() < deadline,
+                    "cold Catalog hang: indexed={observed}, running={}, completeness={completeness}",
+                    pool.running()
+                );
+                finished = pool.wait_for_finished_after(
+                    finished,
+                    COLD_CATALOG_RECHECK_AFTER
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                );
             }
             assert_eq!(observed, 60 + unrelated);
             eprintln!(
