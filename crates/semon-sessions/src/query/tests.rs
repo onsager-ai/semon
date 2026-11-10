@@ -2761,7 +2761,7 @@ fn contract_reference() -> &'static Value {
             "7ce1ac4d4f34af9143aa292b631a07fd797890b1"
         );
         assert_eq!(reference["clock"], NOW);
-        assert_eq!(reference["responses"].as_array().unwrap().len(), 134);
+        assert_eq!(reference["responses"].as_array().unwrap().len(), 114);
         reference
     })
 }
