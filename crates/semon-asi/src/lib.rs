@@ -1,4 +1,8 @@
 //! Storage contracts for Agent Session Intelligence analytics.
+//!
+//! The crate holds the analytics schema ([`schema`]), the single-writer
+//! generation store with its manifest ([`store`]) and tiered compaction
+//! ([`compact`]). It does not depend on `semon-sessions`.
 
 pub mod compact;
 pub mod error;
@@ -10,6 +14,8 @@ pub mod store;
 
 mod parquet_io;
 
+#[cfg(all(test, feature = "duckdb-tests"))]
+mod duckdb_smoke;
 #[cfg(test)]
 mod testutil;
 
