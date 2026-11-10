@@ -191,7 +191,7 @@ fn parse_analytics_args(mut arguments: impl Iterator<Item = String>) -> Result<C
     match arguments.next().as_deref() {
         Some("materialize") => parse_materialize_args(arguments).map(Command::Materialize),
         Some("coverage") => parse_coverage_args(arguments).map(Command::Coverage),
-        _ => return Err(analytics_usage()),
+        _ => Err(analytics_usage()),
     }
 }
 
