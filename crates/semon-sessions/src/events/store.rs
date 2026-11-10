@@ -1189,7 +1189,7 @@ pub(crate) fn requeue_concurrent_sources(
     options: &crate::Options,
     prepared: &crate::model::PreparedSources,
 ) -> io::Result<()> {
-    let paths = prepared
+    let mut paths = prepared
         .rows
         .iter()
         .flat_map(|row| &row.sources)
@@ -1214,6 +1214,24 @@ pub(crate) fn requeue_concurrent_sources(
         .collect::<std::collections::BTreeSet<_>>();
     if paths.is_empty() {
         return Ok(());
+    }
+    if options.facts.is_none() {
+        let archived = crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache))
+            .missing_sources(options)?;
+        for source in prepared.rows.iter().flat_map(|row| &row.sources) {
+            if paths.contains(source.path.to_string_lossy().as_ref())
+                && archived.iter().any(|native| {
+                    native.full_path() == source.path
+                        && native.native_id == source.native_id
+                        && native.ledger == crate::source_carrier::ledger(source)
+                })
+            {
+                paths.remove(source.path.to_string_lossy().as_ref());
+            }
+        }
+        if paths.is_empty() {
+            return Ok(());
+        }
     }
     let store = SqliteStore::attempt_selected(&super::EventCache::path(&options.cache))
         .map_err(|error| io::Error::other(error.to_string()))?;
@@ -1841,7 +1859,13 @@ pub(super) fn selected_roles_current(
             let Some(sidecar) = read_claude_sidecar(&mut metadata, path, &ledger)? else {
                 return Ok(false);
             };
-            if !sidecar.current(&source.path) {
+            if !sidecar.current(&source.path)
+                && !standalone_archive_source(connection, path, &ledger)?.is_some_and(|native| {
+                    !source.path.exists()
+                        && native.sidecar.as_ref() == Some(&sidecar)
+                        && native.native_id == source.native_id
+                })
+            {
                 return Ok(false);
             }
             Some(sidecar)
@@ -4765,7 +4789,7 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
         return Ok(found);
     }
     let unsupported_archive: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM meta WHERE key GLOB 'archive_event_index:*' AND CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN COALESCE(json_type(value,'$.version')<>'integer' OR json_extract(value,'$.version')<>6 OR json_extract(value,'$.parser_version')<>?1,1) ELSE 1 END)",
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key GLOB 'archive_event_index:*' AND CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN COALESCE(json_type(value,'$.version')<>'integer' OR json_extract(value,'$.version')<>7 OR json_extract(value,'$.parser_version')<>?1,1) ELSE 1 END)",
         [CACHE_VERSION],
         |row| row.get(0),
     )?;
@@ -4901,6 +4925,8 @@ pub(crate) fn current(connection: &Connection) -> rusqlite::Result<bool> {
 #[serde(deny_unknown_fields)]
 struct ArchivedIndex {
     version: u32,
+    /// Exact standalone chain; external providers own their independent custody.
+    chain_id: Option<String>,
     parser_version: u32,
     source: crate::SessionSourceRef,
     stat: Stat,
@@ -4918,7 +4944,13 @@ struct ArchivedIndex {
 
 impl ArchivedIndex {
     fn matches(&self, ledger: &Ledger) -> bool {
-        self.version == 6
+        self.version == 7
+            && self.chain_id.as_ref().is_none_or(|id| {
+                id.len() == 32
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
             && self.source_chunks_sha256.as_ref().is_some_and(|hash| {
                 hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
             })
@@ -4951,6 +4983,18 @@ impl ArchivedIndex {
             && self.source.prefix_sha256 == ledger.prefix
             && self.source.tail_sha256 == ledger.tail
     }
+}
+
+fn standalone_archive_source(
+    connection: &Connection,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::archive::NativeSource>> {
+    let database = connection.path().ok_or(rusqlite::Error::InvalidQuery)?;
+    let archive = crate::archive::Archive::new(crate::archive::standalone_dir(Path::new(database)));
+    archive
+        .admitted_source(Path::new(path), ledger)
+        .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 fn archive_index_key(path: &str) -> String {
@@ -4996,7 +5040,7 @@ fn archived_index(connection: &Connection, path: &str) -> rusqlite::Result<Optio
             let record: ArchivedIndex =
                 serde_json::from_str(&value.ok_or(rusqlite::Error::InvalidQuery)?)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            if record.version != 6 || record.parser_version != CACHE_VERSION {
+            if record.version != 7 || record.parser_version != CACHE_VERSION {
                 return Err(rusqlite::Error::InvalidQuery);
             }
             Ok(record)
@@ -5027,6 +5071,7 @@ pub(crate) fn retain_archive_index(
     path: &str,
     proof: &crate::SessionSourceProof,
     projection: &crate::SourceProjectionReady,
+    chain_id: Option<String>,
 ) -> rusqlite::Result<bool> {
     if !current(connection)? {
         return Ok(false);
@@ -5107,7 +5152,8 @@ pub(crate) fn retain_archive_index(
         };
     }
     let record = ArchivedIndex {
-        version: 6,
+        version: 7,
+        chain_id,
         parser_version: CACHE_VERSION,
         source: proof.source.clone(),
         stat: expected.stat,
@@ -5140,18 +5186,18 @@ pub(crate) fn archive_index_retained(
         return Ok(false);
     };
     let header_matches = if proof.source.root == "codex" {
-        record.version == 6
+        record.version == 7
             && record.native_header_sha256.is_some()
             && record.native_header_sha256 == codex_header_digest(connection, path)?
     } else if proof.source.root == "claude" && crate::native_sidecar::agent_path(Path::new(path)) {
         let mut statement = connection.prepare(NATIVE_METADATA_VALUE)?;
         let sidecar = read_claude_sidecar(&mut statement, path, &ledger)?;
-        record.version == 6
+        record.version == 7
             && record.native_header_sha256.is_some()
             && record.native_header_sha256 == claude_sidecar_digest(connection, path)?
             && sidecar.is_some_and(|sidecar| sidecar.verified(Path::new(path)))
     } else {
-        record.version == 6
+        record.version == 7
     };
     Ok(header_matches
         && record.launch_calls_sha256.is_some()
@@ -7061,6 +7107,29 @@ mod tests {
         let (rows, projections) = catalog_fixture_projection(&options);
         assert_eq!(rows.len(), count);
         (options, rows, projections)
+    }
+
+    #[test]
+    fn unchanged_publication_does_not_read_archive_inventory() {
+        let root = scratch("requeue-no-archive-read");
+        let (options, rows, _) = catalog_native_fixture(&root, 2, true);
+        let inputs = rows
+            .iter()
+            .flat_map(|row| &row.sources)
+            .map(|source| crate::native_evidence::source_input(&source.path, &options).unwrap())
+            .collect::<Vec<_>>();
+        let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+        let prepared =
+            crate::model::prepare_sources(&options, &mut cache, &inputs, CATALOG_FIXTURE_NOW)
+                .unwrap();
+        assert!(!prepared.rows.is_empty());
+        fs::write(
+            crate::archive::standalone_dir(&options.cache).join("sources.log"),
+            b"invalid journal\n",
+        )
+        .unwrap();
+        requeue_concurrent_sources(&options, &prepared).unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -10433,7 +10502,7 @@ mod tests {
             ),
             (
                 "archive",
-                "INSERT INTO meta VALUES('archive_event_index:original','{\"version\":7}')",
+                "INSERT INTO meta VALUES('archive_event_index:original','{\"version\":8}')",
                 "archived marker version",
             ),
         ] {

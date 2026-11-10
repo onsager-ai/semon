@@ -351,6 +351,9 @@ pub fn retain_source_event_index(
     use CatalogIdentityError::{InvalidArguments, ScopeChanged, Unavailable};
     let path = archive_index_path(options, proof, projection)?;
     let full = path.to_str().ok_or(InvalidArguments)?;
+    let chain_id = crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache))
+        .protect_index(&path, proof)
+        .map_err(|_| Unavailable)?;
     let mut connection = Connection::open_with_flags(
         EventCache::path(&options.cache),
         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -367,7 +370,7 @@ pub fn retain_source_event_index(
     crate::storage::sqlite::qualify(&transaction, &namespace).map_err(|_| Unavailable)?;
     if !projection_ready(&transaction, &proof.source.root, &proof.source.path, full)?
         .is_some_and(|ready| same_projection(&ready, projection))
-        || !crate::events::retain_archive_index(&transaction, full, proof, projection)
+        || !crate::events::retain_archive_index(&transaction, full, proof, projection, chain_id)
             .map_err(|_| Unavailable)?
     {
         return Err(ScopeChanged);

@@ -603,7 +603,7 @@ mod tests {
             })
             .unwrap();
         let marker: Value = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(marker["version"], 6);
+        assert_eq!(marker["version"], 7);
         fs::write(&home.meta, metadata().to_string() + " ").unwrap();
         assert!(!crate::source_event_index_retained(&home.options, &proof, &ready).unwrap());
         home.refuse_eviction();

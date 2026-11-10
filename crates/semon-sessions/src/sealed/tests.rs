@@ -482,6 +482,37 @@ fn forget_keeps_every_segment_when_the_manifest_is_missing() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn seal_certificate_protects_its_exact_chain_from_pruning() {
+    let root = scratch("custody-retention");
+    let log = root.join("a.jsonl");
+    fs::write(&log, jsonl(100_000, 22)).unwrap();
+    seal(&log, 1, u64::MAX).unwrap();
+    assert!(chain(&root, &log));
+    let held = read_custody(&seal_dir(&log)).unwrap().unwrap();
+    let archive = crate::archive::Archive::new(&held.archive);
+    let manifest_path = held
+        .archive
+        .join(
+            fs::read_dir(&held.archive)
+                .unwrap()
+                .filter_map(Result::ok)
+                .find(|entry| entry.file_type().unwrap().is_dir())
+                .unwrap()
+                .file_name(),
+        )
+        .join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["chains"][0]["admitted_at"] = serde_json::json!(0);
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    assert_eq!(archive.prune(Some(0)).unwrap(), 0);
+    archive.verify(&held.source).unwrap();
+    assert!(log.exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn custody_is_for_the_bytes_that_were_archived() {
     let root = scratch("custody");
     let log = root.join("a.jsonl");

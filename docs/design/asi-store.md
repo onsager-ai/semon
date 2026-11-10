@@ -119,7 +119,32 @@ an append-only zstd copy of each native log under `archive/`, admitting only the
 prefix index has consumed. A rewrite starts a new chain and preserves the old
 one; index can read archived sources when native logs are gone. Existing origin
 retention is unchanged: indefinite by default, with optional
-`archive.retention_days`; native logs are never deleted by this design.
+`archive.retention_days`; native logs are never deleted by this design. This
+contract is carried by explicit maintenance, `semon archive prune
+--retention-days N [--cache PATH]`, with no configuration file or background
+deleter. Omitting the flag deletes nothing and reports indefinite retention.
+Age is immutable chain admission time, not file modification time; only chains
+strictly older than the window and without an exact chain dependency may retire.
+`archive/clock.json` records the highest admission or successful prune time.
+Admission clamps its timestamp to that durable high-water mark. Retention fails
+closed with an error and deletes nothing when the wall clock is behind the mark;
+a successful prune advances the mark only after completing its work. A clock
+already behind before the very first admission cannot be detected; that residual
+risk is accepted.
+The native source binding, index retention markers and seal custody certificates
+protect their named chain regardless of age. Custody registers each dependency
+before publishing its external marker; interrupted publication may over-retain
+bytes. Retiring a marker does not automatically release that custody reference.
+
+Standalone manifests bind the exact chain to the configured native root,
+allowlisted relative path, native ID, consumed-prefix ledger and observed Claude
+sidecar metadata. Missing-source discovery uses only bindings under the current
+configured roots; present native files retain precedence. Rebuilds verify the
+chain and consumed prefix, replay the same native parser and preserve the
+original ledger instead of assigning a temporary file's physical witness.
+Unconsumed suffixes are not archived or promoted to complete source custody.
+The current manifest requires admission times and dependency metadata; unsupported
+old manifests are refused without converting or deleting their bytes.
 
 An opt-in replica follows supported mirror and #572 custody, including preserving
 replaced bytes and redaction provenance. Before acknowledging `replace`, preserve

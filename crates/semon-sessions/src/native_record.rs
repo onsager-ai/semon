@@ -1,5 +1,4 @@
 //! Private exact-byte evidence locations, bound to the containing native ledger.
-use crate::sealed::LogFile;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -44,7 +43,7 @@ impl Record {
         Ok(())
     }
 
-    pub(crate) fn verify(&self, file: &mut LogFile) -> io::Result<()> {
+    pub(crate) fn verify(&self, file: &mut (impl Read + Seek)) -> io::Result<()> {
         file.seek(SeekFrom::Start(self.offset))?;
         let mut reader = file.take(self.length);
         let mut hash = Sha256::new();
@@ -69,7 +68,7 @@ impl Record {
         Ok(())
     }
 
-    pub(crate) fn read(&self, file: &mut LogFile) -> io::Result<Vec<u8>> {
+    pub(crate) fn read(&self, file: &mut (impl Read + Seek)) -> io::Result<Vec<u8>> {
         file.seek(SeekFrom::Start(self.offset))?;
         let mut bytes = Vec::new();
         file.take(self.length).read_to_end(&mut bytes)?;
