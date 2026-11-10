@@ -65,10 +65,11 @@ coverage metadata needed by the current schema. Distinguish source completeness
 from computation current/pending/failed/frozen. Missing or disconnected alone does
 not imply frozen. Report session/step counts, exclusive-usage denominators and
 unknown/unclassified coverage by recorded versions; do not claim a uniform refresh
-from a scalar manifest version. A transform bump reprojects admitted facts; rules
-and price refresh of untouched sessions remain origin derivation work. The native
-Catalog producer advances those stale source repairs in bounded rounds (64 sources per
-qualification), durably through its ordinary source invalidations. A stale
+from a scalar manifest version. A transform bump reprojects admitted facts. Rules
+refresh of untouched sessions remains origin derivation work: the native Catalog
+producer advances stale rules in bounded rounds (64 sources per qualification),
+durably through its ordinary source invalidations. Price refresh is separate
+origin work in the reprice worker, bounded to 128 owners and 4,096 facts. A stale
 session is `Pending` to the writer, which retains its previous facts and only
 publishes a replacement after the session is re-admitted. Manifest `Versions.rules`
 is the writer target, not a claim about the versions of retained rows; there is no
@@ -95,9 +96,9 @@ this plan. It drains stale rules through the native Catalog/activity producer's
 bounded repair rounds before publishing, with strict index opening (no recovery
 fallback), then starts `semon-sessions::analytics_writer` against
 that read-only SQLite index. Nothing starts the writer by default: Viewer, MCP,
-push and receive remain disabled as hosts. The Viewer observes Catalog
-qualification but does not request a replacement publication or run an origin
-refresh. The first materialize writes a random
+push and receive remain disabled as hosts. The Viewer drives the same native
+Catalog producer, including rules repairs, but does not start the analytics
+writer or a replacement publication. The first materialize writes a random
 `origin-` namespace to `<index parent>/analytics-namespace`, and later runs reuse
 it. Deleting that state directory starts a new namespace with new session IDs;
 there is no automatic reconciliation. Rename or transfer is a later explicit

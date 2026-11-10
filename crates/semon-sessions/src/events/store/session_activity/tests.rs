@@ -477,7 +477,12 @@ fn analytics_writer_incremental_live_rows_match_a_final_full_refresh() {
 fn stale_rules_stay_pending_until_native_catalog_refresh_republishes() {
     let root = scratch("analytics-rules-refresh");
     let (options, rows, _) = catalog_native_fixture(&root, 2, true);
-    let row = rows.iter().find(|row| row.harness == "claude").unwrap();
+    let row_key = rows
+        .iter()
+        .find(|row| row.harness == "claude")
+        .unwrap()
+        .key
+        .clone();
     let index = crate::events::EventCache::path(&options.cache);
     let store_root = root.join("analytics-store");
     let clock = ManualClock::new(0);
@@ -496,7 +501,7 @@ fn stale_rules_stay_pending_until_native_catalog_refresh_republishes() {
         .changes
         .iter()
         .find_map(|change| match change {
-            SessionChange::Admitted(session) if session.session.native_session_id == row.key => {
+            SessionChange::Admitted(session) if session.session.native_session_id == row_key => {
                 Some(session.session_uid.clone())
             }
             _ => None,
@@ -507,9 +512,34 @@ fn stale_rules_stay_pending_until_native_catalog_refresh_republishes() {
         .unwrap()
         .execute(
             "UPDATE session_activity_projections SET rules_version=0 WHERE session_key=?1",
-            [&row.key],
+            [&row_key],
         )
         .unwrap();
+
+    // A Catalog metadata change supplies the normal `silver_change` while
+    // leaving the stale activity header in place, so the writer itself must
+    // consume the Pending transition.
+    let (mut pending_rows, pending_slots) = catalog_fixture_projection(&options);
+    let pending_row = pending_rows
+        .iter_mut()
+        .find(|row| row.key == row_key)
+        .unwrap();
+    pending_row.name = "rules refresh pending".into();
+    pending_row.session_activity = None;
+    let (mut cache, _) = opened(&index);
+    assert_eq!(
+        catalog_write(
+            &mut cache,
+            &pending_rows,
+            &pending_slots,
+            false,
+            CatalogWriter::Auto
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
+    drop(cache);
 
     let mut pending_input = SqliteAnalyticsInput::open(&index, "fixture-machine").unwrap();
     let pending = pending_input
@@ -519,6 +549,9 @@ fn stale_rules_stay_pending_until_native_catalog_refresh_republishes() {
         session_uid: uid.clone()
     }));
     drop(pending_input);
+    clock.advance(2_000);
+    writer.notify();
+    writer.wait_for_publishes(2);
     let retained_manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
     assert_eq!(
         live_fact_rows(&store_root, &retained_manifest),
@@ -539,7 +572,7 @@ fn stale_rules_stay_pending_until_native_catalog_refresh_republishes() {
 
     clock.advance(2_000);
     writer.notify();
-    writer.wait_for_publishes(2);
+    writer.wait_for_publishes(3);
     let refreshed_manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
     let refreshed_rows = live_fact_rows(&store_root, &refreshed_manifest);
     writer.stop_and_join();
@@ -558,29 +591,113 @@ fn stale_rules_stay_pending_until_native_catalog_refresh_republishes() {
 }
 
 #[test]
-fn native_catalog_rules_refresh_drains_more_than_one_repair_round() {
+fn native_catalog_rules_refresh_skips_never_derivable_sessions_and_drains_rounds() {
     let root = scratch("rules-repair-rounds");
-    let (options, _, _) = catalog_native_fixture(&root, 66, true);
+    let (options, rows, _) = catalog_native_fixture(&root, 68, true);
     let index = crate::events::EventCache::path(&options.cache);
-    let changed = rusqlite::Connection::open(&index)
+    let mismatched_key = rows
+        .iter()
+        .find(|row| row.harness == "claude")
         .unwrap()
+        .key
+        .clone();
+    let missing_key = rows
+        .iter()
+        .find(|row| row.harness == "claude" && row.key != mismatched_key)
+        .unwrap()
+        .key
+        .clone();
+    let mismatched_path = rows
+        .iter()
+        .find(|row| row.key == mismatched_key)
+        .unwrap()
+        .sources[0]
+        .path
+        .to_string_lossy()
+        .into_owned();
+    let missing_path = rows
+        .iter()
+        .find(|row| row.key == missing_key)
+        .unwrap()
+        .sources[0]
+        .path
+        .to_string_lossy()
+        .into_owned();
+
+    append_claude_step(&options, "rules-never-derivable");
+    let (mut pending_rows, pending_slots) = catalog_fixture_projection(&options);
+    pending_rows
+        .iter_mut()
+        .find(|row| row.key == mismatched_key)
+        .unwrap()
+        .session_activity = None;
+    let (mut store, _) = opened(&index);
+    assert_eq!(
+        catalog_write(
+            &mut store,
+            &pending_rows,
+            &pending_slots,
+            false,
+            CatalogWriter::Auto
+        )
+        .unwrap()
+        .0,
+        Outcome::Written
+    );
+    let changed = store
+        .connection
         .execute(
             "UPDATE session_activity_projections SET rules_version=0",
             [],
         )
         .unwrap();
-    assert!(changed > 64);
+    assert!(changed > 66);
+    store
+        .connection
+        .execute(
+            "DELETE FROM session_activity_projections WHERE session_key=?1",
+            [&missing_key],
+        )
+        .unwrap();
+    let before = repairs(&store.connection).unwrap();
+    assert_eq!(before.len(), 64);
+    assert!(!before.contains(&missing_path));
+    assert!(!before.contains(&mismatched_path));
+    drop(store);
 
-    crate::refresh_analytics_catalog(&options, || false).unwrap();
-    let stale: i64 = rusqlite::Connection::open(&index)
-        .unwrap()
+    let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+    let mut work = crate::viewer::lock(&evidence.storage.work);
+    let rounds = (1..=32)
+        .find(|_| {
+            evidence
+                .refresh_catalog(&mut work, crate::model::now_ms())
+                .unwrap()
+        })
+        .expect("bounded native refresh must qualify without requeueing never-derivable sessions");
+    assert!(
+        rounds > 1,
+        "more than one 64-source repair round is required"
+    );
+    let cache = work.events.as_ref().unwrap();
+    assert!(cache.qualified_catalog().unwrap());
+    assert!(cache.pending_catalog_sources(1).unwrap().is_empty());
+    drop(work);
+    evidence.retire();
+
+    let (store, _) = opened(&index);
+    let stale_repairable: i64 = store
+        .connection
         .query_row(
-            "SELECT COUNT(*) FROM session_activity_projections WHERE rules_version<>?1",
-            [crate::events::session_activity::ACTIVITY_RULES_VERSION],
+            "SELECT COUNT(*) FROM session_activity_projections WHERE session_key NOT IN (?1,?2) AND rules_version<>?3",
+            params![missing_key, mismatched_key, crate::events::session_activity::ACTIVITY_RULES_VERSION],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(stale, 0);
+    assert_eq!(stale_repairable, 0);
+    let after = repairs(&store.connection).unwrap();
+    assert!(!after.contains(&missing_path));
+    assert!(!after.contains(&mismatched_path));
+    drop(store);
     fs::remove_dir_all(root).unwrap();
 }
 
