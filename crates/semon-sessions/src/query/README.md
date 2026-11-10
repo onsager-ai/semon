@@ -1,6 +1,6 @@
 # Query contract reference
 
-Control delivery, managed runtime and SSH are retired. Full-text `find` remains paused until the ASI query surface lands. Query supports native session evidence and focused history reads; passive process and lock facts remain observations only. See the [collection retirement scope](../../../../docs/design/session-foundation-retirement.md#collection-retirement-scope).
+Control delivery, managed runtime and SSH are retired. ASI SQL and schema queries are available; full-text search follows in #567. Query supports native session evidence and focused history reads; passive process and lock facts remain observations only. See the [collection retirement scope](../../../../docs/design/session-foundation-retirement.md#collection-retirement-scope).
 
 Embedding callers admit a `SessionSources` owner and use
 `Query::from_sources(sources)`. The host still owns authorization, admission and

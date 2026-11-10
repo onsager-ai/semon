@@ -608,7 +608,7 @@ pub(super) fn read(
     mode: crate::SessionSourceReadMode,
     now: i64,
 ) -> Result<Option<Value>, QueryError> {
-    read_inner(options, key, args, provider, mode, now, None)
+    read_inner(options, key, args, provider, mode, now)
 }
 
 pub(super) fn session(
@@ -624,27 +624,6 @@ pub(super) fn session(
     read_inner(options, key, &args, provider, mode, now, None)
 }
 
-pub(super) fn search(
-    options: &Options,
-    key: &str,
-    served: &str,
-    provider: Option<&dyn crate::SessionSourceReader>,
-    mode: crate::SessionSourceReadMode,
-    now: i64,
-    search: &mut super::search::Search,
-) -> Result<bool, QueryError> {
-    Ok(read_inner(
-        options,
-        key,
-        &json!({"id":key}),
-        provider,
-        mode,
-        now,
-        Some((served, search)),
-    )?
-    .is_some())
-}
-
 #[allow(clippy::too_many_arguments)]
 fn read_inner(
     options: &Options,
@@ -653,7 +632,6 @@ fn read_inner(
     provider: Option<&dyn crate::SessionSourceReader>,
     mode: crate::SessionSourceReadMode,
     now: i64,
-    search: Option<(&str, &mut super::search::Search)>,
 ) -> Result<Option<Value>, QueryError> {
     #[cfg(test)]
     SLOTS.with(|slots| slots.set(0));
@@ -837,13 +815,13 @@ fn read_inner(
     // Read proof pages and root witnesses only for touched byte ranges. Each
     // request-owned source retains at most one decoded hash page.
     let session = args["_session"] == true;
-    let context = if search.is_some() || session {
+    let context = if session {
         crate::overview_repair::query_context(&tx, key).map_err(unavailable)?
     } else {
         vec![row.clone()]
     };
     let mut query_headers = Vec::new();
-    if search.is_some() || session {
+    if session {
         for owner in &context {
             let Some(encoded) =
                 crate::query_projection::header(&tx, &crate::query_projection::identity(owner))
@@ -1147,121 +1125,6 @@ fn read_inner(
         }
         qualify_virtual_aliases(&mut summary, &context, args["_machine_alias"].as_str());
         return Ok(Some(json!({"now":now,"session":summary})));
-    }
-    if let Some((served, search)) = search {
-        let data = crate::model::QueryData::identity(options, now);
-        let mut high = total;
-        while high > 0 && !search.stopped() {
-            if search.at_capacity() {
-                let eligible:bool=db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE session_key=?1 AND slot<?2 AND (?3 IS NULL OR json_extract(metadata,'$.t')>=?3))"),params![key,high as i64,search.since()],|r|r.get(0)).map_err(unavailable)?;
-                if eligible {
-                    search.stop();
-                }
-                break;
-            }
-            let low = high.saturating_sub(64);
-            let snapshot = db.transaction().map_err(unavailable)?;
-            unchanged(
-                &snapshot,
-                key,
-                history.is_some(),
-                &text,
-                headers,
-                &slot_generation,
-            )?;
-            let mut statement = snapshot.prepare(&format!("SELECT CASE WHEN octet_length(metadata)<=65536 THEN metadata ELSE NULL END FROM {table} WHERE session_key=?1 AND slot>=?2 AND slot<?3 ORDER BY slot")).map_err(unavailable)?;
-            let recipes = statement
-                .query_map(params![key, low as i64, high as i64], |row| {
-                    row.get::<_, String>(0)
-                })
-                .map_err(unavailable)?
-                .map(|text| {
-                    serde_json::from_str::<SavedSlot>(&text.map_err(unavailable)?)
-                        .map_err(unavailable)
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            if recipes.len() != high - low {
-                return Err(unavailable("Native search slots are incomplete"));
-            }
-            drop(statement);
-            snapshot.commit().map_err(unavailable)?;
-            #[cfg(test)]
-            SLOTS.with(|slots| slots.set(slots.get() + recipes.len()));
-            let transcript = crate::model::Transcript {
-                slots: recipes
-                    .iter()
-                    .enumerate()
-                    .map(|(index, saved)| {
-                        let mut slot = saved.restore();
-                        observation.apply(saved, &mut slot, low + index);
-                        slot
-                    })
-                    .collect(),
-                ..Default::default()
-            };
-            for (index, slot) in transcript.slots.into_iter().enumerate().rev() {
-                if !search.eligible(slot.t) {
-                    continue;
-                }
-                if search.at_capacity() {
-                    search.stop();
-                    break;
-                }
-                let handoffs = if let crate::model::SlotKind::H(id) = &slot.kind {
-                    if let Some(cutoff) = cutoff
-                        && !edge_kept(&db, id, cutoff)?
-                    {
-                        vec![]
-                    } else {
-                        vec![edge(&db, id, &context, &records, &bytes_left)?]
-                    }
-                } else {
-                    vec![]
-                };
-                let transcript = crate::model::Transcript {
-                    slots: vec![slot],
-                    ..Default::default()
-                };
-                search.scan_range(served, &transcript, low + index, &data, &handoffs, &records)?;
-            }
-            high = low;
-        }
-        records
-            .finish()
-            .map_err(|error| records.query_error(error))?;
-        let snapshot = db.transaction().map_err(unavailable)?;
-        unchanged(
-            &snapshot,
-            key,
-            history.is_some(),
-            &text,
-            headers,
-            &slot_generation,
-        )?;
-        for (owner, expected) in &query_headers {
-            if crate::query_projection::header(&snapshot, owner)
-                .map_err(unavailable)?
-                .as_deref()
-                != Some(expected)
-            {
-                return Err(unavailable("Native query recipes changed"));
-            }
-        }
-        let current = crate::overview_repair::query_context(&snapshot, key).map_err(unavailable)?;
-        if serde_json::to_value(&current).map_err(unavailable)?
-            != serde_json::to_value(&context).map_err(unavailable)?
-        {
-            return Err(unavailable("Native query relationship publication changed"));
-        }
-        snapshot.commit().map_err(unavailable)?;
-        if crate::native_evidence::query_runtime_generation(options).map_err(unavailable)?
-            != runtime
-        {
-            return Err(unavailable(
-                "Native search observation changed during this read",
-            ));
-        }
-        return Ok(Some(Value::Null));
     }
     // Every requested block verifies its original indexed proof. Finish fences
     // only touched sources; unrelated fragments of this session need no body I/O.

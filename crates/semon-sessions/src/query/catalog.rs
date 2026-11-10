@@ -392,121 +392,7 @@ fn spend(left: &mut usize, bytes: usize) -> Result<(), QueryError> {
     Ok(())
 }
 
-fn has_search_slots(options: &Options, key: &str, since: Option<i64>) -> Result<bool, QueryError> {
-    let db = open(options)?;
-    let history: bool = db
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_history_projections WHERE session_key=?1)",
-            [key],
-            |r| r.get(0),
-        )
-        .map_err(unavailable)?;
-    let table = if history {
-        "session_history_slots"
-    } else {
-        "session_slots"
-    };
-    db.query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE session_key=?1 AND (?2 IS NULL OR json_extract(metadata,'$.t')>=?2))"),rusqlite::params![key,since],|r|r.get(0)).map_err(unavailable)
-}
-
 impl Query {
-    #[allow(clippy::too_many_arguments)]
-    fn search_catalog(
-        &self,
-        args: &Value,
-        since: Option<i64>,
-        now: i64,
-        rows: &BTreeMap<String, Value>,
-        owner: &BTreeMap<String, (usize, String)>,
-        parts: &[Part],
-        provider: Option<&CatalogReaderFactory>,
-        mode: crate::SessionSourceReadMode,
-    ) -> Result<Value, QueryError> {
-        let summaries = rows
-            .iter()
-            .map(|(id, saved)| (id.clone(), saved["summary"].clone()))
-            .collect();
-        let mut search = super::search::Search::new(args, since, summaries);
-        for served in search.order() {
-            let (index, own) = &owner[&served];
-            let (machine, source) = &self.sources.machines[*index];
-            let machine = if machine.is_empty() { "local" } else { machine };
-            let key = &parts[*index].owners[own];
-            // The old stop rule runs before the next eligible slot, even when
-            // that slot would not match. Qualify that condition using recipes
-            // before creating another archive reader or decoding its evidence.
-            if search.at_capacity() {
-                if has_search_slots(&source.options, key, since)? {
-                    search.stop();
-                    break;
-                }
-                continue;
-            }
-            let reader = provider
-                .map(|factory| factory(machine, key))
-                .transpose()
-                .map_err(|error| QueryError::io(&error))?;
-            let bounded = reader
-                .as_deref()
-                .map(|reader| crate::source_reader::BudgetedReader::new(reader, 1024));
-            let reader = bounded
-                .as_ref()
-                .map(|reader| reader as &dyn crate::SessionSourceReader);
-            if super::transcript::search(
-                &source.options,
-                key,
-                &served,
-                reader,
-                mode,
-                now,
-                &mut search,
-            )? {
-                if search.stopped() {
-                    break;
-                }
-                continue;
-            }
-            crate::overview_repair::with_query(&source.options, key, reader, mode, now, |data| {
-                let data = Arc::new(data);
-                let native_parts = self
-                    .sources
-                    .machines
-                    .iter()
-                    .enumerate()
-                    .map(|(part, (key, source))| {
-                        (
-                            key.clone(),
-                            if part == *index {
-                                data.clone()
-                            } else {
-                                Arc::new(crate::model::QueryData::identity(&source.options, now))
-                            },
-                        )
-                    })
-                    .collect();
-                let native = QueryRead::new(native_parts, usize::MAX);
-                let view = View::native(
-                    &native,
-                    now,
-                    ReadShape::Search,
-                    reader.map(|reader| (reader, mode)),
-                )?;
-                let transcript = data
-                    .tx
-                    .get(own)
-                    .ok_or_else(|| unavailable("Selected search transcript unavailable"))?;
-                let records = data.sources.reader_with_mode(reader, mode);
-                search.scan(&served, transcript, &data, &view.handoffs, &records)?;
-                records.finish().map_err(|error| QueryError::io(&error))
-            })
-            .map_err(|error| QueryError::io(&error))??;
-            if search.stopped() {
-                break;
-            }
-        }
-        Ok(search.finish(now))
-    }
-
     /// Select summaries or search native sources using a published Catalog.
     /// Publication remains the caller's existing source coordinator's job.
     /// Providers are request-owned and scoped to their admitted machine key.
@@ -532,20 +418,6 @@ impl Query {
         self.execute_catalog_at(tool, args, provider, mode, now)
     }
 
-    // Retained optional search qualification never opens a product override.
-    #[cfg(test)]
-    pub(super) fn call_optional_catalog_at(
-        &mut self,
-        tool: &str,
-        args: &Value,
-        provider: Option<&CatalogReaderFactory>,
-        mode: crate::SessionSourceReadMode,
-        now: i64,
-    ) -> Result<Value, QueryError> {
-        validate_tool_call(&retained_query_tools(), tool, args)?;
-        self.execute_catalog_at(tool, args, provider, mode, now)
-    }
-
     fn execute_catalog_at(
         &mut self,
         tool: &str,
@@ -556,9 +428,9 @@ impl Query {
     ) -> Result<Value, QueryError> {
         #[cfg(test)]
         WORK.with(|work| work.set(Work::default()));
-        if !matches!(tool, "list_sessions" | "stalls" | "find") {
+        if !matches!(tool, "list_sessions" | "stalls") {
             return Err(QueryError::invalid(
-                "Catalog calls require a listing, stall or search tool",
+                "Catalog calls require a listing or stall tool",
             ));
         }
         if self.sources.is_retired() {
@@ -661,9 +533,7 @@ impl Query {
         for (id, saved) in &mut rows {
             saved["summary"]["children"] = json!(children.get(id).cloned().unwrap_or_default());
         }
-        let mut result = if tool == "find" {
-            self.search_catalog(args, since, now, &rows, &owner, &parts, provider, mode)?
-        } else if tool == "list_sessions" {
+        let mut result = if tool == "list_sessions" {
             list_response(
                 rows.values()
                     .map(|saved| saved["summary"].clone())
@@ -693,9 +563,6 @@ impl Query {
             "stalls"
         };
         for row in result[returned].as_array_mut().expect("native answer") {
-            if tool == "find" {
-                break;
-            }
             let Some(question) = row["open_question"]["handoff"].as_str().map(str::to_owned) else {
                 continue;
             };

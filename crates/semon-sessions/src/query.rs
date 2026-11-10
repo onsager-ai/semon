@@ -22,7 +22,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     Options,
-    model::{SessionFacts, SlotKind, Transcript, now_ms, one_line},
+    model::{SessionFacts, SlotKind, Transcript, now_ms},
     native_evidence::SessionSources,
     tx,
     union::{Owner, QueryRead},
@@ -106,12 +106,6 @@ pub const DEFAULT_WINDOW: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// Defaults and bounds.
 const LIST_LIMIT: i64 = 100;
 const LIST_MAX: i64 = 1000;
-const FIND_LIMIT: i64 = 20;
-const FIND_MAX: i64 = 200;
-const FIND_BYTES: i64 = 64 * 1024 * 1024;
-const FIND_BYTES_MAX: i64 = 1024 * 1024 * 1024;
-/// A snippet shows this many bytes on each side of a match.
-const CONTEXT: usize = 80;
 
 /// A tool's failure: a closed `code` and a message for people.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,15 +266,6 @@ fn id_property(what: &str) -> Value {
 
 /// Active collection tools, with their input schemas.
 pub fn query_tools() -> Vec<QueryTool> {
-    retained_query_tools()
-        .into_iter()
-        .filter(|tool| tool.name != "find")
-        .collect()
-}
-
-// Preserve the optional matcher contract and independent semantic fixtures.
-// Public dispatch must pass validate_query_call before preparing any evidence.
-fn retained_query_tools() -> Vec<QueryTool> {
     vec![
         QueryTool {
             name: "list_sessions",
@@ -348,24 +333,6 @@ fn retained_query_tools() -> Vec<QueryTool> {
                     "limit": {"type": "integer", "minimum": 1, "maximum": tx::PAGE_ENTRIES, "default": tx::PAGE_ENTRIES, "description": "At most this many entries."},
                 },
                 "required": ["id"],
-                "additionalProperties": false,
-            }),
-        },
-        QueryTool {
-            name: "find",
-            description: "Entries whose text contains the given text (ASCII case-insensitive), newest first, with \
-                the session, the entry's position (for read_transcript) and a snippet; and the sessions they are \
-                in, or whose name, repo or branch contains it. Bounded by a result limit and a byte budget.",
-            positional: Some("text"),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string", "minLength": 1, "maxLength": 1000, "description": "The text to find."},
-                    "since": since_property("Only entries since then:"),
-                    "limit": {"type": "integer", "minimum": 1, "maximum": FIND_MAX, "default": FIND_LIMIT, "description": "At most this many entries."},
-                    "max_bytes": {"type": "integer", "minimum": 1, "maximum": FIND_BYTES_MAX, "default": FIND_BYTES, "description": "Stop after reading this many bytes of logs."},
-                },
-                "required": ["text"],
                 "additionalProperties": false,
             }),
         },
@@ -514,7 +481,6 @@ struct View {
 enum ReadShape<'a> {
     Summaries,
     Session(&'a str),
-    Search,
 }
 
 impl View {
@@ -572,7 +538,6 @@ impl View {
                         part.served(&handoff.from) == id
                             || handoff.to.as_ref().is_some_and(|to| part.served(to) == id)
                     }
-                    ReadShape::Search => true,
                     ReadShape::Summaries => false,
                 };
                 if !requested && !question {
@@ -826,43 +791,10 @@ fn newest_first(a: &Value, b: &Value) -> std::cmp::Ordering {
         .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
 }
 
-/// Where `needle` (already ASCII-lowercase) first occurs in `text`, ASCII
-/// case-insensitively. Byte offsets are the text's own.
-fn find_in(text: &str, needle: &str) -> Option<usize> {
-    text.to_ascii_lowercase().find(needle)
-}
-
-/// The text around a match, on one line.
-fn snippet(text: &str, at: usize, length: usize) -> String {
-    let mut start = at.saturating_sub(CONTEXT);
-    while !text.is_char_boundary(start) {
-        start -= 1;
-    }
-    let mut end = (at + length + CONTEXT).min(text.len());
-    while !text.is_char_boundary(end) {
-        end += 1;
-    }
-    let mut out = String::new();
-    if start > 0 {
-        out.push('…');
-    }
-    out.push_str(&one_line(&text[start..end], 4 * CONTEXT));
-    if end < text.len() {
-        out.push('…');
-    }
-    out
-}
-
 /// Validate the active collection contract before admitting source/archive work.
 /// This performs no I/O and grants no source authority. Window membership and
 /// generation checks still belong to the actual Query call.
 pub fn validate_query_call(tool: &str, args: &Value) -> Result<(), QueryError> {
-    if tool == "find" {
-        return Err(QueryError::new(
-            "capability_unavailable",
-            "Full-text find is paused in the collection configuration",
-        ));
-    }
     validate_tool_call(&query_tools(), tool, args)
 }
 
@@ -915,7 +847,6 @@ pub struct Query {
 
 mod activity;
 pub(crate) mod catalog;
-mod search;
 mod transcript;
 
 impl Query {
@@ -1025,20 +956,6 @@ impl Query {
         let empty = json!({});
         let args = if args.is_null() { &empty } else { args };
         validate_query_call(tool, args)?;
-        self.execute_at(tool, args, now)
-    }
-
-    // Only unit fixtures can enter the retained optional search engine.
-    #[cfg(test)]
-    fn call_optional_at(
-        &mut self,
-        tool: &str,
-        args: &Value,
-        now: i64,
-    ) -> Result<Value, QueryError> {
-        let empty = json!({});
-        let args = if args.is_null() { &empty } else { args };
-        validate_tool_call(&retained_query_tools(), tool, args)?;
         self.execute_at(tool, args, now)
     }
 
@@ -1200,7 +1117,6 @@ impl Query {
             "get_session" => self.get_session(args, now, None),
             "get_session_activity" => self.get_session_activity(args, now),
             "read_transcript" => self.read_transcript(args, now, None),
-            "find" => self.find(args, now, None),
             "stalls" => self.stalls(args, now, None),
             _ => unreachable!("every tool is handled"),
         }?;
@@ -1700,56 +1616,6 @@ impl Query {
         })?;
         records.finish().map_err(|error| QueryError::io(&error))?;
         serde_json::from_str(&page).map_err(|error| QueryError::new("io", error.to_string()))
-    }
-
-    fn find(
-        &mut self,
-        args: &Value,
-        now: i64,
-        provider: Option<(
-            &dyn crate::SessionSourceReader,
-            crate::SessionSourceReadMode,
-        )>,
-    ) -> Result<Value, QueryError> {
-        let since = self.since(args, now)?;
-        let view = self.view(now, ReadShape::Search, provider)?;
-        let rows = view
-            .sessions
-            .iter()
-            .map(|(id, row)| {
-                let mut row = row.clone();
-                row["id"] = json!(id);
-                row["kind"] = json!(view.facts.get(id).map(|facts| &facts.kind));
-                row["last_activity"] = json!(view.last(id));
-                (id.clone(), row)
-            })
-            .collect();
-        let mut search = search::Search::new(args, since, rows);
-        let transcripts: BTreeMap<_, _> = self
-            .evidence()
-            .parts
-            .iter()
-            .enumerate()
-            .flat_map(|(index, part)| {
-                part.data
-                    .tx
-                    .iter()
-                    .map(move |(own, tx)| (part.served(own), (index, tx)))
-            })
-            .collect();
-        for served in search.order() {
-            let Some((index, transcript)) = transcripts.get(&served) else {
-                continue;
-            };
-            let data = &self.evidence().parts[*index].data;
-            let records = data.sources.reader_with(provider);
-            search.scan(&served, transcript, data, &view.handoffs, &records)?;
-            records.finish().map_err(|error| QueryError::io(&error))?;
-            if search.stopped() {
-                break;
-            }
-        }
-        Ok(search.finish(now))
     }
 
     fn stalls(

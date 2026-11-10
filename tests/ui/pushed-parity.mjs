@@ -245,24 +245,9 @@ function corpus(args, env) {
     } while (true);
     sessions[row.id] = { details: call('get_session', [row.id]), transcript };
   }
-  const disabled = spawnSync(bin, ['query', 'find', 'session', '--all', '--json', ...args], {
-    env: { ...process.env, ...env },
-    encoding: 'utf8',
-    timeout: READ_TIMEOUT_MS,
-  });
-  if (
-    disabled.error ||
-    disabled.status !== 1 ||
-    disabled.stdout.trim() ||
-    !disabled.stderr.includes('capability_unavailable')
-  )
-    throw Error(
-      'pushed-parity stale find did not explicitly refuse before search: ' + disabled.stderr,
-    );
   const json = {
     listing,
     sessions,
-    paused_find: { error: 'capability_unavailable' },
     stalls: call('stalls', ['--idle-minutes', '1']),
   };
   return { text: JSON.stringify(json), json };

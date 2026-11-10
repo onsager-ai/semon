@@ -1,8 +1,9 @@
 # ASI query
 
 Status: accepted architecture/spec for #545 (revised 2026-11-09 for federation
-D1–D8 and DuckDB analytics); implementation remains delivery work. Store:
-[ASI store](asi-store.md) (#544). Direction:
+D1–D8 and DuckDB analytics). #566 delivers local SQL and schema through CLI and
+MCP; search, view, Viewer and Hub remain follow-up work. Store: [ASI store](asi-store.md)
+(#544). Direction:
 [ASI direction](asi-direction.md#architecture). Remote policy/channel contract:
 [ASI federation](asi-federation.md).
 
@@ -264,8 +265,10 @@ records; cancellation/source changes during a read publish no invalid partial pa
 - **MCP** advertises these beside the existing focused tools. `find`, with
   its retained schema, tests and pause notes, is removed.
 - **CLI:** `semon query sql|schema|search|view`, with flags derived from the
-  tool schemas as today. Output is JSON by default, and `sql --format tsv` is
-  available.
+  tool schemas as today. Output is compact JSON by default; `sql --format tsv`
+  writes a tab-delimited header and rows, with tab, newline and carriage-return
+  characters in values replaced by spaces. Query failures write the same error
+  envelope as JSON and exit 1; successful commands exit 0.
 - **Viewer:** `POST /api/asi/sql`, `POST /api/asi/search`,
   `GET /api/asi/schema` and `POST /api/asi/view`, behind authentication,
   Origin/Host/CSRF checks and per-user/machine/namespace grants. Bodies, search
@@ -307,5 +310,6 @@ records; cancellation/source changes during a read publish no invalid partial pa
 - Results expose admitted heads and freshness/version coverage. Multi-source
   policy intersections never disclose restricted contributions or label a
   fragment complete; SQL never fetches bodies.
-- MCP: `tools/list` has the four tools and no `find`.
+- Current local MCP: `tools/list` has `sql` and `schema`, and no `find`. `search`
+  and `view` arrive with their respective follow-up surfaces.
 - Performance budgets from [ASI store](asi-store.md#performance-from-day-1).

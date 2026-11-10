@@ -199,7 +199,7 @@ missing evidence and invalidation still queue the same bounded native producer.
 
 ## Former collection configuration
 
-This section records the collection configuration before the 2026-11-08 retirement. Control delivery, managed runtime and SSH are retired; full-text `find` remains paused until the ASI query surface lands. The former reader removed control actions and New Session navigation while retaining passive recorded asks/outcomes and process/lock observations. Metadata and selected-text navigation were available in that reader. These details, including the optional control components described elsewhere in this historical contract, do not define current product scope. See the [collection retirement scope](session-foundation-retirement.md#collection-retirement-scope).
+This section records the collection configuration before the 2026-11-08 retirement. Control delivery, managed runtime, SSH and the paused `find` surface are retired; ASI SQL and schema queries are current and FTS search follows in #567. The former reader removed control actions and New Session navigation while retaining passive recorded asks/outcomes and process/lock observations. Metadata and selected-text navigation were available in that reader. These details, including the optional control components described elsewhere in this historical contract, do not define current product scope. See the [collection retirement scope](session-foundation-retirement.md#collection-retirement-scope).
 
 ## Refactoring contract
 

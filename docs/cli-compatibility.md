@@ -1,6 +1,6 @@
 # CLI evidence compatibility
 
-Control delivery, managed runtime and SSH have been retired with their code and active entry points. Broad `find` remains paused until the ASI query surface lands. This document records native harness session, mirror, identity, transcript and usage evidence; retired control/runtime contracts are outside its current scope. See the [collection retirement scope](design/session-foundation-retirement.md#collection-retirement-scope).
+Control delivery, managed runtime, SSH and the former native `find` surface have been retired with their code and active entry points. ASI SQL and schema queries are available; full-text search follows in #567. This document records native harness session, mirror, identity, transcript and usage evidence; retired control/runtime contracts are outside its current scope. See the [collection retirement scope](design/session-foundation-retirement.md#collection-retirement-scope).
 
 Tracking: #235, #236–242. Baseline audited at main
 `24e1932ef78238fdb13b5c1d11b61636695baf34` on 2026-10-03.

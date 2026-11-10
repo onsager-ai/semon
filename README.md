@@ -19,8 +19,8 @@ Control delivery, managed runtime and SSH are also retired, with their code and
 active entry points removed. Local collection, non-SSH Push/receive, native
 identity and lineage, passive questions and approvals from logs, archive and
 unarchive, enrollment, authorization, export, and passive runtime observation
-remain supported. Full-text `find` remains paused until the ASI query surface
-lands. Retirement does not delete user data, credentials, history or installed
+remain supported. ASI SQL and schema queries are available; full-text search
+follows in #567. Retirement does not delete user data, credentials, history or installed
 services. See the [session foundation contract](docs/design/session-foundation-retirement.md#collection-retirement-scope).
 
 ## Seeing your agent sessions
@@ -122,6 +122,10 @@ They read a window of recent logs: only the log files modified in the last 30 da
 | `get_session_activity` | `id`, `kind` (`steps` / `facts`), `generation`, `cursor`, `limit` | typed metadata pages, capped at 256 items; continuation requires the returned generation and cursor |
 | `read_transcript` | `id`, one of `before` / `after` / `turn`, `limit` | a source-backed native transcript page, sharing Viewer slot ordering and rendering |
 | `stalls` | `idle_minutes`, `since` | sessions quiet for that long that are working, wait on a question, or whose process died while its pid file said busy, each with a `stall_reason` |
+| `sql` | `query`, `params`, `limit`, `timeout_ms` | read-only DuckDB SQL over the current local analytics snapshot (build with `--features asi-query`) |
+| `schema` | `table` | generated ASI analytics schema reference (build with `--features asi-query`) |
+
+`sql` and `schema` return compact JSON by default. `sql --format tsv` prints a tab-delimited header and rows; tabs, newlines and carriage returns in values become spaces. Typed query failures print the standard error envelope and exit 1; successful commands exit 0. MCP exposes the generated JSON reference at `semon://asi/schema`.
 
 Session summaries add nullable `activity_analytics`: ownership/context totals, compactions and per-session thrash, waste and empty-search signals, typed change counts and cost completeness. It measures wait time from exact interval unions and reports exclusive waste time and list cost by kind and category. Exact parent families receive aggregate totals only; wait measurements sum each physical session's union. Measurements retain known amounts and unknown-step coverage. See [session activity analytics](docs/design/session-activity-analytics.md) for fields and roll-up semantics. Activity pages contain no raw bytes, source paths, commands or output bodies.
 
