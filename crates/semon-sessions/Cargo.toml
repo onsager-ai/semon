@@ -8,6 +8,7 @@ description = "Read-only local Claude Code and Codex session tree."
 
 [dependencies]
 semon-asi = { path = "../semon-asi" }
+getrandom.workspace = true
 libc.workspace = true
 reqwest.workspace = true
 rusqlite = { workspace = true, features = ["cache", "hooks", "limits"] }
@@ -28,6 +29,10 @@ test-clock = []
 test-ui-account-server = []
 # Scoped deterministic receiver/producer integration tests; absent in production.
 test-hooks = []
+
+[dev-dependencies]
+arrow = { version = "=58.4.1", default-features = false }
+parquet = { version = "=58.4.1", default-features = false, features = ["arrow", "zstd"] }
 
 [[example]]
 name = "ui-account-server"

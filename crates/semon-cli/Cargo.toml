@@ -14,3 +14,9 @@ path = "src/main.rs"
 semon-push = { path = "../semon-push" }
 semon-sessions = { path = "../semon-sessions" }
 serde_json.workspace = true
+
+[dev-dependencies]
+arrow = { version = "=58.4.1", default-features = false }
+parquet = { version = "=58.4.1", default-features = false, features = ["arrow", "zstd"] }
+rusqlite.workspace = true
+semon-asi = { path = "../semon-asi" }

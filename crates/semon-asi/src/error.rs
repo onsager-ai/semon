@@ -20,6 +20,17 @@ impl Error {
     pub(crate) fn invalid(message: impl Into<String>) -> Self {
         Self::Invalid(message.into())
     }
+
+    /// Whether retrying the failed store operation can be safe without changing
+    /// its input or on-disk contract.
+    pub fn is_operational(&self) -> bool {
+        matches!(self, Self::Io(_))
+            || matches!(
+                self,
+                Self::Parquet(parquet::errors::ParquetError::External(source))
+                    if source.downcast_ref::<std::io::Error>().is_some()
+            )
+    }
 }
 
 impl fmt::Display for Error {
@@ -68,5 +79,24 @@ impl From<arrow::error::ArrowError> for Error {
 impl From<serde_json::Error> for Error {
     fn from(error: serde_json::Error) -> Self {
         Self::Json(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_external_parquet_io_is_operational() {
+        assert!(
+            Error::Parquet(parquet::errors::ParquetError::External(Box::new(
+                std::io::Error::other("temporary"),
+            )))
+            .is_operational()
+        );
+        assert!(
+            !Error::Parquet(parquet::errors::ParquetError::General("bad footer".into()))
+                .is_operational()
+        );
     }
 }
