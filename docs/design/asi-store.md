@@ -264,8 +264,10 @@ tables.
   The CLI checks namespace validity and missing-file/store ambiguity read-only
   before opening the store, so refusal preserves crash leftovers. It validates
   an existing index read-only, then acquires writer ownership before recovery,
-  namespace creation or writable refresh, and drains the Viewer's native
-  Catalog/activity producer with strict opening and no recovery fallback.
+  namespace creation or writable refresh, and drains stale rules through the
+  native Catalog/activity producer's bounded repair rounds before publishing,
+  with strict opening and no recovery fallback. Viewer only observes that
+  qualification; it does not start origin refresh or replacement publication.
   Namespace loading refuses symlinks and non-regular files and reads at most the
   expected length plus one. The index path must be the user's own trusted state
   file. Analytics input opens refuse symlinks with SQLite NOFOLLOW; regular-file
@@ -406,12 +408,17 @@ The writer's pure transition table is the authority for chain ownership:
   available admitted index. CI compares incremental and full-refresh live rows.
   Imported frozen heads may be the only surviving facts and are not assumed
   rebuildable from a receiver index.
-- **Versions and missing sources.** Queue stale rules, transform and pricing
-  versions in bounded producer batches; a transform-only change reprojects admitted
-  index facts without deriving labels/prices again. Origin rules/pricing changes
-  publish the resulting admitted activity generation; receivers retain each origin's
-  recorded versions and report coverage. A missing source retains its complete
-  facts and is marked `source_missing`. In particular, the multi-source gap #582
+- **Versions and missing sources.** Transform changes reproject admitted index
+  facts without deriving labels or prices again. Rules and price refresh of
+  untouched sessions are origin derivation work: the native Catalog producer
+  advances those stale source repairs in bounded rounds (64 sources per qualification),
+  durably as ordinary source invalidations. Stale activity is `Pending` to the
+  writer, so prior facts remain live until a re-admitted replacement is
+  published. Manifest `Versions.rules` is the writer target, not a claim about
+  retained rows, and there is no uniform-refresh claim. Origin rules/pricing
+  changes publish the resulting admitted activity generation; receivers retain
+  each origin's recorded versions and report coverage. A missing source retains
+  its complete facts and is marked `source_missing`. In particular, the multi-source gap #582
   must not replace a complete generation with a fragment. Re-derive at the origin
   when raw returns. A format mismatch refuses exactly; preserve or export frozen
   facts and custody, with no automatic reset or multi-version exception.
