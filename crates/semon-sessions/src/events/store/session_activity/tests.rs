@@ -132,8 +132,8 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     fs::create_dir_all(missing_path.parent().unwrap()).unwrap();
     let missing_records = [
         serde_json::json!({
-            "type":"system", "subtype":"compact_boundary", "sessionId":"native-cl-00",
-            "session_id":"native-cl-00", "timestamp":"2026-09-24T00:01:30Z",
+            "type":"system", "subtype":"compact_boundary", "uuid":"compact-cleared",
+            "sessionId":"native-cl-00", "session_id":"native-cl-00", "timestamp":"2026-09-24T00:01:30Z",
             "compactMetadata":{"trigger":"auto","preTokens":155000}
         }),
         serde_json::json!({
@@ -1034,7 +1034,7 @@ fn step_facts_keep_private_tool_details_and_usage_ownership() {
 #[test]
 fn activity_repricing_resumes_and_never_serves_mixed_prices() {
     let root = scratch("activity-reprice");
-    let (options, mut rows, _) = catalog_native_fixture(&root, 2, true);
+    let (options, mut rows, _) = catalog_native_fixture(&root, 1, true);
     let row = rows.iter_mut().find(|row| row.harness == "claude").unwrap();
     let original = row.session_activity.as_ref().unwrap().clone();
     let usage = (0..260)
