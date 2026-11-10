@@ -92,8 +92,9 @@ configuration and enablement surface. It coalesces catalog-publication
 notifications into at-most-one cycle per interval, opens a fresh read-only
 `SqliteAnalyticsInput` for each cycle, and uses the current native activity-rules
 version and pricing snapshot fingerprint as manifest targets. It preserves the
-adapter's admitted input boundary: bounded cold/full input remains outstanding
-work, not a limit added by the writer.
+adapter's admitted input boundary: the adapter bounds inventory and incremental
+chunks using the configured input budget, and the writer schedules continuation
+at the same interval until the input reports completion.
 
 Lock contention is an observable no-writer state. Unsupported or integrity input
 refuses visibly without mutating the SQLite index, advancing its checkpoint,
