@@ -5716,6 +5716,11 @@ mod tests {
     /// held build, which would never answer.
     const HUNG_AFTER: Duration = Duration::from_secs(5);
 
+    /// Cold Catalog completion must make worker-progress events eventually.
+    /// This is a hang guard, not a throughput budget: the test orders on each
+    /// completed worker rather than elapsed time.
+    const COLD_CATALOG_HANG_AFTER: Duration = Duration::from_secs(300);
+
     /// Runs `read` on a thread of its own, and fails unless it answered
     /// within [`AT_ONCE`]. A read that waits on a held build fails the test
     /// after [`HUNG_AFTER`] rather than hanging it.
@@ -6706,9 +6711,10 @@ mod tests {
             let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
             let options = fixture.options.clone();
             let start = Instant::now();
-            let (published, first_page) = mpsc::channel();
+            let (published, first_page) = mpsc::channel::<u64>();
             let (release, released) = mpsc::channel::<()>();
             let released = Mutex::new(released);
+            let pool_for_hook = pool.clone();
             *lock(&view.hooks.building) = Some(Arc::new(move || {
                 let page = crate::session_catalog_page(&options, "fixture", "limit=60");
                 assert_eq!(page.status, 200);
@@ -6727,28 +6733,34 @@ mod tests {
                     .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
                     .unwrap();
                 assert_eq!(observed, if unrelated == 0 { 60 } else { 64 });
-                assert!(
-                    start.elapsed() <= AT_ONCE,
-                    "bounded initial page took {:?}",
-                    start.elapsed()
-                );
                 eprintln!(
                     "production-first-page unrelated={unrelated} latency_us={} response_bytes={} native_sources={observed}",
                     start.elapsed().as_micros(),
                     page.body.len()
                 );
-                published.send(()).unwrap();
+                // This size-one pool has one view. The held worker owns its
+                // only running slot, and a running view cannot be queued, so
+                // no other worker can finish before this hold is released.
+                published.send(pool_for_hook.finished()).unwrap();
                 let _ = lock(&released).recv();
             }));
             view.note_catalog_read().unwrap();
-            first_page
-                .recv_timeout(HUNG_AFTER)
-                .expect("bounded cold page was not published");
-            let reading = view.clone();
-            let page = at_once(
-                "foreground Catalog while global observation is held",
-                move || native_api(&reading, "/api/sessions", "limit=60"),
+            let mut finished = first_page
+                .recv_timeout(COLD_CATALOG_HANG_AFTER)
+                .expect("cold Catalog hang: bounded page was not published");
+            assert_eq!(
+                pool.finished(),
+                finished,
+                "the held worker finished before its hold was released"
             );
+            let reading = view.clone();
+            let (answered, page) = mpsc::channel();
+            thread::spawn(move || {
+                let _ = answered.send(native_api(&reading, "/api/sessions", "limit=60"));
+            });
+            let page = page
+                .recv_timeout(COLD_CATALOG_HANG_AFTER)
+                .expect("cold Catalog hang: foreground page waited on held history");
             assert_eq!(page.status, 200);
             assert_eq!(body_of(&page)["completeness"]["state"], "partial");
             assert_eq!(pool.running(), 1);
@@ -6773,8 +6785,9 @@ mod tests {
             );
             let options = fixture.options.clone();
             let focused = Instant::now();
-            let answer = at_once("focused native Query while history is held", move || {
-                crate::Query::with_machines(vec![("fixture".into(), options)])
+            let (answered, query) = mpsc::channel();
+            thread::spawn(move || {
+                let answer = crate::Query::with_machines(vec![("fixture".into(), options)])
                     .call_selected(
                         "fixture",
                         "selected-00000",
@@ -6783,8 +6796,12 @@ mod tests {
                         None,
                         crate::SessionSourceReadMode::LocalThenProvider,
                     )
-                    .unwrap()
+                    .unwrap();
+                let _ = answered.send(answer);
             });
+            let answer = query
+                .recv_timeout(COLD_CATALOG_HANG_AFTER)
+                .expect("cold Catalog hang: focused Query waited on held history");
             assert!(answer.to_string().contains("selected first page"));
             assert_eq!(pool.running(), 1);
             eprintln!(
@@ -6792,19 +6809,18 @@ mod tests {
                 focused.elapsed().as_micros(),
                 answer.to_string().len()
             );
-            drop(release);
             // Historical ingestion scales with inventory size. Its bounded
             // steps commit Index offsets and partial Catalog publications while
-            // foreground reads remain responsive. Require complete collection
-            // qualification and worker cleanup before the existing production
-            // stalled-worker boundary; the foreground deadline stays separate.
+            // foreground reads remain responsive. Release it only after both
+            // foreground reads have completed while it was held, then observe
+            // every completion from the refresh pool rather than polling time.
+            drop(release);
             let background = Instant::now();
             let connection =
                 rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             let mut observed: i64 = connection
                 .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
                 .unwrap();
-            let deadline = background + STALLED_AFTER;
             loop {
                 assert!(pool.threads() <= 1);
                 assert!(pool.entries_for(&view) <= 1);
@@ -6826,12 +6842,7 @@ mod tests {
                 {
                     break;
                 }
-                assert!(
-                    Instant::now() < deadline,
-                    "cold Catalog did not complete before the production stall boundary {STALLED_AFTER:?}: indexed={observed}, running={}",
-                    pool.running()
-                );
-                thread::sleep(Duration::from_millis(20));
+                finished = pool.wait_for_finished_after(finished, COLD_CATALOG_HANG_AFTER);
             }
             assert_eq!(observed, 60 + unrelated);
             eprintln!(

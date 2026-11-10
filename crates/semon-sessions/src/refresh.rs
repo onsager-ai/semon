@@ -61,6 +61,9 @@ pub struct RefreshPool {
     state: Mutex<PoolState>,
     /// Signalled when an entry becomes the first due.
     wake: Condvar,
+    /// Signalled after a worker has left the running set.
+    #[cfg(test)]
+    finished: Condvar,
     /// How long a worker waits with nothing to run before it stops.
     idle_after: Duration,
     /// [`OVERFLOW_AFTER`], but for tests.
@@ -86,6 +89,9 @@ struct PoolState {
     peak: usize,
     #[cfg(test)]
     started: usize,
+    /// Workers that have left the running set.
+    #[cfg(test)]
+    finished: u64,
 }
 
 #[cfg(test)]
@@ -124,6 +130,8 @@ impl RefreshPool {
             size: size.max(1),
             state: Mutex::default(),
             wake: Condvar::new(),
+            #[cfg(test)]
+            finished: Condvar::new(),
             idle_after: IDLE_AFTER,
             overflow_after: OVERFLOW_AFTER,
         })
@@ -137,6 +145,8 @@ impl RefreshPool {
             size: size.max(1),
             state: Mutex::default(),
             wake: Condvar::new(),
+            #[cfg(test)]
+            finished: Condvar::new(),
             idle_after: IDLE_AFTER,
             overflow_after,
         })
@@ -173,6 +183,28 @@ impl RefreshPool {
     /// Queue/worker counts alone do not establish that native work has drained.
     pub fn running(&self) -> usize {
         lock(&self.state).running.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn finished(&self) -> u64 {
+        lock(&self.state).finished
+    }
+
+    /// Wait for a worker that was running when `finished` was observed to
+    /// leave the running set. Tests use this to order a Catalog continuation
+    /// after the step that drove it, without polling on wall-clock intervals.
+    #[cfg(test)]
+    pub(crate) fn wait_for_finished_after(&self, finished: u64, timeout: Duration) -> u64 {
+        let state = lock(&self.state);
+        let (state, _) = self
+            .finished
+            .wait_timeout_while(state, timeout, |state| state.finished == finished)
+            .unwrap_or_else(PoisonError::into_inner);
+        assert_ne!(
+            state.finished, finished,
+            "refresh-pool hang: no worker completed within {timeout:?}"
+        );
+        state.finished
     }
 
     /// Queues `view`'s check at `at`, in place of its entry `replacing` if
@@ -340,7 +372,13 @@ fn worker(pool: Arc<RefreshPool>) {
     struct Running<'a>(&'a RefreshPool, u64);
     impl Drop for Running<'_> {
         fn drop(&mut self) {
-            lock(&self.0.state).running.remove(&self.1);
+            let mut state = lock(&self.0.state);
+            state.running.remove(&self.1);
+            #[cfg(test)]
+            {
+                state.finished += 1;
+                self.0.finished.notify_all();
+            }
         }
     }
     let replace = Replace(pool);
