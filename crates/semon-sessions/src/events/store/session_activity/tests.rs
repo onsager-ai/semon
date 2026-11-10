@@ -595,9 +595,11 @@ fn native_catalog_rules_refresh_skips_never_derivable_sessions_and_drains_rounds
     let root = scratch("rules-repair-rounds");
     let (options, rows, _) = catalog_native_fixture(&root, 68, true);
     let index = crate::events::EventCache::path(&options.cache);
+    // `append_claude_step` extends native-cl-00, so only that session's Catalog
+    // source cohort moves away from its stored activity witness.
     let mismatched_key = rows
         .iter()
-        .find(|row| row.harness == "claude")
+        .find(|row| row.sources[0].path.ends_with("native-cl-00.jsonl"))
         .unwrap()
         .key
         .clone();
