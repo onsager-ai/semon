@@ -1556,13 +1556,13 @@ fn run_mcp(home: &HomeArgs) -> Result<(), String> {
             executable: env::current_exe().map_err(|error| error.to_string())?,
             store_root: asi_store_root(home),
         };
-        return semon_sessions::serve_mcp_with_extension(
+        semon_sessions::serve_mcp_with_extension(
             &mut query,
             &mut extension,
             io::stdin().lock(),
             io::stdout().lock(),
         )
-        .map_err(|error| error.to_string());
+        .map_err(|error| error.to_string())
     }
     #[cfg(not(feature = "asi-query"))]
     semon_sessions::serve_mcp(&mut query, io::stdin().lock(), io::stdout().lock())

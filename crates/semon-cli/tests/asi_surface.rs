@@ -61,11 +61,9 @@ impl Server {
         let stdout = child.stdout.take().unwrap();
         let (sender, replies) = mpsc::channel();
         thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                if let Ok(line) = line {
-                    if sender.send(line).is_err() {
-                        break;
-                    }
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                if sender.send(line).is_err() {
+                    break;
                 }
             }
         });
