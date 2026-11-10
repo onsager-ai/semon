@@ -6690,6 +6690,69 @@ mod tests {
     }
 
     #[test]
+    fn a_catalog_read_resumes_cold_observation_after_interest_expires() {
+        let fixture = Fixture::new();
+        for n in 0..65 {
+            let id = format!("cold-{n:05}");
+            fixture.claude(&id, &[json!({"type":"user","sessionId":id,"uuid":id,"cwd":"/tmp/project","timestamp":"2026-10-01T00:00:00Z","message":{"role":"user","content":"cold observation"}})]);
+        }
+        let pool = RefreshPool::new(1);
+        let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
+        let (starts, release) = view.hooks.hold();
+        view.note_catalog_read().unwrap();
+        starts
+            .recv_timeout(COLD_CATALOG_HANG_AFTER)
+            .expect("the first partial Catalog publication is held");
+        assert_eq!(pool.running(), 1);
+        let finished = pool.finished();
+        // Expire interest while the worker is held, without sleeping or racing
+        // its requeue decision. Pending cold work intentionally pauses on idle.
+        {
+            let mut state = lock(&view.live.state);
+            state.idle_after = Duration::ZERO;
+            state.read_at = Some(Instant::now());
+            assert!(!state.active());
+        }
+        drop(release);
+        assert!(pool.wait_for_finished_after(finished, COLD_CATALOG_HANG_AFTER) > finished);
+        assert_eq!(pool.running(), 0);
+        assert_eq!(pool.entries_for(&view), 0);
+        assert_eq!(lock(&view.live.state).slot, Slot::Idle);
+        assert!(
+            view.evidence
+                .catalog_pending(&lock(&view.evidence.storage.work))
+        );
+        let connection =
+            rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
+        let indexed: i64 = connection
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(indexed, 64);
+        let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+        assert_eq!(page.status, 200);
+        assert_eq!(body_of(&page)["completeness"]["state"], "partial");
+        assert_eq!(lock(&view.live.state).slot, Slot::Idle);
+
+        // Restore the normal interest window before the Viewer read renews it
+        // and queues the ordinary bounded producer when it has gone idle.
+        lock(&view.live.state).idle_after = IDLE_AFTER;
+        assert_eq!(native_api(&view, "/api/sessions", "limit=60").status, 200);
+        assert!(lock(&view.live.state).active());
+        eventually("the resumed cold observation completes", || {
+            let page = crate::session_catalog_page(&fixture.options, "fixture", "limit=60");
+            (page.status == 200
+                && body_of(&page)["completeness"]["state"] == "complete"
+                && pool.running() == 0)
+                .then_some(())
+        });
+        let indexed: i64 = connection
+            .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(indexed, 65);
+        view.close();
+    }
+
+    #[test]
     fn initial_catalog_page_precedes_global_native_observation() {
         for unrelated in [0, 256, 2048] {
             let fixture = Fixture::new();
@@ -6710,6 +6773,9 @@ mod tests {
             }
             let pool = RefreshPool::new(1);
             let view = pooled(&fixture, Refresh::OnInvalidate, &pool);
+            // Keep interest active beyond the hang guard without new reads
+            // requeueing a continuation that the worker failed to schedule.
+            lock(&view.live.state).idle_after = Duration::from_secs(3600);
             let options = fixture.options.clone();
             let start = Instant::now();
             let (published, first_page) = mpsc::channel::<u64>();
