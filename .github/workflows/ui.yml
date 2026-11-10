@@ -34,6 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       run_expensive: ${{ steps.classify.outputs.run_expensive }}
+      viewer_tier: ${{ steps.classify.outputs.viewer_tier }}
     steps:
       - name: Check out full history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -52,7 +53,7 @@ jobs:
   foundation:
     name: UI types and generated assets
     needs: classify
-    if: needs.classify.outputs.run_expensive == 'true'
+    if: needs.classify.outputs.viewer_tier != 'none'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -165,7 +166,7 @@ jobs:
 
   checks:
     name: viewer / ${{ matrix.suite }}
-    needs: build
+    needs: [classify, build]
     runs-on: ubuntu-latest
     # The diagnostic lane runs the unchanged journey twice plus a phase sweep.
     # Product deadlines and every other suite's existing allowance stay unchanged.
@@ -173,7 +174,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [navigation, transcript, shell, interaction, accessibility, live, order-phone, order-desktop-light, order-desktop-dark, performance, transport]
+        suite: ${{ fromJSON(needs.classify.outputs.viewer_tier == 'full' && '["navigation","transcript","shell","interaction","accessibility","live","order-phone","order-desktop-light","order-desktop-dark","performance","transport"]' || needs.classify.outputs.viewer_tier == 'smoke' && '["navigation","live","transport"]' || '[]') }}
     env:
       SEMON_UI_OUT: ${{ github.workspace }}/tests/ui/out
       SEMON_CATALOG_OUT: ${{ github.workspace }}/tests/ui/out/catalog-phases
@@ -422,15 +423,21 @@ jobs:
       - name: Require the selected workflow path to pass
         env:
           CLASSIFIER_RESULT: ${{ needs.classify.result }}
-          RUN_EXPENSIVE: ${{ needs.classify.outputs.run_expensive }}
+          VIEWER_TIER: ${{ needs.classify.outputs.viewer_tier }}
           FOUNDATION_RESULT: ${{ needs.foundation.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           CHECKS_RESULT: ${{ needs.checks.result }}
         run: |
           test "$CLASSIFIER_RESULT" = success
-          if [ "$RUN_EXPENSIVE" = true ]; then
-            test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
-          else
-            test "$RUN_EXPENSIVE" = false
-            test "$FOUNDATION_RESULT" = skipped && test "$BUILD_RESULT" = skipped && test "$CHECKS_RESULT" = skipped
-          fi
+          case "$VIEWER_TIER" in
+            full|smoke)
+              test "$FOUNDATION_RESULT" = success && test "$BUILD_RESULT" = success && test "$CHECKS_RESULT" = success
+              ;;
+            none)
+              test "$FOUNDATION_RESULT" = skipped && test "$BUILD_RESULT" = skipped && test "$CHECKS_RESULT" = skipped
+              ;;
+            *)
+              echo "Unknown viewer tier: $VIEWER_TIER" >&2
+              exit 1
+              ;;
+          esac

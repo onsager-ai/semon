@@ -57,9 +57,12 @@ cargo clippy --all-targets --locked -- --no-deps -D warnings
 cargo test --locked
 ```
 
-Viewer changes require applicable fixture/browser suites. CI makes no pixel
-comparison; review the uploaded screenshots for visible changes. Do not loosen
-existing thresholds or remove required checks.
+Viewer changes require the full fixture/browser matrix; other code changes run
+the navigation, live-update and transport smoke suites, while docs-only and
+`crates/semon-asi/`-only PRs skip Viewer browser suites. Pushes to main and manual
+dispatch run the full matrix. The required `viewer browser checks` aggregate
+passes when the selected tier passes and when suites are intentionally skipped.
+CI makes no pixel comparison; review uploaded screenshots for visible changes.
 Reconcile current product decisions with the baseline scope before UI work;
 follow docs/design/ai-design-workflow.md for actual-image review and classification.
 Use Node 22+ and the foundation lane's locked tooling: `npm --prefix ui ci

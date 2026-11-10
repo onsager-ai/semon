@@ -61,10 +61,12 @@ test('the workflow matrix and functional condition reach every declared group', 
     new URL('../../.github/workflows/ui.yml', import.meta.url),
     'utf8',
   );
-  const matrix = workflow
-    .match(/suite: \[([^\]]+)\]/)[1]
-    .split(',')
-    .map((s) => s.trim());
+  const matrixLine = workflow.match(/^        suite: (.+)$/m)[1];
+  // The full tier is the first matrix list; the smoke tier must be a subset of it.
+  const [matrix, smoke] = [...matrixLine.matchAll(/'(\[[^']*\])'/g)].map(([, list]) =>
+    JSON.parse(list),
+  );
+  assert.ok(smoke.length > 0 && smoke.every((suite) => matrix.includes(suite)));
   const functional = JSON.parse(workflow.match(/contains\(fromJSON\('([^']+)'\)/)[1]);
   assert.deepEqual(functional.sort(), Object.keys(GROUPS).sort());
   assert.equal(new Set(matrix).size, matrix.length);
@@ -125,7 +127,7 @@ test('infrastructure has one foundation owner and touch checks have one browser 
     assert.ok(foundation.includes(`tests/ui/checks/${file}.test.mjs`), file);
   assert.match(foundation, /npm --prefix tests\/ui ci --no-audit --no-fund/);
   assert.match(build, /needs: foundation/);
-  assert.match(checks, /needs: build/);
+  assert.match(checks, /needs: \[classify, build\]/);
   assert.doesNotMatch(checks, /name: Browser-check infrastructure regression tests/);
   assert.match(checks, /name: Install pinned UI consumer tooling/);
   assert.doesNotMatch(foundation, /tap-hit\.test\.mjs/);
