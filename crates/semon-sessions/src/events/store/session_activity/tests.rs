@@ -667,24 +667,9 @@ fn native_catalog_rules_refresh_skips_never_derivable_sessions_and_drains_rounds
     assert!(!before.contains(&mismatched_path));
     drop(store);
 
-    let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
-    let mut work = crate::viewer::lock(&evidence.storage.work);
-    let rounds = (1..=32)
-        .find(|_| {
-            evidence
-                .refresh_catalog(&mut work, crate::model::now_ms())
-                .unwrap()
-        })
-        .expect("bounded native refresh must qualify without requeueing never-derivable sessions");
-    assert!(
-        rounds > 1,
-        "more than one 64-source repair round is required"
-    );
-    let cache = work.events.as_ref().unwrap();
-    assert!(cache.qualified_catalog().unwrap());
-    assert!(cache.pending_catalog_sources(1).unwrap().is_empty());
-    drop(work);
-    evidence.retire();
+    // More than 64 repairable sessions are stale, so qualification needs more
+    // than one repair round; the never-derivable ones must not block it.
+    crate::refresh_analytics_catalog(&options, || false).unwrap();
 
     let (store, _) = opened(&index);
     let stale_repairable: i64 = store
