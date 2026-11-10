@@ -1,15 +1,11 @@
 #!/bin/sh
 set -eu
-# Scope the check before requiring UI tooling, including on Rust/docs-only commits.
-if git diff --cached --quiet --diff-filter=ACMR -- \
-  ':(glob)ui/src/**/*.ts' ':(glob)ui/src/**/*.tsx' \
-  ':(glob)ui/tests/**/*.mjs' ':(glob)ui/*.mjs' ':(glob)ui/*.json' \
-  ':(glob)tests/ui/**/*.mjs'; then
-  exit 0
-else
-  status=$?
-  [ "$status" -eq 1 ] || exit "$status"
+
+hooks_dir=$(cd "$(dirname "$0")" && pwd)
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+  "$hooks_dir/checks/rustfmt"
+
+if [ -x "$hooks_dir/pre-commit.local" ]; then
+  exec "$hooks_dir/pre-commit.local" "$@"
 fi
-command -v node >/dev/null 2>&1 || { echo 'Install Node 22+ before using the UI hook.' >&2; exit 1; }
-[ -d ui/node_modules/prettier ] || { echo 'Run npm --prefix ui ci --no-audit --no-fund before using the UI hook.' >&2; exit 1; }
-node ui/format.mjs --staged
