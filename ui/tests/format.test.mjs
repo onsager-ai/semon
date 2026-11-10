@@ -18,13 +18,13 @@ test('hook skips empty, Rust/docs-only and deleted UI changes without Node or Pr
     await mkdir(join(root, 'ui/src'), { recursive: true });
     await mkdir(join(root, 'bin'));
     await copyFile(
-      new URL('../../.githooks/pre-commit', import.meta.url),
-      join(root, '.githooks/pre-commit'),
+      new URL('../../.githooks/pre-commit.local', import.meta.url),
+      join(root, '.githooks/pre-commit.local'),
     );
     const gitPath = spawnSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).stdout.trim();
     await symlink(gitPath, join(root, 'bin/git'));
     const hook = () =>
-      run('/bin/sh', ['.githooks/pre-commit'], {
+      run('/bin/sh', ['.githooks/pre-commit.local'], {
         env: { ...process.env, PATH: join(root, 'bin') },
       });
     git('init');
@@ -46,7 +46,7 @@ test('hook skips empty, Rust/docs-only and deleted UI changes without Node or Pr
     const required = hook();
     assert.equal(required.status, 1);
     assert.match(required.stderr, /Install Node 22\+/);
-    const missingDependencies = run('/bin/sh', ['.githooks/pre-commit']);
+    const missingDependencies = run('/bin/sh', ['.githooks/pre-commit.local']);
     assert.equal(missingDependencies.status, 1);
     assert.match(missingDependencies.stderr, /npm --prefix ui ci/);
   } finally {

@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "manifest_sha256": "282df73f7584768039761322048e030bdd2296d0cf30a0cc66fa70692dad6b44",
-  "block_sha256": "21b24d84a4636c657f08116aac12fb3d4a0ea717b66c92f4cfe1dff433f8d9a4",
+  "manifest_sha256": "a4d9d50f2cd3744d2d352b5c76d5b256d724ddfef164f9d73667f24c2d5204d6",
+  "block_sha256": "1439c3ccca8e357299cad3e45d87db923b7ac76fc0ebb671d72984001bd6ab85",
   "resolved_skills": [
     "ci-triage",
     "docs-drift-guard",
@@ -93,7 +93,7 @@
       "mode": "100644"
     },
     ".agents/skills/pre-push/SKILL.md": {
-      "sha256": "153e3faba2fa93c81885415b3d1e85b66ab93ab65dacb07a27b7b61efeb8b367",
+      "sha256": "42392e9937b1401745b253780dd7816c6509ea8ab171a5a6c8efa16f1a821eb8",
       "owner": "shared",
       "mode": "100644"
     },
@@ -103,7 +103,7 @@
       "mode": "100644"
     },
     ".agents/sync.mjs": {
-      "sha256": "68ab4378c640a8f89e6718c30b0903d853defcab2a8723436d082005b34099c2",
+      "sha256": "d982b940cb47c31b1246ada6890f3035f6249b4d796c465a65725719b7270844",
       "owner": "tooling",
       "mode": "100644"
     },
@@ -188,7 +188,7 @@
       "mode": "100644"
     },
     ".claude/skills/pre-push/SKILL.md": {
-      "sha256": "153e3faba2fa93c81885415b3d1e85b66ab93ab65dacb07a27b7b61efeb8b367",
+      "sha256": "42392e9937b1401745b253780dd7816c6509ea8ab171a5a6c8efa16f1a821eb8",
       "owner": "shared",
       "mode": "100644"
     },
@@ -207,8 +207,23 @@
       "owner": "local-projection",
       "mode": "100644"
     },
+    ".githooks/checks/rustfmt": {
+      "sha256": "04454c6ef15548648df5c36c9a51de67c0ed33764951ef904ca2cbfe3ccff0fe",
+      "owner": "hooks",
+      "mode": "100755"
+    },
+    ".githooks/pre-commit": {
+      "sha256": "a78dff69220f18fa5a914fd41b45319c00823d52897058d62154c501274e65d5",
+      "owner": "hooks",
+      "mode": "100755"
+    },
+    ".githooks/README.md": {
+      "sha256": "915de38a96822e1e32ecd63532924d40583570b2986a1acc2003cfe1130e1bf5",
+      "owner": "hooks",
+      "mode": "100644"
+    },
     ".github/workflows/agent-config.yml": {
-      "sha256": "60dca4b2ee7022d76732df2654190e246cdd510f9e6adef3941e3d9b602e3cb2",
+      "sha256": "f7567d8a59bfe33c6962a5f36fce118ec0bef385be0f70770effcc6717353f8d",
       "owner": "tooling",
       "mode": "100644"
     }
