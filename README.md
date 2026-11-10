@@ -178,6 +178,21 @@ semon analytics materialize --all --batch-sessions 16 --batch-steps 4096
 semon analytics materialize --watch --since 7d
 ```
 
+`semon analytics coverage` reads one already-published analytics snapshot without
+starting the writer or taking its lock. It groups live `fact_session` rows by their
+recorded transform, rules, price and taxonomy versions plus source/computation
+status, and reports session and step coverage. The manifest versions are displayed
+as writer **TARGETS**, not as a claim that every session refreshed uniformly.
+Native pending, failed and frozen derivation state is not part of this report.
+Like the writer, it refuses a symlinked state or store directory and a store without its
+`analytics-namespace`. It holds the live map in memory, as the writer does, so its memory
+grows with the number of live sessions.
+
+```sh
+semon analytics coverage
+semon analytics coverage --json
+```
+
 To give Claude Code's agents these tools, add the server once; user scope makes it available in every project. It reads the last 30 days; add `--since 7d` for a lighter first run or `--all` for everything:
 
 ```sh

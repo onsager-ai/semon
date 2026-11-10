@@ -5,6 +5,7 @@
 //! ([`compact`]). It does not depend on `semon-sessions`.
 
 pub mod compact;
+pub mod coverage;
 pub mod error;
 pub mod governance;
 pub mod input;
@@ -23,6 +24,7 @@ mod duckdb_smoke;
 mod testutil;
 
 pub use compact::CompactionPolicy;
+pub use coverage::{CoverageGroup, CoverageKey, CoverageReport, CoverageTotals};
 pub use error::{Error, Result};
 pub use governance::{
     ContributorWitness, CoverageWitness, Destination, ExportAuthority, ExportWitness,
