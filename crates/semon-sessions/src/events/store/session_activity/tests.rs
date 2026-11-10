@@ -27,7 +27,7 @@ fn wait_for_writer_manifest(root: &std::path::Path) -> semon_asi::Manifest {
 }
 
 #[test]
-fn analytics_writer_publishes_admitted_fixture_rows() {
+fn analytics_writer_publishes_fixture_rows_once_per_debounce_interval() {
     let root = scratch("analytics-writer-publishes");
     let (options, rows, slots) = catalog_native_fixture(&root, 1, false);
     let index = crate::events::EventCache::path(&options.cache);
@@ -41,8 +41,11 @@ fn analytics_writer_publishes_admitted_fixture_rows() {
         &index,
         &store_root,
     ));
-    handle.notify();
+    for _ in 0..8 {
+        handle.notify();
+    }
     let manifest = wait_for_writer_manifest(&store_root);
+    assert_eq!(manifest.generation, 1);
     assert!(manifest.checkpoints.contains_key("fixture-machine"));
     assert!(
         !semon_asi::read_live_map(&store_root, &manifest)
