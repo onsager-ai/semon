@@ -1898,6 +1898,7 @@ dependencies = [
  "arrow",
  "duckdb",
  "hex",
+ "libc",
  "parquet",
  "serde",
  "serde_json",
@@ -1909,9 +1910,12 @@ dependencies = [
 name = "semon-cli"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "semon-asi",
  "semon-push",
  "semon-sessions",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

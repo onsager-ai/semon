@@ -6,6 +6,10 @@ use std::{
 };
 
 fn main() -> ExitCode {
+    #[cfg(feature = "asi-query")]
+    if env::args().skip(1).eq(["asi", "query-worker"]) {
+        return ExitCode::from(semon_asi::query::worker_stdio() as u8);
+    }
     match parse_args().and_then(run) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
