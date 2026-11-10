@@ -2,7 +2,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -97,12 +97,36 @@ pub fn load_or_create_analytics_namespace(state_dir: &Path) -> Result<String, St
 }
 
 fn load(path: &Path) -> Result<String, String> {
-    let content = fs::read_to_string(path).map_err(|error| {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = options.open(path).map_err(|error| {
         format!(
-            "cannot read analytics namespace {}: {error}",
+            "cannot open analytics namespace {}: {error}",
             path.display()
         )
     })?;
+    if !file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err(format!(
+            "analytics namespace {} must be a regular file",
+            path.display()
+        ));
+    }
+    let mut content = String::new();
+    // Include one extra byte to detect oversized input without unbounded reads.
+    file.take((PREFIX.len() + RANDOM_BYTES * 2 + 2) as u64)
+        .read_to_string(&mut content)
+        .map_err(|error| {
+            format!(
+                "cannot read analytics namespace {}: {error}",
+                path.display()
+            )
+        })?;
     let namespace = content.strip_suffix('\n').ok_or_else(|| {
         format!(
             "malformed analytics namespace {}; expected one newline-terminated opaque ID",
@@ -235,6 +259,26 @@ mod tests {
     }
 
     #[test]
+    fn namespace_refuses_empty_whitespace_wrong_charset_and_oversized_files() {
+        let root = temporary_root("invalid-content");
+        let path = root.join(ANALYTICS_NAMESPACE_FILE);
+        for bytes in [
+            Vec::new(),
+            b" \n".to_vec(),
+            format!("origin-{}\n", "g".repeat(64)).into_bytes(),
+            format!("origin-{}\n", "A".repeat(64)).into_bytes(),
+            vec![0xff; 72],
+            format!("origin-{}\nextra", "a".repeat(64)).into_bytes(),
+            vec![b'a'; 1024 * 1024],
+        ] {
+            fs::write(&path, &bytes).unwrap();
+            assert!(load_or_create_analytics_namespace(&root).is_err());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn missing_namespace_with_existing_store_refuses() {
         let root = temporary_root("existing-store");
         let manifest = root.join("analytics-store/analytics/manifest.json");
@@ -256,5 +300,47 @@ mod tests {
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
         );
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod special_file_tests {
+    use super::*;
+    use std::os::unix::{ffi::OsStrExt, fs::symlink};
+
+    #[test]
+    fn namespace_refuses_symlink_and_fifo_without_following_or_blocking() {
+        for fifo in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "semon-namespace-special-{}-{fifo}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let path = root.join(ANALYTICS_NAMESPACE_FILE);
+            let target = root.join("target");
+            fs::write(&target, format!("origin-{}\n", "a".repeat(64))).unwrap();
+            if fifo {
+                let name = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+                if unsafe { libc::mkfifo(name.as_ptr(), 0o600) } != 0 {
+                    fs::remove_dir_all(root).unwrap();
+                    continue;
+                }
+            } else {
+                symlink(&target, &path).unwrap();
+            }
+            assert!(load_or_create_analytics_namespace(&root).is_err());
+            let kind = fs::symlink_metadata(&path).unwrap().file_type();
+            if fifo {
+                use std::os::unix::fs::FileTypeExt;
+                assert!(kind.is_fifo());
+            } else {
+                assert!(kind.is_symlink());
+            }
+            assert_eq!(
+                fs::read_to_string(target).unwrap(),
+                format!("origin-{}\n", "a".repeat(64))
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

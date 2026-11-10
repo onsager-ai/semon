@@ -573,15 +573,11 @@ fn run(command: Command) -> Result<(), String> {
     }
 }
 
-fn refresh_catalog(query: &mut semon_sessions::Query) -> Result<(), String> {
-    query
-        .call("list_sessions", &serde_json::json!({}))
-        .map(|_| ())
-        .map_err(|error| format!("catalog refresh: {error}"))
-}
-
-fn publish_materialization(writer: &semon_sessions::Handle) -> Result<(), String> {
-    match writer.publish_and_wait() {
+fn publish_materialization(
+    writer: &semon_sessions::Handle,
+    stop: &semon_push::Stop,
+) -> Result<(), String> {
+    match writer.publish_and_wait_until(|| stop.is_stopped()) {
         semon_sessions::AnalyticsWriterStatus::Idle => Ok(()),
         semon_sessions::AnalyticsWriterStatus::NoWriter => Err("analytics writer busy".into()),
         semon_sessions::AnalyticsWriterStatus::Refused { reason } => {
@@ -594,26 +590,29 @@ fn publish_materialization(writer: &semon_sessions::Handle) -> Result<(), String
 }
 
 /// Materialize the local Analytics Store from the native Event Index. The
-/// Catalog refresh is the same Query producer path used by `semon query` and
-/// MCP; analytics only opens its published SQLite result.
+/// Catalog refresh drains the strict native producer used by the Viewer;
+/// analytics only opens its successfully published SQLite result.
 fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
-    let index_path = semon_sessions::analytics_index_path(&args.home.options.cache);
+    let options = semon_sessions::Options {
+        since: args.home.window.unwrap_or(semon_sessions::DEFAULT_WINDOW),
+        ..args.home.options
+    };
+    let index_path = semon_sessions::analytics_index_path(&options.cache);
     let state_dir = index_path.parent().ok_or_else(|| {
         format!(
             "analytics materialize requires an Event Index path with a parent: {}",
             index_path.display()
         )
     })?;
-    let mut query = args.home.query();
-    refresh_catalog(&mut query)?;
-    let namespace = semon_sessions::load_or_create_analytics_namespace(state_dir)?;
     let store_root = semon_sessions::analytics_store_root(&index_path).ok_or_else(|| {
         format!(
             "analytics materialize requires an Event Index path with a parent: {}",
             index_path.display()
         )
     })?;
-    let writer = semon_sessions::start(semon_sessions::AnalyticsWriterConfig::new(
+    let owner = semon_sessions::analytics_writer::Owner::acquire(&index_path, &store_root)?;
+    let namespace = semon_sessions::load_or_create_analytics_namespace(state_dir)?;
+    let writer = owner.start(semon_sessions::AnalyticsWriterConfig::new(
         namespace.clone(),
         index_path,
         store_root.clone(),
@@ -624,14 +623,17 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
         interrupt::stop_on_signal(&stop);
     }
     let result = (|| {
-        publish_materialization(&writer)?;
+        semon_sessions::refresh_analytics_catalog(&options, || stop.is_stopped())
+            .map_err(|error| format!("catalog refresh: {error}"))?;
+        publish_materialization(&writer, &stop)?;
         println!(
             "analytics materialized: namespace={namespace} store={} status=idle",
             store_root.display()
         );
         while args.watch && !stop.sleep(std::time::Duration::from_secs(2)) {
-            refresh_catalog(&mut query)?;
-            publish_materialization(&writer)?;
+            semon_sessions::refresh_analytics_catalog(&options, || stop.is_stopped())
+                .map_err(|error| format!("catalog refresh: {error}"))?;
+            publish_materialization(&writer, &stop)?;
         }
         Ok(())
     })();
@@ -954,7 +956,8 @@ fn query_usage() -> String {
 fn analytics_usage() -> String {
     "Usage: semon analytics materialize [--watch] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--copilot-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
      Refreshes the local native Catalog, then explicitly materializes its analytics store.\n\
-     --watch refreshes and publishes every 2 s until Ctrl-C or SIGTERM."
+     Catalog refresh is complete; --since/--all do not bound analytics input.\n\
+     --watch refreshes and publishes every 2 s; failures exit visibly. Ctrl-C/SIGTERM stops the wait."
         .to_owned()
 }
 

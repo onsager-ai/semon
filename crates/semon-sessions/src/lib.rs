@@ -26,6 +26,48 @@ pub use analytics_writer::{
     AnalyticsWriterConfig, AnalyticsWriterStatus, Handle, analytics_store_root, start,
 };
 
+/// Refresh the complete local Catalog and activity through the native producer.
+/// Strict producer mode propagates index failures without recovery or reset.
+/// The caller owns the analytics writer lock before invoking this operation.
+pub fn refresh_analytics_catalog(
+    options: &Options,
+    cancelled: impl Fn() -> bool,
+) -> io::Result<()> {
+    let options = Options {
+        scan_window: false,
+        ..options.clone()
+    };
+    let evidence = native_evidence::NativeEvidence::for_source_key("local", options);
+    evidence
+        .catalog_demand
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let mut work = evidence
+        .storage
+        .work
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    loop {
+        if cancelled() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Catalog refresh cancelled",
+            ));
+        }
+        if evidence.refresh_catalog(&mut work, model::now_ms())? {
+            let cache = work
+                .events
+                .as_ref()
+                .ok_or_else(|| io::Error::other("Catalog producer has no index"))?;
+            if !cache.qualified_catalog()? || !cache.pending_catalog_sources(1)?.is_empty() {
+                return Err(io::Error::other(
+                    "Catalog refresh completed without a publication",
+                ));
+            }
+            return Ok(());
+        }
+    }
+}
+
 /// The SQLite Event Index path for a configured cache stem.
 ///
 /// This is the same path the native Catalog producer owns. Analytics opens it

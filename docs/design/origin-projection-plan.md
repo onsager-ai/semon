@@ -84,15 +84,24 @@ observing the new physical witness as pending.
 ## Integration after the storage stack merges
 
 `semon analytics materialize` is the explicit local lifecycle entry point for
-this plan. It refreshes the native Catalog through the same producer path as
-`semon query` and MCP, then starts `semon-sessions::analytics_writer` against
+this plan. It drains the native Catalog/activity producer used by the Viewer
+with strict index opening (no recovery fallback), then starts `semon-sessions::analytics_writer` against
 that read-only SQLite index. Nothing starts the writer by default: Viewer, MCP,
 push and receive remain disabled as hosts. The first materialize writes a random
 `origin-` namespace to `<index parent>/analytics-namespace`, and later runs reuse
 it. Deleting that state directory starts a new namespace with new session IDs;
 there is no automatic reconciliation. Rename or transfer is a later explicit
 operator workflow. The CLI's `--watch` repeats Catalog refresh and notification
-until stopped. The writer coalesces notifications into at-most-one cycle per
+until stopped; it exits visibly on refresh or publication failure. It acquires
+the store lock before namespace creation or writable Catalog refresh. Existing
+index validation is read-only and precedes any analytics state creation, so
+corrupt and unsupported indexes are refused unchanged. Namespace loading refuses
+symlinks and non-regular files and reads at most the expected length plus one.
+Each wait has its own request generation and outcome: success is settled only
+after that request's publication and compaction, never at an intermediate Idle
+or successful manifest reload. Later requests cannot inherit a previous outcome.
+SIGINT/SIGTERM cancels pending waits, joins the writer, and is then re-raised.
+The writer coalesces notifications into at-most-one cycle per
 interval, opens a fresh read-only `SqliteAnalyticsInput` for each cycle, and
 uses the current native activity-rules version and pricing snapshot fingerprint
 as manifest targets. It preserves the adapter's admitted input boundary:
@@ -102,7 +111,10 @@ Lock contention is an observable no-writer state. Unsupported or integrity input
 refuses visibly without mutating the SQLite index, advancing its checkpoint,
 resetting state or deleting data; a later notification makes one fresh read
 attempt. Direct store I/O and Parquet `External` I/O back off, as do operational
-SQLite busy/locked/I/O/full/cannot-open errors. Parquet page-read I/O surfaced as
+SQLite busy/locked/I/O/full/cannot-open errors. Three operational failures exhaust
+the request budget with the last error (up to 1s/2s backoffs plus publication
+spacing); successful reloads do not reset that budget. A new Catalog publication
+notification permits a fresh attempt after refusal. Parquet page-read I/O surfaced as
 an Arrow error latches refusal until the next notification; the writer does not
 recover its lost typed I/O source. A store error reloads the manifest before
 retry because a rename may already have published the generation. Reload success
