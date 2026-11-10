@@ -687,7 +687,10 @@ pub static DIM_REPO: Table = Table {
             "repo_id",
             "Sanitised remote repo_id; null for a local repository.",
         ),
-        path_opt("repo_path", "Local repository path; null for a remote."),
+        path_opt(
+            "repo_path",
+            "Local repository path; null for a remote and for the shared `unknown` key.",
+        ),
         label("display_name", "Display name."),
     ],
 };

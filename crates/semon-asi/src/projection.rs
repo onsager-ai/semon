@@ -10,7 +10,7 @@ use crate::{
     error::{Error, Result},
     input::{
         Activity, AdmittedSession, ContextBand, Price, PriceUnit, RateKind, Step, Trigger,
-        UsageOwner, WasteKind,
+        UNKNOWN_REPO_KEY, UsageOwner, WasteKind,
     },
     schema::{self, Type},
 };
@@ -39,6 +39,12 @@ pub struct ProjectedSession {
 pub fn project(session: &AdmittedSession) -> Result<ProjectedSession> {
     let mut output = ProjectedSession::default();
     let date_rows = dates(session);
+    let repo_path =
+        if session.session.repo.repo_id.is_none() && session.session.repo.key != UNKNOWN_REPO_KEY {
+            session.session.repo.local_path.as_deref()
+        } else {
+            None
+        };
 
     for step in &session.steps {
         let timestamp = step.timestamp;
@@ -150,10 +156,7 @@ pub fn project(session: &AdmittedSession) -> Result<ProjectedSession> {
         row([
             ("repo_key", text(&session.session.repo.key)),
             ("repo_id", text_opt(session.session.repo.repo_id.as_deref())),
-            (
-                "repo_path",
-                text_opt(session.session.repo.local_path.as_deref()),
-            ),
+            ("repo_path", text_opt(repo_path)),
             ("display_name", text(&session.session.repo.display_name)),
         ]),
     )?;
@@ -811,5 +814,50 @@ mod tests {
         assert_eq!(step["activity"], Cell::Text(Some("unknown".into())));
         assert_eq!(step["ts"], Cell::Timestamp(None));
         assert_eq!(step["date_key"], Cell::Integer(None));
+    }
+
+    #[test]
+    fn repository_dimensions_keep_local_paths_local() {
+        let mut first = session(Vec::new());
+        first.session.repo.local_path = Some("/work/one".into());
+        let mut second = first.clone();
+        second.session_uid = "machine/codex/other".into();
+        second.session.native_session_id = "other".into();
+        second.session.repo.local_path = Some("/work/two".into());
+
+        let first_repo = project(&first).unwrap().tables["dim_repo"][0].clone();
+        let second_repo = project(&second).unwrap().tables["dim_repo"][0].clone();
+        assert_eq!(first_repo, second_repo);
+        assert_eq!(first_repo["repo_path"], Cell::Text(None));
+
+        let mut local = first;
+        local.session.repo.repo_id = None;
+        local.session.repo.key = "7b2d8e19-0383-4f09-a4e1-4f2ea134ce70".into();
+        let local_repo = project(&local).unwrap().tables["dim_repo"][0].clone();
+        assert_eq!(local_repo["repo_key"], text(&local.session.repo.key));
+        assert_eq!(
+            local_repo["repo_path"],
+            Cell::Text(Some("/work/one".into()))
+        );
+    }
+
+    #[test]
+    fn unknown_repositories_share_one_path_free_dimension_row() {
+        let mut first = session(Vec::new());
+        first.session.repo = Repo {
+            key: UNKNOWN_REPO_KEY.into(),
+            repo_id: None,
+            local_path: Some("/work/one".into()),
+            display_name: "unknown".into(),
+        };
+        let mut second = first.clone();
+        second.session_uid = "machine/codex/other".into();
+        second.session.native_session_id = "other".into();
+        second.session.repo.local_path = Some("/work/two".into());
+
+        let first_repo = project(&first).unwrap().tables["dim_repo"][0].clone();
+        let second_repo = project(&second).unwrap().tables["dim_repo"][0].clone();
+        assert_eq!(first_repo, second_repo);
+        assert_eq!(first_repo["repo_path"], Cell::Text(None));
     }
 }

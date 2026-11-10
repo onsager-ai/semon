@@ -42,7 +42,7 @@ const LIVE_DIR: &str = "live";
 /// A file leaves the store this long after the first generation that no longer names it.
 pub const RETIREMENT_DELAY_MS: i64 = 10 * 60 * 1000;
 
-/// Source of the time used to stamp unpublication; injectable for tests.
+/// Source of the time used to stamp unpublication and source loss; injectable for tests.
 pub trait Clock {
     fn now_ms(&self) -> i64;
 }
@@ -64,7 +64,8 @@ impl<T: Clock + ?Sized> Clock for Arc<T> {
     }
 }
 
-/// Versions of the code that produced the rows; a stale row is requeued.
+/// Writer targets for future publications; retained rows keep their recorded
+/// per-session versions and may therefore differ from these targets.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Versions {
     pub transform: u32,
@@ -243,6 +244,10 @@ impl<C: Clock> Store<C> {
 
     pub fn analytics_dir(&self) -> &Path {
         &self.analytics
+    }
+
+    pub(crate) fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
     }
 
     /// Writes one generation and makes it current. A crash before the manifest rename
