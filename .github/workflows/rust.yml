@@ -245,7 +245,7 @@ jobs:
       - name: Build the DuckDB tests
         run: |
           started=$SECONDS
-          cargo test -p semon-asi --features duckdb-tests --locked --no-run
+          cargo test -p semon-asi -p semon-cli --features semon-asi/duckdb-tests,semon-cli/asi-query --locked --no-run
           {
             echo "### semon-asi DuckDB build"
             echo "- cache hit: \`${{ steps.cache.outputs.cache-hit }}\`"
@@ -255,7 +255,10 @@ jobs:
           } | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: cargo test (DuckDB)
-        run: cargo test -p semon-asi --features duckdb-tests --locked
+        run: cargo test -p semon-asi -p semon-cli --features semon-asi/duckdb-tests,semon-cli/asi-query --locked -- --show-output
+
+      - name: cargo clippy (query engine and worker)
+        run: cargo clippy -p semon-asi -p semon-cli --all-targets --features semon-asi/duckdb-tests,semon-cli/asi-query --locked -- --no-deps -D warnings
 
   codex-conformance:
     name: Pinned Codex fixture conformance
