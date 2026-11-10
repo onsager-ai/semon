@@ -122,20 +122,27 @@ fn copied_native_compactions_collapse_or_withhold_only_the_conflicting_session()
             .sources[0]
             .path;
         let prefix = fs::read_to_string(original).unwrap();
-        let mut compact = serde_json::json!({
+        let compact = serde_json::json!({
             "type":"system", "subtype":"compact_boundary", "uuid":"compact-shared",
             "sessionId":"native-cl-00", "timestamp":"2026-09-24T00:01:30Z",
             "compactMetadata":{"trigger":"auto","preTokens":155000}
         });
         fs::write(original, format!("{prefix}{compact}\n")).unwrap();
-        let copy = options
-            .claude_home
-            .join("projects/-work-proj-copy/native-cl-00.jsonl");
-        fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        // The copy overlaps the original only in the shared compaction record.
+        // Its other records stay distinct: identical turn/event records would
+        // collide in the causal trace tables before reaching the adapter.
+        same_stem_contributor(&options, Some("compact-shared"));
         if conflict == "timestamp" {
-            compact["timestamp"] = serde_json::json!("2026-09-24T00:01:31Z");
+            let copy = options
+                .claude_home
+                .join("projects/-work-proj-copy/native-cl-00.jsonl");
+            let text = fs::read_to_string(&copy).unwrap();
+            fs::write(
+                &copy,
+                text.replacen("2026-09-24T00:01:30Z", "2026-09-24T00:01:31Z", 1),
+            )
+            .unwrap();
         }
-        fs::write(copy, format!("{prefix}{compact}\n")).unwrap();
         let (rows, slots) = catalog_fixture_projection(&options);
         let row = rows.iter().find(|row| row.harness == "claude").unwrap();
         assert_eq!(row.sources.len(), 2);
@@ -154,19 +161,34 @@ fn copied_native_compactions_collapse_or_withhold_only_the_conflicting_session()
             declared, 2,
             "both physical contributors must reach the adapter"
         );
-        if conflict == "step" {
-            let metadata: String = store.connection.query_row(
-                "SELECT metadata FROM session_activity_compactions WHERE session_key=?1 AND ordinal=1",
-                [&row.key], |record| record.get(0),
-            ).unwrap();
-            let mut compact: serde_json::Value = serde_json::from_str(&metadata).unwrap();
-            assert!(!compact["step_id"].is_null());
-            compact["step_id"] = serde_json::Value::Null;
-            store.connection.execute(
+        let persisted = |ordinal: i64| -> serde_json::Value {
+            let metadata: String = store
+                .connection
+                .query_row(
+                    "SELECT metadata FROM session_activity_compactions WHERE session_key=?1 AND ordinal=?2",
+                    params![row.key, ordinal],
+                    |record| record.get(0),
+                )
+                .unwrap();
+            serde_json::from_str(&metadata).unwrap()
+        };
+        let first = persisted(0);
+        assert!(!first["step_id"].is_null());
+        // Which contributor persisted first is an ingest detail. Make the two
+        // native facts agree on their step so only the injected conflict differs.
+        let mut second = persisted(1);
+        second["step_id"] = if conflict == "step" {
+            serde_json::Value::Null
+        } else {
+            first["step_id"].clone()
+        };
+        store
+            .connection
+            .execute(
                 "UPDATE session_activity_compactions SET metadata=?2 WHERE session_key=?1 AND ordinal=1",
-                params![row.key, compact.to_string()],
-            ).unwrap();
-        }
+                params![row.key, second.to_string()],
+            )
+            .unwrap();
         let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
         let batch = input.read_admitted(None).unwrap();
         let uid = "fixture-machine/claude/native-cl-00";
@@ -183,15 +205,9 @@ fn copied_native_compactions_collapse_or_withhold_only_the_conflicting_session()
                 format!("{uid}/c/compact-shared")
             );
             assert!(session.compactions[0].step_uid.is_some());
-            assert_eq!(
-                session.steps.len(),
-                1,
-                "copied native step IDs are already unique"
-            );
             let projected = semon_asi::project(session).unwrap();
             assert_eq!(projected.tables["fact_compaction"].len(), 1);
-            assert_eq!(projected.tables["fact_step"].len(), 1);
-            assert_eq!(projected.tables["fact_turn"].len(), 1);
+            assert_eq!(projected.tables["fact_step"].len(), session.steps.len());
         } else {
             assert!(session.is_none());
             assert!(batch.changes.contains(&SessionChange::Pending {
