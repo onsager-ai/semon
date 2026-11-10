@@ -646,14 +646,14 @@ fn note_session_state(
     if let Some(crate::facts::RepoId::Path(path)) = row.repo_id.as_ref() {
         tx.execute(
             "INSERT INTO silver_repo_identity(repo_path,repo_key) \
-             SELECT ?1,'local:' || lower(hex(randomblob(16))) \
+             SELECT ?1,'local-' || lower(hex(randomblob(16))) \
              WHERE NOT EXISTS(SELECT 1 FROM silver_repo_identity WHERE repo_path=?1)",
             [path],
         )?;
     }
     tx.execute(
         "INSERT INTO silver_session_identity(session_key,harness,native_session_id) VALUES(?1,?2,?3) ON CONFLICT(session_key) DO UPDATE SET harness=excluded.harness,native_session_id=excluded.native_session_id",
-        params![row.key, row.harness, row.key],
+        params![row.key, row.harness, native_session_id(row)?],
     )?;
     let digest = analytics_digest(tx, row)?;
     let stored: Option<String> = tx
@@ -714,54 +714,30 @@ pub(super) fn remove_mismatched(
     tx: &Transaction<'_>,
     row: &crate::model::summary::CatalogRow,
 ) -> rusqlite::Result<()> {
-    let sources = crate::retention::source_generation(&row.sources)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     if source_missing_for_row(tx, row)? {
         note_session_state(tx, row, false)?;
         return Ok(());
     }
-    let removed = tx.execute(
-        "DELETE FROM session_activity_projections WHERE session_key=?1 AND source_generation<>?2",
-        params![row.key, sources],
+    let ready: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM session_activity_projections WHERE session_key=?1)",
+        [&row.key],
+        |r| r.get(0),
     )?;
-    if removed > 0 {
-        // A removal has to keep its exact native identity after Catalog rows
-        // are no longer available, so consumers can remove the prior UID.
-        tx.execute(
-            "INSERT INTO silver_session_identity(session_key,harness,native_session_id) VALUES(?1,?2,?3) ON CONFLICT(session_key) DO UPDATE SET harness=excluded.harness,native_session_id=excluded.native_session_id",
-            params![row.key, row.harness, row.key],
-        )?;
-        tx.execute(
-            "INSERT INTO silver_change(session_key,kind) VALUES(?1,'removed')",
-            [&row.key],
-        )?;
-        tx.execute(
-            "DELETE FROM silver_session_state WHERE session_key=?1",
-            [&row.key],
-        )?;
-        tx.execute(
-            "DELETE FROM session_activity_facts WHERE session_key=?1",
-            [&row.key],
-        )?;
-        tx.execute(
-            "DELETE FROM session_activity_steps WHERE session_key=?1",
-            [&row.key],
-        )?;
-        tx.execute(
-            "DELETE FROM session_activity_compactions WHERE session_key=?1",
-            [&row.key],
-        )?;
-    } else {
-        let ready: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM session_activity_projections WHERE session_key=?1)",
-            [&row.key],
-            |r| r.get(0),
-        )?;
-        if ready {
-            note_session_state(tx, row, false)?;
-        }
+    if ready {
+        // A changed source generation invalidates future admission; it is not
+        // proof that the Catalog session was removed. Preserve the last
+        // complete cohort until the replacement is fully admitted or the
+        // Catalog lifecycle records actual source loss/removal.
+        note_session_state(tx, row, false)?;
     }
     Ok(())
+}
+
+fn native_session_id(row: &crate::model::summary::CatalogRow) -> rusqlite::Result<&str> {
+    let [native_session_id] = row.native_ids.as_slice() else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    Ok(native_session_id)
 }
 
 pub(super) fn repairs(c: &Connection) -> rusqlite::Result<Vec<String>> {
@@ -832,10 +808,6 @@ pub(crate) fn page(
 /// Read all persisted StepFacts under the same source, rules, price and
 /// generation admission as activity pages. This crate-internal reader is for
 /// the analytics writer; public query and mirror surfaces must use `items`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "kept crate-internal for the analytics writer")
-)]
 pub(crate) fn step_facts(
     c: &Connection,
     row: &crate::model::summary::CatalogRow,

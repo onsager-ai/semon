@@ -77,18 +77,27 @@ impl AnalyticsInput for SqliteAnalyticsInput {
 
                 let mut result = Vec::with_capacity(changed.len());
                 for (key, kind) in changed {
-                    let uid = session_uid(&namespace, &session_identity(tx, &key)?);
-                    if kind == "removed" {
-                        result.push(SessionChange::Removed { session_uid: uid });
-                        continue;
-                    }
-                    if kind != "changed" {
+                    let identity = session_identity(tx, &key)?;
+                    let uid = session_uid(&namespace, &identity);
+                    if kind != "changed" && kind != "removed" {
                         return Err(rusqlite::Error::InvalidQuery);
                     }
                     let Some(row) = catalog_row(tx, &key)? else {
-                        result.push(SessionChange::Pending { session_uid: uid });
+                        if kind == "removed" {
+                            result.push(SessionChange::Removed { session_uid: uid });
+                        } else {
+                            result.push(SessionChange::Pending { session_uid: uid });
+                        }
                         continue;
                     };
+                    // A Catalog row is still a live identity.  A `removed`
+                    // journal entry may only delete an identity that is no
+                    // longer in Catalog; while replacement activity is pending,
+                    // retain the previous admitted facts.
+                    if kind == "removed" {
+                        result.push(SessionChange::Pending { session_uid: uid });
+                        continue;
+                    }
                     if row.lifecycle != CatalogLifecycle::Current {
                         result.push(SessionChange::SourceMissing {
                             session_uid: uid,
@@ -287,13 +296,24 @@ fn session_identity(
     key: &str,
 ) -> rusqlite::Result<(String, String)> {
     if let Some(row) = catalog_row(tx, key)? {
-        return Ok((row.harness, row.key));
+        return native_session_identity(&row);
     }
     tx.query_row(
         "SELECT harness,native_session_id FROM silver_session_identity WHERE session_key=?1",
         [key],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )
+}
+
+/// Catalog keys disambiguate source-local rows; they are not native session
+/// identifiers. A current logical session has one native identity even when
+/// several source files contribute to it. Refuse an ambiguous catalog row
+/// rather than deriving an identifier from a key prefix.
+fn native_session_identity(row: &CatalogRow) -> rusqlite::Result<(String, String)> {
+    let [native_session_id] = row.native_ids.as_slice() else {
+        return Err(rusqlite::Error::InvalidQuery);
+    };
+    Ok((row.harness.clone(), native_session_id.clone()))
 }
 
 fn source_witness(tx: &rusqlite::Transaction<'_>, key: &str) -> rusqlite::Result<CatalogRow> {
@@ -371,7 +391,7 @@ fn admitted(
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    let session_uid = session_uid(namespace, &(row.harness.clone(), row.key.clone()));
+    let session_uid = session_uid(namespace, &native_session_identity(&row)?);
     let fact_by_id: BTreeMap<_, _> = facts.into_iter().map(|(_, id, fact)| (id, fact)).collect();
     if fact_by_id.len() != steps.len() {
         return Err(rusqlite::Error::InvalidQuery);
@@ -401,6 +421,9 @@ fn admitted(
     let source_generation = crate::retention::source_generation(&witness.sources)
         .map_err(|_| rusqlite::Error::InvalidQuery)?;
     let compactions = read_compactions(tx, &session_uid, &row, generation, &price_version)?;
+    let usage_complete = projected_steps
+        .iter()
+        .all(|step| !step.billing.split_unknown);
     Ok(AdmittedSession {
         session_uid: session_uid.clone(),
         source_witness: SourceWitness {
@@ -432,9 +455,7 @@ fn admitted(
         session: session_input(tx, namespace, &session_uid, &row, repo)?,
         steps: projected_steps,
         compactions,
-        usage_complete: projected_steps
-            .iter()
-            .all(|step| !step.billing.split_unknown),
+        usage_complete,
         prices,
     })
 }
@@ -500,9 +521,10 @@ fn session_input(
     Ok(Session {
         machine: namespace.into(),
         harness: row.harness.clone(),
-        native_session_id: row.key.clone(),
+        native_session_id: native_session_identity(row)?.1,
         role: match row.kind.as_str() {
             "subagent" => Role::Worker,
+            "codex-run" if parent_session_uid.is_some() => Role::Worker,
             "session" | "codex-run" => Role::Solo,
             _ => Role::Unknown,
         },
@@ -525,7 +547,10 @@ fn repo(tx: &rusqlite::Transaction<'_>, row: &CatalogRow) -> rusqlite::Result<Re
             key: id.clone(),
             repo_id: Some(id.clone()),
             local_path: row.repo.clone(),
-            display_name: id.clone(),
+            // A remote identity can contain path separators, which are valid
+            // in its Key-class field but forbidden by the display-name
+            // contract. Keep the display label deliberately non-identifying.
+            display_name: "remote repository".into(),
         }),
         Some(RepoId::Path(path)) => Ok(Repo {
             // Bind the existing native path identity to the origin-owned,
@@ -722,11 +747,40 @@ fn hex_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use rusqlite::{Connection, params};
+    use serde_json::json;
 
     use super::*;
 
     fn transaction(connection: &mut Connection) -> rusqlite::Transaction<'_> {
         connection.transaction().unwrap()
+    }
+
+    fn catalog_row(
+        key: &str,
+        harness: &str,
+        native_id: &str,
+        parent: Option<&str>,
+        kind: &str,
+    ) -> CatalogRow {
+        serde_json::from_value(json!({
+            "key": key,
+            "name": "synthetic",
+            "harness": harness,
+            "kind": kind,
+            "native_ids": [native_id],
+            "parent": parent,
+            "parent_source": null,
+            "repo": null,
+            "branch": null,
+            "model": "",
+            "effort": null,
+            "start": null,
+            "last": null,
+            "tokens": [0.0, 0.0, 0.0],
+            "cost": crate::pricing::Cost::default(),
+            "sources": []
+        }))
+        .unwrap()
     }
 
     #[test]
@@ -749,13 +803,13 @@ mod tests {
             )
             .unwrap();
 
-        let prices = {
+        let recorded_prices = {
             let tx = transaction(&mut connection);
             prices(&tx, "synthetic", "g1", &table.fingerprint).unwrap()
         };
-        assert!(!prices.is_empty());
+        assert!(!recorded_prices.is_empty());
         assert!(
-            prices
+            recorded_prices
                 .iter()
                 .all(|price| price.price_version == table.fingerprint)
         );
@@ -798,6 +852,65 @@ mod tests {
         assert_eq!(
             session_uid("machine", &identity),
             "machine/codex/native%2Fsession"
+        );
+    }
+
+    #[test]
+    fn catalog_collisions_use_native_identity_and_recorded_codex_parent() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE session_catalog(session_key TEXT PRIMARY KEY, metadata TEXT NOT NULL) STRICT;\
+                 CREATE TABLE silver_session_identity(\
+                    session_key TEXT PRIMARY KEY, harness TEXT NOT NULL, native_session_id TEXT NOT NULL\
+                 ) STRICT;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO silver_session_identity VALUES(?1,?2,?3)",
+                params!["parent-catalog-key", "codex", "parent-native"],
+            )
+            .unwrap();
+        let child = catalog_row(
+            ":codex:same",
+            "codex",
+            "same",
+            Some("parent-catalog-key"),
+            "codex-run",
+        );
+        let session = {
+            let tx = transaction(&mut connection);
+            assert_eq!(
+                native_session_identity(&child).unwrap(),
+                ("codex".into(), "same".into())
+            );
+            session_input(
+                &tx,
+                "machine",
+                "machine/codex/same",
+                &child,
+                Repo {
+                    key: "unknown".into(),
+                    repo_id: None,
+                    local_path: None,
+                    display_name: "unknown".into(),
+                },
+            )
+            .unwrap()
+        };
+        assert_eq!(session.native_session_id, "same");
+        assert_eq!(
+            session.parent_session_uid.as_deref(),
+            Some("machine/codex/parent-native")
+        );
+        assert_eq!(session.role, Role::Worker);
+        assert!(
+            native_session_identity(&CatalogRow {
+                native_ids: vec!["one".into(), "two".into()],
+                ..child
+            })
+            .is_err()
         );
     }
 }

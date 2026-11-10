@@ -52,6 +52,11 @@ appear complete.
 Identity stays native. Rows are never keyed by ordinals, generations or row
 IDs, so labels survive every rebuild.
 
+The origin adapter derives a session UID from configured machine namespace,
+native harness and the exact native session ID. A Catalog key is only a
+source-local disambiguator and must not replace that ID during a harness collision;
+recorded native parent links use the same identity rule.
+
 - **Namespace.** Each machine's sources use its configured machine name. A
   receiver binds each push token to the token's name, refuses a token named
   after itself, and reserves `local`.

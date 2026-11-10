@@ -517,7 +517,7 @@ fn int_opt_u64(value: Option<u64>) -> Result<Cell> {
         .map(Cell::Integer)
 }
 
-fn sum_u64(values: impl Iterator<Item = u64>) -> Result<u64> {
+fn sum_u64(mut values: impl Iterator<Item = u64>) -> Result<u64> {
     values.try_fold(0_u64, |sum, value| {
         sum.checked_add(value)
             .ok_or_else(|| Error::Invalid("integer overflow".into()))

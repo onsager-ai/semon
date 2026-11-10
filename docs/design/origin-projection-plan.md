@@ -15,6 +15,13 @@ incarnation/sequence checkpoint encoding and validation; incarnation changes cau
 a full namespace read. A pending or unavailable generation is distinct from an
 empty admitted session or an explicit removal.
 
+The ASI session UID is `(configured machine namespace, native harness, native
+session ID)`, percent-encoded component-wise. The Catalog key only disambiguates
+source-local rows and is never substituted for the native ID: collisions and
+parent links resolve through the recorded native identity. A Catalog row with no
+single native identity is unavailable rather than guessed. `codex-run` is a
+worker when its recorded native parent resolves; otherwise its role remains solo.
+
 Project steps, ordered tool calls, turns, sessions, compactions and dimensions
 from admitted SQLite evidence. Preserve native UID, lineage, source witness and
 exclusive/copied usage semantics. Copy recorded labels, triggers, cost components
@@ -44,6 +51,13 @@ and price refresh remain origin derivation work, queued in bounded batches.
 Preserve the last complete admitted generation after partial or total source loss.
 Format mismatches refuse explicitly while preserving custody; no automatic reset,
 conversion, compatibility layer or deletion of frozen data is permitted.
+An older Event Index schema is an unsupported persistent format, even when its
+object names look familiar. Producers leave it unchanged; a later, explicit
+operator recovery may only proceed after independently establishing the retained
+source cohort and custody. A Catalog source-generation change publishes `Pending`
+until a complete replacement is admitted; it never emits a removal or deletes the
+previous complete facts. `Removed` is reserved for a Catalog identity that is no
+longer present.
 
 ## Integration after the storage stack merges
 

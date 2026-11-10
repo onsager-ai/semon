@@ -1240,6 +1240,37 @@ mod tests {
     }
 
     #[test]
+    fn complete_grant_accepts_origin_local_and_remote_repository_rows() {
+        let grant = authority(
+            Destination::Receiver,
+            &["repo_key", "display_name", "repo_path"],
+        );
+        for row in [
+            Map::from_iter([
+                (
+                    "repo_key".into(),
+                    Value::String("local-0123456789abcdef".into()),
+                ),
+                ("display_name".into(), Value::String("local".into())),
+                ("repo_path".into(), Value::String("/work/local".into())),
+            ]),
+            Map::from_iter([
+                (
+                    "repo_key".into(),
+                    Value::String("github.com/onsager-ai/semon".into()),
+                ),
+                (
+                    "display_name".into(),
+                    Value::String("remote repository".into()),
+                ),
+                ("repo_path".into(), Value::String("/work/semon".into())),
+            ]),
+        ] {
+            assert!(project_derived_row(&grant, "dim_repo", &row).is_ok());
+        }
+    }
+
+    #[test]
     fn typed_keys_accept_documented_uids_repositories_and_integer_dates() {
         let date_fields = [
             "date_key",

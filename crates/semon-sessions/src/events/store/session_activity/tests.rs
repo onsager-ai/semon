@@ -2,8 +2,10 @@ use super::super::tests::{
     catalog_fixture_projection, catalog_native_fixture, catalog_write, opened, scratch,
 };
 use super::*;
+use crate::SqliteAnalyticsInput;
 use crate::events::session_activity::classify::Change;
 use crate::events::session_activity::{ActivityStepId, Ownership, TimedInput, UsageOwner};
+use semon_asi::{AnalyticsInput, Reconciliation, SessionChange};
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {
     page(
@@ -198,6 +200,22 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
         Outcome::Written
     );
     let complete = read(&store.connection, row);
+    let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+    let first = input.read_admitted(None).unwrap();
+    assert_eq!(first.reconciliation, Reconciliation::ReplaceNamespace);
+    let admitted_uid = first
+        .changes
+        .iter()
+        .find_map(|change| match change {
+            SessionChange::Admitted(session)
+                if session.session.native_session_id == "native-cl-00" =>
+            {
+                Some(session.session_uid.clone())
+            }
+            _ => None,
+        })
+        .expect("the complete source cohort is admitted");
+    let checkpoint = first.checkpoint;
     let original_header = header(&store.connection, &key);
     assert_eq!(
         source_missing(&store.connection, &key).unwrap(),
@@ -286,6 +304,11 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
     );
 
     assert_eq!(source_missing(&store.connection, &key).unwrap(), Some(true));
+    let unavailable = input.read_admitted(Some(&checkpoint)).unwrap();
+    assert_eq!(unavailable.reconciliation, Reconciliation::Incremental);
+    assert!(unavailable.changes.iter().any(|change| {
+        matches!(change, SessionChange::SourceMissing { session_uid, retained_at_origin: true } if session_uid == &admitted_uid)
+    }));
     let missing_membership = catalog_sources(&store.connection, &key);
     assert_eq!(missing_membership.len(), 2);
     assert!(
@@ -556,7 +579,15 @@ fn missing_member_retains_complete_activity_until_its_source_witness_returns() {
         .unwrap();
     let witness: crate::model::summary::CatalogRow = serde_json::from_str(&witness).unwrap();
     assert_eq!(witness.sources, recovered.sources);
+    let restored = input.read_admitted(Some(&unavailable.checkpoint)).unwrap();
+    assert!(restored.changes.iter().any(|change| {
+        matches!(change, SessionChange::SourceRestored { session_uid } if session_uid == &admitted_uid)
+    }));
+    assert!(restored.changes.iter().any(|change| {
+        matches!(change, SessionChange::Admitted(session) if session.session_uid == admitted_uid)
+    }));
 
+    drop(input);
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
@@ -1294,12 +1325,13 @@ fn rewriting_activity_logs_a_change_only_when_it_differs() {
 }
 
 #[test]
-fn removing_a_mismatched_projection_logs_a_removal_once() {
+fn invalidating_a_mismatched_projection_keeps_the_last_complete_cohort_pending() {
     let root = scratch("change-log-removed");
     let (options, rows, _) = catalog_native_fixture(&root, 2, true);
     let (mut store, _) = opened(&crate::events::EventCache::path(&options.cache));
     let row = rows.iter().find(|row| row.harness == "claude").unwrap();
     let start = changes(&store.connection).len();
+    let header = read(&store.connection, row);
     let mut moved = row.clone();
     moved.sources[0].offset += 1;
     let tx = store.connection.transaction().unwrap();
@@ -1307,11 +1339,16 @@ fn removing_a_mismatched_projection_logs_a_removal_once() {
     tx.commit().unwrap();
     let logged = changes(&store.connection);
     assert_eq!(logged.len(), start + 1);
-    assert_eq!(logged.last(), Some(&(row.key.clone(), "removed".into())));
+    assert_eq!(logged.last(), Some(&(row.key.clone(), "changed".into())));
+    assert_eq!(read(&store.connection, row), header);
     let tx = store.connection.transaction().unwrap();
     remove_mismatched(&tx, &moved).unwrap();
     tx.commit().unwrap();
-    assert_eq!(changes(&store.connection).len(), start + 1, "nothing left");
+    assert_eq!(
+        changes(&store.connection).len(),
+        start + 1,
+        "unchanged invalidation"
+    );
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }
@@ -1334,6 +1371,17 @@ fn catalog_changes_log_a_change_without_rewriting_unchanged_activity() {
     let row = rows.iter().find(|row| row.harness == "claude").unwrap();
     let projection = row.session_activity.as_ref().unwrap();
     publish_row(&mut store, row, projection);
+    assert_eq!(
+        store
+            .connection
+            .query_row(
+                "SELECT harness,native_session_id FROM silver_session_identity WHERE session_key=?1",
+                [&row.key],
+                |record| Ok((record.get::<_, String>(0)?, record.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+        (row.harness.clone(), row.native_ids[0].clone())
+    );
     let mut variants = Vec::new();
     for edit in 0..12 {
         let mut next = row.clone();

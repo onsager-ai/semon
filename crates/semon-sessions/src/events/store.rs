@@ -661,7 +661,6 @@ const PUT_RUN: &str = "INSERT OR REPLACE INTO reported_runs (session_id, start, 
 /// Read the index incarnation, the changes after `after` and, through `read`,
 /// derived rows from the same SQLite snapshot. A changed incarnation means
 /// the caller must re-read the namespace in full.
-#[allow(dead_code, reason = "the analytics writer is the first caller")]
 pub(crate) fn read_silver_changes<T>(
     connection: &mut Connection,
     after: i64,
@@ -2859,7 +2858,6 @@ enum Init {
     Ready,
     NoWal,
     Fresh,
-    Obsolete,
     Unsupported(&'static str),
 }
 
@@ -4011,7 +4009,7 @@ impl SqliteStore {
                 ));
             }
             Init::Unsupported(reason) => return Err(Unopened::Unsupported(reason.into())),
-            Init::Fresh | Init::Obsolete => unreachable!("init initializes fresh storage"),
+            Init::Fresh => unreachable!("init initializes fresh storage"),
         }
         let store = Self {
             connection,
@@ -4775,7 +4773,7 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
     Ok(Init::Ready)
 }
 
-/// One authored DDL set, shared by cold initialization and whole-index rebuilds.
+/// One authored DDL set for cold initialization.
 fn storage_ddl() -> [&'static str; 11] {
     [
         SCHEMA,
@@ -4792,170 +4790,17 @@ fn storage_ddl() -> [&'static str; 11] {
     ]
 }
 
-/// Recognize ownership without reading old event/proof/recipe payloads. Refuse
-/// mixed databases: no unknown tables, views or triggers may be discarded.
-/// The three retired table names are ownership evidence, never old-schema DDL.
-type OwnedObjects = Vec<(String, String)>;
-
-fn owned_objects(connection: &Connection) -> rusqlite::Result<Option<OwnedObjects>> {
-    let objects = connection
-        .prepare("SELECT type,name,tbl_name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type DESC,name LIMIT 513")?
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if objects.len() > 512 {
-        return Ok(None);
-    }
-    let declared = |kind: &str, name: &str| {
-        let prefix = format!("CREATE {kind} IF NOT EXISTS ");
-        storage_ddl().iter().any(|ddl| {
-            ddl.split(prefix.as_str()).skip(1).any(|tail| {
-                tail.split(|ch: char| ch.is_whitespace() || ch == '(')
-                    .next()
-                    == Some(name)
-            })
-        })
-    };
-    let table = |name: &str| {
-        declared("TABLE", name)
-            || matches!(
-                name,
-                "native_usage_migrations" | "native_tree_copy_queue" | "session_search_postings"
-            )
-    };
-    if objects
-        .iter()
-        .any(|(kind, name, owner)| match kind.as_str() {
-            "table" => !table(name),
-            "index" => !table(owner),
-            "trigger" => !table(owner) || !declared("TRIGGER", name),
-            _ => true,
-        })
-    {
-        return Ok(None);
-    }
-    Ok(Some(
-        objects
-            .into_iter()
-            .filter_map(|(kind, name, _)| {
-                matches!(kind.as_str(), "table" | "trigger").then_some((kind, name))
-            })
-            .collect(),
-    ))
-}
-
-fn contract_number(value: &str) -> Option<u32> {
-    let number = value.parse::<u32>().ok()?;
-    (number > 0 && value == number.to_string()).then_some(number)
-}
-
-/// Only producers can turn an obsolete, positively recognized Semon contract
-/// into a fresh index. Every known version must be readable and <= current;
-/// a single newer/unrecognized contract wins over any older contract.
+/// Producers only accept the current Semon contract.  Older persistent indexes
+/// may contain the sole retained evidence for a session, so the producer must
+/// refuse them rather than treating a version marker as proof that a destructive
+/// rebuild is safe.
 fn qualify_producer(connection: &Connection) -> rusqlite::Result<Init> {
-    let found = qualify(connection)?;
-    if !matches!(found, Init::Unsupported(_)) {
-        return Ok(found);
-    }
-    let schema: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let application: i64 =
-        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
-    if schema <= 0 || schema > SCHEMA_VERSION || application != 0 {
-        return Ok(found);
-    }
-    // These stable columns and the canonical parser key are the evidence
-    // existing Semon databases already wrote; no new marker is required.
-    for sql in [
-        "SELECT key,value FROM meta LIMIT 0",
-        "SELECT file_id,path,dev,ino,resume_at,head_sha256,tail_sha256 FROM files LIMIT 0",
-        "SELECT file_id,extra,seq,k,o,b FROM events LIMIT 0",
-    ] {
-        if let Err(error) = connection.prepare(sql) {
-            return match malformed_schema(error)? {
-                Init::Unsupported(_) => Ok(found),
-                _ => unreachable!(),
-            };
-        }
-    }
-    let mut obsolete = schema < SCHEMA_VERSION;
-    for (key, current, required) in [
-        ("cache_version", CACHE_VERSION, true),
-        (
-            "catalog_version",
-            crate::model::summary::CATALOG_VERSION,
-            false,
-        ),
-        (
-            "search_version",
-            contract_number(crate::catalog_search::VERSION).expect("current search version"),
-            false,
-        ),
-    ] {
-        let value: Option<String> = connection
-            .query_row(
-                "SELECT value FROM meta WHERE key=?1 AND octet_length(value)<=32",
-                [key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(value) = value else {
-            // Oversized values are not absent metadata.
-            let present: bool = connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)",
-                [key],
-                |row| row.get(0),
-            )?;
-            if required || present {
-                return Ok(found);
-            }
-            continue;
-        };
-        let Some(version) = contract_number(&value) else {
-            return Ok(found);
-        };
-        if version > current {
-            return Ok(found);
-        }
-        obsolete |= version < current;
-    }
-    let recipe: Option<Option<String>> = connection.query_row(
-        "SELECT CASE WHEN octet_length(value)<=128 THEN value ELSE NULL END FROM meta WHERE key='catalog_semantic_recipe'", [], |row| row.get(0),
-    ).optional()?;
-    if let Some(recipe) = recipe {
-        let Some(version) = recipe
-            .as_deref()
-            .and_then(|text| text.strip_prefix("recorded-origin-turn-complete-receipts-v"))
-            .and_then(contract_number)
-        else {
-            return Ok(found);
-        };
-        let current = semantic_stage::RECIPE
-            .strip_prefix("recorded-origin-turn-complete-receipts-v")
-            .and_then(contract_number)
-            .expect("current semantic recipe");
-        if version > current {
-            return Ok(found);
-        }
-        obsolete |= version < current;
-    }
-    // Inspect only format numbers, never old archive payloads or source bytes.
-    let (invalid, older): (bool, bool) = connection.query_row(
-        "SELECT COALESCE(MAX(CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN CASE WHEN json_type(value,'$.version')='integer' AND json_extract(value,'$.version') BETWEEN 1 AND 6 AND ((json_extract(value,'$.version')<6 AND json_type(value,'$.parser_version') IS NULL) OR (json_type(value,'$.parser_version')='integer' AND json_extract(value,'$.parser_version') BETWEEN 1 AND ?1)) THEN 0 ELSE 1 END ELSE 1 END),0), COALESCE(MAX(CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN json_extract(value,'$.version')<6 OR json_extract(value,'$.parser_version')<?1 ELSE 0 END),0) FROM meta WHERE key GLOB 'archive_event_index:*'",
-        [CACHE_VERSION], |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    if invalid {
-        return Ok(found);
-    }
-    obsolete |= older;
-    if obsolete && owned_objects(connection)?.is_some() {
-        Ok(Init::Obsolete)
-    } else {
-        Ok(found)
-    }
+    qualify(connection)
 }
 
-/// Reclassify inside SQLite's writer lock. Reset and current DDL commit as one
-/// transaction: WAL readers keep their old snapshots; producers cannot reset a
-/// store that another producer has already rebuilt. No files are unlinked.
+/// Initialize a fresh index under SQLite's writer lock. Unsupported persistent
+/// state is left untouched; an operator may only recover it after separately
+/// establishing source availability and custody.
 fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.set_prepared_statement_cache_capacity(32);
@@ -4966,28 +4811,13 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         return Ok(found);
     }
     let fresh = matches!(found, Init::Fresh);
-    let rebuild = matches!(found, Init::Obsolete);
     let mut initialized = false;
-    if fresh || rebuild {
-        if fresh {
-            // Cold initialization retains exclusion through the first WAL switch.
-            connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
-        }
+    if fresh {
+        // Cold initialization retains exclusion through the first WAL switch.
+        connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         match qualify_producer(&transaction)? {
-            state @ (Init::Fresh | Init::Obsolete) => {
-                if matches!(state, Init::Obsolete) {
-                    let Some(objects) = owned_objects(&transaction)? else {
-                        return Ok(Init::Unsupported(
-                            "unsupported session index: ambiguous ownership",
-                        ));
-                    };
-                    // Triggers precede tables; indexes disappear with their table.
-                    for (kind, name) in objects {
-                        let quoted = name.replace('"', "\"\"");
-                        transaction.execute_batch(&format!("DROP {kind} \"{quoted}\""))?;
-                    }
-                }
+            Init::Fresh => {
                 for ddl in storage_ddl() {
                     transaction.execute_batch(ddl)?;
                 }
@@ -5012,7 +4842,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         mode = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
     }
     if !mode.eq_ignore_ascii_case("wal") {
-        return Ok(if fresh || rebuild {
+        return Ok(if fresh {
             Init::NoWal
         } else {
             Init::Unsupported("unsupported session index: journal mode")
@@ -6795,7 +6625,10 @@ fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite
 mod tests {
     use std::collections::BTreeSet;
 
+    use semon_asi::{AnalyticsInput, Reconciliation, SessionChange};
+
     use super::*;
+    use crate::SqliteAnalyticsInput;
     use crate::events::{
         ASYNC, Kind, Links, PIN, RateLimitWindow, RateLimits, SENDS, STDIN, SignalKind, UNKNOWN,
     };
@@ -10814,256 +10647,158 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_producer_contracts_rebuild_once_and_keep_focused_reads_read_only() {
-        for change in [
-            "DROP INDEX catalog_search_native; DROP INDEX catalog_search_pending_filename; DROP INDEX catalog_search_pending_copilot; DROP INDEX catalog_search_header; PRAGMA user_version=33",
-            "PRAGMA user_version=32",
-            "PRAGMA user_version=1",
-            "UPDATE meta SET value='1' WHERE key='cache_version'",
-            "INSERT INTO meta VALUES('catalog_version','1')",
-            "INSERT INTO meta VALUES('search_version','1')",
-            "INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v2')",
-            "INSERT INTO meta VALUES('archive_event_index:old','{\"version\":1}')",
-            "CREATE TABLE native_usage_migrations(source_path TEXT); PRAGMA user_version=31",
-        ] {
-            for scoped in [false, true] {
-                let root = scratch("obsolete-contract");
-                let cache = root.join("index.json");
-                let path = cache.with_extension("sqlite3");
-                let (mut old, _) = opened(&path);
-                old.write_one("obsolete", None, None, &ledger(1), &full())
-                    .unwrap();
-                old.write_runs(&[run()], &stamp()).unwrap();
-                old.connection.execute_batch(change).unwrap();
-                old.connection
-                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
-                    .unwrap();
-                drop(old);
-                let original = fs::read(&path).unwrap();
-                if change.contains("archive_event_index") {
-                    let reader = focused_connection(&path).unwrap();
-                    assert!(archived_index(&reader, "old").is_err());
-                } else {
-                    assert!(focused_connection(&path).is_err(), "{change}");
-                    assert!(SqliteStore::attempt_selected(&path).is_err(), "{change}");
-                }
-                assert_eq!(fs::read(&path).unwrap(), original);
-                let producer = if scoped {
-                    super::super::EventCache::open_scoped(&cache)
-                } else {
-                    super::super::EventCache::open(&cache)
-                }
+    fn obsolete_producer_contracts_are_refused_without_mutation() {
+        for schema in [43, 44] {
+            let root = scratch("obsolete-contract");
+            let path = root.join("index.sqlite3");
+            let (mut store, _) = opened(&path);
+            store
+                .write_one("retained", None, None, &ledger(1), &full())
                 .unwrap();
-                drop(producer);
-                let (mut current, loaded) = opened(&path);
-                assert!(
-                    loaded.files.is_empty() && loaded.reported_runs.is_empty(),
-                    "{change}"
-                );
-                assert!(matches!(qualify(&current.connection).unwrap(), Init::Ready));
-                let ranges = std::array::from_fn(|_| (String::new(), String::new()));
-                let search = super::super::CatalogSearchLookup {
-                    query: "missing",
-                    ranges: &ranges,
-                };
-                assert!(
-                    catalog_search_paths(&current.connection, &search, 64)
-                        .unwrap()
-                        .is_empty()
-                );
-                current
-                    .write_one("fresh", None, None, &ledger(2), &full())
-                    .unwrap();
-                drop(current);
-                let (_, loaded) = opened(&path);
-                assert_eq!(loaded.files.len(), 1, "restart must not reset: {change}");
-                assert_eq!(loaded.files[0].0, "fresh");
-                fs::remove_dir_all(root).unwrap();
-            }
-        }
-    }
-
-    #[test]
-    fn obsolete_reset_refuses_foreign_databases_and_waits_for_the_sqlite_writer() {
-        let root = scratch("obsolete-ownership-and-lock");
-        let foreign = root.join("foreign.sqlite3");
-        let db = Connection::open(&foreign).unwrap();
-        db.execute_batch("CREATE TABLE private(secret TEXT); INSERT INTO private VALUES('preserve'); PRAGMA user_version=1").unwrap();
-        drop(db);
-        let original = fs::read(&foreign).unwrap();
-        assert!(matches!(
-            SqliteStore::attempt(&foreign),
-            Err(Unopened::Unsupported(_))
-        ));
-        assert!(matches!(
-            SqliteStore::attempt_scoped(&foreign, true),
-            Err(Unopened::Unsupported(_))
-        ));
-        assert_eq!(fs::read(&foreign).unwrap(), original);
-        let path = root.join("owned.sqlite3");
-        let (mut old, _) = opened(&path);
-        old.write_one("obsolete", None, None, &ledger(1), &full())
-            .unwrap();
-        old.connection
-            .pragma_update(None, "user_version", 32)
-            .unwrap();
-        old.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let original = catalog_state(&old.connection);
-        assert!(matches!(
-            SqliteStore::attempt_scoped(&path, true),
-            Err(Unopened::Other(_))
-        ));
-        assert_eq!(catalog_state(&old.connection), original);
-        old.connection.execute_batch("ROLLBACK").unwrap();
-        let (_, loaded) = opened(&path);
-        assert!(loaded.files.is_empty());
-        drop(old);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn obsolete_reset_preserves_wal_snapshots_and_serializes_concurrent_producers() {
-        let root = scratch("obsolete-wal");
-        let path = root.join("index.sqlite3");
-        let (mut old, _) = opened(&path);
-        old.write_one("obsolete", None, None, &ledger(1), &full())
-            .unwrap();
-        old.connection
-            .pragma_update(None, "user_version", 32)
-            .unwrap();
-        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        reader.execute_batch("BEGIN").unwrap();
-        assert_eq!(
-            reader
-                .query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-        assert!(!fs::read(sibling(&path, "-wal")).unwrap().is_empty());
-        // A second producer finishes while the first is between its read-only
-        // qualification and locked initialization. Reclassification must spare
-        // the second producer's newly committed rows.
-        let other_path = path.clone();
-        BEFORE_STORAGE_INIT.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move || {
-                std::thread::spawn(move || {
-                    let (mut other, _) = opened(&other_path);
-                    other
-                        .write_one("fresh", None, None, &ledger(2), &full())
-                        .unwrap();
-                })
-                .join()
+            store
+                .connection
+                .pragma_update(None, "user_version", schema)
                 .unwrap();
-            }));
-        });
-        let (mut current, loaded) = opened(&path);
-        assert_eq!(loaded.files.len(), 1);
-        assert_eq!(loaded.files[0].0, "fresh");
-        assert_eq!(
-            reader
-                .query_row("SELECT path FROM files", [], |r| r.get::<_, String>(0))
-                .unwrap(),
-            "obsolete"
-        );
-        assert_eq!(
-            old.write_one("obsolete", Some(&ledger(1)), None, &ledger(2), &full())
-                .unwrap(),
-            Outcome::Conflict
-        );
-        assert_eq!(
-            current
-                .write_one("fresh", Some(&ledger(2)), None, &ledger(3), &full())
-                .unwrap(),
-            Outcome::Written
-        );
-        reader.execute_batch("ROLLBACK").unwrap();
-        drop(reader);
-        drop(old);
-        drop(current);
-        let (_, loaded) = opened(&path);
-        assert_eq!(loaded.files.len(), 1);
-        assert_eq!(loaded.files[0].1, ledger(3));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn obsolete_index_rebuilds_native_catalog_history_and_selected_transcripts() {
-        for scoped in [false, true] {
-            let root = scratch("obsolete-native");
-            let (options, rows, _) = catalog_native_fixture(&root, 2, true);
-            let originals = rows
-                .iter()
-                .flat_map(|row| &row.sources)
-                .map(|source| (source.path.clone(), fs::read(&source.path).unwrap()))
-                .collect::<Vec<_>>();
-            let untouched = [
-                root.join("archive-object"),
-                root.join("credentials"),
-                root.join("seed.tree.json"),
-                root.join("unrelated.sqlite3"),
-            ];
-            for file in &untouched {
-                fs::write(file, b"retain exact original bytes").unwrap();
-            }
-            let path = super::super::EventCache::path(&options.cache);
-            let db = Connection::open(&path).unwrap();
-            db.pragma_update(None, "user_version", 32).unwrap();
-            drop(db);
-            let producer = if scoped {
-                super::super::EventCache::open_scoped(&options.cache)
-            } else {
-                super::super::EventCache::open(&options.cache)
-            }
-            .unwrap();
-            drop(producer);
-            let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
-            let complete = (0..128).any(|_| {
-                evidence
-                    .refresh_catalog(
-                        &mut crate::viewer::lock(&evidence.storage.work),
-                        CATALOG_FIXTURE_NOW,
-                    )
-                    .unwrap()
-            });
-            evidence.retire();
-            assert!(complete);
-            for row in &rows {
-                assert!(
-                    crate::session_catalog_identity(&options, "source", &row.key)
-                        .unwrap()
-                        .is_some()
-                );
-                assert!(
-                    crate::session_catalog_history_identity(&options, "source", &row.key)
-                        .unwrap()
-                        .is_some()
-                );
-            }
-            let reply = crate::session_transcript_range_with_mode(
-                &options,
-                "source",
-                "sid=native-cx-01&after=0&limit=2",
-                None,
-                crate::SessionSourceReadMode::LocalOrPinnedProvider,
-            );
-            assert_eq!(
-                reply.status,
-                200,
-                "{}",
-                String::from_utf8_lossy(&reply.body)
-            );
-            for (file, bytes) in originals {
-                assert_eq!(fs::read(file).unwrap(), bytes);
-            }
-            for file in untouched {
-                assert_eq!(fs::read(file).unwrap(), b"retain exact original bytes");
-            }
-            let (store, loaded) = opened(&path);
-            assert_eq!(loaded.files.len(), 2);
-            assert!(matches!(qualify(&store.connection).unwrap(), Init::Ready));
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
             drop(store);
+            let original = fs::read(&path).unwrap();
+            assert!(matches!(
+                SqliteStore::attempt(&path),
+                Err(Unopened::Unsupported(error)) if error.contains("older schema")
+            ));
+            assert_eq!(fs::read(&path).unwrap(), original);
+            let reader =
+                Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            assert_eq!(
+                reader
+                    .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn analytics_input_reads_real_catalog_generations_and_explicit_removals() {
+        let root = scratch("analytics-input");
+        let (options, rows, slots) = catalog_native_fixture(&root, 4, false);
+        let path = super::super::EventCache::path(&options.cache);
+        let mut metadata_only = rows.clone();
+        let pending_row = metadata_only
+            .iter_mut()
+            .find(|row| row.harness == "claude")
+            .unwrap();
+        let pending_native_id = pending_row.native_ids[0].clone();
+        pending_row.session_activity = None;
+        let (mut store, _) = opened(&path);
+        catalog_write(
+            &mut store,
+            &metadata_only,
+            &slots,
+            false,
+            CatalogWriter::Auto,
+        )
+        .unwrap();
+
+        let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        let initial = input.read_admitted(None).unwrap();
+        assert_eq!(initial.reconciliation, Reconciliation::ReplaceNamespace);
+        let pending_uid = format!("fixture-machine/claude/{pending_native_id}");
+        assert!(initial.changes.iter().any(|change| {
+            matches!(change, SessionChange::Pending { session_uid } if session_uid == &pending_uid)
+        }));
+        assert!(initial.changes.iter().any(|change| {
+            matches!(change, SessionChange::Admitted(session) if session.steps.is_empty())
+        }));
+        assert!(initial.changes.iter().any(|change| {
+            matches!(change, SessionChange::Admitted(session)
+                if session.session.native_session_id == "native-cx-03"
+                    && session.session.role == semon_asi::input::Role::Worker
+                    && session.session.parent_session_uid.as_deref()
+                        == Some("fixture-machine/codex/native-cx-01"))
+        }));
+
+        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+        let admitted = input.read_admitted(Some(&initial.checkpoint)).unwrap();
+        assert_eq!(admitted.reconciliation, Reconciliation::Incremental);
+        assert!(admitted.changes.iter().any(|change| {
+            matches!(change, SessionChange::SourceRestored { session_uid } if session_uid == &pending_uid)
+        }));
+        assert!(admitted.changes.iter().any(|change| {
+            matches!(change, SessionChange::Admitted(session) if session.session_uid == pending_uid)
+        }));
+
+        let live_removed_key = rows
+            .iter()
+            .find(|row| row.native_ids[0] == pending_native_id)
+            .unwrap()
+            .key
+            .clone();
+        store
+            .connection
+            .execute(
+                "INSERT INTO silver_change(session_key,kind) VALUES(?1,'removed')",
+                [&live_removed_key],
+            )
+            .unwrap();
+        let invalidated = input.read_admitted(Some(&admitted.checkpoint)).unwrap();
+        assert!(invalidated.changes.iter().any(|change| {
+            matches!(change, SessionChange::Pending { session_uid } if session_uid == &pending_uid)
+        }));
+
+        let removed_key = rows
+            .iter()
+            .find(|row| row.harness == "codex" && row.native_ids[0] == "native-cx-01")
+            .unwrap()
+            .key
+            .clone();
+        let removed_uid = "fixture-machine/codex/native-cx-01";
+        let tx = store.connection.transaction().unwrap();
+        tx.execute(
+            "DELETE FROM session_catalog WHERE session_key=?1",
+            [&removed_key],
+        )
+        .unwrap();
+        tx.execute(
+            "DELETE FROM session_activity_projections WHERE session_key=?1",
+            [&removed_key],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO silver_change(session_key,kind) VALUES(?1,'removed')",
+            [&removed_key],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let removed = input.read_admitted(Some(&invalidated.checkpoint)).unwrap();
+        assert!(removed.changes.iter().any(|change| {
+            matches!(change, SessionChange::Removed { session_uid } if session_uid == removed_uid)
+        }));
+
+        let checkpoint = removed.checkpoint;
+        drop(input);
+        drop(store);
+        fs::remove_file(&path).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = sibling(&path, suffix);
+            if sidecar.exists() {
+                fs::remove_file(sidecar).unwrap();
+            }
+        }
+        drop(opened(&path));
+        let mut replacement = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        assert_eq!(
+            replacement
+                .read_admitted(Some(&checkpoint))
+                .unwrap()
+                .reconciliation,
+            Reconciliation::ReplaceNamespace
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
