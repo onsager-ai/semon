@@ -7,7 +7,9 @@ use crate::analytics_writer::{AnalyticsWriterConfig, start_with_clock};
 use crate::events::session_activity::classify::Change;
 use crate::events::session_activity::{ActivityStepId, Ownership, TimedInput, UsageOwner};
 use arrow::{
-    array::{Array, Int64Array, StringArray},
+    array::{Array, ArrayRef, Int64Array, StringArray},
+    compute::cast,
+    datatypes::DataType,
     util::display::array_value_to_string,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -93,7 +95,15 @@ fn live_fact_rows(root: &std::path::Path, manifest: &semon_asi::Manifest) -> Vec
                 let values = (0..batch.num_columns())
                     .filter(|column| *column != generation)
                     .map(|column| {
-                        array_value_to_string(batch.column(column).as_ref(), row).unwrap()
+                        // Timestamps carry a named time zone that arrow cannot
+                        // render without chrono-tz; compare their raw values.
+                        let array: ArrayRef = match batch.column(column).data_type() {
+                            DataType::Timestamp(..) => {
+                                cast(batch.column(column), &DataType::Int64).unwrap()
+                            }
+                            _ => batch.column(column).clone(),
+                        };
+                        array_value_to_string(array.as_ref(), row).unwrap()
                     })
                     .collect::<Vec<_>>()
                     .join("|");
@@ -312,8 +322,10 @@ fn analytics_writer_retries_an_operational_sqlite_busy_error() {
     catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
     drop(cache);
 
-    let lock = rusqlite::Connection::open(&index).unwrap();
-    lock.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    // A WAL index never blocks a reader, so make the operational failure by
+    // moving the index away: opening it read-only then reports CANTOPEN.
+    let moved = index.with_extension("moved");
+    std::fs::rename(&index, &moved).unwrap();
     let store_root = root.join("analytics-store");
     let clock = ManualClock::new(0);
     let handle = start_with_clock(
@@ -323,7 +335,7 @@ fn analytics_writer_retries_an_operational_sqlite_busy_error() {
     handle.notify();
     handle.wait_for_input_attempts(1);
     handle.wait_for_status(crate::AnalyticsWriterStatus::Retrying { attempt: 1 });
-    lock.execute_batch("ROLLBACK").unwrap();
+    std::fs::rename(&moved, &index).unwrap();
     clock.advance(1_000);
     handle.notify();
     handle.wait_for_publishes(1);
