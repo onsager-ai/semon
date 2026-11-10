@@ -6,9 +6,10 @@
 use std::fmt::Write;
 
 use crate::schema::{
-    ACTIVITY, ASI_SCHEMA_VERSION, COMPUTATION_STATUS, CONTEXT_BAND, Class, Column, INITIATOR, Kind,
-    PARENT_METHOD, PRICE_STATUS, PRICE_UNIT, RATE_KIND, ROLE, SOURCE_STATUS, STATUS, TARGET_TYPE,
-    TRIGGER, Table, Type, USAGE_OWNER, WASTE_KIND, table as schema_table,
+    ACTIVITY, ASI_SCHEMA_VERSION, COMPUTATION_STATUS, CONTEXT_BAND, Class, Column, DIM_SESSION,
+    FACT_LABEL, FACT_STEP, INITIATOR, Kind, PARENT_METHOD, PRICE_STATUS, PRICE_UNIT, RATE_KIND,
+    ROLE, SOURCE_STATUS, STATUS, TARGET_TYPE, TRIGGER, Table, Type, USAGE_OWNER, WASTE_KIND,
+    table as schema_table,
 };
 
 /// A named closed enum set in the analytics schema.
@@ -18,6 +19,7 @@ pub struct EnumDefinition {
 }
 
 /// A column exposed by a semantic view.
+#[derive(Clone, Copy)]
 pub struct ViewColumn {
     pub name: &'static str,
     pub data_type: Type,
@@ -28,8 +30,61 @@ pub struct ViewColumn {
 /// declared here so that this module remains free of DuckDB.
 pub struct SemanticView {
     pub name: &'static str,
-    pub columns: &'static [ViewColumn],
+    pub shape: ViewShape,
     pub sql: &'static str,
+}
+
+/// The declared source of a semantic view's result columns.
+#[derive(Clone, Copy)]
+pub enum ViewShape {
+    /// Columns the view defines itself, such as aggregates.
+    Explicit(&'static [ViewColumn]),
+    /// A projection of selected columns from one analytics table.
+    TableProjection {
+        table: &'static Table,
+        columns: &'static [&'static str],
+    },
+    /// All stored table columns plus generated columns in query result order.
+    TableWithGenerated {
+        table: &'static Table,
+        columns: &'static [ViewColumn],
+    },
+}
+
+impl SemanticView {
+    /// Resolves the view's output columns in query result order.
+    pub fn columns(&self) -> Vec<ViewColumn> {
+        match self.shape {
+            ViewShape::Explicit(columns) => columns.to_vec(),
+            ViewShape::TableProjection { table, columns } => columns
+                .iter()
+                .map(|name| view_column(table.column(name).expect("declared view column exists")))
+                .collect(),
+            ViewShape::TableWithGenerated { table, columns } => table
+                .columns
+                .iter()
+                .map(view_column)
+                .chain(std::iter::once(generation_column()))
+                .chain(columns.iter().copied())
+                .collect(),
+        }
+    }
+}
+
+fn view_column(column: &Column) -> ViewColumn {
+    ViewColumn {
+        name: column.name,
+        data_type: column.data_type,
+        nullable: column.nullable,
+    }
+}
+
+fn generation_column() -> ViewColumn {
+    ViewColumn {
+        name: crate::schema::GEN_COLUMN,
+        data_type: Type::Integer,
+        nullable: false,
+    }
 }
 
 /// A table lookup failure for schema consumers.
@@ -234,286 +289,20 @@ const COST_BY_DAY: &[ViewColumn] = &[
         nullable: false,
     },
 ];
-const STEP_FAILURE: &[ViewColumn] = &[
-    ViewColumn {
-        name: "step_uid",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "turn_uid",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "session_uid",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "model_key",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "repo_key",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "date_key",
-        data_type: Type::Integer,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "ts",
-        data_type: Type::Timestamp,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "input_tokens",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "output_tokens",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "cache_read_tokens",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "cache_write_5m_tokens",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "cache_write_1h_tokens",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "reasoning_tokens",
-        data_type: Type::Integer,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "web_search_requests",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "speed",
-        data_type: Type::Text,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "service_tier",
-        data_type: Type::Text,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "prompt_size_tokens",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "split_unknown",
-        data_type: Type::Boolean,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "usage_owner",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "context_tokens",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "context_band",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "model_ms",
-        data_type: Type::Integer,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "tool_ms",
-        data_type: Type::Integer,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "usd_est",
-        data_type: Type::Float,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "input_usd",
-        data_type: Type::Float,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "cache_read_usd",
-        data_type: Type::Float,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "cache_write_usd",
-        data_type: Type::Float,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "output_usd",
-        data_type: Type::Float,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "price_status",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "price_version",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "activity",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "waste_kind",
-        data_type: Type::Text,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "trigger",
-        data_type: Type::Text,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "ok",
-        data_type: Type::Boolean,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "_gen",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "tool_calls",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-];
-const LANE_SESSION: &[ViewColumn] = &[
-    ViewColumn {
-        name: "lane_root_uid",
-        data_type: Type::Text,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "session_uid",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "parent_session_uid",
-        data_type: Type::Text,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "role",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "repo_key",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "status",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "started_at",
-        data_type: Type::Timestamp,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "ended_at",
-        data_type: Type::Timestamp,
-        nullable: true,
-    },
-];
-const CURRENT_LABEL: &[ViewColumn] = &[
-    ViewColumn {
-        name: "label_id",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "target_type",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "target_uid",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "field",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "value",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "labeller",
-        data_type: Type::Text,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "taxonomy_version",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "confidence",
-        data_type: Type::Float,
-        nullable: true,
-    },
-    ViewColumn {
-        name: "created_at",
-        data_type: Type::Timestamp,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "revision",
-        data_type: Type::Integer,
-        nullable: false,
-    },
-    ViewColumn {
-        name: "_gen",
-        data_type: Type::Integer,
-        nullable: false,
-    },
+const STEP_FAILURE_GENERATED: &[ViewColumn] = &[ViewColumn {
+    name: "tool_calls",
+    data_type: Type::Integer,
+    nullable: false,
+}];
+const LANE_SESSION: &[&str] = &[
+    "lane_root_uid",
+    "session_uid",
+    "parent_session_uid",
+    "role",
+    "repo_key",
+    "status",
+    "started_at",
+    "ended_at",
 ];
 
 /// Versioned with the query engine. Spend is at step grain, never multiplied by a
@@ -521,22 +310,31 @@ const CURRENT_LABEL: &[ViewColumn] = &[
 pub const SEMANTIC_VIEWS: &[SemanticView] = &[
     SemanticView {
         name: "cost_by_day",
-        columns: COST_BY_DAY,
+        shape: ViewShape::Explicit(COST_BY_DAY),
         sql: "SELECT date_key, repo_key, model_key, price_version, sum(usd_est) FILTER (WHERE price_status = 'priced') AS usd_est, count(*) FILTER (WHERE price_status = 'unpriced') AS unpriced_steps FROM fact_step WHERE usage_owner = 'exclusive' GROUP BY ALL",
     },
     SemanticView {
         name: "step_failure",
-        columns: STEP_FAILURE,
+        shape: ViewShape::TableWithGenerated {
+            table: &FACT_STEP,
+            columns: STEP_FAILURE_GENERATED,
+        },
         sql: "SELECT s.*, coalesce(t.tool_calls, 0) AS tool_calls FROM fact_step s LEFT JOIN (SELECT step_uid, count(*) AS tool_calls FROM fact_tool_call GROUP BY step_uid) t USING (step_uid) WHERE s.ok = false",
     },
     SemanticView {
         name: "lane_session",
-        columns: LANE_SESSION,
+        shape: ViewShape::TableProjection {
+            table: &DIM_SESSION,
+            columns: LANE_SESSION,
+        },
         sql: "SELECT lane_root_uid, session_uid, parent_session_uid, role, repo_key, status, started_at, ended_at FROM dim_session",
     },
     SemanticView {
         name: "current_label",
-        columns: CURRENT_LABEL,
+        shape: ViewShape::TableWithGenerated {
+            table: &FACT_LABEL,
+            columns: &[],
+        },
         sql: "SELECT * FROM fact_label QUALIFY row_number() OVER (PARTITION BY target_type, target_uid, field ORDER BY starts_with(labeller, 'human:') DESC, revision DESC, created_at DESC, label_id DESC) = 1",
     },
 ];
@@ -577,7 +375,7 @@ pub fn json() -> String {
         output.push_str("    {\"name\": ");
         push_json(&mut output, view.name);
         output.push_str(", \"columns\": [");
-        for (column_index, column) in view.columns.iter().enumerate() {
+        for (column_index, column) in view.columns().iter().enumerate() {
             if column_index > 0 {
                 output.push_str(", ");
             }
@@ -653,7 +451,7 @@ pub fn markdown() -> String {
             view.name
         )
         .unwrap();
-        for column in view.columns {
+        for column in view.columns() {
             writeln!(
                 output,
                 "| `{}` | `{}` | {} |",
@@ -802,8 +600,14 @@ mod tests {
             fs::write(&path, expected).unwrap();
             return;
         }
+        let actual = fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "could not read {}: {error}; regenerate with SEMON_REGENERATE_ASI_SCHEMA=1 cargo test -p semon-asi reference::tests::checked_in_reference_files",
+                path.display()
+            )
+        });
         assert_eq!(
-            fs::read_to_string(&path).unwrap(),
+            actual,
             expected,
             "{} is stale; regenerate with SEMON_REGENERATE_ASI_SCHEMA=1 cargo test -p semon-asi reference::tests::checked_in_reference_files",
             path.display()
@@ -867,7 +671,7 @@ mod tests {
                 .split("\n### ")
                 .next()
                 .unwrap();
-            for column in view.columns {
+            for column in view.columns() {
                 assert!(
                     rendered["columns"]
                         .as_array()
@@ -905,6 +709,43 @@ mod tests {
             table("fact_nothing").unwrap_err(),
             UnknownTable("fact_nothing".into())
         );
+    }
+
+    #[test]
+    fn table_view_shapes_follow_their_tables() {
+        for view in SEMANTIC_VIEWS {
+            let columns = view.columns();
+            match view.shape {
+                ViewShape::Explicit(_) => (),
+                ViewShape::TableProjection {
+                    table,
+                    columns: selected,
+                } => assert_eq!(
+                    columns.iter().map(|column| column.name).collect::<Vec<_>>(),
+                    selected.to_vec(),
+                    "{} no longer projects {} in order",
+                    view.name,
+                    table.name
+                ),
+                ViewShape::TableWithGenerated { table, .. } => {
+                    assert_eq!(
+                        columns[..table.columns.len()]
+                            .iter()
+                            .map(|column| column.name)
+                            .collect::<Vec<_>>(),
+                        table
+                            .columns
+                            .iter()
+                            .map(|column| column.name)
+                            .collect::<Vec<_>>(),
+                        "{} no longer begins with {}",
+                        view.name,
+                        table.name
+                    );
+                    assert_eq!(columns[table.columns.len()].name, crate::schema::GEN_COLUMN);
+                }
+            }
+        }
     }
 
     #[test]
