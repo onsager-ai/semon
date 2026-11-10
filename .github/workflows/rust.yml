@@ -215,6 +215,48 @@ jobs:
             test "$TEST_RESULT" = skipped
           fi
 
+  # semon-asi's DuckDB tests: the bundled C++ build is slow, so ordinary runs leave
+  # the `duckdb-tests` feature off and this job owns it, with its own cache.
+  asi-duckdb:
+    name: semon-asi DuckDB tests
+    needs: classify
+    if: needs.classify.outputs.run_expensive == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Rust toolchain
+        id: rust-toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-asi-duckdb-${{ steps.rust-toolchain.outputs.cachekey }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-asi-duckdb-${{ steps.rust-toolchain.outputs.cachekey }}-
+
+      - name: Build the DuckDB tests
+        run: |
+          started=$SECONDS
+          cargo test -p semon-asi --features duckdb-tests --locked --no-run
+          {
+            echo "### semon-asi DuckDB build"
+            echo "- cache hit: \`${{ steps.cache.outputs.cache-hit }}\`"
+            echo "- build seconds: $((SECONDS - started))"
+            find target/debug/deps -maxdepth 1 -type f -executable -name 'semon_asi-*' \
+              -printf '- test binary: %f, %s bytes\n'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: cargo test (DuckDB)
+        run: cargo test -p semon-asi --features duckdb-tests --locked
+
   codex-conformance:
     name: Pinned Codex fixture conformance
     uses: ./.github/workflows/codex-conformance.yml

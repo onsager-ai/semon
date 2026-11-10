@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# DuckDB is the read engine (asi-store.md, Crate boundary). Its bundled C++ build is
+# slow, so ordinary builds do not compile it: the live-row smoke test and the future
+# query engine sit behind this feature, which has its own CI job.
+duckdb-tests = ["dep:duckdb"]
+
 [dependencies]
 # Pinned: the Parquet writer's output is part of the store format. The major version
 # is the one duckdb 1.10506.1 depends on, so Arrow is compiled once.
@@ -14,6 +20,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
+duckdb = { version = "=1.10506.1", features = ["bundled", "parquet", "json"], optional = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"
