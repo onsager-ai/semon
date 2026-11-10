@@ -242,6 +242,31 @@ impl<C: Clock> Store<C> {
         &self.live
     }
 
+    /// Reloads the published manifest and its matching live map while retaining
+    /// this process's writer lock.
+    ///
+    /// A directory fsync failure can be reported after the manifest rename has
+    /// made a generation visible. Writers use this before retrying such an
+    /// operation so they do not publish from a stale checkpoint.
+    pub fn reload_manifest(&mut self) -> Result<()> {
+        let manifest = match read_manifest_in(&self.analytics)? {
+            Some(manifest) => manifest,
+            None if self.manifest.generation == 0 => Manifest::empty(),
+            None => {
+                return Err(Error::invalid(
+                    "published analytics manifest disappeared; preserve or export the store before recovery",
+                ));
+            }
+        };
+        let live = match &manifest.live_map {
+            Some(path) => read_live_map_file(&self.analytics.join(path))?,
+            None => HashMap::new(),
+        };
+        self.manifest = manifest;
+        self.live = live;
+        Ok(())
+    }
+
     pub fn analytics_dir(&self) -> &Path {
         &self.analytics
     }
@@ -864,6 +889,39 @@ mod tests {
         assert_eq!(store.manifest().generation, 2);
         assert_eq!(g2_bytes(dir.path()), reader_files);
         assert_eq!(store.publish(&update(&[(S1, 1)], "three", 0)).unwrap(), 3);
+    }
+
+    #[test]
+    fn reload_manifest_adopts_the_published_checkpoint_before_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = open(dir.path(), &clock);
+        let mut update = update(&[(S1, 1)], "published", 0);
+        update
+            .checkpoints
+            .insert("machine".into(), "incarnation:7".into());
+        store.publish(&update).unwrap();
+        let expected = read_manifest(dir.path()).unwrap().unwrap();
+
+        // Model the stale in-memory view a caller must repair after an error
+        // reported after manifest rename; the durable manifest remains source
+        // of truth for the next publication's checkpoint.
+        store.manifest = Manifest::empty();
+        store.live.clear();
+        store.reload_manifest().unwrap();
+
+        assert_eq!(store.manifest(), &expected);
+        assert_eq!(
+            store.live_map(),
+            &read_live_map(dir.path(), &expected).unwrap()
+        );
+
+        std::fs::remove_file(dir.path().join("analytics/manifest.json")).unwrap();
+        let before_manifest = store.manifest().clone();
+        let before_live = store.live_map().clone();
+        assert!(matches!(store.reload_manifest(), Err(Error::Invalid(_))));
+        assert_eq!(store.manifest(), &before_manifest);
+        assert_eq!(store.live_map(), &before_live);
     }
 
     #[test]

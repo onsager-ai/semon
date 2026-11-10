@@ -644,6 +644,66 @@ fn bounded_pending_catalog_inventory_needs_no_journal_entries() {
 }
 
 #[test]
+fn bounded_writer_continues_one_chunk_per_interval_without_fresh_notifications() {
+    let (root, options, _, _native) = fixture("bounded-writer", 4);
+    let store_root = root.join("writer-store");
+    let time = Arc::new(clock());
+    let mut config = crate::AnalyticsWriterConfig::new(
+        NAMESPACE,
+        crate::events::EventCache::path(&options.cache),
+        &store_root,
+    );
+    config.input_budget = budget(1, 8_192);
+    let handle = crate::analytics_writer::start_with_clock(config, Arc::clone(&time));
+    handle.notify();
+    handle.wait_for_publishes(1);
+    handle.wait_for_idle_wait();
+    let first = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_eq!(
+        semon_asi::read_live_map(&store_root, &first).unwrap().len(),
+        1
+    );
+    assert!(first.source_missing.is_empty());
+
+    let previous_wait = handle.idle_waits();
+    time.0.store(2_099, Ordering::SeqCst);
+    handle.wake_for_clock();
+    handle.wait_for_idle_wait_after(previous_wait);
+    assert_eq!(
+        handle.published(),
+        1,
+        "the existing 2 s cadence still applies to continuations"
+    );
+    for count in 2..=4 {
+        time.0
+            .store(100 + (count - 1) as i64 * 2_000, Ordering::SeqCst);
+        handle.wake_for_clock();
+        handle.wait_for_publishes(count);
+        handle.wait_for_idle_wait();
+    }
+    let final_manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_eq!(
+        semon_asi::read_live_map(&store_root, &final_manifest)
+            .unwrap()
+            .len(),
+        4
+    );
+    let checkpoint: Value = serde_json::from_str(&final_manifest.checkpoints[NAMESPACE]).unwrap();
+    assert_eq!(checkpoint["cursor"]["phase"], "incremental");
+    let previous_wait = handle.idle_waits();
+    time.0.store(10_000, Ordering::SeqCst);
+    handle.wake_for_clock();
+    handle.wait_for_idle_wait_after(previous_wait);
+    assert_eq!(
+        handle.published(),
+        4,
+        "completed inventory leaves no publication demand"
+    );
+    handle.stop_and_join();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bounded_empty_inventory_completes_and_checkpoints_zero() {
     let (root, options, _, _native) = fixture("bounded-empty", 0);
     let mut input = ObservedInput::open(&options);

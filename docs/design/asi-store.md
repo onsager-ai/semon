@@ -226,12 +226,23 @@ tables.
   becomes the authoritative producer store's single writer: push, Viewer, MCP,
   or receive for an explicitly transferred replica namespace. Other processes only
   read. Imported receiver heads are admitted publications, not locally rebuilt indexes.
-- **Cycle.** The caller schedules discovery at a 2 s cadence and chooses an
-  input budget. `publish_cycle` publishes one bounded chunk as one `Update` and
+  The local `semon-sessions` writer service is an explicit lifecycle primitive:
+  its namespace is caller-supplied, it opens a separate read-only index connection
+  per cycle, and it is not enabled or started by a host yet. Its store-root helper
+  uses `<index parent>/analytics-store`, never a path inside the SQLite index file. A busy
+  lock is observable as a no-writer state; unsupported input latches a refusal
+  without changing the index or a checkpoint, until a later notification retries.
+  Store refusals also latch until a new notification; each refusal consumes only
+  the notification snapshot captured before its operation, preserving notifications
+  received during that operation.
+- **Cycle.** The caller selects an interval (2 s by default) and an input
+  budget. `publish_cycle` publishes one bounded chunk as one `Update` and
   generation, then returns its generation and completion flag. The caller may
   drain further chunks immediately, yield between them, or stop and resume at
   the next tick; 2 s is neither a transaction deadline nor a promise to finish a
-  cold inventory in one cycle. The writer service is a separate delivery slice.
+  cold inventory in one cycle. The existing local writer selects its budget via
+  `AnalyticsWriterConfig.input_budget` and schedules each incomplete chunk at the
+  next interval without requiring another external notification.
   Recompute touched sessions **whole**: a following step can change an earlier
   step's duration, and a late record can change older rows. No session is split
   to meet a budget; CI measures the cost of the exceptional oversize session.
@@ -250,6 +261,18 @@ tables.
     resumable input checkpoint, the durable revision checkpoint, and the live-map
     file. It fsyncs the manifest, renames it into place, and fsyncs the
     directory. A crash leaves the previous generation.
+  - The local service coalesces catalog-publication notifications. Operational
+    classification covers direct store I/O, Parquet `External` I/O, and SQLite
+    busy/locked/I/O/full/cannot-open errors. These retry with bounded exponential
+    backoff. Parquet page-read I/O can surface as an Arrow error after losing its
+    typed I/O source; it fails safe by latching `Refused` until the next
+    notification, like structural errors. A store error requires manifest reload
+    before its operation resumes. A successful reload preserves the retry attempt;
+    only success of the resumed operation clears it. Every publication attempt
+    advances the cycle deadline, including an error after a visible rename.
+    It uses the activity rules target and current pricing-snapshot fingerprint
+    as writer targets; these do not assert that untouched rows have uniformly
+    refreshed versions.
 - **Reading.** Each fact view keeps only live rows:
   `… semi join live on (session_uid, _gen)`.
 - **Compaction** is tiered. Cycle files are level 0. When a table has more
@@ -260,9 +283,15 @@ tables.
   level-1 files are never rewritten, so work grows with changes and not with
   table size, and a second compaction run straight after the first is a no-op.
   Compaction publishes as just another generation.
+  The local service makes at most one bounded compaction attempt after a
+  successful publish.
 - **Retirement.** A file leaves the store 10 minutes after the first
   published generation that no longer names it. Queries hold a snapshot for at
-  most their deadline plus fetch time, well under that.
+  most their deadline plus fetch time, well under that. The local service only
+  considers retirement on a slow maintenance cadence and never during shutdown.
+  Due retirement can precede a publication waiting for its interval, preserving
+  publication demand and its retry count. Reload, refusal and retry deadlines
+  remain barriers; waiting uses the earliest eligible deadline.
 - **Full refresh.** The same pure projection rebuilds origin analytics from an
   available admitted index. CI compares incremental and full-refresh live rows.
   Imported frozen heads may be the only surviving facts and are not assumed
