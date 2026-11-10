@@ -75,7 +75,8 @@ solo. A native `subagent` kind independently establishes worker status.
   after itself, and reserves `local`.
 - **Encoding.** A UID is a sequence of percent-encoded components joined by
   `/`. RFC 3986 unreserved characters stay as they are, and every other byte
-  becomes `%XX`.
+  becomes uppercase `%XX`. The adapter and namespace reconciliation use the
+  same component encoder owned by `semon-asi`.
 - **Keys.**
 
   | Key | Components |
@@ -180,9 +181,17 @@ column declares a class: `key`, `enum`, `number`, `time`, `name`, `path` or
 | --- | --- |
 | `dim_machine`, `dim_harness`, `dim_tool`, `dim_date` | Conformed and small |
 | `dim_session` | Role, parent, parent method, lane root, repo, branch, status, start and end |
-| `dim_repo` | `repo_id` and a display name. `repo_id` is the `origin` remote with credentials, scheme and `.git` removed and the host lowercased, keeping non-default ports (`github.com/onsager-ai/semon`). A local-path or `file:` remote is classed `path`, and no remote gives `unknown`. |
+| `dim_repo` | `repo_id` and a display name. `repo_id` is the `origin` remote with credentials, scheme and `.git` removed and the host lowercased, keeping non-default ports (`github.com/onsager-ai/semon`). A local-path or `file:` remote is classed `path`, and no remote gives `unknown`. `repo_path` is present only for a repository with its own local identity; remote and shared `unknown` keys carry no machine-local path. |
 | `dim_model` | Immutable model identity: model, provider. Historical attributes can become SCD2 when they are needed. |
 | `dim_price` | SCD2 by price version: provider, model, `rate_kind`, `tier`, `threshold_tokens`, `usd_per_unit`, `valid_from`, `valid_to`, `learned_at` |
+
+A price row's logical key is `(price_version, provider, model, rate_kind, tier,
+speed, service_tier, threshold_tokens, unit)`. Repeated observations of the same
+rate retain one row: the earliest `learned_at`, then earliest `valid_from`, with
+`valid_to` from that observation (lowest `valid_to`, null first, breaks an exact
+timestamp tie). A different `usd_per_unit` for the same key refuses the entire
+publication without advancing its checkpoint. Different price versions retain
+their separate SCD2 rows.
 
 The SQLite activity projection is the only derivation of steps, L0 labels,
 context, StepFacts, cost components and prices. Analytics is a pure projection of
@@ -263,9 +272,9 @@ tables.
   facts and custody, with no automatic reset or multi-version exception.
 - **Namespace reconciliation.** A `ReplaceNamespace` batch is a complete
   inventory for its namespace. Every already-live session UID with that exact
-  namespace prefix that the batch does not mention is marked `source_missing`,
-  retaining its rows and recorded versions; other namespaces are untouched. A
-  later `SourceRestored` clears the marker.
+  encoded namespace component followed by `/` that the batch does not mention
+  is marked `source_missing`, retaining its rows and recorded versions; other
+  namespaces are untouched. A later `SourceRestored` clears the marker.
 - **Federated publication.** #555's immutable objects, `expected_parent` and
   namespace claim epochs publish complete admitted heads. Receiver imports carry
   per-origin heads and source, activity and transcript generations separately;

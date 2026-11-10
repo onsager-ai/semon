@@ -11,6 +11,26 @@ use std::collections::BTreeMap;
 /// Index parser/cache version.
 pub const ANALYTICS_TRANSFORM_VERSION: u32 = 1;
 
+/// Shared repository key when no remote or origin-owned local identity is known.
+pub const UNKNOWN_REPO_KEY: &str = "unknown";
+
+/// Encode one session-UID component using the RFC 3986 unreserved set.
+///
+/// Unreserved ASCII bytes (`A-Za-z0-9-._~`) remain literal; every other UTF-8
+/// byte becomes uppercase `%XX`. Components are joined with literal `/`.
+pub fn encode_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
 /// Reads one namespace of admitted activity evidence.
 ///
 /// `checkpoint` is deliberately opaque to `semon-asi`.  An implementation
@@ -322,4 +342,26 @@ pub enum RateKind {
 pub enum PriceUnit {
     Mtok,
     Request,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_component;
+
+    #[test]
+    fn uid_component_encoding_preserves_historical_adapter_output() {
+        for (input, expected) in [
+            ("", ""),
+            ("/", "%2F"),
+            ("%", "%25"),
+            (" ", "%20"),
+            ("~", "~"),
+            ("Aaz09-._~", "Aaz09-._~"),
+            ("a/b", "a%2Fb"),
+            ("a%2Fb", "a%252Fb"),
+            ("机器😀", "%E6%9C%BA%E5%99%A8%F0%9F%98%80"),
+        ] {
+            assert_eq!(encode_component(input), expected, "{input:?}");
+        }
+    }
 }

@@ -13,7 +13,7 @@ use arrow::array::{
 use arrow::record_batch::RecordBatch;
 
 use crate::error::Error;
-use crate::input::{ANALYTICS_TRANSFORM_VERSION, AnalyticsInput, SessionChange};
+use crate::input::{ANALYTICS_TRANSFORM_VERSION, AnalyticsInput, SessionChange, encode_component};
 use crate::parquet_io::read_batches;
 use crate::projection::{Cell, Row, project};
 use crate::schema::{Kind, TABLES, Table, Type};
@@ -149,7 +149,7 @@ fn update_for_batch<C: Clock>(
     }
 
     if batch.reconciliation == crate::input::Reconciliation::ReplaceNamespace {
-        let namespace_prefix = format!("{}/", batch.namespace);
+        let namespace_prefix = format!("{}/", encode_component(&batch.namespace));
         for session_uid in store.live_map().keys() {
             if session_uid.starts_with(&namespace_prefix) && !mentioned.contains(session_uid) {
                 mark_source_missing(
@@ -271,6 +271,10 @@ fn merge_dimension_rows(
     mut rows: Vec<Row>,
     additions: Vec<Row>,
 ) -> crate::Result<Vec<Row>> {
+    if table.name == "dim_price" {
+        rows.extend(additions);
+        return deduplicate_dimension_rows(table, rows);
+    }
     for row in deduplicate_dimension_rows(table, additions)? {
         match dimension_row_position(table, &rows, &row)? {
             Some(index) if rows[index] == row => {}
@@ -286,6 +290,16 @@ fn deduplicate_dimension_rows(table: &Table, rows: Vec<Row>) -> crate::Result<Ve
     for row in rows {
         match dimension_row_position(table, &unique, &row)? {
             Some(index) if unique[index] == row => {}
+            Some(index) if table.name == "dim_price" => {
+                if unique[index].get("usd_per_unit") != row.get("usd_per_unit") {
+                    return Err(Error::invalid(
+                        "conflicting dim_price rates for one logical key",
+                    ));
+                }
+                if price_observation_order(&row)? < price_observation_order(&unique[index])? {
+                    unique[index] = row;
+                }
+            }
             Some(_) => {
                 return Err(Error::invalid(format!(
                     "conflicting {} dimension rows in one input batch",
@@ -304,7 +318,25 @@ fn dimension_row_position(
     candidate: &Row,
 ) -> crate::Result<Option<usize>> {
     if table.name == "dim_price" {
-        return Ok(rows.iter().position(|row| row == candidate));
+        const KEY: [&str; 9] = [
+            "price_version",
+            "provider",
+            "model",
+            "rate_kind",
+            "tier",
+            "speed",
+            "service_tier",
+            "threshold_tokens",
+            "unit",
+        ];
+        for key in KEY {
+            if !candidate.contains_key(key) {
+                return Err(Error::invalid(format!("missing dim_price key {key}")));
+            }
+        }
+        return Ok(rows
+            .iter()
+            .position(|row| KEY.iter().all(|key| row.get(key) == candidate.get(key))));
     }
     let key = candidate
         .get(table.columns[0].name)
@@ -312,6 +344,24 @@ fn dimension_row_position(
     Ok(rows
         .iter()
         .position(|row| row.get(table.columns[0].name) == Some(key)))
+}
+
+// Fetch time is excluded from price_version. Retain the first observation of
+// an unchanged rate, including its valid_to. Break timestamp ties consistently
+// so the result does not depend on admission order.
+fn price_observation_order(row: &Row) -> crate::Result<(i64, i64, Option<i64>)> {
+    match (
+        row.get("learned_at"),
+        row.get("valid_from"),
+        row.get("valid_to"),
+    ) {
+        (
+            Some(Cell::Timestamp(Some(learned_at))),
+            Some(Cell::Timestamp(Some(valid_from))),
+            Some(Cell::Timestamp(valid_to)),
+        ) => Ok((*learned_at, *valid_from, *valid_to)),
+        _ => Err(Error::invalid("invalid dim_price observation timestamps")),
+    }
 }
 
 fn rows_to_batch(table: &'static Table, rows: &[Row]) -> crate::Result<RecordBatch> {
@@ -438,9 +488,11 @@ mod tests {
     use crate::input::{
         AdmittedBatch, AdmittedSession, BillingUsage, ContextBand, Coverage, Model, ParentMethod,
         Price, PriceUnit, RateKind, Reconciliation, RecordedCost, RecordedVersions, Repo, Role,
-        Session, SourceWitness, Status, Step, ToolCall, UsageOwner,
+        Session, SourceWitness, Status, Step, ToolCall, UNKNOWN_REPO_KEY, UsageOwner,
     };
-    use crate::schema::{DIM_REPO, DIM_TOOL, FACT_SESSION, FACT_STEP, FACT_TOOL_CALL, Kind};
+    use crate::schema::{
+        DIM_PRICE, DIM_REPO, DIM_TOOL, FACT_SESSION, FACT_STEP, FACT_TOOL_CALL, Kind,
+    };
     use crate::store::{Fault, Store, read_live_map, read_manifest};
     use crate::testutil::{FACT_TABLES, TestClock, all_rows, live_steps, update};
 
@@ -597,6 +649,29 @@ mod tests {
         admitted.session.repo.repo_id = Some("example/remote".into());
         admitted.session.repo.local_path = Some(local_path.into());
         admitted.session.repo.display_name = "remote".into();
+        admitted
+    }
+
+    fn unknown_repo_session(id: &str, local_path: &str) -> AdmittedSession {
+        let mut admitted = session(id, Some("step"), "shell");
+        admitted.session.repo = Repo {
+            key: UNKNOWN_REPO_KEY.into(),
+            repo_id: None,
+            local_path: Some(local_path.into()),
+            display_name: "unknown".into(),
+        };
+        admitted
+    }
+
+    fn priced_session(id: &str, learned_at: i64, rate: f64) -> AdmittedSession {
+        let mut admitted = session(id, Some("step"), "shell");
+        admitted.versions.price = "same-version".into();
+        admitted.steps[0].cost.price_version = "same-version".into();
+        let price = &mut admitted.prices[0];
+        price.price_version = "same-version".into();
+        price.learned_at = learned_at;
+        price.valid_from = learned_at;
+        price.usd_per_unit = rate;
         admitted
     }
 
@@ -872,6 +947,275 @@ mod tests {
                 .source_missing
                 .contains_key("m/codex/frozen")
         );
+    }
+
+    #[test]
+    fn replace_namespace_matches_only_its_encoded_component() {
+        let namespaces = ["a/b", "a%2Fb", "a", "a b", "机器"];
+        let uids: Vec<_> = namespaces
+            .iter()
+            .flat_map(|namespace| {
+                ["present", "absent"]
+                    .map(|id| format!("{}/codex/{id}", encode_component(namespace)))
+            })
+            .collect();
+        let sessions: Vec<_> = uids.iter().map(|uid| (uid.as_str(), 1)).collect();
+        for namespace in namespaces {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = open(dir.path());
+            store.publish(&update(&sessions, "seed", 0)).unwrap();
+            let before_live = store.live_map().clone();
+            let before_steps = live_steps(&store);
+            let prefix = encode_component(namespace);
+            let mut input = QueuedInput::new([AdmittedBatch {
+                namespace: namespace.into(),
+                checkpoint: "new:1".into(),
+                reconciliation: Reconciliation::ReplaceNamespace,
+                changes: vec![SessionChange::Pending {
+                    session_uid: format!("{prefix}/codex/present"),
+                }],
+            }]);
+
+            publish_cycle(&mut store, &mut input, namespace, versions()).unwrap();
+            assert_eq!(store.live_map(), &before_live);
+            assert_eq!(live_steps(&store), before_steps);
+            assert_eq!(
+                store
+                    .manifest()
+                    .source_missing
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                vec![format!("{prefix}/codex/absent")],
+                "namespace {namespace:?}",
+            );
+            assert_eq!(store.manifest().checkpoints[namespace], "new:1");
+        }
+    }
+
+    #[test]
+    fn unknown_repositories_deduplicate_within_and_across_cycles() {
+        for separate_cycles in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = open(dir.path());
+            let one = SessionChange::Admitted(Box::new(unknown_repo_session("one", "/work/one")));
+            let two = SessionChange::Admitted(Box::new(unknown_repo_session("two", "/work/two")));
+            let batches = if separate_cycles {
+                vec![
+                    batch("inc:1", Reconciliation::ReplaceNamespace, vec![one]),
+                    batch("inc:2", Reconciliation::Incremental, vec![two]),
+                ]
+            } else {
+                vec![batch(
+                    "inc:1",
+                    Reconciliation::ReplaceNamespace,
+                    vec![one, two],
+                )]
+            };
+            let mut input = QueuedInput::new(batches);
+            publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+            let first_repo_files: Vec<_> = store.manifest().files_of("dim_repo").cloned().collect();
+            if separate_cycles {
+                publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+            }
+            let repos = dimension_rows(&store, &DIM_REPO).unwrap();
+            assert_eq!(repos.len(), 1);
+            assert_eq!(
+                repos[0]["repo_key"],
+                Cell::Text(Some(UNKNOWN_REPO_KEY.into()))
+            );
+            assert_eq!(repos[0]["repo_path"], Cell::Text(None));
+            assert_eq!(
+                store
+                    .manifest()
+                    .files_of("dim_repo")
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                first_repo_files,
+            );
+            assert_eq!(store.live_map().len(), 2);
+        }
+    }
+
+    #[test]
+    fn unchanged_price_rates_keep_the_first_observation_in_either_order() {
+        for separate_cycles in [false, true] {
+            for reverse in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let mut store = open(dir.path());
+                let mut early = priced_session("early", 100, 1.0);
+                early.prices[0].valid_to = Some(150);
+                let expected = project(&early).unwrap().tables["dim_price"].clone();
+                let late = priced_session("late", 200, 1.0);
+                let mut changes = vec![
+                    SessionChange::Admitted(Box::new(early)),
+                    SessionChange::Admitted(Box::new(late)),
+                ];
+                if reverse {
+                    changes.reverse();
+                }
+                let batches = if separate_cycles {
+                    changes
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, change)| {
+                            batch(
+                                &format!("inc:{index}"),
+                                Reconciliation::Incremental,
+                                vec![change],
+                            )
+                        })
+                        .collect()
+                } else {
+                    vec![batch("inc:1", Reconciliation::ReplaceNamespace, changes)]
+                };
+                let mut input = QueuedInput::new(batches);
+                publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+                let first_price_files: Vec<_> =
+                    store.manifest().files_of("dim_price").cloned().collect();
+                if separate_cycles {
+                    publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+                    if !reverse {
+                        assert_eq!(
+                            store
+                                .manifest()
+                                .files_of("dim_price")
+                                .cloned()
+                                .collect::<Vec<_>>(),
+                            first_price_files,
+                        );
+                    }
+                }
+                assert_eq!(dimension_rows(&store, &DIM_PRICE).unwrap(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn conflicting_price_rates_refuse_the_entire_cycle() {
+        for separate_cycles in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = open(dir.path());
+            let mut seed = QueuedInput::new([batch(
+                "seed:1",
+                Reconciliation::ReplaceNamespace,
+                vec![SessionChange::Admitted(Box::new(session(
+                    "seed", None, "shell",
+                )))],
+            )]);
+            publish_cycle(&mut store, &mut seed, NAMESPACE, versions()).unwrap();
+            let one = SessionChange::Admitted(Box::new(priced_session("one", 100, 1.0)));
+            let two = SessionChange::Admitted(Box::new(priced_session("two", 200, 2.0)));
+            let batches = if separate_cycles {
+                vec![
+                    batch("inc:1", Reconciliation::Incremental, vec![one]),
+                    batch("inc:2", Reconciliation::Incremental, vec![two]),
+                ]
+            } else {
+                vec![batch("inc:1", Reconciliation::Incremental, vec![one, two])]
+            };
+            let mut input = QueuedInput::new(batches);
+            if separate_cycles {
+                publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+            }
+            let before = store.manifest().clone();
+            let before_live = store.live_map().clone();
+            let before_rows = all_rows(&store, &FACT_TABLES);
+            assert!(matches!(
+                publish_cycle(&mut store, &mut input, NAMESPACE, versions()),
+                Err(PublishError::Store(Error::Invalid(message))) if message.contains("conflicting dim_price")
+            ));
+            assert_eq!(store.manifest(), &before);
+            assert_eq!(store.live_map(), &before_live);
+            assert_eq!(all_rows(&store, &FACT_TABLES), before_rows);
+            assert_eq!(read_manifest(dir.path()).unwrap().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn price_identity_includes_every_logical_rate_selector() {
+        let admitted = priced_session("one", 100, 1.0);
+        let original = project(&admitted).unwrap().tables["dim_price"][0].clone();
+        for (key, value) in [
+            ("price_version", Cell::Text(Some("another-version".into()))),
+            ("provider", Cell::Text(Some("another-provider".into()))),
+            ("model", Cell::Text(Some("another-model".into()))),
+            ("rate_kind", Cell::Text(Some("output".into()))),
+            ("tier", Cell::Text(Some("long".into()))),
+            ("speed", Cell::Text(Some("fast".into()))),
+            ("service_tier", Cell::Text(Some("priority".into()))),
+            ("threshold_tokens", Cell::Integer(Some(200_000))),
+            ("unit", Cell::Text(Some("request".into()))),
+        ] {
+            let mut other = original.clone();
+            other.insert(key, value);
+            other.insert("usd_per_unit", Cell::Float(Some(2.0)));
+            assert_eq!(
+                merge_dimension_rows(&DIM_PRICE, vec![original.clone()], vec![other.clone()])
+                    .unwrap(),
+                vec![original.clone(), other],
+                "selector {key}",
+            );
+        }
+    }
+
+    #[test]
+    fn price_observation_timestamp_ties_are_deterministic() {
+        let admitted = priced_session("one", 100, 1.0);
+        let original = project(&admitted).unwrap().tables["dim_price"][0].clone();
+        let mut later_validity = original.clone();
+        later_validity.insert("valid_from", Cell::Timestamp(Some(150)));
+        let mut later_end = original.clone();
+        later_end.insert("valid_to", Cell::Timestamp(Some(200)));
+        for later in [later_validity, later_end] {
+            for rows in [
+                vec![original.clone(), later.clone()],
+                vec![later, original.clone()],
+            ] {
+                assert_eq!(
+                    deduplicate_dimension_rows(&DIM_PRICE, rows).unwrap(),
+                    vec![original.clone()],
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_complete_dimension_state_is_not_republished() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path());
+        let admitted = priced_session("one", 100, 1.0);
+        let mut input = QueuedInput::new([
+            batch(
+                "inc:1",
+                Reconciliation::ReplaceNamespace,
+                vec![SessionChange::Admitted(Box::new(admitted.clone()))],
+            ),
+            batch(
+                "inc:2",
+                Reconciliation::Incremental,
+                vec![SessionChange::Admitted(Box::new(admitted))],
+            ),
+        ]);
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        let before: Vec<_> = store
+            .manifest()
+            .files
+            .iter()
+            .filter(|file| crate::schema::table(&file.table).unwrap().kind == Kind::Dimension)
+            .cloned()
+            .collect();
+        assert!(!before.is_empty());
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        let after: Vec<_> = store
+            .manifest()
+            .files
+            .iter()
+            .filter(|file| crate::schema::table(&file.table).unwrap().kind == Kind::Dimension)
+            .cloned()
+            .collect();
+        assert_eq!(after, before);
+        assert_eq!(store.manifest().checkpoints[NAMESPACE], "inc:2");
     }
 
     #[test]

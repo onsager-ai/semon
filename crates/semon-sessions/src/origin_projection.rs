@@ -11,7 +11,7 @@ use semon_asi::input::{
     Activity, AdmittedBatch, AdmittedSession, AnalyticsInput, BillingUsage, Compaction,
     ContextBand, Coverage, Model, ParentMethod, Price, PriceUnit, RateKind, Reconciliation,
     RecordedCost, RecordedVersions, Repo, Role, Session, SessionChange, Source, SourceWitness,
-    Status, Step, ToolCall, Trigger, UsageOwner, WasteKind,
+    Status, Step, ToolCall, Trigger, UNKNOWN_REPO_KEY, UsageOwner, WasteKind, encode_component,
 };
 
 use crate::{
@@ -633,7 +633,7 @@ fn repo(tx: &rusqlite::Transaction<'_>, row: &CatalogRow) -> rusqlite::Result<Re
             display_name: "local".into(),
         }),
         Some(RepoId::Unknown) | None => Ok(Repo {
-            key: "unknown".into(),
+            key: UNKNOWN_REPO_KEY.into(),
             repo_id: None,
             local_path: row.repo.clone(),
             display_name: "unknown".into(),
@@ -857,19 +857,6 @@ fn session_uid(namespace: &str, identity: &(String, String)) -> String {
         encode_component(&identity.0),
         encode_component(&identity.1),
     )
-}
-
-fn encode_component(value: &str) -> String {
-    let mut encoded = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                encoded.push(byte as char)
-            }
-            _ => encoded.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    encoded
 }
 
 fn hex_bytes(bytes: &[u8]) -> String {

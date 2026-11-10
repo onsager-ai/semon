@@ -97,9 +97,20 @@ scanning facts. Retain unreferenced dimensions until bounded maintenance can
 prune them. Clarify `Versions` documentation: manifest versions are writer
 targets, while untouched sessions retain recorded versions.
 
+Shared repository keys (remote identities and `unknown`) carry no machine-local
+path; only a repository with its own local identity projects `repo_path`.
+Price dimensions merge by logical rate key, including price version and all rate
+selectors. An unchanged rate retains its first learned observation and that
+row's validity interval, independent of arrival order; conflicting rates under
+one key refuse the cycle without advancing the checkpoint. Distinct price
+versions remain separate SCD2 rows. See the [store contract](asi-store.md) for
+the complete key and timestamp tie ordering.
+
 A `ReplaceNamespace` inventory marks any prior live session under that exact
-namespace prefix which it does not mention as `source_missing`; rows remain live
-and other namespaces are untouched. A later `SourceRestored` clears the marker.
+encoded namespace component followed by `/` which it does not mention as
+`source_missing`; rows remain live and other namespaces are untouched. The
+adapter and publisher share `semon-asi`'s canonical UID component encoder. A
+later `SourceRestored` clears the marker.
 
 A reader loads the manifest once, its matching live map and exactly its named
 files. Filter session facts by `(session_uid, _gen)`; labels are append-only.
