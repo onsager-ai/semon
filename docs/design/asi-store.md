@@ -385,20 +385,28 @@ a removal does not make a valid cursor skip or fail. Unknown fields,
 invalid phase combinations, out-of-range or nonexistent anchors are
 `InvalidQuery`, never a successful empty read. A valid checkpoint from a different
 incarnation starts a new inventory from zero; it never completes the abandoned
-incarnation's reconciliation. The checkpoint is an internal cursor, not an
-authentication token. It is opaque to `semon-asi` and is committed only with the
-chunk's manifest. Error, stop or restart resumes from that committed cursor;
-a failed publication re-reads the same range. No partial inventory can infer
-source absence. Explicit source-availability observations remain effective.
+incarnation's reconciliation. The checkpoint is opaque to `semon-asi` and is
+committed only with the chunk's manifest. Error, stop or restart resumes from
+that committed cursor; a failed publication re-reads the same range. No partial
+inventory can infer source absence. Explicit source-availability observations
+remain effective.
+
+Checkpoints are writer-owned manifest state, not authenticated claims. Validation
+rejects malformed or inconsistent cursors, including sequences ahead of the
+current journal maximum; it cannot distinguish an edited, otherwise valid cursor
+from one the writer produced. Same-user tampering with that manifest, or with the
+configured namespace/index binding, is outside this trust boundary.
 
 Input memory is bounded by the selected key/journal page and step budget plus one
 whole oversize session (including its evidence/projection). The final UID set
 requires O(namespace sessions) strings, not StepFacts. Existing store live maps
 and complete dimension merging remain O(store sessions/dimensions); this change
 does not bound those publication structures or the size of a single session.
-Inventory traverses Catalog/activity keys, not journal history. Journal retention
-must preserve checkpoint sequence anchors for the incarnation; pruning or
-resequencing requires a new incarnation contract. Native identity/Catalog anchors
+Inventory traverses Catalog/activity keys, not journal history. The silver journal
+is append-only within an incarnation: production never deletes or rewrites its
+rows. Any pruning or resequencing MUST change the incarnation, restarting
+inventory rather than silently skipping changes. Sequence numbers may have gaps;
+replay does not require contiguity. Native identity/Catalog anchors
 are retained on ordinary removal. Explicit operator purges may refuse an affected
 checkpoint; this read-only adapter never recreates deleted data or resets custody.
 

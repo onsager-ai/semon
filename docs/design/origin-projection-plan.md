@@ -142,6 +142,10 @@ The admitted input now takes a caller-selected positive session/journal and step
 budget (defaults: 64 sessions/journal entries and 8,192 admitted steps). Inventory
 pages Catalog/activity keys through its starting maximum key, recording sequence
 S for catch-up. Metadata-only `Pending` identities need no journal entry.
+The silver journal is append-only within an incarnation; production does not
+prune or rewrite its rows. Any pruning or resequencing MUST change the
+incarnation so readers restart inventory. Sequence gaps are allowed, and cursors
+ahead of the current journal maximum are refused.
 Whole-session atomicity allows a single oversize session. Partial chunks
 publish independently and checkpoint their cursor. Only the final inventory
 chunk carries `ReplaceNamespace { session_uids }`, with the complete current UID

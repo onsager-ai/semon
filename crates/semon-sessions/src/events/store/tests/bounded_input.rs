@@ -464,6 +464,173 @@ fn bounded_inventory_replays_late_records_additions_and_removals() {
 }
 
 #[test]
+fn bounded_inventory_replays_new_session_behind_keyset_cursor() {
+    let (root, options, _, mut native) = fixture("bounded-add-behind-cursor", 4);
+    let mut store = Store::open_with_clock(&root.join("chunked"), clock()).unwrap();
+    let mut input = ObservedInput::open(&options);
+    let selected = budget(1, 8_192);
+    for _ in 0..2 {
+        assert!(!chunk(&mut store, &mut input, selected).complete);
+    }
+    let cursor: Value = serde_json::from_str(&store.manifest().checkpoints[NAMESPACE]).unwrap();
+    assert_eq!(cursor["cursor"]["phase"], "inventory");
+    assert!("a-new" < cursor["cursor"]["after"].as_str().unwrap());
+    let snapshot = cursor["cursor"]["snapshot"].as_i64().unwrap();
+    let new_uid = format!("{NAMESPACE}/claude/a-new");
+    let path = options.claude_home.join("projects/-work-proj/a-new.jsonl");
+    fs::write(path, [
+        serde_json::json!({"type":"user", "uuid":"a-new-user", "sessionId":"a-new", "timestamp":"2026-09-24T00:03:00Z", "message":{"role":"user", "content":"Synthetic session behind the cursor"}}).to_string(),
+        serde_json::json!({"type":"assistant", "uuid":"a-new-assistant", "sessionId":"a-new", "timestamp":"2026-09-24T00:03:01Z", "message":{"id":"a-new-message", "role":"assistant", "model":"claude-sonnet-4-5", "content":[{"type":"text", "text":"Synthetic answer"}], "usage":{"input_tokens":10, "output_tokens":5}}}).to_string(),
+    ].join("\n") + "\n").unwrap();
+    republish(&mut native, &options);
+    let added_after_snapshot: bool = native
+        .connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM silver_change WHERE session_key='a-new' AND seq>?1)",
+            [snapshot],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(added_after_snapshot);
+
+    // The bounded inventory cannot revisit this key. Its complete UID set
+    // includes the new identity, but only replay from S may publish its facts.
+    for _ in 0..8 {
+        let progress = chunk(&mut store, &mut input, selected);
+        let batch = input.last.as_ref().unwrap();
+        assert!(!batch.changes.iter().any(|change| {
+            matches!(change, SessionChange::Admitted(session) if session.session_uid == new_uid)
+        }));
+        assert!(!store.live_map().contains_key(&new_uid));
+        if let Reconciliation::ReplaceNamespace { session_uids } = &batch.reconciliation {
+            assert!(session_uids.contains(&new_uid));
+            assert!(!progress.complete);
+            break;
+        }
+    }
+    assert_eq!(input.reconciliations, 1);
+    let cursor: Value = serde_json::from_str(&store.manifest().checkpoints[NAMESPACE]).unwrap();
+    assert_eq!(cursor["cursor"]["phase"], "incremental");
+    assert_eq!(cursor["cursor"]["after"].as_i64(), Some(snapshot));
+    let mut replayed_new = false;
+    for _ in 0..16 {
+        let progress = chunk(&mut store, &mut input, selected);
+        let batch = input.last.as_ref().unwrap();
+        assert_eq!(batch.reconciliation, Reconciliation::Incremental);
+        replayed_new |= batch.changes.iter().any(|change| {
+            matches!(change, SessionChange::Admitted(session) if session.session_uid == new_uid)
+        });
+        if progress.complete {
+            break;
+        }
+    }
+    assert!(input.last.as_ref().unwrap().complete);
+    assert!(replayed_new);
+    assert!(store.live_map().contains_key(&new_uid));
+    assert!(store.manifest().source_missing.is_empty());
+    let mut expected = Store::open_with_clock(&root.join("one-shot"), clock()).unwrap();
+    assert_eq!(
+        drain(
+            &mut expected,
+            &mut ObservedInput::open(&options),
+            InputBudget::default()
+        ),
+        1
+    );
+    assert_eq!(live_rows(&store), live_rows(&expected));
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bounded_inventory_replays_source_missing_and_restored_between_chunks() {
+    let (root, options, rows, mut native) = fixture("bounded-availability", 6);
+    let (_, slots) = catalog_fixture_projection(&options);
+    let mut store = Store::open_with_clock(&root.join("chunked"), clock()).unwrap();
+    let mut expected = Store::open_with_clock(&root.join("one-shot"), clock()).unwrap();
+    for target in [&mut store, &mut expected] {
+        drain(
+            target,
+            &mut ObservedInput::open(&options),
+            InputBudget::default(),
+        );
+    }
+    let retained = live_rows(&store);
+    new_incarnation(&mut native);
+    let mut input = ObservedInput::open(&options);
+    let selected = budget(1, 8_192);
+    assert!(!chunk(&mut store, &mut input, selected).complete);
+    let withdrawn = rows.iter().find(|row| row.key == "native-cl-02").unwrap();
+    let withdrawn_uid = uid(withdrawn);
+    let available: Vec<_> = rows
+        .iter()
+        .filter(|row| row.key != withdrawn.key)
+        .cloned()
+        .collect();
+    catalog_write(&mut native, &available, &slots, false, CatalogWriter::Auto).unwrap();
+    assert_eq!(
+        session_activity::source_missing(&native.connection, &withdrawn.key).unwrap(),
+        Some(true)
+    );
+    assert!(!chunk(&mut store, &mut input, selected).complete);
+    assert!(input.last.as_ref().unwrap().changes.iter().any(|change| {
+        matches!(change, SessionChange::SourceMissing { session_uid, retained_at_origin: true } if session_uid == &withdrawn_uid)
+    }));
+    assert!(store.manifest().source_missing.contains_key(&withdrawn_uid));
+    assert_eq!(
+        live_rows(&store),
+        retained,
+        "source loss keeps frozen facts"
+    );
+
+    // Restore the exact native generation after its inventory key has passed.
+    // The eventual SourceRestored observation must therefore come from replay.
+    catalog_write(&mut native, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    assert_eq!(
+        session_activity::source_missing(&native.connection, &withdrawn.key).unwrap(),
+        Some(false)
+    );
+    let mut restored_by_replay = false;
+    for _ in 0..32 {
+        let progress = chunk(&mut store, &mut input, selected);
+        let batch = input.last.as_ref().unwrap();
+        if matches!(
+            batch.reconciliation,
+            Reconciliation::ReplaceNamespace { .. }
+        ) {
+            assert!(store.manifest().source_missing.contains_key(&withdrawn_uid));
+        }
+        if batch.changes.iter().any(|change| {
+            matches!(change, SessionChange::SourceRestored { session_uid } if session_uid == &withdrawn_uid)
+        }) {
+            assert_eq!(batch.reconciliation, Reconciliation::Incremental);
+            restored_by_replay = true;
+        }
+        if progress.complete {
+            break;
+        }
+    }
+    assert!(input.last.as_ref().unwrap().complete);
+    assert_eq!(input.reconciliations, 1);
+    assert!(restored_by_replay);
+    assert!(input.removed.is_empty());
+    assert!(store.manifest().source_missing.is_empty());
+    assert_eq!(
+        drain(
+            &mut expected,
+            &mut ObservedInput::open(&options),
+            InputBudget::default()
+        ),
+        1
+    );
+    assert_eq!(live_rows(&store), live_rows(&expected));
+    assert_eq!(
+        store.manifest().source_missing,
+        expected.manifest().source_missing
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bounded_inventory_incarnation_change_abandons_old_partial_reconciliation() {
     let (root, options, _, mut native) = fixture("bounded-incarnation", 5);
     let mut store = Store::open_with_clock(&root.join("analytics-store"), clock()).unwrap();

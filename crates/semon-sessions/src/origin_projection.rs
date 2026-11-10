@@ -25,6 +25,10 @@ use crate::{
 ///
 /// The namespace is supplied by the owner that configured the index.  It is
 /// not inferred from paths or host state.
+///
+/// The silver journal is append-only within an index incarnation. Any pruning
+/// or resequencing must change the incarnation so readers restart inventory.
+/// Sequence numbers may have gaps; replay does not require contiguity.
 pub struct SqliteAnalyticsInput {
     namespace: String,
     connection: Connection,
