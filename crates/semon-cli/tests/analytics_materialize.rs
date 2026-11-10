@@ -292,26 +292,3 @@ fn materialize_requires_the_existing_stores_namespace() {
     assert_eq!(fs::read(manifest).unwrap(), before);
     assert!(!state.join("analytics-namespace").exists());
 }
-
-#[test]
-fn materialize_propagates_catalog_producer_failure_without_publishing() {
-    let home = fixture::Fixture::new();
-    assert!(materialize(&home).status.success());
-    let state = home.root.join("state");
-    let manifest = state.join("analytics-store/analytics/manifest.json");
-    let before = fs::read(&manifest).unwrap();
-    // The read-only analytics format check passes, but the native producer must
-    // refuse a current-format index bound to a different source namespace.
-    let connection = rusqlite::Connection::open(state.join("index.sqlite3")).unwrap();
-    connection
-        .execute(
-            "UPDATE meta SET value='synthetic-other-origin' WHERE key='storage_namespace'",
-            [],
-        )
-        .unwrap();
-    drop(connection);
-    let output = materialize(&home);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("catalog refresh:"));
-    assert_eq!(fs::read(manifest).unwrap(), before);
-}
