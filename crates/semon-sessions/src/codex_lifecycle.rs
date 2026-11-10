@@ -603,14 +603,40 @@ mod tests {
     }
 
     #[test]
-    fn parser28_rebuild_and_source_replacement_cannot_retain_completed_turn() {
+    fn obsolete_parser_is_refused_without_mutating_completed_turn() {
         let home = Home::new();
         home.append(event("task_started", Some("a")));
         home.append(event("task_complete", Some("a")));
         assert_eq!(home.query()["turn_lifecycle"]["phase"], "completed");
-        home.db()
-            .execute("UPDATE meta SET value='28' WHERE key='cache_version'", [])
-            .unwrap();
+        let db = home.db();
+        db.execute(
+            "UPDATE meta SET value=?1 WHERE key='cache_version'",
+            [(crate::events::CACHE_VERSION - 1).to_string()],
+        )
+        .unwrap();
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+        let before = crate::native_timing::cleanup_tests::snapshot(&db);
+        let path = crate::events::EventCache::path(&home.options.cache);
+        let database = fs::read(&path).unwrap();
+        let wal = fs::read(format!("{}-wal", path.display())).unwrap();
+        let source = fs::read(&home.path).unwrap();
+        let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+        let error = evidence
+            .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)
+            .unwrap_err();
+        evidence.retire();
+        assert!(error.to_string().contains("parser version mismatch"));
+        assert_eq!(crate::native_timing::cleanup_tests::snapshot(&db), before);
+        assert_eq!(fs::read(&path).unwrap(), database);
+        assert_eq!(fs::read(format!("{}-wal", path.display())).unwrap(), wal);
+        assert_eq!(fs::read(&home.path).unwrap(), source);
+    }
+
+    #[test]
+    fn current_source_replacement_cannot_retain_completed_turn() {
+        let home = Home::new();
+        home.append(event("task_started", Some("a")));
+        home.append(event("task_complete", Some("a")));
         assert_eq!(home.query()["turn_lifecycle"]["phase"], "completed");
         let version: String = home
             .db()

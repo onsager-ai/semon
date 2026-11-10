@@ -8231,6 +8231,22 @@ mod tests {
             .unwrap();
         assert!(catalog_batch_bytes(&rows, &metadata, CatalogWriter::Auto).is_some());
         catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
+        let family_parent = rows
+            .iter()
+            .position(|row| row.key == "native-cx-01")
+            .unwrap();
+        let family_members = |store: &SqliteStore| {
+            store.connection.query_row(
+                "SELECT json_extract(metadata,'$.activity_analytics.family.member_sessions') FROM session_catalog WHERE session_key=?1",
+                ["native-cx-01"],
+                |row| row.get::<_, usize>(0),
+            ).unwrap()
+        };
+        assert_eq!(
+            family_members(&batch),
+            32,
+            "publication folds the native Codex child summaries into their parent"
+        );
         assert_eq!(
             batch
                 .connection
@@ -8289,12 +8305,20 @@ mod tests {
             )
             .unwrap();
         catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
+        assert_eq!(
+            family_members(&batch),
+            31,
+            "detaching the child updates its former parent's family summary"
+        );
         let feed = batch.connection.prepare("SELECT session_key,read_scope FROM session_catalog_changes WHERE revision>?1 ORDER BY revision").unwrap().query_map([feed_before], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        let expected = [0, 2, 4, 5, 6, 7]
-            .into_iter()
-            .flat_map(|position| {
-                ["current", "retained_history"]
-                    .map(|scope| (rows[position].key.clone(), scope.to_owned()))
+        // Detaching rows[4] also changes the native Codex parent's family
+        // summary. Its feed entries follow the caller's direct row changes.
+        let expected = rows
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| [0, 2, 4, 5, 6, 7, family_parent].contains(position))
+            .flat_map(|(_, row)| {
+                ["current", "retained_history"].map(|scope| (row.key.clone(), scope.to_owned()))
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -8747,7 +8771,7 @@ mod tests {
         use std::io::Write;
         for count in [63usize, 64, 65, 257] {
             let root = scratch("catalog-paged-original");
-            let (options, _, _) = catalog_native_fixture(&root, 2, true);
+            let (options, _, initial_projections) = catalog_native_fixture(&root, 2, true);
             let key = "native-cx-01";
             let relative = "sessions/2026/09/24/rollout-native-cx-01.jsonl";
             let original_path = options.codex_home.join(relative);
@@ -8755,8 +8779,17 @@ mod tests {
                 .append(true)
                 .open(&original_path)
                 .unwrap();
-            // The fixture starts with exactly two native transcript entries.
-            for n in 2..count {
+            // The initial model-setting signal is a transcript slot too.
+            let initial = &initial_projections
+                .iter()
+                .find(|row| row.key == key)
+                .unwrap()
+                .slots;
+            assert_eq!(initial.len(), 3);
+            assert!(
+                matches!(initial[0].recipe, crate::slot_projection::Recipe::Signal { ref signal } if signal.kind == crate::events::SignalKind::Model)
+            );
+            for n in initial.len()..count {
                 writeln!(file,"{}",serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Original native record {n}")}]}})).unwrap();
             }
             drop(file);
@@ -10744,7 +10777,7 @@ mod tests {
     }
 
     #[test]
-    fn analytics_anchors_use_ingested_record_ordinals_and_native_compaction_ids() {
+    fn analytics_anchors_prefer_native_ids_and_fall_back_to_ingested_record_ordinals() {
         let root = scratch("analytics-record-ordinals");
         let (options, rows, _) = catalog_native_fixture(&root, 1, false);
         let source = &rows[0].sources[0].path;
@@ -10809,29 +10842,43 @@ mod tests {
             })
             .expect("complete synthetic native evidence is admitted");
         assert_eq!(admitted.steps.len(), 2);
-        assert!(
-            admitted.steps[0]
-                .turn_uid
-                .ends_with("/t/%40native-cl-00%3A3"),
-            "record 3 at byte 900 uses its record ordinal"
+        let uid = "fixture-machine/claude/native-cl-00";
+        assert_eq!(
+            admitted.steps[0].turn_uid,
+            format!("{uid}/t/message-first"),
+            "record 3 at byte 900 prefers its native message ID"
         );
-        assert!(
-            admitted.steps[1]
-                .turn_uid
-                .ends_with("/t/%40native-cl-00%3A5")
+        assert_eq!(
+            admitted.steps[1].turn_uid,
+            format!("{uid}/t/message-second")
         );
         assert_eq!(admitted.compactions.len(), 2);
-        assert!(
-            admitted.compactions[0]
-                .compaction_uid
-                .ends_with("/c/native-compact"),
+        assert_eq!(
+            admitted.compactions[0].compaction_uid,
+            format!("{uid}/c/native-compact"),
             "a native compaction ID is preferred"
         );
-        assert!(
-            admitted.compactions[1]
-                .compaction_uid
-                .ends_with("/c/%40native-cl-00%3A4")
+        assert_eq!(
+            admitted.compactions[1].compaction_uid,
+            format!("{uid}/c/%40native-cl-00%3A4"),
+            "without a native ID, compaction record 4 uses its ordinal"
         );
+        for anchor in admitted
+            .steps
+            .iter()
+            .flat_map(|step| [&step.step_uid, &step.turn_uid])
+            .chain(
+                admitted
+                    .compactions
+                    .iter()
+                    .map(|compaction| &compaction.compaction_uid),
+            )
+        {
+            assert!(!anchor.contains("%2F"));
+            assert!(!anchor.contains("projects"));
+            assert!(!anchor.contains("analytics-record-ordinals"));
+            assert!(!anchor.contains("900"));
+        }
         drop(input);
         drop(store);
         fs::remove_dir_all(root).unwrap();
@@ -10846,7 +10893,7 @@ mod tests {
         let mut metadata_only = rows.clone();
         let pending_row = metadata_only
             .iter_mut()
-            .find(|row| row.harness == "claude")
+            .find(|row| row.key == "native-cl-02")
             .unwrap();
         let pending_native_id = pending_row.native_ids[0].clone();
         pending_row.session_activity = None;
@@ -10868,9 +10915,18 @@ mod tests {
         let initial = input.read_admitted(None).unwrap();
         assert_eq!(initial.reconciliation, Reconciliation::ReplaceNamespace);
         let pending_uid = format!("fixture-machine/claude/{pending_native_id}");
-        assert!(initial.changes.iter().any(|change| {
-            matches!(change, SessionChange::Pending { session_uid } if session_uid == &pending_uid)
-        }));
+        assert_eq!(
+            initial
+                .changes
+                .iter()
+                .filter_map(|change| match change {
+                    SessionChange::Pending { session_uid } => Some(session_uid.as_str()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([pending_uid.as_str()]),
+            "exactly the owner whose activity was withheld is Pending"
+        );
         let admitted_sessions = initial
             .changes
             .iter()
@@ -10884,7 +10940,7 @@ mod tests {
                 .iter()
                 .map(|session| session.session.native_session_id.as_str())
                 .collect::<std::collections::BTreeSet<_>>(),
-            std::collections::BTreeSet::from(["native-cl-02", "native-cx-01", "native-cx-03"]),
+            std::collections::BTreeSet::from(["native-cl-00", "native-cx-01", "native-cx-03"]),
             "only the deliberately withheld Claude owner is pending"
         );
         assert!(
