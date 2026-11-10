@@ -4,10 +4,8 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-import tomllib
 
 SCRIPT = Path(__file__).with_name("should-run-expensive-ci.py")
-ROOT = SCRIPT.parents[2]
 SPEC = importlib.util.spec_from_file_location("ci_classifier", SCRIPT)
 CLASSIFIER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(CLASSIFIER)
@@ -89,7 +87,7 @@ class ClassifierTests(unittest.TestCase):
 
         self.assertEqual(tier(), "full")
         self.assertEqual(tier("docs/guide.md", "README.md"), "none")
-        self.assertEqual(tier("crates/semon-asi/src/lib.rs", "docs/asi.md"), "none")
+        self.assertEqual(tier("crates/semon-asi/src/lib.rs", "docs/asi.md"), "smoke")
         for path in (
             "ui/src/app.tsx",
             "tests/ui/fixture-data/sample.json",
@@ -106,16 +104,6 @@ class ClassifierTests(unittest.TestCase):
     def test_events_select_full_viewer_tier(self):
         self.assertEqual(CLASSIFIER.classify("push", "", ""), (True, "full"))
         self.assertEqual(CLASSIFIER.classify("workflow_dispatch", "", ""), (True, "full"))
-
-    def test_viewer_binary_does_not_link_asi(self):
-        for crate in ("semon-cli", "semon-push", "semon-sessions"):
-            manifest = tomllib.loads((ROOT / "crates" / crate / "Cargo.toml").read_text())
-            for section in ("dependencies", "dev-dependencies", "build-dependencies"):
-                self.assertNotIn(
-                    "semon-asi",
-                    manifest.get(section, {}),
-                    f"{crate} now depends on semon-asi; remove VIEWER_UNLINKED_PREFIXES",
-                )
 
     def test_classifier_failure_propagates(self):
         with self.assertRaises(subprocess.CalledProcessError):

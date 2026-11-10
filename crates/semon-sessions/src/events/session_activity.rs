@@ -18,7 +18,7 @@ use crate::{claude_usage::Shared, pricing};
 pub(crate) mod analytics;
 pub(crate) mod classify;
 
-pub(crate) const ACTIVITY_RULES_VERSION: u32 = 10;
+pub(crate) const ACTIVITY_RULES_VERSION: u32 = 11;
 const HOUR_MS: u64 = 3_600_000;
 
 /// Claude IDs are scoped by `SessionActivity::session_key`. Codex identity is
@@ -130,6 +130,7 @@ pub(crate) struct ToolCallFact {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct StepFacts {
     pub(crate) turn_id: Option<String>,
+    pub(crate) record_ordinal: Option<u64>,
     pub(crate) usage_owner: UsageOwner,
     pub(crate) billing: BillingUsage,
     pub(crate) model_ms: Option<u64>,
@@ -309,6 +310,7 @@ impl Trigger {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Compaction {
     pub(crate) position: SourcePosition,
+    pub(crate) native_record: Option<super::NativeRecordIdentity>,
     pub(crate) timestamp: Option<i64>,
     pub(crate) step_id: Option<ActivityStepId>,
 }
@@ -625,6 +627,7 @@ pub(crate) fn derive(
         .into_iter()
         .filter(|(_, signal)| signal.k == SignalKind::Compact)
         .map(|(source, signal)| Compaction {
+            native_record: signal.native_record,
             position: SourcePosition {
                 source,
                 offset: signal.o,

@@ -143,6 +143,8 @@ pub(crate) struct CatalogRow {
     pub(crate) presentation_kind: Option<String>,
     pub(crate) native_ids: Vec<String>,
     pub(crate) parent: Option<String>,
+    /// Observed evidence that established the parent, absent for native
+    /// lineage even when an environment or marker observation agrees.
     pub(crate) parent_source: Option<String>,
     pub(crate) repo: Option<String>,
     /// Persisted with the analytics digest in silver_session_state, never in
@@ -157,6 +159,23 @@ pub(crate) struct CatalogRow {
     pub(crate) tokens: [f64; 3],
     pub(crate) cost: crate::pricing::Cost,
     pub(crate) sources: Vec<CatalogSource>,
+}
+
+impl CatalogRow {
+    /// The native identity of this Catalog owner.  Claude continuations can
+    /// contribute several native source IDs to one lineage; the lineage key is
+    /// the recorded root when it appears in that set.  Other multi-ID rows do
+    /// not establish a single native identity.
+    pub(crate) fn owner_native_id(&self) -> Option<&str> {
+        self.native_ids
+            .iter()
+            .find(|native_id| native_id.as_str() == self.key.as_str())
+            .map(String::as_str)
+            .or_else(|| match self.native_ids.as_slice() {
+                [native_id] => Some(native_id),
+                _ => None,
+            })
+    }
 }
 
 /// Shared qualification for exact native Query publication fields. These are
@@ -195,7 +214,7 @@ pub(crate) struct CatalogSource {
     pub(crate) native_role: Option<Value>,
 }
 
-pub(crate) const CATALOG_VERSION: u32 = 8;
+pub(crate) const CATALOG_VERSION: u32 = 9;
 
 pub(super) fn source(file: &super::SourceFile) -> CatalogSource {
     let (dev, ino, offset, prefix_sha256, tail_sha256, changed_ns) = file.revision;

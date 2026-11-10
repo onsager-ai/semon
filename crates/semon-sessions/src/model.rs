@@ -3223,6 +3223,7 @@ impl<'a> Builder<'a> {
         }
         for (child, spawner, _, _) in &spawns {
             self.sessions[*child].parent = *spawner;
+            self.sessions[*child].out.parent_source = None;
             if spawner.is_none() {
                 self.sessions[*child].out.lane = true;
             }
@@ -3915,15 +3916,22 @@ impl<'a> Builder<'a> {
         runs.sort_by_key(|position| (self.files[*position].first, *position));
         for position in runs {
             let (spawner, call, ambiguous) = self.codex_spawner(position)?;
-            spawns.push((self.of_file[position], spawner, call, ambiguous));
+            let source = match &self.files[position].role {
+                Role::Codex(meta) if meta.parent_thread.is_none() && spawner.is_some() => {
+                    Some("marker".to_owned())
+                }
+                _ => None,
+            };
+            spawns.push((self.of_file[position], spawner, call, ambiguous, source));
         }
-        for (child, spawner, _, _) in &spawns {
+        for (child, spawner, _, _, source) in &spawns {
             self.sessions[*child].parent = *spawner;
+            self.sessions[*child].out.parent_source.clone_from(source);
             if spawner.is_none() {
                 self.sessions[*child].out.lane = true;
             }
         }
-        for (child, spawner, call, ambiguous) in spawns {
+        for (child, spawner, call, ambiguous, _) in spawns {
             let state = self.sessions[child]
                 .out
                 .turn_lifecycle
@@ -4672,10 +4680,12 @@ impl<'a> Builder<'a> {
             else {
                 continue;
             };
-            self.sessions[child].out.parent_source = Some(link.source);
             if self.sessions[child].parent == Some(parent) {
                 continue;
             }
+            // Agreement can enrich native evidence without owning lineage.
+            // Marker-only Codex spawns already carry their observed source.
+            self.sessions[child].out.parent_source = Some(link.source);
             self.sessions[child].parent = Some(parent);
             self.sessions[child].out.lane = false;
             let call = link.call.as_deref().and_then(|id| self.find_in(parent, id));
@@ -7896,7 +7906,7 @@ fn prepare_history_inner(
                 let mut summary = FileIndex::default();
                 let mut offset = 0u64;
 
-                for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+                for (ordinal, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
                     crate::selected_read::charge(std::mem::size_of::<Event>() + 128, line.len())?;
                     if line.len() > 32 * 1024 * 1024 || line.last() != Some(&b'\n') {
                         return Err(io::Error::new(
@@ -7906,6 +7916,7 @@ fn prepare_history_inner(
                     }
                     match crate::tx::parse_native_record(line) {
                         Some(value) => {
+                            let first_signal = summary.signals.len();
                             if value["type"] == "session_meta" {
                                 header = value["payload"].clone();
                             }
@@ -7920,6 +7931,12 @@ fn prepare_history_inner(
                                     ));
                                 }
                             }
+                            summary.capture_record_identity(
+                                &value,
+                                offset,
+                                ordinal as u64,
+                                first_signal,
+                            );
                         }
                         None => events::gap(&mut summary, offset),
                     }

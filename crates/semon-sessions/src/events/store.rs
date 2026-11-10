@@ -249,7 +249,9 @@ fn emit_catalog_publish_attempt(
 // the per-database storage version stamp (current stores do not run storage
 // DDL), the ledger epoch on source ledgers and published sources, and compact
 // activity summaries for bounded family publication.
-pub(crate) const SCHEMA_VERSION: i64 = 43;
+// v47: Catalog parent_source names only the observed evidence owning a link;
+// agreement with native lineage leaves it absent, including staged endpoints.
+pub(crate) const SCHEMA_VERSION: i64 = 47;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -362,6 +364,15 @@ CREATE TABLE IF NOT EXISTS silver_session_state (
     digest TEXT NOT NULL,
     repo_id TEXT
 ) STRICT;
+CREATE TABLE IF NOT EXISTS silver_session_identity (
+    session_key TEXT PRIMARY KEY,
+    harness TEXT NOT NULL,
+    native_session_id TEXT NOT NULL
+) STRICT;
+CREATE TABLE IF NOT EXISTS silver_repo_identity (
+    repo_path TEXT PRIMARY KEY,
+    repo_key TEXT NOT NULL UNIQUE
+) STRICT;
 CREATE TABLE IF NOT EXISTS silver_change (
     seq INTEGER PRIMARY KEY,
     session_key TEXT NOT NULL,
@@ -440,6 +451,7 @@ CREATE TABLE IF NOT EXISTS signals (
     at INTEGER NOT NULL,
     n TEXT,
     v INTEGER,
+    native_record TEXT,
     PRIMARY KEY (file_id, seq)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS usage_identity (
@@ -475,6 +487,7 @@ CREATE TABLE IF NOT EXISTS usage (
     billing_split_unknown INTEGER NOT NULL,
     record_ids TEXT NOT NULL,
     native_offset INTEGER NOT NULL,
+    record_ordinal INTEGER,
     PRIMARY KEY (file_id, message_id)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS codex_usage (
@@ -617,25 +630,25 @@ struct EventState {
     activity_tool: Option<super::session_activity::classify::ToolCallEvidence>,
 }
 
-const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
+const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v, native_record";
 
-const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals (file_id, seq, k, o, t, at, n, v) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals (file_id, seq, k, o, t, at, n, v, native_record) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 
 const USAGE_COLUMNS: &str = "message_id, model, input, cached_input, output, reasoning_output, \
      total, model_input, model_output, model_cache_write, model_cache_read, billing_input, \
      billing_output, billing_cache_read, billing_cache_write_5m, billing_cache_write_1h, \
      billing_web_search_requests, billing_speed, billing_service_tier, billing_prompt_size, \
-     billing_timestamp, billing_split_unknown, record_ids, native_offset";
+     billing_timestamp, billing_split_unknown, record_ids, native_offset, record_ordinal";
 
 const PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (file_id, message_id, model, input, \
      cached_input, output, reasoning_output, total, model_input, model_output, \
      model_cache_write, model_cache_read, billing_input, billing_output, billing_cache_read, \
      billing_cache_write_5m, billing_cache_write_1h, billing_web_search_requests, \
      billing_speed, billing_service_tier, billing_prompt_size, billing_timestamp, \
-     billing_split_unknown, record_ids, native_offset) \
+     billing_split_unknown, record_ids, native_offset, record_ordinal) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-     ?19, ?20, ?21, ?22, ?23, ?24, ?25)";
+     ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)";
 
 const CODEX_USAGE_COLUMNS: &str = "seq, model, input, output, cache_write, cache_read, t";
 
@@ -652,7 +665,6 @@ const PUT_RUN: &str = "INSERT OR REPLACE INTO reported_runs (session_id, start, 
 /// Read the index incarnation, the changes after `after` and, through `read`,
 /// derived rows from the same SQLite snapshot. A changed incarnation means
 /// the caller must re-read the namespace in full.
-#[allow(dead_code, reason = "the analytics writer is the first caller")]
 pub(crate) fn read_silver_changes<T>(
     connection: &mut Connection,
     after: i64,
@@ -2850,7 +2862,6 @@ enum Init {
     Ready,
     NoWal,
     Fresh,
-    Obsolete,
     Unsupported(&'static str),
 }
 
@@ -4002,7 +4013,7 @@ impl SqliteStore {
                 ));
             }
             Init::Unsupported(reason) => return Err(Unopened::Unsupported(reason.into())),
-            Init::Fresh | Init::Obsolete => unreachable!("init initializes fresh storage"),
+            Init::Fresh => unreachable!("init initializes fresh storage"),
         }
         let store = Self {
             connection,
@@ -4644,12 +4655,14 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT usage_ready FROM native_usage_sources LIMIT 0",
         "SELECT tree_root FROM native_tree_repairs LIMIT 0",
         "SELECT source_generation FROM session_slot_projections LIMIT 0",
-        "SELECT source_generation,generation,rules_version,pricing_fingerprint,total,summary,preview FROM session_activity_projections LIMIT 0",
+        "SELECT source_generation,generation,rules_version,pricing_fingerprint,pricing_snapshot,total,summary,preview FROM session_activity_projections LIMIT 0",
         "SELECT generation,ordinal,metadata,waste_kind,waste_category,empty_search FROM session_activity_steps LIMIT 0",
         "SELECT generation,identity,metadata FROM session_activity_facts LIMIT 0",
         "SELECT generation,ordinal,metadata FROM session_activity_compactions LIMIT 0",
         "SELECT seq,session_key,kind FROM silver_change LIMIT 0",
         "SELECT session_key,digest,repo_id FROM silver_session_state LIMIT 0",
+        "SELECT session_key,harness,native_session_id FROM silver_session_identity LIMIT 0",
+        "SELECT repo_path,repo_key FROM silver_repo_identity LIMIT 0",
         "SELECT metadata FROM session_history_catalog LIMIT 0",
         "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
     ] {
@@ -4764,7 +4777,7 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
     Ok(Init::Ready)
 }
 
-/// One authored DDL set, shared by cold initialization and whole-index rebuilds.
+/// One authored DDL set for cold initialization.
 fn storage_ddl() -> [&'static str; 11] {
     [
         SCHEMA,
@@ -4781,170 +4794,17 @@ fn storage_ddl() -> [&'static str; 11] {
     ]
 }
 
-/// Recognize ownership without reading old event/proof/recipe payloads. Refuse
-/// mixed databases: no unknown tables, views or triggers may be discarded.
-/// The three retired table names are ownership evidence, never old-schema DDL.
-type OwnedObjects = Vec<(String, String)>;
-
-fn owned_objects(connection: &Connection) -> rusqlite::Result<Option<OwnedObjects>> {
-    let objects = connection
-        .prepare("SELECT type,name,tbl_name FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type DESC,name LIMIT 513")?
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if objects.len() > 512 {
-        return Ok(None);
-    }
-    let declared = |kind: &str, name: &str| {
-        let prefix = format!("CREATE {kind} IF NOT EXISTS ");
-        storage_ddl().iter().any(|ddl| {
-            ddl.split(prefix.as_str()).skip(1).any(|tail| {
-                tail.split(|ch: char| ch.is_whitespace() || ch == '(')
-                    .next()
-                    == Some(name)
-            })
-        })
-    };
-    let table = |name: &str| {
-        declared("TABLE", name)
-            || matches!(
-                name,
-                "native_usage_migrations" | "native_tree_copy_queue" | "session_search_postings"
-            )
-    };
-    if objects
-        .iter()
-        .any(|(kind, name, owner)| match kind.as_str() {
-            "table" => !table(name),
-            "index" => !table(owner),
-            "trigger" => !table(owner) || !declared("TRIGGER", name),
-            _ => true,
-        })
-    {
-        return Ok(None);
-    }
-    Ok(Some(
-        objects
-            .into_iter()
-            .filter_map(|(kind, name, _)| {
-                matches!(kind.as_str(), "table" | "trigger").then_some((kind, name))
-            })
-            .collect(),
-    ))
-}
-
-fn contract_number(value: &str) -> Option<u32> {
-    let number = value.parse::<u32>().ok()?;
-    (number > 0 && value == number.to_string()).then_some(number)
-}
-
-/// Only producers can turn an obsolete, positively recognized Semon contract
-/// into a fresh index. Every known version must be readable and <= current;
-/// a single newer/unrecognized contract wins over any older contract.
+/// Producers only accept the current Semon contract.  Older persistent indexes
+/// may contain the sole retained evidence for a session, so the producer must
+/// refuse them rather than treating a version marker as proof that a destructive
+/// rebuild is safe.
 fn qualify_producer(connection: &Connection) -> rusqlite::Result<Init> {
-    let found = qualify(connection)?;
-    if !matches!(found, Init::Unsupported(_)) {
-        return Ok(found);
-    }
-    let schema: i64 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let application: i64 =
-        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
-    if schema <= 0 || schema > SCHEMA_VERSION || application != 0 {
-        return Ok(found);
-    }
-    // These stable columns and the canonical parser key are the evidence
-    // existing Semon databases already wrote; no new marker is required.
-    for sql in [
-        "SELECT key,value FROM meta LIMIT 0",
-        "SELECT file_id,path,dev,ino,resume_at,head_sha256,tail_sha256 FROM files LIMIT 0",
-        "SELECT file_id,extra,seq,k,o,b FROM events LIMIT 0",
-    ] {
-        if let Err(error) = connection.prepare(sql) {
-            return match malformed_schema(error)? {
-                Init::Unsupported(_) => Ok(found),
-                _ => unreachable!(),
-            };
-        }
-    }
-    let mut obsolete = schema < SCHEMA_VERSION;
-    for (key, current, required) in [
-        ("cache_version", CACHE_VERSION, true),
-        (
-            "catalog_version",
-            crate::model::summary::CATALOG_VERSION,
-            false,
-        ),
-        (
-            "search_version",
-            contract_number(crate::catalog_search::VERSION).expect("current search version"),
-            false,
-        ),
-    ] {
-        let value: Option<String> = connection
-            .query_row(
-                "SELECT value FROM meta WHERE key=?1 AND octet_length(value)<=32",
-                [key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(value) = value else {
-            // Oversized values are not absent metadata.
-            let present: bool = connection.query_row(
-                "SELECT EXISTS(SELECT 1 FROM meta WHERE key=?1)",
-                [key],
-                |row| row.get(0),
-            )?;
-            if required || present {
-                return Ok(found);
-            }
-            continue;
-        };
-        let Some(version) = contract_number(&value) else {
-            return Ok(found);
-        };
-        if version > current {
-            return Ok(found);
-        }
-        obsolete |= version < current;
-    }
-    let recipe: Option<Option<String>> = connection.query_row(
-        "SELECT CASE WHEN octet_length(value)<=128 THEN value ELSE NULL END FROM meta WHERE key='catalog_semantic_recipe'", [], |row| row.get(0),
-    ).optional()?;
-    if let Some(recipe) = recipe {
-        let Some(version) = recipe
-            .as_deref()
-            .and_then(|text| text.strip_prefix("recorded-origin-turn-complete-receipts-v"))
-            .and_then(contract_number)
-        else {
-            return Ok(found);
-        };
-        let current = semantic_stage::RECIPE
-            .strip_prefix("recorded-origin-turn-complete-receipts-v")
-            .and_then(contract_number)
-            .expect("current semantic recipe");
-        if version > current {
-            return Ok(found);
-        }
-        obsolete |= version < current;
-    }
-    // Inspect only format numbers, never old archive payloads or source bytes.
-    let (invalid, older): (bool, bool) = connection.query_row(
-        "SELECT COALESCE(MAX(CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN CASE WHEN json_type(value,'$.version')='integer' AND json_extract(value,'$.version') BETWEEN 1 AND 6 AND ((json_extract(value,'$.version')<6 AND json_type(value,'$.parser_version') IS NULL) OR (json_type(value,'$.parser_version')='integer' AND json_extract(value,'$.parser_version') BETWEEN 1 AND ?1)) THEN 0 ELSE 1 END ELSE 1 END),0), COALESCE(MAX(CASE WHEN octet_length(value)<=16384 AND json_valid(value) THEN json_extract(value,'$.version')<6 OR json_extract(value,'$.parser_version')<?1 ELSE 0 END),0) FROM meta WHERE key GLOB 'archive_event_index:*'",
-        [CACHE_VERSION], |row| Ok((row.get(0)?, row.get(1)?)),
-    )?;
-    if invalid {
-        return Ok(found);
-    }
-    obsolete |= older;
-    if obsolete && owned_objects(connection)?.is_some() {
-        Ok(Init::Obsolete)
-    } else {
-        Ok(found)
-    }
+    qualify(connection)
 }
 
-/// Reclassify inside SQLite's writer lock. Reset and current DDL commit as one
-/// transaction: WAL readers keep their old snapshots; producers cannot reset a
-/// store that another producer has already rebuilt. No files are unlinked.
+/// Initialize a fresh index under SQLite's writer lock. Unsupported persistent
+/// state is left untouched; an operator may only recover it after separately
+/// establishing source availability and custody.
 fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.set_prepared_statement_cache_capacity(32);
@@ -4955,28 +4815,13 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         return Ok(found);
     }
     let fresh = matches!(found, Init::Fresh);
-    let rebuild = matches!(found, Init::Obsolete);
     let mut initialized = false;
-    if fresh || rebuild {
-        if fresh {
-            // Cold initialization retains exclusion through the first WAL switch.
-            connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
-        }
+    if fresh {
+        // Cold initialization retains exclusion through the first WAL switch.
+        connection.pragma_update(None, "locking_mode", "EXCLUSIVE")?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         match qualify_producer(&transaction)? {
-            state @ (Init::Fresh | Init::Obsolete) => {
-                if matches!(state, Init::Obsolete) {
-                    let Some(objects) = owned_objects(&transaction)? else {
-                        return Ok(Init::Unsupported(
-                            "unsupported session index: ambiguous ownership",
-                        ));
-                    };
-                    // Triggers precede tables; indexes disappear with their table.
-                    for (kind, name) in objects {
-                        let quoted = name.replace('"', "\"\"");
-                        transaction.execute_batch(&format!("DROP {kind} \"{quoted}\""))?;
-                    }
-                }
+            Init::Fresh => {
                 for ddl in storage_ddl() {
                     transaction.execute_batch(ddl)?;
                 }
@@ -5001,7 +4846,7 @@ fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
         mode = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
     }
     if !mode.eq_ignore_ascii_case("wal") {
-        return Ok(if fresh || rebuild {
+        return Ok(if fresh {
             Init::NoWal
         } else {
             Init::Unsupported("unsupported session index: journal mode")
@@ -5868,6 +5713,10 @@ fn read_file(
             return Err(gap("signals"));
         }
         signals.push(Signal {
+            native_record: signal_row
+                .get::<_, Option<String>>(7)?
+                .map(|value| from_json(7, &value))
+                .transpose()?,
             k: untag(1, signal_row.get(1)?)?,
             o: uint(signal_row.get(2)?),
             t: signal_row.get(3)?,
@@ -6031,6 +5880,7 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
 fn read_usage(row: &Row<'_>) -> rusqlite::Result<(String, MessageUsage)> {
     let usage = MessageUsage {
         offset: uint(row.get(23)?),
+        record_ordinal: row.get::<_, Option<i64>>(24)?.map(uint),
         record_ids: from_json(22, &row.get::<_, String>(22)?)?,
         model: row.get(1)?,
         tokens: Tokens {
@@ -6484,7 +6334,15 @@ fn write_file(
         &changes.signals,
         signals,
         |seq, signal| {
-            let Signal { k, o, t, at, n, v } = signal;
+            let Signal {
+                native_record,
+                k,
+                o,
+                t,
+                at,
+                n,
+                v,
+            } = signal;
             put.execute(params![
                 file_id,
                 seq_int(seq),
@@ -6493,7 +6351,8 @@ fn write_file(
                 t,
                 at,
                 n,
-                v.map(int)
+                v.map(int),
+                native_record.as_ref().map(json).transpose()?,
             ])
             .map(drop)
         },
@@ -6690,6 +6549,7 @@ fn put_usage(
 ) -> rusqlite::Result<()> {
     let MessageUsage {
         offset,
+        record_ordinal,
         record_ids,
         model,
         tokens:
@@ -6748,6 +6608,7 @@ fn put_usage(
         split_unknown,
         json(record_ids)?,
         int(*offset),
+        record_ordinal.map(int),
     ])?;
     Ok(())
 }
@@ -6784,7 +6645,10 @@ fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite
 mod tests {
     use std::collections::BTreeSet;
 
+    use semon_asi::{AnalyticsInput, Reconciliation, SessionChange};
+
     use super::*;
+    use crate::SqliteAnalyticsInput;
     use crate::events::{
         ASYNC, Kind, Links, PIN, RateLimitWindow, RateLimits, SENDS, STDIN, SignalKind, UNKNOWN,
     };
@@ -7129,21 +6993,44 @@ mod tests {
             } else {
                 let id = format!("native-cx-{position:02}");
                 let mut payload = serde_json::json!({"id":id,"cwd":"/work/proj","originator":"codex_exec","thread_source":"user"});
+                if position == 1 {
+                    // A native fork has no fresh receipt before its own usage
+                    // is reported. Inherited counters do not create steps;
+                    // the producer can admit a complete, zero-step generation.
+                    payload["forked_from_id"] = serde_json::json!("synthetic-fork-base");
+                    payload["forked_from_ordinal_exclusive"] = serde_json::json!(0);
+                }
                 if position > 1 {
                     payload["parent_thread_id"] = serde_json::json!("native-cx-01");
                     payload["thread_source"] = serde_json::json!("subagent");
                     payload["agent_path"] =
                         serde_json::json!(format!("native-cx-01/child-{position}"));
                 }
+                let mut records = vec![
+                    serde_json::json!({"type":"session_meta","timestamp":"2026-09-24T00:00:00Z","payload":payload}),
+                    serde_json::json!({"type":"turn_context","timestamp":"2026-09-24T00:00:00Z","payload":{"model":"gpt-6-sol"}}),
+                    serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Native Codex fixture"}]}}),
+                    serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Native Codex answer"}]}}),
+                ];
+                if position > 1 {
+                    // A per-response native receipt is required for activity
+                    // admission.  The child also carries the recorded parent
+                    // marker above, exercising Codex worker lineage.
+                    records.push(serde_json::json!({
+                        "type":"token_usage_record", "timestamp":"2026-09-24T00:01:00Z",
+                        "payload":{
+                            "thread_id":id, "session_id":id,
+                            "turn_id":format!("turn-{id}"), "response_id":format!("response-{id}"),
+                            "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,
+                                "cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}
+                        }
+                    }));
+                }
                 (
                     options
                         .codex_home
                         .join(format!("sessions/2026/09/24/rollout-{id}.jsonl")),
-                    vec![
-                        serde_json::json!({"type":"session_meta","timestamp":"2026-09-24T00:00:00Z","payload":payload}),
-                        serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Native Codex fixture"}]}}),
-                        serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Native Codex answer"}]}}),
-                    ],
+                    records,
                 )
             };
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -8346,6 +8233,22 @@ mod tests {
             .unwrap();
         assert!(catalog_batch_bytes(&rows, &metadata, CatalogWriter::Auto).is_some());
         catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
+        let family_parent = rows
+            .iter()
+            .position(|row| row.key == "native-cx-01")
+            .unwrap();
+        let family_members = |store: &SqliteStore| {
+            store.connection.query_row(
+                "SELECT json_extract(metadata,'$.activity_analytics.family.member_sessions') FROM session_catalog WHERE session_key=?1",
+                ["native-cx-01"],
+                |row| row.get::<_, i64>(0),
+            ).unwrap()
+        };
+        assert_eq!(
+            family_members(&batch),
+            32,
+            "publication folds the native Codex child summaries into their parent"
+        );
         assert_eq!(
             batch
                 .connection
@@ -8404,12 +8307,20 @@ mod tests {
             )
             .unwrap();
         catalog_write_pair(&mut batch, &mut row_wise, &rows, &projections, false);
+        assert_eq!(
+            family_members(&batch),
+            31,
+            "detaching the child updates its former parent's family summary"
+        );
         let feed = batch.connection.prepare("SELECT session_key,read_scope FROM session_catalog_changes WHERE revision>?1 ORDER BY revision").unwrap().query_map([feed_before], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
-        let expected = [0, 2, 4, 5, 6, 7]
-            .into_iter()
-            .flat_map(|position| {
-                ["current", "retained_history"]
-                    .map(|scope| (rows[position].key.clone(), scope.to_owned()))
+        // Detaching rows[4] also changes the native Codex parent's family
+        // summary. Its feed entries follow the caller's direct row changes.
+        let expected = rows
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| [0, 2, 4, 5, 6, 7, family_parent].contains(position))
+            .flat_map(|(_, row)| {
+                ["current", "retained_history"].map(|scope| (row.key.clone(), scope.to_owned()))
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -8862,7 +8773,7 @@ mod tests {
         use std::io::Write;
         for count in [63usize, 64, 65, 257] {
             let root = scratch("catalog-paged-original");
-            let (options, _, _) = catalog_native_fixture(&root, 2, true);
+            let (options, _, initial_projections) = catalog_native_fixture(&root, 2, true);
             let key = "native-cx-01";
             let relative = "sessions/2026/09/24/rollout-native-cx-01.jsonl";
             let original_path = options.codex_home.join(relative);
@@ -8870,8 +8781,17 @@ mod tests {
                 .append(true)
                 .open(&original_path)
                 .unwrap();
-            // The fixture starts with exactly two native transcript entries.
-            for n in 2..count {
+            // The initial model-setting signal is a transcript slot too.
+            let initial = &initial_projections
+                .iter()
+                .find(|row| row.key == key)
+                .unwrap()
+                .slots;
+            assert_eq!(initial.len(), 3);
+            assert!(
+                matches!(initial[0].recipe, crate::slot_projection::Recipe::Signal { ref signal } if signal.kind == crate::events::SignalKind::Model)
+            );
+            for n in initial.len()..count {
                 writeln!(file,"{}",serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Original native record {n}")}]}})).unwrap();
             }
             drop(file);
@@ -9929,6 +9849,10 @@ mod tests {
             }],
             signals: vec![
                 Signal {
+                    native_record: Some(super::super::NativeRecordIdentity {
+                        ordinal: 3,
+                        id: Some("compact-native".into()),
+                    }),
                     k: SignalKind::Compact,
                     o: 40,
                     t: Some(41),
@@ -9937,6 +9861,7 @@ mod tests {
                     v: Some(u64::MAX),
                 },
                 Signal {
+                    native_record: None,
                     k: SignalKind::Interrupt,
                     o: 42,
                     t: None,
@@ -9968,6 +9893,7 @@ mod tests {
                     "msg-1".to_owned(),
                     MessageUsage {
                         offset: 123,
+                        record_ordinal: Some(3),
                         record_ids: std::collections::BTreeSet::from(["record-uuid".into()]),
                         model: Some("claude-test".to_owned()),
                         tokens: Tokens {
@@ -10609,7 +10535,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rebuilt_index_has_a_new_incarnation_and_an_empty_change_log() {
+    fn unsupported_index_refusal_preserves_its_incarnation_and_change_log() {
         let root = scratch("incarnation");
         let cache = root.join("index.json");
         let path = cache.with_extension("sqlite3");
@@ -10637,12 +10563,26 @@ mod tests {
         db.execute_batch("PRAGMA user_version=1; PRAGMA wal_checkpoint(TRUNCATE)")
             .unwrap();
         drop(db);
-        let producer = super::super::EventCache::open(&cache).unwrap();
-        drop(producer);
-        let (current, _) = opened(&path);
-        drop(current);
-        let second = incarnation(&path);
-        assert_ne!(second, first, "a rebuild is a new incarnation");
+        let retained = fs::read(&path).unwrap();
+        assert!(
+            super::super::EventCache::open(&cache).is_err(),
+            "opening an unsupported persistent format must refuse"
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            retained,
+            "refusal preserves custody"
+        );
+        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(
+            reader
+                .query_row("SELECT count(*) FROM silver_change", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1,
+            "refusal must not reset retained journal state"
+        );
+        drop(reader);
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -10803,256 +10743,399 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_producer_contracts_rebuild_once_and_keep_focused_reads_read_only() {
-        for change in [
-            "DROP INDEX catalog_search_native; DROP INDEX catalog_search_pending_filename; DROP INDEX catalog_search_pending_copilot; DROP INDEX catalog_search_header; PRAGMA user_version=33",
-            "PRAGMA user_version=32",
-            "PRAGMA user_version=1",
-            "UPDATE meta SET value='1' WHERE key='cache_version'",
-            "INSERT INTO meta VALUES('catalog_version','1')",
-            "INSERT INTO meta VALUES('search_version','1')",
-            "INSERT INTO meta VALUES('catalog_semantic_recipe','recorded-origin-turn-complete-receipts-v2')",
-            "INSERT INTO meta VALUES('archive_event_index:old','{\"version\":1}')",
-            "CREATE TABLE native_usage_migrations(source_path TEXT); PRAGMA user_version=31",
-        ] {
-            for scoped in [false, true] {
-                let root = scratch("obsolete-contract");
-                let cache = root.join("index.json");
-                let path = cache.with_extension("sqlite3");
-                let (mut old, _) = opened(&path);
-                old.write_one("obsolete", None, None, &ledger(1), &full())
-                    .unwrap();
-                old.write_runs(&[run()], &stamp()).unwrap();
-                old.connection.execute_batch(change).unwrap();
-                old.connection
-                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
-                    .unwrap();
-                drop(old);
-                let original = fs::read(&path).unwrap();
-                if change.contains("archive_event_index") {
-                    let reader = focused_connection(&path).unwrap();
-                    assert!(archived_index(&reader, "old").is_err());
-                } else {
-                    assert!(focused_connection(&path).is_err(), "{change}");
-                    assert!(SqliteStore::attempt_selected(&path).is_err(), "{change}");
-                }
-                assert_eq!(fs::read(&path).unwrap(), original);
-                let producer = if scoped {
-                    super::super::EventCache::open_scoped(&cache)
-                } else {
-                    super::super::EventCache::open(&cache)
-                }
+    fn obsolete_producer_contracts_are_refused_without_mutation() {
+        for schema in [44, 45, 46] {
+            let root = scratch("obsolete-contract");
+            let path = root.join("index.sqlite3");
+            let (mut store, _) = opened(&path);
+            store
+                .write_one("retained", None, None, &ledger(1), &full())
                 .unwrap();
-                drop(producer);
-                let (mut current, loaded) = opened(&path);
-                assert!(
-                    loaded.files.is_empty() && loaded.reported_runs.is_empty(),
-                    "{change}"
-                );
-                assert!(matches!(qualify(&current.connection).unwrap(), Init::Ready));
-                let ranges = std::array::from_fn(|_| (String::new(), String::new()));
-                let search = super::super::CatalogSearchLookup {
-                    query: "missing",
-                    ranges: &ranges,
-                };
-                assert!(
-                    catalog_search_paths(&current.connection, &search, 64)
-                        .unwrap()
-                        .is_empty()
-                );
-                current
-                    .write_one("fresh", None, None, &ledger(2), &full())
-                    .unwrap();
-                drop(current);
-                let (_, loaded) = opened(&path);
-                assert_eq!(loaded.files.len(), 1, "restart must not reset: {change}");
-                assert_eq!(loaded.files[0].0, "fresh");
-                fs::remove_dir_all(root).unwrap();
-            }
-        }
-    }
-
-    #[test]
-    fn obsolete_reset_refuses_foreign_databases_and_waits_for_the_sqlite_writer() {
-        let root = scratch("obsolete-ownership-and-lock");
-        let foreign = root.join("foreign.sqlite3");
-        let db = Connection::open(&foreign).unwrap();
-        db.execute_batch("CREATE TABLE private(secret TEXT); INSERT INTO private VALUES('preserve'); PRAGMA user_version=1").unwrap();
-        drop(db);
-        let original = fs::read(&foreign).unwrap();
-        assert!(matches!(
-            SqliteStore::attempt(&foreign),
-            Err(Unopened::Unsupported(_))
-        ));
-        assert!(matches!(
-            SqliteStore::attempt_scoped(&foreign, true),
-            Err(Unopened::Unsupported(_))
-        ));
-        assert_eq!(fs::read(&foreign).unwrap(), original);
-        let path = root.join("owned.sqlite3");
-        let (mut old, _) = opened(&path);
-        old.write_one("obsolete", None, None, &ledger(1), &full())
-            .unwrap();
-        old.connection
-            .pragma_update(None, "user_version", 32)
-            .unwrap();
-        old.connection.execute_batch("BEGIN IMMEDIATE").unwrap();
-        let original = catalog_state(&old.connection);
-        assert!(matches!(
-            SqliteStore::attempt_scoped(&path, true),
-            Err(Unopened::Other(_))
-        ));
-        assert_eq!(catalog_state(&old.connection), original);
-        old.connection.execute_batch("ROLLBACK").unwrap();
-        let (_, loaded) = opened(&path);
-        assert!(loaded.files.is_empty());
-        drop(old);
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn obsolete_reset_preserves_wal_snapshots_and_serializes_concurrent_producers() {
-        let root = scratch("obsolete-wal");
-        let path = root.join("index.sqlite3");
-        let (mut old, _) = opened(&path);
-        old.write_one("obsolete", None, None, &ledger(1), &full())
-            .unwrap();
-        old.connection
-            .pragma_update(None, "user_version", 32)
-            .unwrap();
-        let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        reader.execute_batch("BEGIN").unwrap();
-        assert_eq!(
-            reader
-                .query_row("SELECT count(*) FROM files", [], |r| r.get::<_, i64>(0))
-                .unwrap(),
-            1
-        );
-        assert!(!fs::read(sibling(&path, "-wal")).unwrap().is_empty());
-        // A second producer finishes while the first is between its read-only
-        // qualification and locked initialization. Reclassification must spare
-        // the second producer's newly committed rows.
-        let other_path = path.clone();
-        BEFORE_STORAGE_INIT.with(|slot| {
-            *slot.borrow_mut() = Some(Box::new(move || {
-                std::thread::spawn(move || {
-                    let (mut other, _) = opened(&other_path);
-                    other
-                        .write_one("fresh", None, None, &ledger(2), &full())
-                        .unwrap();
-                })
-                .join()
+            store
+                .connection
+                .pragma_update(None, "user_version", schema)
                 .unwrap();
-            }));
-        });
-        let (mut current, loaded) = opened(&path);
-        assert_eq!(loaded.files.len(), 1);
-        assert_eq!(loaded.files[0].0, "fresh");
-        assert_eq!(
-            reader
-                .query_row("SELECT path FROM files", [], |r| r.get::<_, String>(0))
-                .unwrap(),
-            "obsolete"
-        );
-        assert_eq!(
-            old.write_one("obsolete", Some(&ledger(1)), None, &ledger(2), &full())
-                .unwrap(),
-            Outcome::Conflict
-        );
-        assert_eq!(
-            current
-                .write_one("fresh", Some(&ledger(2)), None, &ledger(3), &full())
-                .unwrap(),
-            Outcome::Written
-        );
-        reader.execute_batch("ROLLBACK").unwrap();
-        drop(reader);
-        drop(old);
-        drop(current);
-        let (_, loaded) = opened(&path);
-        assert_eq!(loaded.files.len(), 1);
-        assert_eq!(loaded.files[0].1, ledger(3));
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn obsolete_index_rebuilds_native_catalog_history_and_selected_transcripts() {
-        for scoped in [false, true] {
-            let root = scratch("obsolete-native");
-            let (options, rows, _) = catalog_native_fixture(&root, 2, true);
-            let originals = rows
-                .iter()
-                .flat_map(|row| &row.sources)
-                .map(|source| (source.path.clone(), fs::read(&source.path).unwrap()))
-                .collect::<Vec<_>>();
-            let untouched = [
-                root.join("archive-object"),
-                root.join("credentials"),
-                root.join("seed.tree.json"),
-                root.join("unrelated.sqlite3"),
-            ];
-            for file in &untouched {
-                fs::write(file, b"retain exact original bytes").unwrap();
-            }
-            let path = super::super::EventCache::path(&options.cache);
-            let db = Connection::open(&path).unwrap();
-            db.pragma_update(None, "user_version", 32).unwrap();
-            drop(db);
-            let producer = if scoped {
-                super::super::EventCache::open_scoped(&options.cache)
-            } else {
-                super::super::EventCache::open(&options.cache)
-            }
-            .unwrap();
-            drop(producer);
-            let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
-            let complete = (0..128).any(|_| {
-                evidence
-                    .refresh_catalog(
-                        &mut crate::viewer::lock(&evidence.storage.work),
-                        CATALOG_FIXTURE_NOW,
-                    )
-                    .unwrap()
-            });
-            evidence.retire();
-            assert!(complete);
-            for row in &rows {
-                assert!(
-                    crate::session_catalog_identity(&options, "source", &row.key)
-                        .unwrap()
-                        .is_some()
-                );
-                assert!(
-                    crate::session_catalog_history_identity(&options, "source", &row.key)
-                        .unwrap()
-                        .is_some()
-                );
-            }
-            let reply = crate::session_transcript_range_with_mode(
-                &options,
-                "source",
-                "sid=native-cx-01&after=0&limit=2",
-                None,
-                crate::SessionSourceReadMode::LocalOrPinnedProvider,
-            );
-            assert_eq!(
-                reply.status,
-                200,
-                "{}",
-                String::from_utf8_lossy(&reply.body)
-            );
-            for (file, bytes) in originals {
-                assert_eq!(fs::read(file).unwrap(), bytes);
-            }
-            for file in untouched {
-                assert_eq!(fs::read(file).unwrap(), b"retain exact original bytes");
-            }
-            let (store, loaded) = opened(&path);
-            assert_eq!(loaded.files.len(), 2);
-            assert!(matches!(qualify(&store.connection).unwrap(), Init::Ready));
+            store
+                .connection
+                .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                .unwrap();
             drop(store);
+            let original = fs::read(&path).unwrap();
+            assert!(matches!(
+                SqliteStore::attempt(&path),
+                Err(Unopened::Unsupported(error)) if error.contains("older schema")
+            ));
+            assert_eq!(fs::read(&path).unwrap(), original);
+            let reader =
+                Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+            assert_eq!(
+                reader
+                    .query_row("SELECT count(*) FROM files", [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                1
+            );
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    #[test]
+    fn analytics_anchors_prefer_native_ids_and_fall_back_to_ingested_record_ordinals() {
+        let root = scratch("analytics-record-ordinals");
+        let (options, rows, _) = catalog_native_fixture(&root, 1, false);
+        let source = &rows[0].sources[0].path;
+        let native_id = &rows[0].native_ids[0];
+        let user = serde_json::json!({"type":"user","sessionId":native_id,"timestamp":"2026-09-24T00:00:00Z","message":{"role":"user","content":"Synthetic prompt without a native turn UUID"}});
+        let compact = |id: Option<&str>| {
+            let mut record = serde_json::json!({"type":"system","subtype":"compact_boundary","sessionId":native_id,"timestamp":"2026-09-24T00:00:01Z","compactMetadata":{"trigger":"auto","preTokens":100}});
+            if let Some(id) = id {
+                record["uuid"] = serde_json::json!(id);
+            }
+            record
+        };
+        let assistant = |id: &str| serde_json::json!({"type":"assistant","sessionId":native_id,"timestamp":"2026-09-24T00:00:02Z","message":{"id":id,"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"Synthetic answer"}],"usage":{"input_tokens":10,"output_tokens":5}}});
+        let padding = serde_json::json!({"type":"queue-operation","padding":""});
+        let mut prefix = [
+            user.to_string(),
+            padding.to_string(),
+            compact(Some("native-compact")).to_string(),
+        ]
+        .join("\n")
+            + "\n";
+        let padding_size = 900usize.checked_sub(prefix.len()).unwrap();
+        let padding =
+            serde_json::json!({"type":"queue-operation","padding":"x".repeat(padding_size)});
+        prefix = [
+            user.to_string(),
+            padding.to_string(),
+            compact(Some("native-compact")).to_string(),
+        ]
+        .join("\n")
+            + "\n";
+        assert_eq!(prefix.len(), 900);
+        fs::write(
+            source,
+            prefix
+                + &assistant("message-first").to_string()
+                + "\n"
+                + &compact(None).to_string()
+                + "\n"
+                + &assistant("message-second").to_string()
+                + "\n",
+        )
+        .unwrap();
+        let (rows, slots) = catalog_fixture_projection(&options);
+        let path = super::super::EventCache::path(&options.cache);
+        let (mut store, _) = opened(&path);
+        assert_eq!(
+            catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        let admitted = input
+            .read_admitted(None)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find_map(|change| match change {
+                SessionChange::Admitted(session) => Some(session),
+                _ => None,
+            })
+            .expect("complete synthetic native evidence is admitted");
+        assert_eq!(admitted.steps.len(), 2);
+        let uid = "fixture-machine/claude/native-cl-00";
+        assert_eq!(
+            admitted.steps[0].turn_uid,
+            format!("{uid}/t/message-first"),
+            "record 3 at byte 900 prefers its native message ID"
+        );
+        assert_eq!(
+            admitted.steps[1].turn_uid,
+            format!("{uid}/t/message-second")
+        );
+        assert_eq!(admitted.compactions.len(), 2);
+        assert_eq!(
+            admitted.compactions[0].compaction_uid,
+            format!("{uid}/c/native-compact"),
+            "a native compaction ID is preferred"
+        );
+        assert_eq!(
+            admitted.compactions[1].compaction_uid,
+            format!("{uid}/c/%40native-cl-00%3A4"),
+            "without a native ID, compaction record 4 uses its ordinal"
+        );
+        for anchor in admitted
+            .steps
+            .iter()
+            .flat_map(|step| [&step.step_uid, &step.turn_uid])
+            .chain(
+                admitted
+                    .compactions
+                    .iter()
+                    .map(|compaction| &compaction.compaction_uid),
+            )
+        {
+            assert!(!anchor.contains("%2F"));
+            assert!(!anchor.contains("projects"));
+            assert!(!anchor.contains("analytics-record-ordinals"));
+            assert!(!anchor.contains("900"));
+        }
+        drop(input);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn analytics_input_reads_real_catalog_generations_and_explicit_removals() {
+        use std::io::Write;
+        let root = scratch("analytics-input");
+        let (options, rows, slots) = catalog_native_fixture(&root, 4, false);
+        let path = super::super::EventCache::path(&options.cache);
+        let mut metadata_only = rows.clone();
+        let pending_row = metadata_only
+            .iter_mut()
+            .find(|row| row.key == "native-cl-02")
+            .unwrap();
+        let pending_native_id = pending_row.native_ids[0].clone();
+        pending_row.session_activity = None;
+        let (mut store, _) = opened(&path);
+        assert_eq!(
+            catalog_write(
+                &mut store,
+                &metadata_only,
+                &slots,
+                false,
+                CatalogWriter::Auto,
+            )
+            .unwrap()
+            .0,
+            Outcome::Written
+        );
+
+        let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        let initial = input.read_admitted(None).unwrap();
+        assert_eq!(initial.reconciliation, Reconciliation::ReplaceNamespace);
+        let pending_uid = format!("fixture-machine/claude/{pending_native_id}");
+        assert_eq!(
+            initial
+                .changes
+                .iter()
+                .filter_map(|change| match change {
+                    SessionChange::Pending { session_uid } => Some(session_uid.as_str()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([pending_uid.as_str()]),
+            "exactly the owner whose activity was withheld is Pending"
+        );
+        let admitted_sessions = initial
+            .changes
+            .iter()
+            .filter_map(|change| match change {
+                SessionChange::Admitted(session) => Some(session),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            admitted_sessions
+                .iter()
+                .map(|session| session.session.native_session_id.as_str())
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from(["native-cl-00", "native-cx-01", "native-cx-03"]),
+            "only the deliberately withheld Claude owner is pending"
+        );
+        assert!(
+            admitted_sessions.iter().any(|session| {
+                session.session.native_session_id == "native-cx-01" && session.steps.is_empty()
+            }),
+            "a qualified zero-step session is admitted, not pending"
+        );
+        assert!(
+            admitted_sessions.iter().any(|session| {
+                session.session.native_session_id == "native-cx-03"
+                    && !session.steps.is_empty()
+                    && session.session.role == semon_asi::input::Role::Worker
+                    && session.session.parent_session_uid.as_deref()
+                        == Some("fixture-machine/codex/native-cx-01")
+            }),
+            "the native receipt and parent marker admit the Codex child as a worker"
+        );
+
+        assert_eq!(
+            catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        let admitted = input.read_admitted(Some(&initial.checkpoint)).unwrap();
+        assert_eq!(admitted.reconciliation, Reconciliation::Incremental);
+        assert!(admitted.changes.iter().any(|change| {
+            matches!(change, SessionChange::SourceRestored { session_uid } if session_uid == &pending_uid)
+        }));
+        assert!(admitted.changes.iter().any(|change| {
+            matches!(change, SessionChange::Admitted(session) if session.session_uid == pending_uid)
+        }));
+
+        // A changed physical witness without an activity publication is a
+        // live Pending transition.  It must be journaled so incremental and
+        // full readers agree while the previous complete generation remains
+        // retained in the index.
+        let source_only_key = rows
+            .iter()
+            .find(|row| row.native_ids[0] == "native-cx-03")
+            .unwrap()
+            .key
+            .clone();
+        let source_only_uid = "fixture-machine/codex/native-cx-03";
+        let retained_projection = |store: &SqliteStore| {
+            store.connection.query_row(
+                "SELECT generation,total,summary, \
+                 (SELECT count(*) FROM session_activity_steps s WHERE s.session_key=p.session_key), \
+                 (SELECT group_concat(metadata,'') FROM \
+                   (SELECT metadata FROM session_activity_steps WHERE session_key=p.session_key ORDER BY ordinal)) \
+                 FROM session_activity_projections p WHERE session_key=?1",
+                [&source_only_key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?)),
+            ).unwrap()
+        };
+        let retained = retained_projection(&store);
+        assert!(retained.1 > 0 && !retained.4.is_empty());
+        assert_eq!(
+            retained.1, retained.3,
+            "all declared steps and their StepFacts are retained"
+        );
+        let source_path = &rows
+            .iter()
+            .find(|row| row.key == source_only_key)
+            .unwrap()
+            .sources[0]
+            .path;
+        let mut source = fs::OpenOptions::new()
+            .append(true)
+            .open(source_path)
+            .unwrap();
+        writeln!(source, "{}", serde_json::json!({"type":"turn_context","timestamp":"2026-09-24T00:02:00Z","payload":{"model":"gpt-6-sol"}})).unwrap();
+        drop(source);
+        // Run normal ingest so the changed source, its exact ledger and the
+        // replacement recipes are genuinely indexed before Catalog publication.
+        let (rows, slots) = catalog_fixture_projection(&options);
+        let mut source_only = rows.clone();
+        let source_only_row = source_only
+            .iter_mut()
+            .find(|row| row.key == source_only_key)
+            .unwrap();
+        source_only_row.session_activity = None;
+        assert_eq!(
+            catalog_write(&mut store, &source_only, &slots, false, CatalogWriter::Auto,)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        assert_eq!(
+            retained_projection(&store),
+            retained,
+            "Pending retains the complete activity generation and facts"
+        );
+        let pending = input.read_admitted(Some(&admitted.checkpoint)).unwrap();
+        assert!(pending.changes.iter().any(|change| {
+            matches!(change, SessionChange::Pending { session_uid } if session_uid == source_only_uid)
+        }));
+        let mut full = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        let full_pending = full.read_admitted(None).unwrap();
+        assert!(full_pending.changes.iter().any(|change| {
+            matches!(change, SessionChange::Pending { session_uid } if session_uid == source_only_uid)
+        }));
+        assert_eq!(
+            catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        let restored = input.read_admitted(Some(&pending.checkpoint)).unwrap();
+        assert!(restored.changes.iter().any(|change| {
+            matches!(change, SessionChange::SourceRestored { session_uid } if session_uid == source_only_uid)
+        }));
+        assert!(restored.changes.iter().any(|change| {
+            matches!(change, SessionChange::Admitted(session) if session.session_uid == source_only_uid)
+        }));
+        let restored_session = restored.changes.iter().find(|change| {
+            matches!(change, SessionChange::Admitted(session) if session.session_uid == source_only_uid)
+        }).unwrap();
+        let full_restored = full.read_admitted(None).unwrap();
+        assert!(
+            full_restored.changes.contains(restored_session),
+            "incremental and full restoration admit the same complete generation"
+        );
+
+        let live_removed_key = rows
+            .iter()
+            .find(|row| row.native_ids[0] == pending_native_id)
+            .unwrap()
+            .key
+            .clone();
+        store
+            .connection
+            .execute(
+                "INSERT INTO silver_change(session_key,kind) VALUES(?1,'removed')",
+                [&live_removed_key],
+            )
+            .unwrap();
+        let invalidated = input.read_admitted(Some(&admitted.checkpoint)).unwrap();
+        assert!(invalidated.changes.iter().any(|change| {
+            matches!(change, SessionChange::Pending { session_uid } if session_uid == &pending_uid)
+        }));
+
+        let removed_key = rows
+            .iter()
+            .find(|row| row.harness == "codex" && row.native_ids[0] == "native-cx-01")
+            .unwrap()
+            .key
+            .clone();
+        let removed_uid = "fixture-machine/codex/native-cx-01";
+        let tx = store.connection.transaction().unwrap();
+        tx.execute(
+            "DELETE FROM session_catalog WHERE session_key=?1",
+            [&removed_key],
+        )
+        .unwrap();
+        tx.execute(
+            "DELETE FROM session_activity_projections WHERE session_key=?1",
+            [&removed_key],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT INTO silver_change(session_key,kind) VALUES(?1,'removed')",
+            [&removed_key],
+        )
+        .unwrap();
+        tx.commit().unwrap();
+        let removed = input.read_admitted(Some(&invalidated.checkpoint)).unwrap();
+        assert!(removed.changes.iter().any(|change| {
+            matches!(change, SessionChange::Removed { session_uid } if session_uid == removed_uid)
+        }));
+
+        let checkpoint = removed.checkpoint;
+        drop(full);
+        drop(input);
+        drop(store);
+        fs::remove_file(&path).unwrap();
+        for suffix in ["-wal", "-shm"] {
+            let sidecar = sibling(&path, suffix);
+            if sidecar.exists() {
+                fs::remove_file(sidecar).unwrap();
+            }
+        }
+        drop(opened(&path));
+        let mut replacement = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        assert_eq!(
+            replacement
+                .read_admitted(Some(&checkpoint))
+                .unwrap()
+                .reconciliation,
+            Reconciliation::ReplaceNamespace
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

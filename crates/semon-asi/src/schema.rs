@@ -9,7 +9,7 @@ use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
 /// Bumped on any change to a table, column, type, class or enum set. A store whose
 /// manifest carries another version is refused (asi-store.md, Version bumps).
-pub const ASI_SCHEMA_VERSION: u32 = 1;
+pub const ASI_SCHEMA_VERSION: u32 = 3;
 
 /// Name of the generation column the writer appends to every file.
 pub const GEN_COLUMN: &str = "_gen";
@@ -169,6 +169,10 @@ const fn int_key(name: &'static str, doc: &'static str) -> Column {
     col(name, Type::Integer, false, Class::Key, doc)
 }
 
+const fn int_key_opt(name: &'static str, doc: &'static str) -> Column {
+    col(name, Type::Integer, true, Class::Key, doc)
+}
+
 const fn en(name: &'static str, values: &'static [&'static str], doc: &'static str) -> Column {
     let mut column = col(name, Type::Text, false, Class::Enum, doc);
     column.values = values;
@@ -209,6 +213,10 @@ const fn flag(name: &'static str, doc: &'static str) -> Column {
     col(name, Type::Boolean, false, Class::Enum, doc)
 }
 
+const fn flag_opt(name: &'static str, doc: &'static str) -> Column {
+    col(name, Type::Boolean, true, Class::Enum, doc)
+}
+
 const fn ts(name: &'static str, doc: &'static str) -> Column {
     col(name, Type::Timestamp, false, Class::Time, doc)
 }
@@ -243,6 +251,7 @@ const ACTIVITY: &[&str] = &[
     "setup",
     "report",
     "think",
+    "unknown",
 ];
 const WASTE_KIND: &[&str] = &[
     "wait",
@@ -263,11 +272,13 @@ const TRIGGER: &[&str] = &[
     "missing_input",
     "none_visible",
 ];
-const INITIATOR: &[&str] = &["user", "manager", "peer", "self"];
+const INITIATOR: &[&str] = &["user", "manager", "peer", "self", "unknown"];
 const TARGET_TYPE: &[&str] = &["session", "turn", "step", "compaction", "lane", "work_item"];
 const ROLE: &[&str] = &["manager", "worker", "reviewer", "solo", "unknown"];
 const PARENT_METHOD: &[&str] = &["native", "workspace", "none"];
 const STATUS: &[&str] = &["active", "ended", "unknown"];
+const SOURCE_STATUS: &[&str] = &["complete", "missing"];
+const COMPUTATION_STATUS: &[&str] = &["current", "pending", "failed", "frozen"];
 const RATE_KIND: &[&str] = &[
     "input",
     "output",
@@ -293,8 +304,11 @@ pub static FACT_STEP: Table = Table {
             "repo_key",
             "Key into dim_repo; never a path or a hash of one.",
         ),
-        int_key("date_key", "UTC start date as yyyymmdd; key into dim_date."),
-        ts("ts", "Start of the model call."),
+        int_key_opt("date_key", "UTC start date as yyyymmdd; key into dim_date."),
+        ts_opt(
+            "ts",
+            "Start of the model call, when the harness recorded one.",
+        ),
         num("input_tokens", "tokens", "Uncached input tokens."),
         num("output_tokens", "tokens", "Output tokens."),
         num(
@@ -312,10 +326,10 @@ pub static FACT_STEP: Table = Table {
             "tokens",
             "Input tokens written to the 1-hour cache.",
         ),
-        num(
+        num_opt(
             "reasoning_tokens",
             "tokens",
-            "Reasoning tokens, when reported separately.",
+            "Reasoning tokens, when the harness reported them separately.",
         ),
         num(
             "web_search_requests",
@@ -365,6 +379,22 @@ pub static FACT_STEP: Table = Table {
             "usd",
             "Estimate under price_version; null when unpriced.",
         ),
+        real_opt(
+            "input_usd",
+            "usd",
+            "Recorded uncached-input cost component.",
+        ),
+        real_opt(
+            "cache_read_usd",
+            "usd",
+            "Recorded cache-read cost component.",
+        ),
+        real_opt(
+            "cache_write_usd",
+            "usd",
+            "Recorded cache-write cost component.",
+        ),
+        real_opt("output_usd", "usd", "Recorded output cost component."),
         en(
             "price_status",
             PRICE_STATUS,
@@ -374,7 +404,7 @@ pub static FACT_STEP: Table = Table {
         en(
             "activity",
             ACTIVITY,
-            "Deterministic activity label; first matching rule.",
+            "Deterministic activity label, or unknown when rule evidence is absent.",
         ),
         en_opt(
             "waste_kind",
@@ -386,7 +416,10 @@ pub static FACT_STEP: Table = Table {
             TRIGGER,
             "What triggered a failure or waste step.",
         ),
-        flag("ok", "False when the step's main action failed."),
+        flag_opt(
+            "ok",
+            "False when the step's main action failed; null when unknown.",
+        ),
     ],
 };
 
@@ -399,11 +432,11 @@ pub static FACT_TOOL_CALL: Table = Table {
         key("session_uid", "Session UID."),
         key("step_uid", "Step UID of the requesting step."),
         num("ord", "", "Position of the call within its step."),
-        ts("ts", "Start of the call, or of the step when unknown."),
+        ts_opt("ts", "Start of the call, when the harness recorded one."),
         key("tool_key", "Key into dim_tool."),
         path_opt("target_path", "Path the call targets, when it has one."),
         label_opt("command_tag", "Normalised command family of a shell call."),
-        flag("ok", "False when the call failed."),
+        flag_opt("ok", "False when the call failed; null when unrecorded."),
         num_opt("exit_code", "", "Process exit code, when the call has one."),
         num_opt("tool_ms", "ms", "Duration of the call."),
     ],
@@ -418,7 +451,7 @@ pub static FACT_TURN: Table = Table {
         key("turn_uid", "Turn UID."),
         key("session_uid", "Session UID."),
         en("initiator", INITIATOR, "Who started the turn."),
-        ts("started_at", "Start of the turn."),
+        ts_opt("started_at", "Start of the turn, when known."),
         ts_opt("ended_at", "End of the turn; null while it runs."),
         num("step_count", "steps", "Steps in the turn."),
     ],
@@ -431,8 +464,8 @@ pub static FACT_SESSION: Table = Table {
     sort_time: Some("started_at"),
     columns: &[
         key("session_uid", "Session UID."),
-        int_key("date_key", "UTC start date as yyyymmdd; key into dim_date."),
-        ts("started_at", "Start of the session."),
+        int_key_opt("date_key", "UTC start date as yyyymmdd; key into dim_date."),
+        ts_opt("started_at", "Start of the session, when known."),
         ts_opt("ended_at", "End of the session; null while it runs."),
         num(
             "input_tokens",
@@ -459,10 +492,10 @@ pub static FACT_SESSION: Table = Table {
             "tokens",
             "1-hour cache-write tokens, exclusive usage.",
         ),
-        num(
+        num_opt(
             "reasoning_tokens",
             "tokens",
-            "Reasoning tokens over exclusive usage.",
+            "Reasoning tokens over exclusive usage, when complete.",
         ),
         num(
             "web_search_requests",
@@ -475,15 +508,49 @@ pub static FACT_SESSION: Table = Table {
             "usd",
             "Spend the harness reported itself, when it does.",
         ),
-        num(
+        num_opt(
             "wall_ms",
             "ms",
-            "Wall-clock time from first to last record.",
+            "Wall-clock time when both bounds are known.",
         ),
-        num("model_ms", "ms", "Summed model time."),
+        num_opt(
+            "model_ms",
+            "ms",
+            "Summed model time when every step reports it.",
+        ),
         num("step_count", "steps", "Steps in the session."),
         num("failure_count", "steps", "Steps with ok = false."),
         flag("usage_complete", "True when every step reported its usage."),
+        en(
+            "source_status",
+            SOURCE_STATUS,
+            "Source cohort status at publication.",
+        ),
+        en(
+            "computation_status",
+            COMPUTATION_STATUS,
+            "Recorded computation status at publication.",
+        ),
+        num(
+            "exclusive_step_count",
+            "steps",
+            "Exclusive steps represented by this row.",
+        ),
+        num(
+            "unknown_step_count",
+            "steps",
+            "Steps with unknown recorded values.",
+        ),
+        num(
+            "unclassified_step_count",
+            "steps",
+            "Steps with no deterministic activity label.",
+        ),
+        num_opt(
+            "taxonomy_version",
+            "",
+            "Taxonomy version when categorical labels were admitted.",
+        ),
         num(
             "transform_version",
             "",
@@ -503,7 +570,10 @@ pub static FACT_COMPACTION: Table = Table {
         key("compaction_uid", "Compaction UID."),
         key("session_uid", "Session UID."),
         key_opt("step_uid", "Step the compaction followed, when known."),
-        ts("ts", "Time of the compaction."),
+        ts_opt(
+            "ts",
+            "Time of the compaction, when the harness recorded it.",
+        ),
     ],
 };
 
@@ -598,7 +668,7 @@ pub static DIM_SESSION: Table = Table {
         ),
         label_opt("branch", "Branch at the start of the session."),
         en("status", STATUS, "Session status."),
-        ts("started_at", "Start of the session."),
+        ts_opt("started_at", "Start of the session, when known."),
         ts_opt("ended_at", "End of the session; null while it runs."),
     ],
 };
@@ -792,7 +862,6 @@ mod tests {
                 Some(name) => {
                     let column = table.column(name).expect("sort column exists");
                     assert_eq!(column.class, Class::Time, "{}", table.name);
-                    assert!(!column.nullable, "{}", table.name);
                 }
                 None => assert_eq!(table.kind, Kind::Dimension, "{}", table.name),
             }

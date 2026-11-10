@@ -950,11 +950,12 @@ mod tests {
         drop(store);
         let path = dir.path().join("analytics/manifest.json");
         let text = fs::read_to_string(&path).unwrap();
-        fs::write(
-            &path,
-            text.replace("\"schema_version\": 1", "\"schema_version\": 99"),
-        )
-        .unwrap();
+        let current = format!("\"schema_version\": {ASI_SCHEMA_VERSION}");
+        assert!(
+            text.contains(&current),
+            "the manifest records the schema version"
+        );
+        fs::write(&path, text.replace(&current, "\"schema_version\": 99")).unwrap();
         assert!(matches!(read_manifest(dir.path()), Err(Error::Invalid(_))));
     }
 

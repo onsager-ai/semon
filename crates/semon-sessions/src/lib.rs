@@ -16,10 +16,12 @@ use serde_json::Value;
 
 mod analytics;
 mod causal_trace;
+mod origin_projection;
 mod overview;
 mod overview_repair;
 pub use causal_trace::session_causal_trace;
 pub(crate) use causal_trace::session_causal_trace_with_gate;
+pub use origin_projection::SqliteAnalyticsInput;
 pub(crate) use overview::session_home_details_with_gate;
 pub use overview::{
     OverviewSource, overview_source_key, session_home_details_with_mode, session_overview_reply,
@@ -1145,6 +1147,7 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
         i64::try_from(now.saturating_mul(1000)).unwrap_or(i64::MAX),
     );
     for (child, link) in links {
+        let agrees = parents.get(&child) == Some(&link.parent);
         parents.insert(child.clone(), link.parent.clone());
         let via_tool = if let (Some(call), Some(summary)) =
             (link.call.as_ref(), summaries.get(&link.parent))
@@ -1157,7 +1160,7 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
             None
         };
         if let Some(node) = flat.get_mut(&child) {
-            node.parent_source = Some(link.source);
+            node.parent_source = (!agrees).then_some(link.source);
             node.unlinked = false;
             if via_tool.is_some() {
                 node.via_tool = via_tool;

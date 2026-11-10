@@ -1240,6 +1240,37 @@ mod tests {
     }
 
     #[test]
+    fn complete_grant_accepts_origin_local_and_remote_repository_rows() {
+        let grant = authority(
+            Destination::Receiver,
+            &["repo_key", "display_name", "repo_path"],
+        );
+        for row in [
+            Map::from_iter([
+                (
+                    "repo_key".into(),
+                    Value::String("local-0123456789abcdef".into()),
+                ),
+                ("display_name".into(), Value::String("local".into())),
+                ("repo_path".into(), Value::String("/work/local".into())),
+            ]),
+            Map::from_iter([
+                (
+                    "repo_key".into(),
+                    Value::String("github.com/onsager-ai/semon".into()),
+                ),
+                (
+                    "display_name".into(),
+                    Value::String("remote repository".into()),
+                ),
+                ("repo_path".into(), Value::String("/work/semon".into())),
+            ]),
+        ] {
+            assert!(project_derived_row(&grant, "dim_repo", &row).is_ok());
+        }
+    }
+
+    #[test]
     fn typed_keys_accept_documented_uids_repositories_and_integer_dates() {
         let date_fields = [
             "date_key",
@@ -1287,6 +1318,12 @@ mod tests {
             "step_count",
             "failure_count",
             "usage_complete",
+            "source_status",
+            "computation_status",
+            "exclusive_step_count",
+            "unknown_step_count",
+            "unclassified_step_count",
+            "taxonomy_version",
             "transform_version",
             "rules_version",
             "price_version",
@@ -1298,7 +1335,9 @@ mod tests {
             "cache_write_1h_tokens": 0, "reasoning_tokens": 0,
             "web_search_requests": 0, "usd_est": null, "reported_usd": null,
             "wall_ms": 0, "model_ms": 0, "step_count": 1, "failure_count": 0,
-            "usage_complete": true, "transform_version": 1, "rules_version": 1,
+            "usage_complete": true, "source_status": "complete", "computation_status": "current",
+            "exclusive_step_count": 1, "unknown_step_count": 0, "unclassified_step_count": 0,
+            "taxonomy_version": null, "transform_version": 1, "rules_version": 1,
             "price_version": "pricing:v1",
         }));
         assert!(
@@ -1335,6 +1374,10 @@ mod tests {
             "model_ms",
             "tool_ms",
             "usd_est",
+            "input_usd",
+            "cache_read_usd",
+            "cache_write_usd",
+            "output_usd",
             "price_status",
             "price_version",
             "activity",
@@ -1352,7 +1395,8 @@ mod tests {
             "web_search_requests": 0, "speed": null, "service_tier": null,
             "prompt_size_tokens": 0, "split_unknown": false, "usage_owner": "exclusive",
             "context_tokens": 0, "context_band": "under_50k", "model_ms": null,
-            "tool_ms": null, "usd_est": null, "price_status": "unpriced",
+            "tool_ms": null, "usd_est": null, "input_usd": null, "cache_read_usd": null,
+            "cache_write_usd": null, "output_usd": null, "price_status": "unpriced",
             "price_version": "pricing:v1", "activity": "implement", "waste_kind": null,
             "trigger": null, "ok": true,
         }));

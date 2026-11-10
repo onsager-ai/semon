@@ -682,6 +682,7 @@ mod tests {
     ) -> MessageUsage {
         MessageUsage {
             offset: 0,
+            record_ordinal: None,
             record_ids: Default::default(),
             model: Some(model.to_owned()),
             tokens: crate::Tokens::default(),

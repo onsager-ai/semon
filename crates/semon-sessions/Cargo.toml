@@ -7,6 +7,7 @@ publish = false
 description = "Read-only local Claude Code and Codex session tree."
 
 [dependencies]
+semon-asi = { path = "../semon-asi" }
 libc.workspace = true
 reqwest.workspace = true
 rusqlite = { workspace = true, features = ["cache", "hooks", "limits"] }

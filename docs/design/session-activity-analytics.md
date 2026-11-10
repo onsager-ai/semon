@@ -27,8 +27,15 @@ surface. In particular, raw `target_path` values remain local to the index.
 Each fact carries the native `turn_id` (`turn_id` from the Codex identity tuple,
 or the UUID of the exact preceding Claude user record in the same source; absent
 when that record is not exact), `usage_owner` (`exclusive` or `copied`), and the
-complete billing usage input. Each owned tool call is in source order with its
-ordinal, stripped native tool name, closed command tag, settled outcome, decoded
+complete billing usage input. It also carries the usage record's zero-based
+physical `record_ordinal`, captured by native ingest before session/activity
+ordering. Compaction evidence retains that ordinal and its native record ID
+when present. The admitted analytics projection prefers native IDs and otherwise
+uses the validated filename stem and this ordinal; byte offsets and activity row
+ordinals are not record identities. These fields share the saved generation and
+source witness admission, and projection never reparses native sources for them.
+Each owned tool call is in source order with its ordinal, stripped native tool
+name, closed command tag, settled outcome, decoded
 exit code, and raw file-tool target path where known. Shell calls never receive
 an invented target path.
 
@@ -72,9 +79,12 @@ The current session activity schema stores a session activity header, ordered
 step rows keyed by `(session_key, generation, ordinal)` with their private
 `StepFacts`, separate ordered compaction rows, compact summary metadata, and
 typed change facts keyed by session, generation and stable identity.
-Parser 40 retains the exact last Claude usage observation offset alongside the
-existing message ID and assistant UUIDs. The producer uses its established file
-merge order and copied-record ownership map; Codex reads only model-accepted
+Parser 41 and schema 46 retain the exact last Claude usage observation offset
+and physical record ordinal alongside the existing message ID and assistant
+UUIDs, plus native record identity on normalized signals. Activity rules 11
+carries that evidence into StepFacts and compaction rows. Unsupported prior
+Semon indexes remain refused without conversion or deletion. The producer uses
+its established file merge order and copied-record ownership map; Codex reads only model-accepted
 facts whose normalized source receipt matches the selected consumed ledger.
 Ordinary header and detail publication shares the Catalog transaction and its
 complete source membership, ledger, claim and generation checks. Focused activity

@@ -52,6 +52,24 @@ appear complete.
 Identity stays native. Rows are never keyed by ordinals, generations or row
 IDs, so labels survive every rebuild.
 
+The origin adapter derives a session UID from configured machine namespace,
+native harness and the exact native session ID. A Catalog key is only a
+source-local disambiguator and must not replace that ID during a harness collision;
+recorded native parent links use the same identity rule.
+
+The origin adapter exports `parent_method = native` only for resolved native
+Catalog parentage (`parent_source` absent). Catalog's observed `ancestry`,
+`environment` (`SEMON_PARENT`) and `marker` (`Semon-Parent` in prompt text) links
+set `parent_source` only when they establish or replace the parent. Agreement
+with an existing native parent leaves native provenance intact; a marker-only
+Codex spawn still records `marker`. These observed links are not native lineage.
+They also do not establish the workspace-and-time inference described by
+`workspace`. The current ASI methods cannot represent
+these sources, so the adapter omits their parent UID and uses `none`; it treats
+unknown source values the same way. An absent parent also uses `none`.
+Only native parentage promotes a `codex-run` to worker; otherwise it remains
+solo. A native `subagent` kind independently establishes worker status.
+
 - **Namespace.** Each machine's sources use its configured machine name. A
   receiver binds each push token to the token's name, refuses a token named
   after itself, and reserves `local`.
@@ -63,14 +81,35 @@ IDs, so labels survive every rebuild.
   | Key | Components |
   | --- | --- |
   | `session_uid` | `{namespace}/{harness}/{native_session_id}` |
-  | `turn_uid` | `{session_uid}/t/{id}`, where `id` is the Codex `turn_id`, the Claude initiating record `uuid`, the handoff ID, or else a record anchor |
+  | `turn_uid` | `{session_uid}/t/{id}`, where `id` is the Codex `turn_id`, the Claude initiating record `uuid` (or the step's native `message.id` when no initiating UUID is recorded), the handoff ID, or else a record anchor |
   | `step_uid` | `{session_uid}/s/claude/{message_id}` or `{session_uid}/s/codex/{thread}/{session}/{turn}/{response}` (`ActivityStepId`) |
   | `compaction_uid` | `{session_uid}/c/{id}`, where `id` is the native record ID or else a record anchor |
 
 - **Record anchor.** `@{source}:{n}`, where `source` is the native log's file
   stem (which matches `^[A-Za-z0-9._\-]{1,128}$`) and `n` is the record's
   ordinal within that log. It is independent of paths, keys and how logs
-  interleave, and stable while the log's prefix is unchanged.
+  interleave, and stable while the log's prefix is unchanged. Native IDs are
+  preferred. The existing persisted Claude `ActivityStepId` supplies the native
+  message ID without changing the Event Index format. Same-stem contributors
+  cannot use the fallback to distinguish their records; no physical path or
+  byte offset may enter the anchor.
+
+  If a step or compaction has neither a usable native ID nor an unambiguous
+  record anchor, the origin input returns `SessionChange::Pending` for that
+  whole session generation. Consumers retain prior facts; the input emits no
+  `SourceRestored` for that session and still admits other eligible sessions in
+  the batch. This is an admission limitation, not a source-missing observation
+  or a removal. A later publication with representable evidence can be admitted.
+  Invalid persisted data and database errors still fail the read.
+
+- **Repeated compaction identity.** Copied contributors can carry the same
+  native compaction ID. Compatible timestamps and associated step UIDs collapse
+  to one fact, retaining first occurrence in persisted ordinal order. Missing
+  values are unknown and merge with known values in either contributor order.
+  Two different known timestamps or step UIDs make the whole session generation
+  `Pending`, with the same retention and batch isolation as an unrepresentable
+  anchor. Physical compaction rows must still match the header's declared count
+  and contiguous ordinals before deduplication; missing rows fail integrity.
 
 ## Raw
 
