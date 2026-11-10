@@ -64,7 +64,8 @@ impl<T: Clock + ?Sized> Clock for Arc<T> {
     }
 }
 
-/// Versions of the code that produced the rows; a stale row is requeued.
+/// Writer targets for future publications; retained rows keep their recorded
+/// per-session versions and may therefore differ from these targets.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Versions {
     pub transform: u32,
