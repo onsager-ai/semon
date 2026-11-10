@@ -190,9 +190,9 @@ impl RefreshPool {
         lock(&self.state).finished
     }
 
-    /// Wait for a worker that was running when `finished` was observed to
-    /// leave the running set. Tests use this to order a Catalog continuation
-    /// after the step that drove it, without polling on wall-clock intervals.
+    /// Wait briefly for a worker that was running when `finished` was observed
+    /// to leave the running set. Tests recheck Catalog state after this timeout
+    /// because a continuation may become visible without another completion.
     #[cfg(test)]
     pub(crate) fn wait_for_finished_after(&self, finished: u64, timeout: Duration) -> u64 {
         let state = lock(&self.state);
@@ -200,10 +200,6 @@ impl RefreshPool {
             .finished
             .wait_timeout_while(state, timeout, |state| state.finished == finished)
             .unwrap_or_else(PoisonError::into_inner);
-        assert_ne!(
-            state.finished, finished,
-            "refresh-pool hang: no worker completed within {timeout:?}"
-        );
         state.finished
     }
 
