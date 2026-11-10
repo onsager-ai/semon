@@ -298,31 +298,30 @@ tables.
   missing state only after a complete activity publication contains every
   previously witnessed identity and stores the full source vector.
 
-
 ### Resumable admitted input
 
 `AnalyticsInput::read_admitted(checkpoint, budget)` returns one `AdmittedBatch`:
 namespace, opaque next checkpoint, ordered whole-session changes, reconciliation,
-and `complete`. `InputBudget` limits journal entries examined (and therefore
-sessions) and admitted steps; defaults are 64 entries and 8,192 steps. Both limits
-must be positive. Multiple entries for one session in the bounded journal page
-collapse to its last entry, ordered by that sequence. A first session exceeding
+and `complete`. `InputBudget` limits selected inventory sessions or incremental
+journal entries, and admitted steps; defaults are 64 sessions/entries and 8,192
+steps. Both limits must be positive. Multiple entries for one session in an
+incremental journal page collapse to its last entry, ordered by that sequence. A first session exceeding
 the step limit is returned whole, alone; otherwise the next session is deferred
 without advancing past its entry. `Pending`, `SourceMissing`, `SourceRestored`
 and `Removed` retain their existing admission and custody meanings.
 
-The SQLite adapter uses the durable silver journal as the inventory traversal:
-every current Catalog/activity identity has a journal entry in this incarnation.
-It does not allocate every Catalog key or every change since the checkpoint.
-For a cold read or changed incarnation it captures the current maximum sequence
-**S**, traverses entries from zero through S in bounded pages, and reads the
-current complete evidence for each selected session in that page's transaction.
-Historical removals during this inventory traversal are observations, not deletion
-instructions: an absent identity stays pending until final UID reconciliation.
-Revisiting a session is harmless whole-session replacement. Only the final page
-through S queries the complete UID set (current Catalog union retained activity
-identities), in the same transaction as its session reads. It emits
-`ReplaceNamespace` and changes the checkpoint to incremental sequence S.
+For a cold read or changed incarnation the SQLite adapter captures the current
+maximum journal sequence **S** and maximum current inventory key **K**. It pages
+current Catalog union retained activity keys in binary key order, through K,
+using an exclusive last-key cursor. Each page reads the current complete evidence
+for its selected sessions in that page's transaction. Metadata-only Catalog rows
+are visited as `Pending`, even when they have never had admitted activity and
+therefore have no silver journal entry. No page allocates all Catalog keys or all
+changes since a checkpoint. A disappearing key need not be visited: only the
+final page queries the complete current UID set (current Catalog union retained
+activity identities). That page emits `ReplaceNamespace` and changes the
+checkpoint to incremental sequence S. The UID set is independent of the key bound
+K: it includes identities first added while inventory was running.
 
 Chunks use separate read transactions. Every changed identity after S is replayed
 from S as incremental whole-session replacement or an explicit `Removed`; this
@@ -347,8 +346,10 @@ writes require another cycle; a permanently advancing journal can keep catch-up
 incomplete, but each call still returns bounded work.
 
 The adapter strictly validates the checkpoint format, namespace binding,
-incarnation syntax, nonnegative sequences, phase/cursor ordering and actual
-journal sequence anchors before using a same-incarnation cursor. Unknown fields,
+incarnation syntax, nonnegative sequences, inventory key bounds and actual
+journal/key anchors before using a same-incarnation cursor. Inventory key anchors
+may outlive current membership through retained Catalog or native identity rows;
+a removal does not make a valid cursor skip or fail. Unknown fields,
 invalid phase combinations, out-of-range or nonexistent anchors are
 `InvalidQuery`, never a successful empty read. A valid checkpoint from a different
 incarnation starts a new inventory from zero; it never completes the abandoned
@@ -358,15 +359,17 @@ chunk's manifest. Error, stop or restart resumes from that committed cursor;
 a failed publication re-reads the same range. No partial inventory can infer
 source absence. Explicit source-availability observations remain effective.
 
-Input memory is bounded by the selected journal page and step budget plus one
+Input memory is bounded by the selected key/journal page and step budget plus one
 whole oversize session (including its evidence/projection). The final UID set
 requires O(namespace sessions) strings, not StepFacts. Existing store live maps
 and complete dimension merging remain O(store sessions/dimensions); this change
 does not bound those publication structures or the size of a single session.
-Inventory may traverse historical journal entries more than once per session;
-its total cost is proportional to journal history, but no call loads that history
-into an unbounded vector. Journal retention must preserve these anchors for the
-incarnation; pruning/resequencing requires a new incarnation contract.
+Inventory traverses Catalog/activity keys, not journal history. Journal retention
+must preserve checkpoint sequence anchors for the incarnation; pruning or
+resequencing requires a new incarnation contract. Native identity/Catalog anchors
+are retained on ordinary removal. Explicit operator purges may refuse an affected
+checkpoint; this read-only adapter never recreates deleted data or resets custody.
+
 
 ## Durable state
 
