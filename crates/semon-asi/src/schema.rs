@@ -237,10 +237,10 @@ const fn path_opt(name: &'static str, doc: &'static str) -> Column {
     col(name, Type::Text, true, Class::Path, doc)
 }
 
-const USAGE_OWNER: &[&str] = &["exclusive", "copied"];
-const CONTEXT_BAND: &[&str] = &["under_50k", "50k_to_150k", "over_150k"];
-const PRICE_STATUS: &[&str] = &["priced", "unpriced"];
-const ACTIVITY: &[&str] = &[
+pub(crate) const USAGE_OWNER: &[&str] = &["exclusive", "copied"];
+pub(crate) const CONTEXT_BAND: &[&str] = &["under_50k", "50k_to_150k", "over_150k"];
+pub(crate) const PRICE_STATUS: &[&str] = &["priced", "unpriced"];
+pub(crate) const ACTIVITY: &[&str] = &[
     "coordinate",
     "wait",
     "integrate",
@@ -253,14 +253,14 @@ const ACTIVITY: &[&str] = &[
     "think",
     "unknown",
 ];
-const WASTE_KIND: &[&str] = &[
+pub(crate) const WASTE_KIND: &[&str] = &[
     "wait",
     "failed_call",
     "retry",
     "redundant_read",
     "context_refill",
 ];
-const TRIGGER: &[&str] = &[
+pub(crate) const TRIGGER: &[&str] = &[
     "tool_error",
     "empty_result",
     "test_or_ci_failure",
@@ -272,14 +272,15 @@ const TRIGGER: &[&str] = &[
     "missing_input",
     "none_visible",
 ];
-const INITIATOR: &[&str] = &["user", "manager", "peer", "self", "unknown"];
-const TARGET_TYPE: &[&str] = &["session", "turn", "step", "compaction", "lane", "work_item"];
-const ROLE: &[&str] = &["manager", "worker", "reviewer", "solo", "unknown"];
-const PARENT_METHOD: &[&str] = &["native", "workspace", "none"];
-const STATUS: &[&str] = &["active", "ended", "unknown"];
-const SOURCE_STATUS: &[&str] = &["complete", "missing"];
-const COMPUTATION_STATUS: &[&str] = &["current", "pending", "failed", "frozen"];
-const RATE_KIND: &[&str] = &[
+pub(crate) const INITIATOR: &[&str] = &["user", "manager", "peer", "self", "unknown"];
+pub(crate) const TARGET_TYPE: &[&str] =
+    &["session", "turn", "step", "compaction", "lane", "work_item"];
+pub(crate) const ROLE: &[&str] = &["manager", "worker", "reviewer", "solo", "unknown"];
+pub(crate) const PARENT_METHOD: &[&str] = &["native", "workspace", "none"];
+pub(crate) const STATUS: &[&str] = &["active", "ended", "unknown"];
+pub(crate) const SOURCE_STATUS: &[&str] = &["complete", "missing"];
+pub(crate) const COMPUTATION_STATUS: &[&str] = &["current", "pending", "failed", "frozen"];
+pub(crate) const RATE_KIND: &[&str] = &[
     "input",
     "output",
     "cache_read",
@@ -288,7 +289,7 @@ const RATE_KIND: &[&str] = &[
     "reasoning",
     "web_search_request",
 ];
-const PRICE_UNIT: &[&str] = &["mtok", "request"];
+pub(crate) const PRICE_UNIT: &[&str] = &["mtok", "request"];
 
 pub static FACT_STEP: Table = Table {
     name: "fact_step",

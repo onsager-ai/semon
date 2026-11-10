@@ -13,6 +13,7 @@ pub mod projection;
 pub mod publish;
 #[cfg(feature = "query-engine")]
 pub mod query;
+pub mod reference;
 pub mod schema;
 pub mod store;
 
