@@ -26,6 +26,7 @@ enum Command {
     Receive(ReceiveArgs),
     Query(QueryArgs),
     Materialize(MaterializeArgs),
+    Coverage(CoverageArgs),
     Mcp(HomeArgs),
     ArchivePrune {
         cache: PathBuf,
@@ -105,6 +106,12 @@ struct MaterializeArgs {
     input_budget: semon_sessions::InputBudget,
 }
 
+/// Read-only coverage over the currently published local analytics snapshot.
+struct CoverageArgs {
+    cache: PathBuf,
+    json: bool,
+}
+
 struct PushArgs {
     options: semon_push::PushOptions,
     watch: bool,
@@ -141,7 +148,7 @@ fn parse_args() -> Result<Command, String> {
         Some("push") => parse_push_args(arguments).map(Command::Push),
         Some("receive") => parse_receive_args(arguments).map(Command::Receive),
         Some("query") => parse_query_args(arguments).map(Command::Query),
-        Some("analytics") => parse_analytics_args(arguments).map(Command::Materialize),
+        Some("analytics") => parse_analytics_args(arguments),
         Some("mcp") => parse_mcp_args(arguments).map(Command::Mcp),
         Some("archive") => parse_archive_args(arguments),
         Some("-h" | "--help") => Err(usage()),
@@ -180,13 +187,17 @@ fn parse_archive_args(mut arguments: impl Iterator<Item = String>) -> Result<Com
     })
 }
 
-fn parse_analytics_args(
-    mut arguments: impl Iterator<Item = String>,
-) -> Result<MaterializeArgs, String> {
+fn parse_analytics_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
     match arguments.next().as_deref() {
-        Some("materialize") => {}
+        Some("materialize") => parse_materialize_args(arguments).map(Command::Materialize),
+        Some("coverage") => parse_coverage_args(arguments).map(Command::Coverage),
         _ => return Err(analytics_usage()),
     }
+}
+
+fn parse_materialize_args(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<MaterializeArgs, String> {
     let mut home = HomeArgs::default();
     let mut watch = false;
     let mut input_budget = semon_sessions::InputBudget::default();
@@ -238,6 +249,22 @@ fn parse_analytics_args(
         watch,
         input_budget,
     })
+}
+
+fn parse_coverage_args(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<CoverageArgs, String> {
+    let mut cache = semon_sessions::Options::default().cache;
+    let mut json = false;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--cache" => cache = arguments.next().ok_or("--cache requires a value")?.into(),
+            "--json" => json = true,
+            "-h" | "--help" => return Err(analytics_usage()),
+            _ => return Err(format!("unknown analytics coverage argument: {argument}")),
+        }
+    }
+    Ok(CoverageArgs { cache, json })
 }
 
 fn parse_sessions_args(
@@ -611,6 +638,12 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
 }
 
 fn run(command: Command) -> Result<(), String> {
+    // Coverage deliberately bypasses process-wide pricing initialization: it is a
+    // read-only report over an already published ASI snapshot.
+    let command = match command {
+        Command::Coverage(args) => return run_coverage(args),
+        command => command,
+    };
     semon_sessions::pricing::initialize_default();
     if matches!(
         &command,
@@ -631,6 +664,7 @@ fn run(command: Command) -> Result<(), String> {
         Command::Receive(args) => run_receive(args),
         Command::Query(args) => run_query(args),
         Command::Materialize(args) => run_materialize(args),
+        Command::Coverage(_) => unreachable!("coverage returns before pricing initialization"),
         Command::Mcp(home) => run_mcp(&home),
         Command::ArchivePrune {
             cache,
@@ -649,6 +683,60 @@ fn run(command: Command) -> Result<(), String> {
             }
             Ok(())
         }
+    }
+}
+
+fn run_coverage(args: CoverageArgs) -> Result<(), String> {
+    let index_path = semon_sessions::analytics_index_path(&args.cache);
+    let store_root = semon_sessions::analytics_store_root(&index_path).ok_or_else(|| {
+        format!(
+            "analytics coverage requires an Event Index path with a parent: {}",
+            index_path.display()
+        )
+    })?;
+    let report = semon_asi::coverage::read(&store_root)
+        .map_err(|error| format!("analytics coverage: {error}"))?
+        .ok_or_else(|| format!("no analytics store at {}", store_root.display()))?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string(&report).map_err(|error| error.to_string())?
+        );
+    } else {
+        print_coverage(&report);
+    }
+    Ok(())
+}
+
+fn print_coverage(report: &semon_asi::CoverageReport) {
+    println!("{}; {}.", report.scope, report.derivation_state);
+    println!("manifest generation: {}", report.manifest_generation);
+    println!(
+        "writer TARGETS: transform={} rules={} price={}",
+        report.writer_targets.transform, report.writer_targets.rules, report.writer_targets.price
+    );
+    println!("source-missing UIDs: {}", report.source_missing_uids);
+    println!(
+        "transform\trules\tprice\ttaxonomy\tsource\tcomputation\tsessions\tsteps\texclusive\tunknown\tunclassified"
+    );
+    for group in &report.groups {
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            group.key.transform_version,
+            group.key.rules_version,
+            group.key.price_version,
+            group
+                .key
+                .taxonomy_version
+                .map_or_else(|| "-".to_owned(), |value| value.to_string()),
+            group.key.source_status,
+            group.key.computation_status,
+            group.totals.session_count,
+            group.totals.step_count,
+            group.totals.exclusive_step_count,
+            group.totals.unknown_step_count,
+            group.totals.unclassified_step_count,
+        );
     }
 }
 
@@ -1049,7 +1137,10 @@ fn analytics_usage() -> String {
      Catalog refresh is complete; --since/--all do not bound analytics input.\n\
      Batch limits are positive integers up to min(usize::MAX, i64::MAX) for this build; defaults are 64 sessions/journal entries and 8192 steps. An oversize session stays whole.\n\
      One-shot finishes inherited replay, then drains immediately through a fresh endpoint; later changes belong to the next request.\n\
-     --watch uses a minimum spacing of 2 s between chunk attempts; failures exit visibly. Ctrl-C/SIGTERM stops the wait."
+     --watch uses a minimum spacing of 2 s between chunk attempts; failures exit visibly. Ctrl-C/SIGTERM stops the wait.\n\
+     \n\
+     Usage: semon analytics coverage [--cache PATH] [--json]\n\
+     Reports one PUBLISHED live-row snapshot. Native pending/failed/frozen derivation state is not part of this report."
         .to_owned()
 }
 
@@ -1068,6 +1159,9 @@ fn usage() -> String {
          Usage: semon analytics materialize [--watch] [--batch-sessions N] [--batch-steps N] [--since DURATION | --all] [home options as for sessions]\n\
          Explicitly refreshes the local native Catalog and materializes local-only analytics. Nothing starts this writer by default.\n\
          Batch limits default to 64 sessions/journal entries and 8192 steps; an oversize session stays whole. Limits are positive and at most min(usize::MAX, i64::MAX).\n\
+         \n\
+         Usage: semon analytics coverage [--cache PATH] [--json]\n\
+         Read-only coverage from one published live-row analytics snapshot. It does not report native pending/failed/frozen derivation state.\n\
          \n\
          Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
          The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener. Both read\n\
@@ -1100,9 +1194,12 @@ mod tests {
         let largest = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
         for flag in ["--batch-sessions", "--batch-steps"] {
             let limit = largest.to_string();
-            let args =
+            let Command::Materialize(args) =
                 parse_analytics_args(["materialize", flag, &limit].map(str::to_owned).into_iter())
-                    .unwrap();
+                    .unwrap()
+            else {
+                panic!("materialize parser returned a different command");
+            };
             let actual = if flag == "--batch-sessions" {
                 args.input_budget.max_sessions
             } else {

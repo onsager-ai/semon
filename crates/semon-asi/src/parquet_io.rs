@@ -95,6 +95,20 @@ pub(crate) fn write_file(path: &Path, batch: &RecordBatch) -> Result<Written> {
 
 /// Reads every batch of a file, or only the named top-level columns.
 pub(crate) fn read_batches(path: &Path, columns: Option<&[&str]>) -> Result<Vec<RecordBatch>> {
+    let mut batches = Vec::new();
+    visit_batches(path, columns, |batch| {
+        batches.push(batch);
+        Ok(())
+    })?;
+    Ok(batches)
+}
+
+/// Visits each batch of a file without retaining earlier batches.
+pub(crate) fn visit_batches(
+    path: &Path,
+    columns: Option<&[&str]>,
+    mut visit: impl FnMut(RecordBatch) -> Result<()>,
+) -> Result<()> {
     #[cfg(test)]
     READS.with(|reads| reads.set(reads.get() + 1));
     let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?)?;
@@ -109,11 +123,10 @@ pub(crate) fn read_batches(path: &Path, columns: Option<&[&str]>) -> Result<Vec<
         }
         None => builder,
     };
-    let mut batches = Vec::new();
     for batch in builder.build()? {
-        batches.push(batch?);
+        visit(batch?)?;
     }
-    Ok(batches)
+    Ok(())
 }
 
 /// Adds the `_gen` column to a batch of a table's declared columns.
