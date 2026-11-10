@@ -544,7 +544,6 @@ fn bounded_inventory_replays_new_session_behind_keyset_cursor() {
 #[test]
 fn bounded_inventory_replays_source_missing_and_restored_between_chunks() {
     let (root, options, rows, mut native) = fixture("bounded-availability", 6);
-    let (_, slots) = catalog_fixture_projection(&options);
     let mut store = Store::open_with_clock(&root.join("chunked"), clock()).unwrap();
     let mut expected = Store::open_with_clock(&root.join("one-shot"), clock()).unwrap();
     for target in [&mut store, &mut expected] {
@@ -561,12 +560,34 @@ fn bounded_inventory_replays_source_missing_and_restored_between_chunks() {
     assert!(!chunk(&mut store, &mut input, selected).complete);
     let withdrawn = rows.iter().find(|row| row.key == "native-cl-02").unwrap();
     let withdrawn_uid = uid(withdrawn);
-    let available: Vec<_> = rows
+    assert_eq!(withdrawn.sources.len(), 1);
+    let source = &withdrawn.sources[0].path;
+    let original = fs::read(source).unwrap();
+    fs::remove_file(source).unwrap();
+    let (available, slots) = catalog_fixture_projection(&options);
+    assert!(available.iter().all(|row| row.key != withdrawn.key));
+    let seen = available
         .iter()
-        .filter(|row| row.key != withdrawn.key)
-        .cloned()
+        .flat_map(|row| &row.sources)
+        .map(|source| source.path.to_string_lossy().into_owned())
         .collect();
-    catalog_write(&mut native, &available, &slots, false, CatalogWriter::Auto).unwrap();
+    // Match the existing missing-member fixture: a full scan must retire the
+    // absent source ledger before a complete catalog publication can withdraw
+    // its session. Omitting a still-current ledger would refuse publication.
+    let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+    cache.begin_scan().unwrap();
+    cache.begin_full_scan().unwrap();
+    let mut dirty = false;
+    cache.retain(&seen, &mut dirty);
+    cache.end_scan();
+    drop(cache);
+    assert!(dirty, "the missing source must leave the current ledger");
+    assert_eq!(
+        catalog_write(&mut native, &available, &slots, false, CatalogWriter::Auto)
+            .unwrap()
+            .0,
+        Outcome::Written
+    );
     assert_eq!(
         session_activity::source_missing(&native.connection, &withdrawn.key).unwrap(),
         Some(true)
@@ -582,9 +603,17 @@ fn bounded_inventory_replays_source_missing_and_restored_between_chunks() {
         "source loss keeps frozen facts"
     );
 
-    // Restore the exact native generation after its inventory key has passed.
+    // Restore the source bytes after its inventory key has passed, and let the
+    // native producer admit the complete current cohort again.
     // The eventual SourceRestored observation must therefore come from replay.
-    catalog_write(&mut native, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    fs::write(source, original).unwrap();
+    let (restored, slots) = catalog_fixture_projection(&options);
+    assert_eq!(
+        catalog_write(&mut native, &restored, &slots, false, CatalogWriter::Auto)
+            .unwrap()
+            .0,
+        Outcome::Written
+    );
     assert_eq!(
         session_activity::source_missing(&native.connection, &withdrawn.key).unwrap(),
         Some(false)
@@ -883,7 +912,13 @@ fn bounded_writer_request_waits_for_complete_inventory() {
     config.input_budget = budget(1, 8_192);
     let handle = crate::analytics_writer::start_with_clock(config, Arc::clone(&time));
     std::thread::scope(|scope| {
-        let waiter = scope.spawn(|| handle.publish_and_wait());
+        // Cancellation bounds scoped-thread cleanup even if an assertion
+        // fails before the fake clock reaches the final publication.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let handle_ref = &handle;
+        let waiter = scope.spawn(move || {
+            handle_ref.publish_and_wait_until(|| std::time::Instant::now() >= deadline)
+        });
         for count in 1..=4 {
             if count > 1 {
                 time.0

@@ -237,17 +237,10 @@ impl Handle {
 
     #[cfg(test)]
     pub(crate) fn wait_for_publishes(&self, expected: u64) {
-        let mut state = lock(&self.shared.state);
-        while state.published < expected && !state.stop {
-            state = self
-                .shared
-                .changed
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-        }
-        assert!(
-            state.published >= expected,
-            "writer stopped before publishing"
+        wait_for_test_state(
+            &self.shared,
+            |state| state.published >= expected,
+            "publication",
         );
     }
 
@@ -304,15 +297,11 @@ impl Handle {
 
     #[cfg(test)]
     pub(crate) fn wait_for_idle_wait(&self) {
-        let mut state = lock(&self.shared.state);
-        while !(state.waiting && state.status == AnalyticsWriterStatus::Idle) && !state.stop {
-            state = self
-                .shared
-                .changed
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-        }
-        assert!(state.waiting && state.status == AnalyticsWriterStatus::Idle);
+        wait_for_test_state(
+            &self.shared,
+            |state| state.waiting && state.status == AnalyticsWriterStatus::Idle,
+            "idle wait",
+        );
     }
 
     #[cfg(test)]
@@ -322,15 +311,11 @@ impl Handle {
 
     #[cfg(test)]
     pub(crate) fn wait_for_idle_wait_after(&self, previous: u64) {
-        let mut state = lock(&self.shared.state);
-        while state.idle_waits <= previous && !state.stop {
-            state = self
-                .shared
-                .changed
-                .wait(state)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-        }
-        assert!(state.idle_waits > previous);
+        wait_for_test_state(
+            &self.shared,
+            |state| state.idle_waits > previous,
+            "next idle wait",
+        );
     }
 
     #[cfg(test)]
@@ -1032,6 +1017,27 @@ fn settle(shared: &Shared, generation: u64, outcome: AnalyticsWriterStatus) {
 fn consume_notification(shared: &Shared, notification: u64) {
     let mut state = lock(&shared.state);
     state.consumed = notification;
+}
+
+#[cfg(test)]
+fn wait_for_test_state(shared: &Shared, ready: impl Fn(&State) -> bool, description: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    let mut state = lock(&shared.state);
+    while !ready(&state) && !state.stop {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            // Unblock the writer and any scoped request waiter before failing.
+            state.stop = true;
+            shared.changed.notify_all();
+            panic!("writer test timed out waiting for {description}");
+        }
+        state = shared
+            .changed
+            .wait_timeout(state, remaining)
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .0;
+    }
+    assert!(ready(&state), "writer stopped before {description}");
 }
 
 #[cfg(test)]
