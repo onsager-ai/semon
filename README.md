@@ -137,6 +137,23 @@ semon query list_sessions --since 90d --newer-than 60d   # a wider window
 semon query get_session SESSION_ID --all                 # every log file
 ```
 
+## Local analytics materialization
+
+`semon analytics materialize` is the explicit, local-only entry point for
+analytics publication. It refreshes the same native Catalog used by `semon
+query`, then writes Parquet under `<index parent>/analytics-store`; Viewer,
+MCP, push and receive never enable it implicitly. The first run records a
+random namespace in `<index parent>/analytics-namespace`, and later runs reuse
+it. Deleting that state directory creates a new namespace and new session IDs;
+there is no automatic reconciliation or rename/transfer workflow yet. Typed
+local paths can be present in the Parquet, so governed export remains a
+separate operation.
+
+```sh
+semon analytics materialize --all
+semon analytics materialize --watch --since 7d
+```
+
 To give Claude Code's agents these tools, add the server once; user scope makes it available in every project. It reads the last 30 days; add `--since 7d` for a lighter first run or `--all` for everything:
 
 ```sh

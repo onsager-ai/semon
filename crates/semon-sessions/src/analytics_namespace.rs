@@ -157,3 +157,104 @@ fn sync_directory(path: &Path) -> Result<(), String> {
         })?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        sync::atomic::{AtomicU64, Ordering},
+        thread,
+    };
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+
+    fn temporary_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "semon-analytics-namespace-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn creates_an_opaque_stable_namespace_once() {
+        let root = temporary_root("stable");
+        let first = load_or_create_analytics_namespace(&root).unwrap();
+        assert!(valid(&first));
+        assert_eq!(first, load_or_create_analytics_namespace(&root).unwrap());
+        assert_eq!(
+            fs::read_to_string(root.join(ANALYTICS_NAMESPACE_FILE)).unwrap(),
+            format!("{first}\n")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn created_namespace_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = temporary_root("mode");
+        load_or_create_analytics_namespace(&root).unwrap();
+        let mode = fs::metadata(root.join(ANALYTICS_NAMESPACE_FILE))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_creation_uses_one_namespace() {
+        let root = temporary_root("concurrent");
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let root = root.clone();
+            workers.push(thread::spawn(move || {
+                load_or_create_analytics_namespace(&root)
+            }));
+        }
+        let first = workers.remove(0).join().unwrap().unwrap();
+        for worker in workers {
+            assert_eq!(first, worker.join().unwrap().unwrap());
+        }
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn malformed_content_is_refused_without_replacement() {
+        let root = temporary_root("malformed");
+        let path = root.join(ANALYTICS_NAMESPACE_FILE);
+        fs::write(&path, "origin-not-hex\n").unwrap();
+        assert!(load_or_create_analytics_namespace(&root).is_err());
+        assert_eq!(fs::read_to_string(path).unwrap(), "origin-not-hex\n");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_namespace_with_existing_store_refuses() {
+        let root = temporary_root("existing-store");
+        let manifest = root.join("analytics-store/analytics/manifest.json");
+        fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+        fs::write(&manifest, "{}").unwrap();
+        assert!(load_or_create_analytics_namespace(&root).is_err());
+        assert!(!root.join(ANALYTICS_NAMESPACE_FILE).exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn namespace_is_lowercase_hex_randomness_with_a_fixed_prefix() {
+        let root = temporary_root("opaque");
+        let namespace = load_or_create_analytics_namespace(&root).unwrap();
+        assert!(namespace.starts_with(PREFIX));
+        assert!(
+            namespace[PREFIX.len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+}

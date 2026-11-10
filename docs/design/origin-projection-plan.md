@@ -83,16 +83,20 @@ observing the new physical witness as pending.
 
 ## Integration after the storage stack merges
 
-`semon-sessions::analytics_writer` now supplies the first local lifecycle
-primitive for this plan. A caller explicitly starts it with a configured
-namespace, read-only SQLite index path and analytics store root; no Viewer, MCP,
-push/receive or CLI path starts it, and the owner still needs to choose the host
-configuration and enablement surface. It coalesces catalog-publication
-notifications into at-most-one cycle per interval, opens a fresh read-only
-`SqliteAnalyticsInput` for each cycle, and uses the current native activity-rules
-version and pricing snapshot fingerprint as manifest targets. It preserves the
-adapter's admitted input boundary: bounded cold/full input remains outstanding
-work, not a limit added by the writer.
+`semon analytics materialize` is the explicit local lifecycle entry point for
+this plan. It refreshes the native Catalog through the same producer path as
+`semon query` and MCP, then starts `semon-sessions::analytics_writer` against
+that read-only SQLite index. Nothing starts the writer by default: Viewer, MCP,
+push and receive remain disabled as hosts. The first materialize writes a random
+`origin-` namespace to `<index parent>/analytics-namespace`, and later runs reuse
+it. Deleting that state directory starts a new namespace with new session IDs;
+there is no automatic reconciliation. Rename or transfer is a later explicit
+operator workflow. The CLI's `--watch` repeats Catalog refresh and notification
+until stopped. The writer coalesces notifications into at-most-one cycle per
+interval, opens a fresh read-only `SqliteAnalyticsInput` for each cycle, and
+uses the current native activity-rules version and pricing snapshot fingerprint
+as manifest targets. It preserves the adapter's admitted input boundary:
+bounded input lands separately and is not a limit added by the writer.
 
 Lock contention is an observable no-writer state. Unsupported or integrity input
 refuses visibly without mutating the SQLite index, advancing its checkpoint,

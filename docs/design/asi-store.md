@@ -222,19 +222,28 @@ Analytics is published as immutable files, plus a map of which file holds each
 session's current rows. This is the merge-on-read pattern used by lakehouse
 tables.
 
-- **Writer.** The first Semon process that needs analytics takes `analytics.lock` and
-  becomes the authoritative producer store's single writer: push, Viewer, MCP,
-  or receive for an explicitly transferred replica namespace. Other processes only
+- **Writer.** An explicitly invoked local materializer takes `analytics.lock` and
+  becomes the authoritative producer store's single writer. Other processes only
   read. Imported receiver heads are admitted publications, not locally rebuilt indexes.
-  The local `semon-sessions` writer service is an explicit lifecycle primitive:
-  its namespace is caller-supplied, it opens a separate read-only index connection
-  per cycle, and it is not enabled or started by a host yet. Its store-root helper
-  uses `<index parent>/analytics-store`, never a path inside the SQLite index file. A busy
-  lock is observable as a no-writer state; unsupported input latches a refusal
+  The local `semon-sessions` writer service is an explicit lifecycle primitive.
+  `semon analytics materialize` is its only enablement surface: Viewer, MCP,
+  push and receive do not start it. On the first materialize, it creates a
+  random `origin-` namespace in `<index parent>/analytics-namespace`; later
+  materializations reuse that value. If the state directory is deleted, the
+  next materialize has new session UIDs and no automatic reconciliation.
+  Rename or transfer is a later explicit operator workflow. The writer opens a
+  separate read-only index connection per cycle, and its store-root helper uses
+  `<index parent>/analytics-store`, never a path inside the SQLite index file.
+  A present store with a missing namespace file refuses instead of silently
+  forking those identities.
+  A busy lock is observable as a no-writer state; unsupported input latches a refusal
   without changing the index or a checkpoint, until a later notification retries.
   Store refusals also latch until a new notification; each refusal consumes only
   the notification snapshot captured before its operation, preserving notifications
   received during that operation.
+- **Local custody.** The generated Parquet can contain typed local-path
+  fields. It remains local-only; a governed export is a separate operation and
+  is not part of materialization.
 - **Cycle.** By default at most once every 2 s (the caller selects the interval), the writer reads the index change log and
   recomputes every touched session **whole**. It doesn't patch tails: a
   following step can change an earlier step's duration, and a late record can
