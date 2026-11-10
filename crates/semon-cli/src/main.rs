@@ -21,6 +21,7 @@ enum Command {
     Push(PushArgs),
     Receive(ReceiveArgs),
     Query(QueryArgs),
+    Materialize(MaterializeArgs),
     Mcp(HomeArgs),
 }
 
@@ -89,6 +90,12 @@ struct QueryArgs {
     json: bool,
 }
 
+/// Explicit local origin analytics publication over one native Event Index.
+struct MaterializeArgs {
+    home: HomeArgs,
+    watch: bool,
+}
+
 struct PushArgs {
     options: semon_push::PushOptions,
     watch: bool,
@@ -125,11 +132,50 @@ fn parse_args() -> Result<Command, String> {
         Some("push") => parse_push_args(arguments).map(Command::Push),
         Some("receive") => parse_receive_args(arguments).map(Command::Receive),
         Some("query") => parse_query_args(arguments).map(Command::Query),
+        Some("analytics") => parse_analytics_args(arguments).map(Command::Materialize),
         Some("mcp") => parse_mcp_args(arguments).map(Command::Mcp),
         Some("-h" | "--help") => Err(usage()),
         Some(command) => Err(format!("unknown command: {command}\n{}", usage())),
         None => Err(usage()),
     }
+}
+
+fn parse_analytics_args(
+    mut arguments: impl Iterator<Item = String>,
+) -> Result<MaterializeArgs, String> {
+    match arguments.next().as_deref() {
+        Some("materialize") => {}
+        _ => return Err(analytics_usage()),
+    }
+    let mut home = HomeArgs::default();
+    let mut watch = false;
+    while let Some(argument) = arguments.next() {
+        let mut value = || {
+            arguments
+                .next()
+                .ok_or_else(|| format!("{argument} requires a value"))
+        };
+        if home.take(&argument, &mut value)? {
+            continue;
+        }
+        match argument.as_str() {
+            "--watch" => watch = true,
+            "-h" | "--help" => return Err(analytics_usage()),
+            _ => {
+                return Err(format!(
+                    "unknown analytics materialize argument: {argument}"
+                ));
+            }
+        }
+    }
+    home.check()?;
+    if !home.machines.is_empty() {
+        return Err(
+            "analytics materialize requires one local Event Index; --machine is not supported"
+                .into(),
+        );
+    }
+    Ok(MaterializeArgs { home, watch })
 }
 
 fn parse_sessions_args(
@@ -507,6 +553,7 @@ fn run(command: Command) -> Result<(), String> {
     if matches!(
         &command,
         Command::Mcp(_)
+            | Command::Materialize(MaterializeArgs { watch: true, .. })
             | Command::Sessions(SessionsArgs { serve: true, .. })
             | Command::Sessions(SessionsArgs { watch: true, .. })
     ) {
@@ -521,8 +568,86 @@ fn run(command: Command) -> Result<(), String> {
         Command::Push(args) => run_push(&args),
         Command::Receive(args) => run_receive(args),
         Command::Query(args) => run_query(args),
+        Command::Materialize(args) => run_materialize(args),
         Command::Mcp(home) => run_mcp(&home),
     }
+}
+
+fn refresh_catalog(query: &mut semon_sessions::Query) -> Result<(), String> {
+    query
+        .call("list_sessions", &serde_json::json!({}))
+        .map(|_| ())
+        .map_err(|error| format!("catalog refresh: {error}"))
+}
+
+fn publish_materialization(writer: &semon_sessions::Handle) -> Result<(), String> {
+    match writer.publish_and_wait() {
+        semon_sessions::AnalyticsWriterStatus::Idle => Ok(()),
+        semon_sessions::AnalyticsWriterStatus::NoWriter => Err("analytics writer busy".into()),
+        semon_sessions::AnalyticsWriterStatus::Refused { reason } => {
+            Err(format!("analytics writer refused: {reason}"))
+        }
+        status => Err(format!(
+            "analytics writer stopped before publication: {status:?}"
+        )),
+    }
+}
+
+/// Materialize the local Analytics Store from the native Event Index. The
+/// Catalog refresh is the same Query producer path used by `semon query` and
+/// MCP; analytics only opens its published SQLite result.
+fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
+    let index_path = semon_sessions::analytics_index_path(&args.home.options.cache);
+    let state_dir = index_path.parent().ok_or_else(|| {
+        format!(
+            "analytics materialize requires an Event Index path with a parent: {}",
+            index_path.display()
+        )
+    })?;
+    let mut query = args.home.query();
+    refresh_catalog(&mut query)?;
+    let namespace = semon_sessions::load_or_create_analytics_namespace(state_dir)?;
+    let store_root = semon_sessions::analytics_store_root(&index_path).ok_or_else(|| {
+        format!(
+            "analytics materialize requires an Event Index path with a parent: {}",
+            index_path.display()
+        )
+    })?;
+    let writer = semon_sessions::start(semon_sessions::AnalyticsWriterConfig::new(
+        namespace.clone(),
+        index_path,
+        store_root.clone(),
+    ));
+
+    let stop = semon_push::Stop::new();
+    if args.watch {
+        interrupt::stop_on_signal(&stop);
+    }
+    let result = (|| {
+        publish_materialization(&writer)?;
+        println!(
+            "analytics materialized: namespace={namespace} store={} status=idle",
+            store_root.display()
+        );
+        while args.watch && !stop.sleep(std::time::Duration::from_secs(2)) {
+            refresh_catalog(&mut query)?;
+            publish_materialization(&writer)?;
+        }
+        Ok(())
+    })();
+    writer.stop_and_join();
+    if args.watch {
+        if stop.is_stopped() {
+            eprintln!("semon analytics materialize: stopped");
+        }
+        if interrupt::received()
+            && let Err(error) = &result
+        {
+            eprintln!("semon: {error}");
+        }
+        interrupt::raise_received();
+    }
+    result
 }
 
 /// `semon push`, stopped by Ctrl-C or SIGTERM through the same
@@ -826,6 +951,13 @@ fn query_usage() -> String {
     )
 }
 
+fn analytics_usage() -> String {
+    "Usage: semon analytics materialize [--watch] [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--copilot-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE]\n\
+     Refreshes the local native Catalog, then explicitly materializes its analytics store.\n\
+     --watch refreshes and publishes every 2 s until Ctrl-C or SIGTERM."
+        .to_owned()
+}
+
 fn usage() -> String {
     "Usage: semon sessions [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
          Shows a read-only tree of native Claude Code, Codex and Copilot sessions.\n\
@@ -837,6 +969,9 @@ fn usage() -> String {
          Usage: semon query TOOL [ARGUMENTS] [--json] [--since DURATION | --all] [home options as for sessions, and --machine DIR]\n\
          The agent read surface over native session evidence: list_sessions, get_session, get_session_activity, read_transcript,\n\
          stalls. `semon query` alone lists each tool's arguments.\n\
+         \n\
+         Usage: semon analytics materialize [--watch] [--since DURATION | --all] [home options as for sessions]\n\
+         Explicitly refreshes the local native Catalog and materializes local-only analytics. Nothing starts this writer by default.\n\
          \n\
          Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
          The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener. Both read\n\

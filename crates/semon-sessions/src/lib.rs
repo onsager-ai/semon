@@ -15,14 +15,24 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 mod analytics;
+mod analytics_namespace;
 pub mod analytics_writer;
 mod causal_trace;
 mod origin_projection;
 mod overview;
 mod overview_repair;
+pub use analytics_namespace::load_or_create_analytics_namespace;
 pub use analytics_writer::{
     AnalyticsWriterConfig, AnalyticsWriterStatus, Handle, analytics_store_root, start,
 };
+
+/// The SQLite Event Index path for a configured cache stem.
+///
+/// This is the same path the native Catalog producer owns. Analytics opens it
+/// read-only only after that producer has published current Catalog data.
+pub fn analytics_index_path(cache: &Path) -> PathBuf {
+    events::EventCache::path(cache)
+}
 pub use causal_trace::session_causal_trace;
 pub(crate) use causal_trace::session_causal_trace_with_gate;
 pub use origin_projection::SqliteAnalyticsInput;

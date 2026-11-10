@@ -173,6 +173,38 @@ impl Handle {
         lock(&self.shared.state).status.clone()
     }
 
+    /// Requests one publication and waits for that request to settle.
+    ///
+    /// A successful request includes its bounded compaction step. Refused and
+    /// no-writer states are returned to the caller rather than hidden behind a
+    /// later notification.
+    pub fn publish_and_wait(&self) -> AnalyticsWriterStatus {
+        let target = {
+            let mut state = lock(&self.shared.state);
+            state.notifications = state.notifications.wrapping_add(1);
+            self.shared.changed.notify_one();
+            state.notifications
+        };
+        let mut state = lock(&self.shared.state);
+        loop {
+            match &state.status {
+                AnalyticsWriterStatus::Refused { .. }
+                | AnalyticsWriterStatus::NoWriter
+                | AnalyticsWriterStatus::Stopped => return state.status.clone(),
+                AnalyticsWriterStatus::Idle if state.consumed >= target => {
+                    return AnalyticsWriterStatus::Idle;
+                }
+                _ => {
+                    state = self
+                        .shared
+                        .changed
+                        .wait(state)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                }
+            }
+        }
+    }
+
     /// Stops future scheduling and joins without flushing, retirement, or a
     /// partially-started generation.
     pub fn stop_and_join(mut self) {
