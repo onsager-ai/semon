@@ -2,9 +2,8 @@
 
 The required `viewer browser checks` status aggregates the selected Viewer UI
 tier. Pull requests run no browser suites when every changed path is docs-only
-(except compiled `docs/shell.md`) or under `crates/semon-asi/`; other code changes
-run the navigation, live-update and transport smoke suites; viewer inputs run all
-eleven suites. Pushes to main and manual dispatch always run all eleven. The smoke
+(except compiled `docs/shell.md`); other code changes run the navigation,
+live-update and transport smoke suites; viewer inputs run all eleven suites. Pushes to main and manual dispatch always run all eleven. The smoke
 suites cover the catalog navigation/data path, updates arriving while logs are
 written, and pushed/received data parity across transport. CI builds the test-clock
 binary and account fixture once, transfers those binaries to isolated runners, and

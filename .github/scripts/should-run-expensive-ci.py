@@ -15,8 +15,6 @@ VIEWER_PREFIXES = (
     b"crates/semon-sessions/src/viewer",
     b"crates/semon-sessions/tests/viewer_server.rs",
 )
-# The Viewer binary does not link this crate; a classifier test guards that.
-VIEWER_UNLINKED_PREFIXES = (b"crates/semon-asi/",)
 
 
 def changed_paths(base: str, head: str, repository: Path | None = None) -> list[bytes]:
@@ -53,7 +51,7 @@ def run_expensive(paths: list[bytes]) -> bool:
 def viewer_tier(paths: list[bytes]) -> str:
     if not paths or any(path.startswith(VIEWER_PREFIXES) for path in paths):
         return "full"
-    if all(is_docs(path) or path.startswith(VIEWER_UNLINKED_PREFIXES) for path in paths):
+    if all(is_docs(path) for path in paths):
         return "none"
     return "smoke"
 
