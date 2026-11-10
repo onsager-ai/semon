@@ -143,13 +143,13 @@ fn update_for_batch<C: Clock>(
 
     let mut tables = dimension_updates(store, &dimensions, &facts, &touched, &removed)?;
     for table in TABLES {
-        if table.kind == Kind::Session {
-            if let Some(rows) = facts.remove(table.name) {
-                tables.push(TableBatch {
-                    table,
-                    batch: rows_to_batch(table, &rows)?,
-                });
-            }
+        if table.kind == Kind::Session
+            && let Some(rows) = facts.remove(table.name)
+        {
+            tables.push(TableBatch {
+                table,
+                batch: rows_to_batch(table, &rows)?,
+            });
         }
     }
     let mut checkpoints = BTreeMap::new();
@@ -598,26 +598,25 @@ mod tests {
                 .collect(),
             compactions: Vec::new(),
             usage_complete: true,
-            prices: step
-                .is_some()
-                .then(|| {
-                    vec![Price {
-                        price_version,
-                        provider: "openai".into(),
-                        model: "test".into(),
-                        rate_kind: RateKind::Input,
-                        tier: None,
-                        speed: None,
-                        service_tier: None,
-                        threshold_tokens: None,
-                        unit: PriceUnit::Mtok,
-                        usd_per_unit: 1.0,
-                        valid_from: 1_700_000_000_000,
-                        valid_to: None,
-                        learned_at: 1_700_000_000_000,
-                    }]
-                })
-                .unwrap_or_default(),
+            prices: if step.is_some() {
+                vec![Price {
+                    price_version,
+                    provider: "openai".into(),
+                    model: "test".into(),
+                    rate_kind: RateKind::Input,
+                    tier: None,
+                    speed: None,
+                    service_tier: None,
+                    threshold_tokens: None,
+                    unit: PriceUnit::Mtok,
+                    usd_per_unit: 1.0,
+                    valid_from: 1_700_000_000_000,
+                    valid_to: None,
+                    learned_at: 1_700_000_000_000,
+                }]
+            } else {
+                Vec::new()
+            },
         }
     }
 
