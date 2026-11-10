@@ -249,7 +249,7 @@ fn emit_catalog_publish_attempt(
 // the per-database storage version stamp (current stores do not run storage
 // DDL), the ledger epoch on source ledgers and published sources, and compact
 // activity summaries for bounded family publication.
-pub(crate) const SCHEMA_VERSION: i64 = 45;
+pub(crate) const SCHEMA_VERSION: i64 = 46;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -449,6 +449,7 @@ CREATE TABLE IF NOT EXISTS signals (
     at INTEGER NOT NULL,
     n TEXT,
     v INTEGER,
+    native_record TEXT,
     PRIMARY KEY (file_id, seq)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS usage_identity (
@@ -484,6 +485,7 @@ CREATE TABLE IF NOT EXISTS usage (
     billing_split_unknown INTEGER NOT NULL,
     record_ids TEXT NOT NULL,
     native_offset INTEGER NOT NULL,
+    record_ordinal INTEGER,
     PRIMARY KEY (file_id, message_id)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS codex_usage (
@@ -626,25 +628,25 @@ struct EventState {
     activity_tool: Option<super::session_activity::classify::ToolCallEvidence>,
 }
 
-const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v";
+const SIGNAL_COLUMNS: &str = "seq, k, o, t, at, n, v, native_record";
 
-const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals (file_id, seq, k, o, t, at, n, v) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)";
+const PUT_SIGNAL: &str = "INSERT OR REPLACE INTO signals (file_id, seq, k, o, t, at, n, v, native_record) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)";
 
 const USAGE_COLUMNS: &str = "message_id, model, input, cached_input, output, reasoning_output, \
      total, model_input, model_output, model_cache_write, model_cache_read, billing_input, \
      billing_output, billing_cache_read, billing_cache_write_5m, billing_cache_write_1h, \
      billing_web_search_requests, billing_speed, billing_service_tier, billing_prompt_size, \
-     billing_timestamp, billing_split_unknown, record_ids, native_offset";
+     billing_timestamp, billing_split_unknown, record_ids, native_offset, record_ordinal";
 
 const PUT_USAGE: &str = "INSERT OR REPLACE INTO usage (file_id, message_id, model, input, \
      cached_input, output, reasoning_output, total, model_input, model_output, \
      model_cache_write, model_cache_read, billing_input, billing_output, billing_cache_read, \
      billing_cache_write_5m, billing_cache_write_1h, billing_web_search_requests, \
      billing_speed, billing_service_tier, billing_prompt_size, billing_timestamp, \
-     billing_split_unknown, record_ids, native_offset) \
+     billing_split_unknown, record_ids, native_offset, record_ordinal) \
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, \
-     ?19, ?20, ?21, ?22, ?23, ?24, ?25)";
+     ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)";
 
 const CODEX_USAGE_COLUMNS: &str = "seq, model, input, output, cache_write, cache_read, t";
 
@@ -5709,6 +5711,10 @@ fn read_file(
             return Err(gap("signals"));
         }
         signals.push(Signal {
+            native_record: signal_row
+                .get::<_, Option<String>>(7)?
+                .map(|value| from_json(7, &value))
+                .transpose()?,
             k: untag(1, signal_row.get(1)?)?,
             o: uint(signal_row.get(2)?),
             t: signal_row.get(3)?,
@@ -5872,6 +5878,7 @@ fn read_event(row: &Row<'_>) -> rusqlite::Result<(bool, usize, Event)> {
 fn read_usage(row: &Row<'_>) -> rusqlite::Result<(String, MessageUsage)> {
     let usage = MessageUsage {
         offset: uint(row.get(23)?),
+        record_ordinal: row.get::<_, Option<i64>>(24)?.map(uint),
         record_ids: from_json(22, &row.get::<_, String>(22)?)?,
         model: row.get(1)?,
         tokens: Tokens {
@@ -6325,7 +6332,15 @@ fn write_file(
         &changes.signals,
         signals,
         |seq, signal| {
-            let Signal { k, o, t, at, n, v } = signal;
+            let Signal {
+                native_record,
+                k,
+                o,
+                t,
+                at,
+                n,
+                v,
+            } = signal;
             put.execute(params![
                 file_id,
                 seq_int(seq),
@@ -6334,7 +6349,8 @@ fn write_file(
                 t,
                 at,
                 n,
-                v.map(int)
+                v.map(int),
+                native_record.as_ref().map(json).transpose()?,
             ])
             .map(drop)
         },
@@ -6531,6 +6547,7 @@ fn put_usage(
 ) -> rusqlite::Result<()> {
     let MessageUsage {
         offset,
+        record_ordinal,
         record_ids,
         model,
         tokens:
@@ -6589,6 +6606,7 @@ fn put_usage(
         split_unknown,
         json(record_ids)?,
         int(*offset),
+        record_ordinal.map(int),
     ])?;
     Ok(())
 }
@@ -6973,6 +6991,13 @@ mod tests {
             } else {
                 let id = format!("native-cx-{position:02}");
                 let mut payload = serde_json::json!({"id":id,"cwd":"/work/proj","originator":"codex_exec","thread_source":"user"});
+                if position == 1 {
+                    // A native fork has no fresh receipt before its own usage
+                    // is reported. Inherited counters do not create steps;
+                    // the producer can admit a complete, zero-step generation.
+                    payload["forked_from_id"] = serde_json::json!("synthetic-fork-base");
+                    payload["forked_from_ordinal_exclusive"] = serde_json::json!(0);
+                }
                 if position > 1 {
                     payload["parent_thread_id"] = serde_json::json!("native-cx-01");
                     payload["thread_source"] = serde_json::json!("subagent");
@@ -6980,11 +7005,11 @@ mod tests {
                         serde_json::json!(format!("native-cx-01/child-{position}"));
                 }
                 let mut records = vec![
-                        serde_json::json!({"type":"session_meta","timestamp":"2026-09-24T00:00:00Z","payload":payload}),
-                        serde_json::json!({"type":"turn_context","timestamp":"2026-09-24T00:00:00Z","payload":{"model":"gpt-6-sol"}}),
-                        serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Native Codex fixture"}]}}),
-                        serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Native Codex answer"}]}}),
-                    ];
+                    serde_json::json!({"type":"session_meta","timestamp":"2026-09-24T00:00:00Z","payload":payload}),
+                    serde_json::json!({"type":"turn_context","timestamp":"2026-09-24T00:00:00Z","payload":{"model":"gpt-6-sol"}}),
+                    serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:00:00Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Native Codex fixture"}]}}),
+                    serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Native Codex answer"}]}}),
+                ];
                 if position > 1 {
                     // A per-response native receipt is required for activity
                     // admission.  The child also carries the recorded parent
@@ -6994,7 +7019,8 @@ mod tests {
                         "payload":{
                             "thread_id":id, "session_id":id,
                             "turn_id":format!("turn-{id}"), "response_id":format!("response-{id}"),
-                            "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}
+                            "usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15,
+                                "cached_input_tokens":0,"cache_write_input_tokens":0,"reasoning_output_tokens":0}
                         }
                     }));
                 }
@@ -9788,6 +9814,10 @@ mod tests {
             }],
             signals: vec![
                 Signal {
+                    native_record: Some(super::super::NativeRecordIdentity {
+                        ordinal: 3,
+                        id: Some("compact-native".into()),
+                    }),
                     k: SignalKind::Compact,
                     o: 40,
                     t: Some(41),
@@ -9796,6 +9826,7 @@ mod tests {
                     v: Some(u64::MAX),
                 },
                 Signal {
+                    native_record: None,
                     k: SignalKind::Interrupt,
                     o: 42,
                     t: None,
@@ -9827,6 +9858,7 @@ mod tests {
                     "msg-1".to_owned(),
                     MessageUsage {
                         offset: 123,
+                        record_ordinal: Some(3),
                         record_ids: std::collections::BTreeSet::from(["record-uuid".into()]),
                         model: Some("claude-test".to_owned()),
                         tokens: Tokens {
@@ -10501,11 +10533,16 @@ mod tests {
             super::super::EventCache::open(&cache).is_err(),
             "opening an unsupported persistent format must refuse"
         );
-        assert_eq!(fs::read(&path).unwrap(), retained, "refusal preserves custody");
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            retained,
+            "refusal preserves custody"
+        );
         let reader = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
         assert_eq!(
             reader
-                .query_row("SELECT count(*) FROM silver_change", [], |row| row.get::<_, i64>(0))
+                .query_row("SELECT count(*) FROM silver_change", [], |row| row
+                    .get::<_, i64>(0))
                 .unwrap(),
             1,
             "refusal must not reset retained journal state"
@@ -10672,7 +10709,7 @@ mod tests {
 
     #[test]
     fn obsolete_producer_contracts_are_refused_without_mutation() {
-        for schema in [43, 44] {
+        for schema in [44, 45] {
             let root = scratch("obsolete-contract");
             let path = root.join("index.sqlite3");
             let (mut store, _) = opened(&path);
@@ -10707,7 +10744,102 @@ mod tests {
     }
 
     #[test]
+    fn analytics_anchors_use_ingested_record_ordinals_and_native_compaction_ids() {
+        let root = scratch("analytics-record-ordinals");
+        let (options, rows, _) = catalog_native_fixture(&root, 1, false);
+        let source = &rows[0].sources[0].path;
+        let native_id = &rows[0].native_ids[0];
+        let user = serde_json::json!({"type":"user","sessionId":native_id,"timestamp":"2026-09-24T00:00:00Z","message":{"role":"user","content":"Synthetic prompt without a native turn UUID"}});
+        let compact = |id: Option<&str>| {
+            let mut record = serde_json::json!({"type":"system","subtype":"compact_boundary","sessionId":native_id,"timestamp":"2026-09-24T00:00:01Z","compactMetadata":{"trigger":"auto","preTokens":100}});
+            if let Some(id) = id {
+                record["uuid"] = serde_json::json!(id);
+            }
+            record
+        };
+        let assistant = |id: &str| serde_json::json!({"type":"assistant","sessionId":native_id,"timestamp":"2026-09-24T00:00:02Z","message":{"id":id,"role":"assistant","model":"claude-sonnet-4-5","content":[{"type":"text","text":"Synthetic answer"}],"usage":{"input_tokens":10,"output_tokens":5}}});
+        let padding = serde_json::json!({"type":"queue-operation","padding":""});
+        let mut prefix = [
+            user.to_string(),
+            padding.to_string(),
+            compact(Some("native-compact")).to_string(),
+        ]
+        .join("\n")
+            + "\n";
+        let padding_size = 900usize.checked_sub(prefix.len()).unwrap();
+        let padding =
+            serde_json::json!({"type":"queue-operation","padding":"x".repeat(padding_size)});
+        prefix = [
+            user.to_string(),
+            padding.to_string(),
+            compact(Some("native-compact")).to_string(),
+        ]
+        .join("\n")
+            + "\n";
+        assert_eq!(prefix.len(), 900);
+        fs::write(
+            source,
+            prefix
+                + &assistant("message-first").to_string()
+                + "\n"
+                + &compact(None).to_string()
+                + "\n"
+                + &assistant("message-second").to_string()
+                + "\n",
+        )
+        .unwrap();
+        let (rows, slots) = catalog_fixture_projection(&options);
+        let path = super::super::EventCache::path(&options.cache);
+        let (mut store, _) = opened(&path);
+        assert_eq!(
+            catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
+        let admitted = input
+            .read_admitted(None)
+            .unwrap()
+            .changes
+            .into_iter()
+            .find_map(|change| match change {
+                SessionChange::Admitted(session) => Some(session),
+                _ => None,
+            })
+            .expect("complete synthetic native evidence is admitted");
+        assert_eq!(admitted.steps.len(), 2);
+        assert!(
+            admitted.steps[0]
+                .turn_uid
+                .ends_with("/t/%40native-cl-00%3A3"),
+            "record 3 at byte 900 uses its record ordinal"
+        );
+        assert!(
+            admitted.steps[1]
+                .turn_uid
+                .ends_with("/t/%40native-cl-00%3A5")
+        );
+        assert_eq!(admitted.compactions.len(), 2);
+        assert!(
+            admitted.compactions[0]
+                .compaction_uid
+                .ends_with("/c/native-compact"),
+            "a native compaction ID is preferred"
+        );
+        assert!(
+            admitted.compactions[1]
+                .compaction_uid
+                .ends_with("/c/%40native-cl-00%3A4")
+        );
+        drop(input);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn analytics_input_reads_real_catalog_generations_and_explicit_removals() {
+        use std::io::Write;
         let root = scratch("analytics-input");
         let (options, rows, slots) = catalog_native_fixture(&root, 4, false);
         let path = super::super::EventCache::path(&options.cache);
@@ -10719,14 +10851,18 @@ mod tests {
         let pending_native_id = pending_row.native_ids[0].clone();
         pending_row.session_activity = None;
         let (mut store, _) = opened(&path);
-        catalog_write(
-            &mut store,
-            &metadata_only,
-            &slots,
-            false,
-            CatalogWriter::Auto,
-        )
-        .unwrap();
+        assert_eq!(
+            catalog_write(
+                &mut store,
+                &metadata_only,
+                &slots,
+                false,
+                CatalogWriter::Auto,
+            )
+            .unwrap()
+            .0,
+            Outcome::Written
+        );
 
         let mut input = SqliteAnalyticsInput::open(&path, "fixture-machine").unwrap();
         let initial = input.read_admitted(None).unwrap();
@@ -10751,18 +10887,29 @@ mod tests {
             std::collections::BTreeSet::from(["native-cl-02", "native-cx-01", "native-cx-03"]),
             "only the deliberately withheld Claude owner is pending"
         );
-        assert!(admitted_sessions.iter().any(|session| {
-            session.session.native_session_id == "native-cx-01" && session.steps.is_empty()
-        }), "a qualified zero-step session is admitted, not pending");
-        assert!(admitted_sessions.iter().any(|session| {
-            session.session.native_session_id == "native-cx-03"
-                && !session.steps.is_empty()
-                && session.session.role == semon_asi::input::Role::Worker
-                && session.session.parent_session_uid.as_deref()
-                    == Some("fixture-machine/codex/native-cx-01")
-        }), "the native receipt and parent marker admit the Codex child as a worker");
+        assert!(
+            admitted_sessions.iter().any(|session| {
+                session.session.native_session_id == "native-cx-01" && session.steps.is_empty()
+            }),
+            "a qualified zero-step session is admitted, not pending"
+        );
+        assert!(
+            admitted_sessions.iter().any(|session| {
+                session.session.native_session_id == "native-cx-03"
+                    && !session.steps.is_empty()
+                    && session.session.role == semon_asi::input::Role::Worker
+                    && session.session.parent_session_uid.as_deref()
+                        == Some("fixture-machine/codex/native-cx-01")
+            }),
+            "the native receipt and parent marker admit the Codex child as a worker"
+        );
 
-        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+        assert_eq!(
+            catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
         let admitted = input.read_admitted(Some(&initial.checkpoint)).unwrap();
         assert_eq!(admitted.reconciliation, Reconciliation::Incremental);
         assert!(admitted.changes.iter().any(|change| {
@@ -10783,21 +10930,55 @@ mod tests {
             .key
             .clone();
         let source_only_uid = "fixture-machine/codex/native-cx-03";
+        let retained_projection = |store: &SqliteStore| {
+            store.connection.query_row(
+                "SELECT generation,total,summary, \
+                 (SELECT count(*) FROM session_activity_steps s WHERE s.session_key=p.session_key), \
+                 (SELECT group_concat(metadata,'') FROM \
+                   (SELECT metadata FROM session_activity_steps WHERE session_key=p.session_key ORDER BY ordinal)) \
+                 FROM session_activity_projections p WHERE session_key=?1",
+                [&source_only_key],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?, row.get::<_, String>(4)?)),
+            ).unwrap()
+        };
+        let retained = retained_projection(&store);
+        assert!(retained.1 > 0 && !retained.4.is_empty());
+        assert_eq!(
+            retained.1, retained.3,
+            "all declared steps and their StepFacts are retained"
+        );
+        let source_path = &rows
+            .iter()
+            .find(|row| row.key == source_only_key)
+            .unwrap()
+            .sources[0]
+            .path;
+        let mut source = fs::OpenOptions::new()
+            .append(true)
+            .open(source_path)
+            .unwrap();
+        writeln!(source, "{}", serde_json::json!({"type":"turn_context","timestamp":"2026-09-24T00:02:00Z","payload":{"model":"gpt-6-sol"}})).unwrap();
+        drop(source);
+        // Run normal ingest so the changed source, its exact ledger and the
+        // replacement recipes are genuinely indexed before Catalog publication.
+        let (rows, slots) = catalog_fixture_projection(&options);
         let mut source_only = rows.clone();
         let source_only_row = source_only
             .iter_mut()
             .find(|row| row.key == source_only_key)
             .unwrap();
-        source_only_row.sources[0].offset += 1;
         source_only_row.session_activity = None;
-        catalog_write(
-            &mut store,
-            &source_only,
-            &slots,
-            false,
-            CatalogWriter::Auto,
-        )
-        .unwrap();
+        assert_eq!(
+            catalog_write(&mut store, &source_only, &slots, false, CatalogWriter::Auto,)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
+        assert_eq!(
+            retained_projection(&store),
+            retained,
+            "Pending retains the complete activity generation and facts"
+        );
         let pending = input.read_admitted(Some(&admitted.checkpoint)).unwrap();
         assert!(pending.changes.iter().any(|change| {
             matches!(change, SessionChange::Pending { session_uid } if session_uid == source_only_uid)
@@ -10807,7 +10988,12 @@ mod tests {
         assert!(full_pending.changes.iter().any(|change| {
             matches!(change, SessionChange::Pending { session_uid } if session_uid == source_only_uid)
         }));
-        catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+        assert_eq!(
+            catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto)
+                .unwrap()
+                .0,
+            Outcome::Written
+        );
         let restored = input.read_admitted(Some(&pending.checkpoint)).unwrap();
         assert!(restored.changes.iter().any(|change| {
             matches!(change, SessionChange::SourceRestored { session_uid } if session_uid == source_only_uid)
@@ -10815,6 +11001,14 @@ mod tests {
         assert!(restored.changes.iter().any(|change| {
             matches!(change, SessionChange::Admitted(session) if session.session_uid == source_only_uid)
         }));
+        let restored_session = restored.changes.iter().find(|change| {
+            matches!(change, SessionChange::Admitted(session) if session.session_uid == source_only_uid)
+        }).unwrap();
+        let full_restored = full.read_admitted(None).unwrap();
+        assert!(
+            full_restored.changes.contains(restored_session),
+            "incremental and full restoration admit the same complete generation"
+        );
 
         let live_removed_key = rows
             .iter()

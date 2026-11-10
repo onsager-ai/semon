@@ -7896,7 +7896,7 @@ fn prepare_history_inner(
                 let mut summary = FileIndex::default();
                 let mut offset = 0u64;
 
-                for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+                for (ordinal, line) in bytes.split_inclusive(|byte| *byte == b'\n').enumerate() {
                     crate::selected_read::charge(std::mem::size_of::<Event>() + 128, line.len())?;
                     if line.len() > 32 * 1024 * 1024 || line.last() != Some(&b'\n') {
                         return Err(io::Error::new(
@@ -7906,6 +7906,7 @@ fn prepare_history_inner(
                     }
                     match crate::tx::parse_native_record(line) {
                         Some(value) => {
+                            let first_signal = summary.signals.len();
                             if value["type"] == "session_meta" {
                                 header = value["payload"].clone();
                             }
@@ -7920,6 +7921,12 @@ fn prepare_history_inner(
                                     ));
                                 }
                             }
+                            summary.capture_record_identity(
+                                &value,
+                                offset,
+                                ordinal as u64,
+                                first_signal,
+                            );
                         }
                         None => events::gap(&mut summary, offset),
                     }

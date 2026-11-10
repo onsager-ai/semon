@@ -26,7 +26,13 @@ role remains solo.
 
 Project steps, ordered tool calls, turns, sessions, compactions and dimensions
 from admitted SQLite evidence. Preserve native UID, lineage, source witness and
-exclusive/copied usage semantics. Copy recorded labels, triggers, cost components
+exclusive/copied usage semantics. Fallback turn and compaction anchors use the
+zero-based physical record ordinal captured by native ingest and persisted with
+StepFacts/compaction evidence under the same admitted generation. Native IDs take
+precedence; byte offsets and activity/compaction row ordinals never substitute
+for record ordinals. Validated filename stems keep fallback anchors stable on
+relocation; duplicate or ambiguous source contributors refuse projection.
+Copy recorded labels, triggers, cost components
 and pricing fingerprint; do not classify or price again. Preserve all billing
 inputs and unknown values. `dim_price` must describe the exact snapshot that
 priced the admitted steps; investigate persistence of that snapshot rather than

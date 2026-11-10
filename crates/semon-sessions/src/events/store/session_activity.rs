@@ -256,6 +256,10 @@ fn derive_facts(
                 step.id.clone(),
                 activity::StepFacts {
                     turn_id,
+                    record_ordinal: match usage {
+                        Usage::Claude(usage) => usage.record_ordinal,
+                        Usage::Codex(_) => None,
+                    },
                     usage_owner,
                     billing: billing(usage),
                     model_ms: model_ms(step, observations, unclassified_tools, input_events),

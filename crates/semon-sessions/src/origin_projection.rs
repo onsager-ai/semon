@@ -486,7 +486,14 @@ fn read_compactions(
         let metadata: String = record.get(1)?;
         let compact: native_activity::Compaction =
             serde_json::from_str(&metadata).map_err(|_| rusqlite::Error::InvalidQuery)?;
-        let anchor = record_anchor(row, &compact.position)?;
+        let native_record = compact
+            .native_record
+            .as_ref()
+            .ok_or(rusqlite::Error::InvalidQuery)?;
+        let anchor = match native_record.id.as_deref().filter(|id| !id.is_empty()) {
+            Some(id) => id.to_owned(),
+            None => record_anchor(row, &compact.position, native_record.ordinal)?,
+        };
         compactions.push(Compaction {
             compaction_uid: format!("{session_uid}/c/{}", encode_component(&anchor)),
             step_uid: compact.step_id.as_ref().map(|id| step_uid(session_uid, id)),
@@ -584,7 +591,11 @@ fn step_input(
     let step_uid = step_uid(session_uid, &step.id);
     let turn = match &fact.turn_id {
         Some(turn_id) => turn_id.clone(),
-        None => record_anchor(row, &step.position)?,
+        None => record_anchor(
+            row,
+            &step.position,
+            fact.record_ordinal.ok_or(rusqlite::Error::InvalidQuery)?,
+        )?,
     };
     Ok(Step {
         step_uid: step_uid.clone(),
@@ -644,10 +655,12 @@ fn step_input(
 
 /// A fallback record identity is portable native evidence, never a local
 /// physical path.  The catalog binds the physical position to exactly one
-/// source; the exported anchor uses that native log's filename stem.
+/// source; the exported anchor uses that native log's filename stem and the
+/// source-record ordinal persisted by ingest, never its byte offset.
 fn record_anchor(
     row: &CatalogRow,
     position: &native_activity::SourcePosition,
+    record_ordinal: u64,
 ) -> rusqlite::Result<String> {
     let source_path = Path::new(&position.source);
     let matching = row
@@ -675,13 +688,15 @@ fn record_anchor(
     if row
         .sources
         .iter()
-        .filter(|candidate| candidate.path.file_stem().and_then(|value| value.to_str()) == Some(stem))
+        .filter(|candidate| {
+            candidate.path.file_stem().and_then(|value| value.to_str()) == Some(stem)
+        })
         .count()
         != 1
     {
         return Err(rusqlite::Error::InvalidQuery);
     }
-    Ok(format!("@{stem}:{}", position.offset))
+    Ok(format!("@{stem}:{record_ordinal}"))
 }
 
 fn tool_call(call: &native_activity::ToolCallFact) -> ToolCall {
@@ -985,8 +1000,9 @@ mod tests {
             &row,
             &native_activity::SourcePosition {
                 source: "/private/first-root/record.jsonl".into(),
-                offset: 12,
+                offset: 900,
             },
+            3,
         )
         .unwrap();
         row.sources = vec![source("/different/parent/record.jsonl", "root")];
@@ -994,11 +1010,12 @@ mod tests {
             &row,
             &native_activity::SourcePosition {
                 source: "/different/parent/record.jsonl".into(),
-                offset: 12,
+                offset: 900,
             },
+            3,
         )
         .unwrap();
-        assert_eq!(first, "@record:12");
+        assert_eq!(first, "@record:3");
         assert_eq!(first, moved, "source relocation must not change an ASI key");
         let first_compaction_uid = format!("session/c/{}", encode_component(&first));
         let moved_compaction_uid = format!("session/c/{}", encode_component(&moved));
@@ -1014,12 +1031,44 @@ mod tests {
             &row,
             &native_activity::SourcePosition {
                 source: "/different/parent/cleared.jsonl".into(),
-                offset: 12,
+                offset: 900,
             },
+            3,
         )
         .unwrap();
-        assert_eq!(cleared, "@cleared:12");
-        assert_ne!(first, cleared, "distinct native logs retain distinct anchors");
+        assert_eq!(cleared, "@cleared:3");
+        assert_ne!(
+            first, cleared,
+            "distinct native logs retain distinct anchors"
+        );
+
+        let position = native_activity::SourcePosition {
+            source: "/different/parent/record.jsonl".into(),
+            offset: 900,
+        };
+        row.sources.push(source("/another/record.jsonl", "root"));
+        assert!(
+            record_anchor(&row, &position, 3).is_err(),
+            "duplicate stems are ambiguous"
+        );
+        row.sources.pop();
+        row.sources.push(row.sources[0].clone());
+        assert!(
+            record_anchor(&row, &position, 3).is_err(),
+            "duplicate contributors are ambiguous"
+        );
+        row.sources = vec![source("/different/parent/invalid stem.jsonl", "root")];
+        assert!(
+            record_anchor(
+                &row,
+                &native_activity::SourcePosition {
+                    source: "/different/parent/invalid stem.jsonl".into(),
+                    offset: 900
+                },
+                3
+            )
+            .is_err()
+        );
     }
 
     #[test]

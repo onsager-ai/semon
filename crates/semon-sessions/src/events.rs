@@ -95,7 +95,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// compact activity summary adds coverage and component totals, and the
 /// projection stores a bounded timeline preview beside it.
 /// v39: activity steps retain exact Codex call provenance for transcript anchors.
-pub(crate) const CACHE_VERSION: u32 = 40;
+/// v41: usage and compaction signals retain physical record ordinals for ASI anchors.
+pub(crate) const CACHE_VERSION: u32 = 41;
 
 /// The four token categories the model serves for an exact model id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,6 +122,7 @@ impl ModelTokens {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MessageUsage {
     pub(crate) offset: u64,
+    pub(crate) record_ordinal: Option<u64>,
     #[serde(default)]
     pub(crate) record_ids: BTreeSet<String>,
     pub(crate) model: Option<String>,
@@ -396,6 +398,7 @@ pub(crate) struct FileIndex {
 /// `n` holds only a short enum-like tag, never log text.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Signal {
+    pub(crate) native_record: Option<NativeRecordIdentity>,
     pub(crate) k: SignalKind,
     /// Byte offset of the line.
     pub(crate) o: u64,
@@ -412,6 +415,13 @@ pub(crate) struct Signal {
     /// for a denial or a blocking hook, the index in `events` of the tool call
     /// it refused.
     pub(crate) v: Option<u64>,
+}
+
+/// Identity captured at ingest, with a zero-based physical record ordinal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct NativeRecordIdentity {
+    pub(crate) ordinal: u64,
+    pub(crate) id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -485,6 +495,7 @@ fn bounded(text: &str) -> Option<String> {
 fn note(summary: &mut FileIndex, k: SignalKind, o: u64, t: Option<i64>, n: String, v: Option<u64>) {
     let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
     summary.signals.push(Signal {
+        native_record: None,
         k,
         o,
         t,
@@ -752,6 +763,34 @@ fn claude_hook(summary: &mut FileIndex, attachment: &Value, o: u64, t: Option<i6
 }
 
 impl FileIndex {
+    /// Attach source-record identity while the producer owns the parsed record.
+    /// Callers supply its ordinal in the complete physical log, before any
+    /// activity ordering or filtering, and the first newly emitted signal.
+    pub(crate) fn capture_record_identity(
+        &mut self,
+        record: &Value,
+        offset: u64,
+        ordinal: u64,
+        first_signal: usize,
+    ) {
+        if let Some(id) = record
+            .get("message")
+            .and_then(|message| field(message, "id"))
+            && let Some(usage) = self.usage_by_id.get_mut(id)
+            && usage.offset == offset
+        {
+            usage.record_ordinal = Some(ordinal);
+        }
+        for signal in &mut self.signals[first_signal..] {
+            signal.native_record = Some(NativeRecordIdentity {
+                ordinal,
+                id: field(record, "uuid")
+                    .or_else(|| field(record, "id"))
+                    .map(str::to_owned),
+            });
+        }
+    }
+
     fn signal_mut(&mut self, index: usize) -> Option<&mut Signal> {
         if let Some(dirty) = &mut self.dirty_rows {
             dirty.signals.insert(index);
@@ -3508,6 +3547,10 @@ fn parse(
         {
             observations.push(observation);
         }
+        let record_ordinal = index
+            .tree_summary
+            .as_ref()
+            .map(|summary| summary.line_count);
         if let Some(summary) = &mut index.tree_summary {
             if harness == "codex"
                 && let Ok(record) = &record
@@ -3518,6 +3561,7 @@ fn parse(
         }
         match record {
             Ok(record) if record.is_object() => {
+                let before_signals = index.signals.len();
                 if let Some(markers) = &mut index.marker_index {
                     markers.observe(&line, line_offset, true, &record);
                 }
@@ -3534,6 +3578,9 @@ fn parse(
                     activity(index, record_time(&record));
                 }
                 session_activity::classify::capture(index, harness, &record, line_offset, &line);
+                if let Some(ordinal) = record_ordinal {
+                    index.capture_record_identity(&record, line_offset, ordinal, before_signals);
+                }
             }
             _ => {
                 gap(index, line_offset);
@@ -3900,7 +3947,15 @@ fn signal(
         }
         return;
     }
-    summary.signals.push(Signal { k, o, t, at, n, v });
+    summary.signals.push(Signal {
+        native_record: None,
+        k,
+        o,
+        t,
+        at,
+        n,
+        v,
+    });
 }
 
 /// Adds a transcript-only marker. The viewer groups consecutive thinking
@@ -5802,6 +5857,7 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
             id.to_owned(),
             MessageUsage {
                 offset,
+                record_ordinal: None,
                 record_ids,
                 model: field(message, "model").map(str::to_owned),
                 tokens: Tokens {

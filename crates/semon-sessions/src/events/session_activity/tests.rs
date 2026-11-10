@@ -66,6 +66,7 @@ fn compact(source: &str, offset: u64, at: Option<i64>) -> (String, Signal) {
     (
         source.into(),
         Signal {
+            native_record: None,
             k: SignalKind::Compact,
             o: offset,
             t: at,
