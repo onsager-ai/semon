@@ -3,6 +3,7 @@
 pub mod error;
 pub mod governance;
 pub mod input;
+pub mod projection;
 pub mod schema;
 
 pub use error::{Error, Result};
@@ -14,3 +15,4 @@ pub use governance::{
     serialize_governed_row,
 };
 pub use input::{AdmittedBatch, AdmittedSession, AnalyticsInput, SessionChange};
+pub use projection::{Cell, ProjectedSession, Row, project};
