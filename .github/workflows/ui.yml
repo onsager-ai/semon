@@ -166,7 +166,7 @@ jobs:
 
   checks:
     name: viewer / ${{ matrix.suite }}
-    needs: build
+    needs: [classify, build]
     runs-on: ubuntu-latest
     # The diagnostic lane runs the unchanged journey twice plus a phase sweep.
     # Product deadlines and every other suite's existing allowance stay unchanged.
