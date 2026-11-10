@@ -3,27 +3,105 @@ use super::super::tests::{
 };
 use super::*;
 use crate::SqliteAnalyticsInput;
-use crate::analytics_writer::{AnalyticsWriterConfig, start};
+use crate::analytics_writer::{AnalyticsWriterConfig, start_with_clock};
 use crate::events::session_activity::classify::Change;
 use crate::events::session_activity::{ActivityStepId, Ownership, TimedInput, UsageOwner};
-use semon_asi::{AnalyticsInput, Reconciliation, SessionChange};
+use arrow::{
+    array::{Array, Int64Array, StringArray},
+    util::display::array_value_to_string,
+};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use semon_asi::{AnalyticsInput, Clock, Reconciliation, SessionChange};
 use std::{
-    thread,
-    time::{Duration, Instant},
+    fs::File,
+    io::Write,
+    sync::{
+        Arc,
+        atomic::{AtomicI64, Ordering},
+    },
 };
 
-fn wait_for_writer_manifest(root: &std::path::Path) -> semon_asi::Manifest {
-    let deadline = Instant::now() + Duration::from_secs(1);
-    loop {
-        if let Some(manifest) = semon_asi::read_manifest(root).unwrap() {
-            return manifest;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "analytics writer did not publish"
-        );
-        thread::sleep(Duration::from_millis(1));
+struct ManualClock(AtomicI64);
+
+impl ManualClock {
+    fn new(now: i64) -> Arc<Self> {
+        Arc::new(Self(AtomicI64::new(now)))
     }
+
+    fn advance(&self, duration: i64) {
+        self.0.fetch_add(duration, Ordering::SeqCst);
+    }
+}
+
+impl Clock for ManualClock {
+    fn now_ms(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+fn append_claude_step(options: &crate::Options, suffix: &str) {
+    let path = options
+        .claude_home
+        .join("projects/-work-proj/native-cl-00.jsonl");
+    let record = serde_json::json!({
+        "type":"assistant", "uuid":format!("assistant-{suffix}"),
+        "sessionId":"native-cl-00", "timestamp":"2026-09-24T00:03:00Z",
+        "message":{"id":format!("message-{suffix}"), "role":"assistant",
+            "model":"claude-sonnet-4-5", "content":[{"type":"text","text":"Synthetic later step"}],
+            "usage":{"input_tokens":100,"output_tokens":25}}
+    });
+    writeln!(
+        std::fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{record}"
+    )
+    .unwrap();
+}
+
+fn live_fact_rows(root: &std::path::Path, manifest: &semon_asi::Manifest) -> Vec<String> {
+    let live = semon_asi::read_live_map(root, manifest).unwrap();
+    let mut rows = Vec::new();
+    for file in manifest
+        .files
+        .iter()
+        .filter(|file| file.table.starts_with("fact_"))
+    {
+        let path = root.join("analytics").join(&file.path);
+        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap()).unwrap();
+        for batch in builder.build().unwrap() {
+            let batch = batch.unwrap();
+            let schema = batch.schema();
+            let (Ok(session), Ok(generation)) =
+                (schema.index_of("session_uid"), schema.index_of("_gen"))
+            else {
+                continue;
+            };
+            let sessions = batch
+                .column(session)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let generations = batch
+                .column(generation)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            for row in 0..batch.num_rows() {
+                if live.get(sessions.value(row)) != Some(&generations.value(row)) {
+                    continue;
+                }
+                let values = (0..batch.num_columns())
+                    .filter(|column| *column != generation)
+                    .map(|column| {
+                        array_value_to_string(batch.column(column).as_ref(), row).unwrap()
+                    })
+                    .collect::<Vec<_>>()
+                    .join("|");
+                rows.push(format!("{}|{values}", file.table));
+            }
+        }
+    }
+    rows.sort();
+    rows
 }
 
 #[test]
@@ -36,16 +114,27 @@ fn analytics_writer_publishes_fixture_rows_once_per_debounce_interval() {
     drop(cache);
 
     let store_root = root.join("analytics-store");
-    let handle = start(AnalyticsWriterConfig::new(
-        "fixture-machine",
-        &index,
-        &store_root,
-    ));
+    let clock = ManualClock::new(0);
+    let handle = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&clock),
+    );
     for _ in 0..8 {
         handle.notify();
     }
-    let manifest = wait_for_writer_manifest(&store_root);
-    assert_eq!(manifest.generation, 1);
+    handle.wait_for_publishes(1);
+    assert_eq!(handle.published(), 1);
+    let first = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_eq!(first.generation, 1);
+    for _ in 0..8 {
+        handle.notify();
+    }
+    assert_eq!(handle.published(), 1);
+    clock.advance(2_000);
+    handle.notify();
+    handle.wait_for_publishes(2);
+    let manifest = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_eq!(manifest.generation, 2);
     assert!(manifest.checkpoints.contains_key("fixture-machine"));
     assert!(
         !semon_asi::read_live_map(&store_root, &manifest)
@@ -54,6 +143,102 @@ fn analytics_writer_publishes_fixture_rows_once_per_debounce_interval() {
     );
     handle.stop_and_join();
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_restart_resumes_from_the_checkpoint_with_only_the_delta() {
+    let root = scratch("analytics-writer-restart");
+    let (options, rows, slots) = catalog_native_fixture(&root, 2, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let store_root = root.join("analytics-store");
+    let first_clock = ManualClock::new(0);
+    let first = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&first_clock),
+    );
+    first.notify();
+    first.wait_for_publishes(1);
+    let before = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    first.stop_and_join();
+
+    append_claude_step(&options, "after-restart");
+    let (rows, slots) = catalog_fixture_projection(&options);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let second_clock = ManualClock::new(2_000);
+    let second = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &store_root),
+        Arc::clone(&second_clock),
+    );
+    second.notify();
+    second.wait_for_publishes(1);
+    let after = semon_asi::read_manifest(&store_root).unwrap().unwrap();
+    assert_ne!(after.checkpoints, before.checkpoints);
+    assert_eq!(after.generation, before.generation + 1);
+    let delta = after
+        .files
+        .iter()
+        .find(|file| file.generation == after.generation && file.table == "fact_session")
+        .unwrap();
+    assert_eq!(delta.rows, 1, "only the changed session is republished");
+    assert_eq!(
+        semon_asi::read_live_map(&store_root, &after).unwrap().len(),
+        2
+    );
+    second.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn analytics_writer_incremental_live_rows_match_a_final_full_refresh() {
+    let root = scratch("analytics-writer-incremental");
+    let (options, rows, slots) = catalog_native_fixture(&root, 2, false);
+    let index = crate::events::EventCache::path(&options.cache);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+
+    let incremental_root = root.join("incremental-store");
+    let clock = ManualClock::new(0);
+    let incremental = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &incremental_root),
+        Arc::clone(&clock),
+    );
+    incremental.notify();
+    incremental.wait_for_publishes(1);
+
+    append_claude_step(&options, "incremental");
+    let (rows, slots) = catalog_fixture_projection(&options);
+    let (mut cache, _) = opened(&index);
+    catalog_write(&mut cache, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    drop(cache);
+    clock.advance(2_000);
+    incremental.notify();
+    incremental.wait_for_publishes(2);
+    let incremental_manifest = semon_asi::read_manifest(&incremental_root)
+        .unwrap()
+        .unwrap();
+    let incremental_rows = live_fact_rows(&incremental_root, &incremental_manifest);
+    incremental.stop_and_join();
+
+    let full_root = root.join("full-store");
+    let full = start_with_clock(
+        AnalyticsWriterConfig::new("fixture-machine", &index, &full_root),
+        ManualClock::new(0),
+    );
+    full.notify();
+    full.wait_for_publishes(1);
+    let full_manifest = semon_asi::read_manifest(&full_root).unwrap().unwrap();
+    let full_rows = live_fact_rows(&full_root, &full_manifest);
+    assert_eq!(incremental_rows, full_rows);
+    full.stop_and_join();
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 fn read(c: &Connection, row: &crate::model::summary::CatalogRow) -> Page {

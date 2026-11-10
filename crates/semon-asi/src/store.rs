@@ -884,6 +884,32 @@ mod tests {
     }
 
     #[test]
+    fn reload_manifest_adopts_the_published_checkpoint_before_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = TestClock::new(0);
+        let mut store = open(dir.path(), &clock);
+        let mut update = update(&[(S1, 1)], "published", 0);
+        update
+            .checkpoints
+            .insert("machine".into(), "incarnation:7".into());
+        store.publish(&update).unwrap();
+        let expected = read_manifest(dir.path()).unwrap().unwrap();
+
+        // Model the stale in-memory view a caller must repair after an error
+        // reported after manifest rename; the durable manifest remains source
+        // of truth for the next publication's checkpoint.
+        store.manifest = Manifest::empty();
+        store.live.clear();
+        store.reload_manifest().unwrap();
+
+        assert_eq!(store.manifest(), &expected);
+        assert_eq!(
+            store.live_map(),
+            &read_live_map(dir.path(), &expected).unwrap()
+        );
+    }
+
+    #[test]
     fn retirement_waits_ten_minutes_after_unpublication() {
         let dir = tempfile::tempdir().unwrap();
         let clock = TestClock::new(1_000_000);

@@ -29,6 +29,10 @@ test-ui-account-server = []
 # Scoped deterministic receiver/producer integration tests; absent in production.
 test-hooks = []
 
+[dev-dependencies]
+arrow = { version = "=58.4.1", default-features = false }
+parquet = { version = "=58.4.1", default-features = false, features = ["arrow", "zstd"] }
+
 [[example]]
 name = "ui-account-server"
 required-features = ["test-ui-account-server"]

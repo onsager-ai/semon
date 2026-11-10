@@ -1934,7 +1934,9 @@ dependencies = [
 name = "semon-sessions"
 version = "0.1.0"
 dependencies = [
+ "arrow",
  "libc",
+ "parquet",
  "reqwest",
  "rusqlite",
  "semon-asi",

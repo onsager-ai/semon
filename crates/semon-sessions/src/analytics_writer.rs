@@ -83,6 +83,10 @@ struct State {
     notifications: u64,
     consumed: u64,
     status: AnalyticsWriterStatus,
+    #[cfg(test)]
+    published: u64,
+    #[cfg(test)]
+    input_attempts: u64,
 }
 
 struct Shared {
@@ -112,6 +116,77 @@ impl Handle {
     /// partially-started generation.
     pub fn stop_and_join(mut self) {
         self.shutdown();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_publishes(&self, expected: u64) {
+        let mut state = lock(&self.shared.state);
+        while state.published < expected && !state.stop {
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        assert!(
+            state.published >= expected,
+            "writer stopped before publishing"
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn published(&self) -> u64 {
+        lock(&self.shared.state).published
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_input_attempts(&self, expected: u64) {
+        let mut state = lock(&self.shared.state);
+        while state.input_attempts < expected && !state.stop {
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        assert!(
+            state.input_attempts >= expected,
+            "writer stopped before opening input"
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_attempts(&self) -> u64 {
+        lock(&self.shared.state).input_attempts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_refusal(&self) {
+        let mut state = lock(&self.shared.state);
+        while !matches!(state.status, AnalyticsWriterStatus::Refused { .. }) && !state.stop {
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        assert!(matches!(
+            state.status,
+            AnalyticsWriterStatus::Refused { .. }
+        ));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_status(&self, expected: AnalyticsWriterStatus) {
+        let mut state = lock(&self.shared.state);
+        while state.status != expected && !state.stop {
+            state = self
+                .shared
+                .changed
+                .wait(state)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        assert_eq!(state.status, expected);
     }
 
     fn shutdown(&mut self) {
@@ -152,6 +227,10 @@ where
             notifications: 0,
             consumed: 0,
             status: AnalyticsWriterStatus::Idle,
+            #[cfg(test)]
+            published: 0,
+            #[cfg(test)]
+            input_attempts: 0,
         }),
         changed: Condvar::new(),
     });
@@ -281,6 +360,12 @@ fn run<C: Clock + Send + Sync + 'static>(
                 }
             },
             Work::Publish => {
+                #[cfg(test)]
+                {
+                    let mut state = lock(&shared.state);
+                    state.input_attempts += 1;
+                    shared.changed.notify_all();
+                }
                 let notification = notification_count(&shared);
                 let result = match SqliteAnalyticsInput::open(
                     &config.index_path,
@@ -296,6 +381,12 @@ fn run<C: Clock + Send + Sync + 'static>(
                 };
                 match result {
                     Ok(_) => {
+                        #[cfg(test)]
+                        {
+                            let mut state = lock(&shared.state);
+                            state.published += 1;
+                            shared.changed.notify_all();
+                        }
                         consume(&shared, notification);
                         retry_attempt = 0;
                         next_cycle = now + duration_ms(config.interval);
@@ -485,6 +576,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 fn set_status(shared: &Shared, status: AnalyticsWriterStatus) {
     lock(&shared.state).status = status;
+    shared.changed.notify_all();
 }
 
 fn stopped(shared: &Shared) -> bool {
@@ -529,7 +621,6 @@ mod tests {
     use std::{
         fs,
         sync::atomic::{AtomicU64, Ordering},
-        time::Instant,
     };
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -542,36 +633,6 @@ mod tests {
         ));
         fs::create_dir_all(&root).unwrap();
         root
-    }
-
-    fn wait_for_status(handle: &Handle, expected: AnalyticsWriterStatus) {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            if handle.status() == expected {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "writer status: {:?}",
-                handle.status()
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
-    }
-
-    fn wait_for_refusal(handle: &Handle) {
-        let deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            if matches!(handle.status(), AnalyticsWriterStatus::Refused { .. }) {
-                return;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "writer status: {:?}",
-                handle.status()
-            );
-            thread::sleep(Duration::from_millis(1));
-        }
     }
 
     #[test]
@@ -591,9 +652,14 @@ mod tests {
         let store_root = root.join("store");
         let handle = start(AnalyticsWriterConfig::new("machine", &index, &store_root));
         handle.notify();
-        wait_for_refusal(&handle);
+        handle.wait_for_input_attempts(1);
+        handle.wait_for_refusal();
         assert_eq!(fs::read(&index).unwrap(), bytes);
         assert!(semon_asi::read_manifest(&store_root).unwrap().is_none());
+        handle.notify();
+        handle.wait_for_input_attempts(2);
+        handle.wait_for_refusal();
+        assert_eq!(handle.input_attempts(), 2);
         handle.stop_and_join();
         fs::remove_dir_all(root).unwrap();
     }
@@ -607,7 +673,7 @@ mod tests {
             root.join("index.sqlite3"),
             &root,
         ));
-        wait_for_status(&handle, AnalyticsWriterStatus::NoWriter);
+        handle.wait_for_status(AnalyticsWriterStatus::NoWriter);
         handle.stop_and_join();
         drop(held);
         fs::remove_dir_all(root).unwrap();
