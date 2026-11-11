@@ -229,9 +229,28 @@ Use the existing analytics lock for the single writer. DuckDB reads the publishe
 projection; it performs no second derivation or central repricing.
 
 Wire local origin consumers first, consistent with namespace authority; imported
-receiver heads are not rebuilt from local indexes. Implement the #557 export/reset
-surface with explicit custody/ownership checks and no automatic reset. Transport,
-channels, cache, replicas and query/FTS implementation remain outside this slice.
+receiver heads are not rebuilt from local indexes. The delivered #557 export/reset
+surface is explicitly local-only: `semon analytics export <empty-dest> [--cache PATH]`
+takes the existing lock shared and non-blocking, then copies one verified published
+snapshot (namespace, manifest, live map and every manifest-named immutable Parquet
+file) with `export.json` written last. The receipt records format version, namespace,
+manifest generation and per-file relative path, size and SHA-256 digest; the completed
+bundle is re-verified before success. Export refuses a busy writer, missing or ambiguous
+store, symlink/foreign state, unsafe destination, or any manifest/live-map/file admission
+failure, and creates or modifies no source-store state.
+
+`semon analytics reset --confirm NAMESPACE (--verified-export DIR | --without-export)`
+requires the exact owned namespace and takes the lock exclusively and non-blocking. A
+verified export must still match both current namespace and manifest generation; the
+waiver is explicit because it may discard imported or frozen non-rebuildable facts. Reset
+removes the manifest first, then only analytics-store contents, keeping native logs,
+archives, Event Index and the namespace by default. A partial failure therefore reads as
+no store rather than a torn valid snapshot. `--new-namespace` removes the namespace only
+after the store reset; the next materialize then generates fresh identities with no
+reconciliation. A missing namespace with a store remains a materialize refusal, so a
+normal reset that keeps its namespace preserves stable session UIDs. No code path resets
+automatically. Transport, channels, cache, replicas and query/FTS implementation remain
+outside this slice.
 
 ## Verification and delivery
 

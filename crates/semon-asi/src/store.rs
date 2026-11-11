@@ -543,7 +543,7 @@ fn read_manifest_in(analytics: &Path) -> Result<Option<Manifest>> {
     let manifest: Manifest = serde_json::from_slice(&bytes)?;
     if manifest.schema_version != ASI_SCHEMA_VERSION {
         return Err(Error::invalid(format!(
-            "analytics schema version {} is not {ASI_SCHEMA_VERSION}; export and reset",
+            "analytics schema version {} is not {ASI_SCHEMA_VERSION}; run `semon analytics export` then `semon analytics reset`",
             manifest.schema_version
         )));
     }

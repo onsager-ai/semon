@@ -292,8 +292,23 @@ tables.
   Notification counters saturate at u64::MAX, an unreachable process-lifetime
   bound of more than 1.8e19 requests; settlement at exhaustion is unspecified.
 - **Local custody.** The generated Parquet can contain typed local-path
-  fields. It remains local-only; a governed export is a separate operation and
-  is not part of materialization.
+  fields. It remains local-only. `semon analytics export DESTINATION` is an
+  explicit, verified local custody bundle rather than materialization: it copies
+  the namespace, manifest, live map and manifest-named immutable Parquet files,
+  records SHA-256 size/digest evidence in an `export.json` receipt written last,
+  and verifies the completed bundle. It takes the existing writer lock shared
+  and non-blocking without creating it or running recovery, so a writer-held
+  lock refuses rather than producing a torn snapshot. It refuses unsafe or
+  symlinked destinations, a destination inside the source store, and all
+  missing/foreign/unsupported/ambiguous source state. `semon analytics reset`
+  is never automatic. It requires exact namespace confirmation, exclusive
+  non-blocking writer ownership and exactly one verified current export or an
+  explicit `--without-export` waiver for possible loss of imported/frozen
+  facts. Reset deletes the manifest before other analytics-store entries, never
+  touches native logs, archive or Event Index, and retains the namespace unless
+  `--new-namespace` follows a successful reset. A retained namespace makes the
+  next materialization preserve UIDs; removing it deliberately creates fresh
+  identities without reconciliation.
 - **Cycle.** The caller selects an interval (2 s by default) and an input
   budget. `publish_cycle` publishes one bounded chunk as one `Update` and
   generation, then returns its generation and completion flag. The caller may

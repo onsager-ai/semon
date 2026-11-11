@@ -33,6 +33,27 @@ fn materialize(home: &fixture::Fixture) -> Output {
         .unwrap()
 }
 
+fn export(home: &fixture::Fixture, destination: &Path) -> Output {
+    home.command(env!("CARGO_BIN_EXE_semon"))
+        .args(["analytics", "export"])
+        .arg(destination)
+        .arg("--cache")
+        .arg(home.root.join("state/index.json"))
+        .output()
+        .unwrap()
+}
+
+fn reset(home: &fixture::Fixture, arguments: &[&str]) -> Output {
+    let mut command = home.command(env!("CARGO_BIN_EXE_semon"));
+    command.args(["analytics", "reset"]);
+    command.args(arguments);
+    command
+        .arg("--cache")
+        .arg(home.root.join("state/index.json"))
+        .output()
+        .unwrap()
+}
+
 fn recursive_listing(root: &Path) -> BTreeSet<PathBuf> {
     fn visit(root: &Path, directory: &Path, entries: &mut BTreeSet<PathBuf>) {
         for entry in fs::read_dir(directory).unwrap() {
@@ -97,6 +118,110 @@ fn coverage_reads_the_published_live_rows_in_text_and_json() {
     assert!(groups.iter().all(|group| {
         group["step_count"].as_u64().unwrap() >= group["exclusive_step_count"].as_u64().unwrap()
     }));
+}
+
+#[test]
+fn export_copies_a_verified_snapshot_without_changing_the_store() {
+    let home = fixture::Fixture::new();
+    let materialized = materialize(&home);
+    assert!(
+        materialized.status.success(),
+        "{}",
+        String::from_utf8_lossy(&materialized.stderr)
+    );
+    let state = home.root.join("state");
+    let before = recursive_listing(&state);
+    let destination = home.root.join("analytics-export");
+    let output = export(&home, &destination);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(destination.join("export.json").is_file());
+    assert!(destination.join("analytics/manifest.json").is_file());
+    assert!(destination.join("analytics-namespace").is_file());
+    assert_eq!(recursive_listing(&state), before);
+}
+
+#[test]
+fn export_refuses_nonempty_and_inside_store_destinations() {
+    let home = fixture::Fixture::new();
+    assert!(materialize(&home).status.success());
+    let destination = home.root.join("occupied");
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("keep"), b"keep").unwrap();
+    let output = export(&home, &destination);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not empty"));
+    assert_eq!(fs::read(destination.join("keep")).unwrap(), b"keep");
+
+    let inside = home.root.join("state/analytics-store/export");
+    let output = export(&home, &inside);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("inside the source store"));
+}
+
+#[test]
+fn reset_requires_matching_confirmation_and_current_verified_export() {
+    let home = fixture::Fixture::new();
+    assert!(materialize(&home).status.success());
+    let namespace = fs::read_to_string(home.root.join("state/analytics-namespace"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let bundle = home.root.join("analytics-export");
+    assert!(export(&home, &bundle).status.success());
+
+    let bundle_arg = bundle.to_str().unwrap();
+    let wrong = reset(
+        &home,
+        &["--confirm", "origin-wrong", "--verified-export", bundle_arg],
+    );
+    assert!(!wrong.status.success());
+    assert!(String::from_utf8_lossy(&wrong.stderr).contains("exactly match"));
+
+    let reset = reset(
+        &home,
+        &["--confirm", &namespace, "--verified-export", bundle_arg],
+    );
+    assert!(
+        reset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    assert!(home.root.join("state/analytics-namespace").is_file());
+    assert!(!home.root.join("state/analytics-store").exists());
+}
+
+#[test]
+fn reset_requires_one_export_choice_and_can_remove_the_namespace_explicitly() {
+    let home = fixture::Fixture::new();
+    assert!(materialize(&home).status.success());
+    let namespace = fs::read_to_string(home.root.join("state/analytics-namespace"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let missing = reset(&home, &["--confirm", &namespace]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("exactly one"));
+
+    let reset = reset(
+        &home,
+        &[
+            "--confirm",
+            &namespace,
+            "--without-export",
+            "--new-namespace",
+        ],
+    );
+    assert!(
+        reset.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reset.stderr)
+    );
+    assert!(!home.root.join("state/analytics-namespace").exists());
+    assert!(!home.root.join("state/analytics-store").exists());
 }
 
 #[test]

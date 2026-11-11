@@ -985,21 +985,29 @@ fn run_reset(args: ResetArgs) -> Result<(), String> {
         }
         receipt.manifest_generation
     } else {
+        if !args.without_export {
+            return Err(
+                "analytics reset requires an export or explicit --without-export waiver".into(),
+            );
+        }
         semon_asi::read_manifest(&store_root)
             .map_err(|error| format!("analytics reset: {error}"))?
             .ok_or_else(|| format!("no analytics store at {}", store_root.display()))?
             .generation
     };
-    let summary =
-        semon_asi::reset_snapshot(&store_root, expected_generation).map_err(
-            |error| match error {
-                semon_asi::Error::WriterBusy => {
-                    "analytics reset: writer busy; stop `analytics materialize` and retry"
-                        .to_owned()
-                }
-                error => format!("analytics reset: {error}"),
-            },
-        )?;
+    let summary = semon_asi::reset_snapshot(
+        &store_root,
+        &state_dir.join(semon_sessions::ANALYTICS_NAMESPACE_FILE),
+        &namespace,
+        args.verified_export.as_deref(),
+        expected_generation,
+    )
+    .map_err(|error| match error {
+        semon_asi::Error::WriterBusy => {
+            "analytics reset: writer busy; stop `analytics materialize` and retry".to_owned()
+        }
+        error => format!("analytics reset: {error}"),
+    })?;
     if args.new_namespace {
         std::fs::remove_file(state_dir.join(semon_sessions::ANALYTICS_NAMESPACE_FILE)).map_err(
             |error| format!("analytics reset: cannot remove analytics namespace: {error}"),
@@ -1806,7 +1814,19 @@ fn analytics_usage() -> String {
      --watch uses a minimum spacing of 2 s between chunk attempts; failures exit visibly. Ctrl-C/SIGTERM stops the wait.\n\
      \n\
      Usage: semon analytics coverage [--cache PATH] [--json]\n\
-     Reports one PUBLISHED live-row snapshot. Native pending/failed/frozen derivation state is not part of this report."
+     Reports one PUBLISHED live-row snapshot. Native pending/failed/frozen derivation state is not part of this report.
+\
+
+\
+     Usage: semon analytics export DESTINATION [--cache PATH]
+\
+     Copies one verified local analytics snapshot into an empty destination.
+\
+
+\
+     Usage: semon analytics reset --confirm NAMESPACE (--verified-export DIR | --without-export) [--new-namespace] [--cache PATH]
+\
+     Removes only the local analytics store after confirmation. --without-export discards non-rebuildable imported or frozen facts."
         .to_owned()
 }
 
@@ -1828,6 +1848,18 @@ fn usage() -> String {
          Usage: semon analytics coverage [--cache PATH] [--json]\n\
          Read-only coverage from one published live-row analytics snapshot. It does not report native pending/failed/frozen derivation state.\n\
          \n\
+         Usage: semon analytics export DESTINATION [--cache PATH]
+\
+         Copies one verified local analytics snapshot into an empty destination.
+\
+
+\
+         Usage: semon analytics reset --confirm NAMESPACE (--verified-export DIR | --without-export) [--new-namespace] [--cache PATH]
+\
+         Removes only the local analytics store after confirmation. --without-export discards non-rebuildable imported or frozen facts.
+\
+
+\
          Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
          The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener. Both read\n\
          the log files modified within the window, --since (30d by default), or all of them with --all.\n\

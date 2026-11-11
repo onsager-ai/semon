@@ -63,11 +63,17 @@ pub fn export_snapshot(
     namespace: &str,
     destination: &Path,
 ) -> Result<ExportSummary> {
-    let created_destination = prepare_destination(root, destination)?;
+    let (destination, created_destination) = prepare_destination(root, destination)?;
     let copied = (|| {
         let lock = open_lock(root, false)?;
         let manifest = validate_snapshot(root)?;
         require_regular_file(namespace_file, "analytics namespace")?;
+        let source_namespace = fs::read_to_string(namespace_file)?;
+        if source_namespace.trim_end_matches('\n') != namespace {
+            return Err(Error::invalid(
+                "analytics namespace changed before export lock was acquired",
+            ));
+        }
         let files = snapshot_files(root, &manifest)?;
         let mut receipt_files = Vec::with_capacity(files.len() + 1);
         let (bytes, sha256) =
@@ -87,6 +93,10 @@ pub fn export_snapshot(
                 sha256,
             });
         }
+        let sessions = u64::try_from(read_live_map(root, &manifest)?.len())
+            .map_err(|_| Error::invalid("live session count does not fit in u64"))?;
+        let file_count = u64::try_from(manifest.files.len())
+            .map_err(|_| Error::invalid("manifest file count does not fit in u64"))?;
         drop(lock);
 
         let receipt = ExportReceipt {
@@ -99,14 +109,12 @@ pub fn export_snapshot(
         write_receipt(destination, &receipt)?;
         Ok(ExportSummary {
             generation: manifest.generation,
-            sessions: u64::try_from(read_live_map(root, &manifest)?.len())
-                .map_err(|_| Error::invalid("live session count does not fit in u64"))?,
-            files: u64::try_from(manifest.files.len())
-                .map_err(|_| Error::invalid("manifest file count does not fit in u64"))?,
+            sessions,
+            files: file_count,
         })
     })();
     if copied.is_err() {
-        cleanup_destination(destination, created_destination);
+        cleanup_destination(&destination, created_destination);
     }
     copied
 }
@@ -132,9 +140,32 @@ pub fn verify_export(bundle: &Path) -> Result<ExportReceipt> {
 /// The exclusive writer lock prevents a publication racing the removal. The manifest
 /// is removed before every other store entry so a partial failure is never readable as
 /// a valid snapshot.
-pub fn reset_snapshot(root: &Path, expected_generation: u64) -> Result<ResetSummary> {
+pub fn reset_snapshot(
+    root: &Path,
+    namespace_file: &Path,
+    expected_namespace: &str,
+    verified_export: Option<&Path>,
+    expected_generation: u64,
+) -> Result<ResetSummary> {
     let _lock = open_lock(root, true)?;
+    require_regular_file(namespace_file, "analytics namespace")?;
+    let namespace = fs::read_to_string(namespace_file)?;
+    if namespace.trim_end_matches('\n') != expected_namespace {
+        return Err(Error::invalid(
+            "analytics namespace changed before reset lock was acquired",
+        ));
+    }
     let manifest = validate_snapshot(root)?;
+    if let Some(bundle) = verified_export {
+        let receipt = verify_export(bundle)?;
+        if receipt.source_namespace != expected_namespace
+            || receipt.manifest_generation != manifest.generation
+        {
+            return Err(Error::invalid(
+                "verified export does not match the current namespace and manifest generation",
+            ));
+        }
+    }
     if manifest.generation != expected_generation {
         return Err(Error::invalid(
             "published manifest changed after verified export; export again before reset",
@@ -158,13 +189,15 @@ pub fn reset_snapshot(root: &Path, expected_generation: u64) -> Result<ResetSumm
     }
     fs::remove_dir(&analytics)?;
     removed.push(ANALYTICS_DIR.to_owned());
+    fs::remove_file(root.join(LOCK_FILE))?;
+    removed.push(LOCK_FILE.to_owned());
     Ok(ResetSummary {
         generation: manifest.generation,
         removed,
     })
 }
 
-fn prepare_destination(root: &Path, destination: &Path) -> Result<bool> {
+fn prepare_destination(root: &Path, destination: &Path) -> Result<(PathBuf, bool)> {
     let source = canonical_directory(root, "analytics store")?;
     let parent = destination.parent().ok_or_else(|| {
         Error::invalid(format!(
@@ -180,6 +213,12 @@ fn prepare_destination(root: &Path, destination: &Path) -> Result<bool> {
         ))
     })?);
     if destination.starts_with(&source) {
+        return Err(Error::invalid(
+            "export destination is inside the source store",
+        ));
+    }
+    let ancestor = nearest_existing_ancestor(&destination)?;
+    if ancestor.starts_with(&source) {
         return Err(Error::invalid(
             "export destination is inside the source store",
         ));
@@ -200,14 +239,27 @@ fn prepare_destination(root: &Path, destination: &Path) -> Result<bool> {
                     destination.display()
                 )));
             }
-            Ok(false)
+            Ok((destination, false))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             fs::create_dir(&destination)?;
-            Ok(true)
+            Ok((destination, true))
         }
         Err(error) => Err(error.into()),
     }
+}
+
+fn nearest_existing_ancestor(path: &Path) -> Result<PathBuf> {
+    let mut current = path;
+    while !current.exists() {
+        current = current.parent().ok_or_else(|| {
+            Error::invalid(format!(
+                "export destination has no existing ancestor: {}",
+                path.display()
+            ))
+        })?;
+    }
+    canonical_directory(current, "export destination ancestor")
 }
 
 fn cleanup_destination(destination: &Path, created_destination: bool) {
@@ -215,11 +267,9 @@ fn cleanup_destination(destination: &Path, created_destination: bool) {
         let _ = fs::remove_dir_all(destination);
         return;
     }
-    if let Ok(entries) = fs::read_dir(destination) {
-        for entry in entries.flatten() {
-            let _ = fs::remove_dir_all(entry.path());
-        }
-    }
+    let _ = fs::remove_file(destination.join("analytics-namespace"));
+    let _ = fs::remove_dir_all(destination.join(ANALYTICS_DIR));
+    let _ = fs::remove_file(destination.join(RECEIPT_FILE));
 }
 
 fn open_lock(root: &Path, exclusive: bool) -> Result<File> {
