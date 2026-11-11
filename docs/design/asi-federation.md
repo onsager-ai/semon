@@ -335,6 +335,8 @@ libraries neither define that origin assertion contract nor change
 
 ## Outbound-only body channel and read boundary
 
+See the proposed [body-channel coordination note](asi-body-channel.md) for #593/#594 transport alignment.
+
 The origin opens a mutually authenticated TLS connection to its enrolled
 self-hosted receiver over HTTPS (for example a bounded HTTP/2 stream). It opens no
 inbound listening port. NAT traversal therefore requires no inbound origin route.
