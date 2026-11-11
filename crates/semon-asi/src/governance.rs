@@ -398,6 +398,15 @@ pub fn coverage_allowed(authority: &ExportAuthority) -> bool {
     authority.witness.coverage_allowed
 }
 
+/// Whether every contributor permits a field. Projection callers may omit a
+/// denied nullable field before submitting the remaining row for validation.
+pub fn field_allowed(authority: &ExportAuthority, field: &str) -> bool {
+    authority
+        .contributors
+        .iter()
+        .all(|grant| grant.fields.contains(field))
+}
+
 /// The strongest baseline, local, and source classification floor in the cohort.
 /// This stays bound to the opaque authority and is never serialized with a row.
 pub fn sensitivity_floor(authority: &ExportAuthority) -> Sensitivity {
