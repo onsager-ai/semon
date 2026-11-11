@@ -444,7 +444,20 @@ The writer's pure transition table is the authority for chain ownership:
   This artifact contains local paths and is local-only: it is absent from
   `schema::TABLES`, generated SQL schema reference, SQL AST allowlist and the query
   worker's allowed file paths. It has no analytics egress serializer. Governed
-  federation requires a separate policy-qualified projection with opaque handles.
+  federation uses the distinct `semon-asi::egress` receiver projection (#593 slice
+  2), described in [the governance API](asi-governance-api.md#pinned-receiver-projection-593-slice-2).
+  It pins and decodes a local snapshot under the shared lock, resolves every retained
+  contributor through explicitly loaded local policy configuration, and builds fresh
+  policy-qualified rows with persistent random opaque source/evidence handles.
+  Receiver plain name/path fields obey D7 and all contributor policies. Coverage
+  permission is required for session policy-version vectors; denied sessions and
+  unreferenced dimension values never enter the output. The handle database lives
+  at `<state dir>/analytics-egress-handles.sqlite`, beside the namespace file and
+  outside `analytics-store/`. It binds only to the namespace, not a filesystem
+  path. Reset preserves it while keeping the namespace; `--new-namespace` removes
+  both files under the writer lock, retiring the old mappings. Custody export
+  bundles exclude this private operator state. No network, object protocol, claims/heads, Hub
+  profile, L1 or automatic export is delivered by this slice.
   Explicit operator custody export includes and hashes it, verifies its one-to-one
   live binding, and compares it before guarded reset. Reset removes it with the
   analytics store; coverage continues to read only `fact_session`.
