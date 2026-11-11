@@ -7,10 +7,17 @@
 
 use std::{
     collections::BTreeMap,
+    ffi::{CStr, CString, OsString},
     fmt,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
+    os::{
+        fd::{AsRawFd, FromRawFd},
+        unix::{
+            ffi::OsStringExt,
+            fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        },
+    },
     path::{Path, PathBuf},
 };
 
@@ -166,6 +173,7 @@ struct Entry {
 /// Methods require mutable access, so staging and eviction are serialized.
 pub struct BodyCache<C: Clock> {
     dir: PathBuf,
+    directory: CacheDirectory,
     key_path: PathBuf,
     master: Zeroizing<[u8; 32]>,
     clock: C,
@@ -184,12 +192,7 @@ impl<C: Clock> BodyCache<C> {
         if !dir.exists() {
             fs::DirBuilder::new().mode(0o700).create(dir)?;
         }
-        let directory = fs::symlink_metadata(dir)?;
-        if !directory.is_dir() || directory.permissions().mode() & 0o077 != 0 {
-            return Err(CacheError::Disabled(
-                "cache directory must be private and not a symlink",
-            ));
-        }
+        let directory = CacheDirectory::open(dir)?;
         let dir = fs::canonicalize(dir)?;
         let key_path = fs::canonicalize(key_path.parent().unwrap_or(Path::new(".")))
             .map_err(|_| CacheError::Disabled("operator master key is missing or unreadable"))?
@@ -204,12 +207,13 @@ impl<C: Clock> BodyCache<C> {
             ));
         }
         let master = read_master(&key_path)?;
-        let lock = private_open(&dir.join("lock"), true)?;
+        let lock = directory.open_file(Path::new("lock"), libc::O_RDWR | libc::O_CREAT)?;
         lock.try_lock()
             .map_err(|_| CacheError::Disabled("cache already in use"))?;
         let now = clock.now();
         let mut cache = Self {
             dir,
+            directory,
             key_path,
             master,
             clock,
@@ -222,15 +226,21 @@ impl<C: Clock> BodyCache<C> {
         };
         // Interrupted staging is never admitted. Its bytes are removed before
         // any serving or new allocation, including when the clock state is lost.
-        for item in fs::read_dir(&cache.dir)? {
-            let path = item?.path();
+        for path in cache.directory.names()? {
             if path.extension().is_some_and(|ext| ext == "stage") {
-                destroy(&path)?;
+                cache.directory.destroy(&path)?;
             }
         }
-        let state_path = cache.dir.join("clock");
-        let trusted = if state_path.exists() {
-            let state = read_bounded(&state_path, STATE_BYTES as usize)?;
+        let state_path = Path::new("clock");
+        let trusted = if cache
+            .directory
+            .names()?
+            .iter()
+            .any(|name| name == state_path)
+        {
+            let state = cache
+                .directory
+                .read_bounded(state_path, STATE_BYTES as usize)?;
             let decoded = decrypt(&cache.master, &state, b"semon-body-cache-clock")
                 .map_err(|_| CacheError::Disabled("wrong master key or corrupt clock state"))?;
             let bytes: [u8; 8] = decoded
@@ -243,8 +253,7 @@ impl<C: Clock> BodyCache<C> {
         } else {
             false
         };
-        for item in fs::read_dir(&cache.dir)? {
-            let path = item?.path();
+        for path in cache.directory.names()? {
             if path.extension().is_none_or(|ext| ext != "entry") {
                 if path
                     .file_name()
@@ -269,7 +278,7 @@ impl<C: Clock> BodyCache<C> {
                     cache.sequence = cache.sequence.max(entry.used);
                     cache.entries.insert(name, entry);
                 }
-                Err(_) => destroy(&path)?,
+                Err(_) => cache.directory.destroy(&path)?,
             }
         }
         if !trusted {
@@ -353,11 +362,11 @@ impl<C: Clock> BodyCache<C> {
         record.extend_from_slice(&encrypted);
         let stage = self.dir.join(format!("{id}.stage"));
         let result = (|| -> Result<()> {
-            let mut file = private_create(&stage)?;
+            let mut file = self.directory.create(&stage)?;
             file.write_all(&record)?;
             file.sync_all()?;
-            fs::rename(&stage, self.path(&id))?;
-            File::open(&self.dir)?.sync_all()?;
+            self.directory.rename(&stage, &self.path(&id))?;
+            self.directory.0.sync_all()?;
             Ok(())
         })();
         if result.is_err() {
@@ -512,11 +521,11 @@ impl<C: Clock> BodyCache<C> {
             b"semon-body-cache-clock",
         )?;
         let path = self.dir.join("clock.stage");
-        let mut file = private_create(&path)?;
+        let mut file = self.directory.create(&path)?;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        fs::rename(path, self.dir.join("clock"))?;
-        File::open(&self.dir)?.sync_all()?;
+        self.directory.rename(&path, Path::new("clock"))?;
+        self.directory.0.sync_all()?;
         Ok(())
     }
 
@@ -526,7 +535,7 @@ impl<C: Clock> BodyCache<C> {
 
     fn remove(&mut self, id: &str) -> Result<()> {
         if self.entries.contains_key(id) {
-            if let Err(error) = destroy(&self.path(id)) {
+            if let Err(error) = self.directory.destroy(&self.path(id)) {
                 self.disabled = true;
                 return Err(error);
             }
@@ -587,7 +596,9 @@ impl<C: Clock> BodyCache<C> {
     }
 
     fn decode(&self, path: &Path) -> Result<(Metadata, Zeroizing<Vec<u8>>)> {
-        let record = read_bounded(path, META_MAX + Limits::default().response_bytes + OVERHEAD)?;
+        let record = self
+            .directory
+            .read_bounded(path, META_MAX + Limits::default().response_bytes + OVERHEAD)?;
         if record.len() < OVERHEAD {
             return Err(CacheError::Integrity);
         }
@@ -632,7 +643,11 @@ impl<C: Clock> BodyCache<C> {
         {
             return Err(CacheError::Integrity);
         }
-        let bytes = fs::symlink_metadata(path)?.len();
+        let bytes = self
+            .directory
+            .open_file(path, libc::O_RDONLY)?
+            .metadata()?
+            .len();
         let used = metadata.fetched;
         Ok(Entry {
             metadata,
@@ -708,6 +723,7 @@ fn private_open(path: &Path, create: bool) -> Result<File> {
     Ok(file)
 }
 
+#[cfg(test)]
 fn private_create(path: &Path) -> Result<File> {
     Ok(OpenOptions::new()
         .write(true)
@@ -732,40 +748,172 @@ fn read_master(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
     Ok(key)
 }
 
-fn read_bounded(path: &Path, cap: usize) -> Result<Vec<u8>> {
-    let file = private_open(path, false)?;
-    if file.metadata()?.len() > cap as u64 {
-        return Err(CacheError::Integrity);
-    }
-    let mut bytes = Vec::new();
-    file.take(cap as u64 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > cap {
-        return Err(CacheError::Integrity);
-    }
-    Ok(bytes)
-}
+/// Pins custody to an inode, even if a parent writer replaces its pathname.
+struct CacheDirectory(File);
 
-/// Overwrite the wrapped key and fsync before unlinking the ciphertext. This
-/// does not promise physical erasure from snapshots or copy-on-write storage.
-fn destroy(path: &Path) -> Result<()> {
-    let meta = fs::symlink_metadata(path)?;
-    if meta.file_type().is_symlink() {
-        fs::remove_file(path)?;
-        return Ok(());
+impl CacheDirectory {
+    fn open(path: &Path) -> Result<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(path)?;
+        let meta = file.metadata()?;
+        // SAFETY: geteuid has no arguments or memory preconditions.
+        let owner = unsafe { libc::geteuid() };
+        if !meta.is_dir() || meta.uid() != owner || meta.permissions().mode() & 0o777 != 0o700 {
+            return Err(CacheError::Disabled(
+                "cache directory must be owned by this user and mode 0700",
+            ));
+        }
+        Ok(Self(file))
     }
-    if !meta.is_file() {
-        return Err(CacheError::Disabled("unexpected cache directory member"));
+
+    fn name(path: &Path) -> Result<CString> {
+        let name = path.file_name().ok_or(CacheError::Integrity)?;
+        use std::os::unix::ffi::OsStrExt;
+        CString::new(name.as_bytes()).map_err(|_| CacheError::Integrity)
     }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .custom_flags(libc::O_NOFOLLOW)
-        .open(path)?;
-    file.seek(SeekFrom::Start(0))?;
-    file.write_all(&[0; HEADER][..HEADER.min(meta.len() as usize)])?;
-    file.sync_all()?;
-    fs::remove_file(path)?;
-    File::open(path.parent().ok_or(CacheError::Integrity)?)?.sync_all()?;
-    Ok(())
+
+    fn open_file(&self, path: &Path, flags: libc::c_int) -> Result<File> {
+        let name = Self::name(path)?;
+        // SAFETY: the directory fd is live, the name is NUL terminated and the
+        // mode argument is provided even when O_CREAT is absent.
+        let fd = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                flags | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+                0o600 as libc::mode_t,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: openat returned a fresh descriptor, now exclusively owned here.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let meta = file.metadata()?;
+        // SAFETY: geteuid has no memory preconditions.
+        let owner = unsafe { libc::geteuid() };
+        if !meta.is_file()
+            || meta.uid() != owner
+            || meta.nlink() != 1
+            || meta.permissions().mode() & 0o777 != 0o600
+        {
+            return Err(CacheError::Disabled(
+                "cache member must be an owned regular 0600 file with one link",
+            ));
+        }
+        Ok(file)
+    }
+
+    fn create(&self, path: &Path) -> Result<File> {
+        self.open_file(path, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+        let from = Self::name(from)?;
+        let to = Self::name(to)?;
+        // SAFETY: both names are valid C strings and the directory fd stays open.
+        let result = unsafe {
+            libc::renameat(
+                self.0.as_raw_fd(),
+                from.as_ptr(),
+                self.0.as_raw_fd(),
+                to.as_ptr(),
+            )
+        };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
+    fn names(&self) -> Result<Vec<PathBuf>> {
+        // A separate open file description starts each scan at offset zero.
+        // SAFETY: the literal is NUL terminated and the directory fd is live.
+        let fd = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                c".".as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        // SAFETY: fd is a fresh directory descriptor; fdopendir takes ownership on success.
+        let stream = unsafe { libc::fdopendir(fd) };
+        if stream.is_null() {
+            let error = std::io::Error::last_os_error();
+            // SAFETY: fdopendir failed, so ownership of fd remains ours.
+            unsafe {
+                libc::close(fd);
+            }
+            return Err(error.into());
+        }
+        struct Stream(*mut libc::DIR);
+        impl Drop for Stream {
+            fn drop(&mut self) {
+                // SAFETY: this is the unique owner of a successful fdopendir.
+                unsafe {
+                    libc::closedir(self.0);
+                }
+            }
+        }
+        let stream = Stream(stream);
+        let mut names = Vec::new();
+        loop {
+            // readdir_r returns errors directly without platform-specific errno access.
+            // SAFETY: zero is a valid initial dirent; readdir_r initializes the entry.
+            let mut entry: libc::dirent = unsafe { std::mem::zeroed() };
+            let mut result = std::ptr::null_mut();
+            // SAFETY: the stream is live, output storage is valid, and access is serialized.
+            #[allow(deprecated)]
+            let error = unsafe { libc::readdir_r(stream.0, &mut entry, &mut result) };
+            if error != 0 {
+                return Err(std::io::Error::from_raw_os_error(error).into());
+            }
+            if result.is_null() {
+                break;
+            }
+            // SAFETY: a successful readdir_r produces a NUL-terminated d_name.
+            let name = unsafe { CStr::from_ptr(entry.d_name.as_ptr()) }.to_bytes();
+            if name != b"." && name != b".." {
+                names.push(PathBuf::from(OsString::from_vec(name.to_vec())));
+            }
+        }
+        Ok(names)
+    }
+
+    fn read_bounded(&self, path: &Path, cap: usize) -> Result<Vec<u8>> {
+        let file = self.open_file(path, libc::O_RDONLY)?;
+        if file.metadata()?.len() > cap as u64 {
+            return Err(CacheError::Integrity);
+        }
+        let mut bytes = Vec::new();
+        file.take(cap as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > cap {
+            return Err(CacheError::Integrity);
+        }
+        Ok(bytes)
+    }
+
+    /// Destroy the wrapped key before unlink, without following any path component.
+    fn destroy(&self, path: &Path) -> Result<()> {
+        let mut file = self.open_file(path, libc::O_WRONLY)?;
+        let len = file.metadata()?.len();
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(&[0; HEADER][..HEADER.min(len as usize)])?;
+        file.sync_all()?;
+        let name = Self::name(path)?;
+        // SAFETY: name is NUL terminated, directory fd is live; no directory deletion.
+        let result = unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        self.0.sync_all()?;
+        Ok(())
+    }
 }
 
 fn random(bytes: &mut [u8]) -> Result<()> {
@@ -1129,6 +1277,54 @@ mod tests {
         drop(cache);
         let mut cache = f.open(Limits::default());
         assert!(cache.lookup(admission(&key)).unwrap().is_none());
+    }
+
+    #[test]
+    fn directory_swap_cannot_redirect_writes_reads_or_key_destruction() {
+        let f = Fixture::new();
+        let mut cache = f.open(Limits::default());
+        let first = key("first", "source", b"body");
+        cache.insert(first.clone(), b"body", 1000, None).unwrap();
+        let original = f.root.join("original-cache");
+        fs::rename(&f.dir, &original).unwrap();
+        let outside = f.root.join("outside");
+        fs::DirBuilder::new().mode(0o700).create(&outside).unwrap();
+        let victim = outside.join(format!("{}.entry", key_id(&first).unwrap()));
+        let sentinel = b"outside-file-must-not-be-overwritten-or-removed";
+        fs::write(&victim, sentinel).unwrap();
+        std::os::unix::fs::symlink(&outside, &f.dir).unwrap();
+        assert_eq!(
+            cache.lookup(admission(&first)).unwrap().unwrap().as_slice(),
+            b"body"
+        );
+        let second = key("second", "source", b"next");
+        cache.insert(second.clone(), b"next", 1000, None).unwrap();
+        assert!(
+            original
+                .join(format!("{}.entry", key_id(&second).unwrap()))
+                .exists()
+        );
+        cache
+            .invalidate_source("namespace", "enrollment-1", "source")
+            .unwrap();
+        assert_eq!(fs::read(&victim).unwrap(), sentinel);
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+        assert!(
+            !original
+                .join(format!("{}.entry", key_id(&first).unwrap()))
+                .exists()
+        );
+        assert!(
+            !original
+                .join(format!("{}.entry", key_id(&second).unwrap()))
+                .exists()
+        );
+        drop(cache);
+        // Startup listing and cleanup also use the pinned directory descriptor.
+        fs::remove_file(&f.dir).unwrap();
+        fs::rename(&original, &f.dir).unwrap();
+        let cache = f.open(Limits::default());
+        assert!(cache.entries.is_empty());
     }
 
     #[test]
