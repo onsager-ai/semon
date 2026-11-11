@@ -440,6 +440,30 @@ Emit complete admitted records only. Appends may extend a verified prefix; a
 rewrite creates a new source generation and invalidates continuations. Never
 splice old and new bytes or use a first-4-KiB hash as proof of an entire prefix.
 
+### Origin read library integration
+
+The Unix `semon-push::origin_read` core consumes one authenticated enrollment
+through traits for live enrollment scope, admitted handles, the full policy vector,
+rendering and export-view validation. It defines no transport or enrollment storage.
+A renderer first prepares metadata without reading/rendering bodies: exact canonical
+payload length, export-view generation, mapping and continuation. This lets the
+origin fsync an exact authorization range before rendering. Missing preparation or
+mapping evidence is unavailable. The `body_query::view` adapter remains follow-up:
+its current public API lacks a narrowed deadline and exact export-view witness.
+
+Audit ranges are half-open `[0, canonical_payload_bytes)` for each exported typed
+page/field. Continuations identify another typed payload; they never accumulate byte
+offsets. These are exported offsets, never native offsets or original-byte proofs.
+Empty/withheld targets are unavailable. Canonical library bytes retain explicit
+`untrusted_text` tags; they define digest/range accounting, not a wire envelope.
+The core accounts for its complete internal binding plus payload under 256 KiB;
+transport integration must also account for its eventual serialization overhead by
+narrowing the supplied limit. A non-Clone authorized result precedes actual egress;
+the caller completes it with the actual payload byte count after delivery, failure
+or cancellation. Dropping/crashing leaves an attempted authorization. Page/field
+completion uses the existing audit completion event; streaming receipts remain in
+the lease/append integration.
+
 ## Receiver cache: bounded temporary custody
 
 Only the operator's self-hosted receiver holds this cache. It is separate from
