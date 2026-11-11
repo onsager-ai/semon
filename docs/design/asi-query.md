@@ -24,6 +24,13 @@ outbound-only read verbs, with no control, runtime, SSH or Encrypted Relay.
 There is no network SQL endpoint. These tools replace the paused
 `find`. The public dialect is DuckDB SQL.
 
+Durable authoring is separate from these four read tools: the local stdio MCP
+extension exposes `asi_add` with `table`, `id`, and a typed `values` object.
+It shares the CLI's `semon asi add` Writer path, fixes the destination to the
+process's configured cache, and returns only `id`/`revision`. It is not exposed
+through Viewer or remote read surfaces. See [durable state](asi-store.md#durable-state)
+for input types, validation and the author lock.
+
 ## `sql`
 
 ### Sandbox (per request)

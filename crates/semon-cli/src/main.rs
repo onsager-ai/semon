@@ -38,6 +38,12 @@ enum Command {
     Materialize(MaterializeArgs),
     Coverage(CoverageArgs),
     Export(ExportArgs),
+    DurableAdd {
+        table: String,
+        id: String,
+        values: PathBuf,
+        cache: PathBuf,
+    },
     DurableBackup {
         destination: PathBuf,
         cache: PathBuf,
@@ -233,12 +239,47 @@ fn parse_archive_args(mut arguments: impl Iterator<Item = String>) -> Result<Com
 }
 
 fn asi_usage() -> String {
-    "Usage: semon asi backup PATH [--cache PATH]\nCopies author-owned durable state using SQLite online backup; refuses an existing destination.".into()
+    "Usage: semon asi backup PATH [--cache PATH]\nCopies author-owned durable state using SQLite online backup; refuses an existing destination.\nUsage: semon asi add TABLE --id ID --values FILE|- [--cache PATH]\nInserts one durable row from a JSON object of typed column values; '-' reads stdin. Prints only id/revision.".into()
 }
 
 fn parse_asi_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
-    if arguments.next().as_deref() != Some("backup") {
-        return Err(asi_usage());
+    match arguments.next().as_deref() {
+        Some("add") => {
+            let table = arguments
+                .next()
+                .filter(|v| !v.starts_with('-'))
+                .ok_or_else(asi_usage)?;
+            let mut id = None;
+            let mut values = None;
+            let mut cache = None;
+            while let Some(argument) = arguments.next() {
+                let slot = match argument.as_str() {
+                    "--id" => &mut id,
+                    "--values" => &mut values,
+                    "--cache" => &mut cache,
+                    _ => return Err(asi_usage()),
+                };
+                if slot.is_some() {
+                    return Err(asi_usage());
+                }
+                *slot = Some(
+                    arguments
+                        .next()
+                        .filter(|v| v == "-" || !v.starts_with('-'))
+                        .ok_or_else(asi_usage)?,
+                );
+            }
+            return Ok(Command::DurableAdd {
+                table,
+                id: id.ok_or_else(asi_usage)?,
+                values: values.ok_or_else(asi_usage)?.into(),
+                cache: cache
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| semon_sessions::Options::default().cache),
+            });
+        }
+        Some("backup") => {}
+        _ => return Err(asi_usage()),
     }
     let destination = arguments
         .next()
@@ -254,6 +295,48 @@ fn parse_asi_args(mut arguments: impl Iterator<Item = String>) -> Result<Command
         }
     }
     Ok(Command::DurableBackup { destination, cache })
+}
+
+/// Transport conversion only: the durable Writer owns all column and row validation.
+fn durable_add(
+    root: &Path,
+    table: &str,
+    id: &str,
+    values: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use semon_asi::durable::{Value, Writer};
+    let values = values.as_object().ok_or("values must be a JSON object")?;
+    let values = values.iter().map(|(key, value)| {
+        let value = match value {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::String(text) => Value::Text(text.clone()),
+            serde_json::Value::Number(number) => {
+                if let Some(integer) = number.as_i64() {
+                    Value::Integer(integer)
+                } else if number.is_f64() {
+                    Value::Real(number.as_f64().ok_or("invalid durable number")?)
+                } else {
+                    return Err("durable integer is outside the signed 64-bit range");
+                }
+            }
+            _ => return Err("durable values must be strings, numbers or nulls; encode arrays as JSON text"),
+        };
+        Ok((key.clone(), value))
+    }).collect::<Result<std::collections::BTreeMap<_, _>, &str>>()?;
+    let revision = Writer::open(root)
+        .and_then(|mut writer| writer.insert(table, id, values))
+        .map_err(|error| -> String {
+            match error {
+                semon_asi::Error::WriterBusy => {
+                    "durable writer busy: another process holds analytics.lock".into()
+                }
+                semon_asi::Error::Invalid(message) => message,
+                semon_asi::Error::Json(_) => "invalid durable JSON text array".into(),
+                _ => "durable store unavailable; check the configured store and its permissions"
+                    .into(),
+            }
+        })?;
+    Ok(serde_json::json!({"id": id, "revision": revision}))
 }
 
 fn parse_analytics_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
@@ -966,6 +1049,29 @@ fn run(command: Command) -> Result<(), String> {
         Command::Coverage(args) => return run_coverage(args),
         Command::Export(args) => return run_export(args),
         Command::Reset(args) => return run_reset(args),
+        Command::DurableAdd {
+            table,
+            id,
+            values,
+            cache,
+        } => {
+            let input: Box<dyn io::Read> = if values == Path::new("-") {
+                Box::new(io::stdin())
+            } else {
+                Box::new(
+                    std::fs::File::open(values).map_err(|_| "asi add: cannot read values file")?,
+                )
+            };
+            let values = serde_json::from_reader(input)
+                .map_err(|_| "asi add: invalid JSON values object")?;
+            let index = semon_sessions::analytics_index_path(&cache);
+            let root = semon_sessions::analytics_store_root(&index)
+                .ok_or("asi add: index has no parent")?;
+            let result = durable_add(&root, &table, &id, &values)
+                .map_err(|error| format!("asi add: {error}"))?;
+            println!("{result}");
+            return Ok(());
+        }
         Command::DurableBackup { destination, cache } => {
             let index = semon_sessions::analytics_index_path(&cache);
             let root = semon_sessions::analytics_store_root(&index)
@@ -1008,6 +1114,7 @@ fn run(command: Command) -> Result<(), String> {
         Command::Coverage(_)
         | Command::Export(_)
         | Command::Reset(_)
+        | Command::DurableAdd { .. }
         | Command::DurableBackup { .. } => {
             unreachable!("analytics command returns before pricing initialization")
         }
@@ -1850,8 +1957,23 @@ fn asi_schema_reference() -> serde_json::Value {
 
 #[cfg(feature = "asi-query")]
 impl semon_sessions::McpExtension for AsiMcp {
+    fn read_only(&self, name: &str) -> bool {
+        name != "asi_add"
+    }
+
     fn tools(&self) -> Vec<semon_sessions::QueryTool> {
-        asi_tools()
+        let mut tools = asi_tools();
+        tools.push(semon_sessions::QueryTool {
+            name: "asi_add",
+            description: "Insert one author-owned durable row in the configured local store. Returns only id/revision. Body text stays author-local.",
+            positional: None,
+            input_schema: serde_json::json!({"type":"object","properties":{
+                "table":{"type":"string","enum":semon_asi::durable::TABLES.iter().map(|table| table.name).collect::<Vec<_>>()},
+                "id":{"type":"string"},
+                "values":{"type":"object","additionalProperties":{"type":["string","number","null"]}}
+            },"required":["table","id","values"],"additionalProperties":false}),
+        });
+        tools
     }
 
     fn call(
@@ -1860,6 +1982,43 @@ impl semon_sessions::McpExtension for AsiMcp {
         arguments: &serde_json::Value,
     ) -> Option<Result<serde_json::Value, serde_json::Value>> {
         Some(match name {
+            "asi_add" => (|| {
+                if self.remote {
+                    return Err(asi_error(
+                        "capability_unavailable",
+                        "Durable authoring requires a local author process",
+                        "author",
+                    ));
+                }
+                let object = arguments.as_object().ok_or_else(|| {
+                    asi_error("invalid_argument", "Arguments must be an object", "request")
+                })?;
+                if object
+                    .keys()
+                    .any(|key| !["table", "id", "values"].contains(&key.as_str()))
+                {
+                    return Err(asi_error(
+                        "invalid_argument",
+                        "Unknown authoring argument",
+                        "request",
+                    ));
+                }
+                let table = object
+                    .get("table")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| asi_error("invalid_argument", "table is required", "request"))?;
+                let id = object
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| asi_error("invalid_argument", "id is required", "request"))?;
+                let values = object.get("values").ok_or_else(|| {
+                    asi_error("invalid_argument", "values is required", "request")
+                })?;
+                let root = semon_sessions::analytics_store_root(&self.index)
+                    .ok_or_else(|| asi_error("store_unavailable", "Store unavailable", "store"))?;
+                durable_add(&root, table, id, values)
+                    .map_err(|message| asi_error("authoring_failed", &message, "durable"))
+            })(),
             "sql" => self.request(arguments).and_then(|request| {
                 let root = self.store_root.as_deref().ok_or_else(|| {
                     asi_error("store_unavailable", "Analytics unavailable", "store")
@@ -2100,9 +2259,11 @@ fn usage() -> String {
          Usage: semon analytics reset --confirm NAMESPACE (--verified-export DIR | --without-export) [--new-namespace] [--cache PATH]\n\
          Removes only the local analytics store after confirmation. --without-export discards non-rebuildable imported or frozen facts.\n\n\
          Usage: semon asi backup PATH [--cache PATH]\n\
-         Copies author-owned durable state; refuses an existing destination.\n\n\
+         Copies author-owned durable state; refuses an existing destination.\n\
+         Usage: semon asi add TABLE --id ID --values FILE|- [--cache PATH]\n\
+         Inserts one durable row from a JSON values object; '-' reads stdin. Prints only id/revision.\n\n\
          Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
-         The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener. Both read\n\
+         The query tools plus local durable asi_add (with asi-query) over Model Context Protocol on stdin and stdout; no listener. Queries read\n\
          the log files modified within the window, --since (30d by default), or all of them with --all.\n\
          \n\
          Usage: semon push --to URL --token-file PATH [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
@@ -2125,6 +2286,42 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_add_parser_requires_explicit_row_and_values_source() {
+        for args in [
+            vec!["add"],
+            vec!["add", "lane", "--id", "one"],
+            vec!["add", "lane", "--values", "-"],
+            vec!["add", "lane", "--id", "one", "--values"],
+            vec!["add", "lane", "--id", "one", "--values", "-", "--id", "two"],
+            vec!["add", "lane", "--id", "one", "--values", "-", "--unknown"],
+        ] {
+            assert!(parse_asi_args(args.into_iter().map(str::to_owned)).is_err());
+        }
+        for source in ["-", "row.json"] {
+            let Command::DurableAdd {
+                table,
+                id,
+                values,
+                cache,
+            } = parse_asi_args(
+                [
+                    "add", "lane", "--id", "one", "--values", source, "--cache", "cache",
+                ]
+                .into_iter()
+                .map(str::to_owned),
+            )
+            .unwrap()
+            else {
+                panic!("expected durable add");
+            };
+            assert_eq!(table, "lane");
+            assert_eq!(id, "one");
+            assert_eq!(values, PathBuf::from(source));
+            assert_eq!(cache, PathBuf::from("cache"));
+        }
+    }
 
     #[test]
     fn durable_backup_parser_requires_destination_and_reports_help() {

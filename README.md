@@ -112,7 +112,7 @@ DIR is only read. Nothing is written there, and no symbolic link is followed out
 
 ## For agents: `semon query` and `semon mcp`
 
-Native session evidence is shaped for agents and scripts. The focused `semon query` tools print one answer as JSON (one line with `--json`, pretty without); `semon mcp` serves those tools as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. Focused local tools construct native evidence owners directly and reuse the Session Event Index without starting Viewer refresh workers. They take the home options of `semon sessions` (`--claude-home`, `--codex-home`, `--proc-root`, `--cache`, `--facts`, and `--machine DIR` repeated for several machines' homes), and are read-only: no listener, no network, and nothing written but the metadata cache.
+Native session evidence is shaped for agents and scripts. The focused `semon query` tools print one answer as JSON (one line with `--json`, pretty without); `semon mcp` serves those tools as a [Model Context Protocol](https://modelcontextprotocol.io) server over stdio. Focused local tools construct native evidence owners directly and reuse the Session Event Index without starting Viewer refresh workers. They take the home options of `semon sessions` (`--claude-home`, `--codex-home`, `--proc-root`, `--cache`, `--facts`, and `--machine DIR` repeated for several machines' homes), and are read-only: no listener, no network, and nothing written but the metadata cache. With `asi-query`, MCP additionally offers the explicit `asi_add` durable authoring tool described below.
 
 The focused native tools read a window of recent logs: only the log files modified in the last 30 days, so a first run on a large home doesn't read years of history. `--since DURATION` sets another window, and `--all` reads every file. A file that is read is answered whole: a session that began before the window keeps every turn, handoff and busy interval its files hold. A link whose other end is in a file outside the window isn't made; that end shows as a stub or unlinked, as it would if its file were gone. A session whose earlier file (after a `/clear`) a log line names by `session_id` but the window didn't read says `turns_truncated: true`; it is then listed under its first read file's id. Every answer carries `window_start` (epoch ms, `null` with `--all`): where the window of the model that answered starts, the same instant the scan used. A long-running `semon mcp` rebuilds only when the logs change, so its `window_start` can be older than 30 days back, never newer. Over several machines each keeps its own window, and `window_start` is the latest of their starts. A tool's own `since` argument filters inside the window; on the command line it is spelled `--newer-than`, because `--since` is the window. A `since` that reaches before `window_start` is the error `outside_window`, with the `window_start`; the answer is never silently cut short.
 
@@ -212,7 +212,13 @@ Author-owned labels and work records live separately in `asi-durable.sqlite3`.
 `semon asi backup PATH [--cache PATH]` uses SQLite online backup and refuses an
 existing destination. Analytics exports include categorical label assertions, never
 durable free text; analytics rebuild/reset preserves the durable file. The Rust
-writer API is available in `semon-asi`; authoring commands are a later slice.
+writer API is available in `semon-asi`. Add a row with
+`semon asi add lane --id my-lane --values row.json [--cache PATH]`, where
+`row.json` contains a JSON object such as `{"title":"Investigate query latency"}`;
+use `--values -` for stdin. The same shape supports all nine durable tables.
+Success prints only `id` and `revision`. With `asi-query`, local stdio MCP offers
+`asi_add` (`table`, `id`, `values`) against its configured store, using the same
+Writer validation and lock. See [durable state](docs/design/asi-store.md#durable-state).
 
 `semon analytics reset` is explicit destructive maintenance for the analytics store
 only. It requires `--confirm` with the exact `analytics-namespace`, plus exactly one of
