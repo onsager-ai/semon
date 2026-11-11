@@ -1,7 +1,10 @@
 //! Author-owned durable facts. Analytics only opens this file read-only.
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
-use std::path::Path;
+use std::fs::{self, DirBuilder, File, OpenOptions};
+use std::io::Read;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub use rusqlite::types::Value;
 use rusqlite::{Connection, OpenFlags, params};
@@ -11,6 +14,53 @@ use crate::{Error, Result, Store, TableBatch, WriterLock};
 
 pub const FILE: &str = "asi-durable.sqlite3";
 const VERSION: i64 = 1;
+const APPLICATION_ID: i64 = 0x53414455; // SADU: Semon author-owned durable state.
+static BACKUP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn validate_header(path: &Path) -> Result<()> {
+    let mut file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(Error::invalid("durable state must be a regular file"));
+    }
+    let mut header = [0_u8; 100];
+    file.read_exact(&mut header)?;
+    if &header[..16] != b"SQLite format 3\0"
+        || u32::from_be_bytes(header[60..64].try_into().expect("four bytes")) != VERSION as u32
+        || u32::from_be_bytes(header[68..72].try_into().expect("four bytes"))
+            != APPLICATION_ID as u32
+    {
+        return Err(Error::invalid(
+            "unsupported durable SQLite header; preserve or export the file",
+        ));
+    }
+    Ok(())
+}
+
+fn identifier(value: &str, encoded: bool) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || b"._:/+@=-".contains(&b) || (encoded && b == b'%')
+        })
+}
+
+fn backup_staging(parent: &Path) -> Result<PathBuf> {
+    for _ in 0..16 {
+        let sequence = BACKUP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(".asi-backup-{}-{sequence}", std::process::id()));
+        match DirBuilder::new().mode(0o700).create(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(Error::invalid(
+        "cannot reserve private durable backup staging directory",
+    ))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Class {
@@ -192,10 +242,34 @@ fn validate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
         .map_err(sql)?;
-    if version != VERSION {
+    let application: i64 = conn
+        .pragma_query_value(None, "application_id", |r| r.get(0))
+        .map_err(sql)?;
+    if version != VERSION || application != APPLICATION_ID {
         return Err(Error::invalid(format!(
             "durable format {version} refused; expected {VERSION}; preserve or export the file"
         )));
+    }
+    for name in std::iter::once("revision").chain(TABLES.iter().map(|t| t.name)) {
+        let exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [name],
+                |r| r.get(0),
+            )
+            .map_err(sql)?;
+        if !exists {
+            return Err(Error::invalid(format!("durable table missing: {name}")));
+        }
+    }
+    for name in ["label", "adjudication"] {
+        for operation in ["UPDATE", "DELETE"] {
+            let trigger = format!("{name}_{operation}");
+            let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?1 AND tbl_name=?2)", params![trigger,name], |r| r.get(0)).map_err(sql)?;
+            if !exists {
+                return Err(Error::invalid("durable insert-only trigger missing"));
+            }
+        }
     }
     Ok(())
 }
@@ -207,16 +281,27 @@ pub struct Writer {
 impl Writer {
     /// Shares the analytics author lock, so only one author-owned writer runs.
     pub fn open(root: &Path) -> Result<Self> {
-        let lock = WriterLock::acquire(root)?;
         let path = root.join(FILE);
-        let exists = path.try_exists()?;
-        // Check the version before any writable open or pragma.
+        let exists = match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                validate_header(&path)?;
+                true
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        // Refuse foreign headers before creating even the author lock file.
+        let lock = WriterLock::acquire(root)?;
         if exists {
             Reader::open(root)?;
         }
-        let conn = Connection::open(&path).map_err(sql)?;
-        conn.pragma_update(None, "journal_mode", "WAL")
-            .map_err(sql)?;
+        let conn = Connection::open_with_flags(
+            &path,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(sql)?;
         conn.pragma_update(None, "synchronous", "FULL")
             .map_err(sql)?;
         if !exists {
@@ -240,10 +325,15 @@ impl Writer {
                     tx.execute_batch(&format!("CREATE TRIGGER {name}_{operation} BEFORE {operation} ON {name} BEGIN SELECT RAISE(ABORT, 'insert-only durable assertion'); END;")).map_err(sql)?;
                 }
             }
+            tx.pragma_update(None, "application_id", APPLICATION_ID)
+                .map_err(sql)?;
             tx.pragma_update(None, "user_version", VERSION)
                 .map_err(sql)?;
             tx.commit().map_err(sql)?;
         }
+        validate(&conn)?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(sql)?;
         Ok(Self { conn, _lock: lock })
     }
 
@@ -251,7 +341,7 @@ impl Writer {
     /// A failed validation/constraint rolls back both the row and the revision.
     pub fn insert(&mut self, name: &str, id: &str, values: BTreeMap<String, Value>) -> Result<u64> {
         let t = table(name)?;
-        if id.is_empty() || id.contains('/') {
+        if !identifier(id, true) || id.contains('/') {
             return Err(Error::invalid(
                 "durable id must be one nonempty UID component",
             ));
@@ -273,6 +363,24 @@ impl Writer {
                     Value::Real(number) => column.sql.starts_with("REAL") && number.is_finite(),
                     Value::Blob(_) => false,
                 };
+                if let Value::Text(text) = value {
+                    if (column.class == Class::Categorical && !identifier(text, false))
+                        || (column.name == "target_uid" && !identifier(text, true))
+                    {
+                        return Err(Error::invalid(format!(
+                            "invalid durable identifier shape: {}",
+                            column.name
+                        )));
+                    }
+                    if column.name == "labeler"
+                        && !["rule:", "model:", "human:"].iter().any(|prefix| {
+                            text.strip_prefix(*prefix)
+                                .is_some_and(|suffix| !suffix.is_empty())
+                        })
+                    {
+                        return Err(Error::invalid("labeler must be rule:x, model:y or human:z"));
+                    }
+                }
                 if !valid {
                     return Err(Error::invalid(format!(
                         "invalid durable column type: {}",
@@ -347,6 +455,7 @@ pub struct Reader {
 }
 impl Reader {
     pub fn open(root: &Path) -> Result<Self> {
+        validate_header(&root.join(FILE))?;
         let conn = Connection::open_with_flags(
             root.join(FILE),
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
@@ -384,12 +493,19 @@ impl Reader {
         Ok(Some(body))
     }
     pub fn backup(&self, destination: &Path) -> Result<()> {
-        let reserved = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(destination)?;
+        match fs::symlink_metadata(destination) {
+            Ok(_) => return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists).into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        let parent = destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let staging = backup_staging(parent)?;
+        let staged = staging.join("durable.sqlite3");
         let result = (|| {
-            let mut target = Connection::open(destination).map_err(sql)?;
+            let mut target = Connection::open(&staged).map_err(sql)?;
             let backup = rusqlite::backup::Backup::new(&self.conn, &mut target).map_err(sql)?;
             loop {
                 match backup.step(128).map_err(sql)? {
@@ -400,16 +516,17 @@ impl Reader {
             }
             drop(backup);
             drop(target);
-            reserved.sync_all()?;
-            if let Some(parent) = destination.parent().filter(|p| !p.as_os_str().is_empty()) {
-                File::open(parent)?.sync_all()?;
-            }
+            fs::set_permissions(&staged, fs::Permissions::from_mode(0o600))?;
+            File::open(&staged)?.sync_all()?;
+            fs::hard_link(&staged, destination)?;
+            File::open(parent)?.sync_all()?;
             Ok(())
         })();
-        if result.is_err() {
-            let _ = std::fs::remove_file(destination);
-        }
-        result
+        let cleanup = fs::remove_dir_all(&staging);
+        result?;
+        cleanup?;
+        File::open(parent)?.sync_all()?;
+        Ok(())
     }
     fn export(&mut self, checkpoint: u64) -> Result<(u64, Vec<Row>)> {
         let tx = self.conn.transaction().map_err(sql)?;
@@ -457,6 +574,31 @@ impl Reader {
         }
         Ok((revision as u64, out))
     }
+}
+
+/// Read-only outbox drain; the manifest commits rows and checkpoint together.
+pub(crate) fn append_export<C: crate::Clock>(
+    store: &Store<C>,
+    tables: &mut Vec<TableBatch>,
+) -> Result<u64> {
+    let root = store
+        .analytics_dir()
+        .parent()
+        .ok_or_else(|| Error::invalid("analytics root missing"))?;
+    if !root.join(FILE).try_exists()? {
+        if store.manifest().durable_revision != 0 {
+            return Err(Error::invalid("checkpointed durable file missing"));
+        }
+        return Ok(0);
+    }
+    let (revision, rows) = Reader::open(root)?.export(store.manifest().durable_revision)?;
+    if !rows.is_empty() {
+        tables.push(TableBatch {
+            table: &crate::schema::FACT_LABEL,
+            batch: crate::publish::rows_to_batch(&crate::schema::FACT_LABEL, &rows)?,
+        });
+    }
+    Ok(revision)
 }
 
 #[cfg(test)]
@@ -625,6 +767,112 @@ mod tests {
         assert_eq!(id, "adjudication/a");
     }
 
+    fn listing(root: &Path) -> Vec<std::ffi::OsString> {
+        let mut entries: Vec<_> = fs::read_dir(root)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        entries.sort();
+        entries
+    }
+
+    #[test]
+    fn categorical_shape_guards_every_text_category_and_exported_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = Writer::open(dir.path()).unwrap();
+        for table in TABLES {
+            for column in table.columns {
+                if column.class == Class::Categorical && column.sql.starts_with("TEXT") {
+                    for invalid in [
+                        "",
+                        "a prompt sentence goes in a body",
+                        "quoted\"value",
+                        "line\nvalue",
+                        &"x".repeat(129),
+                    ] {
+                        let mut values = if table.name == "label" {
+                            label()
+                        } else if table.name == "adjudication" {
+                            adjudication()
+                        } else {
+                            BTreeMap::new()
+                        };
+                        values.insert(column.name.into(), Value::Text(invalid.into()));
+                        assert!(
+                            writer.insert(table.name, "invalid", values).is_err(),
+                            "{}.{}",
+                            table.name,
+                            column.name
+                        );
+                    }
+                }
+            }
+        }
+        let mut values = label();
+        values.insert("value".into(), Value::Text("valid._:/+@=-123".into()));
+        values.insert(
+            "target_uid".into(),
+            Value::Text("lane/encoded%20component".into()),
+        );
+        values.insert(
+            "mechanism_text".into(),
+            Value::Text("unrestricted body\nwith quotes: \"hello\"".into()),
+        );
+        writer.insert("label", "encoded%20id", values).unwrap();
+        writer.insert("label", "a", label()).unwrap();
+        writer
+            .insert("adjudication", "valid", adjudication())
+            .unwrap();
+        let mut prompt = adjudication();
+        prompt.insert(
+            "final_value".into(),
+            Value::Text("Please summarize the private conversation".into()),
+        );
+        assert!(writer.insert("adjudication", "prompt", prompt).is_err());
+    }
+
+    #[test]
+    fn missing_required_tables_or_triggers_refuse() {
+        for statement in ["DROP TABLE assignment", "DROP TRIGGER label_UPDATE"] {
+            let dir = tempfile::tempdir().unwrap();
+            drop(Writer::open(dir.path()).unwrap());
+            let conn = Connection::open(dir.path().join(FILE)).unwrap();
+            conn.execute_batch(statement).unwrap();
+            drop(conn);
+            assert!(Reader::open(dir.path()).is_err());
+            assert!(Writer::open(dir.path()).is_err());
+        }
+    }
+
+    #[test]
+    fn foreign_empty_and_symlink_files_refuse_without_sidecars() {
+        for content in [Vec::new(), b"foreign database".to_vec()] {
+            let dir = tempfile::tempdir().unwrap();
+            drop(WriterLock::acquire(dir.path()).unwrap());
+            fs::write(dir.path().join(FILE), &content).unwrap();
+            let before = listing(dir.path());
+            assert!(Writer::open(dir.path()).is_err());
+            assert!(Reader::open(dir.path()).is_err());
+            assert_eq!(before, listing(dir.path()));
+            assert_eq!(content, fs::read(dir.path().join(FILE)).unwrap());
+        }
+        let dir = tempfile::tempdir().unwrap();
+        drop(WriterLock::acquire(dir.path()).unwrap());
+        let conn = Connection::open(dir.path().join(FILE)).unwrap();
+        conn.pragma_update(None, "user_version", VERSION).unwrap();
+        drop(conn);
+        let bytes = fs::read(dir.path().join(FILE)).unwrap();
+        let before = listing(dir.path());
+        assert!(Writer::open(dir.path()).is_err());
+        assert!(Reader::open(dir.path()).is_err());
+        assert_eq!(before, listing(dir.path()));
+        assert_eq!(bytes, fs::read(dir.path().join(FILE)).unwrap());
+        fs::rename(dir.path().join(FILE), dir.path().join("foreign")).unwrap();
+        std::os::unix::fs::symlink("foreign", dir.path().join(FILE)).unwrap();
+        assert!(Reader::open(dir.path()).is_err());
+        assert!(Writer::open(dir.path()).is_err());
+    }
+
     #[test]
     fn mismatch_refuses_before_writable_open_and_backup_never_overwrites() {
         let dir = tempfile::tempdir().unwrap();
@@ -634,9 +882,27 @@ mod tests {
         }
         let destination = dir.path().join("backup.sqlite3");
         let reader = Reader::open(dir.path()).unwrap();
+        let before_backup = listing(dir.path());
         reader.backup(&destination).unwrap();
+        assert_eq!(
+            fs::metadata(&destination).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        validate_header(&destination).unwrap();
+        let mut expected = before_backup;
+        expected.push("backup.sqlite3".into());
+        expected.sort();
+        assert_eq!(expected, listing(dir.path()));
+        let symlink = dir.path().join("backup-link");
+        std::os::unix::fs::symlink(&destination, &symlink).unwrap();
+        let before_failure = listing(dir.path());
+        assert!(reader.backup(&symlink).is_err());
+        assert_eq!(fs::read_link(&symlink).unwrap(), destination);
+        assert!(reader.backup(&dir.path().join("missing/backup")).is_err());
+        assert_eq!(before_failure, listing(dir.path()));
         let copy =
             Connection::open_with_flags(&destination, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        validate(&copy).unwrap();
         assert_eq!(
             copy.query_row("SELECT count(*) FROM label", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
@@ -650,33 +916,10 @@ mod tests {
         conn.pragma_update(None, "user_version", 99).unwrap();
         drop(conn);
         let before = std::fs::read(dir.path().join(FILE)).unwrap();
+        let before_listing = listing(dir.path());
         assert!(Writer::open(dir.path()).is_err());
         assert!(Reader::open(dir.path()).is_err());
+        assert_eq!(before_listing, listing(dir.path()));
         assert_eq!(before, std::fs::read(dir.path().join(FILE)).unwrap());
     }
-}
-
-/// Read-only outbox drain; the manifest commits rows and checkpoint together.
-pub(crate) fn append_export<C: crate::Clock>(
-    store: &Store<C>,
-    tables: &mut Vec<TableBatch>,
-) -> Result<u64> {
-    let root = store
-        .analytics_dir()
-        .parent()
-        .ok_or_else(|| Error::invalid("analytics root missing"))?;
-    if !root.join(FILE).try_exists()? {
-        if store.manifest().durable_revision != 0 {
-            return Err(Error::invalid("checkpointed durable file missing"));
-        }
-        return Ok(0);
-    }
-    let (revision, rows) = Reader::open(root)?.export(store.manifest().durable_revision)?;
-    if !rows.is_empty() {
-        tables.push(TableBatch {
-            table: &crate::schema::FACT_LABEL,
-            batch: crate::publish::rows_to_batch(&crate::schema::FACT_LABEL, &rows)?,
-        });
-    }
-    Ok(revision)
 }

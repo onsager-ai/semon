@@ -630,7 +630,10 @@ checkpoint; this read-only adapter never recreates deleted data or resets custod
   files. Labels are append-only, so `fact_label` isn't filtered by the session
   live map, and labels on lanes or work items need no session at all.
   `semon asi backup PATH [--cache PATH]` copies the file with the SQLite online
-  backup API and refuses an existing destination. No authoring CLI is provided.
+  backup API and refuses an existing file or symlink destination. Its parent must
+  exist. Backup writes inside a private sibling staging directory (0700), sets the
+  finished file to 0600, fsyncs it, and publishes with an atomic no-overwrite hard
+  link. Staging is removed on success or failure. No authoring CLI is provided.
 - **Row identity.** Every durable table has an author-assigned `id TEXT PRIMARY KEY`;
   IDs are nonempty single UID components. Focused view UIDs are `{table}/{id}`.
   `link` additionally has a unique `(from_type, from_id, change_id, method)`,
@@ -651,6 +654,21 @@ checkpoint; this read-only adapter never recreates deleted data or resets custod
   categorical and are not exported in this slice. IDs, references, arrays and
   timestamps are internal; the remaining categorical values are declared in code.
   Every row also has an internal writing revision. Arrays use JSON text.
+  Categorical text uses a shape guard: nonempty, at most 128 bytes, and only
+  `[A-Za-z0-9._:/+@=-]`. This is not a vocabulary check; closed taxonomy membership
+  belongs to the labelling layer. Prompts/sentences belong in body columns, which
+  remain unrestricted. Labelers must have `rule:`, `model:` or `human:` plus a
+  nonempty suffix. Exported target UIDs and row IDs follow the same shape with `%`
+  additionally allowed for encoded UID components; row IDs cannot contain `/`.
+- **Format/refusal.** The SQLite header carries `application_id = 0x53414455`
+  (`SADU`) and `user_version = 1`. Before any SQLite connection, a read-only,
+  no-follow regular-file header read checks the SQLite magic and both stamps.
+  Existing empty, foreign and mismatched files refuse without changing bytes or
+  creating SQLite sidecars. Once open, required tables and insert-only triggers
+  are also checked. A valid WAL-mode file opens SQLite read-only for readers;
+  SQLite may create `-wal`/`-shm` sidecars. A read-only filesystem without existing
+  sidecars cannot be read; the single-owner state directory must be writable.
+  Readers do not use `immutable=1`.
 - **Ownership/API.** The Rust writer takes an explicit table, author-assigned ID
   and typed values. It shares the analytics author lock. Export, rebuild, backup
   and focused view use a separate read-only reader; version 1 mismatches refuse
