@@ -255,6 +255,7 @@ impl<C: Clock> Store<C> {
             Some(path) => read_live_map_file(&analytics.join(path))?,
             None => HashMap::new(),
         };
+        crate::provenance::validate(&analytics, &manifest, &live)?;
         discard_uncommitted(&analytics, manifest.generation)?;
         Ok(Self {
             analytics,
@@ -295,6 +296,7 @@ impl<C: Clock> Store<C> {
             Some(path) => read_live_map_file(&self.analytics.join(path))?,
             None => HashMap::new(),
         };
+        crate::provenance::validate(&self.analytics, &manifest, &live)?;
         self.manifest = manifest;
         self.live = live;
         Ok(())

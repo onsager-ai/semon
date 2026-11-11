@@ -412,7 +412,15 @@ The writer's pure transition table is the authority for chain ownership:
   per session avoids duplicating source vectors in every fact row and lets the
   existing bounded compactor filter dead records while preserving live `_gen`.
   Compaction and delayed retirement use the ordinary immutable-file contract;
-  recovery discards uncommitted provenance files just like fact files.
+  recovery discards uncommitted provenance files just like fact files. Before
+  opening or reloading a writer snapshot, validate every referenced provenance
+  file's size and row count and require exactly one matching record for every
+  live session generation. Validation streams only UID/generation columns, with
+  one batch plus O(live sessions) keys in memory; work is O(referenced provenance
+  rows), including dead rows awaiting compaction, without decoding source vectors.
+  Corruption refuses with preserve/export guidance before recovery deletes files
+  or the writer adopts the snapshot. Historical dead records remain legitimate
+  immutable history until compaction; they never satisfy a live generation binding.
   The record retains the complete admitted source generation and ordered cohort
   (`native_id`, local path, consumed offset and prefix SHA-256), activity generation,
   producer package and parser versions, index incarnation when known, recorded
