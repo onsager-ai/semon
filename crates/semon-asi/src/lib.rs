@@ -7,6 +7,7 @@
 pub mod compact;
 pub mod coverage;
 pub mod durable;
+pub mod egress;
 pub mod error;
 pub mod export;
 pub mod governance;

@@ -444,7 +444,18 @@ The writer's pure transition table is the authority for chain ownership:
   This artifact contains local paths and is local-only: it is absent from
   `schema::TABLES`, generated SQL schema reference, SQL AST allowlist and the query
   worker's allowed file paths. It has no analytics egress serializer. Governed
-  federation requires a separate policy-qualified projection with opaque handles.
+  federation uses the distinct `semon-asi::egress` receiver projection (#593 slice
+  2), described in [the governance API](asi-governance-api.md#pinned-receiver-projection-593-slice-2).
+  It pins and decodes a local snapshot under the shared lock, resolves every retained
+  contributor through explicitly loaded local policy configuration, and builds fresh
+  policy-qualified rows with persistent random opaque source/evidence handles.
+  Receiver plain name/path fields obey D7 and all contributor policies. Coverage
+  permission is required for session policy-version vectors; denied sessions and
+  unreferenced dimension values never enter the output. The handle database lives
+  beside `analytics/`, is local private state, and must be retained for stable
+  handles. Custody export/reset currently covers analytics artifacts, not that
+  separately managed mapping. No network, object protocol, claims/heads, Hub
+  profile, L1 or automatic export is delivered by this slice.
   Explicit operator custody export includes and hashes it, verifies its one-to-one
   live binding, and compares it before guarded reset. Reset removes it with the
   analytics store; coverage continues to read only `fact_session`.

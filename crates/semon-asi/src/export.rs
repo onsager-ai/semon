@@ -229,7 +229,11 @@ fn reset_snapshot_with<F: FnOnce()>(
     })
 }
 
-fn require_namespace_ownership(root: &Path, manifest: &Manifest, namespace: &str) -> Result<()> {
+pub(crate) fn require_namespace_ownership(
+    root: &Path,
+    manifest: &Manifest,
+    namespace: &str,
+) -> Result<()> {
     let Some(live_map) = &manifest.live_map else {
         return Ok(());
     };
@@ -376,7 +380,7 @@ fn cleanup_destination(destination: &Path, created_destination: bool) {
     let _ = fs::remove_file(destination.join(RECEIPT_FILE));
 }
 
-fn open_lock(root: &Path, exclusive: bool) -> Result<File> {
+pub(crate) fn open_lock(root: &Path, exclusive: bool) -> Result<File> {
     require_directory(root, "analytics store")?;
     let path = root.join(LOCK_FILE);
     require_regular_file(&path, "analytics lock")?;
@@ -385,7 +389,7 @@ fn open_lock(root: &Path, exclusive: bool) -> Result<File> {
     Ok(lock)
 }
 
-fn validate_snapshot(root: &Path) -> Result<Manifest> {
+pub(crate) fn validate_snapshot(root: &Path) -> Result<Manifest> {
     require_directory(root, "analytics store")?;
     let analytics = root.join(ANALYTICS_DIR);
     require_directory(&analytics, "analytics directory")?;

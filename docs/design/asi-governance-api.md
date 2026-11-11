@@ -47,6 +47,65 @@ envelope; it omits the authenticated principal. Missing optional fields remain
 withheld, while explicit `null`, unknown values, numeric zero, and empty strings
 remain distinct when their typed field is authorized.
 
+## Pinned receiver projection (#593 slice 2)
+
+`semon-asi::egress` connects the decision library to the local Analytics Store.
+`Snapshot::pin(root, namespace_file, namespace)` takes the existing shared store
+lock, admits real directories and regular contained snapshot files using the
+custody-export rules, reads one manifest/live map and its generation-bound
+provenance, and decodes fresh typed rows before releasing the lock. Unknown tables,
+columns, Arrow metadata and Parquet key/value metadata (except the writer's
+`ARROW:schema`) refuse. Size, row-count, generation-range and live-key consistency
+are checked. Later publications cannot alter the in-memory snapshot. Errors are
+fixed enum messages with no underlying path, denied value or parser message.
+
+The caller explicitly loads an operator-owned local JSON registry with
+`Registry::load(path)`. Format 1 has `format`, `namespace`, and `sources`; `sources`
+maps retained source `native_id` values to `{source, baseline, local}`. `source`
+is the existing governance Source document (classification floor, owner, scope
+and scan evidence); baseline/local are existing strict Policy documents. Its `id`
+is replaced by the opaque local source handle. Policy versions come from
+`PolicyBundle::content_version`, never configuration labels. There is no default
+location, ambient source discovery, Catalog lookup, receiver-supplied policy, or
+fallback grant. The trusted local caller supplies the authenticated Principal and
+exact receiver Scope. Missing configuration refuses the operation; missing,
+empty or duplicate retained contributor identities refuse that session.
+
+`Handles::open(root, namespace)` explicitly creates/opens
+`root/egress-handles.sqlite`. New files have mode 0600 on Unix. SQLite random
+32-byte identifiers map source and evidence/native keys independently, scoped to
+that store and namespace. Keep the mapping for the store lifetime; deleting it
+changes exported handles. Native IDs, log stems and source paths remain private.
+Opaque evidence keys use the schema's UID shapes with a fixed `opaque/receiver`
+prefix; they are handles, not native identity or filesystem authority.
+
+`Snapshot::project` evaluates every retained contributor. Each exported session
+is atomic, including its actually referenced dimensions. Denied nullable fields
+are omitted; authorized null and zero remain distinct. A denied required field,
+invalid value, row-existence/destination denial, missing dimension dependency or
+unknown relation endpoint withholds the session. Parent/root relations add the
+complete source cohort of the referenced session; withholding iterates until no
+accepted relation points at a withheld session. This deliberately applies that
+stricter cohort to the entire related session bundle. Unreferenced dimensions
+never export; shared dimensions are projected separately in each session's cohort.
+`dim_price` is withheld because local facts do not retain exact composite rate-row
+identity; recorded costs and price versions still export. `fact_label` remains
+refused. Coverage permission is separately required for the entire session because
+this contract includes a contributing policy-version vector. No withheld counts,
+versions or denominators enter the receiver envelope. Local diagnostic outcome
+counts have no serializer and must stay local.
+
+`Projection::serialize_receiver` builds fresh JSON with profile
+`receiver_plain_v1`, session rows and opaque source/policy-version vectors. Nothing
+is written automatically; callers own the returned bytes. Typed receiver names
+and paths follow D7 under the intersection and existing credential checks. Source
+paths are never emitted; permitted analytics target/repository paths are distinct
+D7 fields. This profile must not be sent to Hub. Hub tokenization, objects,
+isolated object admission, namespace claims/heads, withdrawals, transport and L1
+remain deferred. This slice exposes a library only; no CLI/default-on behavior.
+Pinning materializes the snapshot in memory and requires a momentarily available
+shared writer lock; streaming/resource-budget admission is follow-up object work.
+
 Provider/model/evidence-class egress requires explicit consent from both policy
 layers for every contributor; matching provider/model entries intersect their
 evidence classes rather than requiring identical whole consent objects. Complete
