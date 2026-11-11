@@ -153,6 +153,8 @@ pub struct Update {
     /// The full current rows of the touched sessions (facts), the new rows (labels) or
     /// the whole table (dimensions). A table without rows may be left out.
     pub tables: Vec<TableBatch>,
+    /// Exactly one local custody record per touched session.
+    pub provenance: BTreeMap<String, crate::provenance::Provenance>,
     /// Sessions recomputed whole in this generation, including those with no rows.
     pub touched_sessions: Vec<String>,
     /// Sessions that no longer exist; their rows become dead.
@@ -341,16 +343,43 @@ impl<C: Clock> Store<C> {
             return Err(Error::invalid("a table appears twice in one update"));
         }
 
+        if touched.len() != update.touched_sessions.len()
+            || update.provenance.len() != touched.len()
+            || update
+                .provenance
+                .keys()
+                .any(|uid| !touched.contains(uid.as_str()))
+        {
+            return Err(Error::invalid(
+                "each touched session requires exactly one provenance record",
+            ));
+        }
+        if update
+            .tables
+            .iter()
+            .any(|item| item.table.name == crate::provenance::TABLE.name)
+        {
+            return Err(Error::invalid(
+                "provenance must use the typed publication contract",
+            ));
+        }
+        let mut tables = update.tables.clone();
+        if !update.provenance.is_empty() {
+            tables.push(TableBatch {
+                table: &crate::provenance::TABLE,
+                batch: crate::provenance::batch(&update.provenance)?,
+            });
+        }
         discard_uncommitted(&self.analytics, self.manifest.generation)?;
         // Validate all batches before writing any file in this generation.
-        for item in &update.tables {
+        for item in &tables {
             with_generation(item.table, &item.batch, 0)?;
         }
         let generation = self.manifest.generation + 1;
         let stamp = generation as i64;
         let mut files = self.manifest.files.clone();
         let mut written = Vec::new();
-        for item in &update.tables {
+        for item in &tables {
             let table = item.table;
             if table.kind == Kind::Dimension {
                 files.retain(|file| file.table != table.name);
@@ -396,7 +425,8 @@ impl<C: Clock> Store<C> {
             .copied()
             .collect();
         for file in &mut files {
-            let session_table = table(&file.table).is_some_and(|t| t.kind == Kind::Session);
+            let session_table = file.table == crate::provenance::TABLE.name
+                || table(&file.table).is_some_and(|t| t.kind == Kind::Session);
             let (low, high) = (file.min_row_gen as i64, file.max_row_gen as i64);
             if file.level == 1 && session_table && dying.range(low..=high).next().is_some() {
                 file.dead = None;
@@ -657,7 +687,10 @@ pub(crate) fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let dirs = TABLES.iter().map(|table| table.name).chain([LIVE_DIR]);
+    let dirs = TABLES
+        .iter()
+        .map(|table| table.name)
+        .chain([LIVE_DIR, crate::provenance::TABLE.name]);
     for dir in dirs {
         let entries = match fs::read_dir(analytics.join(dir)) {
             Ok(entries) => entries,

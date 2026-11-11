@@ -322,6 +322,7 @@ mod tests {
                 table: &FACT_SESSION,
                 batch: sessions(rows),
             }],
+            provenance: crate::testutil::provenance(rows.iter().map(|row| row.session_uid)),
             touched_sessions: rows.iter().map(|row| row.session_uid.to_owned()).collect(),
             versions: targets,
             ..Update::default()

@@ -74,7 +74,7 @@ impl<C: Clock> Store<C> {
         let generation = self.manifest.generation + 1;
         let mut dropped: HashSet<String> = HashSet::new();
         let mut added: Vec<FileEntry> = Vec::new();
-        for table in TABLES {
+        for table in TABLES.iter().copied().chain([&crate::provenance::TABLE]) {
             if table.kind == Kind::Dimension {
                 continue;
             }
@@ -117,9 +117,10 @@ impl<C: Clock> Store<C> {
         let mut changed = false;
         let mut memory = 0u64;
         for file in &mut manifest.files {
-            let session_table = TABLES
-                .iter()
-                .any(|table| table.name == file.table && table.kind == Kind::Session);
+            let session_table = file.table == crate::provenance::TABLE.name
+                || TABLES
+                    .iter()
+                    .any(|table| table.name == file.table && table.kind == Kind::Session);
             if file.level == 1 && session_table && file.dead.is_none() {
                 if changed && memory.saturating_add(file.memory) > policy.max_input_bytes {
                     break;
@@ -684,6 +685,7 @@ mod tests {
                         table: &FACT_STEP,
                         batch,
                     }],
+                    provenance: crate::testutil::provenance(std::iter::once(name.as_str())),
                     touched_sessions: vec![name],
                     ..Update::default()
                 })

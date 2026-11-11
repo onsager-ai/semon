@@ -395,6 +395,7 @@ fn validate_snapshot(root: &Path) -> Result<Manifest> {
         require_regular_file(&root.join(path), "published analytics file")?;
     }
     let _live = read_live_map(root, &manifest)?;
+    crate::provenance::read(root, &manifest)?;
     Ok(manifest)
 }
 

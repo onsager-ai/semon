@@ -11,6 +11,7 @@ pub mod export;
 pub mod governance;
 pub mod input;
 pub mod projection;
+pub mod provenance;
 pub mod publish;
 #[cfg(feature = "query-engine")]
 pub mod query;

@@ -8,6 +8,8 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 /// Version of the pure ASI projection. It is independent of the native Event
 /// Index parser/cache version.
 pub const ANALYTICS_TRANSFORM_VERSION: u32 = 1;
@@ -124,6 +126,7 @@ pub enum SessionChange {
 pub struct AdmittedSession {
     pub session_uid: String,
     pub source_witness: SourceWitness,
+    pub derivation: Derivation,
     pub versions: RecordedVersions,
     pub session: Session,
     pub steps: Vec<Step>,
@@ -135,15 +138,26 @@ pub struct AdmittedSession {
     pub prices: Vec<Price>,
 }
 
+/// Producer evidence recorded in the admitted SQLite snapshot. Unknown derivation
+/// times remain absent; native event timestamps are not computation timestamps.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Derivation {
+    pub activity_generation: String,
+    pub producer_version: String,
+    pub parser_version: Option<u32>,
+    pub index_incarnation: Option<String>,
+    pub computed_at: Option<i64>,
+}
+
 /// Complete source cohort provenance.  Paths deliberately remain local only;
 /// governed export receives a different, policy-qualified projection.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceWitness {
     pub generation: String,
     pub sources: Vec<Source>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Source {
     pub native_id: String,
     pub local_path: String,
@@ -153,7 +167,7 @@ pub struct Source {
 
 /// Per-session recorded versions and conservative coverage.  These are facts
 /// of the admitted generation, not writer-wide refresh targets.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecordedVersions {
     pub transform: u32,
     pub rules: u32,
@@ -162,7 +176,7 @@ pub struct RecordedVersions {
     pub coverage: Coverage,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Coverage {
     pub session_count: u64,
     pub step_count: u64,
@@ -248,7 +262,7 @@ pub struct Model {
     pub provider: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BillingUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,

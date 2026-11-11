@@ -38,6 +38,7 @@ fn paths(root: &Path, manifest: &Manifest) -> Result<Vec<(String, String)>, Fail
     manifest
         .files
         .iter()
+        .filter(|file| TABLES.iter().any(|table| table.name == file.table))
         .map(|file| file.path.as_str())
         .chain(manifest.live_map.as_deref())
         .map(|relative| {

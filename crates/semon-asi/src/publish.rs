@@ -100,6 +100,7 @@ fn update_for_batch<C: Clock>(
 ) -> crate::Result<Update> {
     let mut facts = BTreeMap::<&'static str, Vec<Row>>::new();
     let mut dimensions = BTreeMap::<&'static str, Vec<Row>>::new();
+    let mut provenance = BTreeMap::new();
     let mut touched = BTreeSet::new();
     let mut removed = BTreeSet::new();
     let mut source_missing = BTreeMap::new();
@@ -115,6 +116,15 @@ fn update_for_batch<C: Clock>(
                     return Err(Error::invalid("input admits a session more than once"));
                 }
                 let projected = project(&session)?;
+                provenance.insert(
+                    session.session_uid.clone(),
+                    crate::provenance::Provenance {
+                        source_witness: session.source_witness.clone(),
+                        derivation: session.derivation.clone(),
+                        versions: session.versions.clone(),
+                        projected_at: store.now_ms(),
+                    },
+                );
                 for (name, rows) in projected.tables {
                     let table = crate::schema::table(name).ok_or_else(|| {
                         Error::invalid(format!("unknown projection table {name}"))
@@ -191,6 +201,7 @@ fn update_for_batch<C: Clock>(
     checkpoints.insert(batch.namespace, batch.checkpoint);
     Ok(Update {
         tables,
+        provenance,
         touched_sessions: touched.into_iter().collect(),
         removed_sessions: removed.into_iter().collect(),
         source_missing,
@@ -616,6 +627,7 @@ mod tests {
         AdmittedSession {
             session_uid: uid.clone(),
             source_witness: SourceWitness::default(),
+            derivation: crate::input::Derivation::default(),
             versions: RecordedVersions {
                 transform: 3,
                 rules: 4,
