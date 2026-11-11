@@ -71,6 +71,244 @@ fn durable_backup_cli_copies_and_refuses_existing_destination() {
     );
 }
 
+#[test]
+fn durable_add_cli_file_and_stdin_round_trip_without_echoing_bodies() {
+    let home = fixture::Fixture::new();
+    let cache = home.root.join("state/index.json");
+    let output = home
+        .command(env!("CARGO_BIN_EXE_semon"))
+        .args(["analytics", "materialize", "--all", "--proc-root"])
+        .arg(home.root.join("empty-proc"))
+        .arg("--cache")
+        .arg(&cache)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("values.json");
+    let body = "private author text with spaces and punctuation!";
+    for (table, values) in [
+        ("lane", json!({"title":body})),
+        (
+            "intervention",
+            json!({"hypothesis":body,"guardrails":body,"lever":"review"}),
+        ),
+    ] {
+        std::fs::write(&input, values.to_string()).unwrap();
+        let output = cli(
+            &[
+                "asi",
+                "add",
+                table,
+                "--id",
+                "one",
+                "--values",
+                input.to_str().unwrap(),
+            ],
+            cache.clone(),
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&output.stdout).unwrap()["id"],
+            "one"
+        );
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(body));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains(body));
+        let output = cli(&["query", "view", &format!("{table}/one")], cache.clone());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains(body));
+    }
+    let mut child = Command::new(env!("CARGO_BIN_EXE_semon"))
+        .args(["asi", "add", "lane", "--id", "stdin", "--values", "-"])
+        .args(cli_args(cache.clone()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(json!({"title":body}).to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert!(!String::from_utf8_lossy(&output.stdout).contains(body));
+    std::fs::write(&input, json!({"title":body}).to_string()).unwrap();
+    let output = cli(
+        &[
+            "asi",
+            "add",
+            "lane",
+            "--id",
+            "one",
+            "--values",
+            input.to_str().unwrap(),
+        ],
+        cache.clone(),
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("UNIQUE"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(body));
+    let _lock = semon_asi::WriterLock::acquire(&home.root.join("state/analytics-store")).unwrap();
+    let output = cli(
+        &[
+            "asi",
+            "add",
+            "lane",
+            "--id",
+            "locked",
+            "--values",
+            input.to_str().unwrap(),
+        ],
+        cache,
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("writer busy"));
+}
+
+#[test]
+fn durable_add_label_is_insert_only_and_keeps_writer_validation() {
+    let dir = store();
+    let cache = dir.path().join("state/index.json");
+    let input = dir.path().join("label.json");
+    let body = "private label mechanism text";
+    let mut values = json!({"target_type":"lane","target_uid":"lane/one","field":"quality","value":"good","mechanism_text":body,"evidence_step_ids":"[]","labeler":"human:author","taxonomy_version":1,"created_at":1});
+    std::fs::write(&input, values.to_string()).unwrap();
+    let args = [
+        "asi",
+        "add",
+        "label",
+        "--id",
+        "label-one",
+        "--values",
+        input.to_str().unwrap(),
+    ];
+    assert!(cli(&args, cache.clone()).status.success());
+    let output = cli(&args, cache.clone());
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("UNIQUE"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(body));
+    values["value"] = json!(body);
+    std::fs::write(&input, values.to_string()).unwrap();
+    let output = cli(&args, cache);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("identifier shape"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(body));
+}
+
+#[test]
+fn durable_add_mcp_uses_local_writer_and_refuses_paths_and_duplicates() {
+    let dir = store();
+    let mut server = Server::start(dir.path().join("state/index.json"));
+    let body = "private MCP hypothesis body";
+    let args = json!({"table":"intervention","id":"mcp","values":{"hypothesis":body}});
+    let request = |id, arguments| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"asi_add","arguments":arguments}});
+    let reply = server.request(request(1, args.clone()));
+    let (value, failed) = content(&reply);
+    assert!(!failed, "{reply}");
+    assert_eq!(value, json!({"id":"mcp","revision":1}));
+    assert!(!reply.to_string().contains(body));
+    let reply = server.request(request(2, args.clone()));
+    let (error, failed) = content(&reply);
+    assert!(failed);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("UNIQUE")
+    );
+    assert!(!reply.to_string().contains(body));
+    let mut path_args = args.clone();
+    path_args["cache"] = json!(dir.path().join("elsewhere"));
+    let reply = server.request(request(3, path_args));
+    assert!(content(&reply).1);
+    assert!(!dir.path().join("elsewhere").exists());
+    let _lock = semon_asi::WriterLock::acquire(&dir.path().join("state/analytics-store")).unwrap();
+    let reply = server.request(request(4, args));
+    let (error, failed) = content(&reply);
+    assert!(failed);
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("writer busy")
+    );
+    assert!(!reply.to_string().contains(body));
+}
+
+#[test]
+fn durable_add_refuses_oversized_file_stdin_and_mcp_values() {
+    let dir = store();
+    let cache = dir.path().join("state/index.json");
+    let marker = "private oversized prose";
+    let values = json!({"title":marker.repeat(16_384)});
+    let bytes = serde_json::to_vec(&values).unwrap();
+    let input = dir.path().join("oversized.json");
+    std::fs::write(&input, &bytes).unwrap();
+    let output = cli(
+        &[
+            "asi",
+            "add",
+            "lane",
+            "--id",
+            "large",
+            "--values",
+            input.to_str().unwrap(),
+        ],
+        cache.clone(),
+    );
+    let check = |output: std::process::Output| {
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("durable values exceed the 256 KiB authoring limit"));
+        assert!(!error.contains(marker));
+    };
+    check(output);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_semon"))
+        .args(["asi", "add", "lane", "--id", "large", "--values", "-"])
+        .args(cli_args(cache.clone()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The bounded reader may close stdin before the entire payload is written.
+    let write = child.stdin.take().unwrap().write_all(&bytes);
+    if let Err(error) = write {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+    check(child.wait_with_output().unwrap());
+    let mut server = Server::start(cache);
+    let reply = server.request(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"asi_add","arguments":{"table":"lane","id":"large","values":values}}}));
+    let (error, failed) = content(&reply);
+    assert!(failed);
+    assert_eq!(
+        error["error"]["message"],
+        "durable values exceed the 256 KiB authoring limit"
+    );
+    assert!(!reply.to_string().contains(marker));
+    assert!(
+        !dir.path()
+            .join("state/analytics-store/asi-durable.sqlite3")
+            .exists()
+    );
+}
+
 fn cli_args(cache: PathBuf) -> Vec<String> {
     ["--cache".to_owned(), cache.to_string_lossy().into_owned()]
         .into_iter()
@@ -517,6 +755,10 @@ fn mcp_advertises_asi_tools_and_serves_schema_resource() {
     assert!(names.contains(&"schema"));
     assert!(names.contains(&"search"));
     assert!(names.contains(&"view"));
+    assert!(names.contains(&"asi_add"));
+    let add = tools.iter().find(|tool| tool["name"] == "asi_add").unwrap();
+    assert_eq!(add["inputSchema"]["additionalProperties"], false);
+    assert_eq!(add["annotations"]["readOnlyHint"], false);
     for name in ["search", "view"] {
         let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
         assert_eq!(tool["inputSchema"]["additionalProperties"], false);

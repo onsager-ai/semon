@@ -24,6 +24,13 @@ outbound-only read verbs, with no control, runtime, SSH or Encrypted Relay.
 There is no network SQL endpoint. These tools replace the paused
 `find`. The public dialect is DuckDB SQL.
 
+Durable authoring is separate from these four read tools: the local stdio MCP
+extension exposes `asi_add` with `table`, `id`, and a typed `values` object.
+It shares the CLI's `semon asi add` Writer path, fixes the destination to the
+process's configured cache, and returns only `id`/`revision`. It is not exposed
+through Viewer or remote read surfaces. See [durable state](asi-store.md#durable-state)
+for input types, validation and the author lock.
+
 ## `sql`
 
 ### Sandbox (per request)
@@ -401,6 +408,8 @@ records; cancellation/source changes during a read publish no invalid partial pa
 - Results expose admitted heads and freshness/version coverage. Multi-source
   policy intersections never disclose restricted contributions or label a
   fragment complete; SQL never fetches bodies.
-- Current local MCP: `tools/list` has `sql`, `schema`, `search` and `view`, and no
-  `find`. All four reject unknown input properties.
+- Current local MCP: `tools/list` has `sql`, `schema`, `search`, `view` and
+  `asi_add`, and no `find`. All five reject unknown top-level input properties;
+  only `asi_add` advertises `readOnlyHint: false`. Its `values` object is a typed
+  column map, capped at 256 KiB serialized JSON.
 - Performance budgets from [ASI store](asi-store.md#performance-from-day-1).

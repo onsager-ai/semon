@@ -633,7 +633,25 @@ checkpoint; this read-only adapter never recreates deleted data or resets custod
   backup API and refuses an existing file or symlink destination. Its parent must
   exist. Backup writes inside a private sibling staging directory (0700), sets the
   finished file to 0600, fsyncs it, and publishes with an atomic no-overwrite hard
-  link. Staging is removed on success or failure. No authoring CLI is provided.
+  link. Staging is removed on success or failure.
+- **Authoring.** `semon asi add TABLE --id ID --values FILE|- [--cache PATH]`
+  inserts one row in any of the nine durable tables. `--values` reads one JSON
+  object from a file or stdin (`-`), with column names as keys and string, number
+  or null values. Authoring values are limited to 256 KiB: CLI input bytes and
+  the serialized MCP `values` object are checked before writing; oversized input
+  returns a fixed error without supplied text. Arrays are JSON-encoded strings, integers are signed 64-bit,
+  and timestamps are UTC milliseconds. The Writer validates columns, types,
+  categorical shapes, UIDs and constraints; callers cannot supply `id` or
+  `revision` inside values. Reusing an ID refuses rather than updating a row.
+  Success prints only a JSON object containing `id` and `revision`; errors never
+  echo supplied values. Body text is accepted through the same file/stdin object
+  and remains author-local.
+  With `asi-query`, the local stdio MCP extension offers `asi_add` with the same
+  `table`, `id`, and `values` object. Its destination is fixed by the MCP process's
+  configured cache; tool arguments cannot select paths. Both transports acquire
+  the same analytics author lock and refuse immediately when it is held. MCP
+  stdio runs as the local author; no Viewer write route or receiver authoring
+  endpoint is provided. Analytics materialization remains an explicit next step.
 - **Row identity.** Every durable table has an author-assigned `id TEXT PRIMARY KEY`;
   IDs are nonempty single UID components. Focused view UIDs are `{table}/{id}`.
   `link` additionally has a unique `(from_type, from_id, change_id, method)`,

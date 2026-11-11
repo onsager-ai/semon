@@ -635,6 +635,13 @@ fn check_schema(tool: &str, schema: &Value) {
             })
         };
         if kind == "object" {
+            if tool == "asi_add" && name == "values" {
+                assert_eq!(
+                    property["additionalProperties"],
+                    json!({"type":["string","number","null"]})
+                );
+                continue;
+            }
             assert!(property["properties"].is_object());
             assert!(property["required"].is_array());
             assert_eq!(property["additionalProperties"], false);
@@ -729,6 +736,7 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         "search",
         "view",
         "schema",
+        "asi_add",
     ];
     #[cfg(not(feature = "asi-query"))]
     let expected_tools = [
@@ -746,7 +754,11 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
                 .as_str()
                 .is_some_and(|text| !text.is_empty())
         );
-        assert_eq!(tool["annotations"]["readOnlyHint"], true, "{name}");
+        assert_eq!(
+            tool["annotations"]["readOnlyHint"],
+            name != "asi_add",
+            "{name}"
+        );
         check_schema(name, &tool["inputSchema"]);
     }
     // Every active tool answers as `semon query` does.

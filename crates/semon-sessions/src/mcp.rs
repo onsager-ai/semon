@@ -18,8 +18,13 @@ use crate::query::{Query, query_tools};
 /// protocol framing with native-session tools without coupling this crate to an
 /// analytics engine.
 pub trait McpExtension {
-    /// Additional read-only tools to advertise beside the native session tools.
+    /// Additional tools to advertise beside the native session tools.
     fn tools(&self) -> Vec<crate::query::QueryTool>;
+
+    /// Whether an extension-owned tool only reads state.
+    fn read_only(&self, _name: &str) -> bool {
+        true
+    }
 
     /// Handles an additional tool, returning `None` when it does not own `name`.
     /// Errors are already public error envelopes.
@@ -187,7 +192,7 @@ fn tools_with_extension(extension: &impl McpExtension) -> Vec<Value> {
                 "name": tool.name,
                 "description": tool.description,
                 "inputSchema": tool.input_schema,
-                "annotations": {"readOnlyHint": true, "openWorldHint": false},
+                "annotations": {"readOnlyHint": extension.read_only(tool.name), "openWorldHint": false},
             })
         })
         .collect()
