@@ -1,10 +1,9 @@
 # Online body channel (#594)
 
-Status: coordination note reconciled with the #593 contract in PR #634.
+Status: reconciled with the current #593 enrollment contract on main (#634/#639).
 [ASI federation](asi-federation.md) remains binding, including D2/D3 and the
 #630 cache/#631 ACL/audit boundaries. [Enrollment](asi-enrollment.md) owns shared
-transport infrastructure; this note owns #594 behavior. #568 owns receiver Viewer
-integration. Design agreement does not establish runtime delivery.
+infrastructure; #568 owns receiver Viewer integration. Agreement is not runtime delivery.
 
 ## Scope and shared transport
 
@@ -21,9 +20,15 @@ port, redirects or alternate rendezvous endpoint. HTTP/1.1 reuses the blocking
 receiver; HTTP/2 multiplexing and WebSocket upgrades are unnecessary for this slice.
 Thread-per-connection is interim; #636 plans an event-driven listener.
 
-**Agreed boundary — #593 slice 4a, in `crates/semon-push`:** PR #634 is the target
-contract for enrollment schema, kind-aware credential custody, rotation/revocation,
-TLS and shared-listener dispatch. Consume its logical interface:
+**Agreed boundary — #593 slice 4a, in `crates/semon-push`:** the current enrollment
+contract owns provisioning, custody, automatic renewal, revocation, TLS and listener
+dispatch. The [four-action ceremony](asi-enrollment.md#accepted-four-action-ceremony)
+generates enrollment, credentials, issuer keys, certificates, grants and audit
+directories; see [custody outputs](asi-enrollment.md#origin-configuration-and-custody).
+The [state machine](asi-enrollment.md#pairing-bootstrap-and-provisioning-state)
+progresses pending → confirmed → approved → active; [P1 source consent](asi-enrollment.md#source-consent-and-p1)
+is persisted separately. #594 adds no second enrollment or operator step and consumes
+the single logical interface shared with publication:
 
 ```text
 authenticated_enrollment(conn, request_credential, required_kind)
@@ -40,8 +45,8 @@ re-issue message, never deleted; the owning contract defines replacement custody
 
 Use the single [capacity table](asi-enrollment.md#capacity-and-admission), including
 its separate capped poll class and closed-reason 503 refusals instead of excess
-queuing. Those poll/queue caps are agreed interim limits; do not maintain another
-table here. #594 confirms 20-second polls and 16 KiB control envelopes, owns read/
+queuing. Those caps are agreed interim limits. #594 confirms 20-second polls and
+16 KiB control envelopes, owns read/
 lease deadlines, and consumes 4a admission/revocation hooks. Non-poll reservation
 split remains open. Body frames never enter analytics objects or reconnect spools.
 
@@ -50,10 +55,10 @@ split remains open. Body frames never enter analytics objects or reconnect spool
 **Decision — receiver-issued Ed25519 assertions:** receiver-as-issuer is the
 default, explicitly trusting its operator to impersonate users. Independent issuer
 or local-only mode remains available when that trust is unacceptable. See
-[enrollment provisioning](asi-enrollment.md#origin-configuration-and-out-of-band-enrollment)
-for `semon receive enroll`, issuer/key ID/public-key pins and the at-most-two-key
-rotation overlap. 4a owns that state/custody; #594 owns encoding/sign/verify,
-implemented as `body_assertion` in open PR #635.
+[enrollment custody](asi-enrollment.md#origin-configuration-and-custody) and
+[renewal/revocation](asi-enrollment.md#rotation-and-revocation) for generated issuer
+pins and bounded rotation. 4a owns that state/custody; #594 owns encoding/sign/verify,
+implemented as `body_assertion` in merged PR #635 (`db8acabca`).
 
 Assertions use fixed versioned signing encoding and bind issuer/key ID, issued-at,
 expiry (≤60 seconds), audience (origin incarnation + namespace), claim epoch,
@@ -87,14 +92,13 @@ source witness. A changed vector refuses or requires fresh audited authorization
 the same rule covers `authorization_only`. No receiver paths or worker index paths
 supply authority.
 
-**Decision — dedicated origin audit:** PR #635 supplies the origin audit store.
-Use separately configured owned 0700 `body-audit/`, 0600 `audit.lock` and
-`attempts.jsonl`, closed request/principal/source/generation/range/purpose/decision/
-destination/version/time metadata and opaque enrollment/export-view bindings.
-Fsync events and initial directory creation; exclusive writer, ≤64 MiB ceiling,
-completion reservations and at most 16 bounded receipts. No bodies, queries, paths,
-credentials or free-text errors. Torn/full/unwritable audits refuse; no automatic
-repair, pruning or deletion.
+**Origin audit — delivered in #635:** consume the ceremony-generated separate
+0700 directory outside native roots/cache; no fixed basename. Files are 0600
+`audit.lock` and `authorizations.jsonl`. Closed metadata binds request, principal,
+source/generation/range, purpose/decision/destination, versions and opaque enrollment/
+export-view IDs. Fsync events/creation; exclusive writer, ≤64 MiB, reserved completion
+and ≤16 receipts. No bodies, queries, paths, credentials or free-text errors.
+Torn/full/unwritable audits refuse; no automatic repair, pruning or deletion.
 
 **Receiver:** caller-authenticated principal (login outside this note) → ACL before
 discovery, uniform denials → `begin_attempt` → origin round trip → verify response →
@@ -135,9 +139,9 @@ discard late responses. No body retry spool; federation's no-store/logging rules
 
 Each PR carries `Part of #594`:
 
-1. **PR #635, already open:** `body_assertion`, origin audit store and receiver
-   `authorize` primitive. Later slices target #634 interfaces; no channel wire types
-   or routes before #634 merges.
+1. **Delivered — PR #635 (`db8acabca`):** `body_assertion`, origin audit store and
+   receiver `authorize` primitive. Later slices target the current enrollment
+   interfaces; #634 is merged, but working 4a hooks remain an integration dependency.
 2. Poll/response endpoints, bounded frames/queues and ACL/audit/admission/cache wiring
    through 4a hooks. No release before the origin path exists.
 3. Origin loop, resolve/page adapter, export-view witness, exact mappings or explicit
