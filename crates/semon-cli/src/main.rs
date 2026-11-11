@@ -31,6 +31,8 @@ enum Command {
     AsiInputError(serde_json::Value),
     Materialize(MaterializeArgs),
     Coverage(CoverageArgs),
+    Export(ExportArgs),
+    Reset(ResetArgs),
     Mcp(HomeArgs),
     ArchivePrune {
         cache: PathBuf,
@@ -131,6 +133,19 @@ struct CoverageArgs {
     json: bool,
 }
 
+struct ExportArgs {
+    destination: PathBuf,
+    cache: PathBuf,
+}
+
+struct ResetArgs {
+    cache: PathBuf,
+    confirm: String,
+    verified_export: Option<PathBuf>,
+    without_export: bool,
+    new_namespace: bool,
+}
+
 struct PushArgs {
     options: semon_push::PushOptions,
     watch: bool,
@@ -210,6 +225,8 @@ fn parse_analytics_args(mut arguments: impl Iterator<Item = String>) -> Result<C
     match arguments.next().as_deref() {
         Some("materialize") => parse_materialize_args(arguments).map(Command::Materialize),
         Some("coverage") => parse_coverage_args(arguments).map(Command::Coverage),
+        Some("export") => parse_export_args(arguments).map(Command::Export),
+        Some("reset") => parse_reset_args(arguments).map(Command::Reset),
         _ => Err(analytics_usage()),
     }
 }
@@ -284,6 +301,67 @@ fn parse_coverage_args(
         }
     }
     Ok(CoverageArgs { cache, json })
+}
+
+fn parse_export_args(mut arguments: impl Iterator<Item = String>) -> Result<ExportArgs, String> {
+    let destination = arguments
+        .next()
+        .ok_or("analytics export requires an empty destination directory")?
+        .into();
+    let mut cache = semon_sessions::Options::default().cache;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--cache" => cache = arguments.next().ok_or("--cache requires a value")?.into(),
+            "-h" | "--help" => return Err(analytics_usage()),
+            _ => return Err(format!("unknown analytics export argument: {argument}")),
+        }
+    }
+    Ok(ExportArgs { destination, cache })
+}
+
+fn parse_reset_args(mut arguments: impl Iterator<Item = String>) -> Result<ResetArgs, String> {
+    let mut cache = semon_sessions::Options::default().cache;
+    let mut confirm = None;
+    let mut verified_export = None;
+    let mut without_export = false;
+    let mut new_namespace = false;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--cache" => cache = arguments.next().ok_or("--cache requires a value")?.into(),
+            "--confirm" => {
+                confirm = Some(
+                    arguments
+                        .next()
+                        .ok_or("--confirm requires a namespace value")?,
+                )
+            }
+            "--verified-export" => {
+                verified_export = Some(
+                    arguments
+                        .next()
+                        .ok_or("--verified-export requires a directory")?
+                        .into(),
+                )
+            }
+            "--without-export" => without_export = true,
+            "--new-namespace" => new_namespace = true,
+            "-h" | "--help" => return Err(analytics_usage()),
+            _ => return Err(format!("unknown analytics reset argument: {argument}")),
+        }
+    }
+    if verified_export.is_some() == without_export {
+        return Err(
+            "analytics reset requires exactly one of --verified-export DIR or --without-export"
+                .into(),
+        );
+    }
+    Ok(ResetArgs {
+        cache,
+        confirm: confirm.ok_or("analytics reset requires --confirm NAMESPACE")?,
+        verified_export,
+        without_export,
+        new_namespace,
+    })
 }
 
 fn parse_sessions_args(
@@ -806,6 +884,8 @@ fn run(command: Command) -> Result<(), String> {
     // read-only report over an already published ASI snapshot.
     let command = match command {
         Command::Coverage(args) => return run_coverage(args),
+        Command::Export(args) => return run_export(args),
+        Command::Reset(args) => return run_reset(args),
         command => command,
     };
     semon_sessions::pricing::initialize_default();
@@ -835,7 +915,9 @@ fn run(command: Command) -> Result<(), String> {
             Err("query arguments are invalid".into())
         }
         Command::Materialize(args) => run_materialize(args),
-        Command::Coverage(_) => unreachable!("coverage returns before pricing initialization"),
+        Command::Coverage(_) | Command::Export(_) | Command::Reset(_) => {
+            unreachable!("analytics command returns before pricing initialization")
+        }
         Command::Mcp(home) => run_mcp(&home),
         Command::ArchivePrune {
             cache,
@@ -855,6 +937,108 @@ fn run(command: Command) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn run_export(args: ExportArgs) -> Result<(), String> {
+    let (index_path, store_root, state_dir, namespace) =
+        analytics_store_paths(&args.cache, "export")?;
+    admit_coverage_store(&index_path, &store_root)?;
+    let summary = semon_asi::export_snapshot(
+        &store_root,
+        &state_dir.join(semon_sessions::ANALYTICS_NAMESPACE_FILE),
+        &namespace,
+        &args.destination,
+    )
+    .map_err(|error| match error {
+        semon_asi::Error::WriterBusy => {
+            "analytics export: writer busy; stop `analytics materialize` and retry".to_owned()
+        }
+        error => format!("analytics export: {error}"),
+    })?;
+    println!(
+        "analytics exported: path={} generation={} sessions={} files={}",
+        args.destination.display(),
+        summary.generation,
+        summary.sessions,
+        summary.files
+    );
+    Ok(())
+}
+
+fn run_reset(args: ResetArgs) -> Result<(), String> {
+    let (index_path, store_root, state_dir, namespace) =
+        analytics_store_paths(&args.cache, "reset")?;
+    admit_coverage_store(&index_path, &store_root)?;
+    if args.confirm != namespace {
+        return Err("analytics reset: --confirm must exactly match the analytics namespace".into());
+    }
+    let expected_generation = if let Some(bundle) = &args.verified_export {
+        let receipt = semon_asi::verify_export(bundle)
+            .map_err(|error| format!("analytics reset: verified export: {error}"))?;
+        let manifest = semon_asi::read_manifest(&store_root)
+            .map_err(|error| format!("analytics reset: {error}"))?
+            .ok_or_else(|| format!("no analytics store at {}", store_root.display()))?;
+        if receipt.source_namespace != namespace
+            || receipt.manifest_generation != manifest.generation
+        {
+            return Err("analytics reset: verified export does not match the current namespace and manifest generation".into());
+        }
+        receipt.manifest_generation
+    } else {
+        semon_asi::read_manifest(&store_root)
+            .map_err(|error| format!("analytics reset: {error}"))?
+            .ok_or_else(|| format!("no analytics store at {}", store_root.display()))?
+            .generation
+    };
+    let summary =
+        semon_asi::reset_snapshot(&store_root, expected_generation).map_err(
+            |error| match error {
+                semon_asi::Error::WriterBusy => {
+                    "analytics reset: writer busy; stop `analytics materialize` and retry"
+                        .to_owned()
+                }
+                error => format!("analytics reset: {error}"),
+            },
+        )?;
+    if args.new_namespace {
+        std::fs::remove_file(state_dir.join(semon_sessions::ANALYTICS_NAMESPACE_FILE)).map_err(
+            |error| format!("analytics reset: cannot remove analytics namespace: {error}"),
+        )?;
+    }
+    println!(
+        "analytics reset: generation={} removed={} namespace={}",
+        summary.generation,
+        summary.removed.join(","),
+        if args.new_namespace {
+            "removed"
+        } else {
+            "kept"
+        }
+    );
+    Ok(())
+}
+
+fn analytics_store_paths(
+    cache: &Path,
+    operation: &str,
+) -> Result<(PathBuf, PathBuf, PathBuf, String), String> {
+    let index_path = semon_sessions::analytics_index_path(cache);
+    let state_dir = index_path.parent().ok_or_else(|| {
+        format!(
+            "analytics {operation} requires an Event Index path with a parent: {}",
+            index_path.display()
+        )
+    })?;
+    let store_root = semon_sessions::analytics_store_root(&index_path).ok_or_else(|| {
+        format!(
+            "analytics {operation} requires an Event Index path with a parent: {}",
+            index_path.display()
+        )
+    })?;
+    let namespace = semon_sessions::read_analytics_namespace(state_dir)
+        .map_err(|error| format!("analytics {operation}: {error}"))?
+        .ok_or_else(|| format!("no analytics store at {}", store_root.display()))?;
+    Ok((index_path, store_root, state_dir.to_path_buf(), namespace))
 }
 
 fn run_coverage(args: CoverageArgs) -> Result<(), String> {
