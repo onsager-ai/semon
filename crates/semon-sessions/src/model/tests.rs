@@ -9759,14 +9759,18 @@ fn replay(seed: u64) {
 // Each seed owns a separate synthetic home and persistent caches. Expose the
 // independent histories to libtest so one serial 64-seed case does not keep
 // the suite running after the other tests have finished. Keep every seed and
-// every append/restart/fresh-build comparison in replay unchanged.
+// every append/restart/fresh-build comparison in replay unchanged. PR CI runs
+// the fixed first 12 seeds for broad mutation coverage at bounded cost; main
+// and dispatch run all 64. Unset or unknown tiers retain the full coverage.
 mod append_resumed_build_matches_fresh_build_for_seeded_sequences {
     macro_rules! seeds {
         ($($name:ident: $seed:literal),+ $(,)?) => {
             $(
                 #[test]
                 fn $name() {
-                    super::replay($seed);
+                    if $seed < 12 || std::env::var("SEMON_EQUIV_SEEDS").as_deref() != Ok("pr") {
+                        super::replay($seed);
+                    }
                 }
             )+
         };
