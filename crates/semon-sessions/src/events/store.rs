@@ -3519,8 +3519,22 @@ impl SqliteStore {
                     } else {
                         None
                     };
+                    let mut body_owners = BTreeMap::new();
+                    for row in rows {
+                        if let Some(native) = row.owner_native_id() {
+                            *body_owners
+                                .entry((row.harness.as_str(), native))
+                                .or_insert(0usize) += 1;
+                        }
+                    }
                     for (position, (row, metadata)) in rows.iter().zip(&metadata).enumerate() {
-                        bodies::bind_owner(&transaction, row).map_err(failure)?;
+                        // A shared native ID represents ambiguity between physical
+                        // owners, not evidence that their bodies share an identity.
+                        if row.owner_native_id().is_some_and(|native| {
+                            body_owners.get(&(row.harness.as_str(), native)) == Some(&1)
+                        }) {
+                            bodies::bind_owner(&transaction, row).map_err(failure)?;
+                        }
                         // The first selected row may be unchanged. These
                         // intervals are nested in catalog_metadata, not
                         // additive publication totals.

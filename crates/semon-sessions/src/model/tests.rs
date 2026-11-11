@@ -11063,6 +11063,17 @@ fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources()
         .query_map(["root"], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
     assert_eq!(children, ["child"]);
 
+    let body_owners = || {
+        connection
+            .prepare("SELECT DISTINCT session_uid FROM body ORDER BY session_uid")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let original_body_owners = body_owners();
+    assert_eq!(original_body_owners, ["claude/child", "claude/root"]);
     let (generation, mut rows) = read_catalog(&home);
     // The index must represent ambiguity even if a future adapter observes
     // one native identifier at several separate physical session owners.
@@ -11077,6 +11088,7 @@ fn catalog_native_and_parent_indexes_keep_ambiguity_and_remove_retired_sources()
     let owners: Vec<String> = connection.prepare("SELECT DISTINCT session_key FROM session_catalog_sources WHERE harness=?1 AND native_id=?2 ORDER BY session_key").unwrap()
         .query_map(["claude", "ambiguous-native"], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
     assert_eq!(owners, ["child", "root"]);
+    assert_eq!(body_owners(), original_body_owners);
     let wrong_harness: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM session_catalog_sources WHERE harness=?1 AND native_id=?2",
