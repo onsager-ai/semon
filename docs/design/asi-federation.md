@@ -407,6 +407,26 @@ already copied by an operator/client. Configuration must make excluded backups a
 key custody reviewable. A restart sweeps expired/invalid entries before serving;
 an untrustworthy time/TTL state invalidates the cache, not the facts.
 
+### Initial cache library boundary
+
+The receiver cache library lives in `semon-push`, without listener or Viewer
+wiring. Its initial custody backend is Unix-only: an explicit operator file holds
+exactly 32 random key bytes, must be a regular 0600 file opened with `O_NOFOLLOW`,
+and must live outside the dedicated 0700 cache directory and its excluded backups.
+ChaCha20-Poly1305 wraps independent per-entry keys and authenticates envelope
+metadata; explicit rotation invalidates entries. The 256 KiB response ceiling
+includes the serialized envelope metadata. Cache accounting includes encrypted
+records, staging and reserved clock-state replacement space; each cohort member
+is charged the full entry size. Clock regression tolerance is two seconds, using
+a persisted authenticated high-water mark; reads never extend expiry. LRU is
+maintained in process; restart orders surviving entries by fetch time.
+
+A lookup consumes an exact-key `ReadAdmission` assertion from the future trusted
+channel/ACL layer, including current narrower origin limits. Its constructor does
+not authenticate anyone: that layer must first complete online origin
+authorization/audit and receiver authorization/read-attempt audit. This library
+alone does not establish D2 or expose a remote body read.
+
 `stream-through` prohibits disk persistence and uses bounded request-owned memory
 only, with `no-store` responses and no retry spool. It does not mean zero copies:
 origin, receiver TLS endpoint and browser see plaintext. Restricted sources default
