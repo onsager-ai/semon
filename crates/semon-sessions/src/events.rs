@@ -1,10 +1,8 @@
 //! The per-file event index behind the session model.
 //!
-//! Every event is metadata and byte offsets only: its kind, line offset,
-//! block, time and the ids that join it to other files. It never holds
-//! message text, briefs, tool input or output, or answers (risk:secret).
-//! The model reads text back from the source line by offset and keeps it in
-//! memory only.
+//! Events remain metadata and byte offsets only. The separate origin-local
+//! body projection captures new text during parsing for transactional FTS ingest;
+//! ordinary event/model reads never load persisted body text.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -333,10 +331,12 @@ impl DirtyRows {
     }
 }
 
-/// One file's event index and the facts the model needs about it. Metadata
-/// only (risk:secret).
+/// One file's event metadata and model facts, plus transient new body text
+/// awaiting the same source transaction. Persisted body reads are separate.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct FileIndex {
+    #[serde(skip)]
+    pub(crate) bodies: store::bodies::Batch,
     #[serde(skip)]
     pub(crate) dirty_rows: Option<DirtyRows>,
     /// Only this parse batch; durable facts and identities stay in the Event Index.
@@ -2928,6 +2928,13 @@ impl EventCache {
         }
         for (path, _, _) in files {
             self.unpersisted.remove(&path);
+            if let Some(index) = self
+                .files
+                .get_mut(&path)
+                .and_then(|file| file.index.as_mut())
+            {
+                Arc::make_mut(index).bodies.checkpoint();
+            }
         }
         Ok(())
     }
@@ -3064,6 +3071,7 @@ pub(crate) fn scan_archive(
         }
         let harness = native.root.as_str();
         let mut index = FileIndex::default();
+        index.bodies.begin(&path, harness);
         if harness == "codex" {
             index.native_usage_observations = Some(Vec::new());
             let mut line = Vec::new();
@@ -3121,6 +3129,7 @@ pub(crate) fn scan_archive(
         }
         if cache.store.is_some() && !cache.unpersisted.contains(&key) {
             store::native_usage::checkpoint(&mut index);
+            index.bodies.checkpoint();
             if let Some(store) = cache.store.as_ref()
                 && let Some((stored, metadata)) = store
                     .load_tree(&key, &native.ledger.stat)
@@ -3329,6 +3338,7 @@ pub(crate) fn scan_file(
         let clone_started = Instant::now();
         let shared = Arc::strong_count(&index) > 1;
         let writable = Arc::make_mut(&mut index);
+        writable.bodies.begin(path, harness);
         if !append && harness == "codex" {
             writable.native_usage_observations = Some(Vec::new());
         }
@@ -3623,6 +3633,7 @@ pub(crate) fn scan_file(
         }
         if cache.store.is_some() && !cache.unpersisted.contains(&key) {
             store::native_usage::checkpoint(Arc::make_mut(&mut index));
+            Arc::make_mut(&mut index).bodies.checkpoint();
             if let Some(store) = cache.store.as_ref()
                 && let Some((stored, metadata)) = store
                     .load_tree(&key, &ledger.stat)
@@ -3762,6 +3773,7 @@ fn parse(
                 } else {
                     activity(index, record_time(&record));
                 }
+                index.bodies.capture(harness, &record, record_ordinal)?;
                 session_activity::classify::capture(index, harness, &record, line_offset, &line);
                 if let Some(ordinal) = record_ordinal {
                     index.capture_record_identity(&record, line_offset, ordinal, before_signals);

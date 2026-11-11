@@ -17,6 +17,7 @@ use serde_json::Value;
 mod analytics;
 mod analytics_namespace;
 pub mod analytics_writer;
+pub mod body_query;
 pub use semon_asi::InputBudget;
 mod causal_trace;
 mod origin_projection;

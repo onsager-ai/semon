@@ -19,9 +19,10 @@ Control delivery, managed runtime and SSH are also retired, with their code and
 active entry points removed. Local collection, non-SSH Push/receive, native
 identity and lineage, passive questions and approvals from logs, archive and
 unarchive, enrollment, authorization, export, and passive runtime observation
-remain supported. ASI SQL and schema queries are available; full-text search
-follows in #567. Retirement does not delete user data, credentials, history or installed
-services. See the [session foundation contract](docs/design/session-foundation-retirement.md#collection-retirement-scope).
+remain supported. With the `asi-query` feature, ASI SQL, schema, origin-local
+full-text search and focused body views are available through CLI and MCP after
+analytics materialization. Remote body access remains follow-up work. Retirement
+does not delete user data, credentials, history or installed services. See the [session foundation contract](docs/design/session-foundation-retirement.md#collection-retirement-scope).
 
 ## Seeing your agent sessions
 

@@ -183,7 +183,14 @@ transfer. It runs per namespace and supplies:
   metadata. D7 permits those typed paths in receiver analytics, not in arbitrary
   display fields. Repository dependencies use the effective native working
   directory, including a subagent sidecar's `worktreePath`.
-- **Bodies for FTS5** (phase 2): see [ASI query](asi-query.md#search).
+- **Bodies for FTS5** (#567): `body` and its external-content `body_fts` live only
+  in the origin-local index. Stored UID columns are namespace-relative (beginning
+  with `{harness}/{native_session_id}`); search/view prefix the validated
+  `analytics-namespace` at read time and accept full UIDs. Namespace creation stays
+  exclusively in `analytics materialize`. `body_source` records source ownership
+  for transactional append/rewrite cleanup. Event Index schema 48 refuses older
+  indexes without mutation; explicit recovery must establish source availability
+  and custody before rebuilding. See [ASI query](asi-query.md#search).
 
 ## Analytics model
 

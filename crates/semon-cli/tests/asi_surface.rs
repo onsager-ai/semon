@@ -9,6 +9,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "../../../tests/support/native_home_cli.rs"]
+mod fixture;
+
 use semon_asi::{Manifest, Store};
 use serde_json::{Value, json};
 
@@ -99,6 +102,92 @@ fn content(reply: &Value) -> (Value, bool) {
 }
 
 #[test]
+fn cli_and_mcp_search_and_view_native_fixture_text() {
+    let home = fixture::Fixture::new();
+    home.write("configured-claude/projects/fixture/00000000-0000-4000-8000-000000000001.jsonl", b"{\"type\":\"user\",\"uuid\":\"prompt\",\"sessionId\":\"00000000-0000-4000-8000-000000000001\",\"timestamp\":\"2026-11-10T00:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"uniqueftsneedle\"}}\n");
+    let output = home
+        .command(env!("CARGO_BIN_EXE_semon"))
+        .args(["analytics", "materialize", "--all", "--proc-root"])
+        .arg(home.root.join("empty-proc"))
+        .arg("--cache")
+        .arg(home.root.join("state/index.json"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cache = home.root.join("state/index.json");
+    let output = cli(&["query", "search", "uniqueftsneedle"], cache.clone());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["hits"].as_array().unwrap().len(), 1);
+    let uid = result["hits"][0]["body_uid"].as_str().unwrap().to_owned();
+    let output = cli(&["query", "view", &uid], cache.clone());
+    assert!(output.status.success());
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        result["bodies"][0]["text"]["untrusted_text"],
+        "uniqueftsneedle"
+    );
+    let mut server = Server::start(cache);
+    let reply = server.request(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"query":"uniqueftsneedle"}}}));
+    let (result, failed) = content(&reply);
+    assert!(!failed);
+    assert_eq!(result["hits"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn cli_body_queries_emit_json_and_remote_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("state/index.json");
+    for args in [
+        vec!["query", "search", "needle"],
+        vec!["query", "view", "label/one"],
+    ] {
+        let output = cli(&args, cache.clone());
+        assert!(!output.status.success());
+        let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["error"]["code"], "not_materialized");
+    }
+    let output = cli(
+        &[
+            "query",
+            "search",
+            "needle",
+            "--machine",
+            "/missing/receiver",
+        ],
+        cache,
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "capability_unavailable");
+}
+
+#[test]
+fn durable_text_is_not_an_analytics_sql_column() {
+    let dir = store();
+    let output = cli(
+        &["query", "sql", "SELECT body FROM fact_label"],
+        dir.path().join("state/index.json"),
+    );
+    assert!(!output.status.success());
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(value["error"]["code"].is_string());
+    let schema: Value = serde_json::from_str(&semon_asi::reference::json()).unwrap();
+    for table in schema["tables"].as_array().unwrap() {
+        for column in table["columns"].as_array().unwrap() {
+            assert_ne!(column["class"], "body");
+        }
+    }
+}
+
+#[test]
 fn cli_sql_json_tsv_and_typed_errors() {
     let dir = store();
     let cache = dir.path().join("state/index.json");
@@ -167,6 +256,12 @@ fn mcp_advertises_asi_tools_and_serves_schema_resource() {
         .collect();
     assert!(names.contains(&"sql"));
     assert!(names.contains(&"schema"));
+    assert!(names.contains(&"search"));
+    assert!(names.contains(&"view"));
+    for name in ["search", "view"] {
+        let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+        assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+    }
     assert!(!names.contains(&"find"));
     let sql = tools.iter().find(|tool| tool["name"] == "sql").unwrap();
     assert_eq!(sql["inputSchema"]["required"], json!(["query"]));

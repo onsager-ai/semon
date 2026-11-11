@@ -2,7 +2,8 @@
 
 Status: accepted architecture/spec for #545 (revised 2026-11-09 for federation
 D1–D8 and DuckDB analytics). #566 delivers local SQL and schema through CLI and
-MCP; search, view, Viewer and Hub remain follow-up work. Store: [ASI store](asi-store.md)
+MCP; #567 adds origin-local search and focused view. Viewer and Hub remain
+follow-up work. Store: [ASI store](asi-store.md)
 (#544). Direction:
 [ASI direction](asi-direction.md#architecture). Remote policy/channel contract:
 [ASI federation](asi-federation.md).
@@ -160,7 +161,23 @@ FTS5 over index bodies, in each namespace's ingest index:
   `part` is one of `user`, `assistant`, `command`, `tool_output` and `error`,
   and `step_uid` is `null` for parts no step owns. `body_uid` is
   `{turn_uid or step_uid}/b/{part}/{ord}`.
+- Stored `session_uid`, `turn_uid`, `step_uid` and `body_uid` are namespace-relative:
+  they begin with `{harness}/{native_session_id}`, using the same component encoding
+  as analytics. Responses prefix the validated namespace from
+  `<index parent>/analytics-namespace`; full `view` input UIDs must match it.
+  Ingestion never creates that file. Before the first materialization, reads return
+  `not_materialized`; a missing namespace alongside an existing analytics store
+  retains the existing `store_unavailable` refusal.
 - `body_fts`: external-content FTS5 using `unicode61 remove_diacritics 2`.
+  The bundled SQLite build already enables FTS5. Insert/delete triggers maintain
+  postings in the source transaction. `body_source` tracks source contributions;
+  copied identical bodies share a row and conflicting content refuses ingestion.
+- Catalog publication reconciles a continuation's body owner to the same native
+  lineage owner used by analytics. Only an actual owner change rekeys existing
+  bodies; ordinary append and publication do not revisit historical text.
+- `ord` packs the zero-based physical record ordinal and block ordinal as
+  `record * 1048576 + block`, preserving append order. Text with no exact native
+  model-response owner has a null `step_uid`; proximity never invents one.
 
 Bodies are appended with the ingest tail in the same transaction, so
 indexing work grows with new text and not with session length. A source
@@ -180,7 +197,19 @@ an incomplete cached/replica corpus as complete search. Hub has no search.
   `body_uid`, `session_uid`, `turn_uid`, `step_uid`, `part`, `ts`, and a snippet
   of up to 300 characters as `{"untrusted_text": "…"}`. The response is capped
   at 1 MiB, and the deadline and cancellation are the same as for `sql`.
+- Fusion uses `1 / (60 + rank)` with one-based namespace ranks; equal scores
+  sort by full `body_uid`. Time filters are inclusive UTC milliseconds and `repo`
+  matches the persisted sanitized `repo_id` fact.
 - On Hub: `capability_unavailable`, before I/O.
+
+The CLI/MCP extension runs body requests in `semon asi body-worker`, using SQL's
+four-slot admission and process runner, with a fixed two-second whole-request
+parent deadline. SQLite also checks that deadline through its progress handler.
+Each index is held in one read snapshot. `--machine` body requests and MCP servers
+configured with received machines refuse before namespace or body reads. A bound
+non-local SQLite index also refuses before reading bodies. The receiver/Hub access
+entry point refuses before opening any file. This repository has no Hub ASI route;
+no Viewer HTTP body/search route is added by #567.
 
 ## `view`
 
@@ -191,6 +220,14 @@ free text are never analytics columns. Typed names and paths in operator receive
 analytics are plain. **PM interpretation of D7, open to user correction:** this
 plain-field choice applies origin→operator receiver; the settled Hub export rule
 still tokenizes paths, and Hub never receives bodies.
+
+The current local result is `{"bodies":[…],"truncated":false,"data_notice":…}`.
+Each body carries the same full identity fields as a search hit and
+`text: {"untrusted_text": "…"}`. Local results are capped at 256 KiB and each body
+at 65,536 characters, with explicit `truncated`. The ASI durable store (#560) does
+not exist yet: `label/`, `adjudication/`, `lane/` and `intervention/` targets return
+`not_found` with `detail: durable_not_implemented`. They are never resolved through
+SQL or unrelated annotation stores.
 
 Remote view is an origin-rendered, bounded **typed** transcript page or field,
 not HTML or native bytes. The origin pins the native Catalog and slot recipes and
@@ -242,7 +279,8 @@ records; cancellation/source changes during a read publish no invalid partial pa
 | `capability_unavailable` | Remote search before federated coverage/audit, or search/view on Hub |
 | `body_unavailable` | Remote view cannot supply evidence; closed reason distinguishes retryable `origin_offline` from permanent `source_missing` |
 | `stale_generation` | Requested source, activity, transcript or export-view generation no longer matches |
-| `not_found` | Unknown UID in `view` |
+| `not_found` | Unknown UID in `view`, including durable targets pending #560 |
+| `not_materialized` | Origin search/view before the first analytics materialization creates its namespace |
 
 ## Prompt-injection safety
 
@@ -265,9 +303,10 @@ records; cancellation/source changes during a read publish no invalid partial pa
 
 - **MCP** advertises these beside the existing focused tools. `find`, with
   its retained schema, tests and pause notes, is removed.
-- **CLI:** the current local commands are `semon query sql|schema`; `search`
-  and `view` arrive with their follow-up surfaces. Output is compact JSON by
-  default; `--json` is accepted but redundant. `sql --format tsv` writes a
+- **CLI:** the current local commands are `semon query sql|schema|search|view`.
+  Body queries require an index ingested with the current schema and an existing
+  analytics materialization; `search QUERY` and `view UID` accept the table's inputs.
+  Output is compact JSON by default; `--json` is accepted but redundant. `sql --format tsv` writes a
   tab-delimited header and rows, with tab, newline and carriage-return
   characters in column names and values replaced by spaces. Query failures write
   the same error envelope as JSON on stdout and exit 1; successful commands exit
@@ -313,6 +352,6 @@ records; cancellation/source changes during a read publish no invalid partial pa
 - Results expose admitted heads and freshness/version coverage. Multi-source
   policy intersections never disclose restricted contributions or label a
   fragment complete; SQL never fetches bodies.
-- Current local MCP: `tools/list` has `sql` and `schema`, and no `find`. `search`
-  and `view` arrive with their respective follow-up surfaces.
+- Current local MCP: `tools/list` has `sql`, `schema`, `search` and `view`, and no
+  `find`. All four reject unknown input properties.
 - Performance budgets from [ASI store](asi-store.md#performance-from-day-1).
