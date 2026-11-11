@@ -5,6 +5,8 @@ use std::{
     process::ExitCode,
 };
 
+const ANALYTICS_NAMESPACE_FILE: &str = "analytics-namespace";
+
 fn main() -> ExitCode {
     #[cfg(feature = "asi-query")]
     if env::args().skip(1).eq(["asi", "query-worker"]) {
@@ -945,7 +947,7 @@ fn run_export(args: ExportArgs) -> Result<(), String> {
     admit_coverage_store(&index_path, &store_root)?;
     let summary = semon_asi::export_snapshot(
         &store_root,
-        &state_dir.join(semon_sessions::ANALYTICS_NAMESPACE_FILE),
+        &state_dir.join(ANALYTICS_NAMESPACE_FILE),
         &namespace,
         &args.destination,
     )
@@ -997,7 +999,7 @@ fn run_reset(args: ResetArgs) -> Result<(), String> {
     };
     let summary = semon_asi::reset_snapshot(
         &store_root,
-        &state_dir.join(semon_sessions::ANALYTICS_NAMESPACE_FILE),
+        &state_dir.join(ANALYTICS_NAMESPACE_FILE),
         &namespace,
         args.verified_export.as_deref(),
         expected_generation,
@@ -1009,7 +1011,7 @@ fn run_reset(args: ResetArgs) -> Result<(), String> {
         error => format!("analytics reset: {error}"),
     })?;
     if args.new_namespace {
-        std::fs::remove_file(state_dir.join(semon_sessions::ANALYTICS_NAMESPACE_FILE)).map_err(
+        std::fs::remove_file(state_dir.join(ANALYTICS_NAMESPACE_FILE)).map_err(
             |error| format!("analytics reset: cannot remove analytics namespace: {error}"),
         )?;
     }
@@ -1031,22 +1033,25 @@ fn analytics_store_paths(
     operation: &str,
 ) -> Result<(PathBuf, PathBuf, PathBuf, String), String> {
     let index_path = semon_sessions::analytics_index_path(cache);
-    let state_dir = index_path.parent().ok_or_else(|| {
-        format!(
-            "analytics {operation} requires an Event Index path with a parent: {}",
-            index_path.display()
-        )
-    })?;
+    let state_dir = index_path
+        .parent()
+        .ok_or_else(|| {
+            format!(
+                "analytics {operation} requires an Event Index path with a parent: {}",
+                index_path.display()
+            )
+        })?
+        .to_path_buf();
     let store_root = semon_sessions::analytics_store_root(&index_path).ok_or_else(|| {
         format!(
             "analytics {operation} requires an Event Index path with a parent: {}",
             index_path.display()
         )
     })?;
-    let namespace = semon_sessions::read_analytics_namespace(state_dir)
+    let namespace = semon_sessions::read_analytics_namespace(&state_dir)
         .map_err(|error| format!("analytics {operation}: {error}"))?
         .ok_or_else(|| format!("no analytics store at {}", store_root.display()))?;
-    Ok((index_path, store_root, state_dir.to_path_buf(), namespace))
+    Ok((index_path, store_root, state_dir, namespace))
 }
 
 fn run_coverage(args: CoverageArgs) -> Result<(), String> {
