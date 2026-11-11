@@ -88,6 +88,29 @@ pub(crate) fn sample(
     RecordBatch::try_new(Arc::new(table.arrow_schema()), columns).expect("sample batch")
 }
 
+pub(crate) fn provenance<'a>(
+    uids: impl Iterator<Item = &'a str>,
+) -> std::collections::BTreeMap<String, crate::provenance::Provenance> {
+    uids.map(|uid| {
+        (
+            uid.to_owned(),
+            crate::provenance::Provenance {
+                source_witness: crate::input::SourceWitness::default(),
+                derivation: crate::input::Derivation::default(),
+                versions: crate::input::RecordedVersions {
+                    transform: 1,
+                    rules: 1,
+                    price: "test".into(),
+                    taxonomy: None,
+                    coverage: crate::input::Coverage::default(),
+                },
+                projected_at: 0,
+            },
+        )
+    })
+    .collect()
+}
+
 /// An update that recomputes `sessions` whole: `fact_step` and `fact_session` rows.
 pub(crate) fn update(sessions: &[(&str, usize)], tag: &str, ts_base: i64) -> Update {
     let summary: Vec<(&str, usize)> = sessions.iter().map(|(session, _)| (*session, 1)).collect();
@@ -102,6 +125,7 @@ pub(crate) fn update(sessions: &[(&str, usize)], tag: &str, ts_base: i64) -> Upd
                 batch: sample(&FACT_SESSION, &summary, tag, ts_base),
             },
         ],
+        provenance: provenance(sessions.iter().map(|(uid, _)| *uid)),
         touched_sessions: sessions
             .iter()
             .map(|(session, _)| (*session).to_owned())
@@ -148,6 +172,7 @@ pub(crate) fn update_all(sessions: &[(&str, usize)], tag: &str, ts_base: i64) ->
             batch(&FACT_COMPACTION, summary.as_slice()),
             batch(&FACT_LABEL, [("label", 1)].as_slice()),
         ],
+        provenance: provenance(sessions.iter().map(|(uid, _)| *uid)),
         touched_sessions: sessions
             .iter()
             .map(|(session, _)| (*session).to_owned())

@@ -107,6 +107,12 @@ opaque mappings, never filesystem paths or the record-anchor filename stem.
    changed-session generations. A partial source loss preserves the last complete
    admitted generation and publishes missing-source coverage. It must not replace
    a multi-source session with a surviving fragment: [#582][i582] tracks that gap.
+   The local store retains that generation's complete admitted source witness,
+   activity generation, producer/parser and recorded versions, index incarnation
+   and known derivation timestamps in a manifest-bound provenance artifact (#593
+   slice 1). It survives Pending, source loss, compaction and restart with the
+   facts. Local paths remain local-only and are excluded from SQL; this custody
+   record is not a transport object or authenticated publisher identity.
 4. A distinct export projection applies the policies of **every contributing
    source**, as specified below. Never serialize internal StepFacts or the native
    mirror `Facts` object onto this path. StepFacts contains raw target paths;

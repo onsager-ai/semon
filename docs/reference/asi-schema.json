@@ -1,5 +1,5 @@
 {
-  "asi_schema_version": 3,
+  "asi_schema_version": 4,
   "classes": ["key", "enum", "number", "time", "name", "path", "body"],
   "enums": [
     {"name": "usage_owner", "values": ["exclusive", "copied"]},

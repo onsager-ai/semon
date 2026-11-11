@@ -707,6 +707,7 @@ mod tests {
                 generation: "complete".into(),
                 sources: Vec::new(),
             },
+            derivation: crate::input::Derivation::default(),
             versions: RecordedVersions {
                 transform: 40,
                 rules: 10,

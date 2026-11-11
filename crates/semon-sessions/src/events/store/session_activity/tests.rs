@@ -474,6 +474,64 @@ fn analytics_writer_incremental_live_rows_match_a_final_full_refresh() {
 }
 
 #[test]
+fn published_provenance_matches_the_sqlite_admitted_witness() {
+    let root = scratch("analytics-provenance");
+    let (options, _, _) = catalog_native_fixture(&root, 2, true);
+    let index = crate::events::EventCache::path(&options.cache);
+    let mut input = SqliteAnalyticsInput::open(&index, "fixture-machine").unwrap();
+    let admitted = input.read_admitted(None, InputBudget::default()).unwrap();
+    let expected: std::collections::BTreeMap<_, _> = admitted
+        .changes
+        .iter()
+        .filter_map(|change| {
+            if let SessionChange::Admitted(session) = change {
+                assert!(session.derivation.index_incarnation.is_some());
+                assert_eq!(
+                    session.derivation.parser_version,
+                    Some(crate::events::CACHE_VERSION)
+                );
+                assert!(!session.derivation.activity_generation.is_empty());
+                Some((
+                    session.session_uid.clone(),
+                    (
+                        session.source_witness.clone(),
+                        session.derivation.clone(),
+                        session.versions.clone(),
+                    ),
+                ))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert!(!expected.is_empty());
+    drop(input);
+    let store_root = root.join("store");
+    let mut store = semon_asi::Store::open_with_clock(&store_root, ManualClock::new(123)).unwrap();
+    let mut input = SqliteAnalyticsInput::open(&index, "fixture-machine").unwrap();
+    semon_asi::publish_cycle(
+        &mut store,
+        &mut input,
+        "fixture-machine",
+        semon_asi::Versions::default(),
+        InputBudget::default(),
+    )
+    .unwrap();
+    let actual = semon_asi::provenance::read(&store_root, store.manifest()).unwrap();
+    assert_eq!(actual.len(), expected.len());
+    for (uid, (witness, derivation, versions)) in expected {
+        assert_eq!(actual[&uid].1.source_witness, witness);
+        assert_eq!(actual[&uid].1.derivation, derivation);
+        assert_eq!(actual[&uid].1.versions, versions);
+        assert_eq!(actual[&uid].1.projected_at, 123);
+        assert_eq!(Some(&actual[&uid].0), store.live_map().get(&uid));
+    }
+    drop(input);
+    drop(store);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn stale_rules_stay_pending_until_native_catalog_refresh_republishes() {
     let root = scratch("analytics-rules-refresh");
     let (options, rows, _) = catalog_native_fixture(&root, 2, true);
