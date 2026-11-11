@@ -14,6 +14,7 @@ zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
 hex.workspace = true
 httpdate = "1.0"
 reqwest.workspace = true
+ring = "=0.17.14"
 # Already built for reqwest (same version and features); used directly for
 # `semon receive`'s TLS listener and its token randomness.
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }

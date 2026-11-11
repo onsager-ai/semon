@@ -36,6 +36,7 @@ use semon_sessions::{Facts, FactsSource, Input, Options};
 use serde::{Deserialize, Serialize};
 
 mod archives;
+pub mod body_assertion;
 #[cfg(unix)]
 pub mod body_cache;
 mod lock;
