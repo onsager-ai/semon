@@ -7,6 +7,7 @@
 pub mod compact;
 pub mod coverage;
 pub mod error;
+pub mod export;
 pub mod governance;
 pub mod input;
 pub mod projection;
@@ -27,6 +28,9 @@ mod testutil;
 pub use compact::CompactionPolicy;
 pub use coverage::{CoverageGroup, CoverageKey, CoverageReport, CoverageTotals};
 pub use error::{Error, Result};
+pub use export::{
+    ExportReceipt, ExportSummary, ResetSummary, export_snapshot, reset_snapshot, verify_export,
+};
 pub use governance::{
     ContributorWitness, CoverageWitness, Destination, ExportAuthority, ExportWitness,
     GovernanceError, GovernedRow, Policy, PolicyBundle, Principal, Scope, Source,
@@ -42,5 +46,5 @@ pub use projection::{Cell, ProjectedSession, Row, project};
 pub use publish::{PublishError, PublishProgress, publish_cycle};
 pub use store::{
     Clock, FileEntry, Manifest, RETIREMENT_DELAY_MS, SourceMissing, Store, SystemClock, TableBatch,
-    Update, Versions, read_live_map, read_manifest,
+    Update, Versions, WriterLock, read_live_map, read_manifest,
 };

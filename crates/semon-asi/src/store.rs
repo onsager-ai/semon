@@ -185,6 +185,42 @@ pub(crate) enum Fault {
     AfterRename,
 }
 
+/// Exclusive ownership of a store, acquired before opening or recovering it.
+pub struct WriterLock {
+    root: PathBuf,
+    file: File,
+}
+
+impl WriterLock {
+    /// Create a store root if needed and acquire its writer lock without recovery.
+    pub fn acquire(root: &Path) -> Result<Self> {
+        create_durable_dir(root)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join(LOCK_FILE))?;
+        lock_file(&file, true)?;
+        Ok(Self {
+            root: root.to_path_buf(),
+            file,
+        })
+    }
+}
+
+pub(crate) fn lock_file(file: &File, exclusive: bool) -> Result<()> {
+    let locked = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    match locked {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => Err(Error::WriterBusy),
+        Err(TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 /// The analytics writer for one store directory. Holding it holds `analytics.lock`.
 pub struct Store<C: Clock = SystemClock> {
     pub(crate) analytics: PathBuf,
@@ -205,18 +241,12 @@ impl Store<SystemClock> {
 impl<C: Clock> Store<C> {
     /// Takes the writer lock and discards files of a generation that never committed.
     pub fn open_with_clock(root: &Path, clock: C) -> Result<Self> {
-        let analytics = root.join(ANALYTICS_DIR);
-        create_durable_dir(root)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(root.join(LOCK_FILE))?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(Error::WriterBusy),
-            Err(TryLockError::Error(error)) => return Err(error.into()),
-        }
+        Self::open_with_lock(WriterLock::acquire(root)?, clock)
+    }
+
+    /// Open and recover a store while retaining an already acquired writer lock.
+    pub fn open_with_lock(lock: WriterLock, clock: C) -> Result<Self> {
+        let analytics = lock.root.join(ANALYTICS_DIR);
         create_durable_dir(&analytics)?;
         let manifest = read_manifest_in(&analytics)?.unwrap_or_else(Manifest::empty);
         let live = match &manifest.live_map {
@@ -231,7 +261,7 @@ impl<C: Clock> Store<C> {
             live,
             #[cfg(test)]
             fault: None,
-            _lock: lock,
+            _lock: lock.file,
         })
     }
 
@@ -543,7 +573,7 @@ fn read_manifest_in(analytics: &Path) -> Result<Option<Manifest>> {
     let manifest: Manifest = serde_json::from_slice(&bytes)?;
     if manifest.schema_version != ASI_SCHEMA_VERSION {
         return Err(Error::invalid(format!(
-            "analytics schema version {} is not {ASI_SCHEMA_VERSION}; export and reset",
+            "analytics schema version {} is not {ASI_SCHEMA_VERSION}; run `semon analytics export` then `semon analytics reset`",
             manifest.schema_version
         )));
     }

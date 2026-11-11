@@ -197,6 +197,30 @@ semon analytics coverage
 semon analytics coverage --json
 ```
 
+`semon analytics export DESTINATION` makes a verified local bundle of the current
+published snapshot. The destination must be empty and outside the store. The bundle
+contains the namespace, manifest, live map, referenced immutable Parquet files and an
+`export.json` receipt written last with paths, sizes and SHA-256 hashes. Export proves
+that every live session UID belongs to the local namespace and only shares the existing
+`analytics.lock`; if materialization holds it, export refuses rather than copying a torn
+snapshot.
+
+`semon analytics reset` is explicit destructive maintenance for the analytics store
+only. It requires `--confirm` with the exact `analytics-namespace`, plus exactly one of
+`--verified-export DIR` or the clearly named `--without-export` waiver. A verified bundle
+must be outside the store and still match the current manifest, live map, referenced files
+and namespace bytes under the exclusive lock. The waiver can discard imported or frozen
+facts that cannot be rebuilt. Reset does not touch native logs, archives or the SQLite
+Event Index, and keeps the namespace by default so the next materialization retains session
+UIDs. `--new-namespace` removes that namespace while the writer lock remains held; the next
+materialization generates a fresh namespace and does not reconcile identities.
+
+```sh
+semon analytics export ./analytics-backup
+semon analytics reset --confirm origin-... --verified-export ./analytics-backup
+semon analytics reset --confirm origin-... --without-export --new-namespace
+```
+
 To give Claude Code's agents these tools, add the server once; user scope makes it available in every project. It reads the last 30 days; add `--since 7d` for a lighter first run or `--all` for everything:
 
 ```sh
