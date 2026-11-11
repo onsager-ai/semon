@@ -291,9 +291,7 @@ fn verify_current_export(
         || current.iter().any(|(path, file)| {
             receipt_files
                 .get(path.as_str())
-                .is_none_or(|receipt_file| {
-                    file.0 != receipt_file.0 || file.1 != receipt_file.1
-                })
+                .is_none_or(|receipt_file| file.0 != receipt_file.0 || file.1 != receipt_file.1)
         })
     {
         return Err(Error::invalid(

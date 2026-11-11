@@ -263,8 +263,27 @@ fn reset_refuses_an_old_generation_after_reset_and_republication() {
             .status
             .success()
     );
-    home.write("configured-claude/.claude.json", b"{\"changed\":true}");
+    let transcript = home
+        .root
+        .join("configured-claude/projects/fixture/00000000-0000-4000-8000-000000000001.jsonl");
+    let mut transcript_file = fs::OpenOptions::new()
+        .append(true)
+        .open(&transcript)
+        .unwrap();
+    use std::io::Write as _;
+    writeln!(transcript_file, "{}", serde_json::json!({"type":"assistant", "uuid":"late-assistant", "sessionId":"00000000-0000-4000-8000-000000000001", "timestamp":"2026-10-03T08:02:01Z", "message":{"id":"late-message", "role":"assistant", "model":"claude-sonnet-4-5", "content":[{"type":"text", "text":"Synthetic late response"}], "usage":{"input_tokens":30, "output_tokens":7}}})).unwrap();
+    drop(transcript_file);
     assert!(materialize(&home).status.success());
+    let old_receipt: Value =
+        serde_json::from_slice(&fs::read(old_bundle.join("export.json")).unwrap()).unwrap();
+    let current_manifest: Value = serde_json::from_slice(
+        &fs::read(state.join("analytics-store/analytics/manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        old_receipt["manifest_generation"],
+        current_manifest["generation"]
+    );
     let before = file_bytes(&state);
 
     let output = reset(

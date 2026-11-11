@@ -452,6 +452,21 @@ fn materialize_refuses_machine_before_creating_state() {
 }
 
 #[test]
+fn materialize_refuses_non_directory_analytics_before_creating_namespace() {
+    let home = fixture::Fixture::new();
+    let state = home.root.join("state");
+    let store = state.join("analytics-store");
+    fs::create_dir_all(&store).unwrap();
+    fs::write(store.join("analytics"), b"preserve").unwrap();
+    let output = materialize(&home);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("not a real directory"));
+    assert_eq!(fs::read(store.join("analytics")).unwrap(), b"preserve");
+    assert!(!store.join("analytics.lock").exists());
+    assert!(!state.join("analytics-namespace").exists());
+}
+
+#[test]
 fn materialize_requires_the_existing_stores_namespace() {
     let home = fixture::Fixture::new();
     assert!(materialize(&home).status.success());

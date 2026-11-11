@@ -1161,6 +1161,28 @@ fn publish_materialization(
     }
 }
 
+fn admit_materialize_store_shape(root: &Path) -> Result<(), String> {
+    for path in [root.to_path_buf(), root.join("analytics")] {
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_dir() => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(format!(
+                    "analytics writer refused: {} is not a real directory",
+                    path.display()
+                ));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "analytics writer refused: cannot inspect {}: {error}",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Materialize the local Analytics Store from the native Event Index. The
 /// Catalog refresh drains the strict native producer used by the Viewer;
 /// analytics only opens its successfully published SQLite result.
@@ -1185,7 +1207,9 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
     // Refuse invalid existing namespace state before creating a lock or recovering.
     // Re-read under the writer lock because reset can change it after this preflight.
     semon_sessions::read_analytics_namespace(state_dir)?;
+    admit_materialize_store_shape(&store_root)?;
     let owner = semon_sessions::analytics_writer::Owner::acquire(&index_path, &store_root)?;
+    admit_materialize_store_shape(&store_root)?;
     let namespace = match semon_sessions::read_analytics_namespace(state_dir)? {
         Some(namespace) => namespace,
         None => semon_sessions::load_or_create_analytics_namespace(state_dir)?,
