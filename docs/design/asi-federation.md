@@ -331,7 +331,16 @@ rotation or pruning runs automatically. At capacity the operator must stop reads
 preserve the journal under explicit sensitive-history custody, and explicitly
 configure a new dedicated audit directory; cache eviction never touches audits.
 
-#594 must supply origin authorization records and origin audit-before-release,
+`semon-push::origin_audit` supplies a separate origin authorization journal in an
+explicitly configured owned 0700 directory outside native roots/cache, with 0600
+`audit.lock` and `authorizations.jsonl`. Its closed metadata adds opaque enrollment
+scope and export-view binding IDs. Begin fsyncs the decision before render/egress
+and returns the opaque authorization ID for the receiver binding; completion and
+up to 16 receipts use reserved space. Initial directory creation and every event
+are fsynced. Invalid/torn/full/unwritable history refuses reads, without repair,
+pruning or deletion. Reopening never resumes interrupted authorizations.
+
+#594 must wire origin audit-before-release,
 validate issuer/audience/nonce/deadline identity assertions, bind both sides'
 current policy versions to the exact response/admission, and wire user
 authentication, metadata discovery checks, delivery and cancellation. These

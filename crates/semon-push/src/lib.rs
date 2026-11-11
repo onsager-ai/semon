@@ -41,6 +41,8 @@ pub mod body_cache;
 mod lock;
 pub mod mirror;
 #[cfg(unix)]
+pub mod origin_audit;
+#[cfg(unix)]
 pub mod receiver_acl;
 #[cfg(unix)]
 pub mod receiver_audit;

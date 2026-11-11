@@ -59,14 +59,14 @@ pub struct AttemptId(Identifier);
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermittedRange {
-    start: u64,
-    end: u64,
+    pub(crate) start: u64,
+    pub(crate) end: u64,
 }
 impl PermittedRange {
     pub fn new(start: u64, end: u64) -> Option<Self> {
         (start < end).then_some(Self { start, end })
     }
-    fn len(self) -> u64 {
+    pub(crate) fn len(self) -> u64 {
         self.end - self.start
     }
 }
