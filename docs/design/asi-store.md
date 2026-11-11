@@ -622,6 +622,70 @@ are retained on ordinary removal. Explicit operator purges may refuse an affecte
 checkpoint; this read-only adapter never recreates deleted data or resets custody.
 
 
+## Receiver publication objects (#593 slice 3)
+
+`semon_asi::objects` builds a fresh `PublicationObject` only from a governed
+slice-2 `Projection`. Format 1 is canonical, uncompressed JSON: a closed manifest
+and the strict `receiver_plain_v1` session payload. This avoids admitting source
+Parquet bytes, metadata, codecs or row groups. Compression and Parquet are refused,
+so stored/decompressed payload lengths must both equal the canonical payload size.
+The manifest binds schema version, profile, namespace, encoding, session count and
+per-table row counts. SHA-256 and exact length cover the completed whole envelope,
+including the manifest. There is no self-referential digest field. Struct field
+order, sorted maps and projection iteration order make the same projection produce
+identical bytes. Random handles must already exist; regenerated handle registries
+represent different projections. Unsupported schema/format/profile refuses; no
+compatibility reader is provided. Hub token profiles are explicitly unsupported.
+
+The Linux store accepts a host-authorized structured scope `(tenant, destination,
+publisher, namespace)`. Components are 1–128 ASCII letters, digits, `-` or `_`;
+only destination `receiver` is supported. A SHA-256 of the serialized tuple names
+the scope directory, preventing delimiter collisions and user-controlled paths.
+The trusted host must authorize that tuple: a digest or a caller-created Scope
+alone grants no permission. Every lookup, deduplication and token read is confined
+to that scope. No global digest inventory exists.
+
+The operator-provided root must already exist. Descriptor-relative `openat` with
+`O_NOFOLLOW`, directory-only traversal, exclusive file creation and atomic
+`renameat2(RENAME_NOREPLACE)` prevent traversal, symlink following and overwrites.
+The store owns `asi-objects-v1/<scope digest>/`; an advisory exclusive lock permits
+one store instance per scope, with one reserved incomplete `stage`. Upload verifies
+exact digest/length, fsyncs bytes and directory, and remains invisible. Validation
+success installs by atomic no-overwrite rename and directory fsync. Identical
+re-upload compares exact bytes; differing bytes never replace an object. Restart
+under the lock removes only the reserved regular incomplete stage. Unknown entries
+and symlinks refuse and are preserved; objects and lock files are never deleted.
+Same-user/root malicious modification is outside filesystem custody guarantees;
+read-time digest checks still detect byte changes. Linux `/proc/self/fd` is required
+for bounded scope inventory. Other platforms do not expose this store API.
+
+Limits are 8 MiB per object, 20,000 rows, at most 1,024 policy contributors per
+session, and the host-supplied per-scope byte quota (at least 8 MiB). The quota counts
+installed and incomplete staged bytes, including the temporary duplicate during
+re-upload. Scope inventory is capped at 10,002 entries (10,000 installed objects plus
+stage and lock); aggregate tenant concurrency is a host admission responsibility. The store keeps its scope lock during validation.
+
+The internal `semon asi object-worker` consumes a bounded namespace line and exact
+object bytes through stdin, emits one fixed success/failure byte and no diagnostic
+values. It has a cleared environment, private process group, parent-death signal,
+256 MiB address-space ceiling, two CPU seconds and a three-second caller deadline.
+The parent kills/reaps the worker group on completion or failure. The parser admits
+only canonical JSON (including duplicate-key refusal), closed envelopes, known
+schema columns/types/enums, receiver governance name/path/key checks and required
+fields. Body fields, unknown metadata, `fact_label`, `dim_price`, foreign namespace
+UIDs/source handles, unsupported encodings and inconsistent counts/sizes refuse.
+Serde's recursion limit bounds nesting. No decompressor or Parquet parser runs.
+Authentication and truth of publisher-supplied policy/version assertions are not
+established by structural validation.
+
+Only successful isolated validation returns the private-field `ValidatedObject`
+token. Lookup after restart revalidates before returning a token. Failed or pending
+stages cannot be read through the object API. The token is input for future head
+commit work; it activates nothing itself. Claims, epochs, expected-parent commits
+and complete heads (4b), enrollment/credentials (4a), transport/reconciliation (5),
+Hub tokenization and L1 taxonomy are deferred. There is no operator-facing command,
+configuration, listener or network route in this slice; the worker is internal.
+
 ## Durable state
 
 `asi-durable.sqlite3` holds `label`, `adjudication`, `link`, `lane`,
