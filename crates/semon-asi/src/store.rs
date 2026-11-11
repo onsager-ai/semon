@@ -187,10 +187,36 @@ pub(crate) enum Fault {
     AfterRename,
 }
 
+/// Explicit unlock on every return path prevents fork-inherited descriptors from
+/// retaining a lock after its owner releases it, before the child reaches exec.
+pub(crate) struct LockGuard(File);
+impl LockGuard {
+    pub(crate) fn acquire(file: File, exclusive: bool) -> Result<Self> {
+        lock_file(&file, exclusive)?;
+        let guard = Self(file);
+        #[cfg(test)]
+        INHERITED_LOCKS.with(|capture| {
+            if let Some(files) = capture.borrow_mut().as_mut() {
+                files.push(guard.0.try_clone().unwrap());
+            }
+        });
+        Ok(guard)
+    }
+}
+impl Drop for LockGuard {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+#[cfg(test)]
+thread_local! {
+    pub(crate) static INHERITED_LOCKS: std::cell::RefCell<Option<Vec<File>>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Exclusive ownership of a store, acquired before opening or recovering it.
 pub struct WriterLock {
     root: PathBuf,
-    file: File,
+    file: LockGuard,
 }
 
 impl WriterLock {
@@ -202,7 +228,7 @@ impl WriterLock {
             .truncate(false)
             .write(true)
             .open(root.join(LOCK_FILE))?;
-        lock_file(&file, true)?;
+        let file = LockGuard::acquire(file, true)?;
         Ok(Self {
             root: root.to_path_buf(),
             file,
@@ -231,7 +257,7 @@ pub struct Store<C: Clock = SystemClock> {
     pub(crate) live: HashMap<String, i64>,
     #[cfg(test)]
     pub(crate) fault: Option<Fault>,
-    _lock: File,
+    _lock: LockGuard,
 }
 
 impl Store<SystemClock> {

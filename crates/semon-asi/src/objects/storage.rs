@@ -81,8 +81,9 @@ pub struct ObjectStore {
 pub struct StagedObject {
     identity: Identity,
     key: String,
-    device: u64,
-    inode: u64,
+    // Pin the inode even after restart unlinks the old stage. Its identity
+    // cannot be recycled for a replacement while this token remains alive.
+    file: File,
 }
 /// Unforgeable in-process validation receipt. It grants no head activation.
 pub struct ValidatedObject {
@@ -249,12 +250,10 @@ impl ObjectStore {
             }
             io(file.sync_all())?;
             io(self.dir.sync_all())?;
-            let metadata = io(file.metadata())?;
             Ok(StagedObject {
                 identity: expected.clone(),
                 key: self.key.clone(),
-                device: metadata.dev(),
-                inode: metadata.ino(),
+                file: io(file.try_clone())?,
             })
         })();
         if result.is_err() {
@@ -273,7 +272,8 @@ impl ObjectStore {
         }
         let file = open(&self.dir, "stage", libc::O_RDONLY)?;
         let meta = io(file.metadata())?;
-        if meta.dev() != staged.device || meta.ino() != staged.inode {
+        let pinned = io(staged.file.metadata())?;
+        if meta.dev() != pinned.dev() || meta.ino() != pinned.ino() {
             return Err(Failure::Invalid);
         }
         unlink(&self.dir, "stage")
@@ -303,7 +303,8 @@ impl ObjectStore {
     ) -> Result<ValidatedObject> {
         let file = open(&self.dir, "stage", libc::O_RDONLY)?;
         let meta = io(file.metadata())?;
-        if meta.dev() != staged.device || meta.ino() != staged.inode {
+        let pinned = io(staged.file.metadata())?;
+        if meta.dev() != pinned.dev() || meta.ino() != pinned.ino() {
             return Err(Failure::Invalid);
         }
         let bytes = read(file)?;
@@ -509,6 +510,32 @@ mod tests {
         let mut store = ObjectStore::open(root.path(), scope(), MAX_BYTES).unwrap();
         assert_eq!(store.used().unwrap(), bytes.len() as u64);
         assert!(store.stage(&id, &mut &bytes[..]).is_ok());
+    }
+    #[test]
+    fn stale_tokens_pin_unlinked_inodes_and_preserve_replacement_stage() {
+        for validate_old in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = ObjectStore::open(root.path(), scope(), MAX_BYTES).unwrap();
+            let id = identity(b"same bytes");
+            let old = store.stage(&id, &mut &b"same bytes"[..]).unwrap();
+            let old_inode = old.file.metadata().unwrap().ino();
+            drop(store);
+            let mut store = ObjectStore::open(root.path(), scope(), MAX_BYTES).unwrap();
+            assert_eq!(old.file.metadata().unwrap().nlink(), 0);
+            let replacement = store.stage(&id, &mut &b"same bytes"[..]).unwrap();
+            assert_ne!(replacement.file.metadata().unwrap().ino(), old_inode);
+            let result = if validate_old {
+                store
+                    .validate_with(old, |_, _| panic!("stale token reached worker"))
+                    .map(|_| ())
+            } else {
+                store.discard(old)
+            };
+            assert_eq!(result, Err(Failure::Invalid));
+            assert_eq!(store.used().unwrap(), id.bytes);
+            let validated = store.validate_with(replacement, |_, _| Ok(())).unwrap();
+            assert_eq!(store.read(&validated).unwrap(), b"same bytes");
+        }
     }
     #[test]
     fn inventory_reserves_install_slot_and_reopens_at_ceiling() {

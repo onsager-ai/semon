@@ -657,8 +657,9 @@ one store instance per scope, with one reserved incomplete `stage`. Upload verif
 exact digest/length, fsyncs bytes and directory, and remains invisible. Validation
 success installs by atomic no-overwrite rename and directory fsync. Any refused
 validation, dead worker or expired deadline discards that call's stage immediately;
-an explicit `discard(StagedObject)` cancels an unconsumed upload. Token-bound device
-and inode checks prevent stale tokens from deleting replacement stages. Identical
+an explicit `discard(StagedObject)` cancels an unconsumed upload. Each stage token keeps an open file descriptor, pinning its inode even after
+restart unlinks the path; comparison with that descriptor prevents stale tokens
+from deleting replacement stages, including when identical bytes are re-uploaded. Identical
 re-upload compares exact bytes; differing bytes never replace an object. Restart
 under the lock removes only the reserved regular incomplete stage. Unknown entries
 and symlinks refuse and are preserved; objects and lock files are never deleted.
