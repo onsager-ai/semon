@@ -67,7 +67,7 @@ for input types, validation and the author lock.
    interrupt handle at the deadline. Stream result chunks, stopping at the row
    and byte caps.
 
-Every surface runs each query in a child process, `semon asi query-worker`,
+Every surface runs each query in a child process (see [internal worker entries](asi-store.md#internal-worker-entries)),
 with OS limits: address space 2 GiB and CPU time. The parent kills the child
 at the deadline, which covers setup, parsing, binding, execution and fetching;
 the interrupt handle stops execution earlier where it can. DuckDB's
@@ -84,7 +84,7 @@ lints this feature and the CLI together; `duckdb-tests` includes `query-engine`.
 
 Trusted local callers use `query::run(semon_executable, store_root, request)`.
 It takes one of four kernel-released per-store query locks, launches
-`semon asi query-worker`, sends one JSON object on stdin, and receives one JSON
+the internal query worker, sends one JSON object on stdin, and receives one JSON
 result or error object on stdout. The internal request is
 `{"root":"absolute store directory","request":{"query":"SELECT ...","params":[],"limit":1000,"timeout_ms":2000,"max_bytes":1048576}}`.
 Unknown fields are refused. `max_bytes` is an internal response budget, bounded
@@ -215,7 +215,7 @@ an incomplete cached/replica corpus as complete search. Hub has no search.
   matches the persisted sanitized `repo_id` fact.
 - On Hub: `capability_unavailable`, before I/O.
 
-The CLI/MCP extension runs body requests in `semon asi body-worker`, using SQL's
+The CLI/MCP extension runs body requests in the [internal body worker](asi-store.md#internal-worker-entries), using SQL's
 four-slot admission and process runner, with a fixed two-second whole-request
 parent deadline. SQLite also checks that deadline through its progress handler.
 Each index is held in one read snapshot. `--machine` body requests and MCP servers

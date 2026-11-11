@@ -631,7 +631,11 @@ Parquet bytes, metadata, codecs or row groups. Compression and Parquet are refus
 so stored/decompressed payload lengths must both equal the canonical payload size.
 The manifest binds schema version, profile, namespace, encoding, session count and
 per-table row counts. SHA-256 and exact length cover the completed whole envelope,
-including the manifest. There is no self-referential digest field. Struct field
+including the manifest. There is no self-referential digest field. This updates
+slice 2's one current exported ID contract: `Projection` retains its namespace,
+evidence IDs change from `opaque/receiver/...` to `<hex namespace>/receiver/...`,
+and source handles become `<hex namespace>/source/<random hex>`. No old-shape reader
+is retained; projection and admission tests use the same current shape. Struct field
 order, sorted maps and projection iteration order make the same projection produce
 identical bytes. Random handles must already exist; regenerated handle registries
 represent different projections. Unsupported schema/format/profile refuses; no
@@ -651,7 +655,10 @@ The operator-provided root must already exist. Descriptor-relative `openat` with
 The store owns `asi-objects-v1/<scope digest>/`; an advisory exclusive lock permits
 one store instance per scope, with one reserved incomplete `stage`. Upload verifies
 exact digest/length, fsyncs bytes and directory, and remains invisible. Validation
-success installs by atomic no-overwrite rename and directory fsync. Identical
+success installs by atomic no-overwrite rename and directory fsync. Any refused
+validation, dead worker or expired deadline discards that call's stage immediately;
+an explicit `discard(StagedObject)` cancels an unconsumed upload. Token-bound device
+and inode checks prevent stale tokens from deleting replacement stages. Identical
 re-upload compares exact bytes; differing bytes never replace an object. Restart
 under the lock removes only the reserved regular incomplete stage. Unknown entries
 and symlinks refuse and are preserved; objects and lock files are never deleted.
@@ -665,10 +672,14 @@ installed and incomplete staged bytes, including the temporary duplicate during
 re-upload. Scope inventory is capped at 10,002 entries (10,000 installed objects plus
 stage and lock); aggregate tenant concurrency is a host admission responsibility. The store keeps its scope lock during validation.
 
-The internal `semon asi object-worker` consumes a bounded namespace line and exact
+The [internal object worker](#internal-worker-entries) consumes a bounded namespace line and exact
 object bytes through stdin, emits one fixed success/failure byte and no diagnostic
 values. It has a cleared environment, private process group, parent-death signal,
-256 MiB address-space ceiling, two CPU seconds and a three-second caller deadline.
+256 MiB address-space ceiling, two CPU seconds, 16 file descriptors, zero child
+processes (`RLIMIT_NPROC=0`), `PR_SET_NO_NEW_PRIVS` and a three-second caller deadline.
+Limits apply before protocol parsing; environment clearing and no-new-privileges
+also apply at launch. `RLIMIT_NPROC` is a per-real-user limit and root/capability
+exemptions remain an operator service-account concern.
 The parent kills/reaps the worker group on completion or failure. The parser admits
 only canonical JSON (including duplicate-key refusal), closed envelopes, known
 schema columns/types/enums, receiver governance name/path/key checks and required
@@ -685,6 +696,18 @@ commit work; it activates nothing itself. Claims, epochs, expected-parent commit
 and complete heads (4b), enrollment/credentials (4a), transport/reconciliation (5),
 Hub tokenization and L1 taxonomy are deferred. There is no operator-facing command,
 configuration, listener or network route in this slice; the worker is internal.
+
+### Internal worker entries
+
+These hidden early-dispatch entries are re-exec protocols for trusted local
+callers, not operator commands. They are absent from usage/help and README CLI
+inventories. Do not combine the object validator with the query engine.
+
+| Internal entry | Protocol / owner |
+| --- | --- |
+| `asi query-worker` | Bounded JSON request/result, SQL engine; [query protocol](asi-query.md#engine-and-worker-protocol). Requires `asi-query`. |
+| `asi body-worker` | Bounded body request/result with query admission; [body surface](asi-query.md). Requires `asi-query`. |
+| `asi object-worker` | Bounded namespace line plus canonical object, fixed one-byte result; object admission above. TTY stdin refuses before parsing with `internal worker; not a user command`. |
 
 ## Durable state
 

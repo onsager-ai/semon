@@ -76,10 +76,13 @@ pub struct ObjectStore {
     scope: Scope,
     key: String,
     quota: u64,
+    max_objects: usize,
 }
 pub struct StagedObject {
     identity: Identity,
     key: String,
+    device: u64,
+    inode: u64,
 }
 /// Unforgeable in-process validation receipt. It grants no head activation.
 pub struct ValidatedObject {
@@ -96,6 +99,14 @@ impl ValidatedObject {
 }
 impl ObjectStore {
     pub fn open(root: &Path, scope: Scope, quota: u64) -> Result<Self> {
+        Self::open_with_ceiling(root, scope, quota, 10_000)
+    }
+    fn open_with_ceiling(
+        root: &Path,
+        scope: Scope,
+        quota: u64,
+        max_objects: usize,
+    ) -> Result<Self> {
         scope.check()?;
         if !root.is_absolute() || quota < MAX_BYTES {
             return Err(Failure::Invalid);
@@ -135,6 +146,7 @@ impl ObjectStore {
             scope,
             key,
             quota,
+            max_objects,
         };
         // Only the reserved incomplete stage is disposable. Unknown entries remain.
         match open(&store.dir, "stage", libc::O_RDONLY) {
@@ -155,14 +167,18 @@ impl ObjectStore {
         Ok(store)
     }
     fn used(&self) -> Result<u64> {
+        self.inventory().map(|(bytes, _)| bytes)
+    }
+    fn inventory(&self) -> Result<(u64, usize)> {
         let mut total = 0u64;
         let mut entries = 0usize;
+        let mut objects = 0usize;
         for entry in io(fs::read_dir(format!(
             "/proc/self/fd/{}",
             self.dir.as_raw_fd()
         )))? {
             entries += 1;
-            if entries > 10_002 {
+            if entries > self.max_objects + 2 {
                 return Err(Failure::Limit);
             }
             let entry = io(entry)?;
@@ -171,8 +187,14 @@ impl ObjectStore {
             if value == "lock" {
                 continue;
             }
-            if value != "stage" && !hash(value) {
-                return Err(Failure::Storage);
+            if value != "stage" {
+                if !hash(value) {
+                    return Err(Failure::Storage);
+                }
+                objects += 1;
+                if objects > self.max_objects {
+                    return Err(Failure::Limit);
+                }
             }
             let file = open(&self.dir, value, libc::O_RDONLY)?;
             let meta = io(file.metadata())?;
@@ -184,17 +206,19 @@ impl ObjectStore {
         if total > self.quota {
             return Err(Failure::Limit);
         }
-        Ok(total)
+        Ok((total, objects))
     }
     /// Upload never checks another scope's digest inventory. One pending stage.
     pub fn stage(&mut self, expected: &Identity, input: &mut impl Read) -> Result<StagedObject> {
         if !hash(&expected.sha256) || expected.bytes > MAX_BYTES {
             return Err(Failure::Invalid);
         }
-        if self
-            .used()?
-            .checked_add(expected.bytes)
-            .is_none_or(|n| n > self.quota)
+        let (used, objects) = self.inventory()?;
+        let existing = open(&self.dir, &expected.sha256, libc::O_RDONLY).is_ok();
+        if (!existing && objects >= self.max_objects)
+            || used
+                .checked_add(expected.bytes)
+                .is_none_or(|n| n > self.quota)
         {
             return Err(Failure::Limit);
         }
@@ -225,9 +249,12 @@ impl ObjectStore {
             }
             io(file.sync_all())?;
             io(self.dir.sync_all())?;
+            let metadata = io(file.metadata())?;
             Ok(StagedObject {
                 identity: expected.clone(),
                 key: self.key.clone(),
+                device: metadata.dev(),
+                inode: metadata.ino(),
             })
         })();
         if result.is_err() {
@@ -235,7 +262,23 @@ impl ObjectStore {
         }
         result
     }
-    /// Failed validation never installs bytes. A restart discards its stage.
+    /// Explicitly cancel an upload without validation. A stale/foreign token
+    /// cannot remove a replacement stage, even after this store was reopened.
+    pub fn discard(&mut self, staged: StagedObject) -> Result<()> {
+        self.discard_matching(&staged)
+    }
+    fn discard_matching(&self, staged: &StagedObject) -> Result<()> {
+        if staged.key != self.key {
+            return Err(Failure::Invalid);
+        }
+        let file = open(&self.dir, "stage", libc::O_RDONLY)?;
+        let meta = io(file.metadata())?;
+        if meta.dev() != staged.device || meta.ino() != staged.inode {
+            return Err(Failure::Invalid);
+        }
+        unlink(&self.dir, "stage")
+    }
+    /// Failed validation discards its stage immediately.
     pub fn validate(&mut self, staged: StagedObject, executable: &Path) -> Result<ValidatedObject> {
         self.validate_with(staged, |bytes, namespace| run(executable, bytes, namespace))
     }
@@ -247,7 +290,23 @@ impl ObjectStore {
         if staged.key != self.key {
             return Err(Failure::Invalid);
         }
-        let bytes = read(open(&self.dir, "stage", libc::O_RDONLY)?)?;
+        let result = self.install(&staged, worker);
+        if result.is_err() {
+            self.discard_matching(&staged)?;
+        }
+        result
+    }
+    fn install(
+        &self,
+        staged: &StagedObject,
+        worker: impl FnOnce(&[u8], &str) -> Result<()>,
+    ) -> Result<ValidatedObject> {
+        let file = open(&self.dir, "stage", libc::O_RDONLY)?;
+        let meta = io(file.metadata())?;
+        if meta.dev() != staged.device || meta.ino() != staged.inode {
+            return Err(Failure::Invalid);
+        }
+        let bytes = read(file)?;
         if identity(&bytes) != staged.identity {
             return Err(Failure::Invalid);
         }
@@ -275,7 +334,7 @@ impl ObjectStore {
         }
         io(self.dir.sync_all())?;
         Ok(ValidatedObject {
-            identity: staged.identity,
+            identity: staged.identity.clone(),
             scope: self.scope.clone(),
         })
     }
@@ -315,9 +374,20 @@ pub(super) fn worker_limits() -> Result<()> {
         rlim_cur: 2,
         rlim_max: 2,
     };
+    let files = libc::rlimit {
+        rlim_cur: 16,
+        rlim_max: 16,
+    };
+    let processes = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
     // SAFETY: initialized limits; modifies only the disposable worker.
     if unsafe { libc::setrlimit(libc::RLIMIT_AS, &memory) } != 0
         || unsafe { libc::setrlimit(libc::RLIMIT_CPU, &cpu) } != 0
+        || unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &files) } != 0
+        || unsafe { libc::setrlimit(libc::RLIMIT_NPROC, &processes) } != 0
+        || unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } != 0
     {
         return Err(Failure::Worker);
     }
@@ -355,6 +425,9 @@ fn run_with_deadline(
             }
             if libc::getppid() != parent {
                 libc::_exit(1);
+            }
+            if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
             }
             Ok(())
         });
@@ -427,9 +500,42 @@ mod tests {
                 .validate_with(staged, |_, _| Err(Failure::Worker))
                 .is_err()
         );
+        assert_eq!(store.used().unwrap(), bytes.len() as u64);
+        let pending = store.stage(&id, &mut &bytes[..]).unwrap();
+        store.discard(pending).unwrap();
+        assert_eq!(store.used().unwrap(), bytes.len() as u64);
+        let _crashed = store.stage(&id, &mut &bytes[..]).unwrap();
         drop(store);
         let mut store = ObjectStore::open(root.path(), scope(), MAX_BYTES).unwrap();
+        assert_eq!(store.used().unwrap(), bytes.len() as u64);
         assert!(store.stage(&id, &mut &bytes[..]).is_ok());
+    }
+    #[test]
+    fn inventory_reserves_install_slot_and_reopens_at_ceiling() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = ObjectStore::open_with_ceiling(root.path(), scope(), MAX_BYTES, 2).unwrap();
+        for mut bytes in [b"one".as_slice(), b"two".as_slice()] {
+            let staged = store.stage(&identity(bytes), &mut bytes).unwrap();
+            store.validate_with(staged, |_, _| Ok(())).unwrap();
+        }
+        assert_eq!(store.inventory().unwrap().1, 2);
+        assert!(matches!(
+            store.stage(&identity(b"three"), &mut &b"three"[..]),
+            Err(Failure::Limit)
+        ));
+        let staged = store.stage(&identity(b"one"), &mut &b"one"[..]).unwrap();
+        store.validate_with(staged, |_, _| Ok(())).unwrap();
+        drop(store);
+        let store = ObjectStore::open_with_ceiling(root.path(), scope(), MAX_BYTES, 2).unwrap();
+        assert_eq!(store.inventory().unwrap().1, 2);
+        let mut rogue = open(
+            &store.dir,
+            &identity(b"three").sha256,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )
+        .unwrap();
+        rogue.write_all(b"three").unwrap();
+        assert_eq!(store.inventory(), Err(Failure::Limit));
     }
     #[test]
     fn worker_death_and_injected_deadline_refuse() {

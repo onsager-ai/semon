@@ -368,6 +368,7 @@ fn reset_preserves_or_retires_namespace_handles_and_export_excludes_them() {
             .unwrap()
     );
     drop(retained);
+    drop(snapshot);
     crate::reset_snapshot(
         &root,
         &namespace_file,

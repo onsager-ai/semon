@@ -253,6 +253,10 @@ pub(crate) fn reset_snapshot_with<F: FnMut(ResetStage) -> Result<()>>(
         state.sync_all()?;
     }
     on_locked(ResetStage::Completed)?;
+    // A concurrent worker fork can temporarily inherit this open file description
+    // until exec. Release the lock explicitly before returning so that inherited
+    // descriptors cannot make an immediate reopen spuriously report WriterBusy.
+    _lock.unlock()?;
     Ok(ResetSummary {
         generation: manifest.generation,
         removed,
@@ -647,6 +651,23 @@ mod tests {
         testutil::{TestClock, update},
     };
 
+    #[test]
+    fn explicit_unlock_releases_inherited_open_description() {
+        let temporary = tempfile::tempdir().unwrap();
+        drop(Store::open(temporary.path()).unwrap());
+        let lock = open_lock(temporary.path(), true).unwrap();
+        // try_clone duplicates the open description exactly as fork does, without
+        // timing a concurrent child or introducing a test wait.
+        let inherited = lock.try_clone().unwrap();
+        assert!(matches!(
+            Store::open(temporary.path()),
+            Err(Error::WriterBusy)
+        ));
+        lock.unlock().unwrap();
+        drop(lock);
+        drop(Store::open(temporary.path()).unwrap());
+        drop(inherited);
+    }
     #[test]
     fn custody_export_hashes_provenance_and_refuses_tampering() {
         let temporary = tempfile::tempdir().unwrap();

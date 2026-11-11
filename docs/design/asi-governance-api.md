@@ -84,7 +84,9 @@ removing the namespace and syncing again. An interruption between removals keeps
 the old namespace usable with regenerated mappings; it cannot leave old mappings
 behind a retired namespace. There is no reconciliation across retired namespaces. Custody export bundles
 exclude this private operator state. Deleting it changes exported handles. Native IDs, log stems and source paths remain private.
-Opaque evidence keys use the schema's UID shapes with a hex-encoded namespace
+Slice 3 changes slice 2's one current export contract: `Projection` retains its
+namespace and replaces the former `opaque/receiver/...` shape. Opaque evidence
+keys use the schema's UID shapes with a hex-encoded namespace
 and `receiver` prefix. Source handles use `<hex namespace>/source/<random hex>`.
 The namespace binding lets the object validator refuse foreign handles; handles
 are not native identity or filesystem authority.
