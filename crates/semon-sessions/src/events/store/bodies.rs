@@ -126,11 +126,12 @@ impl Batch {
                     })
                     || crate::attachments::parts(record).is_some_and(crate::attachments::has_image);
                 if role == Some("user") && has_prompt {
-                    self.state.turn = Some(
-                        crate::field(record, "uuid")
-                            .map(str::to_owned)
-                            .unwrap_or_else(anchor),
-                    );
+                    // Only a native initiating UUID owns following steps.
+                    // Without one, each assistant uses its native message ID,
+                    // matching analytics; the prompt itself keeps a record anchor.
+                    self.state.turn = crate::field(record, "uuid")
+                        .filter(|id| !id.is_empty())
+                        .map(str::to_owned);
                     self.state.calls.clear();
                 }
                 if role == Some("assistant") {

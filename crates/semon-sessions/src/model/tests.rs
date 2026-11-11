@@ -5176,6 +5176,96 @@ fn staged_deep_claude_spawn_uses_received_true_root_liveness() {
 }
 
 #[test]
+fn uuidless_claude_body_turns_match_analytics_after_append_and_received_copy() {
+    use semon_asi::input::{AnalyticsInput, SessionChange};
+
+    let home = Home::new();
+    let prompt = human("root", ts(5, 0), "uuidless prompt");
+    let mut reply = assistant_usage(
+        "root",
+        ts(5, 1),
+        "msg-1",
+        "claude-opus-5-5",
+        json!({"input_tokens":10,"output_tokens":5}),
+    );
+    reply["message"]["content"] = json!([text("uuidless reply")]);
+    let path = home.top("root", std::slice::from_ref(&prompt));
+    home.build_query();
+    let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    writeln!(file, "{reply}").unwrap();
+    drop(file);
+    home.build_query();
+    let namespace = format!("origin-{}", "a".repeat(64));
+    fs::write(
+        home.root.join("analytics-namespace"),
+        format!("{namespace}\n"),
+    )
+    .unwrap();
+    let check = || {
+        let index = EventCache::path(&home.options.cache);
+        let mut input = crate::SqliteAnalyticsInput::open(&index, &namespace).unwrap();
+        let batch = input
+            .read_admitted(None, semon_asi::InputBudget::default())
+            .unwrap();
+        let step = batch
+            .changes
+            .iter()
+            .find_map(|change| match change {
+                SessionChange::Admitted(session) => session
+                    .steps
+                    .iter()
+                    .find(|step| step.step_uid.ends_with("/s/claude/msg-1")),
+                _ => None,
+            })
+            .expect("analytics admits the native message step");
+        assert_eq!(step.turn_uid, format!("{namespace}/claude/root/t/msg-1"));
+        for uid in [&step.turn_uid, &step.step_uid] {
+            let viewed = crate::body_query::execute(
+                crate::body_query::Request {
+                    indexes: vec![index.clone()],
+                    tool: "view".into(),
+                    arguments: json!({"uid":uid}),
+                },
+                crate::body_query::Access::Origin,
+            )
+            .unwrap();
+            assert!(
+                viewed["bodies"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|body| body["text"]["untrusted_text"] == "uuidless reply")
+            );
+        }
+        let connection = rusqlite::Connection::open(index).unwrap();
+        let mut statement = connection.prepare("SELECT json_array(body_uid,session_uid,turn_uid,step_uid,part,ord,ts,text) FROM body ORDER BY body_uid").unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let appended = check();
+    // A separate cache rebuilds the same complete source without a tail resume.
+    fs::create_dir_all(home.root.join("cold")).unwrap();
+    let cold_options = Options {
+        cache: home.root.join("cold/index.json"),
+        ..home.options.clone()
+    };
+    home.build_at(&cold_options, NOW);
+    let cold = rusqlite::Connection::open(EventCache::path(&cold_options.cache)).unwrap();
+    let cold_rows = cold.prepare("SELECT json_array(body_uid,session_uid,turn_uid,step_uid,part,ord,ts,text) FROM body ORDER BY body_uid").unwrap()
+        .query_map([], |row| row.get::<_, String>(0)).unwrap().collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(appended, cold_rows);
+    home.top("zzz-copy", &[prompt, reply]);
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(file, "{}", json!({"type":"continued-in","continuedInSessionId":"zzz-copy","sessionId":"root","timestamp":ts(5,2)})).unwrap();
+    drop(file);
+    home.build_query();
+    assert_eq!(check(), appended);
+}
+
+#[test]
 fn staged_claude_ambiguity_and_received_copy_policy_match_shared_builder() {
     let home = relay_home();
     let beta = home
