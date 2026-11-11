@@ -364,8 +364,16 @@ fn reset_requires_matching_confirmation_and_current_verified_export() {
         .unwrap()
         .trim()
         .to_owned();
+    let handles_path = home
+        .root
+        .join("state")
+        .join(semon_asi::egress::HANDLES_FILE);
+    drop(semon_asi::egress::Handles::open(&home.root.join("state"), &namespace).unwrap());
+    let mapping_bytes = fs::read(&handles_path).unwrap();
+    assert!(coverage(&home, false).status.success());
     let bundle = home.root.join("analytics-export");
     assert!(export(&home, &bundle).status.success());
+    assert!(!bundle.join(semon_asi::egress::HANDLES_FILE).exists());
 
     let bundle_arg = bundle.to_str().unwrap();
     let wrong = reset(
@@ -385,6 +393,7 @@ fn reset_requires_matching_confirmation_and_current_verified_export() {
         String::from_utf8_lossy(&reset.stderr)
     );
     assert!(home.root.join("state/analytics-namespace").is_file());
+    assert_eq!(fs::read(&handles_path).unwrap(), mapping_bytes);
     assert!(
         home.root
             .join("state/analytics-store/analytics.lock")
@@ -401,6 +410,11 @@ fn reset_requires_one_export_choice_and_can_remove_the_namespace_explicitly() {
         .unwrap()
         .trim()
         .to_owned();
+    let handles_path = home
+        .root
+        .join("state")
+        .join(semon_asi::egress::HANDLES_FILE);
+    drop(semon_asi::egress::Handles::open(&home.root.join("state"), &namespace).unwrap());
     let missing = reset(&home, &["--confirm", &namespace]);
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("exactly one"));
@@ -420,12 +434,19 @@ fn reset_requires_one_export_choice_and_can_remove_the_namespace_explicitly() {
         String::from_utf8_lossy(&reset.stderr)
     );
     assert!(!home.root.join("state/analytics-namespace").exists());
+    assert!(!handles_path.exists());
     assert!(
         home.root
             .join("state/analytics-store/analytics.lock")
             .is_file()
     );
     assert!(!home.root.join("state/analytics-store/analytics").exists());
+    assert!(materialize(&home).status.success());
+    let next_namespace = fs::read_to_string(home.root.join("state/analytics-namespace")).unwrap();
+    assert_ne!(next_namespace.trim(), namespace);
+    drop(
+        semon_asi::egress::Handles::open(&home.root.join("state"), next_namespace.trim()).unwrap(),
+    );
 }
 
 #[test]

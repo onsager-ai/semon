@@ -15,8 +15,8 @@ pub const AUDIT_FILE: &str = "attempts.jsonl";
 pub const MAX_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_RECEIPTS: u32 = 16;
 const RECORD_CAP: u64 = 8192;
-// Reserve enough for the largest completion and every allowed receipt at begin.
-const FOLLOWUP_RESERVE: u64 = (MAX_RECEIPTS as u64 + 1) * RECORD_CAP;
+// Reserve authorization, completion and every allowed receipt at begin.
+const FOLLOWUP_RESERVE: u64 = (MAX_RECEIPTS as u64 + 2) * RECORD_CAP;
 type Result<T> = std::result::Result<T, AuditError>;
 
 /// Exactly 32 opaque bytes rendered as lowercase hex. No free-text constructor.
@@ -59,14 +59,14 @@ pub struct AttemptId(Identifier);
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermittedRange {
-    start: u64,
-    end: u64,
+    pub(crate) start: u64,
+    pub(crate) end: u64,
 }
 impl PermittedRange {
     pub fn new(start: u64, end: u64) -> Option<Self> {
         (start < end).then_some(Self { start, end })
     }
-    fn len(self) -> u64 {
+    pub(crate) fn len(self) -> u64 {
         self.end - self.start
     }
 }
@@ -118,9 +118,26 @@ pub struct AttemptRecord {
     pub destination: Destination,
 }
 
+/// Verified origin evidence for exactly one response, including authorization-only
+/// cache hits. The caller verifies this evidence before persisting the binding.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthorizationBinding {
+    pub request_id: Identifier,
+    pub response_identity: Identifier,
+    pub origin_policy_version: Identifier,
+    pub origin_redactor_version: Identifier,
+    pub origin_authorization_id: Identifier,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case", deny_unknown_fields)]
 enum Event {
+    Authorized {
+        attempt_id: AttemptId,
+        binding: AuthorizationBinding,
+        time: u64,
+    },
     Attempted {
         format: u32,
         attempt_id: AttemptId,
@@ -174,6 +191,7 @@ struct Active {
     next: u64,
     delivered: u64,
     reserve: u64,
+    authorized: bool,
 }
 
 /// One exclusive writer per directory; methods require mutable access. Share via
@@ -218,6 +236,9 @@ impl<C: Clock> AuditStore<C> {
         if used > cap {
             return Err(AuditError::Full);
         }
+        // Replay historical state only; interrupted attempts are never resumed.
+        // Retain completed IDs too, so duplicate begins cannot reset authorization.
+        let mut history = BTreeMap::<AttemptId, Option<Active>>::new();
         // A torn/corrupt append refuses reopening; never erase or repair history.
         let mut reader = BufReader::new(&mut file);
         loop {
@@ -236,21 +257,71 @@ impl<C: Clock> AuditStore<C> {
             match event {
                 Event::Attempted {
                     format,
+                    attempt_id,
                     record,
                     bytes,
                     ..
-                } if format != 1
-                    || bytes != 0
-                    || record.permitted_range.start >= record.permitted_range.end =>
-                {
-                    return Err(AuditError::Invalid);
+                } => {
+                    if format != 1
+                        || bytes != 0
+                        || record.permitted_range.start >= record.permitted_range.end
+                        || history.contains_key(&attempt_id)
+                    {
+                        return Err(AuditError::Invalid);
+                    }
+                    history.insert(
+                        attempt_id,
+                        Some(Active {
+                            next: record.permitted_range.start,
+                            record: *record,
+                            receipts: 0,
+                            delivered: 0,
+                            reserve: 0,
+                            authorized: false,
+                        }),
+                    );
                 }
-                Event::Receipt { range, bytes, .. }
-                    if range.start >= range.end || bytes > range.len() =>
-                {
-                    return Err(AuditError::Invalid);
+                Event::Authorized {
+                    attempt_id,
+                    binding,
+                    ..
+                } => {
+                    let active = history
+                        .get_mut(&attempt_id)
+                        .and_then(Option::as_mut)
+                        .ok_or(AuditError::Invalid)?;
+                    validate_authorization(active, &binding)?;
+                    active.authorized = true;
                 }
-                _ => {}
+                Event::Receipt {
+                    attempt_id,
+                    range,
+                    bytes,
+                    ..
+                } => {
+                    let active = history
+                        .get_mut(&attempt_id)
+                        .and_then(Option::as_mut)
+                        .ok_or(AuditError::Invalid)?;
+                    validate_receipt(active, range, bytes)?;
+                    active.receipts += 1;
+                    active.next = range.end;
+                    active.delivered += bytes;
+                }
+                Event::Completion {
+                    attempt_id,
+                    outcome,
+                    bytes,
+                    ..
+                } => {
+                    let entry = history.get_mut(&attempt_id).ok_or(AuditError::Invalid)?;
+                    validate_completion(
+                        entry.as_ref().ok_or(AuditError::Invalid)?,
+                        outcome,
+                        bytes,
+                    )?;
+                    *entry = None;
+                }
             }
         }
         file.seek(SeekFrom::End(0))
@@ -302,25 +373,37 @@ impl<C: Clock> AuditStore<C> {
                 receipts: 0,
                 delivered: 0,
                 reserve: FOLLOWUP_RESERVE,
+                authorized: false,
             },
         );
         Ok(id)
+    }
+
+    /// Fsync verified origin evidence before admission or release. Exactly once,
+    /// on a granted live attempt. A bare attempted record is never authorization.
+    pub fn authorize(&mut self, id: AttemptId, binding: AuthorizationBinding) -> Result<()> {
+        let active = self.active.get(&id).ok_or(AuditError::Invalid)?;
+        validate_authorization(active, &binding)?;
+        self.append_reserved(
+            &Event::Authorized {
+                attempt_id: id,
+                binding,
+                time: self.clock.now(),
+            },
+            id,
+        )?;
+        self.active
+            .get_mut(&id)
+            .ok_or(AuditError::Invalid)?
+            .authorized = true;
+        Ok(())
     }
 
     /// Append an actual delivered range. At most 16 monotonically ordered,
     /// non-overlapping receipts; start a freshly authorized attempt after that.
     pub fn receipt(&mut self, id: AttemptId, range: PermittedRange, bytes: u64) -> Result<()> {
         let active = self.active.get(&id).ok_or(AuditError::Invalid)?;
-        if active.record.decision != Decision::Granted
-            || active.record.purpose != Purpose::StreamRange
-            || active.receipts >= MAX_RECEIPTS
-            || range.start < active.next
-            || range.start >= range.end
-            || range.end > active.record.permitted_range.end
-            || bytes > range.len()
-        {
-            return Err(AuditError::Invalid);
-        }
+        validate_receipt(active, range, bytes)?;
         self.append_reserved(
             &Event::Receipt {
                 attempt_id: id,
@@ -341,14 +424,7 @@ impl<C: Clock> AuditStore<C> {
     /// attempted record without completion; reopening never turns that into success.
     pub fn complete(&mut self, id: AttemptId, outcome: Outcome, bytes: u64) -> Result<()> {
         let active = self.active.get(&id).ok_or(AuditError::Invalid)?;
-        if bytes > active.record.permitted_range.len()
-            || bytes < active.delivered
-            || (active.record.decision == Decision::Denied
-                && (bytes != 0 || outcome != Outcome::Denied))
-            || (active.record.decision == Decision::Granted && outcome == Outcome::Denied)
-        {
-            return Err(AuditError::Invalid);
-        }
+        validate_completion(active, outcome, bytes)?;
         self.append_reserved(
             &Event::Completion {
                 attempt_id: id,
@@ -398,6 +474,50 @@ impl<C: Clock> AuditStore<C> {
         self.used += bytes.len() as u64;
         Ok(())
     }
+}
+
+fn validate_authorization(active: &Active, binding: &AuthorizationBinding) -> Result<()> {
+    if active.authorized
+        || active.record.decision != Decision::Granted
+        || binding.request_id != active.record.request_id
+        || active
+            .record
+            .origin_policy_version
+            .is_some_and(|v| v != binding.origin_policy_version)
+        || active
+            .record
+            .origin_redactor_version
+            .is_some_and(|v| v != binding.origin_redactor_version)
+    {
+        return Err(AuditError::Invalid);
+    }
+    Ok(())
+}
+fn validate_receipt(active: &Active, range: PermittedRange, bytes: u64) -> Result<()> {
+    if !active.authorized
+        || active.record.decision != Decision::Granted
+        || active.record.purpose != Purpose::StreamRange
+        || active.receipts >= MAX_RECEIPTS
+        || range.start < active.next
+        || range.start >= range.end
+        || range.end > active.record.permitted_range.end
+        || bytes > range.len()
+    {
+        return Err(AuditError::Invalid);
+    }
+    Ok(())
+}
+fn validate_completion(active: &Active, outcome: Outcome, bytes: u64) -> Result<()> {
+    if (!active.authorized && (bytes != 0 || outcome == Outcome::Completed))
+        || bytes > active.record.permitted_range.len()
+        || bytes < active.delivered
+        || (active.record.decision == Decision::Denied
+            && (bytes != 0 || outcome != Outcome::Denied))
+        || (active.record.decision == Decision::Granted && outcome == Outcome::Denied)
+    {
+        return Err(AuditError::Invalid);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -458,6 +578,84 @@ mod tests {
             destination: Destination::Viewer,
         }
     }
+    fn binding() -> AuthorizationBinding {
+        let id = Identifier::from_bytes([1; 32]);
+        AuthorizationBinding {
+            request_id: id,
+            response_identity: id,
+            origin_policy_version: id,
+            origin_redactor_version: id,
+            origin_authorization_id: id,
+        }
+    }
+    #[test]
+    fn reopening_refuses_invalid_authorization_history() {
+        let f = Fixture::new();
+        let mut store = AuditStore::open(&f.0, ClockAt(1), MAX_BYTES).unwrap();
+        let id = store.begin_attempt(record()).unwrap();
+        store.authorize(id, binding()).unwrap();
+        store.complete(id, Outcome::Completed, 1).unwrap();
+        drop(store);
+        let events = f.events();
+        let attempted = events[0].clone();
+        let authorized = events[1].clone();
+        let completed = events[2].clone();
+        let mut wrong_request = authorized.clone();
+        wrong_request["binding"]["request_id"] =
+            serde_json::to_value(Identifier::from_bytes([2; 32])).unwrap();
+        let mut pinned = attempted.clone();
+        pinned["record"]["origin_policy_version"] =
+            serde_json::to_value(Identifier::from_bytes([2; 32])).unwrap();
+        let mut pinned_redactor = attempted.clone();
+        pinned_redactor["record"]["origin_redactor_version"] =
+            serde_json::to_value(Identifier::from_bytes([2; 32])).unwrap();
+        for history in [
+            vec![authorized.clone()],
+            vec![attempted.clone(), authorized.clone(), authorized.clone()],
+            vec![
+                attempted.clone(),
+                authorized.clone(),
+                completed.clone(),
+                authorized.clone(),
+            ],
+            vec![attempted.clone(), wrong_request],
+            vec![pinned, authorized.clone()],
+            vec![pinned_redactor, authorized.clone()],
+            vec![attempted.clone(), completed],
+        ] {
+            let mut bytes = Vec::new();
+            for event in history {
+                serde_json::to_writer(&mut bytes, &event).unwrap();
+                bytes.push(b'\n');
+            }
+            fs::write(f.0.join(AUDIT_FILE), bytes).unwrap();
+            assert!(matches!(
+                AuditStore::open(&f.0, ClockAt(2), MAX_BYTES),
+                Err(AuditError::Invalid)
+            ));
+        }
+    }
+    #[test]
+    fn authorization_precedes_delivery_and_is_exactly_once() {
+        let f = Fixture::new();
+        let mut store = AuditStore::open(&f.0, ClockAt(1), MAX_BYTES).unwrap();
+        let id = store.begin_attempt(record()).unwrap();
+        assert!(store.complete(id, Outcome::Completed, 0).is_err());
+        assert!(store.complete(id, Outcome::Cancelled, 1).is_err());
+        assert!(
+            store
+                .receipt(id, PermittedRange::new(0, 1).unwrap(), 1)
+                .is_err()
+        );
+        let mut wrong = binding();
+        wrong.request_id = Identifier::from_bytes([2; 32]);
+        assert!(store.authorize(id, wrong).is_err());
+        store.authorize(id, binding()).unwrap();
+        assert_eq!(f.events()[1]["event"], "authorized");
+        assert!(store.authorize(id, binding()).is_err());
+        store.complete(id, Outcome::Completed, 1).unwrap();
+        assert!(store.authorize(id, binding()).is_err());
+    }
     #[test]
     fn persisted_before_return_crash_and_completion() {
         let f = Fixture::new();
@@ -466,14 +664,15 @@ mod tests {
         assert_eq!(f.events()[0]["event"], "attempted");
         assert_eq!(f.events()[0]["bytes"], 0);
         assert_eq!(f.events()[0]["time"], 42);
+        store.authorize(id, binding()).unwrap();
         store.complete(id, Outcome::Cancelled, 7).unwrap();
-        assert_eq!(f.events()[1]["bytes"], 7);
-        assert_eq!(f.events()[1]["outcome"], "cancelled");
+        assert_eq!(f.events()[2]["bytes"], 7);
+        assert_eq!(f.events()[2]["outcome"], "cancelled");
         store.begin_attempt(record()).unwrap();
         drop(store);
         let _reopened = AuditStore::open(&f.0, ClockAt(43), MAX_BYTES).unwrap();
-        assert_eq!(f.events().len(), 3);
-        assert_eq!(f.events()[2]["event"], "attempted");
+        assert_eq!(f.events().len(), 4);
+        assert_eq!(f.events()[3]["event"], "attempted");
     }
     #[test]
     fn cap_refuses_without_dropping_and_reserves_completion() {
@@ -487,14 +686,16 @@ mod tests {
             Err(AuditError::Full)
         ));
         assert_eq!(fs::read(f.0.join(AUDIT_FILE)).unwrap(), before);
+        store.authorize(id, binding()).unwrap();
         store.complete(id, Outcome::Completed, 3).unwrap();
-        assert_eq!(f.events().len(), 2);
+        assert_eq!(f.events().len(), 3);
     }
     #[test]
     fn receipts_are_bounded_and_validate_ranges() {
         let f = Fixture::new();
         let mut store = AuditStore::open(&f.0, ClockAt(1), MAX_BYTES).unwrap();
         let id = store.begin_attempt(record()).unwrap();
+        store.authorize(id, binding()).unwrap();
         for start in 0..u64::from(MAX_RECEIPTS) {
             store
                 .receipt(id, PermittedRange::new(start, start + 1).unwrap(), 1)
@@ -507,7 +708,7 @@ mod tests {
         );
         assert!(store.complete(id, Outcome::Completed, 15).is_err());
         store.complete(id, Outcome::Completed, 16).unwrap();
-        assert_eq!(f.events().len(), MAX_RECEIPTS as usize + 2);
+        assert_eq!(f.events().len(), MAX_RECEIPTS as usize + 3);
         assert!(store.complete(id, Outcome::Completed, 16).is_err());
         let mut denied = record();
         denied.decision = Decision::Denied;
@@ -596,11 +797,12 @@ mod tests {
                 scope.spawn(move || {
                     let mut store = store.lock().unwrap();
                     let id = store.begin_attempt(record()).unwrap();
+                    store.authorize(id, binding()).unwrap();
                     store.complete(id, Outcome::Completed, 1).unwrap();
                 });
             }
         });
-        assert_eq!(f.events().len(), 16);
+        assert_eq!(f.events().len(), 24);
     }
     #[test]
     fn torn_journal_and_write_failure_refuse() {
