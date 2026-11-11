@@ -272,6 +272,67 @@ a lost machine might never receive the audit. Neither a valid TTL nor replica
 custody bypasses the online check. Adding offline grants or delegated receiver-only
 body authorization later requires a new explicit user decision.
 
+### Receiver ACL and read-attempt library boundary (#595)
+
+Unix receiver custody lives in `semon-push::receiver_acl` and
+`semon-push::receiver_audit`. The caller supplies an authenticated end-user
+principal; authentication and metadata discovery integration are outside these
+libraries. A push machine token never supplies user authority. Before resolving
+metadata, integrations must check the appropriate grant and use a uniform refusal
+for all cross-user lookups. Analytics and body reads are distinct permissions.
+
+The operator edits `grants.json` (0600, owned, regular, one link) in a dedicated
+owned 0700 directory. There is no ACL management CLI in this slice. The current
+JSON format is `{"format":1,"grants":[{"principal":"alice","machine":"laptop",
+"namespace":"work","permissions":["analytics","body_read"]}]}`. Principals
+are opaque caller-authenticated strings (1–256 bytes, no control characters),
+machines use the existing machine-name grammar, and namespaces use 1–128 ASCII
+letters/digits/underscores/hyphens. Unknown fields, duplicate scope entries,
+duplicate permissions and unsupported formats invalidate the entire document.
+Read-at-decision reload makes revocation effective on the next decision. Missing,
+invalid, insecure and unreadable files return the same `Denied` value as unknown
+principals/scopes and absent permission. A granted decision contains the SHA-256
+of canonical JSON `[1, grant]`, with struct field order and sorted permissions;
+changing that grant changes its version. It grants no origin or cache authority.
+
+The receiver audit directory is separately configured and must be distinct from
+ACL and cache directories; its only members are `audit.lock` and
+`attempts.jsonl`. The same descriptor-relative, no-symlink, owner/mode/link checks
+as the cache protect its 0600 files in an owned 0700 directory. One writer holds
+an exclusive file lock; concurrent callers serialize through a mutex. JSONL
+`attempted` records have format 1, an opaque attempt ID, the closed metadata
+record, zero bytes and injected epoch time. `receipt` and `completion` events
+append actual bytes/ranges/outcomes and time. Each successful append fsyncs before
+return; creating the journal also fsyncs its directory. A crash leaves an attempt
+without a completion. A torn/invalid journal or any write failure refuses reads;
+there is no automatic history repair or deletion.
+
+Audit IDs (including the identity adapter's stable principal ID and policy
+versions) are exactly 32 opaque bytes, serialized as 64 lowercase hex characters.
+Purpose, decision, destination and outcome are closed enums; ranges are numeric,
+half-open exported ranges. No free-form body/query/command/path/credential/snippet
+or error field exists. The adapter must map authenticated identities to stable
+opaque IDs, never credentials. Origin policy/redactor IDs may be absent while the
+channel is absent; an audit record alone cannot authorize body release.
+
+The audit ceiling is 64 MiB (operators may configure a smaller limit), independent
+of cache retention. Begin reserves space for one completion and at most 16 range
+receipts (8 KiB per event), so capacity exhaustion refuses new attempts without
+dropping existing records or consuming active attempts' reserved space. Receipts
+must be ordered, non-overlapping and within the permitted range. After 16 receipts,
+a stream needs a fresh authorization and attempt. Completion records total actual
+bytes, including cancellation/failure, and cannot undercount receipts. No journal
+rotation or pruning runs automatically. At capacity the operator must stop reads,
+preserve the journal under explicit sensitive-history custody, and explicitly
+configure a new dedicated audit directory; cache eviction never touches audits.
+
+#594 must supply origin authorization records and origin audit-before-release,
+validate issuer/audience/nonce/deadline identity assertions, bind both sides'
+current policy versions to the exact response/admission, and wire user
+authentication, metadata discovery checks, delivery and cancellation. These
+libraries neither define that origin assertion contract nor change
+`ReadAdmission`; no remote body route or Hub body access is introduced.
+
 ## Outbound-only body channel and read boundary
 
 The origin opens a mutually authenticated TLS connection to its enrolled
