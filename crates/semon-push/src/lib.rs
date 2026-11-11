@@ -41,6 +41,10 @@ pub mod body_cache;
 mod lock;
 pub mod mirror;
 pub mod redact;
+#[cfg(unix)]
+pub mod receiver_acl;
+#[cfg(unix)]
+pub mod receiver_audit;
 pub mod serve;
 mod status;
 mod stop;

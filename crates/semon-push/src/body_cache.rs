@@ -749,10 +749,15 @@ fn read_master(path: &Path) -> Result<Zeroizing<[u8; 32]>> {
 }
 
 /// Pins custody to an inode, even if a parent writer replaces its pathname.
-struct CacheDirectory(File);
+pub(crate) struct CacheDirectory(File);
 
 impl CacheDirectory {
-    fn open(path: &Path) -> Result<Self> {
+    pub(crate) fn sync(&self) -> Result<()> {
+        self.0.sync_all()?;
+        Ok(())
+    }
+
+    pub(crate) fn open(path: &Path) -> Result<Self> {
         let file = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
@@ -774,7 +779,7 @@ impl CacheDirectory {
         CString::new(name.as_bytes()).map_err(|_| CacheError::Integrity)
     }
 
-    fn open_file(&self, path: &Path, flags: libc::c_int) -> Result<File> {
+    pub(crate) fn open_file(&self, path: &Path, flags: libc::c_int) -> Result<File> {
         let name = Self::name(path)?;
         // SAFETY: the directory fd is live, the name is NUL terminated and the
         // mode argument is provided even when O_CREAT is absent.
@@ -828,7 +833,7 @@ impl CacheDirectory {
         Ok(())
     }
 
-    fn names(&self) -> Result<Vec<PathBuf>> {
+    pub(crate) fn names(&self) -> Result<Vec<PathBuf>> {
         // A separate open file description starts each scan at offset zero.
         // SAFETY: the literal is NUL terminated and the directory fd is live.
         let fd = unsafe {
