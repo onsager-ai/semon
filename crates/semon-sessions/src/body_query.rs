@@ -101,6 +101,7 @@ pub struct Request {
 struct Index {
     connection: Connection,
     namespace: String,
+    durable_root: PathBuf,
 }
 
 fn open(path: &std::path::Path, deadline: Instant) -> Result<Index, Value> {
@@ -143,6 +144,7 @@ fn open(path: &std::path::Path, deadline: Instant) -> Result<Index, Value> {
     Ok(Index {
         connection,
         namespace: encode_component(&namespace),
+        durable_root: crate::analytics_store_root(path).ok_or_else(unavailable)?,
     })
 }
 
@@ -271,17 +273,42 @@ fn view(indexes: &[Index], request: View, deadline: Instant) -> Result<Value, Va
     {
         return Err(invalid());
     }
-    // The ASI durable store (#560) is not implemented. Never route these UIDs
-    // to transcript storage or expose arbitrary analytics fields as bodies.
-    if ["label/", "adjudication/", "lane/", "intervention/"]
-        .iter()
-        .any(|prefix| request.uid.starts_with(prefix))
+    if let Some((kind, id)) = request.uid.split_once('/')
+        && ["label", "adjudication", "lane", "intervention"].contains(&kind)
     {
-        return Err(error(
-            "not_found",
-            "Durable body target does not exist",
-            "durable_not_implemented",
-        ));
+        // These author-local UIDs require one namespace already admitted by open().
+        if indexes.len() != 1 || id.is_empty() || id.contains('/') || request.part.is_some() {
+            return Err(invalid());
+        }
+        let index = &indexes[0];
+        if !index
+            .durable_root
+            .join(semon_asi::durable::FILE)
+            .try_exists()
+            .map_err(|_| unavailable())?
+        {
+            return Err(error("not_found", "Unknown durable UID", "uid"));
+        }
+        let fields = semon_asi::durable::Reader::open(&index.durable_root)
+            .and_then(|reader| reader.body(kind, id))
+            .map_err(|_| unavailable())?
+            .ok_or_else(|| error("not_found", "Unknown durable UID", "uid"))?;
+        let mut truncated = false;
+        let bodies: Vec<_> = fields.into_iter().map(|(field, text)| {
+            let cut: String = text.chars().take(65_536).collect();
+            truncated |= cut.len() < text.len();
+            json!({"body_uid":request.uid,"namespace":index.namespace,"field":field,"text":{"untrusted_text":cut}})
+        }).collect();
+        let mut result = json!({"bodies":bodies,"truncated":truncated,"data_notice":DATA_NOTICE});
+        while serde_json::to_vec(&result)
+            .map_err(|_| unavailable())?
+            .len()
+            > VIEW_BYTES
+        {
+            result["bodies"].as_array_mut().expect("bodies array").pop();
+            result["truncated"] = json!(true);
+        }
+        return Ok(result);
     }
     let mut result = json!({"bodies":[],"truncated":false,"data_notice":DATA_NOTICE});
     for index in indexes {

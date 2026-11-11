@@ -33,6 +33,44 @@ fn store() -> tempfile::TempDir {
     dir
 }
 
+#[test]
+fn durable_backup_cli_copies_and_refuses_existing_destination() {
+    let dir = store();
+    let root = dir.path().join("state/analytics-store");
+    {
+        let mut writer = semon_asi::durable::Writer::open(&root).unwrap();
+        writer
+            .insert(
+                "lane",
+                "one",
+                std::collections::BTreeMap::from([(
+                    "title".into(),
+                    semon_asi::durable::Value::Text("private title".into()),
+                )]),
+            )
+            .unwrap();
+    }
+    let destination = dir.path().join("backup.sqlite3");
+    let path = destination.to_str().unwrap();
+    let cache = dir.path().join("state/index.json");
+    assert!(
+        cli(&["asi", "backup", path], cache.clone())
+            .status
+            .success()
+    );
+    let bytes = std::fs::read(&destination).unwrap();
+    let output = cli(&["asi", "backup", path], cache.clone());
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(bytes, std::fs::read(&destination).unwrap());
+    let help = cli(&["asi", "--help"], cache);
+    assert_eq!(help.status.code(), Some(1));
+    assert!(
+        String::from_utf8(help.stderr)
+            .unwrap()
+            .contains("Usage: semon asi backup PATH")
+    );
+}
+
 fn cli_args(cache: PathBuf) -> Vec<String> {
     ["--cache".to_owned(), cache.to_string_lossy().into_owned()]
         .into_iter()

@@ -629,7 +629,33 @@ checkpoint; this read-only adapter never recreates deleted data or resets custod
   above the checkpoint (categorical columns only) to `fact_label` generation
   files. Labels are append-only, so `fact_label` isn't filtered by the session
   live map, and labels on lanes or work items need no session at all.
-  `semon asi backup PATH` copies the file with the SQLite online backup API.
+  `semon asi backup PATH [--cache PATH]` copies the file with the SQLite online
+  backup API and refuses an existing destination. No authoring CLI is provided.
+- **Row identity.** Every durable table has an author-assigned `id TEXT PRIMARY KEY`;
+  IDs are nonempty single UID components. Focused view UIDs are `{table}/{id}`.
+  `link` additionally has a unique `(from_type, from_id, change_id, method)`,
+  `outcome` a unique `change_id`, and `assignment` a unique
+  `(intervention_id, unit_type, unit_id)`.
+- **Adjudications.** Store required `target_type`, `target_uid`, `field`,
+  `taxonomy_version` and UTC-millisecond `created_at` alongside the methodology
+  fields. A nonempty `label_ids` list must reference existing labels that all
+  agree with those target/field/taxonomy columns. Export one assertion with
+  `label_id = adjudication/{id}`, `labeller = human:<adjudicator>`, `value =
+  final_value`, null confidence and its own revision/time. Label assertion IDs
+  export as `label/{id}`. The existing `current_label` human-first, revision-first
+  ordering applies; analytics columns do not change.
+- **Classes.** The single durable column table in `semon-asi::durable` declares
+  every semantic column. Body columns are exactly `label.mechanism_text`,
+  `adjudication.reason`, `lane.title`, `intervention.hypothesis` and
+  `intervention.guardrails`. Intervention `lever` and `primary_metric` are
+  categorical and are not exported in this slice. IDs, references, arrays and
+  timestamps are internal; the remaining categorical values are declared in code.
+  Every row also has an internal writing revision. Arrays use JSON text.
+- **Ownership/API.** The Rust writer takes an explicit table, author-assigned ID
+  and typed values. It shares the analytics author lock. Export, rebuild, backup
+  and focused view use a separate read-only reader; version 1 mismatches refuse
+  before a writable SQLite open. Durable focused views require exactly one
+  admitted origin namespace and return body fields framed as `untrusted_text`.
 
 ## Hub export (phase 3)
 
