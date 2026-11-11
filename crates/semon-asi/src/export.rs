@@ -191,6 +191,8 @@ pub fn reset_snapshot(
     removed.push(ANALYTICS_DIR.to_owned());
     fs::remove_file(root.join(LOCK_FILE))?;
     removed.push(LOCK_FILE.to_owned());
+    fs::remove_dir(root)?;
+    removed.push(".".to_owned());
     Ok(ResetSummary {
         generation: manifest.generation,
         removed,
