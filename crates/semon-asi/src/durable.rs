@@ -330,7 +330,7 @@ fn initialize(conn: &Connection) -> Result<()> {
 fn create_durable(root: &Path) -> Result<()> {
     let staging = backup_staging(root)?;
     let staged = staging.join("durable.sqlite3");
-    let result = (|| {
+    let result = (|| -> Result<()> {
         let conn = Connection::open(&staged).map_err(sql)?;
         conn.pragma_update(None, "synchronous", "FULL")
             .map_err(sql)?;
