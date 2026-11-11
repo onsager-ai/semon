@@ -163,6 +163,65 @@ fn export_refuses_nonempty_and_inside_store_destinations() {
 }
 
 #[test]
+fn export_and_reset_refuse_a_busy_writer_without_mutation() {
+    let home = fixture::Fixture::new();
+    assert!(materialize(&home).status.success());
+    let state = home.root.join("state");
+    let namespace = fs::read_to_string(state.join("analytics-namespace"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let bundle = home.root.join("analytics-export");
+    assert!(export(&home, &bundle).status.success());
+    let before = recursive_listing(&state);
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .open(state.join("analytics-store/analytics.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+
+    let destination = home.root.join("blocked-export");
+    let export = export(&home, &destination);
+    assert!(!export.status.success());
+    assert!(String::from_utf8_lossy(&export.stderr).contains("writer busy"));
+    assert!(!destination.exists());
+
+    let reset = reset(&home, &["--confirm", &namespace, "--without-export"]);
+    assert!(!reset.status.success());
+    assert!(String::from_utf8_lossy(&reset.stderr).contains("writer busy"));
+    assert_eq!(recursive_listing(&state), before);
+    lock.unlock().unwrap();
+}
+
+#[test]
+fn reset_refuses_a_tampered_export_without_mutation() {
+    let home = fixture::Fixture::new();
+    assert!(materialize(&home).status.success());
+    let state = home.root.join("state");
+    let namespace = fs::read_to_string(state.join("analytics-namespace"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let bundle = home.root.join("analytics-export");
+    assert!(export(&home, &bundle).status.success());
+    fs::write(bundle.join("analytics-namespace"), "tampered\n").unwrap();
+    let before = recursive_listing(&state);
+
+    let output = reset(
+        &home,
+        &[
+            "--confirm",
+            &namespace,
+            "--verified-export",
+            bundle.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("verified export"));
+    assert_eq!(recursive_listing(&state), before);
+}
+
+#[test]
 fn reset_requires_matching_confirmation_and_current_verified_export() {
     let home = fixture::Fixture::new();
     assert!(materialize(&home).status.success());
