@@ -105,8 +105,12 @@ alone is not evidence authority.
 resolve the opaque handle against the admitted native manifest → recheck complete
 contributor policy, source identity/generation and consumed boundaries → persist
 and fsync origin authorization audit → render a typed page, apply governance and
-redaction, revalidate its witness → egress, then record receipts/completion.
-No receiver paths or worker `indexes` are accepted as authority.
+redaction → recheck the full pinned authorization vector immediately before
+egress → release bytes → record receipts/completion. Pin contributor policies, scan/redactor
+versions, enrollment/claim epoch and revocation state, and source witness at
+authorization time. Any change during rendering refuses egress or requires fresh,
+durably audited authorization. Apply the same check to `authorization_only`
+cache-hit responses. No receiver paths or worker `indexes` are accepted as authority.
 
 **Decision — dedicated origin audit store:** propose an explicitly configured
 owned 0700 `body-audit/` directory outside native roots/cache, containing 0600
@@ -122,8 +126,12 @@ store design, not functionality supplied by the receiver audit library.
 **Receiver:** caller supplies an authenticated principal (login/session design is
 outside this note) → `receiver_acl::decide` before discovery, with uniform denials
 → `receiver_audit::begin_attempt` → origin round trip → verify authorization and
-response → construct the existing non-Clone, exact-key `ReadAdmission` → cache
-lookup/rendered-page delivery → `receipt`/`complete` with actual bytes or failure.
+response → append/fsync an authorization-binding audit event → construct the
+existing non-Clone, exact-key `ReadAdmission` → cache lookup/rendered-page delivery
+→ `receipt`/`complete` with actual bytes or failure. The binding matches request ID,
+exact response identity, verified origin policy/redactor versions and origin audit
+authorization ID. Cache hits require the same durable binding. Current
+`begin_attempt` fixes metadata; `receipt`/`complete` cannot add these bindings.
 Recheck ACL/policy versions before release; changed grants require fresh admission.
 
 **Decision — cache hits still contact origin:** `resolve` with `authorization_only`
@@ -163,7 +171,9 @@ Proposed independently reviewable PRs, each carrying `Part of #594`:
 1. Shared wire types, assertion signing/verification and origin audit store;
    settle #593 enrollment, credential and TLS interfaces first.
 2. Receiver poll/response endpoints, bounded queues and ACL/audit/admission/cache
-   wiring; no body release until the origin client path is present.
+   wiring; add `receiver_audit::authorize(AttemptId, binding)` to append/fsync the
+   binding within the attempt's reserved space before admission/release. No body
+   release until the origin client path is present.
 3. Origin client loop and resolve/page adapter for typed `view`, including safe
    mapping or explicit unavailable evidence and end-to-end D2/cache-hit checks.
 4. Append leases, acknowledgements, cancel/backpressure and fresh reconnect grants.
@@ -171,6 +181,22 @@ Proposed independently reviewable PRs, each carrying `Part of #594`:
    foreign namespace/epoch, stale generations, malformed frames, audit failure,
    redaction mappings and cancellation; control/runtime/SSH fail before dispatch.
    Relevant refusal tests also accompany each earlier slice.
+
+Channel acceptance mapping (federation remains authoritative); slice 5 integrates
+these cases, with owning-slice tests accompanying implementation:
+
+| Federation acceptance case | Owning slices |
+| --- | --- |
+| Traversal/symlink races; stale generations | 3 |
+| Replay, foreign namespace, wrong audience | 1, 3 |
+| Unsupported verbs, malformed frames; control/runtime/SSH refused before dispatch | 1, 2, 3 |
+| Zero watchers, credential revocation, backpressure stop within bounds | 2, 4 |
+| Cross-user discovery/cache/field refusal | 2, 3 |
+| Final policy-to-audit binding, including cache hits | 1, 2, 3 |
+| Stream-through without disk writes; key failure fails closed | 2, 3 |
+| Revocation/rewrite invalidates cached admission and continuation | 2, 3, 4 |
+| Length-preserving and length-changing redaction fixtures; exact anchors or refusal | 3 |
+| CI latency/memory/cancellation measurements; shared-listener exhaustion | 5 (2–4 supply bounds) |
 
 ## Open questions for origin lane / PM / owner
 
