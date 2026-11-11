@@ -38,6 +38,10 @@ enum Command {
     Materialize(MaterializeArgs),
     Coverage(CoverageArgs),
     Export(ExportArgs),
+    DurableBackup {
+        destination: PathBuf,
+        cache: PathBuf,
+    },
     Reset(ResetArgs),
     Mcp(HomeArgs),
     ArchivePrune {
@@ -189,6 +193,7 @@ fn parse_args() -> Result<Command, String> {
         Some("receive") => parse_receive_args(arguments).map(Command::Receive),
         Some("query") => parse_query_command(arguments),
         Some("analytics") => parse_analytics_args(arguments),
+        Some("asi") => parse_asi_args(arguments),
         Some("mcp") => parse_mcp_args(arguments).map(Command::Mcp),
         Some("archive") => parse_archive_args(arguments),
         Some("-h" | "--help") => Err(usage()),
@@ -225,6 +230,30 @@ fn parse_archive_args(mut arguments: impl Iterator<Item = String>) -> Result<Com
         cache,
         retention_days,
     })
+}
+
+fn asi_usage() -> String {
+    "Usage: semon asi backup PATH [--cache PATH]\nCopies author-owned durable state using SQLite online backup; refuses an existing destination.".into()
+}
+
+fn parse_asi_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
+    if arguments.next().as_deref() != Some("backup") {
+        return Err(asi_usage());
+    }
+    let destination = arguments
+        .next()
+        .filter(|v| !v.starts_with('-'))
+        .ok_or_else(asi_usage)?
+        .into();
+    let mut cache = semon_sessions::Options::default().cache;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--cache" => cache = arguments.next().ok_or("--cache requires a value")?.into(),
+            "-h" | "--help" => return Err(asi_usage()),
+            _ => return Err(format!("unknown asi backup argument: {argument}")),
+        }
+    }
+    Ok(Command::DurableBackup { destination, cache })
 }
 
 fn parse_analytics_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
@@ -937,6 +966,16 @@ fn run(command: Command) -> Result<(), String> {
         Command::Coverage(args) => return run_coverage(args),
         Command::Export(args) => return run_export(args),
         Command::Reset(args) => return run_reset(args),
+        Command::DurableBackup { destination, cache } => {
+            let index = semon_sessions::analytics_index_path(&cache);
+            let root = semon_sessions::analytics_store_root(&index)
+                .ok_or("asi backup: index has no parent")?;
+            semon_asi::durable::Reader::open(&root)
+                .and_then(|reader| reader.backup(&destination))
+                .map_err(|error| format!("asi backup: {error}"))?;
+            println!("durable backed up: {}", destination.display());
+            return Ok(());
+        }
         command => command,
     };
     semon_sessions::pricing::initialize_default();
@@ -966,7 +1005,10 @@ fn run(command: Command) -> Result<(), String> {
             Err("query arguments are invalid".into())
         }
         Command::Materialize(args) => run_materialize(args),
-        Command::Coverage(_) | Command::Export(_) | Command::Reset(_) => {
+        Command::Coverage(_)
+        | Command::Export(_)
+        | Command::Reset(_)
+        | Command::DurableBackup { .. } => {
             unreachable!("analytics command returns before pricing initialization")
         }
         Command::Mcp(home) => run_mcp(&home),
@@ -2027,18 +2069,10 @@ fn analytics_usage() -> String {
      --watch uses a minimum spacing of 2 s between chunk attempts; failures exit visibly. Ctrl-C/SIGTERM stops the wait.\n\
      \n\
      Usage: semon analytics coverage [--cache PATH] [--json]\n\
-     Reports one PUBLISHED live-row snapshot. Native pending/failed/frozen derivation state is not part of this report.
-\
-
-\
-     Usage: semon analytics export DESTINATION [--cache PATH]
-\
-     Copies one verified local analytics snapshot into an empty destination.
-\
-
-\
-     Usage: semon analytics reset --confirm NAMESPACE (--verified-export DIR | --without-export) [--new-namespace] [--cache PATH]
-\
+     Reports one PUBLISHED live-row snapshot. Native pending/failed/frozen derivation state is not part of this report.\n\n\
+     Usage: semon analytics export DESTINATION [--cache PATH]\n\
+     Copies one verified local analytics snapshot into an empty destination.\n\n\
+     Usage: semon analytics reset --confirm NAMESPACE (--verified-export DIR | --without-export) [--new-namespace] [--cache PATH]\n\
      Removes only the local analytics store after confirmation. --without-export discards non-rebuildable imported or frozen facts."
         .to_owned()
 }
@@ -2061,18 +2095,12 @@ fn usage() -> String {
          Usage: semon analytics coverage [--cache PATH] [--json]\n\
          Read-only coverage from one published live-row analytics snapshot. It does not report native pending/failed/frozen derivation state.\n\
          \n\
-         Usage: semon analytics export DESTINATION [--cache PATH]
-\
-         Copies one verified local analytics snapshot into an empty destination.
-\
-
-\
-         Usage: semon analytics reset --confirm NAMESPACE (--verified-export DIR | --without-export) [--new-namespace] [--cache PATH]
-\
-         Removes only the local analytics store after confirmation. --without-export discards non-rebuildable imported or frozen facts.
-\
-
-\
+         Usage: semon analytics export DESTINATION [--cache PATH]\n\
+         Copies one verified local analytics snapshot into an empty destination.\n\n\
+         Usage: semon analytics reset --confirm NAMESPACE (--verified-export DIR | --without-export) [--new-namespace] [--cache PATH]\n\
+         Removes only the local analytics store after confirmation. --without-export discards non-rebuildable imported or frozen facts.\n\n\
+         Usage: semon asi backup PATH [--cache PATH]\n\
+         Copies author-owned durable state; refuses an existing destination.\n\n\
          Usage: semon mcp [--since DURATION | --all] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--facts FILE] [--machine DIR]...\n\
          The same tools as a Model Context Protocol server on stdin and stdout. Read-only; no listener. Both read\n\
          the log files modified within the window, --since (30d by default), or all of them with --all.\n\
@@ -2097,6 +2125,28 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_backup_parser_requires_destination_and_reports_help() {
+        for args in [
+            vec!["backup"],
+            vec!["--help"],
+            vec!["backup", "--help"],
+            vec!["backup", "out", "--unknown"],
+        ] {
+            assert!(parse_asi_args(args.into_iter().map(str::to_owned)).is_err());
+        }
+        assert!(matches!(
+            parse_asi_args(
+                ["backup", "out", "--cache", "cache"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .unwrap(),
+            Command::DurableBackup { .. }
+        ));
+        assert!(asi_usage().contains("refuses an existing destination"));
+    }
 
     #[test]
     fn analytics_batch_limits_accept_the_sqlite_boundary_and_refuse_larger_values() {

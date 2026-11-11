@@ -629,7 +629,60 @@ checkpoint; this read-only adapter never recreates deleted data or resets custod
   above the checkpoint (categorical columns only) to `fact_label` generation
   files. Labels are append-only, so `fact_label` isn't filtered by the session
   live map, and labels on lanes or work items need no session at all.
-  `semon asi backup PATH` copies the file with the SQLite online backup API.
+  `semon asi backup PATH [--cache PATH]` copies the file with the SQLite online
+  backup API and refuses an existing file or symlink destination. Its parent must
+  exist. Backup writes inside a private sibling staging directory (0700), sets the
+  finished file to 0600, fsyncs it, and publishes with an atomic no-overwrite hard
+  link. Staging is removed on success or failure. No authoring CLI is provided.
+- **Row identity.** Every durable table has an author-assigned `id TEXT PRIMARY KEY`;
+  IDs are nonempty single UID components. Focused view UIDs are `{table}/{id}`.
+  `link` additionally has a unique `(from_type, from_id, change_id, method)`,
+  `outcome` a unique `change_id`, and `assignment` a unique
+  `(intervention_id, unit_type, unit_id)`.
+- **Adjudications.** Store required `target_type`, `target_uid`, `field`,
+  `taxonomy_version` and UTC-millisecond `created_at` alongside the methodology
+  fields. A nonempty `label_ids` list must reference existing labels that all
+  agree with those target/field/taxonomy columns. Export one assertion with
+  `label_id = adjudication/{id}`, `labeller = human:<adjudicator>`, `value =
+  final_value`, null confidence and its own revision/time. Label assertion IDs
+  export as `label/{id}`. The existing `current_label` human-first, revision-first
+  ordering applies; analytics columns do not change.
+- **Classes.** The single durable column table in `semon-asi::durable` declares
+  every semantic column. Body columns are exactly `label.mechanism_text`,
+  `adjudication.reason`, `lane.title`, `intervention.hypothesis` and
+  `intervention.guardrails`. Intervention `lever` and `primary_metric` are
+  categorical and are not exported in this slice. IDs, references, arrays and
+  timestamps are internal; the remaining categorical values are declared in code.
+  Every row also has an internal writing revision. Arrays use JSON text.
+  Categorical text uses a shape guard: nonempty, at most 128 bytes, and only
+  `[A-Za-z0-9._:/+@=-]`. This is not a vocabulary check; closed taxonomy membership
+  belongs to the labelling layer. Prompts/sentences belong in body columns, which
+  remain unrestricted. Labelers must have `rule:`, `model:` or `human:` plus a
+  nonempty suffix. UID-shaped values instead allow canonical unreserved component
+  bytes (`A-Za-z0-9-._~`), valid `%XX` escapes and record-anchor `@`/`:` forms.
+  Each component is nonempty and at most 128 bytes; composite UIDs allow `/`
+  separators and at most 1024 bytes total. Row IDs and referenced label IDs are
+  single components; evidence step IDs and target UIDs may be composite.
+- **Format/refusal.** The SQLite header carries `application_id = 0x53414455`
+  (`SADU`) and `user_version = 1`. Before any SQLite connection, a read-only,
+  no-follow regular-file header read checks the SQLite magic and both stamps.
+  Existing empty, foreign and mismatched files refuse without changing bytes or
+  creating SQLite sidecars. Once open, required tables and insert-only triggers
+  are also checked. A valid WAL-mode file opens SQLite read-only for readers;
+  SQLite may create `-wal`/`-shm` sidecars. A read-only filesystem without existing
+  sidecars cannot be read; the single-owner state directory must be writable.
+  Readers do not use `immutable=1`.
+  First creation initializes schema, triggers and both stamps in a private sibling
+  staging directory under the author lock. After commit, WAL checkpoint/close and
+  file/directory fsync, an atomic no-overwrite hard link publishes the final file.
+  A publication loser validates and opens the winner. Stale uniquely named staging
+  directories are left alone and never block later creation. An existing unstamped
+  final file still refuses; it is never treated as a new database.
+- **Ownership/API.** The Rust writer takes an explicit table, author-assigned ID
+  and typed values. It shares the analytics author lock. Export, rebuild, backup
+  and focused view use a separate read-only reader; version 1 mismatches refuse
+  before a writable SQLite open. Durable focused views require exactly one
+  admitted origin namespace and return body fields framed as `untrusted_text`.
 
 ## Hub export (phase 3)
 

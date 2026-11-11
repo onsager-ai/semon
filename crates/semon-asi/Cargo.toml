@@ -7,7 +7,7 @@ license.workspace = true
 [features]
 # DuckDB is the read engine (asi-store.md, Crate boundary). Its bundled C++ build is
 # slow, so ordinary builds do not compile it. The existing DuckDB CI lane owns it.
-query-engine = ["dep:duckdb", "dep:libc", "dep:tempfile"]
+query-engine = ["dep:duckdb", "dep:tempfile"]
 duckdb-tests = ["query-engine"]
 
 [dependencies]
@@ -20,8 +20,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 hex.workspace = true
+rusqlite = { workspace = true, features = ["backup"] }
 duckdb = { version = "=1.10506.1", features = ["bundled", "parquet", "json"], optional = true }
-libc = { workspace = true, optional = true }
+libc.workspace = true
 tempfile = { version = "3.27.0", optional = true }
 
 [dev-dependencies]

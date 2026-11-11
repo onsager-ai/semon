@@ -208,6 +208,12 @@ that every live session UID belongs to the local namespace and only shares the e
 `analytics.lock`; if materialization holds it, export refuses rather than copying a torn
 snapshot.
 
+Author-owned labels and work records live separately in `asi-durable.sqlite3`.
+`semon asi backup PATH [--cache PATH]` uses SQLite online backup and refuses an
+existing destination. Analytics exports include categorical label assertions, never
+durable free text; analytics rebuild/reset preserves the durable file. The Rust
+writer API is available in `semon-asi`; authoring commands are a later slice.
+
 `semon analytics reset` is explicit destructive maintenance for the analytics store
 only. It requires `--confirm` with the exact `analytics-namespace`, plus exactly one of
 `--verified-export DIR` or the clearly named `--without-export` waiver. A verified bundle
