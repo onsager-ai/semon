@@ -1182,8 +1182,9 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
             index_path.display()
         )
     })?;
-    // Owner::acquire takes analytics.lock before namespace inspection or creation, so
-    // guarded reset can remove both under one writer exclusion interval.
+    // Refuse invalid existing namespace state before creating a lock or recovering.
+    // Re-read under the writer lock because reset can change it after this preflight.
+    semon_sessions::read_analytics_namespace(state_dir)?;
     let owner = semon_sessions::analytics_writer::Owner::acquire(&index_path, &store_root)?;
     let namespace = match semon_sessions::read_analytics_namespace(state_dir)? {
         Some(namespace) => namespace,
@@ -1200,7 +1201,7 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
     if !args.watch {
         config.interval = std::time::Duration::ZERO;
     }
-    let writer = owner.start(config);
+    let writer = owner.start(config)?;
 
     let stop = semon_push::Stop::new();
     if args.watch {

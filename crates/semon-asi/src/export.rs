@@ -7,7 +7,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use arrow::{array::{Array, StringArray}};
+use arrow::array::StringArray;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -15,7 +15,7 @@ use crate::{
     Error, Manifest, Result,
     parquet_io::visit_batches,
     schema::SESSION_COLUMN,
-    store::{read_live_map, read_manifest},
+    store::{lock_file, read_live_map, read_manifest},
 };
 
 const ANALYTICS_DIR: &str = "analytics";
@@ -271,8 +271,8 @@ fn verify_current_export(
     receipt: &ExportReceipt,
 ) -> Result<()> {
     let mut current = BTreeMap::new();
-    for relative in std::iter::once(PathBuf::from("analytics-namespace"))
-        .chain(snapshot_files(root, manifest)?)
+    for relative in
+        std::iter::once(PathBuf::from("analytics-namespace")).chain(snapshot_files(root, manifest)?)
     {
         let path = if relative == Path::new("analytics-namespace") {
             namespace_file.to_path_buf()
@@ -291,7 +291,7 @@ fn verify_current_export(
         || current.iter().any(|(path, file)| {
             receipt_files
                 .get(path.as_str())
-                .map_or(true, |receipt_file| {
+                .is_none_or(|receipt_file| {
                     file.0 != receipt_file.0 || file.1 != receipt_file.1
                 })
         })
@@ -383,16 +383,8 @@ fn open_lock(root: &Path, exclusive: bool) -> Result<File> {
     let path = root.join(LOCK_FILE);
     require_regular_file(&path, "analytics lock")?;
     let lock = OpenOptions::new().read(true).write(exclusive).open(&path)?;
-    let locked = if exclusive {
-        lock.try_lock()
-    } else {
-        lock.try_lock_shared()
-    };
-    match locked {
-        Ok(()) => Ok(lock),
-        Err(std::fs::TryLockError::WouldBlock) => Err(Error::WriterBusy),
-        Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
-    }
+    lock_file(&lock, exclusive)?;
+    Ok(lock)
 }
 
 fn validate_snapshot(root: &Path) -> Result<Manifest> {
@@ -617,7 +609,10 @@ fn require_regular_file(path: &Path, kind: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Store, testutil::{TestClock, update}};
+    use crate::{
+        Store,
+        testutil::{TestClock, update},
+    };
 
     #[test]
     fn reset_removes_new_namespace_before_releasing_writer_lock() {
@@ -634,25 +629,25 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let summary = reset_snapshot_with(
-            &root,
-            &namespace_file,
-            namespace,
-            None,
-            1,
-            true,
-            || {
-                assert!(!namespace_file.exists());
-                let lock = OpenOptions::new()
-                    .write(true)
-                    .open(root.join(LOCK_FILE))
-                    .unwrap();
-                assert!(matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
-            },
-        )
+        let summary = reset_snapshot_with(&root, &namespace_file, namespace, None, 1, true, || {
+            assert!(!namespace_file.exists());
+            let lock = OpenOptions::new()
+                .write(true)
+                .open(root.join(LOCK_FILE))
+                .unwrap();
+            assert!(matches!(
+                lock.try_lock(),
+                Err(std::fs::TryLockError::WouldBlock)
+            ));
+        })
         .unwrap();
 
-        assert!(summary.removed.iter().any(|path| path == "analytics-namespace"));
+        assert!(
+            summary
+                .removed
+                .iter()
+                .any(|path| path == "analytics-namespace")
+        );
         assert!(root.join(LOCK_FILE).is_file());
         assert!(!root.join(ANALYTICS_DIR).exists());
     }

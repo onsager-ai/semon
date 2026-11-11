@@ -4,7 +4,7 @@
 mod fixture;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     process::Output,
@@ -86,7 +86,10 @@ fn file_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
             if entry.file_type().unwrap().is_dir() {
                 visit(root, &path, files);
             } else {
-                files.insert(path.strip_prefix(root).unwrap().to_owned(), fs::read(path).unwrap());
+                files.insert(
+                    path.strip_prefix(root).unwrap().to_owned(),
+                    fs::read(path).unwrap(),
+                );
             }
         }
     }
@@ -255,9 +258,11 @@ fn reset_refuses_an_old_generation_after_reset_and_republication() {
         .to_owned();
     let old_bundle = home.root.join("old-export");
     assert!(export(&home, &old_bundle).status.success());
-    assert!(reset(&home, &["--confirm", &namespace, "--without-export"])
-        .status
-        .success());
+    assert!(
+        reset(&home, &["--confirm", &namespace, "--without-export"])
+            .status
+            .success()
+    );
     home.write("configured-claude/.claude.json", b"{\"changed\":true}");
     assert!(materialize(&home).status.success());
     let before = file_bytes(&state);
@@ -311,7 +316,10 @@ fn export_and_reset_refuse_a_foreign_live_namespace_without_mutation() {
     assert!(materialize(&home).status.success());
     let state = home.root.join("state");
     let namespace_path = state.join("analytics-namespace");
-    let namespace = fs::read_to_string(&namespace_path).unwrap().trim().to_owned();
+    let namespace = fs::read_to_string(&namespace_path)
+        .unwrap()
+        .trim()
+        .to_owned();
     let foreign = format!("origin-{}\n", "f".repeat(64));
     fs::write(&namespace_path, &foreign).unwrap();
     let before = file_bytes(&state);
@@ -358,7 +366,11 @@ fn reset_requires_matching_confirmation_and_current_verified_export() {
         String::from_utf8_lossy(&reset.stderr)
     );
     assert!(home.root.join("state/analytics-namespace").is_file());
-    assert!(home.root.join("state/analytics-store/analytics.lock").is_file());
+    assert!(
+        home.root
+            .join("state/analytics-store/analytics.lock")
+            .is_file()
+    );
     assert!(!home.root.join("state/analytics-store/analytics").exists());
 }
 
@@ -389,7 +401,11 @@ fn reset_requires_one_export_choice_and_can_remove_the_namespace_explicitly() {
         String::from_utf8_lossy(&reset.stderr)
     );
     assert!(!home.root.join("state/analytics-namespace").exists());
-    assert!(home.root.join("state/analytics-store/analytics.lock").is_file());
+    assert!(
+        home.root
+            .join("state/analytics-store/analytics.lock")
+            .is_file()
+    );
     assert!(!home.root.join("state/analytics-store/analytics").exists());
 }
 

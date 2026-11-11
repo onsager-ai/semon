@@ -21,7 +21,7 @@ use std::{
 use rusqlite::{Error as SqliteError, ErrorCode};
 use semon_asi::{
     Clock, CompactionPolicy, Error as StoreError, InputBudget, PublishError, Store, Versions,
-    publish_cycle,
+    WriterLock, publish_cycle,
 };
 
 use crate::{SqliteAnalyticsInput, events::session_activity::ACTIVITY_RULES_VERSION};
@@ -460,7 +460,7 @@ where
 
 /// Ownership acquired before namespace creation or native Catalog mutation.
 pub struct Owner {
-    store: Store<Arc<semon_asi::SystemClock>>,
+    lock: WriterLock,
     clock: Arc<semon_asi::SystemClock>,
 }
 
@@ -477,16 +477,17 @@ impl Owner {
             Err(error) => return Err(format!("analytics writer refused: {error}")),
         }
         let clock = Arc::new(semon_asi::SystemClock);
-        let store =
-            Store::open_with_clock(root, Arc::clone(&clock)).map_err(|error| match error {
-                StoreError::WriterBusy => "analytics writer busy".to_owned(),
-                error => format!("analytics writer refused: {error}"),
-            })?;
-        Ok(Self { store, clock })
+        let lock = WriterLock::acquire(root).map_err(|error| match error {
+            StoreError::WriterBusy => "analytics writer busy".to_owned(),
+            error => format!("analytics writer refused: {error}"),
+        })?;
+        Ok(Self { lock, clock })
     }
 
-    pub fn start(self, config: AnalyticsWriterConfig) -> Handle {
-        start_thread(config, self.clock, Some(self.store))
+    pub fn start(self, config: AnalyticsWriterConfig) -> Result<Handle, String> {
+        let store = Store::open_with_lock(self.lock, Arc::clone(&self.clock))
+            .map_err(|error| format!("analytics writer refused: {error}"))?;
+        Ok(start_thread(config, self.clock, Some(store)))
     }
 }
 
@@ -1782,7 +1783,9 @@ mod tests {
         fs::rename(&index, &target).unwrap();
         let before = fs::read(&target).unwrap();
         std::os::unix::fs::symlink(&target, &index).unwrap();
-        let handle = owner.start(AnalyticsWriterConfig::new("machine", &index, &store_root));
+        let handle = owner
+            .start(AnalyticsWriterConfig::new("machine", &index, &store_root))
+            .unwrap();
         assert!(matches!(
             handle.publish_and_wait(),
             AnalyticsWriterStatus::Refused { .. }
