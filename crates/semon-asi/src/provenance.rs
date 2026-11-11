@@ -121,11 +121,43 @@ pub(crate) fn validate(
         }
         Ok(())
     })();
-    checked.map_err(|error: crate::Error| {
-        crate::Error::invalid(format!(
-            "invalid publication provenance: {error}; preserve or export the store before recovery"
-        ))
-    })
+    checked.map_err(validation_error)
+}
+
+fn validation_error(error: crate::Error) -> crate::Error {
+    use arrow::error::ArrowError;
+    use parquet::errors::ParquetError;
+
+    // Preserve the typed I/O cause so the writer's bounded operational retry
+    // applies. A referenced file disappearing is an integrity failure instead.
+    let error = match error {
+        crate::Error::Arrow(ArrowError::IoError(_, source)) => crate::Error::Io(source),
+        crate::Error::Arrow(ArrowError::ExternalError(source))
+        | crate::Error::Parquet(ParquetError::External(source)) => {
+            return match source.downcast::<std::io::Error>() {
+                Ok(source) => validation_error(crate::Error::Io(*source)),
+                Err(source) => match source.downcast::<ParquetError>() {
+                    Ok(source) => validation_error(crate::Error::Parquet(*source)),
+                    Err(source) => match source.downcast::<ArrowError>() {
+                        Ok(source) => validation_error(crate::Error::Arrow(*source)),
+                        Err(source) => integrity_error(source),
+                    },
+                },
+            };
+        }
+        error => error,
+    };
+    if matches!(&error, crate::Error::Io(source) if source.kind() != std::io::ErrorKind::NotFound) {
+        error
+    } else {
+        integrity_error(error)
+    }
+}
+
+fn integrity_error(error: impl std::fmt::Display) -> crate::Error {
+    crate::Error::invalid(format!(
+        "invalid publication provenance: {error}; preserve or export the store before recovery"
+    ))
 }
 
 /// Read and validate the one-to-one binding to a pinned manifest's live map.
@@ -309,6 +341,45 @@ mod tests {
             assert_eq!(std::fs::read(&orphan).unwrap(), b"preserve");
             assert!(root.join("analytics/fact_session/g1.parquet").exists());
             assert_eq!(path.exists(), corruption != "missing");
+        }
+    }
+
+    #[test]
+    fn validation_preserves_operational_io_and_refuses_missing_custody() {
+        use arrow::error::ArrowError;
+        use parquet::errors::ParquetError;
+        use std::io::{Error, ErrorKind};
+
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::Interrupted,
+            ErrorKind::Other,
+        ] {
+            let errors = [
+                crate::Error::Io(Error::from(kind)),
+                crate::Error::Parquet(ParquetError::External(Box::new(Error::from(kind)))),
+                crate::Error::Arrow(ArrowError::IoError("read".into(), Error::from(kind))),
+                crate::Error::Arrow(ArrowError::ExternalError(Box::new(ParquetError::External(
+                    Box::new(Error::from(kind)),
+                )))),
+            ];
+            for error in errors {
+                let classified = validation_error(error);
+                assert!(classified.is_operational(), "{classified}");
+                assert!(matches!(classified, crate::Error::Io(source) if source.kind() == kind));
+            }
+        }
+        for error in [
+            crate::Error::Io(Error::from(ErrorKind::NotFound)),
+            crate::Error::Parquet(ParquetError::External(Box::new(Error::from(
+                ErrorKind::NotFound,
+            )))),
+            crate::Error::invalid("duplicate live provenance record"),
+            crate::Error::Parquet(ParquetError::General("bad footer".into())),
+        ] {
+            let classified = validation_error(error);
+            assert!(!classified.is_operational());
+            assert!(classified.to_string().contains("preserve or export"));
         }
     }
 
