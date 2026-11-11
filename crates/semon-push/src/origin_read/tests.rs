@@ -164,7 +164,17 @@ struct Renderer<'a> {
     oversized: bool,
 }
 impl PageRenderer for Renderer<'_> {
-    fn prepare(&self, _: &ResolvedSource, _: &Target, _: PinnedPolicy) -> Result<RenderPlan> {
+    fn prepare(
+        &self,
+        _: &ResolvedSource,
+        _: &Target,
+        _: PinnedPolicy,
+        budget: RenderBudget,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<RenderPlan> {
+        assert!(budget.bytes <= MAX_BYTES);
+        assert_eq!(budget.deadline_millis, 12_000);
+        assert!(!cancelled());
         let mut p = plan();
         if self.oversized {
             p.payload_bytes = MAX_BYTES as u64;
@@ -521,6 +531,161 @@ fn authorization_only_requires_exact_origin_witness_and_never_renders() {
         Some(Refused::PolicyChanged)
     );
     assert_eq!(f.journal().lines().count(), 4);
+}
+
+#[test]
+fn cancellation_or_deadline_during_prepare_leaves_journal_empty() {
+    struct Preparing<'a> {
+        inner: Renderer<'a>,
+        action: &'a dyn Fn(),
+    }
+    impl PageRenderer for Preparing<'_> {
+        fn prepare(
+            &self,
+            source: &ResolvedSource,
+            target: &Target,
+            policy: PinnedPolicy,
+            budget: RenderBudget,
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<RenderPlan> {
+            let plan = self
+                .inner
+                .prepare(source, target, policy, budget, cancelled)?;
+            (self.action)();
+            Ok(plan)
+        }
+        fn render(
+            &self,
+            _: &ResolvedSource,
+            _: &Target,
+            _: PinnedPolicy,
+            _: RenderBudget,
+            _: &dyn Fn() -> bool,
+        ) -> Result<RenderedPage> {
+            panic!("preparation refusal must precede render")
+        }
+    }
+    for deadline in [false, true] {
+        let f = Fixture::new();
+        let at = At(Cell::new(10_000));
+        let cancelled = Cell::new(false);
+        let mut audit = AuditStore::open(&f.0, &at, crate::origin_audit::MAX_BYTES).unwrap();
+        let action = || {
+            if deadline {
+                at.0.set(12_000);
+            } else {
+                cancelled.set(true);
+            }
+        };
+        let renderer = Preparing {
+            inner: Renderer {
+                fixture: &f,
+                calls: Cell::new(0),
+                action: &|| {},
+                failure: None,
+                oversized: false,
+            },
+            action: &action,
+        };
+        let result = OriginRead {
+            enrollment: &Enrollment {
+                revoked: Cell::new(false),
+            },
+            resolver: &Resolver { missing: false },
+            policies: &Policies(Cell::new(false)),
+            renderer: &renderer,
+            clock: &at,
+            cancelled: &|| cancelled.get(),
+            audit: &mut audit,
+        }
+        .read(&claims(), &request());
+        assert_eq!(
+            result.err(),
+            Some(if deadline {
+                Refused::Deadline
+            } else {
+                Refused::Unavailable
+            })
+        );
+        assert_eq!(renderer.inner.calls.get(), 0);
+        assert!(f.journal().is_empty());
+    }
+}
+
+#[test]
+fn cancellation_or_deadline_during_final_policy_recheck_closes_audit() {
+    struct Rechecking<'a> {
+        calls: Cell<usize>,
+        action: &'a dyn Fn(),
+    }
+    impl PolicyVector for Rechecking<'_> {
+        fn evaluate(
+            &self,
+            scope: &EnrollmentScope,
+            claims: &Claims,
+            source: &ResolvedSource,
+            target: &Target,
+        ) -> Result<PinnedPolicy> {
+            self.calls.set(self.calls.get() + 1);
+            if self.calls.get() == 2 {
+                (self.action)();
+            }
+            Policies(Cell::new(false)).evaluate(scope, claims, source, target)
+        }
+    }
+    for deadline in [false, true] {
+        let f = Fixture::new();
+        let at = At(Cell::new(10_000));
+        let cancelled = Cell::new(false);
+        let mut audit = AuditStore::open(&f.0, &at, crate::origin_audit::MAX_BYTES).unwrap();
+        let action = || {
+            if deadline {
+                at.0.set(12_000);
+            } else {
+                cancelled.set(true);
+            }
+        };
+        let policies = Rechecking {
+            calls: Cell::new(0),
+            action: &action,
+        };
+        let renderer = Renderer {
+            fixture: &f,
+            calls: Cell::new(0),
+            action: &|| {},
+            failure: None,
+            oversized: false,
+        };
+        let result = OriginRead {
+            enrollment: &Enrollment {
+                revoked: Cell::new(false),
+            },
+            resolver: &Resolver { missing: false },
+            policies: &policies,
+            renderer: &renderer,
+            clock: &at,
+            cancelled: &|| cancelled.get(),
+            audit: &mut audit,
+        }
+        .read(&claims(), &request());
+        assert_eq!(
+            result.err(),
+            Some(if deadline {
+                Refused::Deadline
+            } else {
+                Refused::Unavailable
+            })
+        );
+        assert_eq!(policies.calls.get(), 2);
+        assert_eq!(renderer.calls.get(), 1);
+        let journal = f.journal();
+        assert_eq!(journal.lines().count(), 2);
+        assert!(journal.contains(if deadline {
+            "\"outcome\":\"failed\""
+        } else {
+            "\"outcome\":\"cancelled\""
+        }));
+    }
 }
 
 #[test]

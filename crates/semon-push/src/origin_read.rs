@@ -247,11 +247,15 @@ pub struct RenderBudget {
     pub deadline_millis: u64,
 }
 pub trait PageRenderer {
+    /// Metadata preparation shares the operation's deadline and cancellation.
+    /// Its byte ceiling is narrowed further for binding overhead before rendering.
     fn prepare(
         &self,
         source: &ResolvedSource,
         target: &Target,
         policy: PinnedPolicy,
+        budget: RenderBudget,
+        cancelled: &dyn Fn() -> bool,
     ) -> Result<RenderPlan>;
     /// Use only admitted origin-local typed fields and preserve untrusted_text.
     /// No whole-session replay/inference. Honor budget and cancellation while
@@ -447,8 +451,21 @@ impl<C: Clock> OriginRead<'_, C> {
                 continuation: candidate.continuation.clone(),
             }
         } else {
-            self.renderer.prepare(&source, &request.target, policy)?
+            self.renderer.prepare(
+                &source,
+                &request.target,
+                policy,
+                RenderBudget {
+                    bytes: limit,
+                    deadline_millis: deadline,
+                },
+                self.cancelled,
+            )?
         };
+        check_deadline(self.clock, deadline)?;
+        if (self.cancelled)() {
+            return Err(Refused::Unavailable);
+        }
         let export = plan
             .export_view_generation
             .as_ref()
@@ -596,6 +613,10 @@ impl<C: Clock> OriginRead<'_, C> {
                 origin_redactor_version: policy.redactor_version,
                 origin_authorization_id: audit_id.identifier(),
             };
+            check_deadline(self.clock, deadline)?;
+            if (self.cancelled)() {
+                return Err(Refused::Unavailable);
+            }
             Ok(Authorized {
                 page,
                 response_binding: ResponseBinding {
