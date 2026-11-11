@@ -443,24 +443,6 @@ fn assert_activity_page(page: &Value) {
 fn semon_query_pins_every_tool_and_writes_only_its_cache() {
     let home = Home::new();
     let before = home.inputs();
-    // A stale search never opens native evidence or creates the metadata cache,
-    // including missing text and malformed former arguments.
-    assert!(!home.root.join("state").exists());
-    for args in [
-        vec!["query", "find", "lexer", "--limit", "1", "--json"],
-        vec!["query", "find", "nothing says this", "--json"],
-        vec!["query", "find", "--json"],
-        vec!["query", "find", "lexer", "--limit", "malformed", "--json"],
-    ] {
-        let output = home.semon(&args);
-        assert!(!output.status.success(), "{args:?}");
-        assert!(
-            output.stdout.is_empty(),
-            "paused search is not empty success"
-        );
-        assert!(String::from_utf8_lossy(&output.stderr).contains("capability_unavailable"));
-        assert!(!home.root.join("state").exists());
-    }
     let model = home.native_contract();
     for (tool, _, args, answer) in expected(&model) {
         let mut all = vec!["query", tool];
@@ -622,15 +604,21 @@ fn check_schema(tool: &str, schema: &Value) {
                     "default",
                     "properties",
                     "required",
-                    "additionalProperties"
+                    "additionalProperties",
+                    "items"
                 ]
                 .contains(&key.as_str()),
                 "{tool}.{name}: {key}"
             );
         }
+        if property["type"].is_array() {
+            assert_eq!(tool, "sql");
+            assert_eq!(name, "params");
+            continue;
+        }
         let kind = property["type"].as_str().unwrap();
         assert!(
-            ["string", "integer", "object"].contains(&kind),
+            ["string", "integer", "object", "array"].contains(&kind),
             "{tool}.{name}: {kind}"
         );
         assert!(
@@ -650,6 +638,12 @@ fn check_schema(tool: &str, schema: &Value) {
             assert!(property["properties"].is_object());
             assert!(property["required"].is_array());
             assert_eq!(property["additionalProperties"], false);
+            continue;
+        }
+        if kind == "array" {
+            assert_eq!(tool, "sql");
+            assert_eq!(name, "params");
+            assert!(property["items"]["type"].is_array());
             continue;
         }
         if kind == "string" {
@@ -724,16 +718,25 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        names,
-        [
-            "list_sessions",
-            "get_session",
-            "get_session_activity",
-            "read_transcript",
-            "stalls"
-        ]
-    );
+    #[cfg(feature = "asi-query")]
+    let expected_tools = [
+        "list_sessions",
+        "get_session",
+        "get_session_activity",
+        "read_transcript",
+        "stalls",
+        "sql",
+        "schema",
+    ];
+    #[cfg(not(feature = "asi-query"))]
+    let expected_tools = [
+        "list_sessions",
+        "get_session",
+        "get_session_activity",
+        "read_transcript",
+        "stalls",
+    ];
+    assert_eq!(names, expected_tools);
     for tool in tools {
         let name = tool["name"].as_str().unwrap();
         assert!(
@@ -744,29 +747,6 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         assert_eq!(tool["annotations"]["readOnlyHint"], true, "{name}");
         check_schema(name, &tool["inputSchema"]);
     }
-
-    // Stale search is an explicit tool error before native/cache admission,
-    // even when the old search arguments are malformed.
-    assert!(
-        !init["result"]["instructions"]
-            .as_str()
-            .unwrap()
-            .contains("find")
-    );
-    assert!(!home.root.join("state").exists());
-    for (id, arguments) in (4..).zip([
-        json!({"text": "lexer", "limit": 1}),
-        json!({"text": "nothing says this"}),
-        json!({}),
-        json!({"text": "lexer", "limit": "malformed"}),
-        Value::Null,
-    ]) {
-        let (error, failed) = content(&server.call(id, "find", arguments));
-        assert!(failed);
-        assert_eq!(error["error"]["code"], "capability_unavailable");
-        assert!(!home.root.join("state").exists());
-    }
-
     // Every active tool answers as `semon query` does.
     for (id, (tool, arguments, _, answer)) in (10..).zip(expected(&model)) {
         let reply = server.call(id, tool, arguments.clone());
@@ -791,7 +771,7 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
     let unknown = server.call(32, "nope", json!({}));
     assert_eq!(unknown["error"]["code"], -32602);
     let method = server.request(json!({"jsonrpc": "2.0", "id": 33, "method": "resources/read"}));
-    assert_eq!(method["error"]["code"], -32601);
+    assert_eq!(method["error"]["code"], -32602);
     for (line, id, code) in [
         ("{not json", Value::Null, -32700),
         ("[1, 2]", Value::Null, -32600),

@@ -179,7 +179,7 @@ The earlier map classified runtime, E2B, SSH and control-delivery cases as
 record the earlier decision only; the capabilities and their active entry points and CI jobs have since been retired. The row-level
 entries remain historical inventory, not current acceptance claims; previous
 refusal checks and CI owners are not current gates. See [rust-and-cli.md](rust-and-cli.md)
-and [ui-served-scripts.md](ui-served-scripts.md) for the affected historical rows. The separate full-text `find` boundary remains current until the ASI query surface lands.
+and [ui-served-scripts.md](ui-served-scripts.md) for the affected historical rows. The separate full-text `find` boundary is retired; ASI SQL and schema queries are current and FTS search follows in #567.
 
 ## Findings to act on
 

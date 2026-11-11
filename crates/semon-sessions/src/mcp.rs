@@ -14,6 +14,42 @@ use serde_json::{Value, json};
 
 use crate::query::{Query, query_tools};
 
+/// Optional tools and resources supplied by the embedding binary. They share the
+/// protocol framing with native-session tools without coupling this crate to an
+/// analytics engine.
+pub trait McpExtension {
+    /// Additional read-only tools to advertise beside the native session tools.
+    fn tools(&self) -> Vec<crate::query::QueryTool>;
+
+    /// Handles an additional tool, returning `None` when it does not own `name`.
+    /// Errors are already public error envelopes.
+    fn call(&mut self, name: &str, arguments: &Value) -> Option<Result<Value, Value>>;
+
+    /// Additional MCP resources.
+    fn resources(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    /// Reads an additional resource, returning `None` when it does not own `uri`.
+    fn read_resource(&self, uri: &str) -> Option<Result<Value, (i64, String)>>;
+}
+
+struct NoExtension;
+
+impl McpExtension for NoExtension {
+    fn tools(&self) -> Vec<crate::query::QueryTool> {
+        Vec::new()
+    }
+
+    fn call(&mut self, _: &str, _: &Value) -> Option<Result<Value, Value>> {
+        None
+    }
+
+    fn read_resource(&self, _: &str) -> Option<Result<Value, (i64, String)>> {
+        None
+    }
+}
+
 /// The protocol versions this server speaks, newest first. A client that
 /// asks for one of these gets it; any other gets the newest, as the protocol
 /// says, and decides whether to go on.
@@ -34,8 +70,14 @@ const INSTRUCTIONS: &str = "Semon reads the local Claude Code and Codex session 
     every answer names its window_start, and a since before it is the error outside_window.";
 
 /// Serves MCP over `input` and `output` until `input` ends.
-pub fn serve_mcp(
+pub fn serve_mcp(query: &mut Query, input: impl BufRead, output: impl Write) -> io::Result<()> {
+    serve_mcp_with_extension(query, &mut NoExtension, input, output)
+}
+
+/// Serves MCP with additional embedding-owned tools and resources.
+pub fn serve_mcp_with_extension(
     query: &mut Query,
+    extension: &mut impl McpExtension,
     mut input: impl BufRead,
     mut output: impl Write,
 ) -> io::Result<()> {
@@ -45,7 +87,7 @@ pub fn serve_mcp(
         if input.read_until(b'\n', &mut line)? == 0 {
             return Ok(());
         }
-        if let Some(reply) = handle(query, &line) {
+        if let Some(reply) = handle_with_extension(query, extension, &line) {
             serde_json::to_writer(&mut output, &reply)?;
             output.write_all(b"\n")?;
             output.flush()?;
@@ -59,7 +101,11 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 
 /// The answer to one line, or `None` for a notification, a response or a
 /// blank line.
-fn handle(query: &mut Query, line: &[u8]) -> Option<Value> {
+fn handle_with_extension(
+    query: &mut Query,
+    extension: &mut impl McpExtension,
+    line: &[u8],
+) -> Option<Value> {
     if line.trim_ascii().is_empty() {
         return None;
     }
@@ -96,10 +142,12 @@ fn handle(query: &mut Query, line: &[u8]) -> Option<Value> {
         Some(_) => return Some(error(id, INVALID_PARAMS, "params must be an object")),
     };
     let result = match method {
-        "initialize" => Ok(initialize(&params)),
+        "initialize" => Ok(initialize(&params, !extension.resources().is_empty())),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools": tools()})),
-        "tools/call" => call(query, &params),
+        "tools/list" => Ok(json!({"tools": tools_with_extension(extension)})),
+        "tools/call" => call_with_extension(query, extension, &params),
+        "resources/list" => Ok(json!({"resources": extension.resources()})),
+        "resources/read" => read_resource(extension, &params),
         _ => Err((METHOD_NOT_FOUND, format!("Method not found: {method}"))),
     };
     Some(match result {
@@ -108,22 +156,32 @@ fn handle(query: &mut Query, line: &[u8]) -> Option<Value> {
     })
 }
 
-fn initialize(params: &Value) -> Value {
+#[cfg(test)]
+fn handle(query: &mut Query, line: &[u8]) -> Option<Value> {
+    handle_with_extension(query, &mut NoExtension, line)
+}
+
+fn initialize(params: &Value, has_resources: bool) -> Value {
     let asked = params.get("protocolVersion").and_then(Value::as_str);
     let version = asked
         .and_then(|asked| PROTOCOL_VERSIONS.into_iter().find(|known| *known == asked))
         .unwrap_or(PROTOCOL_VERSIONS[0]);
+    let mut capabilities = json!({"tools": {"listChanged": false}});
+    if has_resources {
+        capabilities["resources"] = json!({"subscribe": false, "listChanged": false});
+    }
     json!({
         "protocolVersion": version,
-        "capabilities": {"tools": {"listChanged": false}},
+        "capabilities": capabilities,
         "serverInfo": {"name": "semon", "version": env!("CARGO_PKG_VERSION")},
         "instructions": INSTRUCTIONS,
     })
 }
 
-fn tools() -> Vec<Value> {
+fn tools_with_extension(extension: &impl McpExtension) -> Vec<Value> {
     query_tools()
         .into_iter()
+        .chain(extension.tools())
         .map(|tool| {
             json!({
                 "name": tool.name,
@@ -135,22 +193,44 @@ fn tools() -> Vec<Value> {
         .collect()
 }
 
-fn call(query: &mut Query, params: &Value) -> Result<Value, (i64, String)> {
+fn call_with_extension(
+    query: &mut Query,
+    extension: &mut impl McpExtension,
+    params: &Value,
+) -> Result<Value, (i64, String)> {
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return Err((INVALID_PARAMS, "tools/call needs a tool name".into()));
     };
-    if name != "find" && !query_tools().iter().any(|tool| tool.name == name) {
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let (value, failed) = if query_tools().iter().any(|tool| tool.name == name) {
+        match query.call(name, &arguments) {
+            Ok(value) => (value, false),
+            Err(error) => (error.to_json(), true),
+        }
+    } else if let Some(result) = extension.call(name, &arguments) {
+        match result {
+            Ok(value) => (value, false),
+            Err(error) => (error, true),
+        }
+    } else {
         return Err((INVALID_PARAMS, format!("Unknown tool: {name}")));
-    }
-    let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
-    let (value, failed) = match query.call(name, &arguments) {
-        Ok(value) => (value, false),
-        Err(error) => (error.to_json(), true),
     };
     Ok(json!({
         "content": [{"type": "text", "text": value.to_string()}],
         "isError": failed,
     }))
+}
+
+fn read_resource(extension: &impl McpExtension, params: &Value) -> Result<Value, (i64, String)> {
+    let Some(uri) = params.get("uri").and_then(Value::as_str) else {
+        return Err((INVALID_PARAMS, "resources/read needs a resource URI".into()));
+    };
+    extension
+        .read_resource(uri)
+        .unwrap_or_else(|| Err((INVALID_PARAMS, format!("Unknown resource: {uri}"))))
 }
 
 #[cfg(test)]
@@ -185,23 +265,6 @@ mod tests {
     }
 
     #[test]
-    fn paused_find_is_unadvertised_and_refuses_before_native_reads() {
-        let (mut query, root) = empty_query("paused-find");
-        assert!(!INSTRUCTIONS.contains("find"));
-        assert!(!tools().iter().any(|tool| tool["name"] == "find"));
-        for arguments in [json!({"text":"private"}), json!({}), json!(17), Value::Null] {
-            let result = call(&mut query, &json!({"name":"find","arguments":arguments})).unwrap();
-            assert_eq!(result["isError"], true);
-            let value: Value =
-                serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
-            assert_eq!(value["error"]["code"], "capability_unavailable");
-        }
-        assert!(!root.join("index.json").exists());
-        assert!(!crate::events::EventCache::path(&root.join("index.json")).exists());
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
     fn requests_notifications_and_malformed_lines() {
         let (mut query, root) = empty_query("unit");
         let init = ask(
@@ -232,6 +295,15 @@ mod tests {
             None,
             "a response needs no answer"
         );
+        let resources = ask(
+            &mut query,
+            r#"{"jsonrpc":"2.0","id":4,"method":"resources/list"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resources,
+            json!({"jsonrpc":"2.0","id":4,"result":{"resources":[]}})
+        );
         let mut code = |line: &str| {
             let reply = handle(&mut query, line.as_bytes()).unwrap();
             (reply["id"].clone(), reply["error"]["code"].as_i64())
@@ -250,10 +322,6 @@ mod tests {
         assert_eq!(
             code(r#"{"jsonrpc":"2.0","id":3}"#),
             (json!(3), Some(INVALID_REQUEST))
-        );
-        assert_eq!(
-            code(r#"{"jsonrpc":"2.0","id":4,"method":"resources/list"}"#),
-            (json!(4), Some(METHOD_NOT_FOUND))
         );
         assert_eq!(
             code(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"nope"}}"#),

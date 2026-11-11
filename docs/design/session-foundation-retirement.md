@@ -30,7 +30,7 @@ operation reconciliation without adding speculative recovery infrastructure.
 > workflows and SSH qualification scripts are removed in step 2, landed in this
 > branch. Multi-machine collection uses non-SSH Push/receive over TLS.
 
-Broad full-text `find` remains paused until the ASI query surface lands. Retirement
+ASI SQL and schema queries are available; full-text search follows in #567. Retirement
 never deletes user data, credentials, native history or installed services, and
 performs no live operational cleanup.
 
@@ -96,8 +96,8 @@ cannot be rebuilt, and old archive markers do not become new custody authority.
   current from retained history under generation fences. Unchanged sources reuse
   the existing Event Index without repeated full-history parsing.
 - Local/stdio and hosted MCP preserve list_sessions, get_session, read_transcript
-  and stalls through the shared native Query. Broad full-text `find` remains paused
-  until the ASI query surface lands. Hosted requests admit native sources without
+  and stalls through the shared native Query. ASI SQL and schema queries are available;
+  full-text search follows in #567. Hosted requests admit native sources without
   ViewerCore, warming or workspace-model preparation.
 - Focused history reads retrieve only selected sources/ranges and bounded
   relationship context, verify identity/generation/integrity, avoid tenant locks

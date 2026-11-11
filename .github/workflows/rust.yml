@@ -142,11 +142,6 @@ jobs:
           cargo test -p semon-sessions --lib --locked events::store::reprice::tests::
           cargo test -p semon-sessions --lib --locked catalog_statement_journal_batch_probe_preserves_catalog_feed_and_transaction_rollback
 
-      - name: Paused full-text find refuses before native reads
-        run: |
-          cargo test -p semon-sessions --lib --locked paused_find_ -- --nocapture
-          cargo test -p semon-cli --bin semon --locked paused_find_ -- --nocapture
-
       - name: Recovery core journey and selected fallback diagnostics
         env:
           SEMON_BUILD_TIMING: "0"
