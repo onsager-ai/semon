@@ -178,7 +178,25 @@ jobs:
           grep -Fq '1 passed; 0 failed;' "$RUNNER_TEMP/cold-catalog-viewer.log"
           SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked journal_append_and_warm_restart_ignore_unrelated_history -- --nocapture
           SEMON_BUILD_TIMING=0 cargo test -p semon-sessions --locked native_codex_archive_unarchive_reuses_the_indexed_generation -- --nocapture
-          SEMON_BUILD_TIMING=1 cargo test --locked -- --skip initial_catalog_page_precedes_global_native_observation
+          RUSTC_BOOTSTRAP=1 SEMON_BUILD_TIMING=1 cargo test --locked -- -Z unstable-options --format=json --report-time --skip initial_catalog_page_precedes_global_native_observation | tee "$RUNNER_TEMP/test-timings.jsonl"
+
+      - name: Temporary unit test timing report
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          rows = []
+          for line in (Path(os.environ['RUNNER_TEMP']) / 'test-timings.jsonl').read_text().splitlines():
+              if line.startswith('{'):
+                  row = json.loads(line)
+                  if row.get('type') == 'test' and 'exec_time' in row:
+                      rows.append(row)
+                  if row.get('type') == 'suite' and row.get('event') in ('ok', 'failed'):
+                      print('SUITE', json.dumps(row))
+          for row in sorted(rows, key=lambda row: row['exec_time'], reverse=True)[:30]:
+              print(f"SLOW {row['exec_time']:.3f}s {row['name']}")
+          PY
 
       - name: Source clock/account strict Clippy
         run: cargo clippy -p semon-sessions --all-targets --features test-clock,test-ui-account-server --locked -- --no-deps -D warnings
