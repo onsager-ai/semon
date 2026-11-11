@@ -5245,6 +5245,16 @@ fn staged_claude_ambiguity_and_received_copy_policy_match_shared_builder() {
         only(&oracle, "spawn", "logged-root", "ambiguous-child").from,
         "logged-root"
     );
+    // The received prefix is one body with two source contributions after
+    // Catalog binds both files to their continuation owner.
+    let connection =
+        rusqlite::Connection::open(home.options.cache.with_extension("sqlite3")).unwrap();
+    let counts: (i64, i64) = connection.query_row(
+        "SELECT count(DISTINCT b.body_uid),count(*) FROM body b JOIN body_source s USING(body_uid) WHERE b.text='got it'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(counts, (1, 2));
 }
 
 #[test]

@@ -9816,6 +9816,10 @@ mod tests {
     // the persistence contract; totals, models and active tool state still are.
     fn index_snapshot(index: &FileIndex) -> String {
         let mut snapshot = index.clone();
+        // Body rows are a pending transaction batch, not retained FileIndex
+        // facts. Keep comparing parser state; persisted rows have a separate
+        // cold/append/rewrite oracle in body_query tests.
+        snapshot.bodies.checkpoint();
         snapshot.tree_summary = index.tree_summary.as_ref().map(|summary| {
             let mut compact = summary.compact(true);
             compact.first = summary.first.clone();

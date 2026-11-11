@@ -96,7 +96,14 @@ impl Batch {
         let ordinal = ordinal.unwrap_or(self.state.record);
         self.state.record = ordinal.saturating_add(1);
         let ts = crate::events::record_time(record);
-        let source = self.state.source.clone();
+        // Received Claude copies retain their record's native session ID even
+        // when the containing continuation file has a different name.
+        let source = if harness == "claude" {
+            crate::field(record, "sessionId").unwrap_or(&self.state.source)
+        } else {
+            &self.state.source
+        }
+        .to_owned();
         let anchor = || format!("@{source}:{ordinal}");
         let mut parts: Vec<(&str, String, Option<String>)> = Vec::new();
         let mut step = None;
@@ -464,7 +471,7 @@ pub(crate) fn write(
     batch: &Batch,
     append: bool,
 ) -> rusqlite::Result<()> {
-    if batch.rows.is_empty() && batch.state.session.is_none() {
+    if batch.rows.is_empty() && batch.state.source.is_empty() {
         if !append {
             clear(tx, path)?;
         }

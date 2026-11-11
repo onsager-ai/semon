@@ -658,6 +658,30 @@ fn append_restart_and_rewrite_leave_no_stale_bodies() {
     let (root, index) = fixture('a');
     let cache = index.with_extension("json");
     let source = root.join("session.jsonl");
+    let assert_cold = || {
+        let (cold_root, cold_index) = fixture('b');
+        let cold_source = cold_root.join("session.jsonl");
+        std::fs::copy(&source, &cold_source).unwrap();
+        let mut cold_cache = EventCache::open_scoped(&cold_index.with_extension("json")).unwrap();
+        crate::events::scan_file(&cold_source, "claude", &mut cold_cache, &mut false).unwrap();
+        let snapshot = |path: &Path| {
+            let connection = Connection::open(path).unwrap();
+            let mut statement = connection.prepare("SELECT json_array(body_uid,session_uid,turn_uid,step_uid,part,ord,ts,text) FROM body ORDER BY body_uid").unwrap();
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let postings: i64 = connection.query_row("SELECT count(*) FROM body_fts WHERE body_fts MATCH 'oldneedle OR newneedle OR replacement'", [], |row| row.get(0)).unwrap();
+            let contributions: i64 = connection
+                .query_row("SELECT count(*) FROM body_source", [], |row| row.get(0))
+                .unwrap();
+            (rows, postings, contributions)
+        };
+        assert_eq!(snapshot(&index), snapshot(&cold_index));
+        drop(cold_cache);
+        std::fs::remove_dir_all(cold_root).unwrap();
+    };
     let line = |role: &str, text: &str| {
         format!(
             "{}\n",
@@ -678,6 +702,7 @@ fn append_restart_and_rewrite_leave_no_stale_bodies() {
         .write_all(line("assistant", "newneedle").as_bytes())
         .unwrap();
     scan();
+    assert_cold();
     let value = request(vec![index.clone()], "search", json!({"query":"newneedle"})).unwrap();
     let hit = &value["hits"][0];
     assert_eq!(
@@ -692,6 +717,7 @@ fn append_restart_and_rewrite_leave_no_stale_bodies() {
     assert_eq!(value["bodies"][0]["text"]["untrusted_text"], "newneedle");
     std::fs::write(&source, line("user", "replacement")).unwrap();
     scan();
+    assert_cold();
     let value = request(
         vec![index],
         "search",
