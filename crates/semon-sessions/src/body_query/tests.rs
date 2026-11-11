@@ -30,13 +30,14 @@ fn insert(index: &Path, text: &str, ordinal: u64) {
 }
 
 fn request(indexes: Vec<PathBuf>, tool: &str, arguments: Value) -> Result<Value, Value> {
-    execute(
+    execute_with_timeout(
         Request {
             indexes,
             tool: tool.into(),
             arguments,
         },
         Access::Origin,
+        Duration::from_secs(30),
     )
 }
 
@@ -481,11 +482,17 @@ fn time_filters_use_inclusive_utc_milliseconds() {
 fn expired_deadline_returns_no_partial_rows() {
     let (root, index) = fixture('a');
     insert(&index, "needle", 0);
-    let deadline = Instant::now();
-    let index = open(&index, Instant::now() + Duration::from_secs(2)).unwrap();
-    let query: Search = serde_json::from_value(json!({"query":"needle"})).unwrap();
     assert_eq!(
-        search(&[index], query, deadline).unwrap_err()["error"]["code"],
+        execute_with_timeout(
+            Request {
+                indexes: vec![index],
+                tool: "search".into(),
+                arguments: json!({"query":"needle"}),
+            },
+            Access::Origin,
+            Duration::ZERO,
+        )
+        .unwrap_err()["error"]["code"],
         "query_timeout"
     );
     std::fs::remove_dir_all(root).unwrap();

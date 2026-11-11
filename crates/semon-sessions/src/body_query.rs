@@ -359,8 +359,16 @@ fn view(indexes: &[Index], request: View, deadline: Instant) -> Result<Value, Va
 }
 
 pub fn execute(request: Request, access: Access) -> Result<Value, Value> {
+    execute_with_timeout(request, access, Duration::from_millis(TIMEOUT_MS))
+}
+
+pub(crate) fn execute_with_timeout(
+    request: Request,
+    access: Access,
+    timeout_budget: Duration,
+) -> Result<Value, Value> {
     admit(access)?;
-    let deadline = Instant::now() + Duration::from_millis(TIMEOUT_MS);
+    let deadline = Instant::now() + timeout_budget;
     // Parse inputs before opening any store. Unknown properties fail closed.
     enum Parsed {
         Search(Search),
@@ -375,6 +383,9 @@ pub fn execute(request: Request, access: Access) -> Result<Value, Value> {
     };
     if request.indexes.is_empty() || request.indexes.len() > 64 {
         return Err(unavailable());
+    }
+    if Instant::now() >= deadline {
+        return Err(timeout());
     }
     let indexes = request
         .indexes
