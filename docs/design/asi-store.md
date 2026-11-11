@@ -658,8 +658,11 @@ checkpoint; this read-only adapter never recreates deleted data or resets custod
   `[A-Za-z0-9._:/+@=-]`. This is not a vocabulary check; closed taxonomy membership
   belongs to the labelling layer. Prompts/sentences belong in body columns, which
   remain unrestricted. Labelers must have `rule:`, `model:` or `human:` plus a
-  nonempty suffix. Exported target UIDs and row IDs follow the same shape with `%`
-  additionally allowed for encoded UID components; row IDs cannot contain `/`.
+  nonempty suffix. UID-shaped values instead allow canonical unreserved component
+  bytes (`A-Za-z0-9-._~`), valid `%XX` escapes and record-anchor `@`/`:` forms.
+  Each component is nonempty and at most 128 bytes; composite UIDs allow `/`
+  separators and at most 1024 bytes total. Row IDs and referenced label IDs are
+  single components; evidence step IDs and target UIDs may be composite.
 - **Format/refusal.** The SQLite header carries `application_id = 0x53414455`
   (`SADU`) and `user_version = 1`. Before any SQLite connection, a read-only,
   no-follow regular-file header read checks the SQLite magic and both stamps.
@@ -669,6 +672,12 @@ checkpoint; this read-only adapter never recreates deleted data or resets custod
   SQLite may create `-wal`/`-shm` sidecars. A read-only filesystem without existing
   sidecars cannot be read; the single-owner state directory must be writable.
   Readers do not use `immutable=1`.
+  First creation initializes schema, triggers and both stamps in a private sibling
+  staging directory under the author lock. After commit, WAL checkpoint/close and
+  file/directory fsync, an atomic no-overwrite hard link publishes the final file.
+  A publication loser validates and opens the winner. Stale uniquely named staging
+  directories are left alone and never block later creation. An existing unstamped
+  final file still refuses; it is never treated as a new database.
 - **Ownership/API.** The Rust writer takes an explicit table, author-assigned ID
   and typed values. It shares the analytics author lock. Export, rebuild, backup
   and focused view use a separate read-only reader; version 1 mismatches refuse

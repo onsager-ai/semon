@@ -39,12 +39,35 @@ fn validate_header(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn identifier(value: &str, encoded: bool) -> bool {
+fn identifier(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
-        && value.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || b"._:/+@=-".contains(&b) || (encoded && b == b'%')
-        })
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:/+@=-".contains(&b))
+}
+
+fn uid_component(value: &str) -> bool {
+    if value.is_empty() || value.len() > 128 {
+        return false;
+    }
+    let mut bytes = value.bytes();
+    while let Some(byte) = bytes.next() {
+        if byte == b'%' {
+            if !bytes.next().is_some_and(|b| b.is_ascii_hexdigit())
+                || !bytes.next().is_some_and(|b| b.is_ascii_hexdigit())
+            {
+                return false;
+            }
+        } else if !byte.is_ascii_alphanumeric() && !b"-._~@:".contains(&byte) {
+            return false;
+        }
+    }
+    true
+}
+
+fn uid(value: &str) -> bool {
+    value.len() <= 1024 && value.split('/').all(uid_component)
 }
 
 fn backup_staging(parent: &Path) -> Result<PathBuf> {
@@ -274,6 +297,69 @@ fn validate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn initialize(conn: &Connection) -> Result<()> {
+    let tx = conn.unchecked_transaction().map_err(sql)?;
+    tx.execute_batch("CREATE TABLE revision (singleton INTEGER PRIMARY KEY CHECK(singleton=1), value INTEGER NOT NULL); INSERT INTO revision VALUES(1,0);").map_err(sql)?;
+    for t in TABLES {
+        let cols = t
+            .columns
+            .iter()
+            .map(|c| format!("\"{}\" {}", c.name, c.sql))
+            .collect::<Vec<_>>()
+            .join(",");
+        tx.execute_batch(&format!(
+            "CREATE TABLE \"{}\" ({}{});",
+            t.name, cols, t.unique
+        ))
+        .map_err(sql)?;
+    }
+    for name in ["label", "adjudication"] {
+        for operation in ["UPDATE", "DELETE"] {
+            tx.execute_batch(&format!("CREATE TRIGGER {name}_{operation} BEFORE {operation} ON {name} BEGIN SELECT RAISE(ABORT, 'insert-only durable assertion'); END;")).map_err(sql)?;
+        }
+    }
+    tx.pragma_update(None, "application_id", APPLICATION_ID)
+        .map_err(sql)?;
+    tx.pragma_update(None, "user_version", VERSION)
+        .map_err(sql)?;
+    tx.commit().map_err(sql)?;
+    validate(conn)?;
+    Ok(())
+}
+
+fn create_durable(root: &Path) -> Result<()> {
+    let staging = backup_staging(root)?;
+    let staged = staging.join("durable.sqlite3");
+    let result = (|| {
+        let conn = Connection::open(&staged).map_err(sql)?;
+        conn.pragma_update(None, "synchronous", "FULL")
+            .map_err(sql)?;
+        initialize(&conn)?;
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(sql)?;
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .map_err(sql)?;
+        conn.close().map_err(|(_, error)| sql(error))?;
+        validate_header(&staged)?;
+        File::open(&staged)?.sync_all()?;
+        File::open(&staging)?.sync_all()?;
+        match fs::hard_link(&staged, root.join(FILE)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                Reader::open(root)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        File::open(root)?.sync_all()?;
+        Ok(())
+    })();
+    let cleanup = fs::remove_dir_all(&staging);
+    result?;
+    cleanup?;
+    File::open(root)?.sync_all()?;
+    Ok(())
+}
+
 pub struct Writer {
     conn: Connection,
     _lock: WriterLock,
@@ -292,45 +378,17 @@ impl Writer {
         };
         // Refuse foreign headers before creating even the author lock file.
         let lock = WriterLock::acquire(root)?;
-        if exists {
-            Reader::open(root)?;
+        if !exists {
+            create_durable(root)?;
         }
+        Reader::open(root)?;
         let conn = Connection::open_with_flags(
             &path,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_CREATE
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )
         .map_err(sql)?;
         conn.pragma_update(None, "synchronous", "FULL")
             .map_err(sql)?;
-        if !exists {
-            let tx = conn.unchecked_transaction().map_err(sql)?;
-            tx.execute_batch("CREATE TABLE revision (singleton INTEGER PRIMARY KEY CHECK(singleton=1), value INTEGER NOT NULL); INSERT INTO revision VALUES(1,0);").map_err(sql)?;
-            for t in TABLES {
-                let cols = t
-                    .columns
-                    .iter()
-                    .map(|c| format!("\"{}\" {}", c.name, c.sql))
-                    .collect::<Vec<_>>()
-                    .join(",");
-                tx.execute_batch(&format!(
-                    "CREATE TABLE \"{}\" ({}{});",
-                    t.name, cols, t.unique
-                ))
-                .map_err(sql)?;
-            }
-            for name in ["label", "adjudication"] {
-                for operation in ["UPDATE", "DELETE"] {
-                    tx.execute_batch(&format!("CREATE TRIGGER {name}_{operation} BEFORE {operation} ON {name} BEGIN SELECT RAISE(ABORT, 'insert-only durable assertion'); END;")).map_err(sql)?;
-                }
-            }
-            tx.pragma_update(None, "application_id", APPLICATION_ID)
-                .map_err(sql)?;
-            tx.pragma_update(None, "user_version", VERSION)
-                .map_err(sql)?;
-            tx.commit().map_err(sql)?;
-        }
         validate(&conn)?;
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(sql)?;
@@ -341,7 +399,7 @@ impl Writer {
     /// A failed validation/constraint rolls back both the row and the revision.
     pub fn insert(&mut self, name: &str, id: &str, values: BTreeMap<String, Value>) -> Result<u64> {
         let t = table(name)?;
-        if !identifier(id, true) || id.contains('/') {
+        if !uid_component(id) {
             return Err(Error::invalid(
                 "durable id must be one nonempty UID component",
             ));
@@ -364,8 +422,8 @@ impl Writer {
                     Value::Blob(_) => false,
                 };
                 if let Value::Text(text) = value {
-                    if (column.class == Class::Categorical && !identifier(text, false))
-                        || (column.name == "target_uid" && !identifier(text, true))
+                    if (column.class == Class::Categorical && !identifier(text))
+                        || (column.name == "target_uid" && !uid(text))
                     {
                         return Err(Error::invalid(format!(
                             "invalid durable identifier shape: {}",
@@ -397,11 +455,14 @@ impl Writer {
             }
         }
         if name == "label" {
-            let _: Vec<String> = serde_json::from_str(text(&values, "evidence_step_ids")?)?;
+            let ids: Vec<String> = serde_json::from_str(text(&values, "evidence_step_ids")?)?;
+            if !ids.iter().all(|id| uid(id)) {
+                return Err(Error::invalid("invalid evidence step UID"));
+            }
         }
         if name == "adjudication" {
             let ids: Vec<String> = serde_json::from_str(text(&values, "label_ids")?)?;
-            if ids.is_empty() {
+            if ids.is_empty() || !ids.iter().all(|id| uid_component(id)) {
                 return Err(Error::invalid("adjudication requires labels"));
             }
             for label in ids {
@@ -765,6 +826,56 @@ mod tests {
             .query_row("SELECT label_id FROM current_label", [], |r| r.get(0))
             .unwrap();
         assert_eq!(id, "adjudication/a");
+    }
+
+    #[test]
+    fn creation_ignores_stale_staging_and_publishes_complete_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join(".asi-backup-stale");
+        fs::create_dir(&stale).unwrap();
+        fs::write(stale.join("durable.sqlite3"), []).unwrap();
+        {
+            let writer = Writer::open(dir.path()).unwrap();
+            validate_header(&dir.path().join(FILE)).unwrap();
+            validate(&writer.conn).unwrap();
+        }
+        assert!(stale.join("durable.sqlite3").exists());
+        Reader::open(dir.path()).unwrap();
+        // A creator that loses publication validates and preserves the winner.
+        let before = fs::read(dir.path().join(FILE)).unwrap();
+        create_durable(dir.path()).unwrap();
+        assert_eq!(before, fs::read(dir.path().join(FILE)).unwrap());
+    }
+
+    #[test]
+    fn encoded_composite_step_uids_are_accepted_for_both_assertions() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut writer = Writer::open(dir.path()).unwrap();
+        let uuid = "01234567-89ab-cdef-0123-456789abcdef";
+        let target =
+            format!("namespace~origin/codex/{uuid}/s/codex/{uuid}/{uuid}/{uuid}/@source:1");
+        assert!(target.len() > 128);
+        let mut values = label();
+        values.insert("target_type".into(), Value::Text("step".into()));
+        values.insert("target_uid".into(), Value::Text(target.clone()));
+        values.insert(
+            "evidence_step_ids".into(),
+            Value::Text(serde_json::to_string(&vec![&target]).unwrap()),
+        );
+        writer.insert("label", "a~encoded%20id", values).unwrap();
+        let mut values = adjudication();
+        values.insert("target_type".into(), Value::Text("step".into()));
+        values.insert("target_uid".into(), Value::Text(target));
+        values.insert(
+            "label_ids".into(),
+            Value::Text("[\"a~encoded%20id\"]".into()),
+        );
+        writer
+            .insert("adjudication", "human~decision", values)
+            .unwrap();
+        for invalid in ["bad%", "bad%GG", "a//b", &"x".repeat(129)] {
+            assert!(!uid(invalid));
+        }
     }
 
     fn listing(root: &Path) -> Vec<std::ffi::OsString> {
