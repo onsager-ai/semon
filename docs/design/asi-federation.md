@@ -91,6 +91,7 @@ session title does not establish identity. Bind a registered machine identity an
 origin incarnation to a namespace under an explicit operator enrollment. Use the
 existing native UID contract internally. External source/evidence handles are
 opaque mappings, never filesystem paths or the record-anchor filename stem.
+See the [proposed enrollment and shared listener contract](asi-enrollment.md) for #593 slice 4a.
 
 ### Origin derivation
 
