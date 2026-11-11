@@ -79,7 +79,10 @@ keys independently, bound only to the namespace. Moving/copying the same namespa
 preserves origin identity; filesystem paths are not identity authority. Keep the
 mapping for the namespace lifetime. Reset with the namespace kept preserves it;
 `reset --new-namespace` retires it under the same writer lock as the namespace
-file. There is no reconciliation across retired namespaces. Custody export bundles
+file. Retirement removes the mapping first and syncs the state directory before
+removing the namespace and syncing again. An interruption between removals keeps
+the old namespace usable with regenerated mappings; it cannot leave old mappings
+behind a retired namespace. There is no reconciliation across retired namespaces. Custody export bundles
 exclude this private operator state. Deleting it changes exported handles. Native IDs, log stems and source paths remain private.
 Opaque evidence keys use the schema's UID shapes with a fixed `opaque/receiver`
 prefix; they are handles, not native identity or filesystem authority.

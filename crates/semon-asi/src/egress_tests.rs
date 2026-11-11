@@ -277,6 +277,50 @@ fn dependency_values_and_denied_lineage_never_escape() {
     );
 }
 #[test]
+fn interrupted_handle_retirement_preserves_usable_namespace() {
+    let (directory, snapshot, handles) = setup();
+    let state = directory.path();
+    let root = state.join("analytics-store");
+    let namespace_file = state.join("analytics-namespace");
+    let handles_path = state.join(HANDLES_FILE);
+    let old_handle = handles.get("source", "native-a").unwrap();
+    drop(handles);
+    let result = crate::export::reset_snapshot_with(
+        &root,
+        &namespace_file,
+        "origin",
+        None,
+        1,
+        Some(&handles_path),
+        |stage| {
+            assert!(stage == crate::export::ResetStage::HandlesRetired);
+            assert!(!handles_path.exists());
+            assert_eq!(fs::read_to_string(&namespace_file).unwrap(), "origin\n");
+            Err(crate::Error::invalid("injected interruption"))
+        },
+    );
+    assert!(result.is_err());
+    assert!(namespace_file.is_file());
+    assert!(!handles_path.exists());
+    let handles = Handles::open(state, "origin").unwrap();
+    assert_ne!(old_handle, handles.get("source", "native-a").unwrap());
+    assert_eq!(
+        project(&snapshot, &registry(), &handles).outcomes.exported,
+        1
+    );
+    drop(handles);
+    let mut store = Store::open(&root).unwrap();
+    store.publish(&update(UID)).unwrap();
+    drop(store);
+    let restored = Snapshot::pin(&root, &namespace_file, "origin").unwrap();
+    let handles = Handles::open(state, "origin").unwrap();
+    assert_eq!(
+        project(&restored, &registry(), &handles).outcomes.exported,
+        1
+    );
+}
+
+#[test]
 fn reset_preserves_or_retires_namespace_handles_and_export_excludes_them() {
     let (directory, snapshot, handles) = setup();
     let state = directory.path();

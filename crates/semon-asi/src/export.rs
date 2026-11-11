@@ -162,18 +162,24 @@ pub fn reset_snapshot(
         verified_export,
         expected_generation,
         retire_namespace_handles,
-        || {},
+        |_| Ok(()),
     )
 }
 
-fn reset_snapshot_with<F: FnOnce()>(
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ResetStage {
+    HandlesRetired,
+    Completed,
+}
+
+pub(crate) fn reset_snapshot_with<F: FnMut(ResetStage) -> Result<()>>(
     root: &Path,
     namespace_file: &Path,
     expected_namespace: &str,
     verified_export: Option<&Path>,
     expected_generation: u64,
     retire_namespace_handles: Option<&Path>,
-    on_locked: F,
+    mut on_locked: F,
 ) -> Result<ResetSummary> {
     let _lock = open_lock(root, true)?;
     require_regular_file(namespace_file, "analytics namespace")?;
@@ -234,16 +240,19 @@ fn reset_snapshot_with<F: FnOnce()>(
     fs::remove_dir(&analytics)?;
     removed.push(ANALYTICS_DIR.to_owned());
     if let Some(handles) = retire_namespace_handles {
-        fs::remove_file(namespace_file)?;
-        removed.push("analytics-namespace".to_owned());
         match fs::remove_file(handles) {
             Ok(()) => removed.push(crate::egress::HANDLES_FILE.to_owned()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        File::open(namespace_file.parent().expect("validated namespace parent"))?.sync_all()?;
+        let state = File::open(namespace_file.parent().expect("validated namespace parent"))?;
+        state.sync_all()?;
+        on_locked(ResetStage::HandlesRetired)?;
+        fs::remove_file(namespace_file)?;
+        removed.push("analytics-namespace".to_owned());
+        state.sync_all()?;
     }
-    on_locked();
+    on_locked(ResetStage::Completed)?;
     Ok(ResetSummary {
         generation: manifest.generation,
         removed,
@@ -690,8 +699,8 @@ mod tests {
             None,
             1,
             Some(&handles_path),
-            || {
-                assert!(!namespace_file.exists());
+            |stage| {
+                assert_eq!(namespace_file.exists(), stage == ResetStage::HandlesRetired);
                 assert!(!handles_path.exists());
                 let lock = OpenOptions::new()
                     .write(true)
@@ -701,6 +710,7 @@ mod tests {
                     lock.try_lock(),
                     Err(std::fs::TryLockError::WouldBlock)
                 ));
+                Ok(())
             },
         )
         .unwrap();
