@@ -300,15 +300,19 @@ tables.
   and non-blocking without creating it or running recovery, so a writer-held
   lock refuses rather than producing a torn snapshot. It refuses unsafe or
   symlinked destinations, a destination inside the source store, and all
-  missing/foreign/unsupported/ambiguous source state. `semon analytics reset`
-  is never automatic. It requires exact namespace confirmation, exclusive
-  non-blocking writer ownership and exactly one verified current export or an
-  explicit `--without-export` waiver for possible loss of imported/frozen
-  facts. Reset deletes the manifest before other analytics-store entries, never
-  touches native logs, archive or Event Index, and retains the namespace unless
-  `--new-namespace` follows a successful reset. A retained namespace makes the
-  next materialization preserve UIDs; removing it deliberately creates fresh
-  identities without reconciliation.
+  missing/foreign/unsupported/ambiguous source state. Export and reset prove
+  local ownership by requiring every live UID to carry the confirmed namespace.
+  `semon analytics reset` is never automatic. It requires exact namespace
+  confirmation, exclusive non-blocking writer ownership and exactly one verified
+  current export or an explicit `--without-export` waiver for possible loss of
+  imported/frozen facts. A verified export must remain outside the store and
+  match the current manifest, live map, namespace and referenced files by size
+  and SHA-256 under that lock. Reset deletes the manifest before other
+  analytics-store entries but retains the lock inode, never touches native logs,
+  archive or Event Index, and retains the namespace unless `--new-namespace`
+  removes it while the writer lock is held. A retained namespace makes the next
+  materialization preserve UIDs; removing it deliberately creates fresh identities
+  without reconciliation.
 - **Cycle.** The caller selects an interval (2 s by default) and an input
   budget. `publish_cycle` publishes one bounded chunk as one `Update` and
   generation, then returns its generation and completion flag. The caller may

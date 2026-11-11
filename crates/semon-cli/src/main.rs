@@ -1003,6 +1003,7 @@ fn run_reset(args: ResetArgs) -> Result<(), String> {
         &namespace,
         args.verified_export.as_deref(),
         expected_generation,
+        args.new_namespace,
     )
     .map_err(|error| match error {
         semon_asi::Error::WriterBusy => {
@@ -1010,11 +1011,6 @@ fn run_reset(args: ResetArgs) -> Result<(), String> {
         }
         error => format!("analytics reset: {error}"),
     })?;
-    if args.new_namespace {
-        std::fs::remove_file(state_dir.join(ANALYTICS_NAMESPACE_FILE)).map_err(|error| {
-            format!("analytics reset: cannot remove analytics namespace: {error}")
-        })?;
-    }
     println!(
         "analytics reset: generation={} removed={} namespace={}",
         summary.generation,
@@ -1186,9 +1182,10 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
             index_path.display()
         )
     })?;
-    let namespace = semon_sessions::read_analytics_namespace(state_dir)?;
+    // Owner::acquire takes analytics.lock before namespace inspection or creation, so
+    // guarded reset can remove both under one writer exclusion interval.
     let owner = semon_sessions::analytics_writer::Owner::acquire(&index_path, &store_root)?;
-    let namespace = match namespace {
+    let namespace = match semon_sessions::read_analytics_namespace(state_dir)? {
         Some(namespace) => namespace,
         None => semon_sessions::load_or_create_analytics_namespace(state_dir)?,
     };

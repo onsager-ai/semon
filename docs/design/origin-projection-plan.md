@@ -241,16 +241,19 @@ failure, and creates or modifies no source-store state.
 
 `semon analytics reset --confirm NAMESPACE (--verified-export DIR | --without-export)`
 requires the exact owned namespace and takes the lock exclusively and non-blocking. A
-verified export must still match both current namespace and manifest generation; the
-waiver is explicit because it may discard imported or frozen non-rebuildable facts. Reset
-removes the manifest first, then only analytics-store contents, keeping native logs,
-archives, Event Index and the namespace by default. A partial failure therefore reads as
-no store rather than a torn valid snapshot. `--new-namespace` removes the namespace only
-after the store reset; the next materialize then generates fresh identities with no
-reconciliation. A missing namespace with a store remains a materialize refusal, so a
-normal reset that keeps its namespace preserves stable session UIDs. No code path resets
-automatically. Transport, channels, cache, replicas and query/FTS implementation remain
-outside this slice.
+verified export must be outside the store and still match the current namespace, manifest,
+live map and every receipt-named snapshot file by byte count and SHA-256 under that lock;
+generation equality alone is insufficient. Export and reset prove ownership by requiring
+every live session UID to begin with the owned namespace. The waiver is explicit because
+it may discard imported or frozen non-rebuildable facts. Reset removes the manifest first,
+then only analytics-store contents while retaining `analytics.lock` and the store root,
+keeping native logs, archives, Event Index and the namespace by default. A partial failure
+therefore reads as no store rather than a torn valid snapshot. `--new-namespace` removes
+the namespace under the same writer lock as reset; the next materialize then generates
+fresh identities with no reconciliation. A missing namespace with a store remains a
+materialize refusal, so a normal reset that keeps its namespace preserves stable session
+UIDs. No code path resets automatically. Transport, channels, cache, replicas and
+query/FTS implementation remain outside this slice.
 
 ## Verification and delivery
 

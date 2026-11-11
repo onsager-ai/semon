@@ -1,17 +1,20 @@
 //! Verified local analytics snapshot export and guarded reset.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
 
+use arrow::{array::{Array, StringArray}};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
     Error, Manifest, Result,
+    parquet_io::visit_batches,
+    schema::SESSION_COLUMN,
     store::{read_live_map, read_manifest},
 };
 
@@ -74,6 +77,7 @@ pub fn export_snapshot(
                 "analytics namespace changed before export lock was acquired",
             ));
         }
+        require_namespace_ownership(root, &manifest, namespace)?;
         let files = snapshot_files(root, &manifest)?;
         let mut receipt_files = Vec::with_capacity(files.len() + 1);
         let (bytes, sha256) =
@@ -137,15 +141,37 @@ pub fn verify_export(bundle: &Path) -> Result<ExportReceipt> {
 }
 
 /// Remove the local store after its caller has validated ownership and confirmation.
-/// The exclusive writer lock prevents a publication racing the removal. The manifest
-/// is removed before every other store entry so a partial failure is never readable as
-/// a valid snapshot.
+/// The exclusive writer lock covers namespace removal and store invalidation. The manifest
+/// is removed before every other store entry so a partial failure is never readable as a
+/// valid snapshot. The lock file and store root remain so another writer cannot acquire a
+/// replacement lock inode before this operation has released ownership.
 pub fn reset_snapshot(
     root: &Path,
     namespace_file: &Path,
     expected_namespace: &str,
     verified_export: Option<&Path>,
     expected_generation: u64,
+    remove_namespace: bool,
+) -> Result<ResetSummary> {
+    reset_snapshot_with(
+        root,
+        namespace_file,
+        expected_namespace,
+        verified_export,
+        expected_generation,
+        remove_namespace,
+        || {},
+    )
+}
+
+fn reset_snapshot_with<F: FnOnce()>(
+    root: &Path,
+    namespace_file: &Path,
+    expected_namespace: &str,
+    verified_export: Option<&Path>,
+    expected_generation: u64,
+    remove_namespace: bool,
+    on_locked: F,
 ) -> Result<ResetSummary> {
     let _lock = open_lock(root, true)?;
     require_regular_file(namespace_file, "analytics namespace")?;
@@ -156,7 +182,9 @@ pub fn reset_snapshot(
         ));
     }
     let manifest = validate_snapshot(root)?;
+    require_namespace_ownership(root, &manifest, expected_namespace)?;
     if let Some(bundle) = verified_export {
+        reject_overlapping_bundle(root, bundle)?;
         let receipt = verify_export(bundle)?;
         if receipt.source_namespace != expected_namespace
             || receipt.manifest_generation != manifest.generation
@@ -165,6 +193,7 @@ pub fn reset_snapshot(
                 "verified export does not match the current namespace and manifest generation",
             ));
         }
+        verify_current_export(root, namespace_file, &manifest, &receipt)?;
     }
     if manifest.generation != expected_generation {
         return Err(Error::invalid(
@@ -189,14 +218,89 @@ pub fn reset_snapshot(
     }
     fs::remove_dir(&analytics)?;
     removed.push(ANALYTICS_DIR.to_owned());
-    fs::remove_file(root.join(LOCK_FILE))?;
-    removed.push(LOCK_FILE.to_owned());
-    fs::remove_dir(root)?;
-    removed.push(".".to_owned());
+    if remove_namespace {
+        fs::remove_file(namespace_file)?;
+        removed.push("analytics-namespace".to_owned());
+    }
+    on_locked();
     Ok(ResetSummary {
         generation: manifest.generation,
         removed,
     })
+}
+
+fn require_namespace_ownership(root: &Path, manifest: &Manifest, namespace: &str) -> Result<()> {
+    let Some(live_map) = &manifest.live_map else {
+        return Ok(());
+    };
+    let prefix = format!("{namespace}/");
+    let path = root.join(ANALYTICS_DIR).join(live_map);
+    visit_batches(&path, Some(&[SESSION_COLUMN]), |batch| {
+        let uids = batch
+            .column_by_name(SESSION_COLUMN)
+            .ok_or_else(|| Error::invalid("published live map lacks session_uid"))?
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| Error::invalid("published live session_uid is not text"))?;
+        for row in 0..batch.num_rows() {
+            if !uids.value(row).starts_with(&prefix) {
+                return Err(Error::invalid(
+                    "published live sessions do not belong to the analytics namespace",
+                ));
+            }
+        }
+        Ok(())
+    })
+}
+
+fn reject_overlapping_bundle(root: &Path, bundle: &Path) -> Result<()> {
+    let root = canonical_directory(root, "analytics store")?;
+    let bundle = canonical_directory(bundle, "export bundle")?;
+    if bundle.starts_with(&root) || root.starts_with(&bundle) {
+        return Err(Error::invalid(
+            "verified export must be outside the analytics store",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_current_export(
+    root: &Path,
+    namespace_file: &Path,
+    manifest: &Manifest,
+    receipt: &ExportReceipt,
+) -> Result<()> {
+    let mut current = BTreeMap::new();
+    for relative in std::iter::once(PathBuf::from("analytics-namespace"))
+        .chain(snapshot_files(root, manifest)?)
+    {
+        let path = if relative == Path::new("analytics-namespace") {
+            namespace_file.to_path_buf()
+        } else {
+            root.join(&relative)
+        };
+        let (bytes, sha256) = hash_file(&path)?;
+        current.insert(relative.to_string_lossy().into_owned(), (bytes, sha256));
+    }
+    let receipt_files: BTreeMap<&str, (u64, &str)> = receipt
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), (file.bytes, file.sha256.as_str())))
+        .collect();
+    if current.len() != receipt_files.len()
+        || current.iter().any(|(path, file)| {
+            receipt_files
+                .get(path.as_str())
+                .map_or(true, |receipt_file| {
+                    file.0 != receipt_file.0 || file.1 != receipt_file.1
+                })
+        })
+    {
+        return Err(Error::invalid(
+            "verified export does not match the current published snapshot",
+        ));
+    }
+    Ok(())
 }
 
 fn prepare_destination(root: &Path, destination: &Path) -> Result<(PathBuf, bool)> {
@@ -507,5 +611,49 @@ fn require_regular_file(path: &Path, kind: &str) -> Result<()> {
             path.display()
         ))),
         Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Store, testutil::{TestClock, update}};
+
+    #[test]
+    fn reset_removes_new_namespace_before_releasing_writer_lock() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state = temporary.path();
+        let root = state.join("analytics-store");
+        let namespace_file = state.join("analytics-namespace");
+        let namespace = "origin-test";
+        fs::write(&namespace_file, format!("{namespace}\n")).unwrap();
+        let clock = TestClock::new(0);
+        let mut store = Store::open_with_clock(&root, clock).unwrap();
+        store
+            .publish(&update(&[("origin-test/claude/session", 1)], "test", 0))
+            .unwrap();
+        drop(store);
+
+        let summary = reset_snapshot_with(
+            &root,
+            &namespace_file,
+            namespace,
+            None,
+            1,
+            true,
+            || {
+                assert!(!namespace_file.exists());
+                let lock = OpenOptions::new()
+                    .write(true)
+                    .open(root.join(LOCK_FILE))
+                    .unwrap();
+                assert!(matches!(lock.try_lock(), Err(std::fs::TryLockError::WouldBlock)));
+            },
+        )
+        .unwrap();
+
+        assert!(summary.removed.iter().any(|path| path == "analytics-namespace"));
+        assert!(root.join(LOCK_FILE).is_file());
+        assert!(!root.join(ANALYTICS_DIR).exists());
     }
 }

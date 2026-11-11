@@ -24,11 +24,16 @@ fn coverage(home: &fixture::Fixture, json: bool) -> Output {
 }
 
 fn materialize(home: &fixture::Fixture) -> Output {
+    materialize_with(home, &[])
+}
+
+fn materialize_with(home: &fixture::Fixture, arguments: &[&str]) -> Output {
     home.command(env!("CARGO_BIN_EXE_semon"))
         .args(["analytics", "materialize", "--all", "--proc-root"])
         .arg(home.root.join("empty-proc"))
         .arg("--cache")
         .arg(home.root.join("state/index.json"))
+        .args(arguments)
         .output()
         .unwrap()
 }
@@ -71,6 +76,24 @@ fn recursive_listing(root: &Path) -> BTreeSet<PathBuf> {
         visit(root, root, &mut entries);
     }
     entries
+}
+
+fn file_bytes(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(root: &Path, directory: &Path, files: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            let path = entry.path();
+            if entry.file_type().unwrap().is_dir() {
+                visit(root, &path, files);
+            } else {
+                files.insert(path.strip_prefix(root).unwrap().to_owned(), fs::read(path).unwrap());
+            }
+        }
+    }
+
+    let mut files = BTreeMap::new();
+    visit(root, root, &mut files);
+    files
 }
 
 #[test]
@@ -222,6 +245,91 @@ fn reset_refuses_a_tampered_export_without_mutation() {
 }
 
 #[test]
+fn reset_refuses_an_old_generation_after_reset_and_republication() {
+    let home = fixture::Fixture::new();
+    assert!(materialize(&home).status.success());
+    let state = home.root.join("state");
+    let namespace = fs::read_to_string(state.join("analytics-namespace"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let old_bundle = home.root.join("old-export");
+    assert!(export(&home, &old_bundle).status.success());
+    assert!(reset(&home, &["--confirm", &namespace, "--without-export"])
+        .status
+        .success());
+    home.write("configured-claude/.claude.json", b"{\"changed\":true}");
+    assert!(materialize(&home).status.success());
+    let before = file_bytes(&state);
+
+    let output = reset(
+        &home,
+        &[
+            "--confirm",
+            &namespace,
+            "--verified-export",
+            old_bundle.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("current published snapshot"));
+    assert_eq!(file_bytes(&state), before);
+}
+
+#[test]
+fn reset_refuses_an_export_inside_the_store_without_deleting_it() {
+    let home = fixture::Fixture::new();
+    assert!(materialize(&home).status.success());
+    let state = home.root.join("state");
+    let namespace = fs::read_to_string(state.join("analytics-namespace"))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let bundle = home.root.join("analytics-export");
+    assert!(export(&home, &bundle).status.success());
+    let inside = state.join("analytics-store/backup");
+    fs::rename(&bundle, &inside).unwrap();
+    let before = file_bytes(&state);
+
+    let output = reset(
+        &home,
+        &[
+            "--confirm",
+            &namespace,
+            "--verified-export",
+            inside.to_str().unwrap(),
+        ],
+    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("outside the analytics store"));
+    assert_eq!(file_bytes(&state), before);
+}
+
+#[test]
+fn export_and_reset_refuse_a_foreign_live_namespace_without_mutation() {
+    let home = fixture::Fixture::new();
+    assert!(materialize(&home).status.success());
+    let state = home.root.join("state");
+    let namespace_path = state.join("analytics-namespace");
+    let namespace = fs::read_to_string(&namespace_path).unwrap().trim().to_owned();
+    let foreign = format!("origin-{}\n", "f".repeat(64));
+    fs::write(&namespace_path, &foreign).unwrap();
+    let before = file_bytes(&state);
+
+    let destination = home.root.join("foreign-export");
+    let output = export(&home, &destination);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("do not belong"));
+    assert!(!destination.exists());
+
+    let output = reset(&home, &["--confirm", foreign.trim(), "--without-export"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("do not belong"));
+    assert_eq!(file_bytes(&state), before);
+    assert_ne!(foreign.trim(), namespace);
+}
+
+#[test]
 fn reset_requires_matching_confirmation_and_current_verified_export() {
     let home = fixture::Fixture::new();
     assert!(materialize(&home).status.success());
@@ -250,7 +358,8 @@ fn reset_requires_matching_confirmation_and_current_verified_export() {
         String::from_utf8_lossy(&reset.stderr)
     );
     assert!(home.root.join("state/analytics-namespace").is_file());
-    assert!(!home.root.join("state/analytics-store").exists());
+    assert!(home.root.join("state/analytics-store/analytics.lock").is_file());
+    assert!(!home.root.join("state/analytics-store/analytics").exists());
 }
 
 #[test]
@@ -280,7 +389,8 @@ fn reset_requires_one_export_choice_and_can_remove_the_namespace_explicitly() {
         String::from_utf8_lossy(&reset.stderr)
     );
     assert!(!home.root.join("state/analytics-namespace").exists());
-    assert!(!home.root.join("state/analytics-store").exists());
+    assert!(home.root.join("state/analytics-store/analytics.lock").is_file());
+    assert!(!home.root.join("state/analytics-store/analytics").exists());
 }
 
 #[test]
