@@ -38,10 +38,13 @@ identity, publisher claims or a remote body read.
 | #596 | Explicit replica enrollment and namespace authority transfer |
 
 Slice 4a supplies usable identity and listener hooks, not functioning analytics
-publication or remote viewing. No async runtime, HTTP/2, WebSocket or additional
-listener is introduced. Origins initiate HTTPS connections to the existing
-receiver; they expose no inbound port. The HTTP/2 example in federation is not a
-requirement to replace HTTP/1.1.
+publication or remote viewing. Slice 4a introduces no async runtime, HTTP/2,
+WebSocket or additional listener. The blocking thread-per-connection listener is
+a temporary constraint: an event-driven receiver listener is planned in #636
+(after slice 4a and #594's first transport slice; spec before implementation).
+Origins initiate HTTPS connections to the existing receiver; they expose no
+inbound port. The HTTP/2 example in federation is not a requirement to replace
+HTTP/1.1 in this slice.
 
 ## Receiver enrollment record
 
@@ -137,7 +140,7 @@ they are never persisted by the receiver, logged, or included in ordinary bundle
 
 | Kind | Permitted receiver routes | `client_cert_required` |
 | --- | --- | --- |
-| `analytics_publish` | `/v1/analytics/` publication routes, once slice 5 implements them | Explicit per-kind setting; proposed default `false`, operator may require it |
+| `analytics_publish` | `/v1/analytics/` publication routes, once slice 5 implements them | Explicit per-kind setting; default `false` (owner decision 2026-11-11, revisited when #594 lands); operator may require it |
 | `body_channel` | `/v1/body/` origin poll and response routes, once #594 implements them | Always `true`; cannot be disabled while this kind is enabled |
 | `mirror_push` | Existing `/v1/mirror/append`, `/facts`, `/status` routes | Explicit per-kind setting; default `false` for supported mirror Push |
 
@@ -159,7 +162,9 @@ Neither enrollment nor a cache backup includes private keys or bearer secrets.
 
 This deliberately changes the supported `semon receive token` and push-client
 surface under the [pre-release policy](../../AGENTS.md#pre-release-compatibility-policy).
-There is no compatibility reader, migration or dual store for `NAME SHA256(token)`.
+There is no compatibility reader, migration or dual store for `NAME SHA256(token)`:
+a receiver that finds the old `DIR/tokens` file refuses to start with a re-issue
+message and leaves the file untouched.
 Operators must re-issue kind-scoped credentials, explicitly enroll/configure the
 participating machines, and update Push clients and token files together. Slice
 4a must update the owning CLI, mirror documentation and tests in its implementation
@@ -243,19 +248,22 @@ existing mirror limits remain owned by `serve.rs` and the mirror protocol.
 | --- | --- |
 | Total connection slots | Existing default 32; slice 4a exposes operator configuration |
 | Unauthenticated connections per IP / IPv6 /64 | Existing default 4; retain pre-authentication enforcement |
-| Body poll class | Proposed: at most 1 outstanding poll per enrollment and `floor(max_connections × poll_share)` globally; configurable share, proposed default 50% |
+| Body poll class | Interim limit: at most 1 outstanding poll per enrollment and `floor(max_connections × poll_share)` globally; configurable share, default 50% |
 | Publication/upload class | Charged to non-poll slots and total; keep capacity available outside the poll quota; object/body bounds owned by slice 5 |
 | Body response-frame class | Charged to non-poll slots and total; must not wait behind long-polls; #594 owns framing and read deadlines |
 | Mirror class | Charged to non-poll slots and total; existing 6 MiB request cap and socket deadlines |
-| Pending body requests | Proposed: at most 4 queued requests per enrollment, metadata/control only, expiring under #594 deadlines |
+| Pending body requests | Interim limit: at most 4 queued requests per enrollment, metadata/control only, expiring under #594 deadlines |
 | Poll duration / control envelope | Proposed: 20 s / 16 KiB; #594 confirms these values |
 | Complete body page/field envelope | Accepted D3 ceiling 256 KiB including metadata; #594 owns frame accounting, lease/read deadlines and narrower limits |
 
-At the default 32 slots and proposed 50% poll share, the product supports **about
-16 poll-connected origins**, with the remaining slots shared by publication,
-responses and mirror work. This is not a promise of hundreds of concurrent
-origins. Raising the setting costs threads, file descriptors and memory and needs
-CI resource measurements; no multiplexing is implied.
+These caps are the **interim** limits of the thread-per-connection listener, set
+by the owner on 2026-11-11 until the event-driven listener of #636 replaces it.
+At the default 32 slots and 50% poll share the current listener can hold about 16
+concurrent long-polls, with the remaining slots shared by publication, responses
+and mirror work. That follows from the threading model; it is not a product
+ceiling or a supported-fleet target. Raising the setting costs threads, file
+descriptors and memory and needs CI resource measurements. Scale beyond it is the
+purpose of #636, not of this slice.
 
 A poll quota is a ceiling, not permission to consume response/publication slots.
 Publication/uploads, response frames and mirror operations have separate accounting
@@ -303,18 +311,28 @@ Enrollment never substitutes for authenticated user grants or D2's online origin
 authorization/audit, including cache hits. PR #632 should reference this authored
 contract when reconciled; its proposed schema/API names are not shipped interfaces.
 
-## Open items
+## Decisions and open items
 
-- PM/owners confirm proposed poll share, queue depth and numeric defaults with
-  #594, plus the non-poll reservation/fairness split and supported fleet target.
+Settled by the owner on 2026-11-11:
+
+- **Capacity.** The caps above are the interim limits (1 poll per enrollment, poll
+  share at most 50%, 4 pending requests per enrollment, `503` instead of queuing).
+  An event-driven receiver listener is planned and tracked in #636; thread-per-
+  connection is temporary and ~16 poll-connected origins is not a product ceiling.
+- **Token store.** The old `DIR/tokens` file is refused with a re-issue message.
+  It is never deleted, migrated or imported (see custody above).
+- **`analytics_publish.client_cert_required`** defaults to `false` for now and is
+  revisited when #594 lands. Body mTLS is already settled and not open.
+
+Still open for implementation owners:
+
 - #594 confirms poll/control bounds and supplies lease/read/cancellation deadlines;
   slice 4a must expose the required deadline/revocation hooks before integration.
-- PM/owner confirms the proposed `analytics_publish.client_cert_required = false`
-  default. Requiring it is supported; body mTLS is already settled and not open.
-- Implementation owners choose exact CLI flags/import spelling, on-disk schema
-  names and certificate provisioning/rotation tooling in slice 4a; document and
-  test those together. Overlap duration is explicit operator policy, not a hidden
-  default. Receiver-as-issuer and Hub exclusion are already settled.
+  The non-poll reservation/fairness split is chosen with the 4a resource tests.
+- Exact CLI flags/import spelling, on-disk schema names and certificate
+  provisioning/rotation tooling are chosen in slice 4a; document and test those
+  together. Overlap duration is explicit operator policy, not a hidden default.
+  Receiver-as-issuer and Hub exclusion are already settled.
 
 CI acceptance for 4a must exercise cross-kind refusal, wrong/missing certificate,
 wrong namespace/incarnation/epoch, revoked credentials on kept-alive connections,
