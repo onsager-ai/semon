@@ -122,9 +122,9 @@ and the store's explicit materializer lifecycle; PM approval is needed before co
 | B3 | Copy the pairing string from the receiver terminal into the origin prompt through a trusted private channel | One transfer/paste action. The string carries the endpoint, receiver identity/trust pin and a high-entropy, single-use invitation secret. It is not a browser link or a short numeric code. Intermediate file saves, chat sends or extra copy operations add actions and exposure; they are not included in this four-action case. |
 | B4 | Approve one combined trust/source summary inside `connect` | Explicitly trust this receiver as user-assertion issuer and approve the listed local source set plus typed name/path disclosure. Generate the client key on origin, bind it through invitation redemption, issue separate credentials and certificate, initialize the local producer, generate policy/registry from admitted sources, and connect. Receiver grants belong only to its OS-authenticated owner, not to the invitation bearer. |
 
-The recommended **candidate** replaces #634's public bundle plus separate secret
-transfer with a single-use provisioning exchange. It requires approval of option
-T1 below. Invitation issuance delegates one enrollment, not arbitrary machine
+This **T1 candidate** replaces #634's public bundle plus separate secret
+transfer with a single-use provisioning exchange. The short-code T3 option below
+is an alternative under evaluation; neither has owner approval. Invitation issuance delegates one enrollment, not arbitrary machine
 administration or body authority. Use at least 128 bits of unpredictable secret,
 a five-minute absolute expiry, one outstanding invitation per requested machine,
 bounded attempts and atomic one-time redemption bound to the origin-generated
@@ -202,15 +202,134 @@ a separate explicit named-reader/stream-through policy permits them.
 
 | Option | Setup count on an already reachable receiver | What is gained and given up |
 | --- | --- | --- |
-| **T1: high-entropy one-use invitation (recommended candidate)** | Four actions as above | Removes a separate receiver confirmation by authorizing possession of a narrowly scoped secret to bind one origin key. Someone stealing the invitation before redemption could occupy that enrollment and submit false origin facts. They gain neither existing body-read grants nor the owner's login, but can deny the intended pairing. Accept only with trusted private transfer, short expiry, atomic binding and visible completion/revoke. This changes #634's prior review of a known origin public identity. |
+| **T1: high-entropy one-use invitation (simpler implementation candidate)** | Four actions as above | Removes a separate receiver confirmation by authorizing possession of a narrowly scoped secret to bind one origin key. Someone stealing the invitation before redemption could occupy that enrollment and submit false origin facts. They gain neither existing body-read grants nor the owner's login, but can deny the intended pairing. Accept only with trusted private transfer, short expiry, atomic binding and visible completion/revoke. This changes #634's prior review of a known origin public identity. |
 | T2: verify the origin identity on receiver before activation | Five actions: T1 plus receiver confirmation of a matching authenticated identity summary | Retains a separate receiver check; a stolen invitation alone cannot activate an enrollment. Misses the requested under-five target; offer if the owner rejects T1's delegation. |
-| Short human code / one-time browser link | No lower claimed count | A short code needs a separately reviewed authenticated password exchange and online guessing limits; a URL secret conflicts with the no-credential-in-URLs boundary. Neither is a shortcut accepted by this document. No homegrown cryptography or implicit TOFU. |
+| **T3: direct short-code PAKE (UX candidate; evaluate before selection)** | Four actions with address supplied in the origin command; see below | A reviewed password-authenticated key exchange replaces the long invitation/pin transfer. It resists offline guessing from captured exchange traffic; a code observed directly can still be used to race/impersonate a peer. Requires a reviewed bootstrap transport, maintained cryptographic implementation and aggregate guessing limits. No account identity is established by PAKE. |
+| One-time browser link with a secret | Not proposed | A secret URL conflicts with the no-credential-in-URLs boundary. Pairing codes go into Semon's protected pairing input, never chat, arguments, browser history or logs. |
 | Default-allow newly discovered or unscanned sources | Potentially fewer future prompts, **not proposed for delivery** | Gives up explicit source approval or fail-closed governance. It would require a separate security decision; selecting all current sources is not this option. |
 
-D2, mTLS and dual audit are identical under T1/T2. There is no proposed offline
+D2, mTLS and dual audit are identical under T1/T2/T3. There is no proposed offline
 grant, receiver-only authorization or machine-token-as-user shortcut. Four actions
-is a design target conditional on T1 approval and complete implementation, not a
-claim that the owner has accepted its security tradeoff.
+is a design target conditional on the chosen provisioning option, P1 approval and
+complete implementation, not an accepted security tradeoff.
+
+### T3 option: direct short-code pairing
+
+The PM supplied a T3 Code UX observation on 2026-11-11: account sign-in, an app
+pairing card, code entry on the other machine, selectable access, visible endpoint
+reachability and links observed to expire after roughly four weeks. This is
+exposed-surface evidence, **not source/protocol evidence**. It does not establish
+that T3 uses PAKE or that its observed lifetime should become Semon policy. Semon
+borrows the interaction pattern without its account system, service or state.
+
+PAKE means a password-authenticated key exchange: a short shared code establishes
+a cryptographic session without exposing that code to offline guessing from a
+captured protocol transcript. Candidate families include SPAKE2 or CPace; no exact
+construction/library is selected here. [RFC 9382](https://www.rfc-editor.org/rfc/rfc9382.html)
+(SPAKE2, Informational, especially sections 3.1–3.3) describes transcript identities
+and confirmation MACs. [RFC 8125](https://www.rfc-editor.org/rfc/rfc8125.html)
+(sections 1 and 4) describes PAKE requirements and interactive-guessing/denial-of-
+service tradeoffs. These references are not implementation approval.
+
+Proposed replacement for B1–B4, still **four counted actions**:
+
+1. Receiver owner runs `semon receive enroll --machine laptop --listen
+   0.0.0.0:8735 --advertise https://desk.example:8735`. Semon shows a short-lived
+   random code in its local authenticated pairing surface and waits for one peer.
+2. Origin owner runs `semon connect --to https://desk.example:8735`. Address is a
+   nonsecret command input. Choosing or discovering it is not authenticated pairing;
+   any extra lookup, picker or address-entry step is recorded in a usability run.
+3. They enter the code directly in the origin's non-echoing Semon prompt, never
+   through chat. Both peers automatically complete cryptographic key confirmation.
+4. They approve the origin's authenticated receiver/issuer, read-only sharing and
+   P1 source summary. Only then activate scoped enrollment and source publication.
+
+Code submission and permission approval remain separate counted actions, even if
+one UI button ultimately submits both. A separate human check of the origin on
+the receiver adds a fifth action. The receiver's initial administrative command
+otherwise delegates one binding to possession of the code, with the same
+identity-selection limitation as T1. Cryptographic mutual confirmation proves
+shared key possession; it is not a human's independent verification of a machine
+or a signed-in account. Peer-provided names are labels, not identity evidence.
+
+Semon's only access choices are read-only sharing of analytics and approved
+on-demand evidence, or a narrower analytics-only scope. Do not copy T3's approval,
+execution or full-access controls. The receiver's authenticated local OS owner
+still supplies its principal and owner browser session; PAKE creates no user login
+and does not make remote headless-owner authentication free. The code chooses no
+source classification and cannot bypass source policy.
+
+**Bootstrap must be specified before this option is selected for implementation.**
+With an existing trusted HTTPS endpoint, normal TLS identity validation precedes
+PAKE. With a LAN/private certificate, a code alone does not supply its trusted
+root. A distinct bounded bootstrap protocol must authenticate and bind the endpoint,
+receiver TLS identity/pin, origin-generated public key, roles, fresh session,
+version and intended enrollment scope through the PAKE-confirmed channel before
+persistent trust or credentials activate. That might require a dedicated bootstrap
+transport; it is not a general “accept invalid certificates” switch. No application
+body, credential, grant or policy enters an unauthenticated channel. No silent
+TOFU or request-installed issuer pin on the body routes. Following provisioning,
+normal HTTPS hostname/pin checks and body mTLS remain mandatory. LAN/Tailscale
+reachability, where already available, is a transport convenience, not proof of
+Semon identity; neither is required infrastructure.
+
+Use an established maintained implementation and independent protocol review;
+these have **not been assessed yet**. Require explicit confirmation from both
+peers, bounded pending state, a minutes-long absolute invitation lifetime,
+atomic single-use activation and cancellation that leaves no active grant.
+Choose code entropy/length and attempt limits together in that review. Limits
+must apply per invitation/session and receiver-wide across addresses, connections,
+retries and repeated invitation issuance; per-IP limits alone are insufficient.
+Lockout can deny legitimate pairing, so report the recovery action without an
+unbounded automatic retry/reissue loop. Expiry/failed confirmation cannot activate
+a partial enrollment. No code or key in logs, URLs, assertions or error text.
+
+**Owner option: code exposure and confirmation.** Recommend direct entry from a
+trusted receiver display into the trusted origin, and reject chat-based pairing
+as the documented flow. A network observer without the code cannot perform offline
+guessing against a sound PAKE transcript; an attacker who sees the actual code
+can race or impersonate a participant. PAKE does not make an untrusted messenger,
+screenshot or remote screen safe. If untrusted code delivery is required, either
+accept that exposure explicitly as a security tradeoff, or add independent identity
+verification via a trusted channel and count its extra actions. Endpoint compromise
+or remote control of either device cannot be repaired by PAKE.
+
+Recommendation for PM/owner: evaluate T3's four-action short-code option with a
+bounded protocol/library review; retain T1 as the simpler alternative. Do not
+claim a three-action result or select an insecure bootstrap to meet a count.
+
+### Expiry and re-pairing as the normal renewal flow
+
+**E1 is a separate owner choice, not implied by the pairing selection.** One option
+is a finite enrollment authorization lifetime followed by the same pairing flow,
+with a clear expiry warning and no new publication/body reads after expiry. This
+reduces routine credential instructions to “re-pair this machine,” but each renewal
+costs the pairing actions and offline machines may lose access until the owner
+returns. The observed T3 four-week lifetime is an example only; choose Semon's
+lifetime deliberately. The alternative is automatic transport credential renewal
+under still-valid explicitly enrolled trust, with manual re-pair after trust loss
+or compromise; it has fewer recurring actions but longer standing authorization.
+Both need independent revocation at the next decision/release, not expiry-only
+access removal. Revocation must also stop active delivery within declared bounds.
+
+Keep invitation expiry, enrollment lifetime, client-certificate/bearer validity,
+owner browser session, short read-assertion validity and D3's cache TTL distinct.
+Re-pair may replace origin transport credentials/certificate through one guided
+operation; old generations must become unusable at the documented cutover. It
+must preserve native namespace/handle continuity where proven, prior facts, source
+restrictions and audits. A revoked enrollment is never resurrected: explicit new
+enrollment uses a new ID and reconciles current authority, not a stale bundle.
+Lost keys or changed origin incarnation cannot silently transfer publisher claims.
+
+Re-pair does not by itself rotate the receiver's assertion-issuer key, server/root
+identity or cache master key. Those serve different custody and trust boundaries.
+If re-pair is chosen to distribute new issuer/root pins, the ceremony must explicitly
+bind that new trust, keep at most two issuer keys during an approved bounded overlap,
+and account for each origin. Compromised trust needs a fresh independently trusted
+ceremony; routine renewal authenticated only by the compromised key is insufficient.
+Cache key rotation remains a receiver-local explicit invalidation operation and
+never deletes facts/audits. Show advanced identity maintenance only when needed,
+but retain its operational contract beneath a simple normal renewal experience.
 
 ### Network and service costs outside pairing
 
@@ -457,7 +576,7 @@ stronger classification and identify which part is merely generation.
 | #630 cache master key | Needs a generated default | Create a separate random 32-byte key under private secret custody outside cache/backups; validate permissions, limits and exclusions. Fail closed on missing key; explicit rotation invalidates entries. Generating a key does not establish backup/swap/core-dump safety on an arbitrary host. |
 | #631 `grants.json` and audit directories | Needs a generated default | Derive exact self-grants from authenticated owner plus enrolled scope; generate separate private directories. Preserve deny-on-invalid and audit-before-release. Never derive the user from a push token. |
 | #633 strict source registry | Needs a design change | Add origin-side generation from admitted contributor identities and approved local policy/real scan output. No absent-registry fallback or default successful scan; source inclusion is not export authority. Provide local explanations of refusals. |
-| #634 enroll/import/public bundle/separate secrets | Needs a design change | T1/T2 provisioning decision; local origin key generation, pinned HTTPS identity, atomic one-use binding, ordinary user names. Update producers, consumers and docs as one current contract. |
+| #634 enroll/import/public bundle/separate secrets | Needs a design change | T1/T2/T3 provisioning and E1 renewal decisions; local origin key generation, pinned HTTPS identity, atomic one-use binding, ordinary user names. Update producers, consumers and docs as one current contract. |
 | #634 credential kinds / certs / issuer keys | Needs a generated default for creation; rotation needs a design change | Generate separate kinds and mTLS material internally, do not conflate transport/user grants. Keep analytics client cert optional for now, body cert mandatory. Guided explicit bounded rotation; no read-request key installation. |
 | Existing `receive token` / `push` | Needs a design change already proposed by #634 | Preserve supported mirror as explicit separate custody, not the default ASI path. Refuse old `tokens` unchanged with re-issue guidance. No migration, deletion or alias that disguises kind changes. |
 | #632 body channel | Fits as internal transport | Consume the one enrollment; no extra pairing. Origin-rendered bounded typed pages, exact evidence mapping, online audit on cache hits and backpressure remain. No remote search or control shortcut. |
@@ -502,10 +621,11 @@ contract; human wording does not smuggle secrets into errors.
 
 PM routes these requests; this Manager does not direct the implementing lanes.
 
-1. Resolve T1/T2 before replacing provisioning. Specify invitation custody, pinned
-   private-root HTTPS, key-possession proof, race/replay/expiry/cancellation behavior,
-   activation and owner authentication. Keep the complete cryptographic protocol
-   out of this UX document and require adversarial CI before delivery claims.
+1. Resolve T1/T2/T3 and E1 before replacing provisioning/renewal. Specify invitation
+   custody or reviewed PAKE bootstrap, pinned private-root HTTPS, key confirmation,
+   race/replay/expiry/cancellation behavior, activation and owner authentication.
+   Keep the complete cryptographic protocol out of this UX document and require
+   independent protocol/library assessment and adversarial CI before delivery claims.
 2. Replace operator-supplied namespace/incarnations/kind/cert fields with generated
    binding and a guided ceremony; validate existing namespace continuity. Keep one
    current enrollment and credential format with no old-token migration.
@@ -560,7 +680,12 @@ missing continuity-state backup guidance. This revision adds explicit host
 prerequisites/partial-setup refusal, proposed profile P1 with real scan prerequisites
 and PM approval, and a separate custody/recovery inventory. The Manager inspected
 those focused fixes; they have not received a second independent review. Review
-certifies neither protocol implementation nor runtime security.
+certifies neither protocol implementation nor runtime security. A subsequent
+independent Sol medium assessment of the PM's PAKE/expiry input supported a
+conditional four-action option and identified bootstrap trust, code exposure,
+aggregate guessing limits and separate key lifecycles as required boundaries.
+The added T3/E1 sections incorporate that assessment; no cryptographic library or
+implemented protocol has been validated.
 
 This is a docs-only proposal. Command syntax is inspected in CLI/source docs;
 proposed commands are not executed or advertised as shipped. No product code,
