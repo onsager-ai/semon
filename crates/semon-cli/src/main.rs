@@ -1011,9 +1011,9 @@ fn run_reset(args: ResetArgs) -> Result<(), String> {
         error => format!("analytics reset: {error}"),
     })?;
     if args.new_namespace {
-        std::fs::remove_file(state_dir.join(ANALYTICS_NAMESPACE_FILE)).map_err(
-            |error| format!("analytics reset: cannot remove analytics namespace: {error}"),
-        )?;
+        std::fs::remove_file(state_dir.join(ANALYTICS_NAMESPACE_FILE)).map_err(|error| {
+            format!("analytics reset: cannot remove analytics namespace: {error}")
+        })?;
     }
     println!(
         "analytics reset: generation={} removed={} namespace={}",
