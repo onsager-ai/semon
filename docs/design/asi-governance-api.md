@@ -71,11 +71,16 @@ fallback grant. The trusted local caller supplies the authenticated Principal an
 exact receiver Scope. Missing configuration refuses the operation; missing,
 empty or duplicate retained contributor identities refuse that session.
 
-`Handles::open(root, namespace)` explicitly creates/opens
-`root/egress-handles.sqlite`. New files have mode 0600 on Unix. SQLite random
-32-byte identifiers map source and evidence/native keys independently, scoped to
-that store and namespace. Keep the mapping for the store lifetime; deleting it
-changes exported handles. Native IDs, log stems and source paths remain private.
+`Handles::open(state_dir, namespace)` explicitly creates/opens
+`state_dir/analytics-egress-handles.sqlite`, beside `analytics-namespace` and
+outside `state_dir/analytics-store`. New files are created atomically with mode
+0600 on Unix. SQLite random 32-byte identifiers map source and evidence/native
+keys independently, bound only to the namespace. Moving/copying the same namespace
+preserves origin identity; filesystem paths are not identity authority. Keep the
+mapping for the namespace lifetime. Reset with the namespace kept preserves it;
+`reset --new-namespace` retires it under the same writer lock as the namespace
+file. There is no reconciliation across retired namespaces. Custody export bundles
+exclude this private operator state. Deleting it changes exported handles. Native IDs, log stems and source paths remain private.
 Opaque evidence keys use the schema's UID shapes with a fixed `opaque/receiver`
 prefix; they are handles, not native identity or filesystem authority.
 

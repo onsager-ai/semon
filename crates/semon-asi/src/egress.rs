@@ -22,11 +22,14 @@ use serde_json::{Map, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 type Result<T> = std::result::Result<T, Failure>;
 type Rows = BTreeMap<String, Vec<Map<String, Value>>>;
+
+/// Private operator state, alongside analytics-namespace, never in custody bundles.
+pub const HANDLES_FILE: &str = "analytics-egress-handles.sqlite";
 
 /// Sanitized failure envelope: never attach parser, path, field or policy values.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,17 +89,17 @@ impl Registry {
 }
 
 /// Local persistent random mappings. Open explicitly; this never modifies facts.
-/// Keep this file for the lifetime of this store and namespace.
+/// Keep this file for the namespace lifetime, independent of store location.
 pub struct Handles {
     connection: Connection,
-    root: PathBuf,
     namespace: String,
 }
 impl Handles {
-    pub fn open(root: &Path, namespace: &str) -> Result<Self> {
-        directory(root).map_err(|_| Failure::Handles)?;
-        let root = root.canonicalize().map_err(|_| Failure::Handles)?;
-        let path = root.join("egress-handles.sqlite");
+    /// `state_dir` is explicitly supplied by the operator, beside the namespace
+    /// file, outside the disposable analytics-store directory.
+    pub fn open(state_dir: &Path, namespace: &str) -> Result<Self> {
+        directory(state_dir).map_err(|_| Failure::Handles)?;
+        let path = state_dir.join(HANDLES_FILE);
         match fs::symlink_metadata(&path) {
             Ok(_) => regular(&path).map_err(|_| Failure::Handles)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -126,7 +129,6 @@ impl Handles {
         }
         Ok(Self {
             connection,
-            root,
             namespace: namespace.into(),
         })
     }
@@ -150,7 +152,6 @@ impl Handles {
 /// All inputs are decoded during pinning; later publications cannot change them.
 /// Private custody data and native keys have no serializer or Debug implementation.
 pub struct Snapshot {
-    root: PathBuf,
     namespace: String,
     rows: Rows,
     provenance: BTreeMap<String, crate::provenance::Provenance>,
@@ -192,7 +193,6 @@ impl Snapshot {
                 .collect();
             let rows = read_rows(root, &manifest, &live)?;
             Ok(Self {
-                root: root.canonicalize()?,
                 namespace: namespace.into(),
                 rows,
                 provenance,
@@ -217,7 +217,6 @@ impl Snapshot {
             || registry.namespace != self.namespace
             || scope.namespace != self.namespace
             || handles.namespace != self.namespace
-            || handles.root != self.root
         {
             return Err(Failure::Registry);
         }
@@ -320,7 +319,7 @@ impl Snapshot {
             return Ok(None);
         }
         // Resolve only dependencies of this session, never copy dimension tables.
-        let mut dependencies = BTreeSet::new();
+        let mut dependencies = Vec::new();
         for (_, row) in &pending {
             for (field, table) in [
                 ("machine_key", "dim_machine"),
@@ -334,7 +333,10 @@ impl Snapshot {
                     continue;
                 }
                 if let Some(value) = row.get(field).filter(|value| !value.is_null()) {
-                    dependencies.insert((table, field, value.to_string()));
+                    let dependency = (table, field, value.clone());
+                    if !dependencies.contains(&dependency) {
+                        dependencies.push(dependency);
+                    }
                 }
             }
         }
@@ -344,7 +346,7 @@ impl Snapshot {
                 .get(table_name)
                 .into_iter()
                 .flatten()
-                .filter(|row| row.get(field).is_some_and(|key| key.to_string() == value))
+                .filter(|row| row.get(field).is_some_and(|key| *key == value))
                 .collect();
             if matches.len() != 1 {
                 return Ok(None);

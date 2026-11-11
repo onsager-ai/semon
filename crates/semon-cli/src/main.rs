@@ -1213,13 +1213,14 @@ fn run_reset(args: ResetArgs) -> Result<(), String> {
             .ok_or_else(|| format!("no analytics store at {}", store_root.display()))?
             .generation
     };
+    let handles_path = state_dir.join(semon_asi::egress::HANDLES_FILE);
     let summary = semon_asi::reset_snapshot(
         &store_root,
         &state_dir.join(ANALYTICS_NAMESPACE_FILE),
         &namespace,
         args.verified_export.as_deref(),
         expected_generation,
-        args.new_namespace,
+        args.new_namespace.then_some(handles_path.as_path()),
     )
     .map_err(|error| match error {
         semon_asi::Error::WriterBusy => {

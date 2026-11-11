@@ -95,13 +95,14 @@ fn update(uid: &str) -> Update {
 }
 fn setup() -> (tempfile::TempDir, Snapshot, Handles) {
     let directory = tempfile::tempdir().unwrap();
-    let root = directory.path();
-    fs::write(root.join("analytics-namespace"), "origin\n").unwrap();
-    let mut store = Store::open(root).unwrap();
+    let state = directory.path();
+    let root = state.join("analytics-store");
+    fs::write(state.join("analytics-namespace"), "origin\n").unwrap();
+    let mut store = Store::open(&root).unwrap();
     store.publish(&update(UID)).unwrap();
     drop(store);
-    let snapshot = Snapshot::pin(root, &root.join("analytics-namespace"), "origin").unwrap();
-    let handles = Handles::open(root, "origin").unwrap();
+    let snapshot = Snapshot::pin(&root, &state.join("analytics-namespace"), "origin").unwrap();
+    let handles = Handles::open(state, "origin").unwrap();
     (directory, snapshot, handles)
 }
 fn project(snapshot: &Snapshot, registry: &Registry, handles: &Handles) -> Projection {
@@ -205,7 +206,7 @@ fn coverage_is_separate_and_snapshot_is_pinned() {
     let original = project(&snapshot, &registry, &handles)
         .serialize_receiver()
         .unwrap();
-    let mut store = Store::open(directory.path()).unwrap();
+    let mut store = Store::open(&directory.path().join("analytics-store")).unwrap();
     store.publish(&update("origin/claude/new-session")).unwrap();
     drop(store);
     assert_eq!(
@@ -275,6 +276,92 @@ fn dependency_values_and_denied_lineage_never_escape() {
             .contains("secret-unreferenced")
     );
 }
+#[test]
+fn reset_preserves_or_retires_namespace_handles_and_export_excludes_them() {
+    let (directory, snapshot, handles) = setup();
+    let state = directory.path();
+    let root = state.join("analytics-store");
+    let namespace_file = state.join("analytics-namespace");
+    let handles_path = state.join(HANDLES_FILE);
+    let original = project(&snapshot, &registry(), &handles)
+        .serialize_receiver()
+        .unwrap();
+    let original_handle = handles.get("source", "native-a").unwrap();
+    drop(handles);
+    assert!(crate::coverage::read(&root).unwrap().is_some());
+    let bundle = state.join("bundle");
+    crate::export_snapshot(&root, &namespace_file, "origin", &bundle).unwrap();
+    let receipt = crate::verify_export(&bundle).unwrap();
+    assert!(
+        receipt
+            .files
+            .iter()
+            .all(|file| !file.path.contains(HANDLES_FILE))
+    );
+    assert!(!bundle.join(HANDLES_FILE).exists());
+    crate::reset_snapshot(&root, &namespace_file, "origin", Some(&bundle), 1, None).unwrap();
+    assert!(handles_path.is_file());
+    let mut store = Store::open(&root).unwrap();
+    store.publish(&update(UID)).unwrap();
+    drop(store);
+    let retained = Handles::open(state, "origin").unwrap();
+    assert_eq!(original_handle, retained.get("source", "native-a").unwrap());
+    assert_eq!(
+        original,
+        project(&snapshot, &registry(), &retained)
+            .serialize_receiver()
+            .unwrap()
+    );
+    drop(retained);
+    crate::reset_snapshot(
+        &root,
+        &namespace_file,
+        "origin",
+        None,
+        1,
+        Some(&handles_path),
+    )
+    .unwrap();
+    assert!(!handles_path.exists());
+    assert!(!namespace_file.exists());
+    fs::write(&namespace_file, "next\n").unwrap();
+    let mut store = Store::open(&root).unwrap();
+    store.publish(&update("next/claude/session")).unwrap();
+    drop(store);
+    let fresh = Handles::open(state, "next").unwrap();
+    assert_ne!(original_handle, fresh.get("source", "native-a").unwrap());
+    assert!(Handles::open(state, "origin").is_err());
+    let snapshot = Snapshot::pin(&root, &namespace_file, "next").unwrap();
+    let mut registry = registry();
+    registry.namespace = "next".into();
+    for registration in registry.sources.values_mut() {
+        registration.source.namespace = "next".into();
+        for policy in [&mut registration.baseline, &mut registration.local] {
+            policy.scopes = BTreeSet::from([Scope {
+                namespace: "next".into(),
+                ..scope()
+            }]);
+        }
+    }
+    let principal = Principal {
+        namespace: "next".into(),
+        ..principal()
+    };
+    let scope = Scope {
+        namespace: "next".into(),
+        ..scope()
+    };
+    assert_eq!(
+        snapshot
+            .project(Some(&registry), &fresh, &principal, &scope)
+            .unwrap()
+            .outcomes
+            .exported,
+        1
+    );
+    assert!(crate::coverage::read(&root).unwrap().is_some());
+}
+
 #[test]
 fn credentials_and_unknown_metadata_fail_closed() {
     let (directory, mut snapshot, handles) = setup();

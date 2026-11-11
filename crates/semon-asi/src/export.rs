@@ -145,13 +145,15 @@ pub fn verify_export(bundle: &Path) -> Result<ExportReceipt> {
 /// is removed before every other store entry so a partial failure is never readable as a
 /// valid snapshot. The lock file and store root remain so another writer cannot acquire a
 /// replacement lock inode before this operation has released ownership.
+/// `retire_namespace_handles` is `None` to keep namespace identity and mappings;
+/// `Some(state_dir/analytics-egress-handles.sqlite)` retires both under this lock.
 pub fn reset_snapshot(
     root: &Path,
     namespace_file: &Path,
     expected_namespace: &str,
     verified_export: Option<&Path>,
     expected_generation: u64,
-    remove_namespace: bool,
+    retire_namespace_handles: Option<&Path>,
 ) -> Result<ResetSummary> {
     reset_snapshot_with(
         root,
@@ -159,7 +161,7 @@ pub fn reset_snapshot(
         expected_namespace,
         verified_export,
         expected_generation,
-        remove_namespace,
+        retire_namespace_handles,
         || {},
     )
 }
@@ -170,7 +172,7 @@ fn reset_snapshot_with<F: FnOnce()>(
     expected_namespace: &str,
     verified_export: Option<&Path>,
     expected_generation: u64,
-    remove_namespace: bool,
+    retire_namespace_handles: Option<&Path>,
     on_locked: F,
 ) -> Result<ResetSummary> {
     let _lock = open_lock(root, true)?;
@@ -200,6 +202,19 @@ fn reset_snapshot_with<F: FnOnce()>(
             "published manifest changed after verified export; export again before reset",
         ));
     }
+    if let Some(handles) = retire_namespace_handles {
+        let parent = namespace_file
+            .parent()
+            .ok_or_else(|| Error::invalid("namespace has no state directory"))?;
+        if handles != parent.join(crate::egress::HANDLES_FILE) {
+            return Err(Error::invalid("handle registry must be beside namespace"));
+        }
+        match fs::symlink_metadata(handles) {
+            Ok(_) => require_regular_file(handles, "egress handle registry")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
     let analytics = root.join(ANALYTICS_DIR);
     let manifest_path = analytics.join(MANIFEST_FILE);
     fs::remove_file(&manifest_path)?;
@@ -218,9 +233,15 @@ fn reset_snapshot_with<F: FnOnce()>(
     }
     fs::remove_dir(&analytics)?;
     removed.push(ANALYTICS_DIR.to_owned());
-    if remove_namespace {
+    if let Some(handles) = retire_namespace_handles {
         fs::remove_file(namespace_file)?;
         removed.push("analytics-namespace".to_owned());
+        match fs::remove_file(handles) {
+            Ok(()) => removed.push(crate::egress::HANDLES_FILE.to_owned()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        File::open(namespace_file.parent().expect("validated namespace parent"))?.sync_all()?;
     }
     on_locked();
     Ok(ResetSummary {
@@ -660,17 +681,28 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let summary = reset_snapshot_with(&root, &namespace_file, namespace, None, 1, true, || {
-            assert!(!namespace_file.exists());
-            let lock = OpenOptions::new()
-                .write(true)
-                .open(root.join(LOCK_FILE))
-                .unwrap();
-            assert!(matches!(
-                lock.try_lock(),
-                Err(std::fs::TryLockError::WouldBlock)
-            ));
-        })
+        let handles_path = state.join(crate::egress::HANDLES_FILE);
+        drop(crate::egress::Handles::open(state, namespace).unwrap());
+        let summary = reset_snapshot_with(
+            &root,
+            &namespace_file,
+            namespace,
+            None,
+            1,
+            Some(&handles_path),
+            || {
+                assert!(!namespace_file.exists());
+                assert!(!handles_path.exists());
+                let lock = OpenOptions::new()
+                    .write(true)
+                    .open(root.join(LOCK_FILE))
+                    .unwrap();
+                assert!(matches!(
+                    lock.try_lock(),
+                    Err(std::fs::TryLockError::WouldBlock)
+                ));
+            },
+        )
         .unwrap();
 
         assert!(
