@@ -241,7 +241,7 @@ fn viewer_asi_routes_enforce_admission_and_worker_boundaries() {
         r#"{"query":"SELECT 42 AS answer"}"#,
         &headers,
     );
-    assert_eq!(status, 200);
+    assert_eq!(status, 200, "{value}");
     assert_eq!(value["rows"], json!([[42]]));
     assert!(head.contains("Cache-Control: no-store"));
     assert!(head.contains("Referrer-Policy: no-referrer"));
@@ -360,7 +360,7 @@ fn cli_and_mcp_search_and_view_native_fixture_text() {
         r#"{"query":"uniqueftsneedle"}"#,
         &viewer.headers(),
     );
-    assert_eq!(status, 200);
+    assert_eq!(status, 200, "{result}");
     assert_eq!(result["hits"].as_array().unwrap().len(), 1);
     assert!(headers.contains("Cache-Control: no-store"));
     assert!(headers.contains("Referrer-Policy: no-referrer"));
@@ -370,7 +370,7 @@ fn cli_and_mcp_search_and_view_native_fixture_text() {
         &json!({"uid": uid}).to_string(),
         &viewer.headers(),
     );
-    assert_eq!(status, 200);
+    assert_eq!(status, 200, "{result}");
     assert_eq!(
         result["bodies"][0]["text"]["untrusted_text"],
         "uniqueftsneedle"

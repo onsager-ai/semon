@@ -122,8 +122,15 @@ fn open(path: &std::path::Path, deadline: Instant) -> Result<Index, Value> {
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|_| unavailable())?;
+    // The Viewer refreshes this WAL index concurrently. A short SQLite lock wait
+    // admits readers across WAL recovery/checkpoint locks without extending the
+    // request deadline or retrying the query after it has started.
     connection
-        .busy_timeout(Duration::ZERO)
+        .busy_timeout(
+            deadline
+                .saturating_duration_since(Instant::now())
+                .min(Duration::from_millis(100)),
+        )
         .map_err(|_| unavailable())?;
     connection
         .progress_handler(1000, Some(move || Instant::now() >= deadline))
