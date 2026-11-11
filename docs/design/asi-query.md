@@ -168,6 +168,11 @@ FTS5 over index bodies, in each namespace's ingest index:
   Ingestion never creates that file. Before the first materialization, reads return
   `not_materialized`; a missing namespace alongside an existing analytics store
   retains the existing `store_unavailable` refusal.
+  `semon analytics reset` never touches the index, so stored bodies survive it.
+  With `--new-namespace` it removes the manifest and the namespace file together,
+  so reads return `not_materialized` until the next materialization creates a new
+  namespace; the same bodies then answer under the new full UIDs. Without it the
+  namespace is kept and reads continue under the same UIDs.
 - `body_fts`: external-content FTS5 using `unicode61 remove_diacritics 2`.
   The bundled SQLite build already enables FTS5. Insert/delete triggers maintain
   postings in the source transaction. `body_source` tracks source contributions;
