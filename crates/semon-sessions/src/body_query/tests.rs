@@ -41,6 +41,131 @@ fn request(indexes: Vec<PathBuf>, tool: &str, arguments: Value) -> Result<Value,
 }
 
 #[test]
+fn image_only_prompt_starts_a_new_claude_turn() {
+    let (root, index) = fixture('a');
+    let mut batch = crate::events::store::bodies::Batch::default();
+    batch.begin(Path::new("session.jsonl"), "claude");
+    let records = [
+        json!({"type":"user","uuid":"turn-a","message":{"content":"text prompt"}}),
+        json!({"type":"user","uuid":"turn-b","message":{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"fixture"}}]}}),
+        json!({"type":"assistant","message":{"id":"answer-b","content":"imageanswerneedle"}}),
+    ];
+    for (ordinal, record) in records.iter().enumerate() {
+        batch
+            .capture("claude", record, Some(ordinal as u64))
+            .unwrap();
+    }
+    let mut connection = Connection::open(&index).unwrap();
+    let tx = connection.transaction().unwrap();
+    crate::events::store::bodies::write(&tx, "session.jsonl", &batch, false).unwrap();
+    tx.commit().unwrap();
+    drop(connection);
+    for (turn, contains_answer) in [("turn-a", false), ("turn-b", true)] {
+        let result = request(
+            vec![index.clone()],
+            "view",
+            json!({"uid":format!("origin-{}/claude/session/t/{turn}","a".repeat(64))}),
+        )
+        .unwrap();
+        assert_eq!(
+            result["bodies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|body| body["text"]["untrusted_text"] == "imageanswerneedle"),
+            contains_answer
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn copilot_denial_fixture_is_searchable_and_in_its_turn() {
+    let (root, index) = fixture('a');
+    let mut batch = crate::events::store::bodies::Batch::default();
+    batch.begin(Path::new("events.jsonl"), "copilot");
+    for (ordinal, line) in include_str!(
+        "../../../../tests/fixtures/compatibility/copilot-1.0.91/lifecycle/denied.events.jsonl"
+    )
+    .lines()
+    .enumerate()
+    {
+        batch
+            .capture(
+                "copilot",
+                &serde_json::from_str::<Value>(line).unwrap(),
+                Some(ordinal as u64),
+            )
+            .unwrap();
+    }
+    let mut connection = Connection::open(&index).unwrap();
+    let tx = connection.transaction().unwrap();
+    crate::events::store::bodies::write(&tx, "events.jsonl", &batch, false).unwrap();
+    tx.commit().unwrap();
+    drop(connection);
+    let result = request(
+        vec![index.clone()],
+        "search",
+        json!({"query":"\"Permission to run this tool was denied\"","part":"error"}),
+    )
+    .unwrap();
+    assert_eq!(result["hits"].as_array().unwrap().len(), 1);
+    let result = request(
+        vec![index],
+        "view",
+        json!({"uid":result["hits"][0]["turn_uid"]}),
+    )
+    .unwrap();
+    assert!(result["bodies"].as_array().unwrap().iter().any(|body| {
+        body["text"]["untrusted_text"]
+            .as_str()
+            .unwrap()
+            .contains("Permission to run this tool was denied")
+    }));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn codex_local_shell_command_preserves_exact_owner() {
+    let (root, index) = fixture('a');
+    let mut batch = crate::events::store::bodies::Batch::default();
+    batch.begin(Path::new("rollout.jsonl"), "codex");
+    let records = [
+        json!({"type":"session_meta","payload":{"id":"native"}}),
+        json!({"type":"response_item","payload":{"type":"local_shell_call","id":"shell-id","thread_id":"thread","session_id":"session","turn_id":"turn","response_id":"response","action":{"type":"exec","command":["sh","-c","printf localshellneedle"],"working_directory":"/fixture"}}}),
+        json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"shell-id","output":"localshelloutput"}}),
+    ];
+    for (ordinal, record) in records.iter().enumerate() {
+        batch
+            .capture("codex", record, Some(ordinal as u64))
+            .unwrap();
+    }
+    let mut connection = Connection::open(&index).unwrap();
+    let tx = connection.transaction().unwrap();
+    crate::events::store::bodies::write(&tx, "rollout.jsonl", &batch, false).unwrap();
+    tx.commit().unwrap();
+    drop(connection);
+    let result = request(
+        vec![index.clone()],
+        "search",
+        json!({"query":"localshellneedle","part":"command"}),
+    )
+    .unwrap();
+    assert_eq!(result["hits"].as_array().unwrap().len(), 1);
+    let step = result["hits"][0]["step_uid"].clone();
+    assert_eq!(
+        step,
+        format!(
+            "origin-{}/codex/native/s/codex/thread/session/turn/response",
+            "a".repeat(64)
+        )
+    );
+    let result = request(vec![index], "view", json!({"uid":step})).unwrap();
+    assert_eq!(result["bodies"].as_array().unwrap().len(), 2);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn fixtures_filters_untrusted_text_and_focused_views() {
     let (root, index) = fixture('a');
     insert(
@@ -364,13 +489,12 @@ fn namespace_loader_refuses_symlinks_and_nonregular_files() {
 #[test]
 fn a_receiver_bound_index_refuses_before_body_access() {
     let (root, index) = fixture('a');
+    {
+        let mut cache = EventCache::open_scoped(&index.with_extension("json")).unwrap();
+        let namespace = crate::storage::Namespace::new("received-machine").unwrap();
+        crate::storage::sqlite::bind(&mut cache, &namespace).unwrap();
+    }
     let connection = Connection::open(&index).unwrap();
-    connection
-        .execute(
-            "INSERT INTO meta VALUES('storage_namespace','received-machine')",
-            [],
-        )
-        .unwrap();
     connection
         .execute_batch("DROP TABLE body_fts; DROP TABLE body")
         .unwrap();

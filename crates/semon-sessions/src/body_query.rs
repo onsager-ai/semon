@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OpenFlags, params};
 use semon_asi::input::encode_component;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -124,18 +124,13 @@ fn open(path: &std::path::Path, deadline: Instant) -> Result<Index, Value> {
     connection
         .busy_timeout(Duration::ZERO)
         .map_err(|_| unavailable())?;
-    connection.progress_handler(1000, Some(move || Instant::now() >= deadline));
+    connection
+        .progress_handler(1000, Some(move || Instant::now() >= deadline))
+        .map_err(|_| unavailable())?;
     connection
         .execute_batch("BEGIN")
         .map_err(|_| unavailable())?;
-    let binding: Option<String> = connection
-        .query_row(
-            "SELECT value FROM meta WHERE key='storage_namespace'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| unavailable())?;
+    let (_, binding) = crate::storage::sqlite::binding(&connection).map_err(|_| unavailable())?;
     if binding.as_deref().is_some_and(|binding| binding != "local") {
         return Err(error(
             "capability_unavailable",

@@ -116,7 +116,8 @@ impl Batch {
                         blocks
                             .iter()
                             .any(|b| crate::field(b, "type") == Some("text"))
-                    });
+                    })
+                    || crate::attachments::parts(record).is_some_and(crate::attachments::has_image);
                 if role == Some("user") && has_prompt {
                     self.state.turn = Some(
                         crate::field(record, "uuid")
@@ -217,16 +218,19 @@ impl Batch {
                                 parts.push((part, text_content(&payload["content"]), None));
                             }
                         }
-                        Some("function_call" | "custom_tool_call") => {
+                        Some("function_call" | "custom_tool_call" | "local_shell_call") => {
                             let text = payload
                                 .get("arguments")
                                 .or_else(|| payload.get("input"))
+                                .or_else(|| payload.get("action"))
                                 .map(text_content)
                                 .unwrap_or_default();
                             parts.push((
                                 "command",
                                 text,
-                                crate::field(payload, "call_id").map(str::to_owned),
+                                crate::field(payload, "call_id")
+                                    .or_else(|| crate::field(payload, "id"))
+                                    .map(str::to_owned),
                             ));
                         }
                         Some("function_call_output" | "custom_tool_call_output") => {
@@ -283,7 +287,15 @@ impl Batch {
                             } else {
                                 "tool_output"
                             },
-                            text_content(&data["result"]),
+                            if data["success"] == false {
+                                data.get("error")
+                                    .and_then(|error| crate::field(error, "message"))
+                                    .map(str::to_owned)
+                                    .filter(|message| !message.is_empty())
+                                    .unwrap_or_else(|| text_content(&data["result"]))
+                            } else {
+                                text_content(&data["result"])
+                            },
                             result_call.clone(),
                         ));
                     }

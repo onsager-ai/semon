@@ -143,6 +143,24 @@ fn cli_and_mcp_search_and_view_native_fixture_text() {
 }
 
 #[test]
+fn query_help_distinguishes_native_and_search_since_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = cli(&["query"], dir.path().join("index.json"));
+    let help = String::from_utf8(output.stderr).unwrap();
+    let search = help
+        .lines()
+        .find(|line| line.trim_start().starts_with("search "))
+        .unwrap();
+    assert!(search.contains("--since VALUE"));
+    assert!(!search.contains("--newer-than"));
+    let native = help
+        .lines()
+        .find(|line| line.trim_start().starts_with("list_sessions "))
+        .unwrap();
+    assert!(native.contains("--newer-than VALUE"));
+}
+
+#[test]
 fn cli_body_queries_emit_json_and_remote_refusal() {
     let dir = tempfile::tempdir().unwrap();
     let cache = dir.path().join("state/index.json");
