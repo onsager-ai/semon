@@ -2,8 +2,9 @@
 
 Status: accepted architecture/spec for #545 (revised 2026-11-09 for federation
 D1–D8 and DuckDB analytics). #566 delivers local SQL and schema through CLI and
-MCP; #567 adds origin-local search and focused view. Viewer and Hub remain
-follow-up work. Store: [ASI store](asi-store.md)
+MCP; #567 adds origin-local search and focused view. #568 exposes the four
+origin-local tools on the loopback Viewer with the `asi-query` feature. Receiver
+admission/remote pages and Hub remain follow-up work. Store: [ASI store](asi-store.md)
 (#544). Direction:
 [ASI direction](asi-direction.md#architecture). Remote policy/channel contract:
 [ASI federation](asi-federation.md).
@@ -213,8 +214,8 @@ parent deadline. SQLite also checks that deadline through its progress handler.
 Each index is held in one read snapshot. `--machine` body requests and MCP servers
 configured with received machines refuse before namespace or body reads. A bound
 non-local SQLite index also refuses before reading bodies. The receiver/Hub access
-entry point refuses before opening any file. This repository has no Hub ASI route;
-no Viewer HTTP body/search route is added by #567.
+entry point refuses before opening any file. This repository has no Hub ASI route.
+The Viewer routes added by #568 use these same worker/admission paths.
 
 ## `view`
 
@@ -323,6 +324,34 @@ records; cancellation/source changes during a read publish no invalid partial pa
   `Cache-Control: no-store`, restrictive referrers and no shared/CDN/service-worker
   storage. Only opaque identities appear in navigation links. This directly changes
   the Semon-owned route contract; no retained GET alias.
+
+  Today the standalone server is loopback-only and authenticates one launch owner
+  with its per-run HttpOnly, SameSite=Strict session cookie. ASI does not accept
+  bootstrap tokens in URLs. All four routes require exactly one local Host,
+  matching Origin and session Cookie; POST additionally requires one JSON
+  Content-Type. Exact Origin plus the cookie is the existing POST CSRF admission.
+  There is no user identity or per-user grant database: the launch owner admits
+  only the single origin store/index fixed at startup, never a request-supplied
+  machine, namespace, path or executable. No cross-user grant is asserted.
+  Per-user/machine/namespace grants and audit are deferred to receiver admission;
+  received/multi-machine Viewer configurations return `capability_unavailable`
+  for all four tools, before body I/O. Imported receiver analytics admission and
+  online origin-rendered remote pages are not implemented by this slice.
+
+  JSON POST objects use the inputs above. HTTP schema currently returns the full
+  generated reference only (`GET /api/asi/schema`, without arguments). All URL
+  parameters are refused, including schema filters and credentials. Request
+  bodies are bounded to 512 KiB. Responses preserve the CLI/MCP JSON result/error
+  envelope. HTTP status is 200 for success, 403 for failed authentication,
+  Host/Origin/CSRF checks or an unsupported unauthenticated method, 405 for an
+  authenticated unsupported schema method, 404 for `not_found`, 503 for
+  `capability_unavailable`, `store_unavailable`, `store_busy`, `not_materialized`,
+  `schema_mismatch` and `body_unavailable`, and 400 for other tool/input errors.
+  The server emits no request access log and never logs URLs, query strings or
+  request bodies. All ASI replies, including errors, carry `Cache-Control:
+  no-store` and `Referrer-Policy: no-referrer`. No ASI service worker or shared
+  cache is introduced. These routes are also present without `asi-query`, but
+  return typed `capability_unavailable` after admission.
 - **Hub:** the same engine over each tenant's analytics. Hub's routes live in the
   Hub repository.
 

@@ -1,7 +1,8 @@
 #![cfg(feature = "asi-query")]
 
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpStream,
     path::PathBuf,
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver},
@@ -93,6 +94,168 @@ impl Drop for Server {
     }
 }
 
+struct Viewer {
+    child: Child,
+    address: String,
+    token: String,
+}
+
+impl Viewer {
+    fn start(cache: PathBuf, remote: bool) -> Self {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_semon"));
+        command
+            .args(["sessions", "--serve", "--listen", "127.0.0.1:0"])
+            .args(cli_args(cache));
+        if remote {
+            command.args(["--machine", "/missing/receiver"]);
+        }
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(stdout).read_line(&mut line).unwrap();
+            let _ = sender.send(line);
+        });
+        let mut viewer = Self {
+            child,
+            address: String::new(),
+            token: String::new(),
+        };
+        let url = receiver.recv_timeout(Duration::from_secs(30)).unwrap();
+        let (address, token) = url
+            .trim()
+            .strip_prefix("http://")
+            .unwrap()
+            .split_once("/?t=")
+            .unwrap();
+        viewer.address = address.into();
+        viewer.token = token.into();
+        viewer
+    }
+
+    fn request(&self, method: &str, path: &str, body: &str, headers: &str) -> (u16, String, Value) {
+        let mut stream = TcpStream::connect(&self.address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        write!(stream, "{method} {path} HTTP/1.1\r\nHost: {}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", self.address, body.len()).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+        (status, head.into(), serde_json::from_str(body).unwrap())
+    }
+
+    fn headers(&self) -> String {
+        format!(
+            "Cookie: semon_session={}\r\nOrigin: http://{}\r\nContent-Type: application/json\r\n",
+            self.token, self.address
+        )
+    }
+}
+
+impl Drop for Viewer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+#[test]
+fn viewer_asi_routes_enforce_admission_and_worker_boundaries() {
+    let dir = store();
+    let viewer = Viewer::start(dir.path().join("state/index.json"), false);
+    for (method, tool) in [
+        ("POST", "sql"),
+        ("GET", "schema"),
+        ("POST", "search"),
+        ("POST", "view"),
+    ] {
+        let path = format!("/api/asi/{tool}");
+        assert_eq!(viewer.request(method, &path, "{}", "").0, 403);
+        let headers = viewer.headers();
+        for bad in [
+            headers.replace(
+                &format!("Origin: http://{}", viewer.address),
+                "Origin: http://evil.test",
+            ),
+            headers.replace(
+                &format!("Cookie: semon_session={}", viewer.token),
+                "Cookie: semon_session=wrong",
+            ),
+            format!("{headers}Host: evil.test\r\n"),
+            headers
+                .lines()
+                .filter(|line| !line.starts_with("Origin:"))
+                .map(|line| format!("{line}\r\n"))
+                .collect(),
+        ] {
+            assert_eq!(viewer.request(method, &path, "{}", &bad).0, 403);
+        }
+    }
+    let headers = viewer.headers();
+    let (status, head, value) = viewer.request(
+        "POST",
+        "/api/asi/sql",
+        r#"{"query":"SELECT 42 AS answer"}"#,
+        &headers,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(value["rows"], json!([[42]]));
+    assert!(head.contains("Cache-Control: no-store"));
+    assert!(head.contains("Referrer-Policy: no-referrer"));
+    assert_eq!(
+        viewer.request("GET", "/api/asi/schema", "", &headers).0,
+        200
+    );
+    let (status, _, value) = viewer.request(
+        "POST",
+        "/api/asi/sql",
+        r#"{"query":"SELECT * FROM read_csv('/outside/private.csv')"}"#,
+        &headers,
+    );
+    assert_eq!(status, 400);
+    assert_eq!(value["error"]["code"], "not_allowed");
+    for body in [
+        "{".to_owned(),
+        "x".repeat(512 * 1024 + 1),
+        r#"{"query":"SELECT 1","root":"/another/store"}"#.into(),
+    ] {
+        assert_eq!(
+            viewer.request("POST", "/api/asi/sql", &body, &headers).0,
+            400
+        );
+    }
+    assert_eq!(
+        viewer
+            .request("POST", "/api/asi/search?query=secret", "{}", &headers)
+            .0,
+        400
+    );
+    assert_eq!(
+        viewer.request("GET", "/api/asi/search", "", &headers).0,
+        403
+    );
+    let receiver = Viewer::start(dir.path().join("absent/index.json"), true);
+    for tool in ["search", "view", "sql", "schema"] {
+        let (status, _, value) = receiver.request(
+            if tool == "schema" { "GET" } else { "POST" },
+            &format!("/api/asi/{tool}"),
+            "{}",
+            &receiver.headers(),
+        );
+        assert_eq!(status, 503);
+        assert_eq!(value["error"]["code"], "capability_unavailable");
+    }
+    assert!(!dir.path().join("absent").exists());
+}
+
 fn content(reply: &Value) -> (Value, bool) {
     let result = &reply["result"];
     (
@@ -135,6 +298,29 @@ fn cli_and_mcp_search_and_view_native_fixture_text() {
         result["bodies"][0]["text"]["untrusted_text"],
         "uniqueftsneedle"
     );
+    let viewer = Viewer::start(cache.clone(), false);
+    let (status, headers, result) = viewer.request(
+        "POST",
+        "/api/asi/search",
+        r#"{"query":"uniqueftsneedle"}"#,
+        &viewer.headers(),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(result["hits"].as_array().unwrap().len(), 1);
+    assert!(headers.contains("Cache-Control: no-store"));
+    assert!(headers.contains("Referrer-Policy: no-referrer"));
+    let (status, headers, result) = viewer.request(
+        "POST",
+        "/api/asi/view",
+        &json!({"uid": uid}).to_string(),
+        &viewer.headers(),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(
+        result["bodies"][0]["text"]["untrusted_text"],
+        "uniqueftsneedle"
+    );
+    assert!(headers.contains("Cache-Control: no-store"));
     let mut server = Server::start(cache);
     let reply = server.request(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search","arguments":{"query":"uniqueftsneedle"}}}));
     let (result, failed) = content(&reply);

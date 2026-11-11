@@ -1494,13 +1494,36 @@ fn machine_options(
         .collect()
 }
 
+fn serve_sessions(options: semon_sessions::ServeOptions) -> io::Result<()> {
+    #[cfg(feature = "asi-query")]
+    {
+        let remote = options.received.is_some() || !options.machines.is_empty();
+        let index = semon_sessions::analytics_index_path(&options.sessions.cache);
+        let store_root = if remote {
+            None
+        } else {
+            semon_sessions::analytics_store_root(&index)
+                .filter(|root| admit_coverage_store(&index, root).is_ok())
+        };
+        let asi = AsiMcp {
+            executable: env::current_exe()?,
+            store_root,
+            index,
+            remote,
+        };
+        semon_sessions::serve_with_asi(options, std::sync::Arc::new(asi))
+    }
+    #[cfg(not(feature = "asi-query"))]
+    semon_sessions::serve(options)
+}
+
 fn run_sessions(args: SessionsArgs) -> Result<(), String> {
     if let Some(dir) = args.received.clone() {
         if !args.serve {
             return print_received(&args, &dir);
         }
         let (machines, received) = received_machines(&args, &dir);
-        return semon_sessions::serve(semon_sessions::ServeOptions {
+        return serve_sessions(semon_sessions::ServeOptions {
             machines,
             received: Some(received),
             sessions: args.options,
@@ -1509,7 +1532,7 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
         .map_err(|error| error.to_string());
     }
     if args.serve {
-        return semon_sessions::serve(semon_sessions::ServeOptions {
+        return serve_sessions(semon_sessions::ServeOptions {
             machines: machine_options(&args.options, &args.machines),
             received: None,
             sessions: args.options,
@@ -1734,6 +1757,39 @@ impl AsiMcp {
             }));
         }
         Ok(asi_schema_reference())
+    }
+}
+
+#[cfg(feature = "asi-query")]
+impl semon_sessions::ViewerAsi for AsiMcp {
+    fn call(
+        &self,
+        tool: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<serde_json::Value, serde_json::Value> {
+        if self.remote {
+            if matches!(tool, "search" | "view") {
+                return self.bodies(tool, arguments);
+            }
+            return Err(asi_error(
+                "capability_unavailable",
+                "Receiver analytics admission unavailable",
+                "receiver",
+            ));
+        }
+        match tool {
+            "sql" => self.request(arguments).and_then(|request| {
+                let root = self.store_root.as_deref().ok_or_else(|| {
+                    asi_error("store_unavailable", "Analytics unavailable", "store")
+                })?;
+                semon_asi::query::run(&self.executable, root, &request)
+                    .map(|result| serde_json::to_value(result).expect("query result serializes"))
+                    .map_err(|failure| serde_json::to_value(failure).expect("failure serializes"))
+            }),
+            "schema" => self.schema(arguments),
+            "search" | "view" => self.bodies(tool, arguments),
+            _ => Err(asi_error("invalid_argument", "Unknown ASI tool", "tool")),
+        }
     }
 }
 

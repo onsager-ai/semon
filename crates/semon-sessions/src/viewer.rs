@@ -240,6 +240,13 @@ struct Viewer {
     core: ViewerCore,
     token: String,
     port: u16,
+    asi: Option<Arc<dyn ViewerAsi>>,
+}
+
+/// An already scoped ASI worker surface supplied by the local CLI host.
+/// HTTP arguments cannot select its store, index, executable or access mode.
+pub trait ViewerAsi: Send + Sync {
+    fn call(&self, tool: &str, arguments: &Value) -> Result<Value, Value>;
 }
 
 /// Headers the viewer sends on every response, whatever its status. A server
@@ -360,7 +367,14 @@ fn random_token() -> io::Result<String> {
 pub fn serve(options: ServeOptions) -> io::Result<()> {
     let address = listen_addr(&options.listen)?;
     let server = Server::http(address).map_err(io::Error::other)?;
-    serve_server(options, server)
+    serve_server(options, server, None)
+}
+
+/// Serves the loopback Viewer with a host-bound ASI worker surface.
+pub fn serve_with_asi(options: ServeOptions, asi: Arc<dyn ViewerAsi>) -> io::Result<()> {
+    let address = listen_addr(&options.listen)?;
+    let server = Server::http(address).map_err(io::Error::other)?;
+    serve_server(options, server, Some(asi))
 }
 
 /// Serves on an already bound loopback listener. Binding to port zero lets
@@ -370,10 +384,14 @@ pub fn serve_listener(options: ServeOptions, listener: std::net::TcpListener) ->
         return Err(invalid_input("the viewer listener must be loopback"));
     }
     let server = Server::from_listener(listener, None).map_err(io::Error::other)?;
-    serve_server(options, server)
+    serve_server(options, server, None)
 }
 
-fn serve_server(options: ServeOptions, server: Server) -> io::Result<()> {
+fn serve_server(
+    options: ServeOptions,
+    server: Server,
+    asi: Option<Arc<dyn ViewerAsi>>,
+) -> io::Result<()> {
     let port = server
         .server_addr()
         .to_ip()
@@ -387,7 +405,12 @@ fn serve_server(options: ServeOptions, server: Server) -> io::Result<()> {
     // Reads answer from the last built model; a rebuild never holds one up.
     core.set_refresh(Refresh::Background);
     let token = random_token()?;
-    let viewer = Arc::new(Viewer { core, token, port });
+    let viewer = Arc::new(Viewer {
+        core,
+        token,
+        port,
+        asi,
+    });
     let server = Arc::new(server);
     println!("http://127.0.0.1:{port}/?t={}", viewer.token);
     // A few requests at once, so a long transcript page doesn't hold up a
@@ -526,8 +549,18 @@ fn json_reply(status: u16, value: Value) -> ViewerReply {
     }
 }
 fn post_authorized(request: &Request, token: &str, port: u16) -> bool {
+    request
+        .headers()
+        .iter()
+        .filter(|h| h.field.equiv("Content-Type"))
+        .count()
+        == 1
+        && asi_schema_authorized(request, token, port)
+}
+
+fn asi_schema_authorized(request: &Request, token: &str, port: u16) -> bool {
     let headers = request.headers();
-    if ["Host", "Origin", "Cookie", "Content-Type"]
+    if ["Host", "Origin", "Cookie"]
         .iter()
         .any(|name| headers.iter().filter(|h| h.field.equiv(name)).count() != 1)
     {
@@ -548,10 +581,121 @@ fn post_authorized(request: &Request, token: &str, port: u16) -> bool {
     tokens == [token]
 }
 
+fn asi_error(code: &str, message: &str, detail: &str) -> Value {
+    serde_json::json!({"error": {"code": code, "message": message, "detail": detail}})
+}
+
+fn asi_reply(result: Result<Value, Value>) -> ViewerReply {
+    match result {
+        Ok(value) => json_reply(200, value),
+        Err(value) => {
+            let status = match value["error"]["code"].as_str().unwrap_or("") {
+                "capability_unavailable"
+                | "store_unavailable"
+                | "store_busy"
+                | "not_materialized"
+                | "schema_mismatch"
+                | "body_unavailable" => 503,
+                "not_found" => 404,
+                _ => 400,
+            };
+            json_reply(status, value)
+        }
+    }
+}
+
 impl Viewer {
+    fn handle_asi(&self, mut request: Request, path: &str, query: &str) {
+        // ASI never accepts the bootstrap credential or data in a URL. The
+        // launch page establishes the HttpOnly cookie before API access.
+        let schema = path == "/api/asi/schema";
+        let auth = if schema && request.method() == &Method::Get {
+            // GET has no Content-Type requirement, but retains exact Host,
+            // Origin and unique-cookie checks used by the POST admission.
+            asi_schema_authorized(&request, &self.token, self.port)
+        } else {
+            request.method() == &Method::Post && post_authorized(&request, &self.token, self.port)
+        };
+        if !auth {
+            respond(
+                request,
+                json_reply(403, asi_error("not_allowed", "Forbidden", "authorization")),
+                None,
+            );
+            return;
+        }
+        let reply = if !query.is_empty() {
+            asi_reply(Err(asi_error(
+                "invalid_argument",
+                "URL arguments are not accepted",
+                "request",
+            )))
+        } else if (schema && request.method() != &Method::Get)
+            || (!schema && request.method() != &Method::Post)
+        {
+            json_reply(
+                405,
+                asi_error("not_allowed", "Method not allowed", "method"),
+            )
+        } else {
+            let arguments = if schema {
+                Ok(serde_json::json!({}))
+            } else if request_header(&request, "Content-Type").is_none_or(|value| {
+                value.split(';').next().map(str::trim) != Some("application/json")
+            }) {
+                Err(asi_error("invalid_argument", "Expected JSON", "request"))
+            } else {
+                let mut bytes = Vec::new();
+                if request
+                    .as_reader()
+                    .take(512 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .is_err()
+                    || bytes.len() > 512 * 1024
+                {
+                    Err(asi_error(
+                        "invalid_argument",
+                        "Invalid or oversized body",
+                        "request",
+                    ))
+                } else {
+                    serde_json::from_slice::<Value>(&bytes)
+                        .ok()
+                        .filter(Value::is_object)
+                        .ok_or_else(|| {
+                            asi_error("invalid_argument", "Expected JSON object", "request")
+                        })
+                }
+            };
+            asi_reply(arguments.and_then(|arguments| {
+                self.asi
+                    .as_ref()
+                    .ok_or_else(|| {
+                        asi_error(
+                            "capability_unavailable",
+                            "ASI worker unavailable",
+                            "asi-query",
+                        )
+                    })?
+                    .call(
+                        path.strip_prefix("/api/asi/").expect("ASI route"),
+                        &arguments,
+                    )
+            }))
+        };
+        respond(request, reply, None);
+    }
+
     fn handle(&self, mut request: Request) {
         let url = request.url().to_owned();
         let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+        if matches!(
+            path,
+            "/api/asi/sql" | "/api/asi/schema" | "/api/asi/search" | "/api/asi/view"
+        ) {
+            self.handle_asi(request, path, query);
+            return;
+        }
         // Credentials are transport-only; reject duplicate or invalid URL tokens.
         let credentials: Vec<_> = query
             .split('&')
@@ -1604,6 +1748,7 @@ mod tests {
             core: ViewerCore::new(fixture.options.clone()),
             token: "0123456789abcdef0123456789abcdef".into(),
             port,
+            asi: None,
         };
         if let Some(expected_session) = expected_session {
             // This fixture owns a known warm publication. Prepare it directly,
@@ -1735,6 +1880,36 @@ mod tests {
         assert!(shell.content_type.starts_with("text/html"));
         drop(work);
         core.close();
+    }
+
+    #[test]
+    fn http_asi_requires_cookie_and_rejects_url_credentials() {
+        let fixture = Fixture::new();
+        let token = "0123456789abcdef0123456789abcdef";
+        for (method, tool) in [
+            ("POST", "sql"),
+            ("GET", "schema"),
+            ("POST", "search"),
+            ("POST", "view"),
+        ] {
+            let wire = http(
+                &fixture,
+                &format!(
+                    "{method} /api/asi/{tool} HTTP/1.1\r\nHost: localhost:PORT\r\nContent-Length: 0\r\n\r\n"
+                ),
+            );
+            assert!(wire.starts_with("HTTP/1.1 403"), "{wire}");
+            assert!(wire.contains("Cache-Control: no-store"));
+            assert!(wire.contains("Referrer-Policy: no-referrer"));
+            let wire = http(
+                &fixture,
+                &format!(
+                    "{method} /api/asi/{tool}?t={token} HTTP/1.1\r\nHost: localhost:PORT\r\nOrigin: http://localhost:PORT\r\nCookie: semon_session={token}\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{{}}"
+                ),
+            );
+            assert!(wire.starts_with("HTTP/1.1 400"), "{wire}");
+            assert!(!wire.contains(token));
+        }
     }
 
     #[test]
