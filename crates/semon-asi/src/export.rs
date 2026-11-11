@@ -105,8 +105,8 @@ pub fn export_snapshot(
             manifest_generation: manifest.generation,
             files: receipt_files,
         };
-        verify_receipt(destination, &receipt)?;
-        write_receipt(destination, &receipt)?;
+        verify_receipt(&destination, &receipt)?;
+        write_receipt(&destination, &receipt)?;
         Ok(ExportSummary {
             generation: manifest.generation,
             sessions,
