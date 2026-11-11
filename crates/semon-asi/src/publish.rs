@@ -1537,6 +1537,79 @@ mod tests {
     }
 
     #[test]
+    fn provenance_changes_only_with_a_complete_admitted_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open(dir.path());
+        let mut first = session("one", Some("step"), "tool");
+        first.source_witness.generation = "first".into();
+        first.source_witness.sources.push(crate::input::Source {
+            native_id: "native".into(),
+            local_path: "/private/native.jsonl".into(),
+            consumed_offset: 42,
+            prefix_sha256: "abc".into(),
+        });
+        let uid = first.session_uid.clone();
+        let mut replacement = first.clone();
+        replacement.source_witness.generation = "replacement".into();
+        replacement.source_witness.sources[0].consumed_offset = 84;
+        let mut input = QueuedInput::new([
+            batch(
+                "1",
+                Reconciliation::Incremental,
+                vec![SessionChange::Admitted(Box::new(first.clone()))],
+            ),
+            batch(
+                "2",
+                Reconciliation::Incremental,
+                vec![SessionChange::Pending {
+                    session_uid: uid.clone(),
+                }],
+            ),
+            batch(
+                "3",
+                Reconciliation::Incremental,
+                vec![SessionChange::SourceMissing {
+                    session_uid: uid.clone(),
+                    retained_at_origin: true,
+                }],
+            ),
+            batch(
+                "4",
+                Reconciliation::Incremental,
+                vec![SessionChange::Admitted(Box::new(replacement.clone()))],
+            ),
+            batch(
+                "5",
+                Reconciliation::Incremental,
+                vec![SessionChange::Removed {
+                    session_uid: uid.clone(),
+                }],
+            ),
+        ]);
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        let original = crate::provenance::read(dir.path(), store.manifest()).unwrap();
+        assert_eq!(original[&uid].1.source_witness, first.source_witness);
+        assert_eq!(original[&uid].1.versions, first.versions);
+        for _ in 0..2 {
+            publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+            assert_eq!(
+                crate::provenance::read(dir.path(), store.manifest()).unwrap(),
+                original
+            );
+        }
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        let current = crate::provenance::read(dir.path(), store.manifest()).unwrap();
+        assert_eq!(current[&uid].0, 4);
+        assert_eq!(current[&uid].1.source_witness, replacement.source_witness);
+        publish_cycle(&mut store, &mut input, NAMESPACE, versions()).unwrap();
+        assert!(
+            crate::provenance::read(dir.path(), store.manifest())
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn unchanged_complete_dimension_state_is_not_republished() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = open(dir.path());
@@ -1558,7 +1631,9 @@ mod tests {
             .manifest()
             .files
             .iter()
-            .filter(|file| crate::schema::table(&file.table).unwrap().kind == Kind::Dimension)
+            .filter(|file| {
+                crate::schema::table(&file.table).is_some_and(|table| table.kind == Kind::Dimension)
+            })
             .cloned()
             .collect();
         assert!(!before.is_empty());
@@ -1567,7 +1642,9 @@ mod tests {
             .manifest()
             .files
             .iter()
-            .filter(|file| crate::schema::table(&file.table).unwrap().kind == Kind::Dimension)
+            .filter(|file| {
+                crate::schema::table(&file.table).is_some_and(|table| table.kind == Kind::Dimension)
+            })
             .cloned()
             .collect();
         assert_eq!(after, before);

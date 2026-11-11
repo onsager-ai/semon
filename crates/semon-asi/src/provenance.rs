@@ -96,3 +96,85 @@ pub fn read(root: &Path, manifest: &Manifest) -> Result<BTreeMap<String, (i64, P
     }
     Ok(records)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        CompactionPolicy, Store, Update,
+        store::{Fault, RETIREMENT_DELAY_MS},
+        testutil::{TestClock, update},
+    };
+
+    const A: &str = "origin/claude/a";
+    const B: &str = "origin/claude/b";
+
+    #[test]
+    fn generations_faults_compaction_retirement_and_restart_preserve_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let clock = TestClock::new(0);
+        let mut store = Store::open_with_clock(root, clock.clone()).unwrap();
+        let first = update(&[(A, 1), (B, 1)], "first", 0);
+        store.publish(&first).unwrap();
+        let original = read(root, store.manifest()).unwrap();
+        assert_eq!(original.len(), 2);
+        let mut replacement = update(&[(A, 2)], "replacement", 0);
+        replacement
+            .provenance
+            .get_mut(A)
+            .unwrap()
+            .source_witness
+            .generation = "replacement".into();
+        for (fault, expected) in [(Fault::BeforeRename, 1), (Fault::AfterRename, 2)] {
+            store.fault = Some(fault);
+            assert!(store.publish(&replacement).is_err());
+            let manifest = crate::read_manifest(root).unwrap().unwrap();
+            let records = read(root, &manifest).unwrap();
+            assert_eq!(records[A].0, expected);
+            assert_eq!(records[B], original[B]);
+            assert_eq!(
+                records[A].1.source_witness.generation == "replacement",
+                expected == 2
+            );
+        }
+        store.reload_manifest().unwrap();
+        let current = read(root, store.manifest()).unwrap();
+        store
+            .publish(&Update {
+                removed_sessions: vec![B.into()],
+                ..Update::default()
+            })
+            .unwrap();
+        let policy = CompactionPolicy {
+            level0_max_files: 0,
+            ..CompactionPolicy::default()
+        };
+        while store.compact(&policy).unwrap().is_some() {}
+        let compacted = read(root, store.manifest()).unwrap();
+        assert_eq!(compacted.len(), 1);
+        assert_eq!(compacted[A], current[A]);
+        for entry in store.manifest().files_of(TABLE.name) {
+            assert_eq!(entry.rows, 1);
+            assert_eq!(entry.dead, Some(0));
+        }
+        clock.advance(RETIREMENT_DELAY_MS + 1);
+        let retired = store.retire().unwrap();
+        assert!(retired.iter().any(|path| path.starts_with("provenance/")));
+        assert_eq!(read(root, store.manifest()).unwrap(), compacted);
+        drop(store);
+        let reopened = Store::open_with_clock(root, clock).unwrap();
+        assert_eq!(read(root, reopened.manifest()).unwrap(), compacted);
+    }
+
+    #[test]
+    fn a_touched_session_requires_exactly_one_typed_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = Store::open_with_clock(directory.path(), TestClock::new(0)).unwrap();
+        let mut invalid = update(&[(A, 1)], "a", 0);
+        invalid.provenance.clear();
+        assert!(store.publish(&invalid).is_err());
+        assert_eq!(store.manifest().generation, 0);
+        assert!(!store.analytics_dir().join(TABLE.name).exists());
+    }
+}

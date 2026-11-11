@@ -404,6 +404,37 @@ The writer's pure transition table is the authority for chain ownership:
 | Shutdown | Drop active and suspended records | Stop without scheduling another operation |
 | Later request arrival | Active record unchanged | Later generation remains pending |
 
+- **Local publication provenance (#593 slice 1).** Each touched session supplies
+  exactly one typed custody record in immutable `provenance/g{generation}.parquet`,
+  keyed by `(session_uid, _gen)`. The manifest lists its size, row count, decoded
+  size and generation range alongside facts. It is written and synced before the
+  same atomic manifest rename and uses the same live map. Keeping the cohort once
+  per session avoids duplicating source vectors in every fact row and lets the
+  existing bounded compactor filter dead records while preserving live `_gen`.
+  Compaction and delayed retirement use the ordinary immutable-file contract;
+  recovery discards uncommitted provenance files just like fact files.
+  The record retains the complete admitted source generation and ordered cohort
+  (`native_id`, local path, consumed offset and prefix SHA-256), activity generation,
+  producer package and parser versions, index incarnation when known, recorded
+  transform/rules/price/taxonomy versions and coverage, and the injected-clock
+  analytics projection time. SQLite does not record a computation timestamp, so
+  that field stays unknown; event timestamps are never substituted. Index
+  incarnation identifies input continuity, not an authenticated publisher.
+  `Pending`, source loss and restoration never rewrite the record from today's
+  Catalog. A complete admitted replacement changes facts and provenance together;
+  explicit session removal makes both dead. Restart retains the same binding.
+  This artifact contains local paths and is local-only: it is absent from
+  `schema::TABLES`, generated SQL schema reference, SQL AST allowlist and the query
+  worker's allowed file paths. It has no analytics egress serializer. Governed
+  federation requires a separate policy-qualified projection with opaque handles.
+  Explicit operator custody export includes and hashes it, verifies its one-to-one
+  live binding, and compares it before guarded reset. Reset removes it with the
+  analytics store; coverage continues to read only `fact_session`.
+  ASI schema version 4 requires this contract. Older stores are refused with the
+  existing export/reset guidance, without migration or dual readers. Export and
+  reset also require the current schema: preserve an unsupported store intact and
+  use its matching older binary for explicit custody export/reset before rebuilding
+  from available admitted sources. Never silently discard frozen data.
 - **Reading.** Each fact view keeps only live rows:
   `… semi join live on (session_uid, _gen)`.
 - **Compaction** is tiered. Cycle files are level 0. When a table has more

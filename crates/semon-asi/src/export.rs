@@ -614,6 +614,34 @@ mod tests {
     };
 
     #[test]
+    fn custody_export_hashes_provenance_and_refuses_tampering() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("store");
+        let namespace_file = temporary.path().join("namespace");
+        fs::write(&namespace_file, "origin-test\n").unwrap();
+        let mut store = Store::open_with_clock(&root, TestClock::new(0)).unwrap();
+        store
+            .publish(&update(&[("origin-test/claude/session", 1)], "a", 0))
+            .unwrap();
+        drop(store);
+        let bundle = temporary.path().join("bundle");
+        export_snapshot(&root, &namespace_file, "origin-test", &bundle).unwrap();
+        let receipt = verify_export(&bundle).unwrap();
+        let provenance = receipt
+            .files
+            .iter()
+            .find(|file| file.path.starts_with("analytics/provenance/"))
+            .unwrap();
+        assert!(provenance.bytes > 0);
+        let manifest = read_manifest(&root).unwrap().unwrap();
+        verify_current_export(&root, &namespace_file, &manifest, &receipt).unwrap();
+        fs::write(bundle.join(&provenance.path), "tampered").unwrap();
+        assert!(verify_export(&bundle).is_err());
+        fs::write(root.join(&provenance.path), "tampered").unwrap();
+        assert!(verify_current_export(&root, &namespace_file, &manifest, &receipt).is_err());
+    }
+
+    #[test]
     fn reset_removes_new_namespace_before_releasing_writer_lock() {
         let temporary = tempfile::tempdir().unwrap();
         let state = temporary.path();

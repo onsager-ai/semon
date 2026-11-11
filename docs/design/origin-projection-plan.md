@@ -75,6 +75,19 @@ publishes a replacement after the session is re-admitted. Manifest `Versions.rul
 is the writer target, not a claim about the versions of retained rows; there is no
 uniform-refresh claim.
 
+Publication now retains a typed local provenance artifact for each live session
+under the same manifest transaction and `(session_uid, _gen)` live-map binding as
+its facts (#593 slice 1). It stores the admitted source witness unchanged, activity
+generation, producer/parser versions, index incarnation, recorded versions and
+coverage, and the analytics projection timestamp. Upstream computation time is
+unknown because SQLite does not persist it. Pending and missing-source changes
+retain that exact record; only complete admission replaces it, and only explicit
+removal drops it. Compaction, restart, custody export and reset share the store's
+ordinary file lifecycle. Provenance paths are excluded from SQL and require a
+separate governed egress projection. ASI schema 4 refuses older stores without a
+migration; preserve unsupported custody and use its matching binary for explicit
+export/reset. See the [retention contract](asi-store.md#generations-publication-and-versions).
+
 Preserve the last complete admitted generation after partial or total source loss.
 Format mismatches refuse explicitly while preserving custody; no automatic reset,
 conversion, compatibility layer or deletion of frozen data is permitted.
