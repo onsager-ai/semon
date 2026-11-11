@@ -1,214 +1,338 @@
 # ASI enrollment and shared listener
 
-Status: **proposed current contract**, 2026-11-11, for implementation by
-[#593](https://github.com/onsager-ai/semon/issues/593) slice 4a. This is the authored
-home for enrollment, credential kinds and shared listener hooks. Storage lane
-[#594](https://github.com/onsager-ai/semon/issues/594) targets this contract;
-its [body-channel proposal in PR #632](https://github.com/onsager-ai/semon/pull/632)
-remains a separate proposal. Neither document proves runtime delivery.
+Status: **current enrollment/provisioning design contract**, reconciled 2026-11-12
+with the [accepted operator journey](asi-operator-journey.md) and owner decisions.
+Implementation, protocol/library suitability and independent technical safety
+review remain pending. This document does not lift PM-owned implementation holds
+or establish runtime delivery. It is the authored home for #593 slice 4a;
+[#594](https://github.com/onsager-ai/semon/issues/594) consumes the same enrollment.
+Its [body-channel proposal in PR #632](https://github.com/onsager-ai/semon/pull/632)
+owns the separate read transport contract.
 
-[ASI federation](asi-federation.md) owns the accepted custody/security boundary.
-Mutual TLS for body routes is accepted. Receiver-as-assertion-issuer is the accepted
-default with the explicit trust acknowledgement below. Hub never participates in
-this enrollment, the body channel, issuer custody or body authorization.
+[ASI federation](asi-federation.md) owns D1–D8 and custody/security boundaries.
+Body-route mTLS and receiver-as-assertion-issuer are accepted, with explicit origin
+trust approval. Hub never participates in enrollment, body transport, issuer
+custody or body authorization. Machine credentials are never user identity or
+source authority.
 
 ## Existing implementation and delivery boundary
 
-At base `25fe18de0`, [`serve.rs`](../../crates/semon-push/src/serve.rs) implements
+At main `db8acabca`, [`serve.rs`](../../crates/semon-push/src/serve.rs) implements
 a blocking HTTP/1.1 thread-per-connection receiver with socket deadlines, operator
-server TLS, and default total/unauthenticated-per-IP connection limits. Its rustls
-configuration uses `with_no_client_auth()`. The dispatcher recognizes mirror
-append, facts and status only, authenticating each request before reading its body.
+server TLS and total/unauthenticated-per-IP limits. It uses
+`with_no_client_auth()` and dispatches mirror append, facts and status,
+authenticating requests before reading bodies.
+[`tokens.rs`](../../crates/semon-push/src/tokens.rs) stores `NAME SHA256(token)`
+lines in `DIR/tokens`; `Tokens::authorize` supplies a machine identity. The
+[mirror protocol](../mirror-protocol.md) and push client implement supported Push,
+not the enrollment, client-certificate identity or remote body read defined here.
+#630/#631 and #635 supply libraries, not integrated onboarding or body service.
 
-[`tokens.rs`](../../crates/semon-push/src/tokens.rs) currently stores
-`NAME SHA256(token)` lines in `DIR/tokens`, with private file/directory modes;
-`Tokens::authorize` supplies a machine identity. The
-[mirror protocol](../mirror-protocol.md), [`mirror.rs`](../../crates/semon-push/src/mirror.rs)
-and [push client](../../crates/semon-push/src/lib.rs) define today's supported Push
-surface. They do not implement enrollment, credential kinds, client-certificate
-identity, publisher claims or a remote body read.
-
-| Slice / owner | Delivered scope when implemented |
+| Slice / owner | Delivery boundary |
 | --- | --- |
-| #593 slice 4a | Enrollment registry, kind-aware credential custody, TLS/route/admission hooks and enrollment/token CLI changes defined here |
+| #593 slice 4a, this contract | Reviewed pairing/bootstrap, enrollment registry, generated identity and kind credentials, persisted source-consent input, automatic renewal, revocation, TLS/route/admission hooks, provisioning outputs and owning CLI/token changes |
+| Receiver integration | Consume cache key/directory, authenticated owner principal and exact ACL/self-grant inputs, separate receiver audit directory; integrate owner Viewer authentication and custody checks |
+| Storage lane #595 (#630/#631) | Own `body_cache`, `receiver_acl` and `receiver_audit`; 4a produces their inputs, not replacement modules |
+| Storage lane #635 | Own `origin_audit`, receiver audit authorization binding and `body_assertion`; 4a produces custody/issuer/scope inputs, not assertion encoding or audit implementations |
+| Governance/origin follow-up to #633 | Generate P1 policy and complete contributor registry from admitted sources and real scan/version evidence; scanning is not delivered by #633 or 4a |
+| Store lifecycle amendment | Authorize/integrate producer startup by `connect`; currently `analytics materialize` is the only enablement surface |
 | #593 slice 4b | Publisher claim activation/epochs, expected-parent commits and namespace heads |
 | #593 slice 3 | Immutable publication objects and validation, independent of 4a |
 | #593 slice 5 | Analytics routes, publication client, reconnect and transport integration |
-| #594 | Body routes/client, assertions, online origin authorization/audit, frames and leases |
+| #594 | Body routes/client, assertion encoding/verification, origin rendering and exact evidence mapping, online authorization, dual-audit/cache admission, frames, cancellation and leases |
 | #596 | Explicit replica enrollment and namespace authority transfer |
 
-Slice 4a supplies usable identity and listener hooks, not functioning analytics
-publication or remote viewing. Slice 4a introduces no async runtime, HTTP/2,
-WebSocket or additional listener. The blocking thread-per-connection listener is
-a temporary constraint: an event-driven receiver listener is planned in #636
-(after slice 4a and #594's first transport slice; spec before implementation).
-Origins initiate HTTPS connections to the existing receiver; they expose no
-inbound port. The HTTP/2 example in federation is not a requirement to replace
-HTTP/1.1 in this slice.
+Slice 4a supplies provisioning and identity/listener hooks; working analytics
+publication and remote viewing require the downstream integrations. It introduces
+no async runtime, HTTP/2, WebSocket or additional general-purpose listener.
+Thread-per-connection is interim: #636 plans an event-driven receiver after 4a and
+#594's first transport slice, with specification before implementation. Origins
+initiate connections and expose no inbound port. Federation's HTTP/2 example
+does not require replacing HTTP/1.1 in this slice.
+
+## Accepted four-action ceremony
+
+These are proposed commands to implement, not shipped commands. After installation,
+the local-owner target is exactly four actions B1–B4. Reachability, host custody,
+service installation and remote-owner login are separate prerequisites/actions as
+counted by the journey; a conditional four-action target is not a clean-host claim.
+
+| Action | Operation | Provisioning effect |
+| --- | --- | --- |
+| B1 | Receiver admin: `semon receive enroll --machine <name> --listen <addr> --advertise <https url>` | The authenticated local OS owner authorizes one enrollment for that machine. First run generates receiver identity/TLS custody, assertion issuer key, separate cache master key, stable owner principal, exact self-grant inputs and receiver audit directory. It starts foreground receiver transport and a loopback-only authenticated owner Viewer through receiver integration. Show a code only on the authenticated local pairing surface. Later enrollments reuse the owned service through its local administrative interface. |
+| B2 | Origin: `semon connect --to <https url>` | The nonsecret address selects the destination, not trust. Begin bounded provisioning and show a non-echoing Semon code prompt. |
+| B3 | Enter the receiver code directly into that trusted origin prompt | Complete the reviewed pairing/bootstrap and mutual key confirmation. No transfer through chat, files, URLs, command arguments, logs or other untrusted channels. |
+| B4 | Approve one combined trust/source summary in `connect` | Confirm receiver-as-issuer trust, authenticated receiver owner, selected current sources, typed name/path disclosure and P1 restrictions. Bind the origin-generated public key, issue separate kind credentials and certificate, and atomically activate the enrollment. Persist source consent separately; downstream policy/producer/publication integrations consume the outputs. |
+
+The target is short-code PAKE (password-authenticated key exchange). The reviewed
+high-entropy one-use invitation is the fallback **only if** a maintained PAKE
+library and its bootstrap cannot pass protocol/library suitability and technical
+safety review. These are not parallel open product options. No library is selected
+here: bring the library choice to the PM/owner for approval before adding any
+dependency. A separate review is in progress.
+
+The fallback preserves the same trusted-device protected entry, combined approval,
+scope binding and single-use activation requirements. Neither mechanism adds a
+fifth human receiver identity check. PAKE confirms shared session-key possession,
+not human/account identity; the local receiver owner authorizes one enrollment,
+not a remote owner login. Another OS user or pairing participant never obtains
+the receiver owner's session or arbitrary administration authority.
+
+## Pairing bootstrap and provisioning state
+
+For an already trusted HTTPS endpoint, normal TLS identity validation precedes
+pairing. A private-root/LAN receiver instead requires a distinct bounded reviewed
+bootstrap that cryptographically authenticates the endpoint and receiver TLS
+identity/pin through the PAKE-confirmed exchange. A private root/certificate must
+match the advertised HTTPS endpoint. Do not modify the system trust store, use a
+general TLS-verification bypass, or accept trust on first use (TOFU). A network
+peer's unverified certificate cannot install itself as trusted. Any dedicated
+bootstrap transport carries only bounded protocol material before confirmation;
+no application body, issued credential, source policy or grant goes over an
+unauthenticated channel. The fallback must independently authenticate/bind the
+same identities and pins through its reviewed invitation exchange.
+
+The transcript binds receiver identity, exact advertised endpoint/TLS pin,
+origin-generated public key, both roles, fresh session identity, protocol version
+and intended enrollment/kind/scope. Require mutual key confirmation and proof of
+origin key possession before approval can activate authority. The origin client
+private key is generated and retained on the origin; it never leaves it. Bootstrap
+provisioning is separate from body routes. Normal post-provisioning connections
+require HTTPS hostname and configured root/pin validation; body routes require
+mTLS. Redirects are refused during provisioning and subsequent transport. Requests
+cannot install issuer keys, change endpoints or relax trust.
+
+| State | Transition and authority |
+| --- | --- |
+| `pending` | Authenticated receiver admin allocates one bounded session, fresh code/invitation and intended scope. No active credential, user grant, claim or body authority. |
+| `confirmed` | Both peers confirm the bound cryptographic transcript and origin key possession. Pending custody remains inactive; confirmation alone is not source approval. |
+| `approved` | Origin B4 approves the authenticated trust/source summary. Persist the exact approval and separate source-consent record before activation; no partial usable credentials or grants. |
+| `active` | One durable atomic activation consumes the single-use session, commits the scoped enrollment/credential generation and releases exact self-grant inputs. No claim/head is activated by this transaction. |
+| `rejected`, `cancelled`, `expired` | Terminal pre-activation outcomes. Discard pending secret material, retain bounded nonsecret outcome/replay state, and activate no credentials/grants. A new attempt requires an explicit admin action under aggregate bounds. |
+| `revoked` | Terminal enrollment outcome, including revocation after activation. All kinds and active hooks lose authority; recovery requires fresh pairing and a new enrollment ID. |
+
+Activation is single-use and serialized against competing confirmation, approval,
+expiry, cancellation and revocation. At most one origin key wins a session; losing
+races, replay and consumed-session retries cannot issue another credential or
+clear revocation. Crash/lost-ack recovery reports the same committed outcome to
+the authenticated peer, never creates a second enrollment or exposes partial
+activation. Cross-machine persistence is not a distributed atomic transaction:
+until durable local trust/consent and matching receiver activation are verified,
+the origin stays inactive. Failed or cancelled pending state cannot become active
+on restart; post-activation cancellation uses disconnect/revocation.
+
+Enforce tight guessing and pending-state bounds per session **and receiver-wide**
+across addresses, connections, retries and repeated issuance. Per-IP limits alone
+are insufficient. Code/invitation entropy, length, expiry, attempt limits and
+aggregate issuance/recovery bounds are **set by the protocol review in slice 4a
+and recorded in this document before implementation merges**. No values are
+selected here. On exhaustion, report a closed outcome; the authenticated local
+receiver admin cancels the pending session and explicitly starts recovery after
+the reviewed receiver-wide restriction permits it. Reissue cannot reset that
+restriction; there is no unbounded retry/reissue loop. Exact recovery timing and
+mechanism are part of that review. Codes, invitations, keys and bearer secrets
+never enter logs, URLs, assertions or errors.
+
+## Source consent and P1
+
+B4 confirms the journey's accepted first-owner policy profile P1. Show the selected
+currently discovered local sources, including private/work material, and allow
+narrowing before approval. Default selection is all current sources; apply an
+`internal` floor only to currently unclassified selected sources. Preserve existing
+classifications, stricter floors, baselines and scans. Unknown classification or
+missing, failed, unsupported, incomplete or stale scans never count as successful
+evidence. Restricted sources remain local unless a separate explicit named-reader
+stream-through policy permits them.
+
+P1 is scoped to the named receiver and its authenticated owner principal: typed
+receiver analytics including plain names/paths and permitted coverage, plus
+approved bounded redacted evidence with encrypted cache under D3 (at most
+15 minutes, 64 MiB/source, 256 MiB global, narrowed by every contributor). No Hub,
+other user, raw replica or hosted-model evidence egress is included. Explicitly
+state that receiver-as-issuer trusts that operator to impersonate users; choose
+independently pinned external issuer administration or local-only use when that
+trust is unacceptable. Declining B4 keeps sources local and cancels activation.
+
+Persist selected-source consent and its receiver/owner/scope binding independently
+from enrollment and transport credentials. Renewal cannot widen it, future
+roots/sources require a new explicit local selection update, and machine
+credentials cannot substitute for it. The policy generator must resolve complete
+admitted contributor identities and actual detector/redactor results under
+[the governance API](asi-governance-api.md#pinned-receiver-projection-593-slice-2).
+It cannot omit a denied contributor, invent a successful scan or fall back on an
+absent registry. Scan-backed P1 registry generation is a downstream dependency,
+not implementation assigned to 4a. Body availability remains refused until actual
+policy, custody, user authentication and both audits pass, including cache hits.
 
 ## Receiver enrollment record
 
-An enrollment is an operator-authorized binding, not a connection or a token.
-The proposed versioned registry has one current schema, rejects unknown fields,
-unsupported versions, duplicate identities and invalid bindings, and publishes
-updates atomically and durably. Invalid/unreadable custody refuses authorization;
-it must not appear to be a valid empty registry.
+An enrollment is an operator-authorized binding, not a connection or token. One
+current versioned registry rejects unknown fields, unsupported versions, duplicate
+identities and invalid bindings; updates are atomic and durable. Invalid or
+unreadable custody refuses authorization rather than appearing empty.
 
 | Field | Contract |
 | --- | --- |
-| `enrollment_id` | Opaque stable identifier allocated by the receiver; never inferred from a hostname, source filename or socket address |
-| `receiver_id` | Explicit receiver identity bound to the exported enrollment bundle |
-| `machine` | Registered machine identity, using the existing machine-name grammar |
-| `namespace` | Explicit namespace under that machine's authority; use the current namespace grammar, not a path |
-| `origin_incarnation`, `index_incarnation` | Origin instance and admitted index incarnation; retain both if their lifecycles differ; no incarnation inferred from contact time |
-| `publisher_claim_epoch` | Assigned claim epoch, or explicitly unassigned before 4b binds a claim; never substitute zero as active authority |
-| `client_certificate_pins` | Explicit SHA-256 SPKI or leaf-certificate fingerprints, tagged by pin type; a verified certificate must match an enrolled pin |
-| `credential_kinds` | Enabled kinds and their per-kind `client_cert_required` setting; a kind is not inferred from the route or another credential |
-| `revoked_at` | Whole-enrollment revocation timestamp, absent only while not revoked |
-| Per-kind `revoked_at` | Independent timestamped revocation for each kind; whole-enrollment revocation overrides every kind |
-| `issuer` | Explicit `receiver` or `external`, with an operator acknowledgement of the selected trust boundary |
-| `assertion_issuer_keys` | One current issuer key ID and pinned public key; at most two accepted key-ID/public-key pairs during explicit rotation overlap |
+| `enrollment_id` | Receiver-allocated opaque stable identity; fresh ID on lost/compromised trust recovery, never inferred from a hostname/path/address |
+| `receiver_id` | Receiver identity bound by confirmed provisioning to its HTTPS endpoint/TLS identity |
+| `machine` | Registered identity using the existing machine-name grammar; display rename cannot change namespace/native identity |
+| `namespace` | Validated existing local namespace binding, not a path or a copy of another origin's identity |
+| `origin_incarnation`, `index_incarnation` | Validated origin instance and admitted index identity; retain both when lifecycles differ; never infer from contact time |
+| `publisher_claim_epoch` | Explicitly unassigned before 4b binds a claim; never use zero as fabricated active authority |
+| `client_certificate_pins` | Tagged SHA-256 SPKI or leaf-certificate fingerprints bound to the origin-generated key and current credential generations |
+| `credential_kinds` | Explicit enabled kinds and per-kind `client_cert_required`; not inferred from another credential |
+| `revoked_at` | Whole-enrollment timestamp; absent only while not revoked |
+| Per-kind `revoked_at` | Independent timestamped kind revocation; whole-enrollment revocation overrides all kinds |
+| `issuer` | Explicit `receiver` or `external`, with origin trust acknowledgement |
+| `assertion_issuer_keys` | Current key ID/pinned public key; at most two accepted pairs during explicit bounded issuer rotation |
 
-The receiver-side record binds these fields to its configured HTTPS identity.
-The origin-side configuration below carries the endpoint and server trust root;
-they are not accepted from a poll, publication or body request. A request cannot
-change any registry field. Native UID, lineage and provenance semantics remain
-those of the admitted native sources.
+For analytics/body kinds require the full origin/namespace binding. Generate
+identity material and validate existing namespace/incarnation continuity locally;
+ordinary pairing does not ask the user to construct these internal fields. If
+there is no admitted namespace/index binding yet, activation of these kinds waits
+for the owning producer lifecycle; 4a cannot invent a namespace/claim to bypass it.
+Mirror-only enrollment binds receiver, enrollment and machine; incarnation, claim
+and issuer fields are explicitly inapplicable until relevant kinds are enabled.
+Mirror custody grants no publisher claim or replica authority. Native UID,
+lineage and provenance rules remain unchanged.
 
-For analytics/body kinds the full origin/namespace binding is required. A
-mirror-only record still binds enrollment ID, receiver and machine; claim epoch,
-origin/index incarnation and assertion issuer are explicitly not applicable until
-those kinds are enrolled. Mirror machine custody does not fabricate a publisher
-claim or grant replica authority.
+<a id="origin-configuration-and-out-of-band-enrollment"></a>
 
-An enrollment or kind with a revocation timestamp is never silently reactivated.
-Whole-enrollment replacement requires explicit new enrollment and a new ID.
-Re-enabling a revoked kind requires an explicit operator action and newly issued
-credentials, retaining the revoked generation as revoked. Re-importing an older
-bundle or reconnecting cannot clear revocation. No revocation operation deletes
-native sources, imported facts, mirror archives or audit history.
+## Origin configuration and custody
 
-## Origin configuration and out-of-band enrollment
+Origin configuration records enrollment/receiver identity, exact endpoint and
+explicit server root/pins, machine/namespace/incarnations, assigned-or-unassigned
+claim epoch, enabled kinds/certificate requirements, issuer acknowledgement and
+pinned public keys, client certificate/pins and protected secret references.
+Requests cannot overwrite configuration. Provisioning installs this state through
+the confirmed exchange; bundles are internal protocol objects, never user-handled
+files. No manual public-bundle transfer, separate bearer delivery or import step
+is part of normal enrollment.
 
-The proposed origin configuration contains:
+| Location / custody class | Generated or persisted state; integration output |
+| --- | --- |
+| Origin private secret custody | Origin-generated client private key and separately protected kind bearer credentials; never exported to receiver or ordinary backups |
+| Origin integrity-protected configuration | Endpoint/root/pins, enrollment/scope, certificate and issuer public pins, secret references and revocation/generation state; separate persisted source consent for policy generation |
+| Origin source/policy custody | Existing namespace, handles and admitted source identity; downstream generated policy/registry from consent plus real scan evidence, separate from credentials |
+| Receiver private registry | Enrollment, kind-scoped credential hashes, activation/consumption, generations and revocation history; no persisted raw bearer secret |
+| Receiver separate secret custody | Receiver TLS private key/root custody, assertion signing key and independent random 32-byte cache master key; none stored in cache or ordinary history backups |
+| Receiver authenticated-owner/ACL custody | Stable principal from authenticated local OS owner, with stable opaque audit mapping; generate exact machine/namespace `analytics` and permitted `body_read` self-grant inputs for `receiver_acl`, no wildcard or pairing-participant principal |
+| Receiver temporary cache custody | Dedicated owned cache directory and separate master-key reference for `body_cache`; D3 limits/exclusions validated by receiver integration, no bodies or keys in enrollment records |
+| Receiver sensitive audit custody | Dedicated receiver directory for `receiver_audit`, separate from cache/ACL and origin audit; `audit.lock` and `attempts.jsonl` |
+| Origin sensitive audit custody | Separate origin directory outside native roots/cache for `origin_audit`; `audit.lock` and `authorizations.jsonl` |
 
-- Enrollment ID, registered machine/namespace, origin/index incarnation and the
-  assigned-or-unassigned claim epoch.
-- Receiver ID, exact HTTPS endpoint and explicit server trust root. HTTPS hostname
-  verification remains mandatory; the identity label alone is not TLS proof.
-- Enabled credential kinds, per-kind certificate requirements, and protected
-  credential references rather than secrets embedded in ordinary configuration.
-- Explicit `issuer: receiver|external` acknowledgement, issuer key IDs and pinned
-  public keys, with no more than two accepted issuer keys during rotation.
-- Origin client certificate/chain and private-key paths, and the enrolled
-  certificate fingerprint(s). The origin retains custody of its private key.
+4a generates custody and explicit cache key/directory, ACL owner/self-grant and
+separate receiver/origin audit-directory outputs. Their owning libraries validate
+and consume them; receiver integration establishes the owner browser session and
+wires safe body service. Do not duplicate storage-lane modules or equate generated
+files with functioning access. First-run precise grant inputs are pending until
+an enrollment has an approved scope and atomic activation; no early active grant.
+Later enrollments reuse receiver identity, owner, keys and directories.
 
-Proposed provisioning flow (CLI spelling beyond `semon receive enroll` is owned by
-slice 4a and must be documented with its implementation):
+Owned 0700 directories and 0600 regular files, checked ownership/links and
+no-symlink opens protect secret/registry/ACL/audit custody according to their
+libraries. Keep secrets, policy/configuration, body cache and audit stores separate;
+protect atomic updates against cross-store replacement. Ordinary enrollment/cache
+backups contain no private keys or bearer secrets. Explicit secret backups remain
+a separate protected custody procedure. A stale registry backup cannot establish
+current revocation state or resurrect an enrollment. Preserve namespace/handle
+continuity only where proven, and preserve facts, sources and audits on refusal.
 
-1. The operator supplies receiver identity/endpoint/trust root, origin binding,
-   enabled kinds, issuer trust choice and the origin's certificate/public identity
-   to `semon receive enroll`. This is a local administrative action, not a public
-   enrollment route. The origin generates/holds its client private key separately.
-2. The receiver records the binding and emits a versioned enrollment bundle with
-   those public identities, trust roots/pins, kind settings and issuer keys. Any
-   newly issued bearer secret is a separate one-time protected delivery; the
-   registry keeps only its hash. The bundle contains no private key.
-3. The operator transfers the bundle out of band and checks receiver identity,
-   endpoint, trust root, certificate pin, namespace/incarnations and issuer choice.
-   A fingerprint learned from the request being authenticated is never trusted.
-4. An explicit import on the origin validates the current bundle and installs the
-   origin configuration, protected credential reference and local key paths. It
-   displays/requires acknowledgement of receiver-as-issuer trust when selected.
-5. Only after explicit import may the origin connect. The receiver rechecks the
-   current registry; a bundle is provisioning input, not authority to undo a later
-   revocation or activate a claim.
-
-Choosing `issuer: receiver` explicitly trusts the receiver operator to impersonate
-end users in assertions. This is the accepted default, not end-to-end protection
-from that operator. Choose an independently pinned external issuer or local-only
-mode when that trust is unacceptable. External issuer enrollment does not relax
-origin policy or online audit. No request installs an issuer or adds an issuer key.
+Generating private files does not establish host safety. Receiver integration
+checks observable core/swap settings and requires reviewable external backup
+exclusions under the journey's custody prerequisites. Unknown/failed custody leaves
+body service disabled and reports analytics-only partial setup. Stream-through is
+an explicit policy choice, not a silent fallback. Enrollment installs no OS service
+or firewall change; foreground lifetime and service setup follow the journey.
 
 ## Credential kinds and custody
 
-Slice 4a replaces the single-kind machine token file with **one current versioned
-kind-aware credential store**. Each bearer record binds a credential ID, enrollment
-ID, exactly one kind, token hash, and timestamped revocation state. Multiple kinds
-require separately issued credentials. Raw bearer secrets are shown/delivered once;
-they are never persisted by the receiver, logged, or included in ordinary bundles.
+Slice 4a replaces the single-kind token file with one current versioned kind-aware
+store. Each bearer record binds credential ID, enrollment ID, exactly one kind,
+hash, generation/validity and revocation state. Issue separate secrets per kind
+inside protected provisioning/renewal; the receiver never persists raw secrets or
+prints them for separate delivery.
 
-| Kind | Permitted receiver routes | `client_cert_required` |
+| Kind | Permitted routes | `client_cert_required` |
 | --- | --- | --- |
-| `analytics_publish` | `/v1/analytics/` publication routes, once slice 5 implements them | Explicit per-kind setting; default `false` (owner decision 2026-11-11, revisited when #594 lands); operator may require it |
-| `body_channel` | `/v1/body/` origin poll and response routes, once #594 implements them | Always `true`; cannot be disabled while this kind is enabled |
-| `mirror_push` | Existing `/v1/mirror/append`, `/facts`, `/status` routes | Explicit per-kind setting; default `false` for supported mirror Push |
+| `analytics_publish` | `/v1/analytics/` once slice 5 implements it | Explicit per-kind setting, default `false` for now; revisited when #594 lands, operator may require it |
+| `body_channel` | `/v1/body/` origin poll/response once #594 implements it | Always `true`, cannot be disabled while enabled |
+| `mirror_push` | Existing `/v1/mirror/append`, `/facts`, `/status` | Explicit per-kind setting, default `false` for supported mirror Push |
 
-These credentials authenticate origin machines, not end users. A body-channel
-credential permits transport only; it grants no `body_read`, metadata discovery,
-cache admission or source-policy permission. Mirror tokens cannot poll or publish
-analytics. Analytics tokens cannot use body routes. Certificate-only possession
-also grants no kind: both the kind credential and any required certificate check
-must pass against the same enrollment.
+A body credential permits machine transport only, with no `body_read`, metadata
+discovery, cache admission or source-policy permission. Mirror credentials cannot
+publish analytics or poll bodies; analytics credentials cannot use body routes.
+Certificate possession alone grants no kind. Credential and any required verified
+certificate must match the same current enrollment.
 
-The store uses owned 0600 regular files in a dedicated owned 0700 directory,
-separate from bodies, publication objects/spools, caches and their backups.
-Protect opens/updates against symlinks and accidental cross-store replacement.
-Origin bearer files and client private keys have the same private custody modes;
-issuer signing private keys stay in receiver-controlled protected custody when
-`issuer: receiver`, or with the external issuer otherwise. Origin issuer pins,
-receiver trust roots and client-key paths are integrity-protected configuration.
-Neither enrollment nor a cache backup includes private keys or bearer secrets.
-
-This deliberately changes the supported `semon receive token` and push-client
-surface under the [pre-release policy](../../AGENTS.md#pre-release-compatibility-policy).
-There is no compatibility reader, migration or dual store for `NAME SHA256(token)`:
-a receiver that finds the old `DIR/tokens` file refuses to start with a re-issue
-message and leaves the file untouched.
-Operators must re-issue kind-scoped credentials, explicitly enroll/configure the
-participating machines, and update Push clients and token files together. Slice
-4a must update the owning CLI, mirror documentation and tests in its implementation
-PR. Refusing unsupported state does not authorize deleting it or any user history.
+Under the [pre-release policy](../../AGENTS.md#pre-release-compatibility-policy),
+there is no compatibility reader, migration or dual path for `NAME SHA256(token)`.
+Finding old `DIR/tokens` refuses receiver startup with re-issue guidance and leaves
+the file untouched. Re-issue kind credentials, explicitly enroll/configure machines
+and update supported Push clients/token inputs together. 4a updates the owning CLI,
+mirror docs and tests; no compatibility alias conceals the change. Refusal never
+authorizes deleting old state or history.
 
 ### Rotation and revocation
 
-Issuer rotation is explicit: provision/import the next pinned key out of band,
-accept the old and new key IDs during a bounded operator-chosen overlap, switch
-signing, then explicitly remove the old pin. There are at most two accepted issuer
-keys, never an unbounded key list or a request-fetched key. Assertion validity,
-nonce replay bounds and signing encoding belong to #594; overlap cannot extend an
-assertion's expiry or revive a revoked enrollment.
+Transport credentials/certificates auto-renew under still-valid explicitly enrolled
+trust, with zero routine operator actions. Require proof of current enrollment/key
+authority, keep scope/source consent and private-key custody, confirm replacement
+and retire old generations at the reviewed cutover. Review validity, overlap and
+cutover mechanics in 4a before implementation merges. No periodic re-pairing or
+routine enrollment-expiry prompt. If valid renewal authority cannot be proven,
+fail closed and use explicit fresh recovery. Renewal cannot clear a whole/kind
+revocation, expand scope or silently transfer publisher authority. A revoked kind
+generation remains revoked; re-enabling the kind requires explicit authorization
+and fresh credentials. A revoked enrollment is never reactivated.
 
-Client-certificate rotation likewise requires an explicit receiver pin update and
-origin configuration update; any overlap is explicitly bounded and removed by the
-operator. Tag SPKI versus leaf pins so their renewal behavior is unambiguous.
-Bearer replacement issues a fresh kind-scoped secret and explicitly revokes the
-old credential; it cannot clear an enrollment/kind revocation timestamp.
+Normal renewal never rotates the assertion issuer, receiver server/root identity
+or cache master key. Exceptional `semon receive rotate --identity` requires a
+reviewed authenticated administrative trust update on each origin, not an ordinary
+read request or routine renewal. Specify and count that operation's commands,
+transfers and approvals before its implementation; no four-action maintenance
+claim. Issuer rotation accepts at most two pinned key IDs in a bounded explicit
+overlap, switches signing and removes the old key. Offline origins fail closed
+after cutover. Compromised trust cannot authenticate its own repair: revoke it and
+use a fresh independently trusted pairing and new enrollment ID.
 
-The receiver checks current whole-enrollment, kind and credential revocation on
-every request, including requests on kept-alive connections. A successful TLS
-handshake is not a cached authorization. Active poll/response integrations receive
-a revocation signal and must recheck before dispatch/release; #594 owns stopping
-in-flight reads within its declared deadlines. Revocation stops new authority
-immediately at the next receiver decision, without waiting for certificate expiry.
+Exceptional `semon receive rotate --cache-key` plus confirmation generates a
+protected replacement and explicitly invalidates disposable cache entries; it
+changes no machine identity and deletes no facts/audits. #594 owns assertion
+validity, nonce bounds and encoding; issuer overlap cannot extend assertion expiry.
 
-The origin independently removes local receiver/issuer pins or disables enrollment
-to stop trusting that receiver. A receiver-side revocation cannot remove an origin
-pin remotely. If the origin is disconnected, propagation waits for contact; no
-claim of instantaneous remote revocation is made. Local pin removal refuses new
-assertions/connections and cancels use of the affected channel. Already delivered
-plaintext cannot be recalled.
+The receiver checks current enrollment, kind and credential revocation on every
+request, including keep-alive connections. TLS handshake success is not cached
+authorization. Revocation immediately removes authority at the next authorization/
+release decision and signals all in-flight poll/response/delivery hooks. Recheck
+before dispatch and release; #594 integrates cancellation and stops active delivery
+within its declared deadlines. No certificate-expiry wait, new bytes under stale
+authority or queued work surviving revocation. Already delivered plaintext cannot
+be recalled; disconnected origins cannot receive instantaneous remote updates.
+
+| Operation | Contract |
+| --- | --- |
+| `semon disconnect --receiver <name>` | Origin command plus confirmation disables local enrollment/channel and receiver/issuer trust in active use; cancel active delivery and stop new publication. Preserve local history, analytics, keys and audits. This alone is not receiver-side revocation. |
+| `semon receive revoke --machine <name>` | Authenticated receiver admin command plus confirmation revokes enrollment, all kinds/generations, associated grants and in-flight hooks; invalidate affected cache entries under cache rules. Preserve admitted facts/audits and report retired/disconnected coverage. Requires no origin contact. |
+| Lost origin | Receiver revokes immediately; replacement pairs with a new enrollment ID. No automatic namespace/claim transfer or erasure of the lost disk. |
+| Lost/compromised receiver | Each surviving origin disconnects before reconnecting; explicitly revoke affected authority and repeat fresh pairing for recovery. An offline origin must be handled locally. |
+| Audit full/invalid | Proposed `semon receive audit status`, then `semon receive audit roll --preserve-to /private/archive` plus confirmation preserves exact journal custody before a fresh private directory is used. Reads stop; no automatic pruning/repair. Origin requires an equivalent local audit operation specified by its owner. |
+
+Bilateral removal uses both disconnect and revoke, with their confirmations. New
+sources require explicit local selection updates; renaming a machine never renames
+its namespace. Permanent evidence loss retains frozen facts and reports unavailable
+bodies; recovery cannot reconstruct missing source custody.
 
 ## Shared listener authentication and dispatch
 
-Extend the existing rustls listener with **optional client-certificate presentation
-and verification**: mirror origins without certificates can still complete TLS.
-Presented certificates must validate against configured client trust and match
-the enrolled SPKI/leaf pin. The TLS layer preserves verified peer identity;
-the route layer enforces `client_cert_required` separately for each kind. No body
-route accepts a missing, unverified, foreign or revoked client identity.
+Extend rustls with optional client-certificate presentation/verification: analytics
+and mirror origins without certificates may complete TLS where their kind permits.
+Presented certificates must validate against configured client trust and match the
+enrolled tagged SPKI/leaf pin. Preserve verified peer evidence; route-level
+`client_cert_required` is independent. Body routes refuse missing, unverified,
+foreign or revoked client identity.
 
-Proposed logical interface (not an existing Rust API):
+One logical interface is shared with #594 (not an existing Rust API):
 
 ```text
 authenticated_enrollment(conn, request_credential, required_kind)
@@ -216,126 +340,118 @@ authenticated_enrollment(conn, request_credential, required_kind)
        index_incarnation, publisher_claim_epoch, kinds, verified_client_identity }
 ```
 
-The connection contributes verified TLS evidence; the request supplies its current
-kind credential. The returned scope comes only from the current registry. Every
-request repeats this decision; a connection cannot retain a wider kind set after
-revocation. A route/body field cannot select a different enrollment or namespace.
+TLS contributes verified evidence, the request its kind credential; scope comes
+only from the current registry. Every request repeats the decision. Route/body
+fields cannot choose another namespace/enrollment or retain authority after
+revocation. Provisioning has a separate bounded dispatcher and cannot bypass this
+interface for application routes or install keys through a body request.
 
-Dispatch order is bounded request-head/framing validation, route/kind selection,
-current credential/enrollment/certificate verification, resource admission and
-size validation, then handler/body consumption. No `100 Continue`, upload staging,
-body resolution or queue insertion precedes the authority and capacity checks.
-Unknown routes/kinds refuse; handlers cannot opt out. Analytics and body routes
-require HTTPS even where the listener also supports loopback mirror HTTP.
-
-`/v1/analytics/` is the receiver namespace for the shared publication mechanism;
-#555's Hub `/v1/asi/` paths are not receiver routes. `/v1/body/` carries #594's
-polls and bounded responses only. Existing mirror routes retain their own kind
-and custody. Body frames never enter analytics objects or the reconnect spool.
+Dispatch order: bounded request-head/framing checks, route/kind selection, current
+credential/enrollment/certificate verification, resource admission/size checks,
+then handler/body consumption. No `100 Continue`, staging, body resolution or queue
+insertion precedes authority and capacity checks. Unknown routes/kinds refuse;
+handlers cannot opt out. Analytics and body require HTTPS even if loopback mirror
+HTTP is supported. `/v1/analytics/` is distinct from Hub `/v1/asi/`; `/v1/body/`
+carries only #594 polls/responses. Body frames never enter analytics objects/spools.
 
 ### Capacity and admission
 
-All classes charge the same operator-configurable `max_connections`. Polls hold
-threads/slots on this blocking listener. Admission accounts for class and enrollment
-in addition to the existing unauthenticated per-IP protection; authenticated NAT
-peers are not all treated as one machine. Idle keep-alive connections continue to
-consume total capacity and remain deadline-bound.
+All classes charge operator-configurable `max_connections`. Polls hold threads/
+slots on this blocking listener. Admission accounts for class and enrollment as
+well as unauthenticated per-IP protection; NAT peers are not one machine. Idle
+keep-alive connections still consume total capacity and remain deadline-bound.
 
-This is the single capacity table. Values marked proposed require confirmation;
-existing mirror limits remain owned by `serve.rs` and the mirror protocol.
+This is the single capacity table. Existing mirror limits remain owned by
+`serve.rs` and the mirror protocol; pairing has the additional reviewed aggregate
+bounds above and cannot consume unbounded pending state or listener capacity.
 
 | Resource / class | Limit and status |
 | --- | --- |
-| Total connection slots | Existing default 32; slice 4a exposes operator configuration |
+| Total connection slots | Existing default 32; 4a exposes operator configuration |
 | Unauthenticated connections per IP / IPv6 /64 | Existing default 4; retain pre-authentication enforcement |
-| Body poll class | Interim limit: at most 1 outstanding poll per enrollment and `floor(max_connections × poll_share)` globally; configurable share, default 50% |
-| Publication/upload class | Charged to non-poll slots and total; keep capacity available outside the poll quota; object/body bounds owned by slice 5 |
-| Body response-frame class | Charged to non-poll slots and total; must not wait behind long-polls; #594 owns framing and read deadlines |
-| Mirror class | Charged to non-poll slots and total; existing 6 MiB request cap and socket deadlines |
-| Pending body requests | Interim limit: at most 4 queued requests per enrollment, metadata/control only, expiring under #594 deadlines |
-| Poll duration / control envelope | Proposed: 20 s / 16 KiB; #594 confirms these values |
-| Complete body page/field envelope | Accepted D3 ceiling 256 KiB including metadata; #594 owns frame accounting, lease/read deadlines and narrower limits |
+| Body poll class | Interim: at most 1 outstanding poll per enrollment and `floor(max_connections × poll_share)` globally; configurable share at most 50%, default 50% |
+| Publication/upload class | Non-poll and total slots; preserve capacity outside poll quota; slice 5 owns object/body bounds |
+| Body response-frame class | Non-poll and total slots; cannot wait behind long-polls; #594 owns framing/read deadlines |
+| Mirror class | Non-poll and total slots; existing 6 MiB request cap and socket deadlines |
+| Pending body requests | Interim: at most 4 queued per enrollment, expiring metadata/control only under #594 deadlines |
+| Poll duration / control envelope | #594 proposal confirms 20 s / 16 KiB; #594 owns these bounds |
+| Complete body page/field envelope | D3 ceiling 256 KiB including metadata; #594 owns frame accounting and narrower lease/read limits |
 
-These caps are the **interim** limits of the thread-per-connection listener, set
-by the owner on 2026-11-11 until the event-driven listener of #636 replaces it.
-At the default 32 slots and 50% poll share the current listener can hold about 16
-concurrent long-polls, with the remaining slots shared by publication, responses
-and mirror work. That follows from the threading model; it is not a product
-ceiling or a supported-fleet target. Raising the setting costs threads, file
-descriptors and memory and needs CI resource measurements. Scale beyond it is the
-purpose of #636, not of this slice.
+These are interim thread-per-connection limits, set by the owner on 2026-11-11
+until #636 replaces the listener. Default 32 slots and 50% poll share yield about
+16 concurrent long-polls; remaining slots serve publication, responses and mirror.
+This is not a product ceiling or fleet target. Raising configuration costs threads,
+file descriptors and memory and needs CI resource evidence. Scale beyond this
+listener belongs to #636, not 4a.
 
-A poll quota is a ceiling, not permission to consume response/publication slots.
-Publication/uploads, response frames and mirror operations have separate accounting
-classes so admission/fairness can be tested; their precise reservation split is an
-open item. Never block all responses behind polls or create an unbounded work queue.
-
-Excess admitted HTTP requests return explicit `503` unavailable with a closed
-reason (`connection_capacity`, `poll_capacity` or `pending_queue_full`) and close
-the connection. Pre-HTTP/failed-TLS connections may be closed without an HTTP
-response; do not allocate an extra worker merely to send 503. Queue expiry and
-revocation discard pending work with explicit unavailable outcomes, never empty
-successful bodies. #594 owns operation correlation, cancellation and retryability.
+Poll quota is a ceiling, never permission to consume response/publication slots.
+Non-poll classes have separate accounting; choose their precise reservation/fairness
+split with 4a resource tests and #594 integration. Never queue unbounded work or
+block all responses behind polls. Excess admitted HTTP requests return `503` with
+a closed reason (`connection_capacity`, `poll_capacity`, `pending_queue_full`) and
+close. Pre-HTTP/failed-TLS connections may close without HTTP; do not allocate a
+worker just to send 503. Expiry/revocation discards pending work with explicit
+unavailable outcomes, never empty success. #594 owns correlation and retryability.
 
 ## Claims, epochs and heads
 
-Enrollment binds the authenticated machine, namespace and origin/index incarnation
-to its publisher claim. It is the authority input, not the claim activation
-transaction. Slice 4b consumes that binding and follows the
+Enrollment binds authenticated machine, namespace and origin/index incarnation as
+an authority input, not a claim activation transaction. Slice 4b follows the
 [shared #555 mechanism](asi-store.md#hub-export-phase-3): pending publisher/epoch,
-complete validated replacement, expected-parent commit and atomic visibility
-switch. The prior complete head remains visible until activation; a delayed or
-revoked publisher cannot overwrite a newer epoch.
-
-Slice 4a represents an unassigned claim explicitly and cannot advance heads.
-Once assigned, the epoch returned to either lane is the current registry/claim
-binding; client-provided epochs must match it. Body requests bind the same scope
-but do not activate claims. An incarnation change requires explicit rebinding and
-4b reconciliation, not silent enrollment reuse or an empty-head reset. Replica
-custody/authority transfer remains #596; this contract grants neither automatically.
+validated complete replacement, expected-parent commit and atomic head visibility.
+Prior complete heads remain until activation; delayed/revoked publishers cannot
+overwrite newer epochs. 4a represents unassigned claims and cannot advance heads.
+Assigned epochs must match current claim binding, not client assertions. Body
+scope does not activate claims. Incarnation change needs explicit rebinding/4b
+reconciliation, never silent enrollment reuse, publisher transfer or empty reset.
+Replica custody/authority remains #596.
 
 ## Interfaces #594 targets
 
-- The versioned enrollment scope and issuer pins above, with explicit receiver
-  trust acknowledgement and current revocation state.
-- Request authentication by `body_channel` plus verified enrolled client identity,
-  and a fresh authority check before dispatch/release.
-- One shared HTTPS HTTP/1.1 listener, body route registration and class-aware slot
-  admission; a bounded per-enrollment pending queue with expiry/revocation hooks.
-- Current issuer key access for the signing component without copying private keys
-  into registry records, bundles, bodies or cache; issuer pins imported at origin.
+- One `authenticated_enrollment` and provisioned versioned scope, current generation/
+  revocation state and issuer pins installed by confirmed provisioning.
+- `body_channel` authentication plus verified enrolled client identity, with fresh
+  authority checks before dispatch/release and in-flight revocation/cancel hooks.
+- Shared HTTPS HTTP/1.1 registration/admission and bounded expiring per-enrollment
+  queues; no second body enrollment or manual credential import.
+- Protected current issuer-key access for the signer, separate from registry/cache;
+  origin receives public pins only through authenticated provisioning/maintenance.
+- Explicit generated cache key/directory, authenticated owner/exact ACL inputs and
+  separate receiver/origin audit-directory outputs for the storage-owned libraries.
 
-#594 supplies assertion encoding/verification, poll/response payloads, channel
-binding, origin audit, per-read policy, cache admission, deadlines and leases.
-Enrollment never substitutes for authenticated user grants or D2's online origin
-authorization/audit, including cache hits. PR #632 should reference this authored
-contract when reconciled; its proposed schema/API names are not shipped interfaces.
+#594 integrates origin authorization/audit and body policy, assertions, payloads,
+channel binding, exact rendering/mappings, cache admission, leases and deadlines.
+#635 supplies its assertion/audit libraries. Enrollment grants neither end-user
+permission nor D2 online authority, including cache hits. Scan-backed P1 generation,
+producer lifecycle, 4b claims/heads and slice 5 publication remain the dependencies
+listed above. PR #632's proposed names are not shipped interfaces.
 
-## Decisions and open items
+## Verification obligations for slice 4a
 
-Settled by the owner on 2026-11-11:
+CI must verify the implementation, not infer safety from this docs PR:
 
-- **Capacity.** The caps above are the interim limits (1 poll per enrollment, poll
-  share at most 50%, 4 pending requests per enrollment, `503` instead of queuing).
-  An event-driven receiver listener is planned and tracked in #636; thread-per-
-  connection is temporary and ~16 poll-connected origins is not a product ceiling.
-- **Token store.** The old `DIR/tokens` file is refused with a re-issue message.
-  It is never deleted, migrated or imported (see custody above).
-- **`analytics_publish.client_cert_required`** defaults to `false` for now and is
-  revisited when #594 lands. Body mTLS is already settled and not open.
+- Successful PAKE pairing (or fallback only after the stated review outcome), and
+  refused wrong-code/key/endpoint/pin/version/role/scope or failed confirmation;
+  private-root bootstrap with no TOFU, general TLS bypass, redirects or secret leaks.
+- Tight per-session and receiver-wide guessing, issuance/pending-state and recovery
+  bounds across addresses/connections/retries; reissue cannot reset aggregate bounds.
+- Concurrent race, replay, expiry, cancellation, consumed-session retry, restart and
+  lost acknowledgement produce at most one atomic activation and no partial grants.
+- Cross-kind, namespace/incarnation/epoch and owner isolation; machine credentials
+  never authenticate users; source consent remains separate and cannot widen through
+  renewal. Body missing/wrong certificates refuse; analytics optionality is preserved.
+- Automatic renewal under valid trust, explicit cutover/old-generation retirement,
+  terminal enrollment/kind revocation on kept-alive connections and in-flight hooks,
+  plus fresh-ID recovery without resurrection, scope expansion or claim transfer.
+- Custody preservation: private origin key never leaves origin, separate secret/
+  cache/ACL/audit state, unsupported/insecure stores refuse, old `tokens` stays
+  untouched, stale backups cannot revive authority, no facts/source/audit deletion.
+- Concurrent poll/upload/response/mirror exhaustion remains bounded with fair
+  response capacity and explicit refusal; required downstream hooks are exercised.
 
-Still open for implementation owners:
-
-- #594 confirms poll/control bounds and supplies lease/read/cancellation deadlines;
-  slice 4a must expose the required deadline/revocation hooks before integration.
-  The non-poll reservation/fairness split is chosen with the 4a resource tests.
-- Exact CLI flags/import spelling, on-disk schema names and certificate
-  provisioning/rotation tooling are chosen in slice 4a; document and test those
-  together. Overlap duration is explicit operator policy, not a hidden default.
-  Receiver-as-issuer and Hub exclusion are already settled.
-
-CI acceptance for 4a must exercise cross-kind refusal, wrong/missing certificate,
-wrong namespace/incarnation/epoch, revoked credentials on kept-alive connections,
-unsupported/insecure store refusal, explicit import/pin rotation, and concurrent
-poll/upload/response/mirror exhaustion without unbounded buffering. Transport/body
-end-to-end guarantees remain the owning slices' gates, not this docs PR's evidence.
+Protocol/library suitability, technical safety review and PM/owner library approval
+are required before dependencies/implementation merge. #594 confirms read/lease/
+cancellation deadlines; 4a resource tests settle non-poll reservations. The review
+records exact pairing/renewal parameters here before implementation merges. Full
+publication, body-read and four-action journey acceptance belong to the owning
+integration slices; docs-only CI proves none of those runtime guarantees.

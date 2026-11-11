@@ -22,6 +22,7 @@ Those PR documents are proposals, not shipped commands. #630/#631 are libraries;
 #635 is a held library PR. Their files are integration inputs, not a functioning
 receiver onboarding flow. The body channel consumes the same enrollment as
 publication; it does not add a second enrollment.
+The #634 enrollment proposal is now reconciled in [asi-enrollment.md](asi-enrollment.md); implementation and review holds remain.
 
 ## Counting steps and the proposed budget
 
