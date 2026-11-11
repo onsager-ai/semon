@@ -38,6 +38,7 @@ fn paths(root: &Path, manifest: &Manifest) -> Result<Vec<(String, String)>, Fail
     manifest
         .files
         .iter()
+        .filter(|file| TABLES.iter().any(|table| table.name == file.table))
         .map(|file| file.path.as_str())
         .chain(manifest.live_map.as_deref())
         .map(|relative| {
@@ -504,5 +505,39 @@ fn classify(error: duckdb::Error) -> Failure {
             "Query could not be bound or executed",
             "query",
         )
+    }
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    #[test]
+    fn local_provenance_is_neither_queryable_nor_an_allowed_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store =
+            crate::Store::open_with_clock(directory.path(), crate::testutil::TestClock::new(0))
+                .unwrap();
+        store
+            .publish(&crate::testutil::update(&[("origin/claude/a", 1)], "a", 0))
+            .unwrap();
+        assert!(
+            !paths(directory.path(), store.manifest())
+                .unwrap()
+                .iter()
+                .any(|(path, _)| path.starts_with("provenance/"))
+        );
+        assert!(!TABLES.iter().any(|table| table.name == "provenance"));
+        let scratch = tempfile::tempdir().unwrap();
+        let db = setup(directory.path(), store.manifest(), scratch.path(), "1GiB").unwrap();
+        for sql in [
+            "SELECT * FROM provenance",
+            "SELECT * FROM read_parquet('analytics/provenance/g1.parquet')",
+        ] {
+            let failure =
+                execute_snapshot(&db, store.manifest(), &Request::new(sql), Instant::now())
+                    .unwrap_err();
+            assert_eq!(failure.error.code, "not_allowed");
+        }
     }
 }

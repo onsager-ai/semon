@@ -122,7 +122,12 @@ impl AnalyticsInput for SqliteAnalyticsInput {
                 let mut cursor_sequence = after_sequence;
                 let mut steps = 0usize;
                 for (key, sequence, kind) in selected {
-                    let next = read_session(tx, &namespace, &key, &kind)?;
+                    let mut next = read_session(tx, &namespace, &key, &kind)?;
+                    for change in &mut next {
+                        if let SessionChange::Admitted(session) = change {
+                            session.derivation.index_incarnation = Some(incarnation.to_owned());
+                        }
+                    }
                     let next_steps = next
                         .iter()
                         .map(|change| match change {
@@ -694,6 +699,13 @@ fn admitted(
                     prefix_sha256: hex_bytes(&source.prefix_sha256),
                 })
                 .collect(),
+        },
+        derivation: semon_asi::input::Derivation {
+            activity_generation: generation.to_owned(),
+            producer_version: env!("CARGO_PKG_VERSION").to_owned(),
+            parser_version: Some(crate::events::CACHE_VERSION),
+            index_incarnation: None,
+            computed_at: None,
         },
         versions: RecordedVersions {
             transform: semon_asi::ANALYTICS_TRANSFORM_VERSION,

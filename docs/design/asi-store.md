@@ -302,8 +302,27 @@ tables.
   Notification counters saturate at u64::MAX, an unreachable process-lifetime
   bound of more than 1.8e19 requests; settlement at exhaustion is unspecified.
 - **Local custody.** The generated Parquet can contain typed local-path
-  fields. It remains local-only; a governed export is a separate operation and
-  is not part of materialization.
+  fields. It remains local-only. `semon analytics export DESTINATION` is an
+  explicit, verified local custody bundle rather than materialization: it copies
+  the namespace, manifest, live map and manifest-named immutable Parquet files,
+  records SHA-256 size/digest evidence in an `export.json` receipt written last,
+  and verifies the completed bundle. It takes the existing writer lock shared
+  and non-blocking without creating it or running recovery, so a writer-held
+  lock refuses rather than producing a torn snapshot. It refuses unsafe or
+  symlinked destinations, a destination inside the source store, and all
+  missing/foreign/unsupported/ambiguous source state. Export and reset prove
+  local ownership by requiring every live UID to carry the confirmed namespace.
+  `semon analytics reset` is never automatic. It requires exact namespace
+  confirmation, exclusive non-blocking writer ownership and exactly one verified
+  current export or an explicit `--without-export` waiver for possible loss of
+  imported/frozen facts. A verified export must remain outside the store and
+  match the current manifest, live map, namespace and referenced files by size
+  and SHA-256 under that lock. Reset deletes the manifest before other
+  analytics-store entries but retains the lock inode, never touches native logs,
+  archive or Event Index, and retains the namespace unless `--new-namespace`
+  removes it while the writer lock is held. A retained namespace makes the next
+  materialization preserve UIDs; removing it deliberately creates fresh identities
+  without reconciliation.
 - **Cycle.** The caller selects an interval (2 s by default) and an input
   budget. `publish_cycle` publishes one bounded chunk as one `Update` and
   generation, then returns its generation and completion flag. The caller may
@@ -395,6 +414,45 @@ The writer's pure transition table is the authority for chain ownership:
 | Shutdown | Drop active and suspended records | Stop without scheduling another operation |
 | Later request arrival | Active record unchanged | Later generation remains pending |
 
+- **Local publication provenance (#593 slice 1).** Each touched session supplies
+  exactly one typed custody record in immutable `provenance/g{generation}.parquet`,
+  keyed by `(session_uid, _gen)`. The manifest lists its size, row count, decoded
+  size and generation range alongside facts. It is written and synced before the
+  same atomic manifest rename and uses the same live map. Keeping the cohort once
+  per session avoids duplicating source vectors in every fact row and lets the
+  existing bounded compactor filter dead records while preserving live `_gen`.
+  Compaction and delayed retirement use the ordinary immutable-file contract;
+  recovery discards uncommitted provenance files just like fact files. Before
+  opening or reloading a writer snapshot, validate every referenced provenance
+  file's size and row count and require exactly one matching record for every
+  live session generation. Validation streams only UID/generation columns, with
+  one batch plus O(live sessions) keys in memory; work is O(referenced provenance
+  rows), including dead rows awaiting compaction, without decoding source vectors.
+  Corruption refuses with preserve/export guidance before recovery deletes files
+  or the writer adopts the snapshot. Historical dead records remain legitimate
+  immutable history until compaction; they never satisfy a live generation binding.
+  The record retains the complete admitted source generation and ordered cohort
+  (`native_id`, local path, consumed offset and prefix SHA-256), activity generation,
+  producer package and parser versions, index incarnation when known, recorded
+  transform/rules/price/taxonomy versions and coverage, and the injected-clock
+  analytics projection time. SQLite does not record a computation timestamp, so
+  that field stays unknown; event timestamps are never substituted. Index
+  incarnation identifies input continuity, not an authenticated publisher.
+  `Pending`, source loss and restoration never rewrite the record from today's
+  Catalog. A complete admitted replacement changes facts and provenance together;
+  explicit session removal makes both dead. Restart retains the same binding.
+  This artifact contains local paths and is local-only: it is absent from
+  `schema::TABLES`, generated SQL schema reference, SQL AST allowlist and the query
+  worker's allowed file paths. It has no analytics egress serializer. Governed
+  federation requires a separate policy-qualified projection with opaque handles.
+  Explicit operator custody export includes and hashes it, verifies its one-to-one
+  live binding, and compares it before guarded reset. Reset removes it with the
+  analytics store; coverage continues to read only `fact_session`.
+  ASI schema version 4 requires this contract. Older stores are refused with the
+  existing export/reset guidance, without migration or dual readers. Export and
+  reset also require the current schema: preserve an unsupported store intact and
+  use its matching older binary for explicit custody export/reset before rebuilding
+  from available admitted sources. Never silently discard frozen data.
 - **Reading.** Each fact view keeps only live rows:
   `… semi join live on (session_uid, _gen)`.
 - **Compaction** is tiered. Cycle files are level 0. When a table has more

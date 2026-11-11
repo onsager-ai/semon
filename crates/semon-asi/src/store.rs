@@ -153,6 +153,8 @@ pub struct Update {
     /// The full current rows of the touched sessions (facts), the new rows (labels) or
     /// the whole table (dimensions). A table without rows may be left out.
     pub tables: Vec<TableBatch>,
+    /// Exactly one local custody record per touched session.
+    pub provenance: BTreeMap<String, crate::provenance::Provenance>,
     /// Sessions recomputed whole in this generation, including those with no rows.
     pub touched_sessions: Vec<String>,
     /// Sessions that no longer exist; their rows become dead.
@@ -185,6 +187,42 @@ pub(crate) enum Fault {
     AfterRename,
 }
 
+/// Exclusive ownership of a store, acquired before opening or recovering it.
+pub struct WriterLock {
+    root: PathBuf,
+    file: File,
+}
+
+impl WriterLock {
+    /// Create a store root if needed and acquire its writer lock without recovery.
+    pub fn acquire(root: &Path) -> Result<Self> {
+        create_durable_dir(root)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join(LOCK_FILE))?;
+        lock_file(&file, true)?;
+        Ok(Self {
+            root: root.to_path_buf(),
+            file,
+        })
+    }
+}
+
+pub(crate) fn lock_file(file: &File, exclusive: bool) -> Result<()> {
+    let locked = if exclusive {
+        file.try_lock()
+    } else {
+        file.try_lock_shared()
+    };
+    match locked {
+        Ok(()) => Ok(()),
+        Err(TryLockError::WouldBlock) => Err(Error::WriterBusy),
+        Err(TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
 /// The analytics writer for one store directory. Holding it holds `analytics.lock`.
 pub struct Store<C: Clock = SystemClock> {
     pub(crate) analytics: PathBuf,
@@ -205,24 +243,19 @@ impl Store<SystemClock> {
 impl<C: Clock> Store<C> {
     /// Takes the writer lock and discards files of a generation that never committed.
     pub fn open_with_clock(root: &Path, clock: C) -> Result<Self> {
-        let analytics = root.join(ANALYTICS_DIR);
-        create_durable_dir(root)?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(root.join(LOCK_FILE))?;
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(Error::WriterBusy),
-            Err(TryLockError::Error(error)) => return Err(error.into()),
-        }
+        Self::open_with_lock(WriterLock::acquire(root)?, clock)
+    }
+
+    /// Open and recover a store while retaining an already acquired writer lock.
+    pub fn open_with_lock(lock: WriterLock, clock: C) -> Result<Self> {
+        let analytics = lock.root.join(ANALYTICS_DIR);
         create_durable_dir(&analytics)?;
         let manifest = read_manifest_in(&analytics)?.unwrap_or_else(Manifest::empty);
         let live = match &manifest.live_map {
             Some(path) => read_live_map_file(&analytics.join(path))?,
             None => HashMap::new(),
         };
+        crate::provenance::validate(&analytics, &manifest, &live)?;
         discard_uncommitted(&analytics, manifest.generation)?;
         Ok(Self {
             analytics,
@@ -231,7 +264,7 @@ impl<C: Clock> Store<C> {
             live,
             #[cfg(test)]
             fault: None,
-            _lock: lock,
+            _lock: lock.file,
         })
     }
 
@@ -263,6 +296,7 @@ impl<C: Clock> Store<C> {
             Some(path) => read_live_map_file(&self.analytics.join(path))?,
             None => HashMap::new(),
         };
+        crate::provenance::validate(&self.analytics, &manifest, &live)?;
         self.manifest = manifest;
         self.live = live;
         Ok(())
@@ -311,16 +345,43 @@ impl<C: Clock> Store<C> {
             return Err(Error::invalid("a table appears twice in one update"));
         }
 
+        if touched.len() != update.touched_sessions.len()
+            || update.provenance.len() != touched.len()
+            || update
+                .provenance
+                .keys()
+                .any(|uid| !touched.contains(uid.as_str()))
+        {
+            return Err(Error::invalid(
+                "each touched session requires exactly one provenance record",
+            ));
+        }
+        if update
+            .tables
+            .iter()
+            .any(|item| item.table.name == crate::provenance::TABLE.name)
+        {
+            return Err(Error::invalid(
+                "provenance must use the typed publication contract",
+            ));
+        }
+        let mut tables = update.tables.clone();
+        if !update.provenance.is_empty() {
+            tables.push(TableBatch {
+                table: &crate::provenance::TABLE,
+                batch: crate::provenance::batch(&update.provenance)?,
+            });
+        }
         discard_uncommitted(&self.analytics, self.manifest.generation)?;
         // Validate all batches before writing any file in this generation.
-        for item in &update.tables {
+        for item in &tables {
             with_generation(item.table, &item.batch, 0)?;
         }
         let generation = self.manifest.generation + 1;
         let stamp = generation as i64;
         let mut files = self.manifest.files.clone();
         let mut written = Vec::new();
-        for item in &update.tables {
+        for item in &tables {
             let table = item.table;
             if table.kind == Kind::Dimension {
                 files.retain(|file| file.table != table.name);
@@ -366,7 +427,8 @@ impl<C: Clock> Store<C> {
             .copied()
             .collect();
         for file in &mut files {
-            let session_table = table(&file.table).is_some_and(|t| t.kind == Kind::Session);
+            let session_table = file.table == crate::provenance::TABLE.name
+                || table(&file.table).is_some_and(|t| t.kind == Kind::Session);
             let (low, high) = (file.min_row_gen as i64, file.max_row_gen as i64);
             if file.level == 1 && session_table && dying.range(low..=high).next().is_some() {
                 file.dead = None;
@@ -543,7 +605,7 @@ fn read_manifest_in(analytics: &Path) -> Result<Option<Manifest>> {
     let manifest: Manifest = serde_json::from_slice(&bytes)?;
     if manifest.schema_version != ASI_SCHEMA_VERSION {
         return Err(Error::invalid(format!(
-            "analytics schema version {} is not {ASI_SCHEMA_VERSION}; export and reset",
+            "analytics schema version {} is not {ASI_SCHEMA_VERSION}; run `semon analytics export` then `semon analytics reset`",
             manifest.schema_version
         )));
     }
@@ -627,7 +689,10 @@ pub(crate) fn discard_uncommitted(analytics: &Path, committed: u64) -> Result<()
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error.into()),
     }
-    let dirs = TABLES.iter().map(|table| table.name).chain([LIVE_DIR]);
+    let dirs = TABLES
+        .iter()
+        .map(|table| table.name)
+        .chain([LIVE_DIR, crate::provenance::TABLE.name]);
     for dir in dirs {
         let entries = match fs::read_dir(analytics.join(dir)) {
             Ok(entries) => entries,

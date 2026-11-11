@@ -75,6 +75,19 @@ publishes a replacement after the session is re-admitted. Manifest `Versions.rul
 is the writer target, not a claim about the versions of retained rows; there is no
 uniform-refresh claim.
 
+Publication now retains a typed local provenance artifact for each live session
+under the same manifest transaction and `(session_uid, _gen)` live-map binding as
+its facts (#593 slice 1). It stores the admitted source witness unchanged, activity
+generation, producer/parser versions, index incarnation, recorded versions and
+coverage, and the analytics projection timestamp. Upstream computation time is
+unknown because SQLite does not persist it. Pending and missing-source changes
+retain that exact record; only complete admission replaces it, and only explicit
+removal drops it. Compaction, restart, custody export and reset share the store's
+ordinary file lifecycle. Provenance paths are excluded from SQL and require a
+separate governed egress projection. ASI schema 4 refuses older stores without a
+migration; preserve unsupported custody and use its matching binary for explicit
+export/reset. See the [retention contract](asi-store.md#generations-publication-and-versions).
+
 Preserve the last complete admitted generation after partial or total source loss.
 Format mismatches refuse explicitly while preserving custody; no automatic reset,
 conversion, compatibility layer or deletion of frozen data is permitted.
@@ -229,9 +242,31 @@ Use the existing analytics lock for the single writer. DuckDB reads the publishe
 projection; it performs no second derivation or central repricing.
 
 Wire local origin consumers first, consistent with namespace authority; imported
-receiver heads are not rebuilt from local indexes. Implement the #557 export/reset
-surface with explicit custody/ownership checks and no automatic reset. Transport,
-channels, cache, replicas and query/FTS implementation remain outside this slice.
+receiver heads are not rebuilt from local indexes. The delivered #557 export/reset
+surface is explicitly local-only: `semon analytics export <empty-dest> [--cache PATH]`
+takes the existing lock shared and non-blocking, then copies one verified published
+snapshot (namespace, manifest, live map and every manifest-named immutable Parquet
+file) with `export.json` written last. The receipt records format version, namespace,
+manifest generation and per-file relative path, size and SHA-256 digest; the completed
+bundle is re-verified before success. Export refuses a busy writer, missing or ambiguous
+store, symlink/foreign state, unsafe destination, or any manifest/live-map/file admission
+failure, and creates or modifies no source-store state.
+
+`semon analytics reset --confirm NAMESPACE (--verified-export DIR | --without-export)`
+requires the exact owned namespace and takes the lock exclusively and non-blocking. A
+verified export must be outside the store and still match the current namespace, manifest,
+live map and every receipt-named snapshot file by byte count and SHA-256 under that lock;
+generation equality alone is insufficient. Export and reset prove ownership by requiring
+every live session UID to begin with the owned namespace. The waiver is explicit because
+it may discard imported or frozen non-rebuildable facts. Reset removes the manifest first,
+then only analytics-store contents while retaining `analytics.lock` and the store root,
+keeping native logs, archives, Event Index and the namespace by default. A partial failure
+therefore reads as no store rather than a torn valid snapshot. `--new-namespace` removes
+the namespace under the same writer lock as reset; the next materialize then generates
+fresh identities with no reconciliation. A missing namespace with a store remains a
+materialize refusal, so a normal reset that keeps its namespace preserves stable session
+UIDs. No code path resets automatically. Transport, channels, cache, replicas and
+query/FTS implementation remain outside this slice.
 
 ## Verification and delivery
 
