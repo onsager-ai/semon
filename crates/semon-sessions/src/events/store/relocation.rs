@@ -329,6 +329,16 @@ pub(super) fn reuse(
         ],
     )
     .map_err(failure)?;
+    tx.execute(
+        "UPDATE body_source SET source_path=?2 WHERE source_path=?1",
+        params![old, path],
+    )
+    .map_err(failure)?;
+    tx.execute(
+        "UPDATE meta SET key=?2 WHERE key=?1",
+        params![format!("body_state:{old}"), format!("body_state:{path}")],
+    )
+    .map_err(failure)?;
     write_codex_header(&tx, path, &relocated, header.as_ref()).map_err(failure)?;
     let normalized_usage =
         native_usage::relocate(&tx, old, path, &prior, &relocated).map_err(failure)?;

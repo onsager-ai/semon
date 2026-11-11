@@ -149,25 +149,54 @@ struct WorkerRequest {
 pub fn run(executable: &Path, root: &Path, request: &Request) -> Result<QueryResult, Failure> {
     let started = Instant::now();
     request.validate()?;
+    let wire = WorkerRequest {
+        root: root.canonicalize().map_err(|_| Failure::unavailable())?,
+        request: request.clone(),
+    };
+    let input = serde_json::to_vec(&wire).map_err(|_| Failure::unavailable())?;
+    let output = run_worker_until(
+        executable,
+        root,
+        "query-worker",
+        &input,
+        started + Duration::from_millis(request.timeout_ms),
+        request.max_bytes,
+    )?;
+    serde_json::from_slice(&output).map_err(|_| Failure::unavailable())
+}
+
+/// Shared bounded process runner for local SQL and index-body requests. Input
+/// paths are supplied by the trusted host, never by public tool arguments.
+pub fn run_worker_until(
+    executable: &Path,
+    root: &Path,
+    worker: &str,
+    input: &[u8],
+    deadline: Instant,
+    max_bytes: usize,
+) -> Result<Vec<u8>, Failure> {
+    let timeout_ms = deadline
+        .saturating_duration_since(Instant::now())
+        .as_millis()
+        .min(10_000) as u64;
+    if timeout_ms == 0 {
+        return Err(Failure::timeout());
+    }
     #[cfg(unix)]
     {
         let slot = process::Slot::acquire(root)?;
         let scratch = tempfile::tempdir().map_err(|_| Failure::unavailable())?;
-        let wire = WorkerRequest {
-            root: root.canonicalize().map_err(|_| Failure::unavailable())?,
-            request: request.clone(),
-        };
-        let input = serde_json::to_vec(&wire).map_err(|_| Failure::unavailable())?;
+        let input = input.to_vec();
         let mut command = Command::new(executable);
         command
-            .args(["asi", "query-worker"])
+            .args(["asi", worker])
             .env_clear()
             .env("TMPDIR", scratch.path())
             .current_dir(scratch.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
-        process::configure(&mut command, request.timeout_ms, &slot);
+        process::configure(&mut command, timeout_ms, &slot);
         let mut child = command.spawn().map_err(|_| Failure::unavailable())?;
         let mut stdin = child.stdin.take().ok_or_else(Failure::unavailable)?;
         let mut stdout = child.stdout.take().ok_or_else(Failure::unavailable)?;
@@ -185,7 +214,6 @@ pub fn run(executable: &Path, root: &Path, request: &Request) -> Result<QueryRes
             })();
             let _ = send.send(response);
         });
-        let deadline = started + Duration::from_millis(request.timeout_ms);
         let output = receive.recv_timeout(deadline.saturating_duration_since(Instant::now()));
         if output.is_err() || Instant::now() >= deadline {
             process::kill(&mut child);
@@ -222,17 +250,19 @@ pub fn run(executable: &Path, root: &Path, request: &Request) -> Result<QueryRes
         if let Ok(failure) = serde_json::from_slice::<Failure>(&output) {
             return Err(failure);
         }
-        if output.len() > request.max_bytes {
+        if output.len() > max_bytes {
             return Err(Failure::resource());
         }
         if !status.success() {
             return Err(Failure::resource());
         }
-        serde_json::from_slice(&output).map_err(|_| Failure::unavailable())
+        Ok(output)
     }
     #[cfg(not(unix))]
     {
-        let _ = (executable, root, started);
+        let _ = (
+            executable, root, worker, input, timeout_ms, max_bytes, deadline,
+        );
         Err(Failure::new(
             "capability_unavailable",
             "Query process limits require Unix",

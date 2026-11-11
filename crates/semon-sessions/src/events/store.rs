@@ -2,7 +2,7 @@
 //!
 //! It holds the metadata represented by [`FileIndex`], versioned stable session
 //! descriptions and a focused-read catalog: kinds, offsets, ids, counts, flags
-//! and native metadata, never message or tool text (risk:secret). Every
+//! and native metadata, plus a separate origin-local body/FTS projection. Every
 //! file's change commits in one `BEGIN IMMEDIATE` transaction together with
 //! its ledger row, so a file's resume offset never runs ahead of its rows,
 //! and a writer re-reads the ledger inside that transaction, so two
@@ -19,6 +19,7 @@
 //! let Row { kept } = row;
 //! ```
 
+pub(crate) mod bodies;
 pub(crate) mod chunk_proofs;
 mod launch_calls;
 pub(crate) mod native_usage;
@@ -251,7 +252,8 @@ fn emit_catalog_publish_attempt(
 // activity summaries for bounded family publication.
 // v47: Catalog parent_source names only the observed evidence owning a link;
 // agreement with native lineage leaves it absent, including staged endpoints.
-pub(crate) const SCHEMA_VERSION: i64 = 47;
+// v48: namespace-relative origin body rows, source ownership and external FTS5.
+pub(crate) const SCHEMA_VERSION: i64 = 48;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -3517,7 +3519,22 @@ impl SqliteStore {
                     } else {
                         None
                     };
+                    let mut body_owners = BTreeMap::new();
+                    for row in rows {
+                        if let Some(native) = row.owner_native_id() {
+                            *body_owners
+                                .entry((row.harness.as_str(), native))
+                                .or_insert(0usize) += 1;
+                        }
+                    }
                     for (position, (row, metadata)) in rows.iter().zip(&metadata).enumerate() {
+                        // A shared native ID represents ambiguity between physical
+                        // owners, not evidence that their bodies share an identity.
+                        if row.owner_native_id().is_some_and(|native| {
+                            body_owners.get(&(row.harness.as_str(), native)) == Some(&1)
+                        }) {
+                            bodies::bind_owner(&transaction, row).map_err(failure)?;
+                        }
                         // The first selected row may be unchanged. These
                         // intervals are nested in catalog_metadata, not
                         // additive publication totals.
@@ -4341,6 +4358,7 @@ impl SqliteStore {
                 "DELETE FROM native_tree_headers WHERE source_path=?1",
                 [path],
             )?;
+            bodies::clear(&transaction, path)?;
             transaction.execute("DELETE FROM files WHERE path = ?1", [path])?;
             transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND harness IN ('semantic-native:codex','semantic-parent:codex')", [path])?;
             transaction.execute("DELETE FROM meta WHERE key=?1", [archive_index_key(path)])?;
@@ -4683,6 +4701,9 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         "SELECT session_key,digest,repo_id FROM silver_session_state LIMIT 0",
         "SELECT session_key,harness,native_session_id FROM silver_session_identity LIMIT 0",
         "SELECT repo_path,repo_key FROM silver_repo_identity LIMIT 0",
+        "SELECT body_uid,session_uid,turn_uid,step_uid,part,ord,ts,text FROM body LIMIT 0",
+        "SELECT source_path,body_uid FROM body_source LIMIT 0",
+        "SELECT text FROM body_fts LIMIT 0",
         "SELECT metadata FROM session_history_catalog LIMIT 0",
         "SELECT current_last_ms,history_last_ms FROM session_search_memberships LIMIT 0",
     ] {
@@ -4798,9 +4819,10 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
 }
 
 /// One authored DDL set for cold initialization.
-fn storage_ddl() -> [&'static str; 11] {
+fn storage_ddl() -> [&'static str; 12] {
     [
         SCHEMA,
+        bodies::SCHEMA,
         native_usage::SCHEMA,
         session_activity::SCHEMA,
         tree_state::SCHEMA,
@@ -5796,6 +5818,7 @@ fn read_file(
     }
 
     let index = FileIndex {
+        bodies: bodies::load(readers.connection, &path)?,
         dirty_rows: None,
         native_usage_observations: native_usage::normalized(readers.connection, &path, &ledger)?
             .then(Vec::new),
@@ -6109,6 +6132,7 @@ fn write_index_changes_measured(
         advance_ledger_epoch(transaction, path)?;
     }
     native_usage::write(transaction, path, ledger, index)?;
+    bodies::write(transaction, path, &index.bodies, changes.is_some())?;
     let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')", [path])?;
     for id in index
@@ -6212,6 +6236,7 @@ fn write_file(
     measurements: &mut crate::native_timing::Measurements,
 ) -> rusqlite::Result<()> {
     let FileIndex {
+        bodies: _,
         dirty_rows: _,
         native_usage_observations: _,
         tree_summary,
@@ -9839,6 +9864,7 @@ mod tests {
     /// then proves it is persisted.
     fn full() -> FileIndex {
         FileIndex {
+            bodies: bodies::Batch::default(),
             dirty_rows: None,
             native_usage_observations: None,
             source_chunks: None,
@@ -10457,6 +10483,16 @@ mod tests {
                 "missing-silver-repo-id",
                 "ALTER TABLE silver_session_state DROP COLUMN repo_id",
                 "malformed persistent state",
+            ),
+            (
+                "missing-body-table",
+                "DROP TABLE body_fts; DROP TABLE body",
+                "malformed schema",
+            ),
+            (
+                "missing-body-fts",
+                "DROP TABLE body_fts",
+                "malformed schema",
             ),
             (
                 "missing-reported-column",

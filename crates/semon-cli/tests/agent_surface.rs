@@ -726,6 +726,8 @@ fn semon_mcp_speaks_the_protocol_and_serves_every_tool() {
         "read_transcript",
         "stalls",
         "sql",
+        "search",
+        "view",
         "schema",
     ];
     #[cfg(not(feature = "asi-query"))]
