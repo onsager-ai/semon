@@ -301,7 +301,11 @@ ACL and cache directories; its only members are `audit.lock` and
 as the cache protect its 0600 files in an owned 0700 directory. One writer holds
 an exclusive file lock; concurrent callers serialize through a mutex. JSONL
 `attempted` records have format 1, an opaque attempt ID, the closed metadata
-record, zero bytes and injected epoch time. `receipt` and `completion` events
+record, zero bytes and injected epoch time. Before admission or release,
+`authorize` fsyncs exactly one binding of matching request ID, exact opaque response
+identity, verified origin policy/redactor IDs and origin audit authorization ID.
+Receipts and successful or nonzero-byte completion refuse without that binding;
+an unbound attempt is not authorization. `receipt` and `completion` events
 append actual bytes/ranges/outcomes and time. Each successful append fsyncs before
 return; creating the journal also fsyncs its directory. A crash leaves an attempt
 without a completion. A torn/invalid journal or any write failure refuses reads;
@@ -316,7 +320,8 @@ opaque IDs, never credentials. Origin policy/redactor IDs may be absent while th
 channel is absent; an audit record alone cannot authorize body release.
 
 The audit ceiling is 64 MiB (operators may configure a smaller limit), independent
-of cache retention. Begin reserves space for one completion and at most 16 range
+of cache retention. Begin reserves space for one authorization binding, one
+completion and at most 16 range
 receipts (8 KiB per event), so capacity exhaustion refuses new attempts without
 dropping existing records or consuming active attempts' reserved space. Receipts
 must be ordered, non-overlapping and within the permitted range. After 16 receipts,
