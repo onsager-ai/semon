@@ -637,7 +637,9 @@ checkpoint; this read-only adapter never recreates deleted data or resets custod
 - **Authoring.** `semon asi add TABLE --id ID --values FILE|- [--cache PATH]`
   inserts one row in any of the nine durable tables. `--values` reads one JSON
   object from a file or stdin (`-`), with column names as keys and string, number
-  or null values. Arrays are JSON-encoded strings, integers are signed 64-bit,
+  or null values. Authoring values are limited to 256 KiB: CLI input bytes and
+  the serialized MCP `values` object are checked before writing; oversized input
+  returns a fixed error without supplied text. Arrays are JSON-encoded strings, integers are signed 64-bit,
   and timestamps are UTC milliseconds. The Writer validates columns, types,
   categorical shapes, UIDs and constraints; callers cannot supply `id` or
   `revision` inside values. Reusing an ID refuses rather than updating a row.

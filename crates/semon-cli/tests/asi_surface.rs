@@ -250,6 +250,65 @@ fn durable_add_mcp_uses_local_writer_and_refuses_paths_and_duplicates() {
     assert!(!reply.to_string().contains(body));
 }
 
+#[test]
+fn durable_add_refuses_oversized_file_stdin_and_mcp_values() {
+    let dir = store();
+    let cache = dir.path().join("state/index.json");
+    let marker = "private oversized prose";
+    let values = json!({"title":marker.repeat(16_384)});
+    let bytes = serde_json::to_vec(&values).unwrap();
+    let input = dir.path().join("oversized.json");
+    std::fs::write(&input, &bytes).unwrap();
+    let output = cli(
+        &[
+            "asi",
+            "add",
+            "lane",
+            "--id",
+            "large",
+            "--values",
+            input.to_str().unwrap(),
+        ],
+        cache.clone(),
+    );
+    let check = |output: std::process::Output| {
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(error.contains("durable values exceed the 256 KiB authoring limit"));
+        assert!(!error.contains(marker));
+    };
+    check(output);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_semon"))
+        .args(["asi", "add", "lane", "--id", "large", "--values", "-"])
+        .args(cli_args(cache.clone()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    // The bounded reader may close stdin before the entire payload is written.
+    let write = child.stdin.take().unwrap().write_all(&bytes);
+    if let Err(error) = write {
+        assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
+    }
+    check(child.wait_with_output().unwrap());
+    let mut server = Server::start(cache);
+    let reply = server.request(json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"asi_add","arguments":{"table":"lane","id":"large","values":values}}}));
+    let (error, failed) = content(&reply);
+    assert!(failed);
+    assert_eq!(
+        error["error"]["message"],
+        "durable values exceed the 256 KiB authoring limit"
+    );
+    assert!(!reply.to_string().contains(marker));
+    assert!(
+        !dir.path()
+            .join("state/analytics-store/asi-durable.sqlite3")
+            .exists()
+    );
+}
+
 fn cli_args(cache: PathBuf) -> Vec<String> {
     ["--cache".to_owned(), cache.to_string_lossy().into_owned()]
         .into_iter()

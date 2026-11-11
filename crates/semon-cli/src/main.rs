@@ -6,6 +6,8 @@ use std::{
 };
 
 const ANALYTICS_NAMESPACE_FILE: &str = "analytics-namespace";
+const DURABLE_VALUES_LIMIT: usize = 256 * 1024;
+const DURABLE_VALUES_TOO_LARGE: &str = "durable values exceed the 256 KiB authoring limit";
 
 fn main() -> ExitCode {
     #[cfg(feature = "asi-query")]
@@ -305,6 +307,13 @@ fn durable_add(
     values: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     use semon_asi::durable::{Value, Writer};
+    if serde_json::to_vec(values)
+        .map_err(|_| "invalid durable values object")?
+        .len()
+        > DURABLE_VALUES_LIMIT
+    {
+        return Err(DURABLE_VALUES_TOO_LARGE.into());
+    }
     let values = values.as_object().ok_or("values must be a JSON object")?;
     let values = values.iter().map(|(key, value)| {
         let value = match value {
@@ -1062,7 +1071,16 @@ fn run(command: Command) -> Result<(), String> {
                     std::fs::File::open(values).map_err(|_| "asi add: cannot read values file")?,
                 )
             };
-            let values = serde_json::from_reader(input)
+            use io::Read;
+            let mut bytes = Vec::new();
+            input
+                .take(DURABLE_VALUES_LIMIT as u64 + 1)
+                .read_to_end(&mut bytes)
+                .map_err(|_| "asi add: cannot read values")?;
+            if bytes.len() > DURABLE_VALUES_LIMIT {
+                return Err(DURABLE_VALUES_TOO_LARGE.into());
+            }
+            let values = serde_json::from_slice(&bytes)
                 .map_err(|_| "asi add: invalid JSON values object")?;
             let index = semon_sessions::analytics_index_path(&cache);
             let root = semon_sessions::analytics_store_root(&index)
@@ -1968,9 +1986,9 @@ impl semon_sessions::McpExtension for AsiMcp {
             description: "Insert one author-owned durable row in the configured local store. Returns only id/revision. Body text stays author-local.",
             positional: None,
             input_schema: serde_json::json!({"type":"object","properties":{
-                "table":{"type":"string","enum":semon_asi::durable::TABLES.iter().map(|table| table.name).collect::<Vec<_>>()},
-                "id":{"type":"string"},
-                "values":{"type":"object","additionalProperties":{"type":["string","number","null"]}}
+                "table":{"type":"string","description":"Durable table to insert into.","enum":semon_asi::durable::TABLES.iter().map(|table| table.name).collect::<Vec<_>>()},
+                "id":{"type":"string","description":"Author-assigned single UID component."},
+                "values":{"type":"object","description":"Typed column values, at most 256 KiB serialized JSON. Encode arrays as JSON text strings.","additionalProperties":{"type":["string","number","null"]}}
             },"required":["table","id","values"],"additionalProperties":false}),
         });
         tools

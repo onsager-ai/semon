@@ -408,6 +408,8 @@ records; cancellation/source changes during a read publish no invalid partial pa
 - Results expose admitted heads and freshness/version coverage. Multi-source
   policy intersections never disclose restricted contributions or label a
   fragment complete; SQL never fetches bodies.
-- Current local MCP: `tools/list` has `sql`, `schema`, `search` and `view`, and no
-  `find`. All four reject unknown input properties.
+- Current local MCP: `tools/list` has `sql`, `schema`, `search`, `view` and
+  `asi_add`, and no `find`. All five reject unknown top-level input properties;
+  only `asi_add` advertises `readOnlyHint: false`. Its `values` object is a typed
+  column map, capped at 256 KiB serialized JSON.
 - Performance budgets from [ASI store](asi-store.md#performance-from-day-1).
