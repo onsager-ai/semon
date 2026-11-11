@@ -224,6 +224,8 @@ impl<C: Clock> BodyCache<C> {
             disabled: false,
             _lock: lock,
         };
+        #[cfg(test)]
+        tests::before_startup_sweep();
         // Interrupted staging is never admitted. Its bytes are removed before
         // any serving or new allocation, including when the clock state is lost.
         for path in cache.directory.names()? {
@@ -957,7 +959,21 @@ fn decrypt(key: &[u8; 32], bytes: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::Cell, rc::Rc};
+    use std::{
+        cell::{Cell, RefCell},
+        rc::Rc,
+    };
+
+    thread_local! {
+        static BEFORE_STARTUP_SWEEP: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
+    }
+
+    pub(super) fn before_startup_sweep() {
+        let hook = BEFORE_STARTUP_SWEEP.with(|slot| slot.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 
     #[derive(Clone)]
     struct FakeClock(Rc<Cell<u64>>);
@@ -1325,11 +1341,62 @@ mod tests {
                 .exists()
         );
         drop(cache);
-        // Startup listing and cleanup also use the pinned directory descriptor.
         fs::remove_file(&f.dir).unwrap();
         fs::rename(&original, &f.dir).unwrap();
         let cache = f.open(Limits::default());
         assert!(cache.entries.is_empty());
+    }
+
+    #[test]
+    fn startup_sweep_stays_on_pinned_directory_after_path_swap() {
+        let f = Fixture::new();
+        let mut cache = f.open(Limits::default());
+        let key = key("expired", "source", b"body");
+        cache.insert(key.clone(), b"body", 1000, None).unwrap();
+        let entry_name = format!("{}.entry", key_id(&key).unwrap());
+        drop(cache);
+        private_create(&f.dir.join("crash.stage"))
+            .unwrap()
+            .write_all(b"interrupted staging")
+            .unwrap();
+        f.clock.0.set(1900);
+
+        let original = f.root.join("pinned-cache");
+        let outside = f.root.join("outside-startup");
+        fs::DirBuilder::new().mode(0o700).create(&outside).unwrap();
+        let sentinel = b"outside-startup-sentinel";
+        for name in ["sentinel", "outside.stage", entry_name.as_str()] {
+            private_create(&outside.join(name))
+                .unwrap()
+                .write_all(sentinel)
+                .unwrap();
+        }
+        let cache_path = f.dir.clone();
+        let moved_path = original.clone();
+        let outside_path = outside.clone();
+        let called = Rc::new(Cell::new(false));
+        let hook_called = Rc::clone(&called);
+        BEFORE_STARTUP_SWEEP.with(|slot| {
+            assert!(
+                slot.borrow_mut()
+                    .replace(Box::new(move || {
+                        fs::rename(&cache_path, &moved_path).unwrap();
+                        std::os::unix::fs::symlink(&outside_path, &cache_path).unwrap();
+                        hook_called.set(true);
+                    }))
+                    .is_none()
+            );
+        });
+
+        let cache = f.open(Limits::default());
+        assert!(called.get());
+        assert!(cache.entries.is_empty());
+        assert!(!original.join("crash.stage").exists());
+        assert!(!original.join(&entry_name).exists());
+        for name in ["sentinel", "outside.stage", entry_name.as_str()] {
+            assert_eq!(fs::read(outside.join(name)).unwrap(), sentinel);
+        }
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 3);
     }
 
     #[test]
