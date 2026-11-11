@@ -190,11 +190,8 @@ fn viewer_asi_routes_enforce_admission_and_worker_boundaries() {
                 "Cookie: semon_session=wrong",
             ),
             format!("{headers}Host: evil.test\r\n"),
-            headers
-                .lines()
-                .filter(|line| !line.starts_with("Origin:"))
-                .map(|line| format!("{line}\r\n"))
-                .collect(),
+            format!("{headers}Origin: http://{}\r\n", viewer.address),
+            format!("{headers}Cookie: semon_session={}\r\n", viewer.token),
         ] {
             assert_eq!(viewer.request(method, &path, "{}", &bad).0, 403);
         }
@@ -210,9 +207,29 @@ fn viewer_asi_routes_enforce_admission_and_worker_boundaries() {
     assert_eq!(value["rows"], json!([[42]]));
     assert!(head.contains("Cache-Control: no-store"));
     assert!(head.contains("Referrer-Policy: no-referrer"));
+    // Same-origin browser GET omits Origin. This HTTP regression covers that
+    // admission contract directly; a separate browser regression is unnecessary.
+    let cookie_only = format!("Cookie: semon_session={}\r\n", viewer.token);
     assert_eq!(
-        viewer.request("GET", "/api/asi/schema", "", &headers).0,
+        viewer.request("GET", "/api/asi/schema", "", &cookie_only).0,
         200
+    );
+    assert_eq!(viewer.request("GET", "/api/asi/schema", "", "").0, 403);
+    let foreign = format!("{cookie_only}Origin: http://evil.test\r\n");
+    assert_eq!(
+        viewer.request("GET", "/api/asi/schema", "", &foreign).0,
+        403
+    );
+    assert_eq!(
+        viewer
+            .request(
+                "POST",
+                "/api/asi/sql",
+                "{}",
+                &format!("{cookie_only}Content-Type: application/json\r\n")
+            )
+            .0,
+        403
     );
     let (status, _, value) = viewer.request(
         "POST",

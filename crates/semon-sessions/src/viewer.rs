@@ -555,10 +555,29 @@ fn post_authorized(request: &Request, token: &str, port: u16) -> bool {
         .filter(|h| h.field.equiv("Content-Type"))
         .count()
         == 1
-        && asi_schema_authorized(request, token, port)
+        && post_cookie_authorized(request, token, port)
 }
 
 fn asi_schema_authorized(request: &Request, token: &str, port: u16) -> bool {
+    let headers = request.headers();
+    // Reuse the existing cookie/Host GET admission without its URL bootstrap.
+    // A browser's same-origin GET normally has no Origin header.
+    authorized(request, "", token, port).is_some()
+        && headers.iter().filter(|h| h.field.equiv("Cookie")).count() == 1
+        && headers.iter().filter(|h| h.field.equiv("Origin")).count() <= 1
+        && request_header(request, "Origin").is_none_or(|origin| {
+            request_header(request, "Host").is_some_and(|host| origin == format!("http://{host}"))
+        })
+        && request_header(request, "Cookie").is_some_and(|cookies| {
+            cookies
+                .split(';')
+                .filter_map(|part| part.trim().strip_prefix("semon_session="))
+                .collect::<Vec<_>>()
+                == [token]
+        })
+}
+
+fn post_cookie_authorized(request: &Request, token: &str, port: u16) -> bool {
     let headers = request.headers();
     if ["Host", "Origin", "Cookie"]
         .iter()
@@ -604,14 +623,35 @@ fn asi_reply(result: Result<Value, Value>) -> ViewerReply {
     }
 }
 
+const ASI_BODY_LIMIT: usize = 512 * 1024;
+
+fn asi_body_length(request: &Request) -> Option<usize> {
+    if request
+        .headers()
+        .iter()
+        .any(|h| h.field.equiv("Transfer-Encoding"))
+        || request
+            .headers()
+            .iter()
+            .filter(|h| h.field.equiv("Content-Length"))
+            .count()
+            != 1
+    {
+        return None;
+    }
+    request_header(request, "Content-Length")?
+        .parse::<usize>()
+        .ok()
+        .filter(|length| *length <= ASI_BODY_LIMIT)
+}
+
 impl Viewer {
     fn handle_asi(&self, mut request: Request, path: &str, query: &str) {
         // ASI never accepts the bootstrap credential or data in a URL. The
         // launch page establishes the HttpOnly cookie before API access.
         let schema = path == "/api/asi/schema";
         let auth = if schema && request.method() == &Method::Get {
-            // GET has no Content-Type requirement, but retains exact Host,
-            // Origin and unique-cookie checks used by the POST admission.
+            // GET reuses cookie/Host admission, with an optional same-origin Origin.
             asi_schema_authorized(&request, &self.token, self.port)
         } else {
             request.method() == &Method::Post && post_authorized(&request, &self.token, self.port)
@@ -644,14 +684,17 @@ impl Viewer {
                 value.split(';').next().map(str::trim) != Some("application/json")
             }) {
                 Err(asi_error("invalid_argument", "Expected JSON", "request"))
-            } else {
+            } else if let Some(length) = asi_body_length(&request) {
+                // tiny_http has no request-local socket deadline or non-draining
+                // rejection API. Validate framing before application body I/O;
+                // the shared transport's blocking/draining limits remain separate.
                 let mut bytes = Vec::new();
                 if request
                     .as_reader()
-                    .take(512 * 1024 + 1)
+                    .take(length as u64)
                     .read_to_end(&mut bytes)
                     .is_err()
-                    || bytes.len() > 512 * 1024
+                    || bytes.len() != length
                 {
                     Err(asi_error(
                         "invalid_argument",
@@ -666,6 +709,12 @@ impl Viewer {
                             asi_error("invalid_argument", "Expected JSON object", "request")
                         })
                 }
+            } else {
+                Err(asi_error(
+                    "invalid_argument",
+                    "Expected bounded Content-Length without Transfer-Encoding",
+                    "request",
+                ))
             };
             asi_reply(arguments.and_then(|arguments| {
                 self.asi
@@ -1880,6 +1929,28 @@ mod tests {
         assert!(shell.content_type.starts_with("text/html"));
         drop(work);
         core.close();
+    }
+
+    #[test]
+    fn http_asi_rejects_unbounded_body_framing() {
+        let fixture = Fixture::new();
+        let token = "0123456789abcdef0123456789abcdef";
+        for framing in [
+            String::new(),
+            format!("Content-Length: {}\r\n", ASI_BODY_LIMIT + 1),
+            "Transfer-Encoding: chunked\r\n".into(),
+        ] {
+            // EOF after the headers also keeps this regression independent of
+            // the pre-existing tiny_http blocking drain on a live connection.
+            let wire = http(
+                &fixture,
+                &format!(
+                    "POST /api/asi/sql HTTP/1.1\r\nHost: localhost:PORT\r\nOrigin: http://localhost:PORT\r\nCookie: semon_session={token}\r\nContent-Type: application/json\r\n{framing}\r\n"
+                ),
+            );
+            assert!(wire.starts_with("HTTP/1.1 400"), "{wire}");
+            assert!(wire.contains("Expected bounded Content-Length"));
+        }
     }
 
     #[test]

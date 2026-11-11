@@ -327,9 +327,11 @@ records; cancellation/source changes during a read publish no invalid partial pa
 
   Today the standalone server is loopback-only and authenticates one launch owner
   with its per-run HttpOnly, SameSite=Strict session cookie. ASI does not accept
-  bootstrap tokens in URLs. All four routes require exactly one local Host,
-  matching Origin and session Cookie; POST additionally requires one JSON
-  Content-Type. Exact Origin plus the cookie is the existing POST CSRF admission.
+  bootstrap tokens in URLs. All four routes require exactly one local Host and
+  session Cookie. GET schema reuses authenticated GET admission: Origin may be
+  absent (as on same-origin browser GET), but a present Origin must match and
+  duplicate Origin headers refuse. POST requires exactly one matching Origin and
+  JSON Content-Type. Exact Origin plus the cookie is the existing POST CSRF admission.
   There is no user identity or per-user grant database: the launch owner admits
   only the single origin store/index fixed at startup, never a request-supplied
   machine, namespace, path or executable. No cross-user grant is asserted.
@@ -341,15 +343,25 @@ records; cancellation/source changes during a read publish no invalid partial pa
   JSON POST objects use the inputs above. HTTP schema currently returns the full
   generated reference only (`GET /api/asi/schema`, without arguments). All URL
   parameters are refused, including schema filters and credentials. Request
-  bodies are bounded to 512 KiB. Responses preserve the CLI/MCP JSON result/error
+  bodies require exactly one Content-Length of at most 512 KiB and no
+  Transfer-Encoding; invalid framing refuses before application body reads.
+  This is an application byte bound, not a transport deadline: the existing
+  Viewer constructors use tiny_http's unlimited connection policy, also for the
+  Home POST route. A stalled body can occupy a worker, and rejecting an unread
+  body still invokes tiny_http's draining destructor, which allocates the declared
+  remainder. Its response API discards Connection headers, so a response-side
+  `Connection: close` cannot bypass draining. Fixing those shared transport limits
+  requires a separate server-policy/vendor change; this slice adds neither.
+  Responses preserve the CLI/MCP JSON result/error
   envelope. HTTP status is 200 for success, 403 for failed authentication,
   Host/Origin/CSRF checks or an unsupported unauthenticated method, 405 for an
   authenticated unsupported schema method, 404 for `not_found`, 503 for
   `capability_unavailable`, `store_unavailable`, `store_busy`, `not_materialized`,
   `schema_mismatch` and `body_unavailable`, and 400 for other tool/input errors.
   The server emits no request access log and never logs URLs, query strings or
-  request bodies. All ASI replies, including errors, carry `Cache-Control:
-  no-store` and `Referrer-Policy: no-referrer`. No ASI service worker or shared
+  request bodies. Application-generated ASI replies, including errors, carry
+  `Cache-Control: no-store` and `Referrer-Policy: no-referrer`; tiny_http parser
+  errors and panic-generated replies bypass these application headers. No ASI service worker or shared
   cache is introduced. These routes are also present without `asi-query`, but
   return typed `capability_unavailable` after admission.
 - **Hub:** the same engine over each tenant's analytics. Hub's routes live in the
