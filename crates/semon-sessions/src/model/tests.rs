@@ -9756,10 +9756,39 @@ fn replay(seed: u64) {
     }
 }
 
-#[test]
-fn append_resumed_build_matches_fresh_build_for_seeded_sequences() {
-    for seed in 0..64 {
-        replay(seed);
+// Each seed owns a separate synthetic home and persistent caches. Expose the
+// independent histories to libtest so one serial 64-seed case does not keep
+// the suite running after the other tests have finished. Keep every seed and
+// every append/restart/fresh-build comparison in replay unchanged.
+mod append_resumed_build_matches_fresh_build_for_seeded_sequences {
+    macro_rules! seeds {
+        ($($name:ident: $seed:literal),+ $(,)?) => {
+            $(
+                #[test]
+                fn $name() {
+                    super::replay($seed);
+                }
+            )+
+        };
+    }
+
+    seeds! {
+        seed_00: 0, seed_01: 1, seed_02: 2, seed_03: 3,
+        seed_04: 4, seed_05: 5, seed_06: 6, seed_07: 7,
+        seed_08: 8, seed_09: 9, seed_10: 10, seed_11: 11,
+        seed_12: 12, seed_13: 13, seed_14: 14, seed_15: 15,
+        seed_16: 16, seed_17: 17, seed_18: 18, seed_19: 19,
+        seed_20: 20, seed_21: 21, seed_22: 22, seed_23: 23,
+        seed_24: 24, seed_25: 25, seed_26: 26, seed_27: 27,
+        seed_28: 28, seed_29: 29, seed_30: 30, seed_31: 31,
+        seed_32: 32, seed_33: 33, seed_34: 34, seed_35: 35,
+        seed_36: 36, seed_37: 37, seed_38: 38, seed_39: 39,
+        seed_40: 40, seed_41: 41, seed_42: 42, seed_43: 43,
+        seed_44: 44, seed_45: 45, seed_46: 46, seed_47: 47,
+        seed_48: 48, seed_49: 49, seed_50: 50, seed_51: 51,
+        seed_52: 52, seed_53: 53, seed_54: 54, seed_55: 55,
+        seed_56: 56, seed_57: 57, seed_58: 58, seed_59: 59,
+        seed_60: 60, seed_61: 61, seed_62: 62, seed_63: 63,
     }
 }
 
