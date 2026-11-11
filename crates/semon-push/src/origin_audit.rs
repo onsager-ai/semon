@@ -105,7 +105,7 @@ impl<C: Clock> AuditStore<C> {
                 .create(dir)
                 .map_err(|_| AuditError::Custody)?;
             // Persist the new directory entry as well as its members below.
-            File::open(dir.parent().ok_or(AuditError::Custody)?)
+            File::open(creation_parent(dir)?)
                 .and_then(|f| f.sync_all())
                 .map_err(|_| AuditError::Custody)?;
         }
@@ -329,6 +329,15 @@ impl<C: Clock> AuditStore<C> {
         Ok(())
     }
 }
+fn creation_parent(dir: &Path) -> Result<&Path> {
+    let parent = dir.parent().ok_or(AuditError::Custody)?;
+    Ok(if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    })
+}
+
 fn validate_receipt(active: &Active, range: PermittedRange, bytes: u64) -> Result<()> {
     if active.record.decision != Decision::Granted
         || active.record.purpose != Purpose::StreamRange
@@ -401,6 +410,22 @@ mod tests {
             decision: Decision::Granted,
             destination: Destination::Cli,
         }
+    }
+    #[test]
+    fn relative_creation_parent_resolves_to_current_directory() {
+        assert_eq!(
+            creation_parent(Path::new("body-audit")).unwrap(),
+            Path::new(".")
+        );
+        assert_eq!(
+            creation_parent(Path::new("scope/body-audit")).unwrap(),
+            Path::new("scope")
+        );
+        assert_eq!(
+            creation_parent(Path::new("/scope/body-audit")).unwrap(),
+            Path::new("/scope")
+        );
+        assert!(creation_parent(Path::new("/")).is_err());
     }
     #[test]
     fn durable_bounded_receipts_and_completion_reservation() {
