@@ -199,6 +199,7 @@ fn update_for_batch<C: Clock>(
     }
     let mut checkpoints = BTreeMap::new();
     checkpoints.insert(batch.namespace, batch.checkpoint);
+    let durable_revision = crate::durable::append_export(store, &mut tables)?;
     Ok(Update {
         tables,
         provenance,
@@ -207,7 +208,7 @@ fn update_for_batch<C: Clock>(
         source_missing,
         source_restored: source_restored.into_iter().collect(),
         checkpoints,
-        durable_revision: store.manifest().durable_revision,
+        durable_revision,
         versions,
     })
 }
@@ -408,7 +409,7 @@ fn price_observation_timestamps(row: &Row) -> crate::Result<(i64, i64, Option<i6
     }
 }
 
-fn rows_to_batch(table: &'static Table, rows: &[Row]) -> crate::Result<RecordBatch> {
+pub(crate) fn rows_to_batch(table: &'static Table, rows: &[Row]) -> crate::Result<RecordBatch> {
     let columns: crate::Result<Vec<ArrayRef>> = table
         .columns
         .iter()

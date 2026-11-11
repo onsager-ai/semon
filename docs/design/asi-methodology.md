@@ -91,6 +91,25 @@ intervention (id, lever, hypothesis, primary_metric, guardrails, preregistered_a
 assignment   (intervention_id, unit_type, unit_id, arm, assigned_at)
 ```
 
+Durable implementation notes (#560): every durable table has an author-assigned
+surrogate `id` and an internal writing `revision`. Composite identities remain
+unique: link `(from_type, from_id, change_id, method)`, outcome `change_id`, and
+assignment `(intervention_id, unit_type, unit_id)`. Durable UIDs are `{table}/{id}`.
+The label's `target_id` is stored as `target_uid`. Adjudication additionally stores
+required `target_type`, `target_uid`, `field`, `taxonomy_version` and `created_at`;
+its nonempty label list must all exist and match those four target/taxonomy fields.
+It exports one human assertion to `fact_label`, with ID `adjudication/{id}`, final
+value, `human:<adjudicator>`, null confidence, its timestamp and writing revision.
+Labels export IDs `label/{id}`. Arrays are JSON text; times are UTC milliseconds.
+
+The complete column/class declaration lives in `semon-asi::durable::TABLES`.
+Body columns are `label.mechanism_text`, `adjudication.reason`, `lane.title`,
+`intervention.hypothesis` and `intervention.guardrails`; they remain author-local
+and are read only through focused view. Intervention `lever` and `primary_metric`
+are categorical (not exported by #560). Identity/reference/array/time columns are
+internal; other columns are categorical as declared in that table. See
+[Durable state](asi-store.md#durable-state) for export and ownership details.
+
 Rules:
 1. **Raw events are never modified.** Everything derived can be recomputed when segmentation, rules or prices change.
 2. **Labels are rows, not columns.** Rule, model and human labels for the same target sit side by side, so agreement and calibration are queries.

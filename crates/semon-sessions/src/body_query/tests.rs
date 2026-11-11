@@ -30,14 +30,87 @@ fn insert(index: &Path, text: &str, ordinal: u64) {
 }
 
 fn request(indexes: Vec<PathBuf>, tool: &str, arguments: Value) -> Result<Value, Value> {
-    execute(
+    execute_with_timeout(
         Request {
             indexes,
             tool: tool.into(),
             arguments,
         },
         Access::Origin,
+        Duration::from_secs(30),
     )
+}
+
+#[test]
+fn durable_view_reads_only_bodies_under_one_admitted_namespace() {
+    let (root, index) = fixture('a');
+    let durable = crate::analytics_store_root(&index).unwrap();
+    {
+        let mut writer = semon_asi::durable::Writer::open(&durable).unwrap();
+        writer
+            .insert(
+                "lane",
+                "one",
+                std::collections::BTreeMap::from([
+                    (
+                        "title".into(),
+                        semon_asi::durable::Value::Text("untrusted lane title".into()),
+                    ),
+                    (
+                        "work_item_id".into(),
+                        semon_asi::durable::Value::Text("hidden reference".into()),
+                    ),
+                ]),
+            )
+            .unwrap();
+        writer
+            .insert(
+                "intervention",
+                "one",
+                std::collections::BTreeMap::from([
+                    (
+                        "hypothesis".into(),
+                        semon_asi::durable::Value::Text("private hypothesis".into()),
+                    ),
+                    (
+                        "guardrails".into(),
+                        semon_asi::durable::Value::Text("private guardrails".into()),
+                    ),
+                ]),
+            )
+            .unwrap();
+    }
+    let result = request(vec![index.clone()], "view", json!({"uid":"lane/one"})).unwrap();
+    assert_eq!(
+        result["bodies"][0]["text"]["untrusted_text"],
+        "untrusted lane title"
+    );
+    assert_eq!(
+        result["bodies"][0]["namespace"],
+        format!("origin-{}", "a".repeat(64))
+    );
+    assert!(!result.to_string().contains("hidden reference"));
+    assert_eq!(
+        request(
+            vec![index.clone()],
+            "view",
+            json!({"uid":"intervention/one"})
+        )
+        .unwrap()["bodies"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(
+        request(
+            vec![index.clone(), index],
+            "view",
+            json!({"uid":"lane/one"})
+        )
+        .is_err()
+    );
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
@@ -409,11 +482,17 @@ fn time_filters_use_inclusive_utc_milliseconds() {
 fn expired_deadline_returns_no_partial_rows() {
     let (root, index) = fixture('a');
     insert(&index, "needle", 0);
-    let deadline = Instant::now();
-    let index = open(&index, Instant::now() + Duration::from_secs(2)).unwrap();
-    let query: Search = serde_json::from_value(json!({"query":"needle"})).unwrap();
     assert_eq!(
-        search(&[index], query, deadline).unwrap_err()["error"]["code"],
+        execute_with_timeout(
+            Request {
+                indexes: vec![index],
+                tool: "search".into(),
+                arguments: json!({"query":"needle"}),
+            },
+            Access::Origin,
+            Duration::ZERO,
+        )
+        .unwrap_err()["error"]["code"],
         "query_timeout"
     );
     std::fs::remove_dir_all(root).unwrap();

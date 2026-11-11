@@ -230,9 +230,12 @@ still tokenizes paths, and Hub never receives bodies.
 The current local result is `{"bodies":[…],"truncated":false,"data_notice":…}`.
 Each body carries the same full identity fields as a search hit and
 `text: {"untrusted_text": "…"}`. Local results are capped at 256 KiB and each body
-at 65,536 characters, with explicit `truncated`. The ASI durable store (#560) does
-not exist yet: `label/`, `adjudication/`, `lane/` and `intervention/` targets return
-`not_found` with `detail: durable_not_implemented`. They are never resolved through
+at 65,536 characters, with explicit `truncated`. Durable `label/`,
+`adjudication/`, `lane/` and `intervention/` targets read author-local body fields
+from `asi-durable.sqlite3` read-only. They require exactly one admitted origin
+namespace and no `part` filter. Each returned field carries its durable `body_uid`,
+namespace, field name and `text: {"untrusted_text": "…"}`. Missing rows return
+`not_found`; unsupported durable formats refuse. They are never resolved through
 SQL or unrelated annotation stores.
 
 Remote view is an origin-rendered, bounded **typed** transcript page or field,
@@ -285,7 +288,7 @@ records; cancellation/source changes during a read publish no invalid partial pa
 | `capability_unavailable` | Remote search before federated coverage/audit, or search/view on Hub |
 | `body_unavailable` | Remote view cannot supply evidence; closed reason distinguishes retryable `origin_offline` from permanent `source_missing` |
 | `stale_generation` | Requested source, activity, transcript or export-view generation no longer matches |
-| `not_found` | Unknown UID in `view`, including durable targets pending #560 |
+| `not_found` | Unknown UID in `view`, including missing durable rows |
 | `not_materialized` | Origin search/view before the first analytics materialization creates its namespace |
 
 ## Prompt-injection safety
