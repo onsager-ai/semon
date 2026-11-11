@@ -9,6 +9,12 @@ retain their metadata and source mappings; their lifecycle changes atomically
 with the collection generation. Native event-cache ledgers can retire without
 removing the original catalog provenance or versioned transcript recipes.
 
+Catalog, recipes and retained proof metadata do not store message/tool text.
+The separate origin-local `body`/`body_fts` projection does store supported
+native message/tool content for ASI search and focused view. It has the same
+custody as native logs and never enters analytics or the Hub; retained provenance
+does not grant authority over that content.
+
 Lifecycle describes the read projection. It does not establish or revoke
 credential custody, runtime ownership, harness authorization or current native
 selection. Exact Current identity may use qualified retained metadata when

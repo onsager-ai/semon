@@ -1310,7 +1310,7 @@ fn strings(value: &Value, path: String, output: &mut Vec<(String, String)>) {
 }
 
 #[test]
-fn planted_secrets_never_reach_the_cache_and_reach_native_query_only_as_their_session() {
+fn planted_secrets_stay_in_owned_bodies_and_reach_native_query_only_as_their_session() {
     let fixture = model_home();
     write_model_home(&fixture, true);
     write_more_secrets(&fixture);
@@ -1342,18 +1342,65 @@ fn planted_secrets_never_reach_the_cache_and_reach_native_query_only_as_their_se
         json!({"sessions": sessions, "handoffs": handoffs.into_values().collect::<Vec<_>>()});
     let nodes = collect(&fixture.options, "").unwrap();
     let cache = fixture.tree_metadata();
-    // The event index's bytes, and its WAL's if it has one: a secret stored
-    // in any row would show here as plain UTF-8.
-    let index = fixture.options.cache.with_extension("sqlite3");
-    let mut events = String::from_utf8_lossy(&fs::read(&index).unwrap()).into_owned();
-    if let Ok(wal) = fs::read(index.with_extension("sqlite3-wal")) {
-        events.push_str(&String::from_utf8_lossy(&wal));
+    // Origin-local body/FTS rows may retain supported native content under
+    // its physical session owner. Every other index table and all tree views
+    // remain metadata-only. Read one SQLite snapshot, including committed WAL
+    // content, and enumerate tables so new metadata tables cannot escape checks.
+    let index = rusqlite::Connection::open_with_flags(
+        fixture.options.cache.with_extension("sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    index.execute_batch("BEGIN").unwrap();
+    let tables = index
+        .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut metadata = String::new();
+    let mut all_rows = String::new();
+    for table in tables {
+        let body_table = table == "body"
+            || table == "body_source"
+            || table == "body_fts"
+            || table.starts_with("body_fts_");
+        let mut statement = index
+            .prepare(&format!("SELECT * FROM \"{}\"", table.replace('"', "\"\"")))
+            .unwrap();
+        let columns = statement.column_count();
+        let mut rows = statement.query([]).unwrap();
+        while let Some(row) = rows.next().unwrap() {
+            for column in 0..columns {
+                let value = row.get_ref(column).unwrap();
+                let text = match value {
+                    rusqlite::types::ValueRef::Text(bytes)
+                    | rusqlite::types::ValueRef::Blob(bytes) => {
+                        String::from_utf8_lossy(bytes).into_owned()
+                    }
+                    value => format!("{value:?}"),
+                };
+                all_rows.push_str(&text);
+                all_rows.push('\n');
+                if !body_table {
+                    metadata.push_str(&text);
+                    metadata.push('\n');
+                }
+            }
+        }
     }
     assert!(
-        events.contains("harbor"),
-        "the event index holds the fixture's files"
+        metadata.contains("harbor"),
+        "the index holds the fixture's files"
     );
-    // label -> a session the handoff carrying it must touch; None: never shown.
+    let invalid_parts: i64 = index.query_row(
+        "SELECT count(*) FROM body WHERE part NOT IN ('user','assistant','command','tool_output','error')",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(invalid_parts, 0);
+    // label -> a session the handoff carrying it must touch; None: never shown
+    // by Native Query (supported body parts are checked independently below).
     let owners: [(&str, Option<&str>); 22] = [
         ("ASK", Some("harbor")),
         ("BRIEF", Some("harbor")),
@@ -1382,11 +1429,58 @@ fn planted_secrets_never_reach_the_cache_and_reach_native_query_only_as_their_se
         let secret = format!("SECRET_{label}_42");
         for (name, output) in [
             ("native tree metadata", &cache),
-            ("event cache", &events),
+            ("event index metadata", &metadata),
             ("tree text", &render_text(&nodes)),
             ("tree json", &render_json(&nodes)),
         ] {
             assert!(!output.contains(&secret), "{secret} in the {name}");
+        }
+    }
+    for (label, _) in owners {
+        let secret = format!("SECRET_{label}_42");
+        let expected = match label {
+            "ASK" => Some(("claude/harbor", "user")),
+            "TEXT" => Some(("claude/harbor", "assistant")),
+            "BRIEF" | "RELAY" | "INPUT" => Some(("claude/harbor", "command")),
+            "OUTPUT" => Some(("claude/harbor", "tool_output")),
+            "TN_RESULT" | "BODY" => Some(("claude/tasks", "user")),
+            "QUESTION" | "LABEL" | "UNCHOSEN" => Some(("claude/tasks", "command")),
+            "SUBAGENT_HANDBACK" => Some(("claude/a-sh", "command")),
+            "CODEX_BRIEF" => Some(("codex/codex-secret", "user")),
+            "CODEX_RESULT" => Some(("codex/codex-secret", "assistant")),
+            "CODEX_ARGS" => Some(("codex/codex-secret", "command")),
+            "CODEX_OUTPUT" => Some(("codex/codex-secret", "tool_output")),
+            _ => None,
+        };
+        let bodies = index.prepare("SELECT session_uid,part,ord,text FROM body WHERE instr(text,?1)>0 ORDER BY body_uid").unwrap()
+            .query_map([&secret], |row| Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?,row.get::<_, i64>(2)?,row.get::<_, String>(3)?))).unwrap()
+            .collect::<Result<Vec<_>, _>>().unwrap();
+        if let Some((session, part)) = expected {
+            assert_eq!(bodies.len(), 1, "{label}: {bodies:?}");
+            assert_eq!((&*bodies[0].0, &*bodies[0].1), (session, part), "{label}");
+            // These labels stay absent from Native Query below, but their
+            // exact supported native body parts belong in origin-local FTS.
+            let exact = match label {
+                "TEXT" => Some((1_048_576, "Running them SECRET_TEXT_42")),
+                "INPUT" => Some((1_048_577, "{\"command\":\"cargo test SECRET_INPUT_42\"}")),
+                "OUTPUT" => Some((2_097_152, "test result: ok SECRET_OUTPUT_42")),
+                "UNCHOSEN" => Some((
+                    6_291_456,
+                    "{\"questions\":[{\"question\":\"Pick SECRET_QUESTION_42?\",\"header\":\"h\",\"multiSelect\":false,\"options\":[{\"label\":\"SECRET_LABEL_42\",\"description\":\"d\"},{\"label\":\"SECRET_UNCHOSEN_42\",\"description\":\"d\"}]}]}",
+                )),
+                "CODEX_ARGS" => Some((2_097_152, "{\"command\":\"echo SECRET_CODEX_ARGS_42\"}")),
+                "CODEX_OUTPUT" => Some((3_145_728, "SECRET_CODEX_OUTPUT_42")),
+                _ => None,
+            };
+            if let Some((ord, text)) = exact {
+                assert_eq!((bodies[0].2, bodies[0].3.as_str()), (ord, text), "{label}");
+            }
+        } else {
+            assert!(bodies.is_empty(), "{label}: {bodies:?}");
+            assert!(
+                !all_rows.contains(&secret),
+                "{secret} anywhere in the index"
+            );
         }
     }
     // Native Query exposes selected handoff content and its owning session's

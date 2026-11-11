@@ -39,8 +39,10 @@ changing Semon-owned contracts or reviewing compatibility code.
 
 - Preserve native session identity, lineage and provenance semantics. An identity
   change must update the relevant fixtures and documented contract together.
-- Native logs and archives may contain private data. Preserve source integrity,
-  authorization and custody; deletion remains an explicit operator action.
+- Native logs, archives and origin-local body/FTS index rows may contain private
+  message/tool text. Preserve source integrity, authorization and custody; body
+  text never enters analytics or the Hub. Metadata projections remain separate.
+  Deletion remains an explicit operator action.
 - Preserve native session/control parser behavior and sanitized harness fixtures.
 - Vendored tiny_http remains governed by vendor/tiny_http/SEMON-PATCH.md.
 - Viewer UI sources live in ui/src/; generated bundles embedded by Rust are

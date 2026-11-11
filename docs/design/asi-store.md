@@ -184,7 +184,10 @@ transfer. It runs per namespace and supplies:
   display fields. Repository dependencies use the effective native working
   directory, including a subagent sidecar's `worktreePath`.
 - **Bodies for FTS5** (#567): `body` and its external-content `body_fts` live only
-  in the origin-local index. Stored UID columns are namespace-relative (beginning
+  in the origin-local index. These rows and FTS postings contain private native
+  message/tool text and have the same custody as native logs; they never enter
+  analytics or the Hub. Metadata tables remain free of message/tool content.
+  Stored UID columns are namespace-relative (beginning
   with `{harness}/{native_session_id}`); search/view prefix the validated
   `analytics-namespace` at read time and accept full UIDs. Namespace creation stays
   exclusively in `analytics materialize`. `body_source` records source ownership

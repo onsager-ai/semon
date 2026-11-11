@@ -8,6 +8,12 @@ by the focused catalog. It provides no authorization grant or raw HTTP route.
 The host selects the authorized machine and source generation; Semon retains
 native record and transcript rendering rules.
 
+ASI search and focused body view also persist supported message/tool text in the
+origin-local Event Index's `body`/`body_fts` projection. That projection has the
+same custody as native logs, never enters analytics or the Hub, and grants no
+additional source-reader authority. Catalog, recipes and proof metadata remain
+separate from body text.
+
 ```rust,ignore
 fn read_range(
     &self,
