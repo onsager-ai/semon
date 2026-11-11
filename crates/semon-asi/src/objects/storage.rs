@@ -72,7 +72,7 @@ fn read(mut file: File) -> Result<Vec<u8>> {
 /// Linux descriptor-relative operations refuse symlinks in every root component.
 pub struct ObjectStore {
     dir: File,
-    _lock: File,
+    _lock: crate::store::LockGuard,
     scope: Scope,
     key: String,
     quota: u64,
@@ -137,10 +137,9 @@ impl ObjectStore {
         if !io(lock.metadata())?.is_file() {
             return Err(Failure::Storage);
         }
-        // SAFETY: lock remains owned for the store lifetime. Never unlink it.
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            return Err(Failure::Storage);
-        }
+        // Never unlink the lock inode; explicitly unlock even if a forked child
+        // temporarily retains a duplicate of this open file description.
+        let lock = crate::store::LockGuard::acquire(lock, true).map_err(|_| Failure::Storage)?;
         let store = Self {
             dir,
             _lock: lock,
@@ -476,6 +475,20 @@ mod tests {
             publisher: "publisher".into(),
             namespace: "origin".into(),
         }
+    }
+    #[test]
+    fn scope_lock_releases_while_inherited_descriptor_remains_open() {
+        let root = tempfile::tempdir().unwrap();
+        crate::store::INHERITED_LOCKS.with(|capture| *capture.borrow_mut() = Some(Vec::new()));
+        let store = ObjectStore::open(root.path(), scope(), MAX_BYTES).unwrap();
+        let inherited =
+            crate::store::INHERITED_LOCKS.with(|capture| capture.borrow_mut().take().unwrap());
+        assert_eq!(inherited.len(), 1);
+        assert!(ObjectStore::open(root.path(), scope(), MAX_BYTES).is_err());
+        drop(store);
+        let reopened = ObjectStore::open(root.path(), scope(), MAX_BYTES).unwrap();
+        drop(reopened);
+        drop(inherited);
     }
     #[test]
     fn stages_quota_recovery_scope_and_immutable_install() {
