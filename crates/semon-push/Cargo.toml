@@ -7,6 +7,10 @@ publish = false
 description = "The mirror protocol: the client that sends the session logs' input files, redacted, and the machine's facts to a receiver, and a reference receiver."
 
 [dependencies]
+chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
+getrandom.workspace = true
+libc.workspace = true
+zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
 hex.workspace = true
 httpdate = "1.0"
 reqwest.workspace = true
