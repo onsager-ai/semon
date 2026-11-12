@@ -596,8 +596,10 @@ impl<C: Clock> BodyCache<C> {
                     && key.origin_incarnation == scope.origin_incarnation
             })
         };
-        // Clock bookkeeping belongs to receiver-wide custody only.
-        let fixed = if scope.is_none() { 2 * STATE_BYTES } else { 0 };
+        // Both total budgets reserve the two clock records that coexist during
+        // atomic replacement. Scope limits change the entries counted and the
+        // eligible victims, not the minimum footprint required for an insertion.
+        let fixed = 2 * STATE_BYTES;
         if staged.saturating_add(fixed) > limits.global_bytes || staged > limits.source_bytes {
             return Err(CacheError::ResourceLimit);
         }
@@ -1399,11 +1401,24 @@ mod tests {
         );
         assert!(cache.entries.contains_key(&b_id));
         assert_eq!(fs::read(&b_path).unwrap(), b_record);
+        let size = cache.entries[&a_id].bytes;
+        // A budget that fits ciphertext but not its bookkeeping reserve must
+        // refuse before evicting either A's existing entry or B's custody.
+        let missing_reserve = Limits {
+            global_bytes: size + 2 * STATE_BYTES - 1,
+            ..Limits::default()
+        };
+        assert_eq!(
+            cache.insert(a.clone(), b"body", 1000, Some(missing_reserve)),
+            Err(CacheError::ResourceLimit)
+        );
+        assert!(cache.entries.contains_key(&a_id));
+        assert!(cache.entries.contains_key(&b_id));
+        assert_eq!(fs::read(&b_path).unwrap(), b_record);
         // A's insertion evicts A's old entry under both scoped total/source
         // ceilings, even though B shares the same native source identifier.
-        let size = cache.entries[&a_id].bytes;
         let narrow = Limits {
-            global_bytes: size + 128,
+            global_bytes: size + 2 * STATE_BYTES + 128,
             source_bytes: size + 128,
             ..Limits::default()
         };
