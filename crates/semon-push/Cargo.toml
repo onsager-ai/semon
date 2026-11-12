@@ -15,6 +15,10 @@ hex.workspace = true
 httpdate = "1.0"
 reqwest.workspace = true
 ring = "=0.17.14"
+rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "crypto", "zeroize"] }
+# rcgen's own transitive types are used only by client_ca for time and DER reading.
+time = { version = "=0.3.55", default-features = false }
+yasna = { version = "=0.6.0", features = ["std", "time"] }
 webpki-roots = { version = "=1.0.9", default-features = false }
 # Already built for reqwest (same version and features); used directly for
 # `semon receive`'s TLS listener and its token randomness.

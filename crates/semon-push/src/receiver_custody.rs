@@ -22,6 +22,10 @@ use zeroize::Zeroizing;
 pub const IDENTITY: &str = "receiver.json";
 pub const SECRETS: &str = "issuer-secrets";
 pub const CACHE_SECRETS: &str = "cache-secrets";
+pub const CLIENT_CA_SECRETS: &str = "client-ca-secrets";
+pub const CLIENT_CA_KEY: &str = "client-ca.pk8";
+pub const CLIENT_CA_CERTIFICATE: &str = "client-ca.der";
+pub const CLIENT_TRUST: &str = "client-trust.pem";
 pub const CACHE: &str = "body-cache";
 pub const AUDIT: &str = "receiver-audit";
 pub const ACL: &str = "acl";
@@ -33,6 +37,7 @@ pub enum Error {
     Custody,
     Invalid,
     Incomplete,
+    PredatesClientCertificates,
     InUse,
     Conflict,
     Random,
@@ -47,6 +52,7 @@ impl fmt::Display for Error {
             Self::Incomplete => {
                 "incomplete receiver initialization; preserve custody for explicit recovery"
             }
+            Self::PredatesClientCertificates => "receiver custody predates client certificates; initialize a fresh receiver directory",
             Self::InUse => "receiver custody locked",
             Self::Conflict => "owner grants conflict",
             Self::Random => "system random source failed",
@@ -64,6 +70,8 @@ struct Identity {
     format: u32,
     receiver_id: String,
     issuer_key_id: String,
+    client_ca_created: u64,
+    client_ca_sha256: String,
 }
 
 /// Contains public identity and paths only; seeds are loaded into zeroizing memory.
@@ -190,6 +198,22 @@ impl ReceiverCustody {
         before_identity: impl FnOnce() -> Result<()>,
         locked: impl FnOnce(&File),
     ) -> Result<Self> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Error::Invalid)?
+            .as_secs();
+        Self::open_with_clock(dir, before_identity, locked, now)
+    }
+    #[cfg(test)]
+    pub(crate) fn open_at(dir: &Path, now: u64) -> Result<Self> {
+        Self::open_with_clock(dir, || Ok(()), |_| {}, now)
+    }
+    fn open_with_clock(
+        dir: &Path,
+        before_identity: impl FnOnce() -> Result<()>,
+        locked: impl FnOnce(&File),
+        now: u64,
+    ) -> Result<Self> {
         if !dir.try_exists().map_err(|_| Error::Custody)? {
             fs::DirBuilder::new()
                 .mode(0o700)
@@ -214,6 +238,17 @@ impl ReceiverCustody {
             {
                 return Err(Error::Incomplete);
             }
+            let client_ca_secrets = root.create_child(CLIENT_CA_SECRETS)?;
+            let client_ca_created = now;
+            let (client_ca_key, client_ca_certificate) =
+                crate::client_ca::generate(client_ca_created).map_err(|_| Error::Random)?;
+            client_ca_secrets.create(CLIENT_CA_KEY, &client_ca_key)?;
+            root.create(CLIENT_CA_CERTIFICATE, &client_ca_certificate)?;
+            root.publish(
+                CLIENT_TRUST,
+                &crate::client_ca::pem(&client_ca_certificate),
+                false,
+            )?;
             let secrets = root.create_child(SECRETS)?;
             let cache_secrets = root.create_child(CACHE_SECRETS)?;
             root.create_child(CACHE)?;
@@ -250,6 +285,8 @@ impl ReceiverCustody {
                     format: 1,
                     receiver_id: enrollment::random_id().map_err(|_| Error::Random)?,
                     issuer_key_id: key_id,
+                    client_ca_created,
+                    client_ca_sha256: crate::wire::sha256_hex(&client_ca_certificate),
                 })?,
                 false,
             )?;
@@ -257,7 +294,28 @@ impl ReceiverCustody {
         Self::load(dir, &root)
     }
     fn load(dir: &Path, root: &Directory) -> Result<Self> {
+        if !root.exists(CLIENT_CA_SECRETS)? || !root.exists(CLIENT_CA_CERTIFICATE)? {
+            return Err(Error::PredatesClientCertificates);
+        }
         let identity: Identity = decode(&root.read(IDENTITY)?)?;
+        let certificate = root.read(CLIENT_CA_CERTIFICATE)?;
+        if crate::wire::sha256_hex(&certificate) != identity.client_ca_sha256
+            || root.read(CLIENT_TRUST)? != crate::client_ca::pem(&certificate)
+        {
+            return Err(Error::Invalid);
+        }
+        let ca_secrets = root.child(CLIENT_CA_SECRETS)?;
+        if ca_secrets
+            .cache
+            .names()
+            .map_err(|_| Error::Custody)?
+            .iter()
+            .any(|name| name != Path::new(CLIENT_CA_KEY))
+        {
+            return Err(Error::Invalid);
+        }
+        let private = Zeroizing::new(ca_secrets.read(CLIENT_CA_KEY)?);
+        crate::client_ca::validate_ca(&private, &certificate).map_err(|_| Error::Invalid)?;
         if identity.format != 1
             || !opaque(&identity.receiver_id, 64)
             || !opaque(&identity.issuer_key_id, 32)
@@ -309,6 +367,32 @@ impl ReceiverCustody {
             identity,
             owner: Owner::authenticated(),
         })
+    }
+    pub(crate) fn issue_client_certificate(
+        &self,
+        public: &[u8],
+        enrollment: &str,
+        now: u64,
+        until: u64,
+    ) -> Result<Vec<u8>> {
+        let root = Directory::open(&self.dir)?;
+        let private = Zeroizing::new(root.child(CLIENT_CA_SECRETS)?.read(CLIENT_CA_KEY)?);
+        let certificate = root.read(CLIENT_CA_CERTIFICATE)?;
+        if crate::wire::sha256_hex(&certificate) != self.identity.client_ca_sha256
+            || root.read(CLIENT_TRUST)? != crate::client_ca::pem(&certificate)
+        {
+            return Err(Error::Invalid);
+        }
+        crate::client_ca::validate_ca(&private, &certificate).map_err(|_| Error::Invalid)?;
+        crate::client_ca::issue(
+            &private,
+            self.identity.client_ca_created,
+            public,
+            enrollment,
+            now,
+            until,
+        )
+        .map_err(|_| Error::Invalid)
     }
     pub fn receiver_id(&self) -> &str {
         &self.identity.receiver_id

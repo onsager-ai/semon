@@ -40,6 +40,7 @@ impl Fixture {
                 version: 1,
                 enrollment_id: "enrollment".into(),
                 credentials: vec![(Kind::MirrorPush, "secret-origin-bearer".into())],
+                client_certificate: None,
             },
             private.as_ref(),
             sources,
@@ -93,6 +94,120 @@ fn atomic_custody_integrity_permissions_and_secret_debug() {
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
     assert!(load(&f.0, None).is_err());
 }
+#[test]
+fn invalid_client_certificate_never_publishes_origin_custody() {
+    let now = 1_800_000_000;
+    let key = rcgen::KeyPair::generate().unwrap();
+    let other = rcgen::KeyPair::generate().unwrap();
+    let (ca, _) = crate::client_ca::generate(now).unwrap();
+    let until = now + 3600;
+    let scope = ActivationInput {
+        receiver_id: "receiver".into(),
+        machine: "laptop".into(),
+        binding: Binding::Inapplicable,
+        kinds: vec![(Kind::MirrorPush, true)],
+        client_certificate_pins: vec![crate::client_ca::pin(key.public_key_raw()).unwrap()],
+        valid_until: until,
+    };
+    let mut missing_eku = rcgen::CertificateParams::default();
+    missing_eku.not_before = time::OffsetDateTime::from_unix_timestamp(now as i64 - 300).unwrap();
+    missing_eku.not_after = time::OffsetDateTime::from_unix_timestamp(until as i64).unwrap();
+    missing_eku.is_ca = rcgen::IsCa::ExplicitNoCa;
+    let missing_eku = missing_eku.self_signed(&key).unwrap().der().to_vec();
+    for certificate in [
+        crate::client_ca::issue(&ca, now, other.public_key_raw(), "enrollment", now, until)
+            .unwrap(),
+        crate::client_ca::issue(&ca, now, key.public_key_raw(), "enrollment", now, until + 1)
+            .unwrap(),
+        missing_eku,
+    ] {
+        let f = Fixture::new();
+        let delivery = Activated {
+            version: 1,
+            enrollment_id: "enrollment".into(),
+            credentials: vec![(Kind::MirrorPush, "secret".into())],
+            client_certificate: Some(crate::provision_wire::encode(&certificate)),
+        };
+        assert!(
+            install(
+                &f.0,
+                "https://receiver.example:443",
+                "laptop",
+                &scope,
+                &delivery,
+                &key.serialize_der(),
+                &[]
+            )
+            .is_err()
+        );
+        assert!(!f.0.exists());
+    }
+}
+
+#[test]
+fn certificate_clock_refuses_future_install_and_expired_load() {
+    let now = 1_800_000_000;
+    let key = rcgen::KeyPair::generate().unwrap();
+    let (ca, _) = crate::client_ca::generate(now).unwrap();
+    let until = now + 3600;
+    let certificate =
+        crate::client_ca::issue(&ca, now, key.public_key_raw(), "enrollment", now, until).unwrap();
+    let scope = ActivationInput {
+        receiver_id: "receiver".into(),
+        machine: "laptop".into(),
+        binding: Binding::Inapplicable,
+        kinds: vec![(Kind::MirrorPush, true)],
+        client_certificate_pins: vec![crate::client_ca::pin(key.public_key_raw()).unwrap()],
+        valid_until: until,
+    };
+    let delivery = Activated {
+        version: 1,
+        enrollment_id: "enrollment".into(),
+        credentials: vec![(Kind::MirrorPush, "secret".into())],
+        client_certificate: Some(crate::provision_wire::encode(&certificate)),
+    };
+    let f = Fixture::new();
+    assert!(
+        install_at(
+            &f.0,
+            "https://receiver.example:443",
+            "laptop",
+            &scope,
+            &delivery,
+            &key.serialize_der(),
+            &[],
+            now - 601
+        )
+        .unwrap_err()
+        .contains("not yet valid")
+    );
+    assert!(!f.0.exists());
+    let name = install_at(
+        &f.0,
+        "https://receiver.example:443",
+        "laptop",
+        &scope,
+        &delivery,
+        &key.serialize_der(),
+        &[],
+        now,
+    )
+    .unwrap();
+    assert!(
+        load_at(&f.0, Some(&name), until)
+            .err()
+            .unwrap()
+            .contains("expired")
+    );
+    assert!(
+        load_at(&f.0, Some(&name), now - 601)
+            .err()
+            .unwrap()
+            .contains("not yet valid")
+    );
+    assert!(load_at(&f.0, Some(&name), now).is_ok());
+}
+
 #[test]
 fn staged_credentials_are_never_a_half_installed_enrollment() {
     let f = Fixture::new();

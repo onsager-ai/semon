@@ -30,7 +30,7 @@ pub fn producer_admission(kinds: &[Kind], state_dir: &std::path::Path) -> Result
         .map_err(|error| error.to_string())?;
         // This revision has no enrollment-supplied expected binding. Admission
         // retains ownership until the still-closed activation gate refuses.
-        return Err("analytics/body enrollment available after producer admission / client-certificate issuance lands".into());
+        return Err("analytics/body enrollment available after producer admission and activation integration lands".into());
     }
     Ok(())
 }
@@ -42,6 +42,9 @@ pub trait Terminal {
     fn approve(&mut self, receiver: &str, receiver_id: &str, machine: &str) -> Result<bool>;
     /// Exact currently discovered native files approved in the summary.
     fn sources(&self) -> Vec<std::path::PathBuf>;
+    fn require_client_certificate(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) struct Connection {
@@ -306,8 +309,15 @@ pub(crate) fn connect_with(
         receiver_id: opened.receiver_id.clone(),
         machine: machine.into(),
         binding: Binding::Inapplicable,
-        kinds: vec![(Kind::MirrorPush, false)],
-        client_certificate_pins: vec![],
+        kinds: vec![(Kind::MirrorPush, terminal.require_client_certificate())],
+        client_certificate_pins: if terminal.require_client_certificate() {
+            vec![
+                crate::client_ca::pin(key.public_key().as_ref())
+                    .map_err(|_| "invalid origin public key")?,
+            ]
+        } else {
+            vec![]
+        },
         valid_until: now().saturating_add(wire::INITIAL_CREDENTIAL_VALIDITY_SECONDS),
     };
     let mut nonce = [0; 32];
@@ -405,7 +415,7 @@ pub(crate) fn connect_with(
     {
         return Err("invalid delivered credential kinds".into());
     }
-    crate::origin_custody::install(
+    crate::origin_custody::install_at(
         custody,
         endpoint,
         machine,
@@ -413,6 +423,7 @@ pub(crate) fn connect_with(
         &delivery,
         &private,
         &terminal.sources(),
+        now(),
     )
 }
 
@@ -466,7 +477,7 @@ mod deadline_tests {
         for kind in [Kind::AnalyticsPublish, Kind::BodyChannel] {
             assert_eq!(
                 producer_admission(&[kind], &state).unwrap_err(),
-                "analytics/body enrollment available after producer admission / client-certificate issuance lands"
+                "analytics/body enrollment available after producer admission and activation integration lands"
             );
         }
         assert!(

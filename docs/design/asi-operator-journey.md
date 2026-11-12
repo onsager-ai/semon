@@ -129,6 +129,11 @@ and downstream integrations remain separate work.
 
 Current mirror-only PR3.2c implementation uses the reviewed public_tls code
 profile in [ASI enrollment](asi-enrollment.md#public_tls-provisioning-wire-contract):
+Receiver enrollment generates the client-issuing CA and exact `client-trust.pem`;
+operators do not hand-edit a trust bundle. Mirror origins can request
+`connect --require-client-certificate`; certificate installation and presentation
+are automatic within the approved enrollment.
+
 B1 authorizes `receive enroll`, B2 runs `connect --to URL [--machine NAME]`, B3
 enters its short code through a non-echoing controlling terminal, and B4 approves
 one receiver identity/endpoint, mirror_push scope and selected current-file list.

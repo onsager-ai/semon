@@ -132,6 +132,7 @@ pub struct Activated {
     pub version: u32,
     pub enrollment_id: String,
     pub credentials: Vec<(crate::credentials::Kind, String)>,
+    pub client_certificate: Option<String>,
 }
 impl Drop for Activated {
     fn drop(&mut self) {
