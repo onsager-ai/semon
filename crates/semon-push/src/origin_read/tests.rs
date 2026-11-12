@@ -114,6 +114,7 @@ fn source() -> ResolvedSource {
         cohort: vec![SourceWitness {
             source_id: "source".into(),
             chain: "chain".into(),
+            prefix_sha256: "a".repeat(64),
             generation: "generation".into(),
             consumed_boundary: 900,
         }],

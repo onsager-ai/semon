@@ -4,7 +4,9 @@
 
 #[path = "analytics_initialize.rs"]
 mod initialize;
-pub use initialize::{Binding, Disposition, Error, ErrorKind, Initialized, Stage, initialize};
+pub use initialize::{
+    Binding, Disposition, Error, ErrorKind, Initialized, Stage, initialize, read_binding,
+};
 
 use std::{
     collections::{BTreeMap, BTreeSet},

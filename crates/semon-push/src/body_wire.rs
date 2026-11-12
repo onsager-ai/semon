@@ -363,6 +363,14 @@ pub(crate) fn validate_key(key: &CacheKey) -> Result<()> {
         Identifier::try_from(id.clone()).map_err(|_| Reason::InvalidRequest)?;
     }
     for (i, source) in key.cohort.iter().enumerate() {
+        if source.prefix_sha256.len() != 64
+            || !source
+                .prefix_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(Reason::InvalidRequest);
+        }
         for id in [&source.source_id, &source.chain, &source.generation] {
             OpaqueId::new(id).map_err(|_| Reason::InvalidRequest)?;
         }
