@@ -247,6 +247,26 @@ files with functioning access. First-run precise grant inputs are pending until
 an enrollment has an approved scope and atomic activation; no early active grant.
 Later enrollments reuse receiver identity, owner, keys and directories.
 
+Implementation status (slice 4a PR3.2a, part of #593): `receiver_custody`
+is an unwired Unix library. Under `DIR`, mode-0700 directories are `enrollment/`
+(existing registry format 1), `secrets/`, `body-cache/`, `acl/` and
+`receiver-audit/`. Mode-0600 files are `receiver.json` (strict JSON format 1:
+random receiver ID and current issuer key ID), `custody.lock`,
+`secrets/issuer-<key-id>.seed` (raw 32-byte Ed25519 seed),
+`secrets/cache-master.key` (independent raw 32-byte key), `acl/grants.json`
+(existing ACL JSON format 1), `acl/owners.json` (strict JSON format 1 enrollment
+ownership and durable pending ACL transaction), and `acl/owners.lock`.
+Issuer IDs are the first 16 bytes of SHA-256 over
+`semon/receiver-assertion-issuer/v1\0` followed by the public key, lowercase hex.
+The cache and its key have distinct parent directories; backup exclusions still
+require operator attestation. Receiver identity is published last; partial initial
+custody refuses without replacing secrets. Owner identity and opaque audit mapping
+are domain-separated SHA-256 of the authenticated effective UID. Audit journal/lock
+creation remains owned by `receiver_audit`. PR3.2b wires provisioning, activation/
+revocation grant calls, CLI, origin custody and tokens cutover; #594 wires body
+service and host-custody decisions. No listener, CLI or serving path uses this
+library yet.
+
 Owned 0700 directories and 0600 regular files, checked ownership/links and
 no-symlink opens protect secret/registry/ACL/audit custody according to their
 libraries. Keep secrets, policy/configuration, body cache and audit stores separate;
