@@ -455,6 +455,12 @@ must remain qualified. Cancellation travels in the next bounded origin poll.
 The host drives the nonblocking receiver maintenance hook at each exchange and
 revocation notification. Native complete-record tail rendering is supplied through
 `AppendPageSource`; the library does not define a production source-handle format.
+The closing operation returns its specific reason. Later calls use the explicit
+uniform `lease_closed` reason for unknown, foreign and already closed IDs; no
+historical enrollment/capability lookup is retained. A persistent audit write
+failure cannot promise a durable failure completion: emission stops and the
+existing attempted/authorized record remains incomplete. A transient followup
+failure permits a failed completion with the actual delivered byte count.
 
 ### Origin read library integration
 

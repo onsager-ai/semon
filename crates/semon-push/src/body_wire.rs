@@ -34,6 +34,9 @@ pub enum Reason {
     AuditFailure,
     PolicyChanged,
     LeaseCapacity,
+    /// Uniform for unknown, foreign and previously closed lease identifiers.
+    /// The operation that closes a live lease returns its specific reason once;
+    /// no historical lease capability or enrollment lookup is retained.
     LeaseClosed,
     ContinuationInvalid,
     Cancelled,

@@ -206,6 +206,8 @@ pub struct AuditStore<C: Clock> {
     reserved: u64,
     active: BTreeMap<AttemptId, Active>,
     failed: bool,
+    #[cfg(test)]
+    fail_followup: Option<bool>,
 }
 impl<C: Clock> AuditStore<C> {
     /// Dedicated directory, separate from ACLs/cache; the integration owns paths.
@@ -338,6 +340,8 @@ impl<C: Clock> AuditStore<C> {
             reserved: 0,
             active: BTreeMap::new(),
             failed: false,
+            #[cfg(test)]
+            fail_followup: None,
         })
     }
 
@@ -439,7 +443,20 @@ impl<C: Clock> AuditStore<C> {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn fail_next_followup(&mut self, completion: bool) {
+        self.fail_followup = Some(completion);
+    }
+
     fn append_reserved(&mut self, event: &Event, id: AttemptId) -> Result<()> {
+        #[cfg(test)]
+        if self.fail_followup.is_some_and(|completion| {
+            matches!(event, Event::Completion { .. }) && completion
+                || matches!(event, Event::Receipt { .. }) && !completion
+        }) {
+            self.fail_followup = None;
+            return Err(AuditError::WriteFailed);
+        }
         self.reserved -= RECORD_CAP;
         let result = self.append(event, 0);
         if result.is_err() {

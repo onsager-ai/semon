@@ -123,6 +123,13 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
     }
     fn check(&self, id: Identifier) -> Result<()> {
         let active = self.active.get(&id).ok_or(Reason::LeaseClosed)?;
+        if self
+            .enrollment
+            .authenticated_enrollment(crate::origin_read::EnrollmentKind::BodyChannel)
+            .is_ok_and(|scope| scope != active.scope)
+        {
+            return Err(Reason::LeaseClosed);
+        }
         if !self.enrollment.is_current(&active.scope) {
             return Err(Reason::Revoked);
         }
@@ -141,6 +148,15 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
             self.acls,
             self.broker.clock,
         )
+    }
+    fn check_or_close(&mut self, id: Identifier) -> Result<()> {
+        match self.check(id) {
+            Err(reason) if reason != Reason::LeaseClosed => {
+                self.close(id, reason)?;
+                Err(reason)
+            }
+            result => result,
+        }
     }
     /// Recheck at each poll/control exchange and before every release. Closed IDs
     /// remain unavailable; cancellation is sent only through the bounded queue.
@@ -272,10 +288,7 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
     /// Collect a fully verified page without waiting. Authorization is persisted
     /// before the payload becomes available to release.
     pub fn collect(&mut self, id: Identifier) -> Result<bool> {
-        if let Err(reason) = self.check(id) {
-            self.close(id, reason)?;
-            return Err(reason);
-        }
+        self.check_or_close(id)?;
         let active = self.active.get(&id).ok_or(Reason::LeaseClosed)?;
         if active.payload.is_some() || active.delivered {
             return Ok(false);
@@ -322,10 +335,7 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
         Ok(true)
     }
     pub fn release(&mut self, id: Identifier) -> Result<TypedPage> {
-        if let Err(reason) = self.check(id) {
-            self.close(id, reason)?;
-            return Err(reason);
-        }
+        self.check_or_close(id)?;
         let active = self.active.get_mut(&id).ok_or(Reason::LeaseClosed)?;
         let page = decode_page(active.payload.as_ref().ok_or(Reason::InvalidRequest)?)?;
         if active.released {
@@ -337,10 +347,7 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
     /// Report the whole admitted page after delivery. A page is one bounded range
     /// receipt and one completed attempt; partial delivery closes the lease.
     pub fn delivered(&mut self, id: Identifier, bytes: u64) -> Result<()> {
-        if let Err(reason) = self.check(id) {
-            self.close(id, reason)?;
-            return Err(reason);
-        }
+        self.check_or_close(id)?;
         let active = self.active.get_mut(&id).ok_or(Reason::LeaseClosed)?;
         let expected = active.payload.as_ref().ok_or(Reason::InvalidRequest)?.len() as u64;
         if !active.released || bytes > expected {
@@ -350,13 +357,15 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
             let attempt = active.attempt.ok_or(Reason::AuditFailure)?;
             active.delivered_bytes = bytes;
             if bytes > 0 {
-                self.audit
-                    .receipt(
-                        attempt,
-                        PermittedRange::new(0, bytes).ok_or(Reason::InvalidRequest)?,
-                        bytes,
-                    )
-                    .map_err(|_| Reason::AuditFailure)?;
+                let result = self.audit.receipt(
+                    attempt,
+                    PermittedRange::new(0, bytes).ok_or(Reason::InvalidRequest)?,
+                    bytes,
+                );
+                if result.is_err() {
+                    let _ = self.close(id, Reason::AuditFailure);
+                    return Err(Reason::AuditFailure);
+                }
             }
             self.close(id, Reason::Cancelled)?;
             return Err(Reason::Cancelled);
@@ -379,10 +388,7 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
         self.leases.delivered(id, &active.scope)
     }
     pub fn acknowledge(&mut self, id: Identifier, continuation: &OpaqueId) -> Result<()> {
-        if let Err(reason) = self.check(id) {
-            self.close(id, reason)?;
-            return Err(reason);
-        }
+        self.check_or_close(id)?;
         let active = self.active.get(&id).ok_or(Reason::LeaseClosed)?;
         if !active.delivered || active.continuation.as_ref() != Some(continuation) {
             return Err(Reason::InvalidRequest);
@@ -402,7 +408,14 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
         }
         Ok(())
     }
+    #[cfg(test)]
+    pub(crate) fn active_request_for_test(&self, id: Identifier) -> Request {
+        self.active.get(&id).expect("test lease").template.clone()
+    }
     pub fn cancel(&mut self, id: Identifier) -> Result<()> {
+        if self.check(id) == Err(Reason::LeaseClosed) {
+            return Err(Reason::LeaseClosed);
+        }
         self.close(id, Reason::Cancelled)
     }
     fn close(&mut self, id: Identifier, reason: Reason) -> Result<()> {

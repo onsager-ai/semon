@@ -286,15 +286,18 @@ impl<'a, C: Clock, T: PollTransport, E: Entropy> OriginClient<'a, C, T, E> {
                 lease_id,
                 lease_deadline,
                 continuation,
-                ..
+                page,
             } => {
                 let Some(lease) = self.leases.get(lease_id) else {
                     return self.refuse(id, Reason::LeaseClosed);
                 };
                 if lease.request != *request_id
                     || lease.binding.continuation.as_ref() != Some(continuation)
+                    || lease.binding.cache_key.selector
+                        != crate::body_cache::Selector::Page(page.as_str().into())
+                    || lease.binding.source_handle != request.source_handle
+                    || lease.binding.mapping.anchor != request.anchor
                 {
-                    self.leases.remove(lease_id);
                     return self.refuse(id, Reason::ContinuationInvalid);
                 }
                 Some((*lease_id, *lease_deadline, Some(continuation)))
