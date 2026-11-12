@@ -15,8 +15,21 @@ pub(super) fn confirm(terminal: &mut File, prompt: &str) -> Result<bool, String>
     std::io::BufReader::new(terminal.try_clone().map_err(|e| e.to_string())?)
         .read_line(&mut line)
         .map_err(|e| e.to_string())?;
-    let line = line.strip_suffix('\n').unwrap_or(&line);
-    Ok(line.strip_suffix('\r').unwrap_or(line) == "yes")
+    Ok(confirmed(&line))
+}
+fn confirmed(line: &str) -> bool {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line) == "yes"
+}
+fn enable_success(machine: &str, kind: &str, enrolled_endpoint: &str) -> String {
+    format!(
+        "Re-enable approved for kind {kind} on machine {machine}; waiting for origin renewal. A running watch will renew automatically; otherwise run semon push --receiver {enrolled_endpoint} on the origin."
+    )
+}
+fn no_authority(machine: &str, current_endpoint: &str) -> String {
+    format!(
+        "enable refused; no valid access remains.\nTo restore access, pair again: on the receiver, run semon receive enroll --machine {machine} with its listener/TLS options and confirm replacement if prompted; on the origin, run semon connect --to {current_endpoint}, enter the code, and approve replacement."
+    )
 }
 fn now() -> Result<u64, String> {
     std::time::SystemTime::now()
@@ -94,10 +107,7 @@ pub(super) fn run(
         if revoke {
             format!("Revoked {target}. History and audits kept.")
         } else {
-            format!(
-                "Re-enable approved for kind {} on machine {machine}; waiting for origin renewal. A running watch will renew automatically; otherwise run semon push --receiver {endpoint} on the origin.",
-                kind_text.unwrap_or("")
-            )
+            enable_success(machine, kind_text.unwrap_or(""), endpoint)
         }
     };
     let state = registry.owner_state(machine, parsed_kind, action, now()?);
@@ -128,9 +138,7 @@ pub(super) fn run(
             ));
         }
         OwnerState::NoAuthority { .. } => {
-            return Err(format!(
-                "enable refused; no valid access remains.\nTo restore access, pair again: on the receiver, run semon receive enroll --machine {machine} with its listener/TLS options and confirm replacement if prompted; on the origin, run semon connect --to {endpoint}, enter the code, and approve replacement."
-            ));
+            return Err(no_authority(machine, endpoint));
         }
         OwnerState::Confirm { enrollment_id, .. } => enrollment_id,
     };
@@ -172,4 +180,31 @@ pub(super) fn run(
     };
     println!("{}", success(&endpoint));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn literal_confirmation_and_cancellation() {
+        for yes in ["yes", "yes\n", "yes\r\n"] {
+            assert!(confirmed(yes));
+        }
+        for no in ["", "Yes\n", "YES\n", " yes\n", "yes \n", "y\n", "no\n"] {
+            assert!(!confirmed(no));
+        }
+    }
+    #[test]
+    fn exact_enable_and_recovery_use_distinct_endpoint_roles() {
+        let enrolled = "https://old.example:443";
+        let current = "https://new.example:443";
+        assert_eq!(
+            enable_success("laptop", "mirror_push", enrolled),
+            "Re-enable approved for kind mirror_push on machine laptop; waiting for origin renewal. A running watch will renew automatically; otherwise run semon push --receiver https://old.example:443 on the origin."
+        );
+        assert_eq!(
+            no_authority("laptop", current),
+            "enable refused; no valid access remains.\nTo restore access, pair again: on the receiver, run semon receive enroll --machine laptop with its listener/TLS options and confirm replacement if prompted; on the origin, run semon connect --to https://new.example:443, enter the code, and approve replacement."
+        );
+    }
 }
