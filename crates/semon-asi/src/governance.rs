@@ -425,6 +425,23 @@ pub fn project_derived_row(
     table_name: &str,
     row: &Map<String, Value>,
 ) -> Result<GovernedRow, GovernanceError> {
+    project_row(authority, table_name, row, false)
+}
+
+pub(crate) fn project_receiver_row(
+    authority: &ExportAuthority,
+    table_name: &str,
+    row: &Map<String, Value>,
+) -> Result<GovernedRow, GovernanceError> {
+    project_row(authority, table_name, row, true)
+}
+
+fn project_row(
+    authority: &ExportAuthority,
+    table_name: &str,
+    row: &Map<String, Value>,
+    receiver_handles: bool,
+) -> Result<GovernedRow, GovernanceError> {
     if authority.witness.principal_id.is_empty()
         || authority.contributors.is_empty()
         || authority
@@ -452,7 +469,11 @@ pub fn project_derived_row(
         if column.class == Class::Body || !fields.contains(name) {
             return Err(GovernanceError::Denied);
         }
-        validate_column_value(column, value, authority.witness.scope.destination)?;
+        if receiver_handles {
+            validate_receiver_value(column, value)?;
+        } else {
+            validate_column_value(column, value, authority.witness.scope.destination)?;
+        }
         projected.insert(name.clone(), value.clone());
     }
     for column in table.columns {
@@ -622,6 +643,24 @@ fn known_export_field(name: &str) -> bool {
                 .column(name)
                 .is_some_and(|column| column.class != Class::Body)
     })
+}
+
+pub(crate) fn validate_receiver_value(
+    column: &schema::Column,
+    value: &Value,
+) -> Result<(), GovernanceError> {
+    if let Some(tag) = crate::egress::handle_tag(column.name) {
+        validate_value(column.data_type, column.nullable, value, column.values)?;
+        if value.is_null()
+            || value
+                .as_str()
+                .is_some_and(|text| crate::egress::handle_hex(tag, text).is_some())
+        {
+            return Ok(());
+        }
+        return Err(GovernanceError::Denied);
+    }
+    validate_column_value(column, value, Destination::Receiver)
 }
 
 pub(crate) fn validate_column_value(

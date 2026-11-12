@@ -84,12 +84,23 @@ removing the namespace and syncing again. An interruption between removals keeps
 the old namespace usable with regenerated mappings; it cannot leave old mappings
 behind a retired namespace. There is no reconciliation across retired namespaces. Custody export bundles
 exclude this private operator state. Deleting it changes exported handles. Native IDs, log stems and source paths remain private.
-Slice 3 changes slice 2's one current export contract: `Projection` retains its
-namespace and replaces the former `opaque/receiver/...` shape. Opaque evidence
-keys use the schema's UID shapes with a hex-encoded namespace
-and `receiver` prefix. Source handles use `<hex namespace>/source/<random hex>`.
-The namespace binding lets the object validator refuse foreign handles; handles
-are not native identity or filesystem authority.
+The one current export contract uses `<tag>:<64 lowercase hex>` handles: source
+`src`, session `ses` (also parent/root), step `stp`, turn `trn`, compaction `cmp`.
+The namespace and harness are absent from the string. The registry's existing raw
+256-bit hex values and schema are unchanged; there is no migration or old reader.
+The envelope validator checks the manifest namespace, exact field-specific shape,
+duplicate entity/policy entries and opaque reuse across tags. Hub keys are
+`(namespace, handle)`; reverse lookup establishes namespace membership.
+`Handles::resolve(tag, handle)` reads the UNIQUE opaque index with the tag's kind,
+returning `Ok(None)` for malformed input or absent mappings without creating rows.
+Storage failures remain sanitized errors. Handles are not native identity or
+filesystem authority.
+
+`Snapshot::admitted_cohorts(registry, principal, scope)` is a local read-only
+accessor sharing projection's admission and relation-withholding loop. Each
+`AdmittedCohort` contains the native session UID, admitted source IDs and exact
+pinned source witnesses keyed by contributing session. It creates no handles,
+never consults body UIDs and has no serializer; its custody paths remain local.
 
 `Snapshot::project` evaluates every retained contributor. Each exported session
 is atomic, including its actually referenced dimensions. Denied nullable fields
