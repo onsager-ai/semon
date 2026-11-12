@@ -920,19 +920,17 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             return Err(Reason::Unavailable);
         }
         let key = verified.binding.cache_key;
-        let insertion = self
-            .cache
+        self.cache
             .insert(
                 key.clone(),
                 &verified.payload,
                 fetched / 1000,
                 Some(origin_limits),
             )
-            .map_err(|_| Reason::Unavailable);
-        if let Err(reason) = insertion {
-            self.cache.discard(&key).map_err(|_| Reason::Unavailable)?;
-            return Err(reason);
-        }
+            .map_err(|_| Reason::Unavailable)?;
+        // Successful insertion owns the entry under this key, including when it
+        // replaced an older entry. Only that successful read's release/abandon
+        // paths may discard it; a refused insertion preserves prior custody.
         let release = (|| {
             if !self.enrollment.is_current(&input.scope) {
                 return Err(Reason::Revoked);
@@ -2323,6 +2321,45 @@ mod tests {
         pending.delivered(bytes).unwrap();
         ADMISSION.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().1, 1));
         ADMISSION.with(|slot| *slot.borrow_mut() = None);
+        // A same-key fetch with an origin total of S permits lookup of the
+        // existing S-byte entry but refuses insertion's additional 128-byte
+        // state reserve. The broker must preserve that existing ciphertext.
+        let entry_path = std::fs::read_dir(root.join("cache"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "entry"))
+            .unwrap();
+        let record = std::fs::read(&entry_path).unwrap();
+        let same_key_limits = CacheLimits {
+            cache_total_bytes: std::num::NonZeroU64::new(record.len() as u64),
+            cache_ttl_seconds: std::num::NonZeroU64::new(1),
+            ..CacheLimits::default()
+        };
+        client.limits = &same_key_limits;
+        let refused = service.read_with(
+            &principal,
+            ReadInput {
+                scope: a.scope.clone(),
+                request: signed(78).0,
+                generation: id(4),
+                destination: Destination::Viewer,
+                candidate: None,
+            },
+            &mut |_, _| assert_eq!(client.step(), Step::Delivered),
+        );
+        assert!(matches!(refused, Err(Reason::Unavailable)));
+        assert_eq!(service.cache.entry_count(), 1);
+        assert_eq!(std::fs::read(&entry_path).unwrap(), record);
+        assert!(
+            service
+                .cache
+                .lookup(ReadAdmission::after_online_authorization_and_audit(
+                    cache_key.clone(),
+                    None
+                ))
+                .unwrap()
+                .is_some()
+        );
         // The header's one-second limit reached insertion, not just parsing.
         at.0.store(11_000, Ordering::Relaxed);
         assert!(

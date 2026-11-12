@@ -327,7 +327,7 @@ impl<C: Clock> BodyCache<C> {
         let size = (aad.len() + body.len() + OVERHEAD) as u64;
         let sources = source_scopes(&metadata.key);
         // A newly verified cohort/policy is also a detected invalidation signal.
-        let stale: Vec<_> = self
+        let mut removals: Vec<_> = self
             .entries
             .iter()
             .filter(|(_, entry)| {
@@ -345,15 +345,21 @@ impl<C: Clock> BodyCache<C> {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        for id in stale {
+        // Plan every invalidation and victim before mutating memory or disk.
+        // A budget refusal must preserve existing entries, including old source
+        // generations and entries under the same key as this response.
+        let origin_limits = Limits::default().narrowed(origin.unwrap_or_default());
+        self.plan_evictions(
+            size,
+            &sources,
+            origin_limits,
+            Some(&metadata.key),
+            &mut removals,
+        )?;
+        self.plan_evictions(size, &sources, self.limits, None, &mut removals)?;
+        for id in removals {
             self.remove(&id)?;
         }
-        // Origin ceilings govern only this namespace/incarnation's custody.
-        // Check them before receiver-wide eviction, so a refused origin budget
-        // cannot evict another origin while attempting an insertion.
-        let origin_limits = Limits::default().narrowed(origin.unwrap_or_default());
-        self.enforce_scoped(size, &sources, origin_limits, Some(&metadata.key))?;
-        self.enforce(size, &sources, self.limits)?;
         let id = key_id(&metadata.key)?;
         // Existing entries count while staging a replacement. Removing first
         // also makes a crash during replacement a miss rather than stale data.
@@ -579,15 +585,21 @@ impl<C: Clock> BodyCache<C> {
     }
 
     fn enforce(&mut self, staged: u64, sources: &[String], limits: Limits) -> Result<()> {
-        self.enforce_scoped(staged, sources, limits, None)
+        let mut removals = Vec::new();
+        self.plan_evictions(staged, sources, limits, None, &mut removals)?;
+        for id in removals {
+            self.remove(&id)?;
+        }
+        Ok(())
     }
 
-    fn enforce_scoped(
-        &mut self,
+    fn plan_evictions(
+        &self,
         staged: u64,
         sources: &[String],
         limits: Limits,
         scope: Option<&CacheKey>,
+        removals: &mut Vec<String>,
     ) -> Result<()> {
         // Enrollment scope is not independently represented in CacheKey. Scope
         // origin custody by its existing namespace and enrolled incarnation.
@@ -607,12 +619,16 @@ impl<C: Clock> BodyCache<C> {
         loop {
             let total: u64 = self
                 .entries
-                .values()
-                .filter(|e| in_scope(&e.metadata.key))
-                .map(|e| e.bytes)
+                .iter()
+                .filter(|(id, e)| !removals.contains(id) && in_scope(&e.metadata.key))
+                .map(|(_, e)| e.bytes)
                 .sum();
             let mut usage = BTreeMap::<String, u64>::new();
-            for entry in self.entries.values().filter(|e| in_scope(&e.metadata.key)) {
+            for (_, entry) in self
+                .entries
+                .iter()
+                .filter(|(id, e)| !removals.contains(id) && in_scope(&e.metadata.key))
+            {
                 for source in source_scopes(&entry.metadata.key) {
                     *usage.entry(source).or_default() += entry.bytes;
                 }
@@ -633,8 +649,9 @@ impl<C: Clock> BodyCache<C> {
             let victim = self
                 .entries
                 .iter()
-                .filter(|(_, e)| {
-                    in_scope(&e.metadata.key)
+                .filter(|(id, e)| {
+                    !removals.contains(id)
+                        && in_scope(&e.metadata.key)
                         && (global_over
                             || source_scopes(&e.metadata.key)
                                 .iter()
@@ -643,7 +660,7 @@ impl<C: Clock> BodyCache<C> {
                 .min_by_key(|(_, e)| e.used)
                 .map(|(id, _)| id.clone())
                 .ok_or(CacheError::ResourceLimit)?;
-            self.remove(&victim)?;
+            removals.push(victim);
         }
     }
 
@@ -1365,6 +1382,49 @@ mod tests {
                 .unwrap_err(),
             CacheError::ResourceLimit
         );
+    }
+
+    #[test]
+    fn refused_generation_change_preserves_custody_and_exact_budget_admits() {
+        let f = Fixture::new();
+        let mut cache = f.open(Limits::default());
+        let a = key("a", "shared-source", b"body");
+        let mut b = a.clone();
+        b.origin_incarnation = "other-origin".into();
+        cache.insert(a.clone(), b"body", 1000, None).unwrap();
+        cache.insert(b.clone(), b"body", 1000, None).unwrap();
+        let a_id = key_id(&a).unwrap();
+        let b_id = key_id(&b).unwrap();
+        let a_record = fs::read(cache.path(&a_id)).unwrap();
+        let b_record = fs::read(cache.path(&b_id)).unwrap();
+        let mut changed = a.clone();
+        changed.cohort[0].generation = "generation-2".into();
+        let size = a_record.len() as u64; // generation-1 and generation-2 have equal length
+        for total in [1, size + 2 * STATE_BYTES - 1] {
+            let limited = Limits {
+                global_bytes: total,
+                ..Limits::default()
+            };
+            assert_eq!(
+                cache.insert(changed.clone(), b"body", 1000, Some(limited)),
+                Err(CacheError::ResourceLimit)
+            );
+            assert!(cache.entries.contains_key(&a_id));
+            assert!(cache.entries.contains_key(&b_id));
+            assert_eq!(fs::read(cache.path(&a_id)).unwrap(), a_record);
+            assert_eq!(fs::read(cache.path(&b_id)).unwrap(), b_record);
+        }
+        let exact = Limits {
+            global_bytes: size + 2 * STATE_BYTES,
+            ..Limits::default()
+        };
+        cache
+            .insert(changed.clone(), b"body", 1000, Some(exact))
+            .unwrap();
+        assert!(!cache.entries.contains_key(&a_id));
+        assert!(!cache.path(&a_id).exists());
+        assert!(cache.entries.contains_key(&key_id(&changed).unwrap()));
+        assert_eq!(fs::read(cache.path(&b_id)).unwrap(), b_record);
     }
 
     #[test]
