@@ -295,6 +295,83 @@ fn authorize(
     auth.authenticated_enrollment(conn, Some("Bearer test-bearer"), kind, 100)
 }
 #[test]
+fn body_enrollment_adapter_rechecks_revision_and_scope() {
+    use crate::{
+        body_broker::EnrollmentSource, body_enrollment::RegistryEnrollmentSource,
+        body_wire::Reason, origin_read::EnrollmentKind,
+    };
+    for failure in ["revision", "read"] {
+        let dir = PrivateDir::new();
+        let mut registry = records(true);
+        registry.enrollments[0].credential_kinds[0].kind = Kind::BodyChannel;
+        registry.credentials[0].kind = Kind::BodyChannel;
+        registry.enrollments[0].binding = Binding::Admitted {
+            namespace: "asi-0123456789abcdef0123456789abcdef".into(),
+            origin_incarnation: "origin-1".into(),
+            index_incarnation: "index-1".into(),
+            publisher_claim_epoch: ClaimEpoch::Assigned(7),
+            issuer: Issuer {
+                kind: IssuerKind::Receiver,
+                origin_trust_acknowledged: true,
+            },
+            assertion_issuer_keys: vec![IssuerKey {
+                key_id: "issuer-1".into(),
+                public_key: [4; 32],
+            }],
+        };
+        install(&dir.0, &registry);
+        let auth = RegistryAuthenticator::open(&dir.0).unwrap();
+        let mut conn = ConnectionAuthority::default();
+        conn.verified_client_identity = Some(identity());
+        let source = RegistryEnrollmentSource::authenticate(
+            &auth,
+            &mut conn,
+            Some("Bearer test-bearer"),
+            10,
+        )
+        .unwrap();
+        let scope = source
+            .authenticated_enrollment(EnrollmentKind::BodyChannel)
+            .unwrap();
+        assert_eq!(scope.publisher_claim_epoch, Some(7));
+        assert_eq!(scope.verified_client_identity, identity().opaque_id());
+        assert!(source.is_current(&scope));
+        assert_eq!(
+            source.authenticated_enrollment(EnrollmentKind::Mirror),
+            Err(Reason::Forbidden)
+        );
+        let mut changed = scope.clone();
+        changed.publisher_claim_epoch = Some(8);
+        assert!(!source.is_current(&changed));
+        let handle = source.revision_handle(&scope).unwrap();
+        assert!(handle.is_current_at(10));
+        if failure == "revision" {
+            let mut store = Store::open(&dir.0).unwrap();
+            let next = store.snapshot().unwrap();
+            store.commit(next.revision(), &next).unwrap();
+        } else {
+            fs::write(dir.0.join("tokens"), b"legacy custody refuses reads").unwrap();
+        }
+        assert!(!source.is_current(&scope));
+        assert!(!handle.is_current_at(10));
+        assert_eq!(
+            source.authenticated_enrollment(EnrollmentKind::BodyChannel),
+            Err(Reason::Revoked)
+        );
+        assert!(
+            RegistryEnrollmentSource::authenticate(
+                &auth,
+                &mut conn,
+                Some("Bearer test-bearer"),
+                10
+            )
+            .is_ok()
+                == (failure == "revision")
+        );
+    }
+}
+
+#[test]
 fn current_registry_and_connection_binding_and_revision() {
     let dir = PrivateDir::new();
     install(&dir.0, &records(false));

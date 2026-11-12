@@ -189,8 +189,9 @@ transfer. It runs per namespace and supplies:
   analytics or the Hub. Metadata tables remain free of message/tool content.
   Stored UID columns are namespace-relative (beginning
   with `{harness}/{native_session_id}`); search/view prefix the validated
-  `analytics-namespace` at read time and accept full UIDs. Namespace creation stays
-  exclusively in `analytics materialize`. `body_source` records source ownership
+  `analytics-namespace` at read time and accept full UIDs. Namespace creation uses
+  only the explicit [producer initializer](asi-producer-lifecycle.md); read paths
+  never initialize. `body_source` records source ownership
   for transactional append/rewrite cleanup. Event Index schema 48 refuses older
   indexes without mutation; explicit recovery must establish source availability
   and custody before rebuilding. See [ASI query](asi-query.md#search).
@@ -261,11 +262,19 @@ tables.
   becomes the authoritative producer store's single writer. Other processes only
   read. Imported receiver heads are admitted publications, not locally rebuilt indexes.
   The local `semon-sessions` writer service is an explicit lifecycle primitive.
-  `semon analytics materialize` is its only enablement surface: Viewer, MCP,
-  push and receive do not start it. On the first materialize, it creates a
-  random `origin-` namespace in `<index parent>/analytics-namespace`; later
-  materializations reuse that value. If the state directory is deleted, the
-  next materialize has new session UIDs and no automatic reconciliation.
+  The [producer-lifecycle amendment](asi-producer-lifecycle.md) specifies one
+  explicit initializer shared by `analytics materialize`, analytics/body `connect`
+  and proposed `start`; these integrations are not all delivered. Only that entry
+  point may create the analytics namespace and request cold index/incarnation
+  creation from the native index producer; no caller generates them separately.
+  Native collection retains its independent index lifecycle. Viewer, MCP, query,
+  push and receive never initialize or start the analytics writer. Initialization
+  creates/reuses a random `origin-` namespace in
+  `<index parent>/analytics-namespace` and returns its validated index incarnation;
+  repeated calls preserve both. It does not publish a manifest or refresh sources.
+  `materialize` remains the low-level batch refresh/publication command. If the
+  state directory is deleted, the next explicit initialization has new session
+  UIDs and no automatic reconciliation.
   Rename or transfer is a later explicit operator workflow. The writer opens a
   separate read-only index connection per cycle, and its store-root helper uses
   `<index parent>/analytics-store`, never a path inside the SQLite index file.
