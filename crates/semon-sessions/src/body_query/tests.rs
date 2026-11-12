@@ -13,7 +13,7 @@ fn fixture(namespace: char) -> (PathBuf, PathBuf) {
     drop(EventCache::open_scoped(&cache).unwrap());
     std::fs::write(
         root.join("analytics-namespace"),
-        format!("origin-{}\n", namespace.to_string().repeat(64)),
+        serde_json::json!({"format":"semon-producer-1", "namespace":format!("origin-{}", namespace.to_string().repeat(64)), "origin_incarnation":format!("producer-{}", "a".repeat(64))}).to_string(),
     )
     .unwrap();
     (root, cache.with_extension("sqlite3"))

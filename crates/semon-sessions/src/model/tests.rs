@@ -5198,7 +5198,7 @@ fn uuidless_claude_body_turns_match_analytics_after_append_and_received_copy() {
     let namespace = format!("origin-{}", "a".repeat(64));
     fs::write(
         home.root.join("analytics-namespace"),
-        format!("{namespace}\n"),
+        serde_json::json!({"format":"semon-producer-1", "namespace":namespace, "origin_incarnation":format!("producer-{}", "a".repeat(64))}).to_string(),
     )
     .unwrap();
     let check = || {

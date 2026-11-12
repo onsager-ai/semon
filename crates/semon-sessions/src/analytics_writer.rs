@@ -465,6 +465,13 @@ pub struct Owner {
 }
 
 impl Owner {
+    pub(crate) fn acquire_qualified(root: &Path) -> semon_asi::Result<Self> {
+        Ok(Self {
+            lock: WriterLock::acquire(root)?,
+            clock: Arc::new(semon_asi::SystemClock),
+        })
+    }
+
     /// Validate existing SQLite bytes read-only before creating analytics state.
     /// Store opening takes its lock before touching the analytics directory.
     pub fn acquire(index: &Path, root: &Path) -> Result<Self, String> {
@@ -485,8 +492,30 @@ impl Owner {
     }
 
     pub fn start(self, config: AnalyticsWriterConfig) -> Result<Handle, String> {
-        let store = Store::open_with_lock(self.lock, Arc::clone(&self.clock))
+        let identity = config
+            .index_path
+            .parent()
+            .map(crate::analytics_namespace::read_identity)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .flatten();
+        if identity
+            .as_ref()
+            .is_some_and(|identity| identity.namespace != config.namespace)
+        {
+            return Err(crate::analytics::Error::new(
+                crate::analytics::ErrorKind::BindingMismatch,
+                crate::analytics::Stage::Ownership,
+            )
+            .to_string());
+        }
+        let mut store = Store::open_with_lock(self.lock, Arc::clone(&self.clock))
             .map_err(|error| format!("analytics writer refused: {error}"))?;
+        if let Some(identity) = identity {
+            store
+                .bind_origin(&identity.namespace, &identity.origin_incarnation)
+                .map_err(|error| error.to_string())?;
+        }
         Ok(start_thread(config, self.clock, Some(store)))
     }
 }

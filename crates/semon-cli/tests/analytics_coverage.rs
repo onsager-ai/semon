@@ -12,6 +12,12 @@ use std::{
 
 use serde_json::Value;
 
+fn namespace(state: &Path) -> String {
+    semon_sessions::read_analytics_namespace(state)
+        .unwrap()
+        .unwrap()
+}
+
 fn coverage(home: &fixture::Fixture, json: bool) -> Output {
     let mut command = home.command(env!("CARGO_BIN_EXE_semon"));
     command
@@ -193,10 +199,7 @@ fn export_and_reset_refuse_a_busy_writer_without_mutation() {
     let home = fixture::Fixture::new();
     assert!(materialize(&home).status.success());
     let state = home.root.join("state");
-    let namespace = fs::read_to_string(state.join("analytics-namespace"))
-        .unwrap()
-        .trim()
-        .to_owned();
+    let namespace = namespace(&state);
     let bundle = home.root.join("analytics-export");
     assert!(export(&home, &bundle).status.success());
     let before = recursive_listing(&state);
@@ -224,10 +227,7 @@ fn reset_refuses_a_tampered_export_without_mutation() {
     let home = fixture::Fixture::new();
     assert!(materialize(&home).status.success());
     let state = home.root.join("state");
-    let namespace = fs::read_to_string(state.join("analytics-namespace"))
-        .unwrap()
-        .trim()
-        .to_owned();
+    let namespace = namespace(&state);
     let bundle = home.root.join("analytics-export");
     assert!(export(&home, &bundle).status.success());
     fs::write(bundle.join("analytics-namespace"), "tampered\n").unwrap();
@@ -252,10 +252,7 @@ fn reset_refuses_an_old_generation_after_reset_and_republication() {
     let home = fixture::Fixture::new();
     assert!(materialize(&home).status.success());
     let state = home.root.join("state");
-    let namespace = fs::read_to_string(state.join("analytics-namespace"))
-        .unwrap()
-        .trim()
-        .to_owned();
+    let namespace = namespace(&state);
     let old_bundle = home.root.join("old-export");
     assert!(export(&home, &old_bundle).status.success());
     assert!(
@@ -305,10 +302,7 @@ fn reset_refuses_an_export_inside_the_store_without_deleting_it() {
     let home = fixture::Fixture::new();
     assert!(materialize(&home).status.success());
     let state = home.root.join("state");
-    let namespace = fs::read_to_string(state.join("analytics-namespace"))
-        .unwrap()
-        .trim()
-        .to_owned();
+    let namespace = namespace(&state);
     let bundle = home.root.join("analytics-export");
     assert!(export(&home, &bundle).status.success());
     let inside = state.join("analytics-store/backup");
@@ -335,23 +329,26 @@ fn export_and_reset_refuse_a_foreign_live_namespace_without_mutation() {
     assert!(materialize(&home).status.success());
     let state = home.root.join("state");
     let namespace_path = state.join("analytics-namespace");
-    let namespace = fs::read_to_string(&namespace_path)
-        .unwrap()
-        .trim()
-        .to_owned();
-    let foreign = format!("origin-{}\n", "f".repeat(64));
-    fs::write(&namespace_path, &foreign).unwrap();
+    let namespace = namespace(&state);
+    let foreign = format!("origin-{}", "f".repeat(64));
+    let mut identity: Value = serde_json::from_slice(&fs::read(&namespace_path).unwrap()).unwrap();
+    identity["namespace"] = Value::String(foreign.clone());
+    fs::write(&namespace_path, serde_json::to_vec(&identity).unwrap()).unwrap();
     let before = file_bytes(&state);
 
     let destination = home.root.join("foreign-export");
     let output = export(&home, &destination);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("do not belong"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("do not match the requested enrollment")
+    );
     assert!(!destination.exists());
 
     let output = reset(&home, &["--confirm", foreign.trim(), "--without-export"]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("do not belong"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("do not match the requested enrollment")
+    );
     assert_eq!(file_bytes(&state), before);
     assert_ne!(foreign.trim(), namespace);
 }
@@ -360,10 +357,7 @@ fn export_and_reset_refuse_a_foreign_live_namespace_without_mutation() {
 fn reset_requires_matching_confirmation_and_current_verified_export() {
     let home = fixture::Fixture::new();
     assert!(materialize(&home).status.success());
-    let namespace = fs::read_to_string(home.root.join("state/analytics-namespace"))
-        .unwrap()
-        .trim()
-        .to_owned();
+    let namespace = namespace(&home.root.join("state"));
     let handles_path = home
         .root
         .join("state")
@@ -406,10 +400,7 @@ fn reset_requires_matching_confirmation_and_current_verified_export() {
 fn reset_requires_one_export_choice_and_can_remove_the_namespace_explicitly() {
     let home = fixture::Fixture::new();
     assert!(materialize(&home).status.success());
-    let namespace = fs::read_to_string(home.root.join("state/analytics-namespace"))
-        .unwrap()
-        .trim()
-        .to_owned();
+    let namespace = namespace(&home.root.join("state"));
     let handles_path = home
         .root
         .join("state")
@@ -442,7 +433,9 @@ fn reset_requires_one_export_choice_and_can_remove_the_namespace_explicitly() {
     );
     assert!(!home.root.join("state/analytics-store/analytics").exists());
     assert!(materialize(&home).status.success());
-    let next_namespace = fs::read_to_string(home.root.join("state/analytics-namespace")).unwrap();
+    let next_namespace = semon_sessions::read_analytics_namespace(&home.root.join("state"))
+        .unwrap()
+        .unwrap();
     assert_ne!(next_namespace.trim(), namespace);
     drop(
         semon_asi::egress::Handles::open(&home.root.join("state"), next_namespace.trim()).unwrap(),
@@ -482,7 +475,7 @@ fn coverage_refuses_symlinked_or_namespace_less_stores_without_mutation() {
     let output = coverage(&home, false);
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("namespace"),
+        String::from_utf8_lossy(&output.stderr).contains("unsupported or inconsistent"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );

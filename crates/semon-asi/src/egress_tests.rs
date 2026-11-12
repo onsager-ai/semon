@@ -97,7 +97,7 @@ fn setup() -> (tempfile::TempDir, Snapshot, Handles) {
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path();
     let root = state.join("analytics-store");
-    fs::write(state.join("analytics-namespace"), "origin\n").unwrap();
+    fs::write(state.join("analytics-namespace"), serde_json::json!({"format":"semon-producer-1", "namespace":"origin", "origin_incarnation":"producer-test"}).to_string()).unwrap();
     let mut store = Store::open(&root).unwrap();
     store.publish(&update(UID)).unwrap();
     drop(store);
@@ -306,7 +306,9 @@ fn interrupted_handle_retirement_preserves_usable_namespace() {
         |stage| {
             assert!(stage == crate::export::ResetStage::HandlesRetired);
             assert!(!handles_path.exists());
-            assert_eq!(fs::read_to_string(&namespace_file).unwrap(), "origin\n");
+            let identity: serde_json::Value =
+                serde_json::from_slice(&fs::read(&namespace_file).unwrap()).unwrap();
+            assert_eq!(identity["namespace"], "origin");
             Err(crate::Error::invalid("injected interruption"))
         },
     );
@@ -380,7 +382,7 @@ fn reset_preserves_or_retires_namespace_handles_and_export_excludes_them() {
     .unwrap();
     assert!(!handles_path.exists());
     assert!(!namespace_file.exists());
-    fs::write(&namespace_file, "next\n").unwrap();
+    fs::write(&namespace_file, serde_json::json!({"format":"semon-producer-1", "namespace":"next", "origin_incarnation":"producer-next"}).to_string()).unwrap();
     let mut store = Store::open(&root).unwrap();
     store.publish(&update("next/claude/session")).unwrap();
     drop(store);

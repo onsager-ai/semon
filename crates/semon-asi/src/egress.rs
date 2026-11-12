@@ -161,7 +161,8 @@ impl Snapshot {
         let read = || -> crate::Result<Self> {
             let _lock = crate::export::open_lock(root, false)?;
             regular(namespace_file)?;
-            if fs::read_to_string(namespace_file)?.trim_end_matches('\n') != namespace {
+            if crate::export::identity_namespace(&fs::read_to_string(namespace_file)?)? != namespace
+            {
                 return Err(crate::Error::invalid("namespace mismatch"));
             }
             let manifest = crate::export::validate_snapshot(root)?;
