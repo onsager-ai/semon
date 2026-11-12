@@ -69,6 +69,52 @@ fn wrong_receiver_identity_refused_before_approval_without_side_effects() {
     assert_eq!(controller.core.registry().unwrap(), before);
 }
 
+#[test]
+fn foreign_certificate_pin_refused_before_approval_without_side_effects() {
+    let fixture = Fixture::new();
+    let mut controller = fixture.controller();
+    let (opened, code) = opened(&mut controller, [1; 32], 100);
+    let key = key();
+    let mut input = input(&controller, 100);
+    input.kinds[0].1 = true;
+    input.client_certificate_pins =
+        vec![crate::client_ca::pin(self::key().public_key().as_ref()).unwrap()];
+    let t = transcript(&opened, &key, [1; 32], input.commitment());
+    let keys = pairing::derive_keys(&code, &t).unwrap();
+    controller
+        .handle(
+            confirmation(&t, &keys.origin_confirmation(&t)),
+            [1; 32],
+            100,
+            |_, _| panic!(),
+        )
+        .unwrap();
+    let before = controller.core.registry().unwrap();
+    let proof = key
+        .sign(&SystemRandom::new(), &wire::possession_message(&t))
+        .unwrap();
+    assert!(
+        controller
+            .handle(
+                Request::Approve(wire::Approve {
+                    version: 1,
+                    session_id: t.session_id.clone(),
+                    proof: wire::encode(proof.as_ref()),
+                    input
+                }),
+                [1; 32],
+                100,
+                |_, _| panic!()
+            )
+            .is_err()
+    );
+    assert_eq!(
+        controller.core.state(&t.session_id, 100).unwrap(),
+        pairing::State::Confirmed
+    );
+    assert_eq!(controller.core.registry().unwrap(), before);
+}
+
 fn key() -> EcdsaKeyPair {
     let random = SystemRandom::new();
     let pkcs8 =
@@ -139,11 +185,14 @@ fn confirmation(t: &Transcript, proof: &pairing::Mac) -> Request {
 #[test]
 fn confirmation_activation_and_recovery_preserve_one_registry_outcome() {
     let fixture = Fixture::new();
+    crate::receiver_custody::ReceiverCustody::open_at(&fixture.0, 100).unwrap();
     let mut controller = fixture.controller();
     let exporter = [1; 32];
     let (opened, code) = opened(&mut controller, exporter, 100);
     let key = key();
-    let input = input(&controller, 100);
+    let mut input = input(&controller, 100);
+    input.kinds[0].1 = true;
+    input.client_certificate_pins = vec![crate::client_ca::pin(key.public_key().as_ref()).unwrap()];
     let t = transcript(&opened, &key, exporter, input.commitment());
     let keys = pairing::derive_keys(&code, &t).unwrap();
     let response = controller
@@ -243,6 +292,8 @@ fn confirmation_activation_and_recovery_preserve_one_registry_outcome() {
     let recovered: wire::Activated = serde_json::from_slice(&recovered).unwrap();
     assert_eq!(recovered.enrollment_id, activated.enrollment_id);
     assert_eq!(recovered.credentials[0].1, activated.credentials[0].1);
+    assert!(activated.client_certificate.is_some());
+    assert_eq!(recovered.client_certificate, activated.client_certificate);
     assert!(
         controller
             .handle(

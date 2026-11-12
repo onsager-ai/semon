@@ -198,6 +198,22 @@ impl ReceiverCustody {
         before_identity: impl FnOnce() -> Result<()>,
         locked: impl FnOnce(&File),
     ) -> Result<Self> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Error::Invalid)?
+            .as_secs();
+        Self::open_with_clock(dir, before_identity, locked, now)
+    }
+    #[cfg(test)]
+    pub(crate) fn open_at(dir: &Path, now: u64) -> Result<Self> {
+        Self::open_with_clock(dir, || Ok(()), |_| {}, now)
+    }
+    fn open_with_clock(
+        dir: &Path,
+        before_identity: impl FnOnce() -> Result<()>,
+        locked: impl FnOnce(&File),
+        now: u64,
+    ) -> Result<Self> {
         if !dir.try_exists().map_err(|_| Error::Custody)? {
             fs::DirBuilder::new()
                 .mode(0o700)
@@ -223,10 +239,7 @@ impl ReceiverCustody {
                 return Err(Error::Incomplete);
             }
             let client_ca_secrets = root.create_child(CLIENT_CA_SECRETS)?;
-            let client_ca_created = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| Error::Invalid)?
-                .as_secs();
+            let client_ca_created = now;
             let (client_ca_key, client_ca_certificate) =
                 crate::client_ca::generate(client_ca_created).map_err(|_| Error::Random)?;
             client_ca_secrets.create(CLIENT_CA_KEY, &client_ca_key)?;

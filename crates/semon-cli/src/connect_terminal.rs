@@ -79,6 +79,12 @@ impl Terminal for Prompt {
     }
 
     fn approve(&mut self, receiver: &str, receiver_id: &str, machine: &str) -> Result<bool> {
+        writeln!(
+            self.tty,
+            "Mirror client certificate required: {}",
+            self.require_client_certificate
+        )
+        .map_err(|e| e.to_string())?;
         writeln!(self.tty, "Receiver: {receiver}\nAuthenticated receiver identity: {receiver_id}\nMachine: {machine}\nEnabled kinds: mirror_push\nThis grants the receiver operator custody of redacted native logs, plain source names/paths and machine facts (hostname, processes, locks and repositories). Redaction is best effort. Analytics/body and issuer authority are not enabled.\nSelected current sources:").map_err(|e| e.to_string())?;
         for (index, source) in self.sources.iter().enumerate() {
             writeln!(self.tty, "  {}. {:?}", index + 1, source).map_err(|e| e.to_string())?;

@@ -6,6 +6,15 @@ use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 type Client = rustls::StreamOwned<rustls::ClientConnection, TcpStream>;
+#[derive(Debug)]
+struct TestTlsClock(Arc<AtomicU64>);
+impl rustls::time_provider::TimeProvider for TestTlsClock {
+    fn current_time(&self) -> Option<rustls::pki_types::UnixTime> {
+        Some(rustls::pki_types::UnixTime::since_unix_epoch(
+            Duration::from_secs(self.0.load(Ordering::Relaxed)),
+        ))
+    }
+}
 struct Harness {
     dir: auth_tests::PrivateDir,
     shared: Arc<Shared>,
@@ -15,6 +24,7 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         let dir = auth_tests::PrivateDir::new();
+        crate::receiver_custody::ReceiverCustody::open_at(&dir.0, 100).unwrap();
         let controller =
             provision::Controller::open(&dir.0, "https://localhost:443", "laptop".into()).unwrap();
         let clock = Arc::new(AtomicU64::new(100));
@@ -32,6 +42,11 @@ impl Harness {
                     },
                     &dir.0,
                 )
+                .map(|config| {
+                    let mut config = (*config).clone();
+                    config.time_provider = Arc::new(TestTlsClock(Arc::clone(&clock)));
+                    Arc::new(config)
+                })
                 .unwrap(),
             ),
             limits: Limits {
@@ -58,6 +73,12 @@ impl Harness {
         }
     }
     fn connect(&self) -> (Client, thread::JoinHandle<()>) {
+        self.connect_identity(None)
+    }
+    fn connect_identity(
+        &self,
+        identity: Option<&crate::ClientIdentity>,
+    ) -> (Client, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let socket = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         socket
@@ -80,8 +101,16 @@ impl Harness {
         ))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .unwrap()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+        .with_root_certificates(roots);
+        let config = match identity {
+            None => config.with_no_client_auth(),
+            Some(identity) => config
+                .with_client_auth_cert(
+                    vec![CertificateDer::from(identity.certificate.clone())],
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(identity.private.to_vec()).into(),
+                )
+                .unwrap(),
+        };
         let connection = rustls::ClientConnection::new(
             Arc::new(config),
             ServerName::try_from("localhost").unwrap(),
@@ -175,6 +204,9 @@ struct OriginTerminal<'a> {
     wrong: bool,
 }
 impl crate::connect::Terminal for OriginTerminal<'_> {
+    fn require_client_certificate(&self) -> bool {
+        true
+    }
     fn code(&mut self) -> crate::Result<crate::credentials::Secret> {
         if self.expired {
             self.harness.clock.store(701, Ordering::Relaxed);
@@ -282,10 +314,11 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
         config.scope.binding,
         crate::enrollment::Binding::Inapplicable
     ));
-    let crate::Credential::Memory(token) = credential else {
-        panic!()
+    let crate::Credential::MutualTls { token, identity } = credential else {
+        panic!("required certificate was not installed")
     };
-    let (mut client, worker) = h.connect();
+    assert!(origin.join(&name).join("client-certificate.der").exists());
+    let (mut client, worker) = h.connect_identity(Some(&identity));
     let bytes = serde_json::to_vec(&semon_sessions::Facts {
         version: semon_sessions::FACTS_VERSION,
         hostname: "laptop".into(),
@@ -297,6 +330,94 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     client.flush().unwrap();
     assert_eq!(response(&mut client).0, 200);
     assert!(h.dir.0.join("machines/laptop/facts.json").exists());
+    drop(client);
+    worker.join().unwrap();
+    // Missing certificate completes optional TLS but cannot use this credential.
+    let (mut client, worker) = h.connect();
+    write!(
+        client,
+        "GET /v1/mirror/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
+        token.expose()
+    )
+    .unwrap();
+    client.flush().unwrap();
+    assert_eq!(response(&mut client).0, 401);
+    drop(client);
+    worker.join().unwrap();
+    // Foreign issuer and trusted issuer with a foreign SPKI both refuse.
+    let other = rcgen::KeyPair::generate().unwrap();
+    let (foreign_ca, _) = crate::client_ca::generate(100).unwrap();
+    let foreign_leaf = crate::client_ca::issue(
+        &foreign_ca,
+        100,
+        other.public_key_raw(),
+        "foreign",
+        100,
+        config.scope.valid_until,
+    )
+    .unwrap();
+    let ca_private = fs::read(h.dir.0.join("client-ca-secrets/client-ca.pk8")).unwrap();
+    let wrong_pin_leaf = crate::client_ca::issue(
+        &ca_private,
+        100,
+        other.public_key_raw(),
+        "foreign",
+        100,
+        config.scope.valid_until,
+    )
+    .unwrap();
+    for (certificate, tls_refusal) in [(foreign_leaf, true), (wrong_pin_leaf, false)] {
+        let foreign = crate::ClientIdentity {
+            certificate,
+            private: zeroize::Zeroizing::new(other.serialize_der()),
+        };
+        let (mut client, worker) = h.connect_identity(Some(&foreign));
+        let sent = write!(
+            client,
+            "GET /v1/mirror/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
+            token.expose()
+        )
+        .and_then(|_| client.flush());
+        if tls_refusal {
+            let mut byte = [0];
+            assert!(sent.is_err() || client.read(&mut byte).is_err());
+        } else {
+            sent.unwrap();
+            assert_eq!(response(&mut client).0, 401);
+        }
+        drop(client);
+        worker.join().unwrap();
+    }
+    h.clock
+        .store(config.scope.valid_until + 1, Ordering::Relaxed);
+    let (mut client, worker) = h.connect_identity(Some(&identity));
+    let sent = client
+        .write_all(b"GET /v1/mirror/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .and_then(|_| client.flush());
+    let mut byte = [0];
+    assert!(sent.is_err() || client.read(&mut byte).is_err());
+    drop(client);
+    worker.join().unwrap();
+    h.clock.store(100, Ordering::Relaxed);
+    let mut store = crate::enrollment::Store::open(&h.dir.0).unwrap();
+    let mut snapshot = store.snapshot().unwrap();
+    snapshot
+        .enrollments
+        .iter_mut()
+        .find(|e| e.enrollment_id == config.enrollment_id)
+        .unwrap()
+        .revoked_at = Some(100);
+    store.commit(snapshot.revision(), &snapshot).unwrap();
+    drop(store);
+    let (mut client, worker) = h.connect_identity(Some(&identity));
+    write!(
+        client,
+        "GET /v1/mirror/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
+        token.expose()
+    )
+    .unwrap();
+    client.flush().unwrap();
+    assert_eq!(response(&mut client).0, 401);
     drop(client);
     worker.join().unwrap();
 }

@@ -74,6 +74,7 @@ pub(crate) fn pin(public: &[u8]) -> Result<CertificatePin> {
     }
     Ok(CertificatePin {
         pin: Pin::Spki(Sha256::digest(OriginKey(public).subject_public_key_info()).into()),
+        generation: 1,
         revoked_at: None,
     })
 }
@@ -86,7 +87,11 @@ pub(crate) fn issue(
     until: u64,
 ) -> Result<Vec<u8>> {
     pin(public)?;
-    if until <= now || until > created.checked_add(TEN_YEARS).ok_or(())? {
+    if until <= now
+        || now < created.saturating_sub(300)
+        || until > now.saturating_add(crate::provision_wire::INITIAL_CREDENTIAL_VALIDITY_SECONDS)
+        || until > created.checked_add(TEN_YEARS).ok_or(())?
+    {
         return Err(());
     }
     let key = KeyPair::from_pkcs8_der_and_sign_algo(

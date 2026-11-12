@@ -649,6 +649,22 @@ pub(crate) fn validate_receipts(registry: &Registry) -> Result<()> {
         {
             return Err(Error::Invalid);
         }
+        let enrollment = registry
+            .enrollments
+            .iter()
+            .find(|e| e.enrollment_id == r.enrollment_id)
+            .ok_or(Error::Invalid)?;
+        let required = enrollment
+            .credential_kinds
+            .iter()
+            .any(|k| k.client_cert_required);
+        if required != r.client_certificate.is_some()
+            || r.client_certificate
+                .as_ref()
+                .is_some_and(|c| c.is_empty() || c.len() > 1536)
+        {
+            return Err(Error::Invalid);
+        }
     }
     Ok(())
 }
