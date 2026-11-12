@@ -76,7 +76,7 @@ struct State {
     work: BTreeMap<Identifier, Work>,
 }
 pub struct Broker<'a> {
-    clock: &'a (dyn ReadClock + Sync),
+    pub(crate) clock: &'a (dyn ReadClock + Sync),
     poll_cap: usize,
     state: Mutex<State>,
     changed: Condvar,
@@ -350,6 +350,12 @@ impl<'a> Broker<'a> {
         let result = self.accept_frame(work, frame, bytes.len());
         if let Err(reason) = result {
             fail(work, reason);
+        }
+        // Cancel has no body delivery consumer. Retire its completed control
+        // exchange immediately so it cannot consume a pending-page slot.
+        if matches!(work.request.operation, wire::Operation::Cancel { .. }) && work.result.is_some()
+        {
+            state.work.remove(&id);
         }
         self.changed.notify_all();
         result
@@ -727,7 +733,12 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             AclDecision::Granted(grant) => grant,
             AclDecision::Denied => return Err(Reason::Forbidden),
         };
-        if !input.request.operation.supported() {
+        if !matches!(
+            input.request.operation,
+            wire::Operation::Resolve { .. }
+                | wire::Operation::ReadPage { .. }
+                | wire::Operation::ReadField { .. }
+        ) {
             return Err(Reason::UnsupportedVerb);
         }
         let original = input.request.operation.clone();
@@ -1168,7 +1179,7 @@ mod tests {
         };
         assert_eq!(
             broker.enqueue(&a, a.scope.clone(), [3; 32], unsupported),
-            Err(Reason::UnsupportedVerb)
+            Err(Reason::InvalidRequest)
         );
         assert!(poll.try_take(&a).unwrap().is_some());
         at.0.store(20_000, Ordering::Relaxed);
@@ -2175,7 +2186,7 @@ mod tests {
             );
             let result = client.step();
             match case {
-                0 => assert_eq!(result, Step::Refused(Reason::UnsupportedVerb)),
+                0 => assert_eq!(result, Step::Refused(Reason::InvalidRequest)),
                 1 => assert_eq!(result, Step::Refused(Reason::InvalidRequest)),
                 2..=5 | 10 | 11 => assert_eq!(result, Step::Refused(Reason::Forbidden)),
                 6 | 7 => assert_eq!(result, Step::Dropped),
@@ -2387,6 +2398,735 @@ mod tests {
         drop(cache);
         drop(receiver);
         drop(origin_audit);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    struct Appends {
+        rewrite: AtomicBool,
+        renders: AtomicU64,
+    }
+    impl crate::append_source::AppendPageSource for Appends {
+        fn prepare(
+            &self,
+            source: &ResolvedSource,
+            cursor: &crate::append_source::AppendCursor<'_>,
+            policy: PinnedPolicy,
+            budget: RenderBudget,
+            cancelled: &dyn Fn() -> bool,
+        ) -> std::result::Result<RenderPlan, Refused> {
+            let mut plan = Renderer.prepare(
+                source,
+                &Target::Page(cursor.page.clone()),
+                policy,
+                budget,
+                cancelled,
+            )?;
+            if self.rewrite.load(Ordering::Relaxed) {
+                plan.export_view_generation = Some(opaque("rewritten"));
+            }
+            plan.continuation = Some(opaque(if cursor.after.is_none() {
+                "next-1"
+            } else {
+                "next-2"
+            }));
+            Ok(plan)
+        }
+        fn render(
+            &self,
+            source: &ResolvedSource,
+            cursor: &crate::append_source::AppendCursor<'_>,
+            policy: PinnedPolicy,
+            budget: RenderBudget,
+            cancelled: &dyn Fn() -> bool,
+        ) -> std::result::Result<RenderedPage, Refused> {
+            self.renders.fetch_add(1, Ordering::Relaxed);
+            let mut rendered = Renderer.render(
+                source,
+                &Target::Page(cursor.page.clone()),
+                policy,
+                budget,
+                cancelled,
+            )?;
+            if self.rewrite.load(Ordering::Relaxed) {
+                rendered.export_view_generation = Some(opaque("rewritten"));
+            }
+            rendered.continuation = Some(opaque(if cursor.after.is_none() {
+                "next-1"
+            } else {
+                "next-2"
+            }));
+            Ok(rendered)
+        }
+    }
+    #[test]
+    fn append_loopback_ack_gate_receipts_and_watcher_cancel() {
+        use crate::{
+            append_receiver::AppendService,
+            origin_client::{OriginClient, Step},
+        };
+        use std::os::unix::fs::PermissionsExt;
+        // Trace: fixed 10_000 ms, request deadline 12_000 ms, lease 70_000 ms.
+        // No clock advance: both pages have independent assertions and attempts.
+        // Each page has two frames; each receiver attempt has one receipt.
+        let at = At(AtomicU64::new(10_000));
+        let a = auth("append-loopback");
+        let broker = Broker::new(Config::default(), &at).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("body-append-loopback-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let acl = root.join("acl");
+        std::fs::create_dir(&acl).unwrap();
+        std::fs::set_permissions(&acl, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let grants = acl.join("grants.json");
+        std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"machine","namespace":"namespace","permissions":["body_read"]}]}"#).unwrap();
+        std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let acls = Acls::new(acl);
+        let mut receiver =
+            AuditStore::open(&root.join("receiver"), &at, receiver_audit::MAX_BYTES).unwrap();
+        let mut origin_audit = crate::origin_audit::AuditStore::open(
+            &root.join("origin"),
+            &at,
+            crate::origin_audit::MAX_BYTES,
+        )
+        .unwrap();
+        let signing = body_assertion::MemoryKey::from_seed(Zeroizing::new([7; 32]));
+        let public = signing.public_key().unwrap();
+        let lookup = |_: &str| Some(public);
+        let mut replay = body_assertion::ReplayCache::new(32);
+        let cancelled = || false;
+        let mut client = OriginClient::new(
+            OriginRead {
+                enrollment: &a,
+                resolver: &Resolver,
+                policies: &Policies,
+                renderer: &Renderer,
+                clock: &at,
+                cancelled: &cancelled,
+                audit: &mut origin_audit,
+            },
+            Loopback {
+                broker: &broker,
+                auth: &a,
+                fail_after_header: false,
+                posts: 0,
+            },
+            FixedEntropy,
+            &mut replay,
+            &lookup,
+            &UnavailableExportView,
+        );
+        let appends = Appends {
+            rewrite: AtomicBool::new(false),
+            renders: AtomicU64::new(0),
+        };
+        client.append_source = Some(&appends);
+        assert_eq!(client.step(), Step::Empty);
+        let mut service = AppendService::new(
+            &broker,
+            &a,
+            &acls,
+            &signing,
+            "issuer",
+            id(11),
+            &mut receiver,
+        );
+        let mut template = signed(77).0;
+        template.operation = wire::Operation::ReadPage {
+            page: opaque("append"),
+        };
+        let (lease, watcher) = service
+            .subscribe(
+                Principal {
+                    subject: "subject".into(),
+                    audit_id: id(9),
+                },
+                a.scope.clone(),
+                template,
+                id(4),
+            )
+            .unwrap();
+        assert_eq!(client.step(), Step::Delivered);
+        assert!(service.collect(lease).unwrap());
+        assert_eq!(
+            service.acknowledge(lease, &opaque("next-1")),
+            Err(Reason::InvalidRequest)
+        );
+        assert_eq!(client.step(), Step::Empty);
+        let first = service.release(lease).unwrap();
+        let bytes = first.canonical_bytes().unwrap().len() as u64;
+        assert_eq!(first.fields[0].text.as_str(), "safe typed body");
+        service.delivered(lease, bytes).unwrap();
+        assert_eq!(client.step(), Step::Empty);
+        assert_eq!(
+            service.acknowledge(lease, &opaque("wrong")),
+            Err(Reason::InvalidRequest)
+        );
+        assert_eq!(client.step(), Step::Empty);
+        service.acknowledge(lease, &opaque("next-1")).unwrap();
+        // Hold the valid request while three independently signed malformed
+        // acknowledgements exercise the actual origin handler. None may render
+        // or advance its state; the original request must still succeed.
+        let valid_ack = broker
+            .state
+            .lock()
+            .unwrap()
+            .work
+            .values()
+            .find(|work| matches!(work.request.operation, wire::Operation::Acknowledge { .. }))
+            .unwrap()
+            .request
+            .clone();
+        broker.cancel(valid_ack.request_id).unwrap();
+        for variant in 0..3u8 {
+            let mut invalid = valid_ack.clone();
+            invalid.request_id = id(100 + variant);
+            if let wire::Operation::Acknowledge {
+                page,
+                continuation,
+                request_id,
+                ..
+            } = &mut invalid.operation
+            {
+                match variant {
+                    0 => *page = opaque("wrong-page"),
+                    1 => *continuation = opaque("wrong-continuation"),
+                    _ => *request_id = id(99),
+                }
+            }
+            let mut claims = body_assertion::decode(&hex::decode(&valid_ack.assertion).unwrap())
+                .unwrap()
+                .claims;
+            claims.nonce = [100 + variant; 32];
+            claims.request_digest = invalid.digest().unwrap();
+            invalid.assertion = hex::encode(body_assertion::encode(
+                &body_assertion::sign(claims, &signing, || 10).unwrap(),
+            ));
+            broker
+                .enqueue(&a, a.scope.clone(), [3; 32], invalid.clone())
+                .unwrap();
+            let before = appends.renders.load(Ordering::Relaxed);
+            assert_eq!(client.step(), Step::Refused(Reason::ContinuationInvalid));
+            assert_eq!(appends.renders.load(Ordering::Relaxed), before);
+            assert!(matches!(
+                broker.take_result(&a, invalid.request_id),
+                Err(Reason::ContinuationInvalid)
+            ));
+        }
+        broker
+            .enqueue(&a, a.scope.clone(), [3; 32], valid_ack)
+            .unwrap();
+        assert_eq!(
+            service.acknowledge(lease, &opaque("next-1")),
+            Err(Reason::InvalidRequest)
+        );
+        assert_eq!(client.step(), Step::Delivered);
+        assert!(service.collect(lease).unwrap());
+        let second = service.release(lease).unwrap();
+        service
+            .delivered(lease, second.canonical_bytes().unwrap().len() as u64)
+            .unwrap();
+        let mut replay_ack = service.active_request_for_test(lease);
+        replay_ack.request_id = id(104);
+        let mut replay_claims =
+            body_assertion::decode(&hex::decode(&replay_ack.assertion).unwrap())
+                .unwrap()
+                .claims;
+        replay_claims.nonce = [104; 32];
+        replay_claims.request_digest = replay_ack.digest().unwrap();
+        replay_ack.assertion = hex::encode(body_assertion::encode(
+            &body_assertion::sign(replay_claims, &signing, || 10).unwrap(),
+        ));
+        broker
+            .enqueue(&a, a.scope.clone(), [3; 32], replay_ack)
+            .unwrap();
+        let before = appends.renders.load(Ordering::Relaxed);
+        assert_eq!(client.step(), Step::Refused(Reason::ContinuationInvalid));
+        assert_eq!(appends.renders.load(Ordering::Relaxed), before);
+        broker.take_result(&a, id(104)).err().unwrap();
+        drop(watcher);
+        service.maintain().unwrap();
+        assert_eq!(service.release(lease).err(), Some(Reason::LeaseClosed));
+        assert_eq!(client.step(), Step::Refused(Reason::Cancelled));
+        // Fresh lease gets a fresh attempt. A changed export generation on its
+        // second request produces no body and closes with continuation_invalid.
+        let mut template = signed(78).0;
+        template.operation = wire::Operation::ReadPage {
+            page: opaque("append"),
+        };
+        let (rewritten, rewrite_watcher) = service
+            .subscribe(
+                Principal {
+                    subject: "subject".into(),
+                    audit_id: id(9),
+                },
+                a.scope.clone(),
+                template,
+                id(4),
+            )
+            .unwrap();
+        assert_eq!(client.step(), Step::Delivered);
+        assert!(service.collect(rewritten).unwrap());
+        let third = service.release(rewritten).unwrap();
+        service
+            .delivered(rewritten, third.canonical_bytes().unwrap().len() as u64)
+            .unwrap();
+        appends.rewrite.store(true, Ordering::Relaxed);
+        service.acknowledge(rewritten, &opaque("next-1")).unwrap();
+        assert_eq!(client.step(), Step::Refused(Reason::ContinuationInvalid));
+        assert_eq!(service.collect(rewritten), Err(Reason::ContinuationInvalid));
+        assert_eq!(service.release(rewritten).err(), Some(Reason::LeaseClosed));
+        drop(rewrite_watcher);
+        drop(service);
+        drop(client);
+        let receiver_text =
+            std::fs::read_to_string(root.join("receiver").join(receiver_audit::AUDIT_FILE))
+                .unwrap();
+        assert_eq!(receiver_text.matches("\"event\":\"attempted\"").count(), 4);
+        assert_eq!(receiver_text.matches("\"event\":\"authorized\"").count(), 3);
+        assert_eq!(receiver_text.matches("\"event\":\"receipt\"").count(), 3);
+        assert_eq!(receiver_text.matches("\"event\":\"completion\"").count(), 4);
+        assert!(!receiver_text.contains("safe typed body"));
+        let origin_text =
+            std::fs::read_to_string(root.join("origin").join(crate::origin_audit::AUDIT_FILE))
+                .unwrap();
+        assert_eq!(origin_text.matches("\"outcome\":\"completed\"").count(), 3);
+        assert_eq!(origin_text.matches("\"outcome\":\"failed\"").count(), 1);
+        assert!(!origin_text.contains("safe typed body"));
+        drop(receiver);
+        drop(origin_audit);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn append_service_failure_and_invalidation_loopback() {
+        use crate::{
+            append_receiver::AppendService,
+            origin_client::{OriginClient, Step},
+        };
+        use std::os::unix::fs::PermissionsExt;
+        // Every independent case starts at 10_000 ms: page expires at 12_000,
+        // lease at 70_000. Partial delivery reports exactly 1 byte. Injected
+        // receipt/complete failures occur once, permitting failed completion.
+        for case in 0..11 {
+            let at = At(AtomicU64::new(10_000));
+            let a = auth("append-failures");
+            let foreign = auth("foreign");
+            let broker = Broker::new(Config::default(), &at).unwrap();
+            let root =
+                std::env::temp_dir().join(format!("append-failure-{}-{case}", std::process::id()));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let acl = root.join("acl");
+            std::fs::create_dir(&acl).unwrap();
+            std::fs::set_permissions(&acl, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let grants = acl.join("grants.json");
+            std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"machine","namespace":"namespace","permissions":["body_read"]}]}"#).unwrap();
+            std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let acls = Acls::new(acl);
+            let mut receiver =
+                AuditStore::open(&root.join("receiver"), &at, receiver_audit::MAX_BYTES).unwrap();
+            let mut origin_audit = crate::origin_audit::AuditStore::open(
+                &root.join("origin"),
+                &at,
+                if case == 8 {
+                    1
+                } else {
+                    crate::origin_audit::MAX_BYTES
+                },
+            )
+            .unwrap();
+            let signing = body_assertion::MemoryKey::from_seed(Zeroizing::new([7; 32]));
+            let public = signing.public_key().unwrap();
+            let lookup = |_: &str| Some(public);
+            let mut replay = body_assertion::ReplayCache::new(32);
+            let cancelled = || false;
+            let appends = Appends {
+                rewrite: AtomicBool::new(false),
+                renders: AtomicU64::new(0),
+            };
+            let mut client = OriginClient::new(
+                OriginRead {
+                    enrollment: &a,
+                    resolver: &Resolver,
+                    policies: &Policies,
+                    renderer: &Renderer,
+                    clock: &at,
+                    cancelled: &cancelled,
+                    audit: &mut origin_audit,
+                },
+                Loopback {
+                    broker: &broker,
+                    auth: &a,
+                    fail_after_header: false,
+                    posts: 0,
+                },
+                FixedEntropy,
+                &mut replay,
+                &lookup,
+                &UnavailableExportView,
+            );
+            client.append_source = Some(&appends);
+            assert_eq!(client.step(), Step::Empty);
+            let mut service = AppendService::new(
+                &broker,
+                &a,
+                &acls,
+                &signing,
+                "issuer",
+                id(11),
+                &mut receiver,
+            );
+            let subscribe = |service: &mut AppendService<'_, '_, &At>| {
+                let mut template = signed(77).0;
+                template.operation = wire::Operation::ReadPage {
+                    page: opaque("append"),
+                };
+                service.subscribe(
+                    Principal {
+                        subject: "subject".into(),
+                        audit_id: id(9),
+                    },
+                    a.scope.clone(),
+                    template,
+                    id(4),
+                )
+            };
+            let (lease, watcher) = subscribe(&mut service).unwrap();
+            if case == 8 {
+                assert_eq!(client.step(), Step::Refused(Reason::AuditFailure));
+                assert_eq!(service.collect(lease), Err(Reason::AuditFailure));
+                assert_eq!(client.transport.posts, 1);
+                assert_eq!(appends.renders.load(Ordering::Relaxed), 0);
+                drop(watcher);
+                drop(service);
+                drop(client);
+                assert_eq!(
+                    std::fs::metadata(root.join("origin").join(crate::origin_audit::AUDIT_FILE))
+                        .unwrap()
+                        .len(),
+                    0
+                );
+                drop(receiver);
+                drop(origin_audit);
+                std::fs::remove_dir_all(root).unwrap();
+                continue;
+            }
+            assert_eq!(client.step(), Step::Delivered);
+            let buffer_binding = broker
+                .state
+                .lock()
+                .unwrap()
+                .work
+                .values()
+                .find_map(|work| {
+                    work.result
+                        .as_ref()
+                        .and_then(|result| result.as_ref().ok())
+                        .map(|response| response.binding.clone())
+                })
+                .unwrap();
+            assert!(service.collect(lease).unwrap());
+            // Cases 9/10 release at 11_999, then report seven delivered bytes
+            // after deadline/revocation. Accounting must precede closure.
+            if case >= 9 {
+                at.0.store(11_999, Ordering::Relaxed);
+            }
+            let bytes = service
+                .release(lease)
+                .unwrap()
+                .canonical_bytes()
+                .unwrap()
+                .len() as u64;
+            let expected = match case {
+                0 => {
+                    let journal_path = root.join("receiver").join(receiver_audit::AUDIT_FILE);
+                    let journal_before = std::fs::read(&journal_path).unwrap();
+                    let renders_before = appends.renders.load(Ordering::Relaxed);
+                    let request_before = service.active_request_for_test(lease).request_id;
+                    service.enrollment = &foreign;
+                    service.maintain().unwrap();
+                    let mut foreign_template = signed(90).0;
+                    foreign_template.operation = wire::Operation::ReadPage {
+                        page: opaque("append"),
+                    };
+                    // B has no established broker channel: subscribe refuses,
+                    // but its preliminary maintenance must leave A untouched.
+                    assert_eq!(
+                        service
+                            .subscribe(
+                                Principal {
+                                    subject: "subject".into(),
+                                    audit_id: id(9)
+                                },
+                                foreign.scope.clone(),
+                                foreign_template,
+                                id(4)
+                            )
+                            .err(),
+                        Some(Reason::Unavailable)
+                    );
+                    assert_eq!(service.delivered(lease, 7), Err(Reason::LeaseClosed));
+                    assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+                    assert_eq!(appends.renders.load(Ordering::Relaxed), renders_before);
+                    assert_eq!(
+                        service.active_request_for_test(lease).request_id,
+                        request_before
+                    );
+                    assert_eq!(service.release(lease).err(), Some(Reason::LeaseClosed));
+                    assert_eq!(service.release(id(99)).err(), Some(Reason::LeaseClosed));
+                    service.enrollment = &a;
+                    service.delivered(lease, bytes).unwrap();
+                    service.acknowledge(lease, &opaque("next-1")).unwrap();
+                    assert_eq!(client.step(), Step::Delivered);
+                    assert!(service.collect(lease).unwrap());
+                    assert_eq!(appends.renders.load(Ordering::Relaxed), renders_before + 1);
+                    // Two 262_144-byte reservations exactly fill 524_288.
+                    // A second-page excess is rejected before aggregate growth;
+                    // a third page cannot exist because lease capacity is two.
+                    let mut manager = crate::body_lease::LeaseManager::default();
+                    let principal = Principal {
+                        subject: "subject".into(),
+                        audit_id: id(9),
+                    };
+                    let (left, left_watch) = manager
+                        .create(
+                            &principal,
+                            a.scope.clone(),
+                            [3; 32],
+                            opaque("append"),
+                            &acls,
+                            &at,
+                        )
+                        .unwrap();
+                    let (right, right_watch) = manager
+                        .create(
+                            &principal,
+                            a.scope.clone(),
+                            [3; 32],
+                            opaque("append"),
+                            &acls,
+                            &at,
+                        )
+                        .unwrap();
+                    manager
+                        .request(left, &a.scope, buffer_binding.receiver_binding.request_id)
+                        .unwrap();
+                    manager
+                        .request(right, &a.scope, buffer_binding.receiver_binding.request_id)
+                        .unwrap();
+                    manager
+                        .verified(left, &a.scope, buffer_binding.clone(), 262_144)
+                        .unwrap();
+                    assert_eq!(
+                        manager.verified(right, &a.scope, buffer_binding.clone(), 262_145),
+                        Err(Reason::BindingMismatch)
+                    );
+                    manager
+                        .verified(right, &a.scope, buffer_binding.clone(), 262_144)
+                        .unwrap();
+                    drop((left_watch, right_watch));
+                    let (second, second_watcher) = subscribe(&mut service).unwrap();
+                    assert_eq!(subscribe(&mut service).err(), Some(Reason::LeaseCapacity));
+                    assert_eq!(client.step(), Step::Delivered);
+                    assert!(service.collect(second).unwrap());
+                    service.cancel(second).unwrap();
+                    drop(second_watcher);
+                    assert_eq!(client.step(), Step::Refused(Reason::Cancelled));
+                    Reason::Cancelled
+                }
+                1 => {
+                    service.delivered(lease, bytes).unwrap();
+                    at.0.store(70_000, Ordering::Relaxed);
+                    service.enrollment = &foreign;
+                    service.sweep_owner(&a.scope, &a).unwrap();
+                    service.enrollment = &a;
+                    Reason::Deadline
+                }
+                2 => {
+                    a.revoked.store(true, Ordering::Relaxed);
+                    Reason::Revoked
+                }
+                3 => {
+                    std::fs::write(&grants, br#"{"format":1,"grants":[]}"#).unwrap();
+                    Reason::AclChanged
+                }
+                4 => {
+                    let poll = wire::control(&wire::PollRequest {
+                        version: wire::VERSION,
+                        channel_binding: [4; 32],
+                    })
+                    .unwrap();
+                    drop(broker.begin_poll(&a, &poll).unwrap());
+                    Reason::ChannelRestart
+                }
+                5 => {
+                    assert_eq!(service.delivered(lease, 1), Err(Reason::Cancelled));
+                    Reason::Cancelled
+                }
+                6 | 7 => {
+                    service.audit.fail_next_followup(case == 7);
+                    assert_eq!(service.delivered(lease, bytes), Err(Reason::AuditFailure));
+                    Reason::AuditFailure
+                }
+                9 | 10 => {
+                    let reason = if case == 9 {
+                        at.0.store(12_000, Ordering::Relaxed);
+                        Reason::Deadline
+                    } else {
+                        a.revoked.store(true, Ordering::Relaxed);
+                        Reason::Revoked
+                    };
+                    assert_eq!(service.delivered(lease, 7), Err(reason));
+                    reason
+                }
+                _ => unreachable!(),
+            };
+            if case == 0 {
+                service.cancel(lease).unwrap();
+            }
+            if (2..=4).contains(&case) {
+                assert_eq!(service.release(lease).err(), Some(expected));
+            }
+            assert_eq!(service.release(lease).err(), Some(Reason::LeaseClosed));
+            assert_eq!(
+                service.acknowledge(lease, &opaque("next-1")),
+                Err(Reason::LeaseClosed)
+            );
+            // No followup page is queued: any remaining exchange is Cancel only.
+            assert!(
+                broker
+                    .state
+                    .lock()
+                    .unwrap()
+                    .work
+                    .values()
+                    .all(
+                        |work| matches!(work.request.operation, wire::Operation::Cancel { .. })
+                            || work.result.is_some()
+                    )
+            );
+            drop(watcher);
+            drop(service);
+            drop(client);
+            let journal =
+                std::fs::read_to_string(root.join("receiver").join(receiver_audit::AUDIT_FILE))
+                    .unwrap();
+            assert!(!journal.contains("safe typed body"));
+            if case >= 6 {
+                assert!(journal.contains("\"outcome\":\"failed\""));
+            }
+            if case == 5 {
+                assert!(journal.contains("\"outcome\":\"cancelled\",\"bytes\":1"));
+            }
+            if case >= 9 {
+                assert!(journal.contains("\"outcome\":\"failed\",\"bytes\":7"));
+                assert!(journal.contains("\"event\":\"receipt\""));
+                assert!(!journal.contains("\"outcome\":\"completed\""));
+            }
+            drop(receiver);
+            drop(origin_audit);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+    #[test]
+    fn lease_scope_capacity_and_clock_boundaries() {
+        use crate::body_lease::LeaseManager;
+        use std::os::unix::fs::PermissionsExt;
+        // Trace: created at 10_000, expiry exactly 70_000 (exclusive).
+        // Two leases fill capacity; foreign scope is refused before state lookup.
+        let at = At(AtomicU64::new(10_000));
+        let a = auth("lease-bounds");
+        let foreign = auth("foreign");
+        let root = std::env::temp_dir().join(format!("lease-bounds-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let grants = root.join("grants.json");
+        std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"machine","namespace":"namespace","permissions":["body_read"]}]}"#).unwrap();
+        std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let acls = Acls::new(root.clone());
+        let principal = Principal {
+            subject: "subject".into(),
+            audit_id: id(9),
+        };
+        let mut leases = LeaseManager::default();
+        let (first, watcher) = leases
+            .create(
+                &principal,
+                a.scope.clone(),
+                [3; 32],
+                opaque("page"),
+                &acls,
+                &at,
+            )
+            .unwrap();
+        let (_, second_watcher) = leases
+            .create(
+                &principal,
+                a.scope.clone(),
+                [3; 32],
+                opaque("page"),
+                &acls,
+                &at,
+            )
+            .unwrap();
+        assert_eq!(
+            leases
+                .create(
+                    &principal,
+                    a.scope.clone(),
+                    [3; 32],
+                    opaque("page"),
+                    &acls,
+                    &at
+                )
+                .err(),
+            Some(Reason::LeaseCapacity)
+        );
+        assert_eq!(
+            leases.check(first, &foreign.scope, [3; 32], &foreign, &acls, &at),
+            Err(Reason::LeaseClosed)
+        );
+        assert_eq!(
+            leases.check(id(99), &foreign.scope, [3; 32], &foreign, &acls, &at),
+            Err(Reason::LeaseClosed)
+        );
+        assert_eq!(
+            leases.check(first, &a.scope, [4; 32], &a, &acls, &at),
+            Err(Reason::ChannelRestart)
+        );
+        at.0.store(69_999, Ordering::Relaxed);
+        assert!(
+            leases
+                .check(first, &a.scope, [3; 32], &a, &acls, &at)
+                .is_ok()
+        );
+        at.0.store(70_000, Ordering::Relaxed);
+        assert_eq!(
+            leases.check(first, &a.scope, [3; 32], &a, &acls, &at),
+            Err(Reason::Deadline)
+        );
+        at.0.store(10_000, Ordering::Relaxed);
+        a.revoked.store(true, Ordering::Relaxed);
+        assert_eq!(
+            leases.check(first, &a.scope, [3; 32], &a, &acls, &at),
+            Err(Reason::Revoked)
+        );
+        a.revoked.store(false, Ordering::Relaxed);
+        std::fs::write(&grants, br#"{"format":1,"grants":[]}"#).unwrap();
+        assert_eq!(
+            leases.check(first, &a.scope, [3; 32], &a, &acls, &at),
+            Err(Reason::AclChanged)
+        );
+        drop(watcher);
+        assert_eq!(
+            leases.check(first, &a.scope, [3; 32], &a, &acls, &at),
+            Err(Reason::NoWatchers)
+        );
+        leases.close(first, &a.scope).unwrap();
+        assert_eq!(
+            leases.close(first, &a.scope).err(),
+            Some(Reason::LeaseClosed)
+        );
+        drop(second_watcher);
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]

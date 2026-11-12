@@ -443,6 +443,29 @@ Emit complete admitted records only. Appends may extend a verified prefix; a
 rewrite creates a new source generation and invalidates continuations. Never
 splice old and new bytes or use a first-4-KiB hash as proof of an entire prefix.
 
+The library lease window is 60 seconds, explicitly renewed by acknowledgement;
+there are at most two leases per enrollment, one unacknowledged page per lease,
+256 KiB per complete framed page and 512 KiB buffered per enrollment. Each page
+gets a fresh assertion, receiver attempt/authorization, origin authorization and
+one receiver range receipt followed by completion. This attempt-per-page choice
+stays below the existing 16-receipt reservation. Append pages stream through
+memory without cache admission. Acknowledgement names the previous request and
+exact opaque continuation; source/cohort generation, export view and pinned policy
+must remain qualified. Cancellation travels in the next bounded origin poll.
+The host drives the nonblocking receiver maintenance hook at each exchange and
+revocation notification. Native complete-record tail rendering is supplied through
+`AppendPageSource`; the library does not define a production source-handle format.
+The closing operation returns its specific reason. Later calls use the explicit
+uniform `lease_closed` reason for unknown, foreign and already closed IDs; no
+historical enrollment/capability lookup is retained. A persistent audit write
+failure cannot promise a durable failure completion: emission stops and the
+existing attempted/authorized record remains incomplete. A transient followup
+failure permits a failed completion with the actual delivered byte count.
+Delivery reports validate and preserve actual bytes before lifecycle closure;
+expiry or revocation during delivery yields a non-success completion without
+renewing release authority. Maintenance is scoped to the authenticated enrollment;
+revocation sweeps additionally name the known owner scope, never foreign leases.
+
 ### Origin read library integration
 
 The Unix `semon-push::origin_read` core consumes one authenticated enrollment
