@@ -50,5 +50,5 @@ pub use projection::{Cell, ProjectedSession, Row, project};
 pub use publish::{PublishError, PublishProgress, publish_cycle};
 pub use store::{
     Clock, FileEntry, Manifest, RETIREMENT_DELAY_MS, SourceMissing, Store, SystemClock, TableBatch,
-    Update, Versions, WriterLock, read_live_map, read_manifest,
+    Update, Versions, WriterLock, qualify_local_store, read_live_map, read_manifest,
 };

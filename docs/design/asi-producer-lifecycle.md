@@ -110,7 +110,9 @@ job; rebuilds still require available authorized sources and custody proof.
   values, or the refusal “run `semon analytics materialize` first, then connect”;
   nothing else. Replace its interim read-only producer-binding precheck (the seam
   returning “run `semon analytics materialize` first, then connect”) with this call,
-  retaining its expected-binding validation. Mirror-only connect skips it. Local
+  passing no expected binding: the seam currently has no expected-binding input
+  and passes none until enrollment supplies one. The library validates an optional
+  expected binding when supplied. Mirror-only connect skips it. Local
   initialization grants no sharing permission; B4 still gates enrollment/source publication.
 - Proposed `start` calls initialize, then runs the local producer and authenticated
   Viewer. Merely opening Viewer, MCP, query, push or receive never initializes.

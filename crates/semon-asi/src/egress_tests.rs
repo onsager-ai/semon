@@ -93,12 +93,66 @@ fn update(uid: &str) -> Update {
         ..Update::default()
     }
 }
+#[test]
+fn custody_refuses_changed_or_missing_producer_incarnation_without_mutation() {
+    for removed in [false, true] {
+        let (directory, snapshot, handles) = setup();
+        drop((snapshot, handles));
+        let root = directory.path().join("analytics-store");
+        let identity_file = directory.path().join("analytics-namespace");
+        let mut identity: serde_json::Value =
+            serde_json::from_slice(&fs::read(&identity_file).unwrap()).unwrap();
+        if removed {
+            identity
+                .as_object_mut()
+                .unwrap()
+                .remove("origin_incarnation");
+        } else {
+            identity["origin_incarnation"] = serde_json::json!("producer-other");
+        }
+        let bytes = serde_json::to_vec(&identity).unwrap();
+        fs::write(&identity_file, &bytes).unwrap();
+        let manifest_path = root.join("analytics/manifest.json");
+        let manifest_bytes = fs::read(&manifest_path).unwrap();
+        let manifest = crate::read_manifest(&root).unwrap().unwrap();
+        let published: Vec<_> = manifest
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .chain(manifest.live_map.as_deref())
+            .map(|relative| {
+                let path = root.join("analytics").join(relative);
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        assert!(Snapshot::pin(&root, &identity_file, "origin").is_err());
+        assert!(
+            crate::export_snapshot(
+                &root,
+                &identity_file,
+                "origin",
+                &directory.path().join("refused-export")
+            )
+            .is_err()
+        );
+        assert!(crate::reset_snapshot(&root, &identity_file, "origin", None, 1, None).is_err());
+        assert_eq!(fs::read(&identity_file).unwrap(), bytes);
+        assert_eq!(fs::read(&manifest_path).unwrap(), manifest_bytes);
+        for (path, bytes) in published {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+        assert!(!directory.path().join("refused-export").exists());
+    }
+}
+
 fn setup() -> (tempfile::TempDir, Snapshot, Handles) {
     let directory = tempfile::tempdir().unwrap();
     let state = directory.path();
     let root = state.join("analytics-store");
-    fs::write(state.join("analytics-namespace"), "origin\n").unwrap();
+    fs::write(state.join("analytics-namespace"), serde_json::json!({"format":"semon-producer-1", "namespace":"origin", "origin_incarnation":"producer-test"}).to_string()).unwrap();
     let mut store = Store::open(&root).unwrap();
+    store.bind_origin("origin", "producer-test").unwrap();
     store.publish(&update(UID)).unwrap();
     drop(store);
     let snapshot = Snapshot::pin(&root, &state.join("analytics-namespace"), "origin").unwrap();
@@ -306,7 +360,9 @@ fn interrupted_handle_retirement_preserves_usable_namespace() {
         |stage| {
             assert!(stage == crate::export::ResetStage::HandlesRetired);
             assert!(!handles_path.exists());
-            assert_eq!(fs::read_to_string(&namespace_file).unwrap(), "origin\n");
+            let identity: serde_json::Value =
+                serde_json::from_slice(&fs::read(&namespace_file).unwrap()).unwrap();
+            assert_eq!(identity["namespace"], "origin");
             Err(crate::Error::invalid("injected interruption"))
         },
     );
@@ -321,6 +377,7 @@ fn interrupted_handle_retirement_preserves_usable_namespace() {
     );
     drop(handles);
     let mut store = Store::open(&root).unwrap();
+    store.bind_origin("origin", "producer-test").unwrap();
     store.publish(&update(UID)).unwrap();
     drop(store);
     let restored = Snapshot::pin(&root, &namespace_file, "origin").unwrap();
@@ -357,6 +414,7 @@ fn reset_preserves_or_retires_namespace_handles_and_export_excludes_them() {
     crate::reset_snapshot(&root, &namespace_file, "origin", Some(&bundle), 1, None).unwrap();
     assert!(handles_path.is_file());
     let mut store = Store::open(&root).unwrap();
+    store.bind_origin("origin", "producer-test").unwrap();
     store.publish(&update(UID)).unwrap();
     drop(store);
     let retained = Handles::open(state, "origin").unwrap();
@@ -380,8 +438,9 @@ fn reset_preserves_or_retires_namespace_handles_and_export_excludes_them() {
     .unwrap();
     assert!(!handles_path.exists());
     assert!(!namespace_file.exists());
-    fs::write(&namespace_file, "next\n").unwrap();
+    fs::write(&namespace_file, serde_json::json!({"format":"semon-producer-1", "namespace":"next", "origin_incarnation":"producer-next"}).to_string()).unwrap();
     let mut store = Store::open(&root).unwrap();
+    store.bind_origin("next", "producer-next").unwrap();
     store.publish(&update("next/claude/session")).unwrap();
     drop(store);
     let fresh = Handles::open(state, "next").unwrap();

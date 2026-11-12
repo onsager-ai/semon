@@ -164,7 +164,9 @@ fn materialize_publishes_once_and_reuses_its_namespace() {
         String::from_utf8_lossy(&first.stderr)
     );
     let state = home.root.join("state");
-    let namespace = fs::read_to_string(state.join("analytics-namespace")).unwrap();
+    let namespace = semon_sessions::read_analytics_namespace(&state)
+        .unwrap()
+        .unwrap();
     let manifest = state.join("analytics-store/analytics/manifest.json");
     assert!(manifest.exists());
     let store = state.join("analytics-store");
@@ -186,6 +188,45 @@ fn materialize_publishes_once_and_reuses_its_namespace() {
         String::from_utf8_lossy(&first.stdout)
     );
 
+    // Initializing an already populated publication preserves every published byte.
+    let published = semon_asi::read_manifest(&store).unwrap().unwrap();
+    assert!(!published.files.is_empty());
+    let identity_path = state.join("analytics-namespace");
+    let identity_bytes = fs::read(&identity_path).unwrap();
+    let manifest_bytes = fs::read(&manifest).unwrap();
+    let files: Vec<_> = published
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(published.live_map.as_deref())
+        .map(|relative| {
+            let path = store.join("analytics").join(relative);
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    let initialized =
+        semon_sessions::analytics::initialize(&state.join("index.sqlite3"), None, || false)
+            .unwrap();
+    let binding = initialized.binding.clone();
+    assert_eq!(fs::read(&identity_path).unwrap(), identity_bytes);
+    assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
+    for (path, bytes) in &files {
+        assert_eq!(&fs::read(path).unwrap(), bytes);
+    }
+    drop(initialized);
+    let repeated =
+        semon_sessions::analytics::initialize(&state.join("index.sqlite3"), Some(&binding), || {
+            false
+        })
+        .unwrap();
+    assert_eq!(repeated.binding, binding);
+    assert_eq!(fs::read(&identity_path).unwrap(), identity_bytes);
+    assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
+    for (path, bytes) in &files {
+        assert_eq!(&fs::read(path).unwrap(), bytes);
+    }
+    drop(repeated);
     let second = materialize(&home);
     assert!(
         second.status.success(),
@@ -193,7 +234,9 @@ fn materialize_publishes_once_and_reuses_its_namespace() {
         String::from_utf8_lossy(&second.stderr)
     );
     assert_eq!(
-        fs::read_to_string(state.join("analytics-namespace")).unwrap(),
+        semon_sessions::read_analytics_namespace(&state)
+            .unwrap()
+            .unwrap(),
         namespace
     );
     assert_eq!(live_session_rows(&store), first_rows);
@@ -228,7 +271,9 @@ fn materialize_tiny_budget_drains_several_chunks_and_matches_one_shot_rows() {
     );
     let state = home.root.join("state");
     let store = state.join("analytics-store");
-    let namespace = fs::read_to_string(state.join("analytics-namespace")).unwrap();
+    let namespace = semon_sessions::read_analytics_namespace(&state)
+        .unwrap()
+        .unwrap();
     let expected = live_rows(&store);
     assert_eq!(live_session_rows(&store).len(), 5);
     assert_eq!(
@@ -247,7 +292,9 @@ fn materialize_tiny_budget_drains_several_chunks_and_matches_one_shot_rows() {
         String::from_utf8_lossy(&bounded.stderr)
     );
     assert_eq!(
-        fs::read_to_string(state.join("analytics-namespace")).unwrap(),
+        semon_sessions::read_analytics_namespace(&state)
+            .unwrap()
+            .unwrap(),
         namespace
     );
     let manifest = semon_asi::read_manifest(&store).unwrap().unwrap();
@@ -297,7 +344,7 @@ fn materialize_refuses_an_unsupported_index_without_changing_its_bytes() {
     let output = materialize(&home);
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("analytics writer refused"),
+        String::from_utf8_lossy(&output.stderr).contains("unsupported or inconsistent"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -317,7 +364,8 @@ fn materialize_reports_a_busy_writer_without_publishing() {
     let output = materialize(&home);
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("analytics writer busy"),
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Another process is writing local analytics"),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
@@ -400,7 +448,7 @@ fn materialize_refuses_old_and_new_sqlite_schemas_unchanged() {
         let before = fs::read(&index).unwrap();
         let output = materialize(&home);
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("analytics writer refused"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported or inconsistent"));
         assert_eq!(fs::read(index).unwrap(), before);
         assert!(!home.root.join("state/analytics-namespace").exists());
         assert!(!home.root.join("state/analytics-store").exists());
@@ -424,7 +472,10 @@ fn materialize_busy_writer_preserves_an_existing_index_and_namespace() {
     home.write("configured-claude/.claude.json", b"{\"changed\":true}");
     let output = materialize(&home);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("analytics writer busy"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Another process is writing local analytics")
+    );
     assert_eq!(fs::read(state.join("index.sqlite3")).unwrap(), index);
     assert_eq!(
         fs::read(state.join("analytics-namespace")).unwrap(),
@@ -460,7 +511,7 @@ fn materialize_refuses_non_directory_analytics_before_creating_namespace() {
     fs::write(store.join("analytics"), b"preserve").unwrap();
     let output = materialize(&home);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("not a real directory"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported or inconsistent"));
     assert_eq!(fs::read(store.join("analytics")).unwrap(), b"preserve");
     assert!(!store.join("analytics.lock").exists());
     assert!(!state.join("analytics-namespace").exists());
@@ -476,7 +527,7 @@ fn materialize_requires_the_existing_stores_namespace() {
     fs::remove_file(state.join("analytics-namespace")).unwrap();
     let output = materialize(&home);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing to generate a namespace"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported or inconsistent"));
     assert_eq!(fs::read(manifest).unwrap(), before);
     assert!(!state.join("analytics-namespace").exists());
 }
@@ -507,7 +558,7 @@ fn materialize_namespace_refusal_preserves_crash_leftovers() {
         }
         let output = materialize(&home);
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("analytics namespace"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported or inconsistent"));
         assert_eq!(fs::read(manifest).unwrap(), before);
         for path in &leftovers {
             assert_eq!(fs::read(path).unwrap(), b"synthetic uncommitted bytes");
@@ -533,7 +584,7 @@ fn materialize_refuses_a_symlinked_index_without_publishing() {
     std::os::unix::fs::symlink(&target, state.join("index.sqlite3")).unwrap();
     let output = materialize(&home);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("analytics writer refused"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("unsupported or inconsistent"));
     assert_eq!(fs::read(target).unwrap(), before);
     assert!(
         fs::symlink_metadata(state.join("index.sqlite3"))
