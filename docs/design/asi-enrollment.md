@@ -253,8 +253,14 @@ libraries. Keep secrets, policy/configuration, body cache and audit stores separ
 protect atomic updates against cross-store replacement. Ordinary enrollment/cache
 backups contain no private keys or bearer secrets. Explicit secret backups remain
 a separate protected custody procedure. A stale registry backup cannot establish
-current revocation state or resurrect an enrollment. Preserve namespace/handle
-continuity only where proven, and preserve facts, sources and audits on refusal.
+current revocation state or authorize resurrection of an enrollment. The checked
+library API rejects stale in-process snapshots, but replacing the registry file
+on disk with an older valid copy is not detectable: no revision high-water mark
+is persisted outside that file. Restoring such a copy does not itself establish
+current revocation state; stale-backup resurrection protection beyond the revision
+check needs a separate high-water-mark custody decision and is deferred. Preserve
+namespace/handle continuity only where proven, and preserve facts, sources and
+audits on refusal.
 
 Generating private files does not establish host safety. Receiver integration
 checks observable core/swap settings and requires reviewable external backup

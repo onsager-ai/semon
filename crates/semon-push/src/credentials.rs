@@ -86,7 +86,7 @@ pub enum Decision {
     Refused,
 }
 /// Local audit diagnostic only. Deliberately has no Display or serialization.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     InvalidCredential,
     Revoked,
@@ -97,10 +97,35 @@ pub enum Refusal {
 /// Not a wire response. Send only `decision` to transport response mapping;
 /// `local_diagnostic` is solely for authenticated local audit/debug consumers.
 /// No Display or serialization is implemented for this container.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Authorization {
     pub decision: Decision,
-    pub local_diagnostic: Option<Refusal>,
+    local_diagnostic: Option<Refusal>,
+}
+impl Authorization {
+    #[cfg(test)]
+    pub(crate) fn expected(decision: Decision, diagnostic: Option<Refusal>) -> Self {
+        Self {
+            decision,
+            local_diagnostic: diagnostic,
+        }
+    }
+    /// Explicit access for authenticated local audit consumers only.
+    pub fn local_diagnostic(&self) -> Option<Refusal> {
+        self.local_diagnostic
+    }
+}
+impl fmt::Debug for Authorization {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Authorization")
+            .field("decision", &self.decision)
+            .finish()
+    }
+}
+impl fmt::Debug for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<local diagnostic redacted>")
+    }
 }
 impl Registry {
     /// `verified_pin` must come from verified TLS evidence, never a request field.
@@ -154,6 +179,9 @@ impl Registry {
                     }
                 }
             }
+            // Every stored digest is compared without early exit. Branches on
+            // a full 256-bit match are observable only to a holder of the valid
+            // secret; a nonmatching secret follows the same all-digest scan.
             if equal & (bearer.kind == kind) & (kind == route_kind) {
                 selected = Some((bearer, found.unwrap_or(Some(Refusal::InvalidCredential))));
             }

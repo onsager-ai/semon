@@ -92,20 +92,17 @@ fn registry(kind: Kind) -> (Registry, Secret) {
     )
 }
 fn refused(reason: Refusal) -> Authorization {
-    Authorization {
-        decision: Decision::Refused,
-        local_diagnostic: Some(reason),
-    }
+    Authorization::expected(Decision::Refused, Some(reason))
 }
 fn allowed(enrollment_id: String, kind: Kind, generation: u64) -> Authorization {
-    Authorization {
-        decision: Decision::Allowed {
+    Authorization::expected(
+        Decision::Allowed {
             enrollment_id,
             kind,
             generation,
         },
-        local_diagnostic: None,
-    }
+        None,
+    )
 }
 fn commit(store: &mut Store, next: &Registry) -> Result<()> {
     store.commit(store.snapshot()?.revision(), next)
@@ -765,8 +762,37 @@ fn all_external_refusals_are_identical_with_local_diagnostics() {
             Refusal::ClientCertificate,
         ),
     ];
+    let debug = format!("{:?}", cases[0].0);
+    let pretty = format!("{:#?}", cases[0].0);
     for (result, diagnostic) in cases {
         assert_eq!(result.decision, Decision::Refused);
-        assert_eq!(result.local_diagnostic, Some(diagnostic));
+        assert_eq!(result.local_diagnostic(), Some(diagnostic));
+        assert_eq!(format!("{result:?}"), debug);
+        assert_eq!(format!("{result:#?}"), pretty);
+        for name in [
+            "InvalidCredential",
+            "Revoked",
+            "RetiredGeneration",
+            "OutsideValidity",
+            "ClientCertificate",
+        ] {
+            assert!(!debug.contains(name));
+            assert!(!pretty.contains(name));
+            assert!(!format!("{:?}", result.local_diagnostic()).contains(name));
+        }
     }
+}
+
+#[test]
+fn revision_overflow_refuses_without_changing_custody() {
+    let f = Fixture::new();
+    let mut store = Store::initialize(&f.0).unwrap();
+    let mut current = Registry::empty();
+    current.revision = u64::MAX;
+    // Seed the boundary through the existing private persistence test path.
+    store.write(&current, |_| Ok(())).unwrap();
+    let before = fs::read(f.member(REGISTRY_FILE)).unwrap();
+    assert_eq!(store.commit(u64::MAX, &current), Err(Error::Invalid));
+    assert_eq!(fs::read(f.member(REGISTRY_FILE)).unwrap(), before);
+    assert_eq!(store.snapshot().unwrap(), current);
 }
