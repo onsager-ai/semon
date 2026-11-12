@@ -21,9 +21,9 @@ The blocking HTTP/1.1 receiver in [`serve.rs`](../../crates/semon-push/src/serve
 retains socket deadlines, operator server TLS and total/unauthenticated-per-IP
 limits. Slice 4a PR2 (#646) adds route classification before body reads, optional
 verified TLS client certificates, current registry authorization per request,
-keep-alive enrollment binding and revision handles for in-flight reauthorization.
+keep-alive enrollment binding and credential handles for in-flight reauthorization.
 `serve_auth.rs` exposes `RegistryAuthenticator`, `AuthenticatedEnrollment` and
-`RevisionHandle`. The bounded registry reader and revision handle inspect registry
+`CredentialHandle`. The bounded registry reader and credential handle inspect registry
 custody only; missing pairing-gate custody does not disable existing authentication.
 Private owned mode-0600 `DIR/client-trust.pem` supplies PEM client roots; absence
 disables client-certificate presentation. Reserved analytics/body routes refuse
@@ -563,7 +563,11 @@ validity, nonce bounds and encoding; issuer overlap cannot extend assertion expi
 
 The receiver checks current enrollment, kind and credential revocation on every
 request, including keep-alive connections. TLS handshake success is not cached
-authorization. Revocation immediately removes authority at the next authorization/
+authorization. In-flight work retains a secret-free credential authority handle,
+bound to its credential ID, enrollment, kind, generation and authenticated client
+pin. Each release re-reads current authority and validity, including any retiring
+generation cutover scheduled after admission. Unrelated registry writes and
+renewals preserve that work while its own credential remains authorized. Revocation immediately removes authority at the next authorization/
 release decision and signals all in-flight poll/response/delivery hooks. Recheck
 before dispatch and release; #594 integrates cancellation and stops active delivery
 within its declared deadlines. No certificate-expiry wait, new bytes under stale
