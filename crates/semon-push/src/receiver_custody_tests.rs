@@ -434,6 +434,35 @@ fn directory_swap_cannot_split_file_and_directory_operations() {
 }
 
 #[test]
+fn initialization_keeps_registry_with_locked_root_after_path_swap() {
+    let f = Fixture::new();
+    let selected = f.0.join("selected");
+    let original = f.0.join("original");
+    fs::DirBuilder::new().mode(0o700).create(&selected).unwrap();
+    let custody = ReceiverCustody::open_with_hooks(
+        &selected,
+        || Ok(()),
+        |_| {
+            fs::rename(&selected, &original).unwrap();
+            fs::DirBuilder::new().mode(0o700).create(&selected).unwrap();
+        },
+    )
+    .unwrap();
+    // Initialization and its final registry read must both use the locked inode.
+    assert!(
+        original
+            .join(enrollment::DIRECTORY)
+            .join(enrollment::REGISTRY_FILE)
+            .is_file()
+    );
+    assert!(original.join(IDENTITY).is_file());
+    assert!(fs::read_dir(&selected).unwrap().next().is_none());
+    let reopened = ReceiverCustody::open_or_initialize(&original).unwrap();
+    assert_eq!(custody.receiver_id(), reopened.receiver_id());
+    assert_eq!(custody.issuer(), reopened.issuer());
+}
+
+#[test]
 fn initialization_explicitly_unlocks_with_inherited_descriptor() {
     let f = Fixture::new();
     let mut inherited = None;

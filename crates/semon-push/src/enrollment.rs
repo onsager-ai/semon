@@ -187,7 +187,11 @@ impl Registry {
     /// A bounded, custody-checked snapshot of the atomically published registry.
     /// Readers need no transaction lock and never hold a lock while handling requests.
     pub fn read_current(receiver_dir: &Path) -> Result<Self> {
-        let parent = Directory::open(receiver_dir)?;
+        Self::read_current_at(&Directory::open(receiver_dir)?.0)
+    }
+    /// Snapshot relative to an already pinned receiver root; never reopens its path.
+    pub(crate) fn read_current_at(receiver_dir: &File) -> Result<Self> {
+        let parent = Directory::from_file(receiver_dir.try_clone().map_err(|_| Error::Custody)?)?;
         let dir = parent.child()?;
         dir.file(LOCK_FILE, libc::O_RDONLY)?;
         dir.load()
@@ -458,6 +462,9 @@ impl Directory {
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)
             .map_err(|_| Error::Custody)?;
+        Self::from_file(file)
+    }
+    fn from_file(file: File) -> Result<Self> {
         let meta = file.metadata().map_err(|_| Error::Custody)?;
         // SAFETY: geteuid has no memory preconditions.
         if !meta.is_dir()
@@ -574,13 +581,17 @@ impl Store {
     /// Explicit first initialization only. Existing/missing registry is never
     /// silently repaired. The receiver parent must already exist and be private.
     pub fn initialize(receiver_dir: &Path) -> Result<Self> {
-        let parent = Directory::open(receiver_dir)?;
+        Self::initialize_at(&Directory::open(receiver_dir)?.0)
+    }
+    /// Initialize under an already pinned receiver root, including gate and lock.
+    pub(crate) fn initialize_at(receiver_dir: &File) -> Result<Self> {
+        let parent = Directory::from_file(receiver_dir.try_clone().map_err(|_| Error::Custody)?)?;
         let name = c"enrollment";
         // SAFETY: live parent descriptor and constant child name.
         if unsafe { libc::mkdirat(parent.0.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
             return Err(Error::Custody);
         }
-        let mut store = Self::acquire(receiver_dir)?;
+        let mut store = Self::acquire_at(&parent)?;
         // Gate and registry are initialized once under the same exclusive lock.
         // Publish the gate first: an interrupted initialization never leaves a
         // usable registry whose gate may be silently recreated.
@@ -593,7 +604,9 @@ impl Store {
     }
     fn acquire(receiver_dir: &Path) -> Result<Self> {
         // Validate parent as well; opening a symlink as the dedicated child fails.
-        let parent = Directory::open(receiver_dir)?;
+        Self::acquire_at(&Directory::open(receiver_dir)?)
+    }
+    fn acquire_at(parent: &Directory) -> Result<Self> {
         let dir = parent.child()?;
         let file = dir.file(LOCK_FILE, libc::O_RDWR | libc::O_CREAT)?;
         file.try_lock().map_err(|_| Error::InUse)?;

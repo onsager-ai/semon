@@ -220,7 +220,7 @@ impl ReceiverCustody {
             root.create_child(AUDIT)?;
             let acl = root.create_child(ACL)?;
             // Registry owns its own directory, lock and durable format.
-            drop(enrollment::Store::initialize(dir).map_err(|_| Error::Custody)?);
+            drop(enrollment::Store::initialize_at(&root.fd).map_err(|_| Error::Custody)?);
             // MemoryKey takes ownership; the additional seed copy is zeroized too.
             let seed = random_secret()?;
             let key = MemoryKey::from_seed(Zeroizing::new(*seed));
@@ -299,7 +299,7 @@ impl ReceiverCustody {
         let _lock = acl.lock("owners.lock")?;
         let mut ledger = load_ledger(&acl)?;
         recover(&acl, &mut ledger)?;
-        enrollment::Registry::read_current(dir).map_err(|_| Error::Custody)?;
+        enrollment::Registry::read_current_at(&root.fd).map_err(|_| Error::Custody)?;
         Ok(Self {
             dir: dir.into(),
             issuer: enrollment::IssuerKey {
