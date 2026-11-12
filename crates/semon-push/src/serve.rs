@@ -1063,32 +1063,6 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
             return refused();
         }
     };
-    if let Request::Approve(message) = &request
-        && message
-            .input
-            .kinds
-            .iter()
-            .any(|(kind, _)| *kind == Kind::BodyChannel)
-    {
-        return Next::Refuse(
-            409,
-            "body_channel available after client-certificate issuance lands",
-            &[],
-        );
-    }
-    if let Request::Approve(message) = &request
-        && message
-            .input
-            .kinds
-            .iter()
-            .any(|(kind, _)| *kind == Kind::AnalyticsPublish)
-    {
-        return Next::Refuse(
-            409,
-            "analytics_publish available after origin connect / producer admission lands",
-            &[],
-        );
-    }
     let clock = || {
         let current = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1118,7 +1092,11 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
         }
         writeln!(terminal, "Pairing {id}: {}", code.expose()).map_err(|_| provision_wire::Refused)
     });
+    let unavailable = controller.take_unavailable();
     drop(controller);
+    if let Some(message) = unavailable {
+        return Next::Refuse(409, message, &[]);
+    }
     let Ok(reply) = reply else {
         return refused();
     };

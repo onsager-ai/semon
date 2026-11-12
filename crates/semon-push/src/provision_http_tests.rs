@@ -272,6 +272,13 @@ fn provisioning_inflight_cap_is_separate_and_released_without_session_creation()
 #[test]
 fn http_tls_pairing_activates_and_mirror_stays_serving() {
     let h = Harness::new();
+    // Mirror authentication uses the real wall clock; provision its fixture in
+    // that same validity window while keeping other pairing tests deterministic.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    h.clock.store(now, Ordering::Relaxed);
     let (mut client, worker) = h.connect();
     let opened = open(&mut client);
     let exporter = client
@@ -290,7 +297,8 @@ fn http_tls_pairing_activates_and_mirror_stays_serving() {
         &random,
     )
     .unwrap();
-    let input = h.input();
+    let mut input = h.input();
+    input.valid_until = now + 1000;
     let transcript = pairing::Transcript {
         version: 1,
         session_id: opened.session_id.clone(),
@@ -428,12 +436,8 @@ fn http_analytics_activation_is_explicitly_unavailable_without_side_effects() {
         "/v1/provision/approve",
         &wire::encode_message(&approve).unwrap(),
     );
-    assert_eq!(status, 409);
-    assert!(
-        String::from_utf8(body)
-            .unwrap()
-            .contains("available after origin connect / producer admission lands")
-    );
+    assert_eq!(status, 401);
+    assert_eq!(body, br#"{"error":"request refused"}"#);
     drop(client);
     worker.join().unwrap();
     assert_eq!(
@@ -450,4 +454,106 @@ fn http_analytics_activation_is_explicitly_unavailable_without_side_effects() {
         .unwrap(),
         acl
     );
+}
+
+#[test]
+fn http_authenticated_analytics_reports_unavailable_without_authority() {
+    let h = Harness::new();
+    let (mut client, worker) = h.connect();
+    let opened = open(&mut client);
+    let exporter = client
+        .conn
+        .export_keying_material([0; 32], wire::EXPORTER_LABEL, Some(&[]))
+        .unwrap();
+    let random = ring::rand::SystemRandom::new();
+    let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &random,
+    )
+    .unwrap();
+    let key = ring::signature::EcdsaKeyPair::from_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        pkcs8.as_ref(),
+        &random,
+    )
+    .unwrap();
+    let mut input = h.input();
+    input.kinds = vec![(Kind::AnalyticsPublish, false)];
+    let transcript = pairing::Transcript {
+        version: 1,
+        session_id: opened.session_id.clone(),
+        endpoint: opened.endpoint,
+        exporter: exporter.to_vec(),
+        origin_key: key.public_key().as_ref().to_vec(),
+        scope: input.commitment(),
+        origin_nonce: [2; 32],
+        receiver_nonce: wire::decode_fixed(&opened.receiver_nonce).unwrap(),
+        origin_role: "origin".into(),
+        receiver_role: "receiver".into(),
+        profile: "public_tls".into(),
+    };
+    let code = h
+        .codes
+        .lock()
+        .unwrap()
+        .remove(&transcript.session_id)
+        .unwrap();
+    let keys = pairing::derive_keys(&code, &transcript).unwrap();
+    let confirm = wire::Confirm {
+        version: 1,
+        session_id: transcript.session_id.clone(),
+        origin_key: wire::encode(&transcript.origin_key),
+        origin_nonce: wire::encode(&transcript.origin_nonce),
+        scope_commitment: wire::encode(&transcript.scope),
+        origin_mac: wire::encode(keys.origin_confirmation(&transcript).expose()),
+    };
+    let (status, body) = post(
+        &mut client,
+        "/v1/provision/confirm",
+        &wire::encode_message(&confirm).unwrap(),
+    );
+    assert_eq!(status, 200);
+    let confirmed: wire::Confirmed = serde_json::from_slice(&body).unwrap();
+    let _key = keys
+        .confirm_receiver(
+            &transcript,
+            &pairing::Mac::from_bytes(wire::decode_fixed(&confirmed.receiver_mac).unwrap()),
+        )
+        .unwrap();
+    let signature = key
+        .sign(&random, &wire::possession_message(&transcript))
+        .unwrap();
+    let approve = wire::Approve {
+        version: 1,
+        session_id: transcript.session_id,
+        proof: wire::encode(signature.as_ref()),
+        input,
+    };
+    let (status, body) = post(
+        &mut client,
+        "/v1/provision/approve",
+        &wire::encode_message(&approve).unwrap(),
+    );
+    assert_eq!(status, 409);
+    assert!(
+        String::from_utf8(body)
+            .unwrap()
+            .contains("available after origin connect / producer admission lands")
+    );
+    drop(client);
+    worker.join().unwrap();
+    assert!(
+        crate::enrollment::Registry::read_current(&h.dir.0)
+            .unwrap()
+            .enrollments()
+            .is_empty()
+    );
+    let acl = fs::read(
+        h.dir
+            .0
+            .join(crate::receiver_custody::ACL)
+            .join(crate::receiver_acl::ACL_FILE),
+    )
+    .unwrap();
+    assert!(!String::from_utf8(acl).unwrap().contains("laptop"));
 }

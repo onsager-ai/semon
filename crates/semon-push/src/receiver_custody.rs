@@ -357,6 +357,9 @@ impl ReceiverCustody {
     /// revoke/retire either wins first (installation refuses) or runs afterward.
     /// Locks are nonblocking, so opposite acquisition order refuses rather than
     /// deadlocking. A busy registry never authorizes cached grants.
+    /// Caller generates the permission scope (currently analytics-only); this API
+    /// checks owner and exact machine/namespace, not permissions derived from
+    /// credential kinds. Future integrations must authorize permissions separately.
     pub fn install_current_owner_grants(
         &self,
         enrollment_id: &str,

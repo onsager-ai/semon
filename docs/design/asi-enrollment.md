@@ -28,18 +28,18 @@ custody only; missing pairing-gate custody does not disable existing authenticat
 Private owned mode-0600 `DIR/client-trust.pem` supplies PEM client roots; absence
 disables client-certificate presentation. Reserved analytics/body routes refuse
 closed until their owning integrations land.
-[`tokens.rs`](../../crates/semon-push/src/tokens.rs) stores `NAME SHA256(token)`
-lines in `DIR/tokens`; `Tokens::authorize` supplies a machine identity. The
-[mirror protocol](../mirror-protocol.md) and push client implement supported Push,
-not the enrollment, client-certificate identity or remote body read defined here.
-#630/#631 and #635 supply libraries, not integrated onboarding or body service.
+The listener uses kind-scoped enrollment-registry authentication; the former
+flat-file token reader and commands are removed. Legacy `DIR/tokens` custody
+refuses startup/routes without import or deletion. The [mirror protocol](../mirror-protocol.md)
+and Push client retain supported mirror transport with enrolled mirror_push bearers.
+#630/#631 and #635 supply libraries, not integrated body service.
 
-The receiver registry and kind-aware credential custody are implemented as Unix
-libraries in `semon-push::enrollment` and `semon-push::credentials`, consumed by
-the listener's registry authenticator. Enrollment creation and pairing remain
-unwired from CLI and default provisioning paths. Explicit library
-initialization creates `DIR/enrollment/registry.json` (format 1) and
-`DIR/enrollment/registry.lock`, relative to the receiver state directory `DIR`.
+The Unix enrollment/credential libraries now feed the receiver provisioning
+controller and `receive enroll` terminal. Receiver-side public_tls provisioning
+creates mirror-only enrollments; origin connect/client, independently validated
+analytics admission, certificate issuance, renewal and revocation CLI remain
+follow-up integrations. Custody creates `DIR/enrollment/registry.json` (format 1)
+and `DIR/enrollment/registry.lock`, relative to receiver state directory `DIR`.
 One atomic registry document contains enrollment bindings, generation-scoped
 certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
 serialized. The library also exposes legacy `DIR/tokens` refusal without importing
@@ -47,12 +47,10 @@ or modifying it. The listener now authenticates only through the current registr
 legacy `DIR/tokens` custody refuses startup and every request with explicit
 re-pair/re-issue guidance, preserving the file and all retained history. A connection
 is bound to one enrollment and cannot switch machines between requests. The old
-flat-token issue/revoke/list commands and reader are retired. Renewal and provisioning route
-integration remain unimplemented. The `public_tls`
-pairing core is landed unwired in `crates/semon-push/src/pairing.rs` with deterministic
-coverage in `pairing_tests.rs`; PR 3.2 will wire provisioning routes, CLI, outputs
-and the tokens cutover, including receiver assertion-issuer signing-key custody;
-PR 3.1 provisions no signing key. `Core::registry()` exposes a fresh registry with
+flat-token issue/revoke/list commands and reader are retired. The public_tls core
+in `pairing.rs` is wired through strict provisioning routes and local owner CLI;
+receiver identity/assertion-issuer custody comes from ReceiverCustody.
+`Core::registry()` exposes a fresh registry with
 all fields for the later `origin_read::EnrollmentScope` adapter. Revocation comes
 from a separate CLI process editing the registry and is observed through its
 revision; pairing holds `pairing.lock`, acquiring `registry.lock` only for short
@@ -294,7 +292,7 @@ verified origin MAC permits a `confirmed` response (version and receiver MAC).
 proof. Recompute input.commitment() and require transcript.scope equality. Apply
 receiver policy: named authorized machine, valid binding, offered kinds only,
 empty certificate pins and no client-cert requirement for mirror. Only mirror_push activates in this slice; analytics_publish refuses until origin connect / independently validated producer admission lands. Peer-supplied namespace/incarnation bindings cannot authorize activation.
-Body-channel enrollment is available after client-certificate issuance lands.
+Unsupported-kind diagnostics are released only after connection/session binding, current confirmed state, exact commitment and origin possession proof verify; earlier failures remain generic. Body-channel enrollment is available after client-certificate issuance lands.
 The **initial credential validity ceiling** is 90 days (7,776,000 seconds) from
 activation now, exclusive lower bound (`valid_until > now`) and inclusive upper
 bound. This is a Manager-chosen parameter for PM review; renewal under valid
@@ -318,7 +316,7 @@ Application key custody is equivalent to its derived bearer authority; it travel
 only to the enrolled TLS endpoint. The new exporter binds recovery to its current
 connection; generic failures and provisioning admission bounds apply. No raw
 application key or bearer is persisted. After two interrupted deliveries explicit
-revocation is required; recovery cannot revive authority.
+revocation is required; recovery cannot revive authority. Receiver recovery refuses receipts with any kind not currently offered (mirror_push only) before reserving another delivery.
 
 The receiver controller is enabled only by local `receive enroll` authorization.
 Codes go directly to `/dev/tty`, never stdout/stderr or a wire field. Its local
@@ -423,7 +421,7 @@ an enrollment has an approved scope and atomic activation; no early active grant
 Later enrollments reuse receiver identity, owner, keys and directories.
 
 Implementation status (slice 4a PR3.2a, part of #593): `receiver_custody`
-is an unwired Unix library. Under `DIR`, mode-0700 directories are `enrollment/`
+is a Unix library consumed by receiver-side provisioning. Under `DIR`, mode-0700 directories are `enrollment/`
 (existing registry format 1), `issuer-secrets/`, `cache-secrets/`, `body-cache/`, `acl/` and
 `receiver-audit/`. Mode-0600 files are `receiver.json` (strict JSON format 1:
 random receiver ID and current issuer key ID), `custody.lock`,
@@ -548,8 +546,8 @@ bodies; recovery cannot reconstruct missing source custody.
 
 ## Shared listener authentication and dispatch
 
-The implementation status above covers PR2's listener hooks and PR 3.1's unwired
-pairing core. PR 3.2 owns provisioning and token cutover; #594 owns body handlers
+The implementation status above covers listener hooks and receiver-side public_tls
+provisioning/token cutover. Origin connect remains follow-up; #594 owns body handlers
 and in-flight cancellation; slice 5 owns analytics handlers.
 
 Extend rustls with optional client-certificate presentation/verification: analytics

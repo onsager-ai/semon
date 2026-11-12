@@ -21,6 +21,7 @@ pub struct Controller {
     endpoint: String,
     machine: String,
     pending: BTreeMap<String, Pending>,
+    unavailable: Option<&'static str>,
 }
 impl Controller {
     /// The caller is the authenticated local OS owner and authorizes exactly one
@@ -43,6 +44,7 @@ impl Controller {
             endpoint,
             machine,
             pending: BTreeMap::new(),
+            unavailable: None,
         })
     }
     pub fn pending(&mut self, now: u64) -> Vec<(String, pairing::State)> {
@@ -110,6 +112,11 @@ impl Controller {
     ) -> Result<Zeroizing<Vec<u8>>, Refused> {
         self.handle_with_clock(request, exporter, &|| now, show)
     }
+    /// Diagnostic exists only for the last authenticated approval; transport
+    /// consumes it while still holding the controller mutex.
+    pub(crate) fn take_unavailable(&mut self) -> Option<&'static str> {
+        self.unavailable.take()
+    }
     pub fn handle_with_clock(
         &mut self,
         request: Request,
@@ -117,6 +124,7 @@ impl Controller {
         clock: &dyn Fn() -> u64,
         show: impl FnOnce(&str, &crate::credentials::Secret) -> Result<(), Refused>,
     ) -> Result<Zeroizing<Vec<u8>>, Refused> {
+        self.unavailable = None;
         let now = clock();
         let bytes = match request {
             Request::Open(_) => {
@@ -185,11 +193,41 @@ impl Controller {
                     .filter(|p| p.exporter == exporter)
                     .ok_or(Refused)?;
                 let transcript = pending.transcript.as_ref().ok_or(Refused)?;
-                self.validate_input(&message.input, now)?;
+                if self
+                    .core
+                    .state(&message.session_id, now)
+                    .map_err(|_| Refused)?
+                    != pairing::State::Confirmed
+                {
+                    return Err(Refused);
+                }
                 if message.input.commitment() != transcript.scope {
                     return Err(Refused);
                 }
                 let evidence = wire::verify_possession(transcript, &message.proof)?;
+                self.unavailable = if message
+                    .input
+                    .kinds
+                    .iter()
+                    .any(|(kind, _)| *kind == Kind::BodyChannel)
+                {
+                    Some("body_channel available after client-certificate issuance lands")
+                } else if message
+                    .input
+                    .kinds
+                    .iter()
+                    .any(|(kind, _)| *kind == Kind::AnalyticsPublish)
+                {
+                    Some(
+                        "analytics_publish available after origin connect / producer admission lands",
+                    )
+                } else {
+                    None
+                };
+                if self.unavailable.is_some() {
+                    return Err(Refused);
+                }
+                self.validate_input(&message.input, now)?;
                 let grants = self.grants(&message.input.binding)?;
                 self.core.approve(evidence, now).map_err(|_| Refused)?;
                 let delivery = self
@@ -236,6 +274,24 @@ impl Controller {
                     transcript_digest: transcript.digest(),
                     summary_digest: transcript.scope,
                 };
+                let registry = self.core.registry().map_err(|_| Refused)?;
+                let receipt = registry
+                    .pairing_receipts
+                    .iter()
+                    .find(|r| r.session_id == evidence.session_id)
+                    .ok_or(Refused)?;
+                let enrollment = registry
+                    .enrollments()
+                    .iter()
+                    .find(|e| e.enrollment_id == receipt.enrollment_id)
+                    .ok_or(Refused)?;
+                if enrollment
+                    .credential_kinds
+                    .iter()
+                    .any(|kind| kind.kind != Kind::MirrorPush)
+                {
+                    return Err(Refused);
+                }
                 let key = pairing::ConfirmedKey::recovered(
                     Zeroizing::new(wire::decode_fixed(&message.application_key)?),
                     transcript,

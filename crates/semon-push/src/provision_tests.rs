@@ -416,6 +416,10 @@ fn analytics_refusal_changes_no_authority_and_never_refunds_attempts() {
             )
             .is_err()
     );
+    assert_eq!(
+        controller.take_unavailable(),
+        Some("analytics_publish available after origin connect / producer admission lands")
+    );
     assert_eq!(controller.core.registry().unwrap(), registry);
     assert_eq!(
         std::fs::read(
