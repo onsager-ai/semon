@@ -1,0 +1,269 @@
+//! Host-driven registry revision notifications for the body broker (Part of #594).
+//!
+//! The host supplies an [`EnrollmentSource`] capable of checking every queued
+//! owner's authority. A source tied to just the notifying request is insufficient.
+//! No listener, background task, or enrollment custody is installed here.
+use std::path::{Path, PathBuf};
+
+use crate::{
+    body_broker::{Broker, EnrollmentSource},
+    body_wire::{Reason, Result},
+    enrollment::{self, Registry},
+};
+
+/// One host-owned watcher per receiver registry and broker. Create it before
+/// accepting work. Calls are serialized by `&mut self`; failed notifications do
+/// not advance the observed revision.
+///
+/// Append owners must additionally call `AppendService::sweep_owner` with each
+/// retained original scope and its owner source. The host owns that collection;
+/// a registry revision alone does not identify the active append services.
+pub struct RevocationWatcher {
+    receiver_dir: PathBuf,
+    revision: u64,
+}
+impl RevocationWatcher {
+    pub fn new(receiver_dir: &Path) -> Result<Self> {
+        Ok(Self {
+            receiver_dir: receiver_dir.to_owned(),
+            revision: current_revision(receiver_dir)?,
+        })
+    }
+
+    /// Returns true after notifying the broker of a changed revision. An
+    /// unreadable registry still triggers fail-closed cleanup, then returns
+    /// `Unavailable`; the last successful revision remains pending for retry.
+    /// The source must itself fail closed when registry reads fail.
+    pub fn notify_if_revision_changed(
+        &mut self,
+        source: &dyn EnrollmentSource,
+        broker: &Broker<'_>,
+    ) -> Result<bool> {
+        let revision = current_revision(&self.receiver_dir);
+        if revision == Ok(self.revision) {
+            return Ok(false);
+        }
+        broker.revocation_changed(source)?;
+        self.revision = revision?;
+        Ok(true)
+    }
+}
+
+fn current_revision(receiver_dir: &Path) -> Result<u64> {
+    enrollment::refuse_legacy_tokens(receiver_dir).map_err(|_| Reason::Unavailable)?;
+    Registry::read_current(receiver_dir)
+        .map(|registry| registry.revision())
+        .map_err(|_| Reason::Unavailable)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        body_assertion::{self, Audience, Claims, MemoryKey},
+        body_broker::Config,
+        body_wire::{self as wire, Operation, Request},
+        enrollment::Store,
+        origin_read::{EnrollmentKind, EnrollmentScope, OpaqueId, ReadClock},
+        receiver_audit::{Destination, Identifier},
+    };
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+    use zeroize::Zeroizing;
+
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    struct Directory(PathBuf);
+    impl Directory {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "semon-body-enrollment-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            crate::tokens::prepare_private_dir(&path, true).unwrap();
+            Store::initialize(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for Directory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    struct At;
+    impl ReadClock for At {
+        fn now_millis(&self) -> u64 {
+            10_000
+        }
+    }
+    struct Owners {
+        revoked: AtomicBool,
+        checks: AtomicUsize,
+    }
+    impl EnrollmentSource for Owners {
+        fn authenticated_enrollment(&self, kind: EnrollmentKind) -> Result<EnrollmentScope> {
+            if kind != EnrollmentKind::BodyChannel {
+                return Err(Reason::Forbidden);
+            }
+            Ok(scope("a"))
+        }
+        fn is_current(&self, scope: &EnrollmentScope) -> bool {
+            self.checks.fetch_add(1, Ordering::Relaxed);
+            scope == &self::scope("b")
+                || (scope == &self::scope("a") && !self.revoked.load(Ordering::Relaxed))
+        }
+    }
+    struct RequestOwner<'a>(&'a Owners, EnrollmentScope);
+    impl EnrollmentSource for RequestOwner<'_> {
+        fn authenticated_enrollment(&self, kind: EnrollmentKind) -> Result<EnrollmentScope> {
+            self.0.authenticated_enrollment(kind)?;
+            Ok(self.1.clone())
+        }
+        fn is_current(&self, scope: &EnrollmentScope) -> bool {
+            self.0.is_current(scope)
+        }
+    }
+    fn opaque(value: &str) -> OpaqueId {
+        OpaqueId::new(value).unwrap()
+    }
+    fn scope(id: &str) -> EnrollmentScope {
+        EnrollmentScope {
+            enrollment_id: opaque(id),
+            machine: opaque("machine"),
+            namespace: opaque("namespace"),
+            origin_incarnation: opaque("origin"),
+            index_incarnation: opaque("index"),
+            publisher_claim_epoch: Some(7),
+            kinds: vec![EnrollmentKind::BodyChannel],
+            verified_client_identity: opaque("client"),
+        }
+    }
+    fn request(n: u8) -> Request {
+        let mut request = Request {
+            version: wire::VERSION,
+            request_id: Identifier::from_bytes([n; 32]),
+            assertion: String::new(),
+            source_handle: opaque("handle"),
+            anchor: opaque("anchor"),
+            operation: Operation::ReadField {
+                field: opaque("assistant"),
+            },
+            max_bytes: 1024,
+            deadline_millis: 20_000,
+            destination: Destination::Viewer,
+        };
+        let claims = Claims {
+            issuer_key_id: "issuer".into(),
+            issued_at: 10,
+            expiry: 20,
+            audience: Audience {
+                origin_incarnation: "origin".into(),
+                namespace: "namespace".into(),
+            },
+            claim_epoch: 7,
+            nonce: [n; 32],
+            subject_principal: "subject".into(),
+            machine: "machine".into(),
+            namespace: "namespace".into(),
+            acl_grant_version: "acl".into(),
+            receiver_policy_version: "policy".into(),
+            request_digest: request.digest().unwrap(),
+            deadline: 20,
+            channel_binding: [3; 32],
+        };
+        let key = MemoryKey::from_seed(Zeroizing::new([7; 32]));
+        request.assertion = hex::encode(body_assertion::encode(
+            &body_assertion::sign(claims, &key, || 10).unwrap(),
+        ));
+        request
+    }
+    fn advance(dir: &Path) {
+        let mut store = Store::open(dir).unwrap();
+        let snapshot = store.snapshot().unwrap();
+        store.commit(snapshot.revision(), &snapshot).unwrap();
+    }
+
+    #[test]
+    fn changed_revision_notifies_once_and_preserves_other_owners_work() {
+        let dir = Directory::new();
+        let mut watcher = RevocationWatcher::new(&dir.0).unwrap();
+        let owners = Owners {
+            revoked: AtomicBool::new(false),
+            checks: AtomicUsize::new(0),
+        };
+        let broker = Broker::new(Config::default(), &At).unwrap();
+        let bytes = wire::control(&wire::PollRequest {
+            version: wire::VERSION,
+            channel_binding: [3; 32],
+        })
+        .unwrap();
+        for (name, n) in [("a", 1), ("b", 2)] {
+            let owner = RequestOwner(&owners, scope(name));
+            drop(broker.begin_poll(&owner, &bytes).unwrap());
+            broker
+                .enqueue(&owners, scope(name), [3; 32], request(n))
+                .unwrap();
+        }
+        owners.checks.store(0, Ordering::Relaxed);
+        assert!(
+            !watcher
+                .notify_if_revision_changed(&owners, &broker)
+                .unwrap()
+        );
+        assert_eq!(owners.checks.load(Ordering::Relaxed), 0);
+        owners.revoked.store(true, Ordering::Relaxed);
+        advance(&dir.0);
+        assert!(
+            watcher
+                .notify_if_revision_changed(&owners, &broker)
+                .unwrap()
+        );
+        assert!(owners.checks.load(Ordering::Relaxed) > 0);
+        owners.checks.store(0, Ordering::Relaxed);
+        assert!(
+            !watcher
+                .notify_if_revision_changed(&owners, &broker)
+                .unwrap()
+        );
+        assert_eq!(owners.checks.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            broker.take_result(&owners, Identifier::from_bytes([1; 32])),
+            Err(Reason::Revoked)
+        ));
+        assert!(
+            broker
+                .take_result(&owners, Identifier::from_bytes([2; 32]))
+                .unwrap()
+                .is_none()
+        );
+        // A second revision cannot be swallowed by the previous notification.
+        advance(&dir.0);
+        assert!(
+            watcher
+                .notify_if_revision_changed(&owners, &broker)
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn unreadable_registry_does_not_acknowledge_a_revision() {
+        let dir = Directory::new();
+        let mut watcher = RevocationWatcher::new(&dir.0).unwrap();
+        let revision = watcher.revision;
+        let owners = Owners {
+            revoked: AtomicBool::new(true),
+            checks: AtomicUsize::new(0),
+        };
+        let broker = Broker::new(Config::default(), &At).unwrap();
+        std::fs::rename(&dir.0, dir.0.with_extension("unreadable")).unwrap();
+        let result = watcher.notify_if_revision_changed(&owners, &broker);
+        std::fs::rename(dir.0.with_extension("unreadable"), &dir.0).unwrap();
+        assert_eq!(result, Err(Reason::Unavailable));
+        assert_eq!(watcher.revision, revision);
+        advance(&dir.0);
+        assert!(
+            watcher
+                .notify_if_revision_changed(&owners, &broker)
+                .unwrap()
+        );
+    }
+}

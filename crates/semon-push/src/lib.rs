@@ -48,6 +48,8 @@ pub mod body_broker;
 #[cfg(unix)]
 pub mod body_cache;
 #[cfg(unix)]
+pub mod body_enrollment;
+#[cfg(unix)]
 pub mod body_lease;
 #[cfg(unix)]
 pub mod body_wire;
