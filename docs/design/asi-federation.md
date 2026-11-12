@@ -467,6 +467,23 @@ or cancellation. Dropping/crashing leaves an attempted authorization. Page/field
 completion uses the existing audit completion event; streaming receipts remain in
 the lease/append integration.
 
+### Body wire library framing (#594 slice 2)
+
+Version 1 control envelopes use strict JSON, capped at 16 KiB. A response frame
+is a four-byte big-endian JSON-header length, the strict JSON header, then exactly
+`payload_bytes` raw canonical typed-body bytes. Frame zero carries the complete
+`origin_read::ResponseBinding`; following data frames carry canonical typed payload
+bytes. A terminal refusal carries a closed reason and retryability. Ordered frame
+numbers start at zero, request IDs correlate every frame, and a final marker ends
+exactly one response. The total encoded frame bytes, including metadata, stay within
+256 KiB and the request's narrower limit; splitting cannot increase that budget.
+Assertions are the existing canonical signing encoding followed by its 64-byte
+signature, transported as lowercase hex. Destination is part of the signed request
+digest. Page/field reads account actual bytes in completion; range receipts remain
+stream-only under the existing audit contract. The receiver broker additionally
+limits retained work to four requests per enrollment, including dispatched results,
+so an abandoned caller cannot grow response memory without bound.
+
 ## Receiver cache: bounded temporary custody
 
 Only the operator's self-hosted receiver holds this cache. It is separate from
