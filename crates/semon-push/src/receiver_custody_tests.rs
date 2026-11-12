@@ -610,6 +610,9 @@ fn revoke_between_activation_and_install_never_restores_grants() {
         enrollment_id: id(1),
         receiver_id: custody.receiver_id().into(),
         machine: "laptop".into(),
+        sequence: 1,
+        origin_key: vec![4; 65],
+        endpoint: "https://receiver.example:443".into(),
         binding: Binding::Admitted {
             namespace: "asi-0123456789abcdef0123456789abcdef".into(),
             origin_incarnation: "origin-1".into(),

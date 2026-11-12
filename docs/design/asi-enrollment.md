@@ -35,8 +35,8 @@ disables client-certificate presentation. Analytics routes remain reserved. #661
 registers the closed body poll/response routes when existing body custody and
 client trust are configured; body enrollment and a reachable end-to-end workflow
 remain blocked on admitted-binding and owning integrations. Its fresh registry
-release checks currently use the conservative revision handle. PR4.1 replaces that
-handle as specified below; PR4.2 renewal routes remain separate from body dispatch
+release checks use the shipped credential-bound `CredentialHandle` from PR4.1.
+PR4.2 renewal routes remain separate from body dispatch
 and pairing-ceremony state. See [receiver route registration](asi-body-channel.md#receiver-route-registration-part-of-594).
 The listener uses kind-scoped enrollment-registry authentication; the former
 flat-file token reader and commands are removed. Legacy `DIR/tokens` custody
@@ -908,12 +908,12 @@ either commits first and is included in revoke, or sees revoke and refuses.
 Grants/cache invalidation follow their owning custody rules; access stops at the
 registry commit even if cleanup is interrupted. Preserve facts, keys and audits.
 
-PR4.1 supplies a credential-bound authority handle: it is current only while that
+The shipped PR4.1 `CredentialHandle` is current only while that
 EXACT credential, its kind scope, enrollment and any presented pin remain
 authorized and in validity. Re-read current custody before dispatch/release and
 signal revoked in-flight work on kept-alive connections. Unrelated registry
-revisions NEVER invalidate it. Missing/unreadable custody fails closed. This
-replaces the shipped conservative `RevisionHandle` that invalidates on any revision.
+revisions NEVER invalidate it. Missing/unreadable custody fails closed. It replaced
+the former `RevisionHandle` that invalidated on any revision.
 
 `semon receive enable --dir DIR --machine M --kind K` requires that same owner and
 confirmation. BEFORE recording anything, require another unrevoked kind with a
@@ -956,13 +956,20 @@ attempt schedules the next eligible attempt; it does not change that attempt's
 bound authorization set. Apply the same retry limits and certificate/authority
 checks; the header grants no authority and cannot widen scope.
 
-For revoke, enable and disconnect, rerunning the SAME command after an uncertain
-commit safely reconciles its earlier attempt before prompting or retrying. Persist
-nonsecret operation identity/outcome metadata under the owning custody lock so the
-rerun is idempotent, reports the earlier durable outcome first, and neither repeats
-an authorization nor affects a replacement enrollment. If uncertainty remains,
-refuse with the table's same-command guidance; never direct operators to custody
-files. This reconciliation precedes normal confirmation and target-state checks.
+Revoke, enable and disconnect are state-idempotent. Reread durable custody before
+prompting; that read reconciles an uncertain whole-document commit. Do not persist
+operation IDs, outcome receipts, acknowledgements or expiry state. Revoke resolves
+M to its most recent non-tombstoned enrollment, or its most recent revoked enrollment
+if all are revoked. Already-revoked targets report the existing success without a
+prompt or write. Enable with an already-pending authorization reports its existing
+success without a prompt or new record; an already-enabled kind reports the table's
+error. Otherwise use the normal confirmation. A replacement enrollment can only be
+changed after the owner types literal `yes` at a new prompt; declining changes
+nothing. Compact tombstones retain the validated machine name and insertion
+sequence solely for this lookup, never as authority. Origin-side disconnect in
+PR4.3 follows the same state-idempotent rule. If custody remains unreadable or the
+outcome remains uncertain, refuse with the table's same-command guidance; never
+direct operators to custody files.
 
 ### Origin disconnect and delivery split
 
@@ -1259,9 +1266,11 @@ CI must verify the implementation, not infer safety from this docs PR:
   whole-enrollment revocation. Refuse last-kind per-kind revoke and enable without
   valid remaining authority before writing. Enable after begin stays pending;
   cancellation/revoke of a bound authorization makes finish refuse.
-- Rerun each revoke/enable/disconnect command after uncertain commit; reconcile
-  idempotently and report the prior outcome before prompting or retrying, without
-  repeating authorization or touching a replacement enrollment.
+- Rerun each revoke/enable/disconnect command after durable commit and report the
+  existing end state without a prompt or repeated authorization. After replacement,
+  rerun prompts for the replacement and declining changes nothing. Exercise crashes
+  and uncertain commits at every step, including the fresh custody read before
+  prompting. Check tombstone lookup at the maximum validated machine-name length.
 - Preserve old valid origin custody across failed staging, crash and disconnect;
   admit no partial/mixed generation or late renewal after disconnect. Preserve keys,
   consent, facts, history and audits; old registry format refuses without migration.

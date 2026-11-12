@@ -22,6 +22,7 @@ pub struct Controller {
     machine: String,
     pending: BTreeMap<String, Pending>,
     unavailable: Option<&'static str>,
+    dir: std::path::PathBuf,
 }
 impl Controller {
     /// The caller is the authenticated local OS owner and authorizes exactly one
@@ -45,6 +46,7 @@ impl Controller {
             machine,
             pending: BTreeMap::new(),
             unavailable: None,
+            dir: dir.to_owned(),
         })
     }
     pub fn pending(&mut self, now: u64) -> Vec<(String, pairing::State)> {
@@ -228,6 +230,10 @@ impl Controller {
                     return Err(Refused);
                 }
                 self.validate_input(&message.input, now)?;
+                crate::generation_audit::append(&self.dir, &[]).map_err(|_| {
+                    self.unavailable = Some(crate::enrollment::AUDIT_UNAVAILABLE);
+                    Refused
+                })?;
                 let expected = if message.input.kinds.iter().any(|(_, required)| *required) {
                     vec![crate::client_ca::pin(&transcript.origin_key).map_err(|_| Refused)?]
                 } else {

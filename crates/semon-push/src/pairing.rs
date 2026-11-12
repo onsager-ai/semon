@@ -796,6 +796,9 @@ impl Core {
             enrollment_id: enrollment_id.clone(),
             receiver_id: self.receiver_id.clone(),
             machine: input.machine,
+            sequence: snapshot.next_sequence,
+            origin_key: t.origin_key.clone(),
+            endpoint: t.endpoint.clone(),
             binding: input.binding,
             client_certificate_pins: input.client_certificate_pins,
             credential_kinds: kinds,
@@ -841,6 +844,19 @@ impl Core {
                 if fresh.pairing_receipts.iter().any(|r| r.session_id == id) {
                     return Err(Error::Terminal);
                 }
+                let replaced: Vec<_> = fresh
+                    .enrollments
+                    .iter()
+                    .filter(|e| e.machine == enrollment.machine && e.revoked_at.is_none())
+                    .map(|e| e.enrollment_id.clone())
+                    .collect();
+                for id in replaced {
+                    fresh.revoke_enrollment(&id, None, now);
+                }
+                let mut enrollment = enrollment;
+                enrollment.sequence = fresh.next_sequence;
+                fresh.next_sequence = fresh.next_sequence.checked_add(1).ok_or(Error::Invalid)?;
+                fresh.latest = now.max(fresh.latest);
                 fresh.enrollments.push(enrollment);
                 fresh.credentials.extend(added_bearers);
                 fresh.pairing_receipts.push(receipt);
@@ -893,7 +909,7 @@ impl Core {
                 || enrollment
                     .credential_kinds
                     .iter()
-                    .any(|k| k.revoked_at.is_some() || k.generations.current != 1)
+                    .any(|k| !k.available || k.generations.current != 1)
                 || snapshot
                     .credentials
                     .iter()

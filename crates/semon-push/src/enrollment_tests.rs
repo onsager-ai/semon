@@ -45,6 +45,9 @@ fn enrollment(kind: Kind) -> Enrollment {
         enrollment_id: id('a'),
         receiver_id: "receiver-1".into(),
         machine: "laptop".into(),
+        sequence: 1,
+        origin_key: vec![4; 65],
+        endpoint: "https://receiver.example:443".into(),
         binding: if kind == Kind::MirrorPush {
             Binding::Inapplicable
         } else {
@@ -151,7 +154,7 @@ fn strict_document_refusals() {
     let base = serde_json::to_value(&r).unwrap();
     let mutations: Vec<fn(&mut Value)> = vec![
         |v| v["unknown"] = json!(true),
-        |v| v["format"] = json!(2),
+        |v| v["format"] = json!(1),
         |v| v["enrollments"][0]["unknown"] = json!(true),
         |v| v["enrollments"][0]["credential_kinds"][0]["unknown"] = json!(true),
         |v| v["enrollments"][0]["credential_kinds"][0]["generations"]["unknown"] = json!(true),
@@ -376,10 +379,10 @@ fn revocation_history_and_generations_are_terminal_through_real_commit() {
     let mut cleared = r.clone();
     cleared.credentials[0].revoked_at = None;
     assert_eq!(commit(&mut store, &cleared), Err(Error::Terminal));
-    r.enrollments[0].credential_kinds[0].revoked_at = Some(21);
+    r.enrollments[0].credential_kinds[0].available = false;
     commit(&mut store, &r).unwrap();
     cleared = r.clone();
-    cleared.enrollments[0].credential_kinds[0].revoked_at = None;
+    cleared.enrollments[0].credential_kinds[0].available = true;
     assert_eq!(commit(&mut store, &cleared), Err(Error::Terminal));
     r.enrollments[0].revoked_at = Some(22);
     commit(&mut store, &r).unwrap();
@@ -461,7 +464,7 @@ fn kind_route_certificate_and_validity_matrix() {
             let mut revoked = r.clone();
             match level {
                 0 => revoked.enrollments[0].revoked_at = Some(99),
-                1 => revoked.enrollments[0].credential_kinds[0].revoked_at = Some(99),
+                1 => revoked.enrollments[0].credential_kinds[0].available = false,
                 _ => revoked.credentials[0].revoked_at = Some(99),
             }
             assert_eq!(
@@ -482,7 +485,7 @@ fn per_kind_revocation_does_not_revoke_other_kinds_and_whole_overrides() {
     r.enrollments[0]
         .credential_kinds
         .push(KindScope::new(Kind::BodyChannel, 2));
-    r.enrollments[0].credential_kinds[0].revoked_at = Some(15);
+    r.enrollments[0].credential_kinds[0].available = false;
     r.validate().unwrap();
     assert_eq!(
         r.authorize(

@@ -13,6 +13,30 @@ pub enum Kind {
     MirrorPush,
 }
 
+impl Kind {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::AnalyticsPublish => "analytics_publish",
+            Self::BodyChannel => "body_channel",
+            Self::MirrorPush => "mirror_push",
+        }
+    }
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "analytics_publish" => Some(Self::AnalyticsPublish),
+            "body_channel" => Some(Self::BodyChannel),
+            "mirror_push" => Some(Self::MirrorPush),
+            _ => None,
+        }
+    }
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::AnalyticsPublish => 0,
+            Self::BodyChannel => 1,
+            Self::MirrorPush => 2,
+        }
+    }
+}
 /// No serializer; exposure is explicit for future protected provisioning only.
 pub struct Secret(Zeroizing<String>);
 impl Secret {
@@ -244,7 +268,7 @@ fn credential_authority_refusal(
     certificate: bool,
     now: u64,
 ) -> Option<Refusal> {
-    if enrollment.revoked_at.is_some() | scope.revoked_at.is_some() | bearer.revoked_at.is_some() {
+    if enrollment.revoked_at.is_some() | !scope.available | bearer.revoked_at.is_some() {
         Some(Refusal::Revoked)
     } else if !((now >= bearer.valid_from) & (now < bearer.valid_until)) {
         Some(Refusal::OutsideValidity)

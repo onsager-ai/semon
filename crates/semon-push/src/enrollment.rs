@@ -18,8 +18,14 @@ use std::{
 pub const DIRECTORY: &str = "enrollment";
 pub const REGISTRY_FILE: &str = "registry.json";
 pub const LOCK_FILE: &str = "registry.lock";
-pub const FORMAT: u32 = 1;
-const CAP: u64 = 4 * 1024 * 1024;
+pub const FORMAT: u32 = 2;
+pub const CAP: u64 = 4 * 1024 * 1024;
+pub const TERMINAL_RESERVE: u64 = 256 * 1024;
+pub const ADMISSION_CAP: u64 = CAP - TERMINAL_RESERVE;
+
+pub const UNSUPPORTED_FORMAT: &str = "Receiver state uses an unsupported format. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See docs/design/asi-enrollment.md#offline-machines-and-missed-renewal.";
+pub const STATE_FULL: &str = "Receiver state is full. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See docs/design/asi-enrollment.md#offline-machines-and-missed-renewal.";
+pub const AUDIT_UNAVAILABLE: &str = "Receiver audit is unavailable. Keep DIR unchanged; restore access to its audit storage before enrolling or renewing.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -34,6 +40,8 @@ pub enum Error {
     Write,
     CommitUncertain,
     LegacyTokens,
+    Full,
+    AuditUnavailable,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -42,7 +50,9 @@ impl fmt::Display for Error {
             Self::GateUnavailable => "pairing gate is unavailable; session creation refused",
             Self::InUse => "enrollment registry is locked",
             Self::Invalid => "invalid enrollment registry",
-            Self::UnsupportedVersion => "unsupported enrollment registry version",
+            Self::UnsupportedVersion => UNSUPPORTED_FORMAT,
+            Self::Full => STATE_FULL,
+            Self::AuditUnavailable => AUDIT_UNAVAILABLE,
             Self::Terminal => "terminal enrollment or credential history cannot be cleared; recover with a new enrollment ID",
             Self::StaleSnapshot => "stale enrollment snapshot; reload before updating",
             Self::Random => "system random source failed",
@@ -136,7 +146,8 @@ pub struct KindScope {
     pub kind: Kind,
     pub client_cert_required: bool,
     pub generations: Generations,
-    pub revoked_at: Option<u64>,
+    pub available: bool,
+    pub enable_authorization: Option<EnableAuthorization>,
 }
 impl KindScope {
     pub fn new(kind: Kind, generation: u64) -> Self {
@@ -147,9 +158,31 @@ impl KindScope {
                 current: generation,
                 retiring: None,
             },
-            revoked_at: None,
+            available: true,
+            enable_authorization: None,
         }
     }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnableAuthorization {
+    pub enrollment_id: String,
+    pub kind: Kind,
+    pub owner: String,
+    pub authorization_id: String,
+    pub created_at: u64,
+    pub consumed_renewal_id: Option<String>,
+}
+/// Compact terminal lookup and no-resurrection evidence; never grants authority.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Tombstone {
+    pub enrollment_id: String,
+    pub machine: String,
+    pub sequence: u64,
+    pub pin: Option<Pin>,
+    /// Analytics, body, mirror, respectively. Zero denotes a never-enrolled kind.
+    pub high_water: [u64; 3],
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -157,6 +190,9 @@ pub struct Enrollment {
     pub enrollment_id: String,
     pub receiver_id: String,
     pub machine: String,
+    pub sequence: u64,
+    pub origin_key: Vec<u8>,
+    pub endpoint: String,
     pub binding: Binding,
     pub client_certificate_pins: Vec<CertificatePin>,
     pub credential_kinds: Vec<KindScope>,
@@ -170,6 +206,9 @@ pub struct Registry {
     pub(crate) enrollments: Vec<Enrollment>,
     pub(crate) credentials: Vec<Bearer>,
     pub(crate) pairing_receipts: Vec<crate::pairing::Receipt>,
+    pub(crate) tombstones: Vec<Tombstone>,
+    pub(crate) latest: u64,
+    pub(crate) next_sequence: u64,
 }
 impl Registry {
     pub fn empty() -> Self {
@@ -179,6 +218,9 @@ impl Registry {
             enrollments: vec![],
             credentials: vec![],
             pairing_receipts: vec![],
+            tombstones: vec![],
+            latest: 0,
+            next_sequence: 1,
         }
     }
     pub fn revision(&self) -> u64 {
@@ -206,6 +248,13 @@ impl Registry {
         if bytes.len() as u64 > CAP {
             return Err(Error::Invalid);
         }
+        // Inspect only the version before the strict current-format decoder. Old
+        // fields never reach a legacy reader or become an empty current registry.
+        let version: serde_json::Value =
+            serde_json::from_slice(bytes).map_err(|_| Error::Invalid)?;
+        if version.get("format").and_then(serde_json::Value::as_u64) != Some(u64::from(FORMAT)) {
+            return Err(Error::UnsupportedVersion);
+        }
         let registry: Self = serde_json::from_slice(bytes).map_err(|_| Error::Invalid)?;
         registry.validate()?;
         Ok(registry)
@@ -219,6 +268,9 @@ impl Registry {
             enrollments,
             credentials,
             pairing_receipts: vec![],
+            tombstones: vec![],
+            latest: 0,
+            next_sequence: 1,
         };
         registry.validate()?;
         Ok(registry)
@@ -232,12 +284,28 @@ impl Registry {
         let mut namespaces = BTreeSet::new();
         let mut pins = BTreeSet::new();
         let mut receiver = None;
+        for t in &self.tombstones {
+            if !opaque(&t.enrollment_id)
+                || !semon_sessions::is_machine_name(&t.machine)
+                || !identities.insert(&t.enrollment_id)
+                || serde_json::to_vec(t).map_err(|_| Error::Invalid)?.len() > 512
+            {
+                return Err(Error::Invalid);
+            }
+            if let Some(pin) = &t.pin {
+                pins.insert((pin, &t.enrollment_id));
+            }
+        }
         for e in &self.enrollments {
             if !opaque(&e.enrollment_id)
                 || !identifier(&e.receiver_id)
                 || !semon_sessions::is_machine_name(&e.machine)
                 || !identities.insert(&e.enrollment_id)
                 || e.credential_kinds.is_empty()
+                || e.credential_kinds.len() > 3
+                || e.origin_key.len() != 65
+                || e.endpoint != crate::pairing::normalize_endpoint(&e.endpoint)?
+                || serde_json::to_vec(e).map_err(|_| Error::Invalid)?.len() > 8192
                 || receiver.is_some_and(|id| id != &e.receiver_id)
             {
                 return Err(Error::Invalid);
@@ -299,7 +367,19 @@ impl Registry {
                 {
                     return Err(Error::Invalid);
                 }
-                if k.client_cert_required
+                if k.enable_authorization.as_ref().is_some_and(|a| {
+                    a.enrollment_id != e.enrollment_id
+                        || a.kind != k.kind
+                        || !opaque(&a.authorization_id)
+                        || !identifier(&a.owner)
+                        || a.consumed_renewal_id.as_ref().is_some_and(|id| !opaque(id))
+                        || (k.available && a.consumed_renewal_id.is_none())
+                }) {
+                    return Err(Error::Invalid);
+                }
+                if k.available
+                    && e.revoked_at.is_none()
+                    && k.client_cert_required
                     && !e
                         .client_certificate_pins
                         .iter()
@@ -337,6 +417,7 @@ impl Registry {
             if !opaque(&b.credential_id)
                 || b.generation == 0
                 || b.valid_from >= b.valid_until
+                || serde_json::to_vec(b).map_err(|_| Error::Invalid)?.len() > 1024
                 || !ids.insert(&b.credential_id)
                 || !hashes.insert(b.sha256)
                 || !generations.insert((&b.enrollment_id, b.kind, b.generation))
@@ -374,6 +455,9 @@ impl Registry {
             if e.receiver_id != next.receiver_id
                 || e.machine != next.machine
                 || e.binding != next.binding
+                || e.origin_key != next.origin_key
+                || e.endpoint != next.endpoint
+                || e.sequence != next.sequence
                 || (e.revoked_at.is_some() && e != next)
             {
                 return Err(Error::Terminal);
@@ -394,7 +478,15 @@ impl Registry {
                     .iter()
                     .find(|n| n.kind == scope.kind)
                     .ok_or(Error::Terminal)?;
-                if (scope.revoked_at.is_some() && scope != n)
+                if (!scope.available
+                    && n.available
+                    && !scope.enable_authorization.as_ref().is_some_and(|a| {
+                        a.consumed_renewal_id.is_none()
+                            && n.enable_authorization.as_ref().is_some_and(|b| {
+                                b.authorization_id == a.authorization_id
+                                    && b.consumed_renewal_id.is_some()
+                            })
+                    }))
                     || n.generations.current < scope.generations.current
                     || (scope.client_cert_required && !n.client_cert_required)
                     || (n.generations.current == scope.generations.current
@@ -722,6 +814,11 @@ impl Store {
         let mut next = current.clone();
         let output = edit(&mut next)?;
         next.follows(&current)?;
+        if next.enrollments.len() > current.enrollments.len()
+            || next.credentials.len() > current.credentials.len()
+        {
+            next.check_admission()?;
+        }
         next.revision = current.revision.checked_add(1).ok_or(Error::Invalid)?;
         self.write(&next, |_| Ok(()))?;
         Ok(output)
@@ -781,6 +878,10 @@ enum Stage {
     Renamed,
     DirectorySynced,
 }
+
+#[path = "enrollment_state.rs"]
+mod state;
+pub use state::{OwnerAction, OwnerState};
 
 #[cfg(test)]
 #[path = "enrollment_tests.rs"]

@@ -14,17 +14,24 @@ enrollment_dir.mkdir(mode=0o700)
 token = secrets.token_hex(32)
 enrollment_id = secrets.token_hex(32)
 registry = {
-    "format": 1,
+    "format": 2,
+    "latest": 0,
+    "next_sequence": 2,
+    "tombstones": [],
     "revision": 1,
     "enrollments": [{
         "enrollment_id": enrollment_id,
         "receiver_id": "ci-receiver",
         "machine": "laptop",
+        "sequence": 1,
+        "origin_key": [4] * 65,
+        "endpoint": "https://receiver.example:443",
         "binding": {"state": "inapplicable"},
         "client_certificate_pins": [],
         "credential_kinds": [{
             "kind": "mirror_push", "client_cert_required": False,
-            "generations": {"current": 1, "retiring": None}, "revoked_at": None,
+            "generations": {"current": 1, "retiring": None},
+            "available": True, "enable_authorization": None,
         }],
         "revoked_at": None,
     }],

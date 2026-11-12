@@ -261,6 +261,9 @@ pub(super) fn records(cert_required: bool) -> Registry {
         enrollment_id: "a".repeat(64),
         receiver_id: "receiver-1".into(),
         machine: "laptop".into(),
+        sequence: 1,
+        origin_key: vec![4; 65],
+        endpoint: "https://receiver.example:443".into(),
         binding: Binding::Inapplicable,
         client_certificate_pins: vec![CertificatePin {
             pin: identity().spki().clone(),
@@ -408,7 +411,7 @@ fn credential_handle_survives_unrelated_writes_and_sibling_renewal() {
     store.commit(next.revision(), &next).unwrap();
     assert!(handle.is_current_at(100));
     let mut next = store.snapshot().unwrap();
-    next.enrollments[1].credential_kinds[0].revoked_at = Some(100);
+    next.enrollments[1].credential_kinds[0].available = false;
     store.commit(next.revision(), &next).unwrap();
     assert!(handle.is_current_at(100));
     let mut next = store.snapshot().unwrap();
@@ -485,7 +488,7 @@ fn credential_handle_fails_closed_when_its_authority_ends() {
         let mut next = store.snapshot().unwrap();
         match failure {
             "credential" => next.credentials[0].revoked_at = Some(100),
-            "kind" => next.enrollments[0].credential_kinds[0].revoked_at = Some(100),
+            "kind" => next.enrollments[0].credential_kinds[0].available = false,
             "enrollment" => next.enrollments[0].revoked_at = Some(100),
             "pin" => next.enrollments[0].client_certificate_pins[0].revoked_at = Some(100),
             "pin_removed" => {
