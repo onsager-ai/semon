@@ -271,9 +271,9 @@ impl ConfirmedKey {
 
     /// Receiver recovery only. Caller must verify a fresh connection-bound origin
     /// signature; deliver() independently matches all persisted receipt hashes.
-    pub(crate) fn recovered(application: [u8; 32], transcript: Transcript) -> Self {
+    pub(crate) fn recovered(application: Zeroizing<[u8; 32]>, transcript: Transcript) -> Self {
         Self {
-            application: Zeroizing::new(application),
+            application,
             transcript,
         }
     }

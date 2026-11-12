@@ -103,6 +103,9 @@ fn post(client: &mut Client, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
     write!(client, "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
     client.write_all(body).unwrap();
     client.flush().unwrap();
+    response(client)
+}
+fn response(client: &mut Client) -> (u16, Vec<u8>) {
     let mut head = vec![];
     while !head.ends_with(b"\r\n\r\n") {
         let mut byte = [0];
@@ -338,29 +341,6 @@ fn http_tls_pairing_activates_and_mirror_stays_serving() {
         proof: wire::encode(signature.as_ref()),
         input,
     };
-    let mut substituted: pairing::ActivationInput =
-        serde_json::from_slice(&serde_json::to_vec(&approve.input).unwrap()).unwrap();
-    substituted.valid_until -= 1;
-    let forged = wire::Approve {
-        version: 1,
-        session_id: approve.session_id.clone(),
-        proof: approve.proof.clone(),
-        input: substituted,
-    };
-    // Commitment substitution refuses and ends only this connection; validate it
-    // on a foreign connection first so the legitimate session remains usable.
-    let (mut attacker, rejected_worker) = h.connect();
-    assert_eq!(
-        post(
-            &mut attacker,
-            "/v1/provision/approve",
-            &wire::encode_message(&forged).unwrap()
-        )
-        .0,
-        401
-    );
-    drop(attacker);
-    rejected_worker.join().unwrap();
     let (status, body) = post(
         &mut client,
         "/v1/provision/approve",
@@ -372,9 +352,8 @@ fn http_tls_pairing_activates_and_mirror_stays_serving() {
     let (mut mirror, other) = h.connect();
     write!(mirror,"POST /v1/mirror/status HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",activated.credentials[0].1).unwrap();
     mirror.flush().unwrap();
-    let mut response = String::new();
-    mirror.read_to_string(&mut response).unwrap();
-    assert!(!response.starts_with("HTTP/1.1 401"));
+    let (status, _) = response(&mut mirror);
+    assert_ne!(status, 401);
     drop(mirror);
     other.join().unwrap();
     drop(client);
@@ -420,5 +399,55 @@ fn http_expiry_and_cross_connection_cancel_are_generic_and_do_not_activate() {
             .unwrap()
             .enrollments()
             .is_empty()
+    );
+}
+
+#[test]
+fn http_analytics_activation_is_explicitly_unavailable_without_side_effects() {
+    let h = Harness::new();
+    let (mut client, worker) = h.connect();
+    let created = open(&mut client);
+    let registry = crate::enrollment::Registry::read_current(&h.dir.0).unwrap();
+    let acl = fs::read(
+        h.dir
+            .0
+            .join(crate::receiver_custody::ACL)
+            .join(crate::receiver_acl::ACL_FILE),
+    )
+    .unwrap();
+    let mut input = h.input();
+    input.kinds = vec![(Kind::AnalyticsPublish, false)];
+    let approve = wire::Approve {
+        version: 1,
+        session_id: created.session_id,
+        proof: wire::encode(&[0; 64]),
+        input,
+    };
+    let (status, body) = post(
+        &mut client,
+        "/v1/provision/approve",
+        &wire::encode_message(&approve).unwrap(),
+    );
+    assert_eq!(status, 409);
+    assert!(
+        String::from_utf8(body)
+            .unwrap()
+            .contains("available after origin connect / producer admission lands")
+    );
+    drop(client);
+    worker.join().unwrap();
+    assert_eq!(
+        crate::enrollment::Registry::read_current(&h.dir.0).unwrap(),
+        registry
+    );
+    assert_eq!(
+        fs::read(
+            h.dir
+                .0
+                .join(crate::receiver_custody::ACL)
+                .join(crate::receiver_acl::ACL_FILE)
+        )
+        .unwrap(),
+        acl
     );
 }

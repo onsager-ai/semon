@@ -312,8 +312,138 @@ fn exact_expiry_cancellation_and_receiver_policy_refuse_without_activation() {
     input.valid_until = 701;
     input.kinds = vec![(Kind::BodyChannel, true)];
     assert!(controller.validate_input(&input, 700).is_err());
+    input.kinds = vec![(Kind::AnalyticsPublish, false)];
+    let before = controller.core.registry().unwrap();
+    assert!(controller.validate_input(&input, 700).is_err());
+    assert_eq!(controller.core.registry().unwrap(), before);
+    input.kinds = vec![(Kind::MirrorPush, false), (Kind::MirrorPush, false)];
+    assert!(controller.validate_input(&input, 700).is_err());
     input.kinds = vec![(Kind::MirrorPush, false)];
     input.machine = "foreign".into();
     assert!(controller.validate_input(&input, 700).is_err());
     assert!(controller.core.registry().unwrap().enrollments().is_empty());
+}
+
+#[test]
+fn confirmation_finishing_at_expiry_spends_attempt_but_refuses() {
+    let fixture = Fixture::new();
+    let mut controller = fixture.controller();
+    let (created, code) = opened(&mut controller, [1; 32], 100);
+    let key = key();
+    let t = transcript(&created, &key, [1; 32], input(100).commitment());
+    let keys = pairing::derive_keys(&code, &t).unwrap();
+    let clock = std::cell::Cell::new(699);
+    let now = || {
+        let current = clock.get();
+        clock.set(700);
+        current
+    };
+    assert!(
+        controller
+            .handle_with_clock(
+                confirmation(&t, &keys.origin_confirmation(&t)),
+                [1; 32],
+                &now,
+                |_, _| panic!("code")
+            )
+            .is_err()
+    );
+    assert_eq!(
+        controller.core.state(&created.session_id, 700).unwrap(),
+        pairing::State::Expired
+    );
+    assert!(controller.core.registry().unwrap().enrollments().is_empty());
+}
+
+#[test]
+fn analytics_refusal_changes_no_authority_and_never_refunds_attempts() {
+    let fixture = Fixture::new();
+    let mut controller = fixture.controller();
+    let (created, code) = opened(&mut controller, [1; 32], 100);
+    let key = key();
+    let mut input = input(100);
+    input.kinds = vec![(Kind::AnalyticsPublish, false)];
+    let t = transcript(&created, &key, [1; 32], input.commitment());
+    let keys = pairing::derive_keys(&code, &t).unwrap();
+    assert!(
+        controller
+            .handle(
+                confirmation(&t, &pairing::Mac::from_bytes([0; 32])),
+                [1; 32],
+                100,
+                |_, _| panic!("code")
+            )
+            .is_err()
+    );
+    let response = controller
+        .handle(
+            confirmation(&t, &keys.origin_confirmation(&t)),
+            [1; 32],
+            100,
+            |_, _| panic!("code"),
+        )
+        .unwrap();
+    let response: wire::Confirmed = serde_json::from_slice(&response).unwrap();
+    let _confirmed = keys
+        .confirm_receiver(
+            &t,
+            &pairing::Mac::from_bytes(wire::decode_fixed(&response.receiver_mac).unwrap()),
+        )
+        .unwrap();
+    let proof = key
+        .sign(&SystemRandom::new(), &wire::possession_message(&t))
+        .unwrap();
+    let registry = controller.core.registry().unwrap();
+    let acl = std::fs::read(
+        controller
+            .custody
+            .acl_dir()
+            .join(crate::receiver_acl::ACL_FILE),
+    )
+    .unwrap();
+    assert!(
+        controller
+            .handle(
+                Request::Approve(wire::Approve {
+                    version: 1,
+                    session_id: t.session_id.clone(),
+                    proof: wire::encode(proof.as_ref()),
+                    input
+                }),
+                [1; 32],
+                100,
+                |_, _| panic!("code")
+            )
+            .is_err()
+    );
+    assert_eq!(controller.core.registry().unwrap(), registry);
+    assert_eq!(
+        std::fs::read(
+            controller
+                .custody
+                .acl_dir()
+                .join(crate::receiver_acl::ACL_FILE)
+        )
+        .unwrap(),
+        acl
+    );
+    assert_eq!(
+        controller.core.state(&t.session_id, 100).unwrap(),
+        pairing::State::Confirmed
+    );
+    assert!(
+        controller
+            .handle(
+                confirmation(&t, &keys_for_replay(&code, &t)),
+                [1; 32],
+                100,
+                |_, _| panic!("code")
+            )
+            .is_err()
+    );
+}
+fn keys_for_replay(code: &Secret, t: &Transcript) -> pairing::Mac {
+    pairing::derive_keys(code, t)
+        .unwrap()
+        .origin_confirmation(t)
 }

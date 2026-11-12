@@ -9,7 +9,7 @@ The reference receiver requires the current enrollment registry and a separate
 Push client's protected input for that kind bearer; a bearer is machine transport
 authority, never user identity or source authority. Legacy `DIR/tokens` state and
 `receive token` commands are refused; preserve old tokens/history and explicitly
-re-pair through the enrollment flow. No import, conversion or deletion occurs.
+re-pair through the enrollment flow in a fresh receiver directory. No import, conversion or deletion occurs.
 Local receiver enrollment starts with `receive enroll --machine NAME --advertise
 HTTPS_URL --dir DIR --tls-cert PEM --tls-key PEM`; origin connect delivery is the
 next integration slice. A kept-alive connection cannot switch enrollments.

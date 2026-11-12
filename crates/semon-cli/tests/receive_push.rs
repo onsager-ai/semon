@@ -524,3 +524,30 @@ fn receive_refuses_plain_http_off_loopback() {
         stderr(&refused)
     );
 }
+
+#[test]
+fn enroll_refuses_legacy_tokens_before_terminal_or_custody_initialization() {
+    let fixture = Fixture::new();
+    let dir = fixture.dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let tokens = b"preserve legacy receiver bytes";
+    std::fs::write(dir.join("tokens"), tokens).unwrap();
+    let output = fixture.receive(&[
+        "enroll",
+        "--machine",
+        "laptop",
+        "--advertise",
+        "https://receiver.example",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--tls-cert",
+        "unused.pem",
+        "--tls-key",
+        "unused-key.pem",
+    ]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("legacy tokens found"));
+    assert!(stderr(&output).contains("fresh receiver directory"));
+    assert_eq!(std::fs::read(dir.join("tokens")).unwrap(), tokens);
+    assert!(!dir.join("receiver.json").exists());
+}

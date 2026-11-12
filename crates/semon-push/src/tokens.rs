@@ -36,3 +36,20 @@ pub fn prepare_private_dir(dir: &Path, create: bool) -> Result<(), String> {
         Err(error) => Err(failed(error)),
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn loose_existing_directory_is_refused_without_changing_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!("semon-private-dir-{}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::prepare_private_dir(&path, true).is_err());
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        std::fs::remove_dir(path).unwrap();
+    }
+}

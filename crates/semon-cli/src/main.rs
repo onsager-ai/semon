@@ -904,7 +904,7 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
 }
 
 /// `semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM]`,
-/// or `semon receive token (add NAME | revoke NAME | list) --dir DIR`.
+/// or `semon receive enroll --machine NAME --advertise HTTPS_URL ...`.
 fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<ReceiveArgs, String> {
     let mut arguments = arguments.peekable();
     if arguments.peek().is_some_and(|argument| argument == "token") {
@@ -1005,6 +1005,8 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
         } => {
             use std::io::{BufRead, IsTerminal, Write};
             use std::sync::{Arc, Mutex};
+            semon_push::enrollment::refuse_legacy_tokens(&options.dir)
+                .map_err(|e| format!("{e}; choose a fresh receiver directory to enroll"))?;
             if options.tls.is_none() {
                 return Err("receive enroll requires --tls-cert and --tls-key".into());
             }

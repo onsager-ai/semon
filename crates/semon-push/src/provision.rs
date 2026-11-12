@@ -108,6 +108,16 @@ impl Controller {
         now: u64,
         show: impl FnOnce(&str, &crate::credentials::Secret) -> Result<(), Refused>,
     ) -> Result<Zeroizing<Vec<u8>>, Refused> {
+        self.handle_with_clock(request, exporter, &|| now, show)
+    }
+    pub fn handle_with_clock(
+        &mut self,
+        request: Request,
+        exporter: [u8; 32],
+        clock: &dyn Fn() -> u64,
+        show: impl FnOnce(&str, &crate::credentials::Secret) -> Result<(), Refused>,
+    ) -> Result<Zeroizing<Vec<u8>>, Refused> {
+        let now = clock();
         let bytes = match request {
             Request::Open(_) => {
                 // Remove terminal transport metadata; Core retains its own bounded outcomes.
@@ -161,7 +171,7 @@ impl Controller {
                     .reserve(&wire::encode(&exporter), transcript.clone(), now)
                     .map_err(|_| Refused)?;
                 let verified = attempt.verify(&message.mac()?).map_err(|_| Refused)?;
-                let proof = self.core.confirm(verified, now).map_err(|_| Refused)?;
+                let proof = self.core.confirm(verified, clock()).map_err(|_| Refused)?;
                 pending.transcript = Some(transcript);
                 wire::encode_message(&wire::Confirmed {
                     version: wire::VERSION,
@@ -189,7 +199,7 @@ impl Controller {
                 // Fresh activation decision is held here; grants never precede commit.
                 if let Some(grants) = grants {
                     self.custody
-                        .install_owner_grants(&delivery.enrollment_id, &grants)
+                        .install_current_owner_grants(&delivery.enrollment_id, &grants)
                         .map_err(|_| Refused)?;
                 }
                 delivery_bytes(delivery)?
@@ -227,7 +237,7 @@ impl Controller {
                     summary_digest: transcript.scope,
                 };
                 let key = pairing::ConfirmedKey::recovered(
-                    wire::decode_fixed(&message.application_key)?,
+                    Zeroizing::new(wire::decode_fixed(&message.application_key)?),
                     transcript,
                 );
                 let delivery = self
@@ -246,7 +256,7 @@ impl Controller {
                 }
                 if let Some(grants) = self.grants(&enrollment.binding)? {
                     self.custody
-                        .install_owner_grants(&delivery.enrollment_id, &grants)
+                        .install_current_owner_grants(&delivery.enrollment_id, &grants)
                         .map_err(|_| Refused)?;
                 }
                 delivery_bytes(delivery)?
@@ -279,7 +289,9 @@ impl Controller {
             || input
                 .kinds
                 .iter()
-                .any(|(kind, certificate)| *certificate || *kind == Kind::BodyChannel)
+                .any(|(kind, certificate)| *certificate || *kind != Kind::MirrorPush)
+            || !matches!(input.binding, Binding::Inapplicable)
+            || input.kinds.len() != 1
         {
             return Err(Refused);
         }

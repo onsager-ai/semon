@@ -293,7 +293,7 @@ verified origin MAC permits a `confirmed` response (version and receiver MAC).
 `approve` carries version, session ID, the full strict ActivationInput and 64-byte
 proof. Recompute input.commitment() and require transcript.scope equality. Apply
 receiver policy: named authorized machine, valid binding, offered kinds only,
-empty certificate pins and no client-cert requirement for analytics/mirror.
+empty certificate pins and no client-cert requirement for mirror. Only mirror_push activates in this slice; analytics_publish refuses until origin connect / independently validated producer admission lands. Peer-supplied namespace/incarnation bindings cannot authorize activation.
 Body-channel enrollment is available after client-certificate issuance lands.
 The **initial credential validity ceiling** is 90 days (7,776,000 seconds) from
 activation now, exclusive lower bound (`valid_until > now`) and inclusive upper
@@ -324,7 +324,7 @@ The receiver controller is enabled only by local `receive enroll` authorization.
 Codes go directly to `/dev/tty`, never stdout/stderr or a wire field. Its local
 terminal accepts `pending` and `cancel SESSION_ID`. Activation commits enrollment,
 kind hashes and receipt together, followed by exact owner grant installation;
-recovery revalidates committed authority before repairing interrupted grants.
+recovery revalidates committed authority before repairing interrupted grants. Grant installation holds owners.lock and a fresh registry lock through the authority check and ACL write; busy/revoked state refuses. The mutex-held KDF and /dev/tty write are known limits: other provisioning and local pending/cancel actions wait without a mutex deadline; existing authenticated routes use separate locks.
 
 ## Source consent and P1
 

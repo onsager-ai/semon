@@ -1035,11 +1035,16 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
         }
         return refused();
     };
+    let body = zeroize::Zeroizing::new(body);
     let Ok(exporter) = exporter else {
         return refused();
     };
     let Some(controller) = slot.shared.provisioning.as_ref() else {
         return refused();
+    };
+    let mut controller = match controller.lock() {
+        Ok(controller) => controller,
+        Err(_) => return refused(),
     };
     let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
         Ok(now) => now.as_secs(),
@@ -1051,10 +1056,6 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
         .provisioning_clock
         .as_ref()
         .map_or(now, |clock| clock());
-    let mut controller = match controller.lock() {
-        Ok(controller) => controller,
-        Err(_) => return refused(),
-    };
     let request = match Request::parse(route, &body) {
         Ok(request) => request,
         Err(_) => {
@@ -1075,7 +1076,32 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
             &[],
         );
     }
-    let reply = controller.handle(request, exporter, now, |id, code| {
+    if let Request::Approve(message) = &request
+        && message
+            .input
+            .kinds
+            .iter()
+            .any(|(kind, _)| *kind == Kind::AnalyticsPublish)
+    {
+        return Next::Refuse(
+            409,
+            "analytics_publish available after origin connect / producer admission lands",
+            &[],
+        );
+    }
+    let clock = || {
+        let current = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(now, |now| now.as_secs());
+        #[cfg(test)]
+        let current = slot
+            .shared
+            .provisioning_clock
+            .as_ref()
+            .map_or(current, |clock| clock());
+        current
+    };
+    let reply = controller.handle_with_clock(request, exporter, &clock, |id, code| {
         #[cfg(test)]
         if let Some(terminal) = &slot.shared.provisioning_terminal {
             return terminal(id, code);

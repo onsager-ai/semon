@@ -111,7 +111,7 @@ same archive after every batch or restart; see the
 The receiver uses the enrollment registry and separate kind-scoped credentials.
 Legacy `DIR/tokens` and `receive token` commands are refused. Preserve those files
 and retained history; explicitly re-pair machines without importing or deleting
-old state. A machine name is 1 to 63 of `a-z`, `0-9` and `-`.
+old state. Choose a fresh receiver directory for enrollment so legacy custody stays intact. A machine name is 1 to 63 of `a-z`, `0-9` and `-`.
 
 Receiver-side pairing starts in a trusted local terminal:
 
