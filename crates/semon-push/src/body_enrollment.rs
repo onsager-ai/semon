@@ -164,7 +164,7 @@ mod tests {
             receiver_audit::{self, AuditStore},
         };
         use std::os::unix::fs::PermissionsExt;
-        for failure in ["revision", "read"] {
+        for failure in ["revision", "read", "delayed"] {
             let dir = Directory::new();
             let a = source(&dir.0, "a");
             let b = source(&dir.0, "b");
@@ -231,6 +231,66 @@ mod tests {
             for (service, (lease, _)) in services.iter_mut().zip(&leases) {
                 service.maintain().unwrap();
                 assert!(service.collect(*lease).is_ok());
+            }
+            if failure == "delayed" {
+                let mut watcher = RevocationWatcher::new(&dir.0).unwrap();
+                broker
+                    .enqueue(&a, a.scope.clone(), [3; 32], request(1))
+                    .unwrap();
+                advance(&dir.0);
+                let fresh = source(&dir.0, "a");
+                let bytes = wire::control(&wire::PollRequest {
+                    version: wire::VERSION,
+                    channel_binding: [4; 32],
+                })
+                .unwrap();
+                let poll = broker.begin_poll(&fresh, &bytes).unwrap();
+                broker
+                    .enqueue(&fresh, fresh.scope.clone(), [4; 32], request(2))
+                    .unwrap();
+                let mut fresh_audit =
+                    AuditStore::open(&dir.0.join("audit-fresh"), &at, receiver_audit::MAX_BYTES)
+                        .unwrap();
+                let mut service = AppendService::new(
+                    &broker,
+                    &fresh,
+                    &acls,
+                    &signing,
+                    "issuer",
+                    Identifier::from_bytes([11; 32]),
+                    &mut fresh_audit,
+                );
+                let mut template = request(78);
+                template.operation = Operation::ReadPage {
+                    page: opaque("append"),
+                };
+                let (lease, _watcher) = service
+                    .subscribe(
+                        Principal {
+                            subject: "subject".into(),
+                            audit_id: Identifier::from_bytes([9; 32]),
+                        },
+                        fresh.scope.clone(),
+                        template,
+                        Identifier::from_bytes([4; 32]),
+                    )
+                    .unwrap();
+                assert!(watcher.notify_if_revision_changed(&fresh, &broker).unwrap());
+                assert_eq!(broker.channel(&fresh.scope), Ok([4; 32]));
+                service.sweep_owner(&fresh.scope, &fresh).unwrap();
+                assert_eq!(service.collect(lease), Ok(false));
+                assert!(matches!(
+                    broker.take_result(&fresh, Identifier::from_bytes([1; 32])),
+                    Err(Reason::Revoked)
+                ));
+                assert!(
+                    broker
+                        .take_result(&fresh, Identifier::from_bytes([2; 32]))
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(poll.try_take(&fresh).unwrap().is_some());
+                continue;
             }
             if failure == "revision" {
                 advance(&dir.0);
