@@ -51,7 +51,7 @@ fn transcript(created: &Created) -> Transcript {
         session_id: created.session_id.clone(),
         endpoint: "https://desk.example:443".into(),
         exporter: vec![2; 32],
-        origin_key: vec![3; 32],
+        origin_key: vec![3; 65],
         scope: input().commitment(),
         origin_nonce: [4; 32],
         receiver_nonce: created.receiver_nonce,
@@ -557,6 +557,36 @@ fn full_happy_path_and_interrupted_delivery_recovery_after_restart() {
     .unwrap();
     assert!(!String::from_utf8(bytes).unwrap().contains(&first_secret));
 }
+#[test]
+fn activation_refuses_a_changed_confirmed_predecessor_or_absence() {
+    for confirmed_existing in [false, true] {
+        let f = Fixture::new();
+        let mut core = f.core();
+        if confirmed_existing {
+            let (t, _) = confirmed(&mut core, "original", 100);
+            core.approve(evidence(&t), 100).unwrap();
+            let original = core.activate(&t.session_id, input(), 100).unwrap();
+            core.bind_predecessor(Some(original.enrollment_id));
+        }
+        let (pending, _) = confirmed(&mut core, "pending", 101);
+        core.approve(evidence(&pending), 101).unwrap();
+        // A competing approved session commits after the owner's observation.
+        let (competitor, _) = confirmed(&mut core, "competitor", 101);
+        core.approve(evidence(&competitor), 101).unwrap();
+        let winner = core.activate(&competitor.session_id, input(), 101).unwrap();
+        let before = core.registry().unwrap();
+        assert!(matches!(
+            core.activate(&pending.session_id, input(), 102),
+            Err(Error::Terminal)
+        ));
+        assert_eq!(core.registry().unwrap(), before);
+        assert_eq!(
+            before.usable_machine("laptop", 102),
+            Some(winner.enrollment_id.as_str())
+        );
+    }
+}
+
 #[test]
 fn cancellation_expiry_replay_competing_keys_and_duplicate_approval() {
     let f = Fixture::new();
