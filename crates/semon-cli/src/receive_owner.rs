@@ -15,12 +15,8 @@ pub(super) fn confirm(terminal: &mut File, prompt: &str) -> Result<bool, String>
     std::io::BufReader::new(terminal.try_clone().map_err(|e| e.to_string())?)
         .read_line(&mut line)
         .map_err(|e| e.to_string())?;
-    Ok(line
-        .strip_suffix('\n')
-        .unwrap_or(&line)
-        .strip_suffix('\r')
-        .unwrap_or(line.strip_suffix('\n').unwrap_or(&line))
-        == "yes")
+    let line = line.strip_suffix('\n').unwrap_or(&line);
+    Ok(line.strip_suffix('\r').unwrap_or(line) == "yes")
 }
 fn now() -> Result<u64, String> {
     std::time::SystemTime::now()
@@ -162,7 +158,6 @@ pub(super) fn run(
     let result = store
         .owner_update(
             dir,
-            machine,
             parsed_kind,
             action,
             &custody.owner().principal,

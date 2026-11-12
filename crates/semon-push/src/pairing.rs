@@ -631,7 +631,7 @@ pub(crate) struct Receipt {
     transcript_digest: [u8; 32],
     application_hash: [u8; 32],
     created: u64,
-    valid_until: u64,
+    pub(crate) valid_until: u64,
     pub(crate) deliveries: u8,
     client_certificate: Option<Vec<u8>>,
 }
@@ -641,6 +641,7 @@ pub(crate) fn validate_receipts(registry: &Registry) -> Result<()> {
         if r.session_id.len() != 64
             || !ids.insert(&r.session_id)
             || r.deliveries > 2
+            || serde_json::to_vec(r).map_err(|_| Error::Invalid)?.len() >= 8192
             || r.created >= r.valid_until
             || !registry
                 .enrollments

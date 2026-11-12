@@ -263,6 +263,13 @@ impl Registry {
     /// Build an activation snapshot. Persistence compares it with current custody
     /// under lock; a caller cannot remove or rewrite terminal history.
     pub fn from_records(enrollments: Vec<Enrollment>, credentials: Vec<Bearer>) -> Result<Self> {
+        let next_sequence = enrollments
+            .iter()
+            .map(|e| e.sequence)
+            .max()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or(Error::Invalid)?;
         let registry = Self {
             format: FORMAT,
             revision: 0,
@@ -271,7 +278,7 @@ impl Registry {
             pairing_receipts: vec![],
             tombstones: vec![],
             latest: 0,
-            next_sequence: 1,
+            next_sequence,
         };
         registry.validate()?;
         Ok(registry)
@@ -289,11 +296,14 @@ impl Registry {
             if !opaque(&t.enrollment_id)
                 || !semon_sessions::is_machine_name(&t.machine)
                 || !identities.insert(&t.enrollment_id)
-                || serde_json::to_vec(t).map_err(|_| Error::Invalid)?.len() > 512
+                || serde_json::to_vec(t).map_err(|_| Error::Invalid)?.len() >= 512
             {
                 return Err(Error::Invalid);
             }
             if let Some(pin) = &t.pin {
+                if pins.iter().any(|(p, _)| *p == pin) {
+                    return Err(Error::Invalid);
+                }
                 pins.insert((pin, &t.enrollment_id));
             }
         }
@@ -306,7 +316,7 @@ impl Registry {
                 || e.credential_kinds.len() > 3
                 || e.origin_key.len() != 65
                 || e.endpoint != crate::pairing::normalize_endpoint(&e.endpoint)?
-                || serde_json::to_vec(e).map_err(|_| Error::Invalid)?.len() > 8192
+                || serde_json::to_vec(e).map_err(|_| Error::Invalid)?.len() >= 8192
                 || receiver.is_some_and(|id| id != &e.receiver_id)
             {
                 return Err(Error::Invalid);
@@ -433,7 +443,7 @@ impl Registry {
             if !opaque(&b.credential_id)
                 || b.generation == 0
                 || b.valid_from >= b.valid_until
-                || serde_json::to_vec(b).map_err(|_| Error::Invalid)?.len() > 1024
+                || serde_json::to_vec(b).map_err(|_| Error::Invalid)?.len() >= 1024
                 || !ids.insert(&b.credential_id)
                 || !hashes.insert(b.sha256)
                 || !generations.insert((&b.enrollment_id, b.kind, b.generation))

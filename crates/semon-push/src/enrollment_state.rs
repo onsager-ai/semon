@@ -31,7 +31,7 @@ impl Registry {
         let size = serde_json::to_vec(self).map_err(|_| Error::Invalid)?.len() as u64;
         // Reserve the maximum terminal timestamp/availability deltas per record.
         let terminal_delta =
-            self.credentials.len() as u64 * 20 + self.enrollments.len() as u64 * 20;
+            self.credentials.len() as u64 * 20 + self.enrollments.len() as u64 * (20 + 512);
         if size > ADMISSION_CAP || size.saturating_add(terminal_delta) > CAP {
             return Err(Error::Full);
         }
@@ -43,6 +43,7 @@ impl Registry {
             .any(|e| e.machine == machine && self.usable(e, now))
     }
     fn usable(&self, e: &Enrollment, now: u64) -> bool {
+        let now = now.max(self.latest);
         self.credentials
             .iter()
             .filter(|b| b.enrollment_id == e.enrollment_id)
@@ -55,6 +56,10 @@ impl Registry {
                         && b.valid_from <= now
                         && now < b.valid_until
                         && s.generations.accepts(b.generation, now)
+                        && (!s.client_cert_required
+                            || e.client_certificate_pins
+                                .iter()
+                                .any(|p| p.generation == b.generation && p.revoked_at.is_none()))
                 })
             })
     }
@@ -105,12 +110,15 @@ impl Registry {
         }
         match action {
             OwnerAction::Revoke => {
-                if e.revoked_at.is_some() || scope.is_some_and(|s| !s.available) {
+                if e.revoked_at.is_some()
+                    || scope.is_some_and(|s| !s.available && s.enable_authorization.is_none())
+                {
                     return OwnerState::Complete {
                         endpoint: e.endpoint.clone(),
                     };
                 }
-                if scope.is_some() && e.credential_kinds.iter().filter(|s| s.available).count() == 1
+                if scope.is_some_and(|s| s.available)
+                    && e.credential_kinds.iter().filter(|s| s.available).count() == 1
                 {
                     return OwnerState::LastKind;
                 }
@@ -182,7 +190,6 @@ impl Store {
     pub fn owner_update(
         &mut self,
         receiver: &Path,
-        machine: &str,
         kind: Option<Kind>,
         action: OwnerAction,
         owner: &str,
@@ -191,7 +198,14 @@ impl Store {
     ) -> Result<OwnerState> {
         let mut next = self.snapshot()?;
         let now = now.max(next.latest);
-        let state = next.owner_state(machine, kind, action, now);
+        let machine = next
+            .enrollments
+            .iter()
+            .find(|e| e.enrollment_id == confirmed_id)
+            .ok_or(Error::StaleSnapshot)?
+            .machine
+            .clone();
+        let state = next.owner_state(&machine, kind, action, now);
         let OwnerState::Confirm { enrollment_id, .. } = &state else {
             return Ok(state);
         };
@@ -248,16 +262,26 @@ impl Store {
                     .enrollments
                     .iter()
                     .find(|e| e.enrollment_id == b.enrollment_id)?
-                    .client_certificate_pins
-                    .iter()
-                    .find(|p| p.generation == b.generation)
-                    .map(|p| p.pin.clone());
+                    .enrolled_pin
+                    .clone();
                 Some(EndedGeneration::new(b, pin, reason, now))
             })
             .collect();
         generation_audit::append(receiver, &records)?;
         let has_terminal = next.enrollments.iter().any(|e| e.revoked_at.is_some());
-        if records.is_empty() && !has_terminal {
+        let receipt_count = next.pairing_receipts.len();
+        next.pairing_receipts.retain(|r| {
+            r.valid_until > now
+                && r.deliveries < 2
+                && next.enrollments.iter().any(|e| {
+                    e.enrollment_id == r.enrollment_id
+                        && e.revoked_at.is_none()
+                        && e.credential_kinds
+                            .iter()
+                            .all(|k| k.available && k.generations.current == 1)
+                })
+        });
+        if records.is_empty() && !has_terminal && receipt_count == next.pairing_receipts.len() {
             return Ok(());
         }
         next.credentials

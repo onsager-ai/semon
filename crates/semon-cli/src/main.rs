@@ -65,7 +65,14 @@ fn main() -> ExitCode {
     match parse_args().and_then(run) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("semon: {error}");
+            if error.starts_with("Receiver state ")
+                || error.starts_with("Receiver audit ")
+                || error.starts_with("Receiver directory ")
+            {
+                eprintln!("{error}");
+            } else {
+                eprintln!("semon: {error}");
+            }
             ExitCode::FAILURE
         }
     }

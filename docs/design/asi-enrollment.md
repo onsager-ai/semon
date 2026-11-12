@@ -1272,6 +1272,10 @@ CI must verify the implementation, not infer safety from this docs PR:
   whole-enrollment revocation. Refuse last-kind per-kind revoke and enable without
   valid remaining authority before writing. Enable after begin stays pending;
   cancellation/revoke of a bound authorization makes finish refuse.
+- Check receiver endpoint mismatch refusal, enable/recovery strings using the
+  recorded endpoint after compaction, and the origin custody name equaling SHA-256
+  of the same normalized endpoint. Plain receive loads that endpoint without a new
+  --advertise argument.
 - Rerun each revoke/enable/disconnect command after durable commit and report the
   existing end state without a prompt or repeated authorization. After replacement,
   rerun prompts for the replacement and declining changes nothing. Exercise crashes
