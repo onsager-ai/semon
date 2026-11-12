@@ -554,6 +554,21 @@ impl Registry {
                 }
             }
         }
+        for b in &self.credentials {
+            if !old
+                .credentials
+                .iter()
+                .any(|previous| previous.credential_id == b.credential_id)
+                && old
+                    .enrollments
+                    .iter()
+                    .find(|e| e.enrollment_id == b.enrollment_id)
+                    .and_then(|e| e.credential_kinds.iter().find(|s| s.kind == b.kind))
+                    .is_some_and(|s| b.generation <= s.generations.current)
+            {
+                return Err(Error::Terminal);
+            }
+        }
         for b in &old.credentials {
             let n = self
                 .credentials
