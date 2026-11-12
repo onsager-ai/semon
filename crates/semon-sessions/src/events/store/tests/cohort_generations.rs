@@ -4,6 +4,45 @@ use crate::origin_projection::{CohortGenerations, CohortReadError, read_cohort_g
 use semon_asi::{egress::AdmittedCohort, input::SourceWitness};
 use std::collections::BTreeMap;
 
+fn admit_sources(
+    store: &mut SqliteStore,
+    options: &crate::Options,
+    rows: &[crate::model::summary::CatalogRow],
+) {
+    let archive = crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache));
+    for source in rows.iter().flat_map(|row| &row.sources) {
+        let input = crate::native_evidence::source_input(&source.path, options).unwrap();
+        let native = crate::archive::NativeSource {
+            home: input.root.home(options).clone(),
+            root: input.root.as_str().to_owned(),
+            path: input.path,
+            native_id: source.native_id.clone(),
+            ledger: Ledger {
+                stat: Stat {
+                    dev: source.dev,
+                    ino: source.ino,
+                    size: source.size,
+                    modified_ns: source.modified_ns,
+                    changed_ns: source.changed_ns,
+                },
+                offset: source.offset,
+                prefix: source.prefix_sha256,
+                tail: source.tail_sha256,
+            },
+            sidecar: None,
+            chain_id: String::new(),
+        };
+        let admitted = archive
+            .admit_native(
+                &mut crate::sealed::LogFile::open(&source.path).unwrap(),
+                &native,
+            )
+            .unwrap();
+        assert!(admitted.is_some());
+        store.record_chain_admission(source.path.to_str().unwrap(), &source.native_id, admitted);
+    }
+}
+
 struct Fixture {
     root: PathBuf,
     options: crate::Options,
@@ -18,6 +57,7 @@ impl Fixture {
         let (options, rows, slots) = catalog_native_fixture(&root, 4, false);
         let path = super::super::super::EventCache::path(&options.cache);
         let (mut store, _) = opened(&path);
+        admit_sources(&mut store, &options, &rows);
         catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
         let identity = crate::analytics_namespace::create(path.parent().unwrap()).unwrap();
         let binding = identity.binding(analytics_index_incarnation(&path).unwrap());
@@ -46,42 +86,6 @@ impl Fixture {
             })
             .collect::<Vec<_>>();
         assert_eq!(cohorts.len(), 4);
-        // Markers are index evidence; archive byte checks are separately tested
-        // by archive retention. Use real archived chains for their identities.
-        let archive = crate::archive::Archive::new(root.join("chain-fixture"));
-        for row in &rows {
-            for source in &row.sources {
-                let bytes = fs::read(&source.path).unwrap();
-                let chain = archive
-                    .preserve(
-                        &source.native_id,
-                        &mut bytes.as_slice(),
-                        crate::archive::NATIVE_REDACTOR,
-                    )
-                    .unwrap()
-                    .unwrap();
-                assert!(chain.length >= source.offset);
-                let input = crate::native_evidence::source_input(&source.path, &options).unwrap();
-                let marker = serde_json::json!({
-                    "version": 7, "chain_id": chain.chain_id, "parser_version": CACHE_VERSION,
-                    "source": {"root": input.root.as_str(), "path": input.path, "native_id": source.native_id,
-                        "offset": source.offset, "prefix_sha256": source.prefix_sha256, "tail_sha256": source.tail_sha256},
-                    "stat": {"dev": source.dev, "ino": source.ino, "size": chain.length,
-                        "modified_ns": source.modified_ns, "changed_ns": source.changed_ns},
-                    "projection_version": crate::slot_projection::VERSION, "projection_generation": "fixture"
-                });
-                store
-                    .connection
-                    .execute(
-                        "INSERT OR REPLACE INTO meta VALUES(?1,?2)",
-                        params![
-                            archive_index_key(source.path.to_str().unwrap()),
-                            marker.to_string()
-                        ],
-                    )
-                    .unwrap();
-            }
-        }
         Self {
             root,
             options,
@@ -93,16 +97,6 @@ impl Fixture {
     }
     fn read(&self, cohorts: &[AdmittedCohort]) -> Result<CohortGenerations, CohortReadError> {
         read_cohort_generations(&self.path, &self.binding, cohorts)
-    }
-    fn saved_markers(&self) -> BTreeMap<String, String> {
-        self.store
-            .connection
-            .prepare("SELECT key,value FROM meta WHERE key GLOB 'archive_event_index:*'")
-            .unwrap()
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-            .unwrap()
-            .collect::<rusqlite::Result<_>>()
-            .unwrap()
     }
     fn repin(&mut self) {
         let mut input = SqliteAnalyticsInput::open(&self.path, &self.binding.namespace).unwrap();
@@ -131,45 +125,8 @@ impl Fixture {
             })
             .collect();
     }
-    fn refresh_markers(
-        &self,
-        rows: &[crate::model::summary::CatalogRow],
-        saved: &BTreeMap<String, String>,
-    ) {
-        for source in rows.iter().flat_map(|row| &row.sources) {
-            let key = archive_index_key(source.path.to_str().unwrap());
-            let mut marker: serde_json::Value = serde_json::from_str(&saved[&key]).unwrap();
-            marker["source"]["offset"] = source.offset.into();
-            marker["source"]["prefix_sha256"] = serde_json::to_value(source.prefix_sha256).unwrap();
-            marker["stat"]["size"] = source.size.into();
-            self.store
-                .connection
-                .execute(
-                    "INSERT OR REPLACE INTO meta VALUES(?1,?2)",
-                    params![key, marker.to_string()],
-                )
-                .unwrap();
-        }
-    }
     fn first_source(&self) -> &semon_asi::input::Source {
         &self.cohorts[0].witnesses.values().next().unwrap().sources[0]
-    }
-    fn mutate_marker(&self, mutate: impl FnOnce(&mut serde_json::Value)) {
-        let key = archive_index_key(&self.first_source().local_path);
-        let text: String = self
-            .store
-            .connection
-            .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
-            .unwrap();
-        let mut value = serde_json::from_str(&text).unwrap();
-        mutate(&mut value);
-        self.store
-            .connection
-            .execute(
-                "UPDATE meta SET value=?2 WHERE key=?1",
-                params![key, value.to_string()],
-            )
-            .unwrap();
     }
 }
 impl Drop for Fixture {
@@ -221,12 +178,20 @@ fn aggregates_exact_membership_and_stable_chain_evidence_without_database_change
             .collect()
     );
     let source = f.first_source();
-    let marker = archived_index(&f.store.connection, &source.local_path)
-        .unwrap()
-        .unwrap();
     assert_eq!(
         all.chains[&source.native_id].chain_id,
-        marker.chain_id.unwrap()
+        cohort_chain(&f.store.connection, source).unwrap()
+    );
+    assert_eq!(
+        f.store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key GLOB 'archive_event_index:*'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
     );
     assert_eq!(before, fs::read(&f.path).unwrap());
     assert_eq!(modified, fs::metadata(&f.path).unwrap().modified().unwrap());
@@ -296,27 +261,41 @@ fn refuses_malformed_and_stale_cohorts() {
 }
 
 #[test]
-fn refuses_missing_and_disagreeing_archive_markers() {
+fn refuses_missing_and_disagreeing_chain_evidence() {
     let f = Fixture::new();
     let selected = &f.cohorts[..1];
-    let prefix = serde_json::to_value([0_u8; 32]).unwrap();
-    f.mutate_marker(|m| m["source"]["prefix_sha256"] = prefix);
-    assert_eq!(f.read(selected), Err(CohortReadError::Stale));
-    let expected_prefix = f.first_source().prefix_sha256.clone();
-    let bytes = (0..32)
-        .map(|i| u8::from_str_radix(&expected_prefix[i * 2..i * 2 + 2], 16).unwrap())
-        .collect::<Vec<_>>();
-    f.mutate_marker(|m| m["source"]["prefix_sha256"] = serde_json::to_value(bytes).unwrap());
-    f.mutate_marker(|m| m["stat"]["size"] = 0.into());
-    assert_eq!(f.read(selected), Err(CohortReadError::Stale));
-    f.mutate_marker(|m| m["stat"]["size"] = u64::MAX.into());
-    f.mutate_marker(|m| m["source"]["offset"] = 0.into());
-    assert_eq!(f.read(selected), Err(CohortReadError::Stale));
+    for assignment in [
+        "prefix_sha256='wrong'",
+        "recorded_size=0",
+        "consumed_offset=0",
+        "native_id='other'",
+        "chain_id='invalid'",
+    ] {
+        f.store
+            .connection
+            .execute_batch("SAVEPOINT evidence")
+            .unwrap();
+        f.store
+            .connection
+            .execute(
+                &format!("UPDATE native_chain_evidence SET {assignment} WHERE source_path=?1"),
+                [&f.first_source().local_path],
+            )
+            .unwrap();
+        assert_eq!(
+            cohort_chain(&f.store.connection, f.first_source()),
+            Err(CohortReadError::Stale)
+        );
+        f.store
+            .connection
+            .execute_batch("ROLLBACK TO evidence; RELEASE evidence")
+            .unwrap();
+    }
     f.store
         .connection
         .execute(
-            "DELETE FROM meta WHERE key=?1",
-            [archive_index_key(&f.first_source().local_path)],
+            "DELETE FROM native_chain_evidence WHERE source_path=?1",
+            [&f.first_source().local_path],
         )
         .unwrap();
     assert_eq!(f.read(selected), Err(CohortReadError::NotIndexed));
@@ -325,34 +304,8 @@ fn refuses_missing_and_disagreeing_archive_markers() {
 #[test]
 fn refuses_conflicting_chain_fields_and_stale_rules_or_prices() {
     let f = Fixture::new();
-    let key = archive_index_key(&f.first_source().local_path);
-    let marker: String = f
-        .store
-        .connection
-        .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r.get(0))
-        .unwrap();
-    // A marker cannot name two chains. The meta primary key separately prevents
-    // two exact-path marker rows; duplicate JSON fields must also refuse.
-    let contradictory = marker.replacen(
-        '{',
-        "{\"chain_id\":\"00000000000000000000000000000000\",",
-        1,
-    );
-    f.store
-        .connection
-        .execute(
-            "UPDATE meta SET value=?2 WHERE key=?1",
-            params![key, contradictory],
-        )
-        .unwrap();
-    assert_eq!(f.read(&f.cohorts[..1]), Err(CohortReadError::Stale));
-    f.store
-        .connection
-        .execute(
-            "UPDATE meta SET value=?2 WHERE key=?1",
-            params![key, marker],
-        )
-        .unwrap();
+    // The exact-path primary key refuses a second candidate.
+    assert!(f.store.connection.execute("INSERT INTO native_chain_evidence SELECT * FROM native_chain_evidence WHERE source_path=?1", [&f.first_source().local_path]).is_err());
     f.store
         .connection
         .execute(
@@ -405,7 +358,6 @@ fn append_republication_changes_generations_and_old_witness_is_stale() {
     let mut f = Fixture::new();
     let before = f.read(&f.cohorts).unwrap();
     let old = f.cohorts.clone();
-    let markers = f.saved_markers();
     let source = old
         .iter()
         .flat_map(|c| &c.witnesses)
@@ -416,16 +368,34 @@ fn append_republication_changes_generations_and_old_witness_is_stale() {
         .clone();
     writeln!(fs::OpenOptions::new().append(true).open(&source.local_path).unwrap(), "{}", serde_json::json!({"type":"turn_context","timestamp":"2026-09-24T00:02:00Z","payload":{"model":"gpt-6-sol"}})).unwrap();
     let (rows, slots) = catalog_fixture_projection(&f.options);
+    admit_sources(&mut f.store, &f.options, &rows);
     catalog_write(&mut f.store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
     assert_eq!(f.read(&old), Err(CohortReadError::Stale));
-    // Restore fixture archive markers at the newly published indexed prefix.
-    // This test exercises index evidence; archive extension verification belongs
-    // to the archive writer and caller.
-    f.refresh_markers(&rows, &markers);
     f.repin();
     let after = f.read(&f.cohorts).unwrap();
     assert_ne!(before.activity_generation, after.activity_generation);
     assert_ne!(before.transcript_generation, after.transcript_generation);
+    assert_eq!(
+        before.chains[&source.native_id].chain_id,
+        after.chains[&source.native_id].chain_id
+    );
+    let fresh = f
+        .cohorts
+        .iter()
+        .flat_map(|c| c.witnesses.values())
+        .flat_map(|w| &w.sources)
+        .find(|s| s.native_id == source.native_id)
+        .unwrap();
+    assert!(fresh.consumed_offset > source.consumed_offset);
+    assert_ne!(fresh.prefix_sha256, source.prefix_sha256);
+    assert_eq!(
+        cohort_chain(&f.store.connection, fresh).unwrap(),
+        before.chains[&source.native_id].chain_id
+    );
+    assert_eq!(
+        cohort_chain(&f.store.connection, &source),
+        Err(CohortReadError::Stale)
+    );
     assert_eq!(f.read(&old), Err(CohortReadError::Stale));
 }
 
@@ -433,7 +403,6 @@ fn append_republication_changes_generations_and_old_witness_is_stale() {
 fn successful_rules_and_pricing_republication_changes_only_activity() {
     let mut f = Fixture::new();
     let before = f.read(&f.cohorts).unwrap();
-    let markers = f.saved_markers();
     let (mut rows, slots) = catalog_fixture_projection(&f.options);
     // Model the recomputed classification/cost result carried by a current
     // publication after replacing obsolete rules/pricing headers.
@@ -445,24 +414,179 @@ fn successful_rules_and_pricing_republication_changes_only_activity() {
     activity.aggregate.exclusive_cost_complete = !activity.aggregate.exclusive_cost_complete;
     f.store.connection.execute("UPDATE session_activity_projections SET rules_version=0,pricing_fingerprint='obsolete'", []).unwrap();
     assert_eq!(f.read(&f.cohorts), Err(CohortReadError::Stale));
+    admit_sources(&mut f.store, &f.options, &rows);
     catalog_write(&mut f.store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
-    f.refresh_markers(&rows, &markers);
     let after = f.read(&f.cohorts).unwrap();
     assert_ne!(before.activity_generation, after.activity_generation);
     assert_eq!(before.transcript_generation, after.transcript_generation);
 }
 
 #[test]
-fn refuses_marker_for_a_different_embedded_file() {
-    let f = Fixture::new();
-    for path in [
-        "projects/other/different.jsonl",
-        "../different.jsonl",
-        "/projects/different.jsonl",
-        "",
-    ] {
-        f.mutate_marker(|m| m["source"]["path"] = path.into());
-        assert_eq!(f.read(&f.cohorts[..1]), Err(CohortReadError::Stale));
+fn requires_exact_source_path_and_ignores_retention_markers() {
+    let mut f = Fixture::new();
+    let before = f.read(&f.cohorts).unwrap();
+    let key = archive_index_key(&f.first_source().local_path);
+    let (rows, slots) = catalog_fixture_projection(&f.options);
+    f.store
+        .connection
+        .execute(
+            "INSERT INTO meta VALUES(?1,'unrelated retention value')",
+            [&key],
+        )
+        .unwrap();
+    assert_eq!(before, f.read(&f.cohorts).unwrap());
+    admit_sources(&mut f.store, &f.options, &rows);
+    catalog_write(&mut f.store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    assert_eq!(
+        f.store
+            .connection
+            .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r
+                .get::<_, String>(0))
+            .unwrap(),
+        "unrelated retention value"
+    );
+    f.store
+        .connection
+        .execute(
+            "UPDATE native_chain_evidence SET source_path='other/' || source_path",
+            [],
+        )
+        .unwrap();
+    assert_eq!(f.read(&f.cohorts), Err(CohortReadError::NotIndexed));
+}
+
+#[test]
+fn native_scan_carries_first_seen_admission_into_source_publication() {
+    let root = scratch("scan-chain-publication");
+    let (mut options, _, _) = catalog_native_fixture(&root, 2, false);
+    let inputs = crate::inputs::inputs(&options)
+        .unwrap()
+        .into_iter()
+        .filter(|input| input.path.ends_with(".jsonl"))
+        .collect::<Vec<_>>();
+    let mut cache = crate::events::EventCache::open_scoped(&options.cache).unwrap();
+    let prepared =
+        crate::model::prepare_sources(&options, &mut cache, &inputs, CATALOG_FIXTURE_NOW).unwrap();
+    assert_eq!(
+        cache.publish_partial_catalog(&prepared).unwrap(),
+        Outcome::Written
+    );
+    let path = crate::events::EventCache::path(&options.cache);
+    let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM native_chain_evidence", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        connection
+            .query_row(
+                "SELECT count(*) FROM meta WHERE key GLOB 'archive_event_index:*'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+        0
+    );
+    drop(connection);
+    let facts = crate::Facts {
+        version: crate::FACTS_VERSION,
+        hostname: "synthetic-chain".into(),
+        codex_rollouts: Some(
+            inputs
+                .iter()
+                .filter(|input| input.root == crate::InputRoot::Codex)
+                .map(|input| input.path.clone())
+                .collect(),
+        ),
+        ..Default::default()
+    };
+    options.facts = Some(root.join("facts.json"));
+    let intent = crate::SessionFactsWrite::begin(&options, "", &facts).unwrap();
+    crate::write_facts(options.facts.as_ref().unwrap(), &facts).unwrap();
+    intent.complete().unwrap();
+    let prepared =
+        crate::model::prepare_sources(&options, &mut cache, &inputs, CATALOG_FIXTURE_NOW).unwrap();
+    assert_eq!(
+        cache.publish_partial_catalog(&prepared).unwrap(),
+        Outcome::Written
+    );
+    let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT count(*) FROM native_chain_evidence", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        0
+    );
+    drop(connection);
+    drop(cache);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn skipped_or_failed_admission_removes_evidence_only_at_publication() {
+    for reason in ["skipped", "failed"] {
+        let mut f = Fixture::new();
+        let (rows, slots) = catalog_fixture_projection(&f.options);
+        let before = f.read(&f.cohorts).unwrap();
+        // These scan outcomes all carry no archive result to publication.
+        for source in rows.iter().flat_map(|row| &row.sources) {
+            f.store
+                .record_chain_admission(source.path.to_str().unwrap(), &source.native_id, None);
+        }
+        assert_eq!(before, f.read(&f.cohorts).unwrap(), "{reason}");
+        f.store.connection.execute_batch("CREATE TEMP TRIGGER chain_publication_failure BEFORE DELETE ON native_chain_evidence BEGIN SELECT RAISE(ABORT,'chain evidence'); END").unwrap();
+        assert!(catalog_write(&mut f.store, &rows, &slots, false, CatalogWriter::Auto).is_err());
+        assert_eq!(before, f.read(&f.cohorts).unwrap(), "{reason}");
+        f.store
+            .connection
+            .execute_batch("DROP TRIGGER chain_publication_failure")
+            .unwrap();
+        catalog_write(&mut f.store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+        assert_eq!(
+            f.read(&f.cohorts),
+            Err(CohortReadError::NotIndexed),
+            "{reason}"
+        );
+    }
+}
+
+#[test]
+fn rewrite_and_truncation_republication_refuse_old_prefixes() {
+    for truncate in [false, true] {
+        let mut f = Fixture::new();
+        let source = f.first_source().clone();
+        let mut bytes = fs::read(&source.local_path).unwrap();
+        if truncate {
+            let end = bytes[..bytes.len() - 1]
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .unwrap()
+                + 1;
+            bytes.truncate(end);
+        } else {
+            let position = bytes
+                .windows(b"Native".len())
+                .position(|window| window == b"Native")
+                .unwrap();
+            bytes[position] = b'M';
+        }
+        fs::write(&source.local_path, bytes).unwrap();
+        let (rows, slots) = catalog_fixture_projection(&f.options);
+        admit_sources(&mut f.store, &f.options, &rows);
+        catalog_write(&mut f.store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+        assert_eq!(
+            cohort_chain(&f.store.connection, &source),
+            Err(CohortReadError::Stale)
+        );
+        assert_eq!(f.read(&f.cohorts), Err(CohortReadError::Stale));
     }
 }
 

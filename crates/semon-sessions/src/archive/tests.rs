@@ -173,6 +173,7 @@ fn missing_native_binding_is_exact_verified_and_retention_protected() {
         archive
             .admit_native(&mut crate::sealed::LogFile::open(&path).unwrap(), &native)
             .unwrap()
+            .is_some()
     );
     let manifest = manifest_path(&archive, &path.to_string_lossy());
     let before = crate::events::Stat::of(&manifest).unwrap();
@@ -186,6 +187,7 @@ fn missing_native_binding_is_exact_verified_and_retention_protected() {
         archive
             .admit_native(&mut crate::sealed::LogFile::open(&path).unwrap(), &native)
             .unwrap()
+            .is_some()
     );
     assert_eq!(crate::events::Stat::of(&manifest).unwrap(), before);
     FAIL_BEFORE_RENAME
@@ -378,10 +380,39 @@ fn bounded_native_checkpoints_extend_custody_without_advertising_incomplete_sour
             sidecar: None,
             chain_id: String::new(),
         };
+        let admitted = archive
+            .admit_native(&mut crate::sealed::LogFile::open(&path).unwrap(), &native)
+            .unwrap()
+            .unwrap();
+        assert_eq!(admitted.consumed_offset, offset as u64);
+        assert_eq!(admitted.prefix_sha256, digest(prefix));
+        assert!(admitted.recorded_size >= offset as u64);
+        let ahead_prefix = &bytes[..3];
+        let mut ahead = native.clone();
+        ahead.ledger.stat = physical;
+        ahead.ledger.offset = 3;
+        ahead.ledger.prefix = digest(ahead_prefix);
+        let ahead_result = archive
+            .admit_native(&mut crate::sealed::LogFile::open(&path).unwrap(), &ahead)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ahead_result.chain_id, admitted.chain_id);
+        assert_eq!(ahead_result.consumed_offset, 3);
+        assert_eq!(ahead_result.prefix_sha256, digest(ahead_prefix));
+        assert_eq!(ahead_result.recorded_size, offset as u64);
+        ahead.ledger.prefix = digest(b"wrong");
         assert!(
             archive
-                .admit_native(&mut crate::sealed::LogFile::open(&path).unwrap(), &native)
+                .admit_native(&mut crate::sealed::LogFile::open(&path).unwrap(), &ahead)
                 .unwrap()
+                .is_none()
+        );
+        ahead.ledger.offset = 0;
+        assert!(
+            archive
+                .admit_native(&mut crate::sealed::LogFile::open(&path).unwrap(), &ahead)
+                .unwrap()
+                .is_none()
         );
         let chains = archive.chains(&path.to_string_lossy()).unwrap();
         assert_eq!(chains.len(), 1);

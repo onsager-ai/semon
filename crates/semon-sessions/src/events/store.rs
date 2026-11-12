@@ -253,7 +253,8 @@ fn emit_catalog_publish_attempt(
 // v47: Catalog parent_source names only the observed evidence owning a link;
 // agreement with native lineage leaves it absent, including staged endpoints.
 // v48: namespace-relative origin body rows, source ownership and external FTS5.
-pub(crate) const SCHEMA_VERSION: i64 = 48;
+// v49: publication-bound native archive chain evidence, separate from retention.
+pub(crate) const SCHEMA_VERSION: i64 = 49;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -314,6 +315,14 @@ CREATE INDEX IF NOT EXISTS session_catalog_current_repo_model ON session_catalog
 CREATE INDEX IF NOT EXISTS session_catalog_current_harness_repo_model ON session_catalog(harness, repo, json_extract(metadata,'$.model'), last_ms DESC, session_key ASC) WHERE lifecycle='current';
 CREATE INDEX IF NOT EXISTS session_catalog_query_last ON session_catalog(json_extract(metadata,'$.query.last'),session_key);
 CREATE INDEX IF NOT EXISTS session_catalog_query_current_state ON session_catalog(json_extract(metadata,'$.query.state'),session_key) WHERE lifecycle='current';
+CREATE TABLE IF NOT EXISTS native_chain_evidence (
+    source_path TEXT PRIMARY KEY,
+    native_id TEXT NOT NULL,
+    chain_id TEXT NOT NULL,
+    consumed_offset INTEGER NOT NULL,
+    prefix_sha256 TEXT NOT NULL,
+    recorded_size INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS session_catalog_sources (
     session_key TEXT NOT NULL,
     lifecycle TEXT NOT NULL DEFAULT 'current' CHECK(lifecycle IN ('current','retained')),
@@ -693,6 +702,7 @@ struct SqliteStore {
     path: PathBuf,
     selected_runs: Option<std::collections::BTreeSet<String>>,
     semantic_rejection: Option<&'static str>,
+    chain_admissions: BTreeMap<String, (String, Option<crate::archive::Admitted>)>,
     #[cfg(test)]
     traversal_observation: Option<crate::native_timing::CatalogTraversalProbe>,
 }
@@ -2036,6 +2046,16 @@ fn failure(error: rusqlite::Error) -> StoreError {
 }
 
 impl IndexStore for SqliteStore {
+    fn record_chain_admission(
+        &mut self,
+        path: &str,
+        native_id: &str,
+        admitted: Option<crate::archive::Admitted>,
+    ) {
+        self.chain_admissions
+            .insert(path.to_owned(), (native_id.to_owned(), admitted));
+    }
+
     fn describe(&self) -> String {
         self.path.display().to_string()
     }
@@ -3886,6 +3906,40 @@ impl SqliteStore {
                     )
                     .map_err(failure)?;
             }
+            if let Some(claims) = claims {
+                for (path, _) in claims {
+                    transaction
+                        .execute(
+                            "DELETE FROM native_chain_evidence WHERE source_path=?1",
+                            [path],
+                        )
+                        .map_err(failure)?;
+                }
+            } else {
+                transaction
+                    .execute("DELETE FROM native_chain_evidence", [])
+                    .map_err(failure)?;
+            }
+            for source in rows.iter().flat_map(|row| &row.sources) {
+                let path = source.path.to_string_lossy();
+                transaction
+                    .execute(
+                        "DELETE FROM native_chain_evidence WHERE source_path=?1",
+                        [path.as_ref()],
+                    )
+                    .map_err(failure)?;
+                if let Some((native_id, Some(admitted))) = self.chain_admissions.get(path.as_ref())
+                    && native_id == &source.native_id
+                    && admitted.consumed_offset == source.offset
+                    && admitted.prefix_sha256 == source.prefix_sha256
+                    && admitted.recorded_size >= source.offset
+                {
+                    transaction.execute(
+                        "INSERT INTO native_chain_evidence VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(source_path) DO UPDATE SET native_id=excluded.native_id,chain_id=excluded.chain_id,consumed_offset=excluded.consumed_offset,prefix_sha256=excluded.prefix_sha256,recorded_size=excluded.recorded_size",
+                        params![path.as_ref(), native_id, admitted.chain_id, admitted.consumed_offset, admitted.prefix_sha256.iter().map(|byte| format!("{byte:02x}")).collect::<String>(), admitted.recorded_size],
+                    ).map_err(failure)?;
+                }
+            }
             stage("generation", &transaction);
             if let Some(projections) = publication.transcripts {
                 let rows_by_key: BTreeMap<_, _> =
@@ -4121,6 +4175,7 @@ impl SqliteStore {
             path: path.to_owned(),
             selected_runs: scoped.then(std::collections::BTreeSet::new),
             semantic_rejection: None,
+            chain_admissions: BTreeMap::new(),
             #[cfg(test)]
             traversal_observation: None,
         };
@@ -4203,6 +4258,7 @@ impl SqliteStore {
             path: path.to_owned(),
             selected_runs: Some(std::collections::BTreeSet::new()),
             semantic_rejection: None,
+            chain_admissions: BTreeMap::new(),
             #[cfg(test)]
             traversal_observation: None,
         };
@@ -4752,6 +4808,7 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
         return malformed_schema(error);
     }
     for sql in [
+        "SELECT source_path,native_id,chain_id,consumed_offset,prefix_sha256,recorded_size FROM native_chain_evidence LIMIT 0",
         "SELECT codex_pricing_fingerprint,ctime_ns,copilot FROM files LIMIT 0",
         "SELECT pricing_fingerprint,lifecycle,parent_key FROM session_catalog LIMIT 0",
         "SELECT usage_ready FROM native_usage_sources LIMIT 0",
@@ -5137,42 +5194,24 @@ pub(crate) fn cohort_chain(
     source: &semon_asi::input::Source,
 ) -> Result<String, crate::origin_projection::CohortReadError> {
     use crate::origin_projection::CohortReadError::{NotIndexed, Stale, Unavailable};
-    let marker = archived_index(connection, &source.local_path)
-        .map_err(|error| match error {
-            rusqlite::Error::SqliteFailure(_, _) => Unavailable,
-            _ => Stale,
-        })?
-        .ok_or(NotIndexed)?;
-    let chain = marker.chain_id.ok_or(NotIndexed)?;
-    let relative = Path::new(&marker.source.path);
-    // The trusted writer binds root/path to the absolute marker key through
-    // Options. This reader has no Options: additionally check the embedded
-    // relative path without inferring a native home from the filesystem.
-    if marker.source.path.is_empty()
-        || !crate::is_input_path(&marker.source.root, &marker.source.path)
-        || !relative
-            .components()
-            .all(|component| matches!(component, std::path::Component::Normal(_)))
-        || !Path::new(&source.local_path).ends_with(relative)
-        || relative.file_name() != Path::new(&source.local_path).file_name()
-    {
-        return Err(Stale);
-    }
+    let evidence = connection.query_row(
+        "SELECT native_id,chain_id,consumed_offset,prefix_sha256,recorded_size FROM native_chain_evidence WHERE source_path=?1",
+        [&source.local_path],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u64>(2)?, row.get::<_, String>(3)?, row.get::<_, u64>(4)?)),
+    ).optional().map_err(|error| match error {
+        rusqlite::Error::SqliteFailure(_, _) => Unavailable,
+        _ => Stale,
+    })?.ok_or(NotIndexed)?;
+    let (native_id, chain, offset, prefix, size) = evidence;
     if chain.len() != 32
         || !chain
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || marker.source.native_id != source.native_id
-        || marker.stat.size < source.consumed_offset
-        || marker.source.offset != source.consumed_offset
+        || native_id != source.native_id
+        || size < source.consumed_offset
+        || offset != source.consumed_offset
         || source.prefix_sha256.len() != 64
-        || marker
-            .source
-            .prefix_sha256
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-            != source.prefix_sha256
+        || prefix != source.prefix_sha256
     {
         return Err(Stale);
     }
@@ -10579,6 +10618,11 @@ mod tests {
                 "malformed schema",
             ),
             (
+                "missing-chain-evidence",
+                "DROP TABLE native_chain_evidence",
+                "malformed schema",
+            ),
+            (
                 "missing-silver-change",
                 "DROP TABLE silver_change",
                 "malformed schema",
@@ -10987,7 +11031,7 @@ mod tests {
 
     #[test]
     fn obsolete_producer_contracts_are_refused_without_mutation() {
-        for schema in [44, 45, 46] {
+        for schema in [44, 45, 46, 47, 48] {
             let root = scratch("obsolete-contract");
             let path = root.join("index.sqlite3");
             let (mut store, _) = opened(&path);

@@ -1604,6 +1604,7 @@ fn scan(
     // before anything can rewrite them. Bounded selections (the Catalog
     // producer's) archive just the sources they scanned, and only the
     // prefix the index consumed so far.
+    cache.clear_chain_admissions(&seen);
     if options.facts.is_none() {
         cache.archive_consumed(options, &seen);
     }
