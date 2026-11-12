@@ -28,8 +28,48 @@ pub struct CohortEvidence {
     pub chains: BTreeMap<String, String>,
 }
 
-/// No public cohort-bound generation reader exists yet. Production integrations
-/// must retain this refusal until the index supplies that reader.
+/// Production index evidence reader. The host supplies a binding independently
+/// held in trusted local configuration; the accessor checks it in its transaction.
+pub struct IndexGenerations<'a> {
+    index: &'a Path,
+    expected: &'a semon_sessions::analytics::Binding,
+}
+impl<'a> IndexGenerations<'a> {
+    pub fn new(index: &'a Path, expected: &'a semon_sessions::analytics::Binding) -> Self {
+        Self { index, expected }
+    }
+}
+impl Generations for IndexGenerations<'_> {
+    fn read(&self, cohorts: &[AdmittedCohort]) -> Result<CohortEvidence> {
+        map_index_evidence(semon_sessions::origin_projection::read_cohort_generations(
+            self.index,
+            self.expected,
+            cohorts,
+        ))
+    }
+}
+
+fn map_index_evidence(
+    evidence: std::result::Result<
+        semon_sessions::origin_projection::CohortGenerations,
+        semon_sessions::origin_projection::CohortReadError,
+    >,
+) -> Result<CohortEvidence> {
+    let evidence = evidence.map_err(|_| Refused::Unavailable)?;
+    Ok(CohortEvidence {
+        activity_generation: OpaqueId::new(&evidence.activity_generation)
+            .map_err(|_| Refused::Unavailable)?,
+        transcript_generation: OpaqueId::new(&evidence.transcript_generation)
+            .map_err(|_| Refused::Unavailable)?,
+        chains: evidence
+            .chains
+            .into_iter()
+            .map(|(native, chain)| (native, chain.chain_id))
+            .collect(),
+    })
+}
+
+/// Explicit refusal for integrations without configured index evidence.
 pub struct UnavailableGenerations;
 impl Generations for UnavailableGenerations {
     fn read(&self, _: &[AdmittedCohort]) -> Result<CohortEvidence> {

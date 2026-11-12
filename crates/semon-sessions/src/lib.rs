@@ -20,7 +20,7 @@ pub mod analytics_writer;
 pub mod body_query;
 pub use semon_asi::InputBudget;
 mod causal_trace;
-mod origin_projection;
+pub mod origin_projection;
 mod overview;
 mod overview_repair;
 pub use analytics_namespace::read_analytics_namespace;

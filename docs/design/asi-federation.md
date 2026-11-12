@@ -496,16 +496,16 @@ generations and each member's chain/prefix/boundary identify the exact snapshot.
 Cache keys include the prefix witness and invalidate conservatively on append.
 Local body UIDs never supply remote authority.
 
-Activity and transcript generations still require an origin-index API that reads
-both against that exact pinned cohort, together with every native member's stable
-archive chain ID from the same qualified transaction. Missing chain evidence refuses.
-The planned `origin_projection::read_cohort_generations` accessor owns this read;
-the adapter never reads archives itself. The existing internal activity reader and
-transcript slot reader have separate admission checks; `LocalView` and `body_query`
-do not expose a cohort-bound pair. The resolver's `Generations` seam requires that
-contract; its concrete `UnavailableGenerations` implementation always refuses.
-This is a producer/index integration dependency for the PM and origin/storage lanes,
-not permission to substitute analytics generations or synthesize index evidence.
+The resolver's production `IndexGenerations` implements the `Generations` seam
+through `origin_projection::read_cohort_generations`: activity and transcript
+generations and every native member's stable archive chain ID come from the same
+qualified index transaction against the exact pinned cohort. The host constructs
+it with the index path and an expected `analytics::Binding` independently held in
+trusted local configuration. The adapter does not derive that expected binding
+from the index. It maps every accessor refusal and invalid opaque generation to
+`Unavailable`; missing chain evidence refuses. It never reads archives itself or
+substitutes analytics generations. `UnavailableGenerations` remains an explicit
+refusal implementation for callers without configured index evidence.
 `LocalView` exact target lookup and the complete governance/scan-backed `PolicyVector`
 remain integration dependencies. Exact export-view witness production and validation
 remain required before remote reads or authorization-only cache hits can succeed.
