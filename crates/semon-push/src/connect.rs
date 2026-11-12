@@ -38,6 +38,9 @@ pub trait Terminal {
     fn approve(&mut self, receiver: &str, receiver_id: &str, machine: &str) -> Result<bool>;
     /// Exact currently discovered native files approved in the summary.
     fn sources(&self) -> Vec<std::path::PathBuf>;
+    fn require_client_certificate(&self) -> bool {
+        false
+    }
 }
 
 pub(crate) struct Connection {
@@ -302,8 +305,15 @@ pub(crate) fn connect_with(
         receiver_id: opened.receiver_id.clone(),
         machine: machine.into(),
         binding: Binding::Inapplicable,
-        kinds: vec![(Kind::MirrorPush, false)],
-        client_certificate_pins: vec![],
+        kinds: vec![(Kind::MirrorPush, terminal.require_client_certificate())],
+        client_certificate_pins: if terminal.require_client_certificate() {
+            vec![
+                crate::client_ca::pin(key.public_key().as_ref())
+                    .map_err(|_| "invalid origin public key")?,
+            ]
+        } else {
+            vec![]
+        },
         valid_until: now().saturating_add(wire::INITIAL_CREDENTIAL_VALIDITY_SECONDS),
     };
     let mut nonce = [0; 32];

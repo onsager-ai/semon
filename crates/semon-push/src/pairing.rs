@@ -633,6 +633,7 @@ pub(crate) struct Receipt {
     created: u64,
     valid_until: u64,
     pub(crate) deliveries: u8,
+    client_certificate: Option<Vec<u8>>,
 }
 pub(crate) fn validate_receipts(registry: &Registry) -> Result<()> {
     let mut ids = BTreeSet::new();
@@ -670,6 +671,7 @@ impl ActivationInput {
 pub struct Delivery {
     pub enrollment_id: String,
     pub credentials: Vec<(Kind, Secret)>,
+    pub client_certificate: Option<Vec<u8>>,
 }
 fn kind_label(kind: Kind) -> &'static [u8] {
     match kind {
@@ -695,12 +697,31 @@ impl Core {
     pub fn activate(&mut self, id: &str, input: ActivationInput, now: u64) -> Result<Delivery> {
         self.commit_activation(id, input, now, true)
     }
+    pub(crate) fn activate_with_issuer(
+        &mut self,
+        id: &str,
+        input: ActivationInput,
+        now: u64,
+        issuer: &crate::receiver_custody::ReceiverCustody,
+    ) -> Result<Delivery> {
+        self.commit_activation_issued(id, input, now, true, Some(issuer))
+    }
     fn commit_activation(
         &mut self,
         id: &str,
         input: ActivationInput,
         now: u64,
         deliver: bool,
+    ) -> Result<Delivery> {
+        self.commit_activation_issued(id, input, now, deliver, None)
+    }
+    fn commit_activation_issued(
+        &mut self,
+        id: &str,
+        input: ActivationInput,
+        now: u64,
+        deliver: bool,
+        issuer: Option<&crate::receiver_custody::ReceiverCustody>,
     ) -> Result<Delivery> {
         let now = self.observe(now)?;
         let session = self.sessions.get_mut(id).ok_or(Error::Invalid)?;
@@ -718,12 +739,31 @@ impl Core {
             return Err(Error::Terminal);
         }
         let enrollment_id = enrollment::random_id()?;
+        let requires_certificate = input
+            .kinds
+            .iter()
+            .any(|(kind, required)| *required || *kind == Kind::BodyChannel);
+        let client_certificate = if requires_certificate {
+            if input.client_certificate_pins
+                != [crate::client_ca::pin(&t.origin_key).map_err(|_| Error::Invalid)?]
+            {
+                return Err(Error::Invalid);
+            }
+            Some(
+                issuer
+                    .ok_or(Error::Invalid)?
+                    .issue_client_certificate(&t.origin_key, &enrollment_id, now, input.valid_until)
+                    .map_err(|_| Error::Invalid)?,
+            )
+        } else {
+            None
+        };
         let kinds: Vec<_> = input
             .kinds
             .into_iter()
             .map(|(kind, required)| {
                 let mut k = KindScope::new(kind, 1);
-                k.client_cert_required = required;
+                k.client_cert_required = required || kind == Kind::BodyChannel;
                 k
             })
             .collect();
@@ -769,6 +809,7 @@ impl Core {
             created: now,
             valid_until: input.valid_until,
             deliveries: u8::from(deliver),
+            client_certificate: client_certificate.clone(),
         };
         self.store
             .pairing_transaction(snapshot.revision(), |fresh| {
@@ -785,6 +826,7 @@ impl Core {
         Ok(Delivery {
             enrollment_id,
             credentials,
+            client_certificate,
         })
     }
     /// Caller has verified a fresh private-key signature binding this request to
@@ -837,6 +879,7 @@ impl Core {
             }
             let delivery = Delivery {
                 enrollment_id: receipt.enrollment_id.clone(),
+                client_certificate: receipt.client_certificate.clone(),
                 credentials: enrollment
                     .credential_kinds
                     .iter()

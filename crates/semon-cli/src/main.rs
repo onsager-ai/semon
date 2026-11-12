@@ -10,9 +10,11 @@ mod connect_terminal;
 fn parse_connect_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut endpoint = None;
     let mut machine = None;
+    let mut require_client_certificate = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--to" => endpoint = Some(arguments.next().ok_or("--to requires URL")?),
+            "--require-client-certificate" => require_client_certificate = true,
             "--machine" => machine = Some(arguments.next().ok_or("--machine requires NAME")?),
             "-h" | "--help" => return Err("Usage: semon connect --to URL [--machine NAME]".into()),
             _ => return Err(format!("unknown connect argument: {argument}")),
@@ -30,6 +32,7 @@ fn parse_connect_args(mut arguments: impl Iterator<Item = String>) -> Result<Com
     Ok(Command::Connect {
         endpoint: endpoint.ok_or("connect requires --to URL")?,
         machine,
+        require_client_certificate,
     })
 }
 
@@ -70,6 +73,7 @@ enum Command {
     Connect {
         endpoint: String,
         machine: String,
+        require_client_certificate: bool,
     },
     Receive(ReceiveArgs),
     Query(QueryArgs),
@@ -924,10 +928,16 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
     let (config, credential) = semon_push::origin_custody::load(&base, receiver.as_deref())?;
     let name = semon_push::wire::sha256_hex(config.endpoint.as_bytes());
     let sources = semon_push::origin_custody::consent(&base, &name, &config)?;
-    let semon_push::Credential::Memory(token) = credential else {
-        return Err("invalid enrolled credential".into());
+    let (token, identity) = match credential {
+        semon_push::Credential::Memory(token) => (token, None),
+        semon_push::Credential::MutualTls { token, identity } => (token, Some(identity)),
+        _ => return Err("invalid enrolled credential".into()),
     };
-    let credential = semon_push::Credential::Enrolled { token, sources };
+    let credential = semon_push::Credential::Enrolled {
+        token,
+        sources,
+        identity,
+    };
     let url = config.endpoint;
     let state = state.unwrap_or_else(|| semon_push::default_state_path(&url));
     Ok(PushArgs {
@@ -1168,7 +1178,11 @@ fn run(command: Command) -> Result<(), String> {
         }
         Command::Sessions(args) => run_sessions(args),
         Command::Push(args) => run_push(&args),
-        Command::Connect { endpoint, machine } => connect_terminal::run(&endpoint, &machine),
+        Command::Connect {
+            endpoint,
+            machine,
+            require_client_certificate,
+        } => connect_terminal::run(&endpoint, &machine, require_client_certificate),
         Command::Receive(args) => run_receive(args),
         Command::Query(args) => run_query(args),
         #[cfg(feature = "asi-query")]

@@ -35,6 +35,7 @@ pub struct Configuration {
     pub consent_file: String,
     pub consent_sha256: String,
     pub credential_sha256: String,
+    pub client_certificate_sha256: Option<String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -162,6 +163,18 @@ pub fn install(
         return Err("invalid mirror credential delivery".into());
     }
     crate::Token::new(&delivery.credentials[0].1)?;
+    let key = EcdsaKeyPair::from_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        private,
+        &ring::rand::SystemRandom::new(),
+    )
+    .map_err(|_| ERROR)?;
+    let certificate = delivery
+        .client_certificate
+        .as_deref()
+        .map(decode_certificate)
+        .transpose()?;
+    validate_certificate(scope, certificate.as_deref(), key.public_key().as_ref())?;
     // Parents contain no credentials. Dedicated custody itself must be owned 0700.
     fs::DirBuilder::new()
         .recursive(true)
@@ -216,6 +229,7 @@ pub fn install(
         consent_file: "source-consent.json".into(),
         consent_sha256: crate::wire::sha256_hex(&consent_bytes),
         credential_sha256: crate::wire::sha256_hex(delivery.credentials[0].1.as_bytes()),
+        client_certificate_sha256: certificate.as_deref().map(crate::wire::sha256_hex),
     };
     let key = EcdsaKeyPair::from_pkcs8(
         &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
@@ -244,6 +258,9 @@ pub fn install(
     dir.write("source-consent.json", &consent_bytes)?;
     dir.write("origin-key.pk8", private)?;
     dir.write("mirror-push.secret", delivery.credentials[0].1.as_bytes())?;
+    if let Some(certificate) = &certificate {
+        dir.write("client-certificate.der", certificate)?;
+    }
     dir.write("enrollment.json", &signed_bytes)?;
     dir.checked.sync().map_err(|_| ERROR)?;
     let from = std::ffi::CString::new(stage).map_err(|_| ERROR)?;
@@ -311,12 +328,12 @@ pub fn load(base: &Path, receiver: Option<&str>) -> Result<(Configuration, crate
         || config.consent_file != "source-consent.json"
         || config.receiver_id != config.scope.receiver_id
         || config.machine != config.scope.machine
-        || config.scope.kinds != [(crate::credentials::Kind::MirrorPush, false)]
+        || config.scope.kinds.len() != 1
+        || config.scope.kinds[0].0 != crate::credentials::Kind::MirrorPush
         || !matches!(
             config.scope.binding,
             crate::enrollment::Binding::Inapplicable
         )
-        || !config.scope.client_certificate_pins.is_empty()
         || crate::check_url(&config.endpoint).map_err(|_| ERROR)? != config.endpoint
         || hex::encode(
             ring::digest::digest(&ring::digest::SHA256, config.endpoint.as_bytes()).as_ref(),
@@ -348,7 +365,33 @@ pub fn load(base: &Path, receiver: Option<&str>) -> Result<(Configuration, crate
         return Err(ERROR.into());
     }
     let token = crate::Token::new(std::str::from_utf8(&secret).map_err(|_| ERROR)?)?;
-    Ok((config, crate::Credential::Memory(token)))
+    let certificate = config
+        .client_certificate_sha256
+        .as_ref()
+        .map(|hash| {
+            let bytes = dir.read("client-certificate.der")?;
+            if crate::wire::sha256_hex(&bytes) != *hash {
+                return Err(ERROR.to_owned());
+            }
+            Ok(bytes.to_vec())
+        })
+        .transpose()?;
+    validate_certificate(
+        &config.scope,
+        certificate.as_deref(),
+        key.public_key().as_ref(),
+    )?;
+    let credential = match certificate {
+        Some(certificate) => crate::Credential::MutualTls {
+            token,
+            identity: crate::ClientIdentity {
+                certificate,
+                private: Zeroizing::new(private.to_vec()),
+            },
+        },
+        None => crate::Credential::Memory(token),
+    };
+    Ok((config, credential))
 }
 
 #[derive(Serialize, Deserialize)]
@@ -378,6 +421,51 @@ pub fn consent(base: &Path, receiver: &str, config: &Configuration) -> Result<Ve
     Ok(consent.sources)
 }
 
+fn decode_certificate(encoded: &str) -> Result<Vec<u8>> {
+    // Reuse the canonical base64url decoder while enforcing a narrow leaf cap.
+    if encoded.len() > 2048 || encoded.len() % 4 == 1 {
+        return Err(ERROR.into());
+    }
+    let alphabet = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut output = Vec::new();
+    let mut bits = 0u32;
+    let mut count = 0;
+    for b in encoded.bytes() {
+        let value = alphabet.iter().position(|v| *v == b).ok_or(ERROR)?;
+        bits = (bits << 6) | value as u32;
+        count += 6;
+        if count >= 8 {
+            count -= 8;
+            output.push((bits >> count) as u8);
+        }
+    }
+    if crate::provision_wire::encode(&output) != encoded {
+        return Err(ERROR.into());
+    }
+    Ok(output)
+}
+fn validate_certificate(
+    scope: &ActivationInput,
+    certificate: Option<&[u8]>,
+    public: &[u8],
+) -> Result<()> {
+    let required = scope.kinds.iter().any(|(_, required)| *required);
+    if required != certificate.is_some() {
+        return Err(ERROR.into());
+    }
+    let expected = if required {
+        vec![crate::client_ca::pin(public).map_err(|_| ERROR)?]
+    } else {
+        vec![]
+    };
+    if scope.client_certificate_pins != expected {
+        return Err(ERROR.into());
+    }
+    if let Some(certificate) = certificate {
+        crate::client_ca::validate(certificate, public, scope.valid_until).map_err(|_| ERROR)?;
+    }
+    Ok(())
+}
 fn validate_size(name: &str, bytes: &[u8]) -> Result<()> {
     if bytes.len() > FILE_CAP {
         return Err(format!(

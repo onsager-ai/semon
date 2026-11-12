@@ -52,6 +52,8 @@ pub mod body_lease;
 #[cfg(unix)]
 pub mod body_wire;
 #[cfg(unix)]
+mod client_ca;
+#[cfg(unix)]
 pub mod connect;
 #[cfg(unix)]
 pub mod credentials;
@@ -133,18 +135,39 @@ pub enum Credential {
     /// A token an embedding app holds in memory, from its OS credential
     /// store for instance. It is never written to disk.
     Memory(Token),
+    #[cfg(unix)]
+    MutualTls {
+        token: Token,
+        identity: ClientIdentity,
+    },
     /// Stored origin consent constrains discovery, including future watch passes.
     #[cfg(unix)]
-    Enrolled { token: Token, sources: Vec<PathBuf> },
+    Enrolled {
+        token: Token,
+        sources: Vec<PathBuf>,
+        identity: Option<ClientIdentity>,
+    },
 }
 
+#[cfg(unix)]
+#[derive(Clone)]
+pub struct ClientIdentity {
+    certificate: Vec<u8>,
+    private: zeroize::Zeroizing<Vec<u8>>,
+}
+#[cfg(unix)]
+impl fmt::Debug for ClientIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ClientIdentity(<redacted>)")
+    }
+}
 impl Credential {
     fn token(&self) -> Result<Token> {
         match self {
             Self::File(path) => read_token(path).map(Token),
             Self::Memory(token) => Ok(token.clone()),
             #[cfg(unix)]
-            Self::Enrolled { token, .. } => Ok(token.clone()),
+            Self::Enrolled { token, .. } | Self::MutualTls { token, .. } => Ok(token.clone()),
         }
     }
 }
@@ -421,7 +444,34 @@ impl Client {
     pub fn new(options: &PushOptions) -> Result<Self> {
         let url = check_url(&options.url)?;
         let token = options.credential.token()?;
-        let http = reqwest::blocking::Client::builder()
+        let http = reqwest::blocking::Client::builder();
+        #[cfg(unix)]
+        let http = match &options.credential {
+            Credential::MutualTls { identity, .. }
+            | Credential::Enrolled {
+                identity: Some(identity),
+                ..
+            } => {
+                let mut pem = client_ca::pem(&identity.certificate);
+                let mut private = crate::provision_wire::encode(&identity.private)
+                    .replace('-', "+")
+                    .replace('_', "/");
+                while private.len() % 4 != 0 {
+                    private.push('=');
+                }
+                pem.extend_from_slice(b"-----BEGIN PRIVATE KEY-----\n");
+                pem.extend_from_slice(private.as_bytes());
+                pem.extend_from_slice(b"\n-----END PRIVATE KEY-----\n");
+                let pem = zeroize::Zeroizing::new(pem);
+                let private = zeroize::Zeroizing::new(private);
+                let identity = reqwest::Identity::from_pem(&pem)
+                    .map_err(|_| "invalid enrolled TLS identity")?;
+                drop(private);
+                http.identity(identity)
+            }
+            _ => http,
+        };
+        let http = http
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(120))
             .user_agent(concat!("semon-push/", env!("CARGO_PKG_VERSION")))

@@ -40,6 +40,7 @@ impl Fixture {
                 version: 1,
                 enrollment_id: "enrollment".into(),
                 credentials: vec![(Kind::MirrorPush, "secret-origin-bearer".into())],
+                client_certificate: None,
             },
             private.as_ref(),
             sources,

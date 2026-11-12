@@ -14,6 +14,7 @@ struct Prompt {
     tty: File,
     reader: BufReader<File>,
     sources: Vec<PathBuf>,
+    require_client_certificate: bool,
 }
 struct Echo {
     fd: libc::c_int,
@@ -61,6 +62,9 @@ impl Prompt {
     }
 }
 impl Terminal for Prompt {
+    fn require_client_certificate(&self) -> bool {
+        self.require_client_certificate
+    }
     fn code(&mut self) -> Result<Secret> {
         self.reader = BufReader::new(
             self.tty
@@ -124,7 +128,7 @@ impl Terminal for Prompt {
         self.sources.clone()
     }
 }
-pub(super) fn run(endpoint: &str, machine: &str) -> Result<()> {
+pub(super) fn run(endpoint: &str, machine: &str, require_client_certificate: bool) -> Result<()> {
     let tty = OpenOptions::new().read(true).write(true).open("/dev/tty").map_err(|_| "connect requires a controlling terminal; codes cannot be read from argv, environment or stdin")?;
     let options = semon_sessions::Options::default();
     let sources = semon_sessions::inputs(&options)
@@ -136,6 +140,7 @@ pub(super) fn run(endpoint: &str, machine: &str) -> Result<()> {
         reader: BufReader::new(tty.try_clone().map_err(|e| e.to_string())?),
         tty,
         sources,
+        require_client_certificate,
     };
     let index_path = semon_sessions::analytics_index_path(&options.cache);
     let analytics_state = index_path.parent().ok_or("analytics index has no parent")?;
