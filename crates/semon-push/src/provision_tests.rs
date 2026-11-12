@@ -138,20 +138,57 @@ fn confirmation_activation_and_recovery_preserve_one_registry_outcome() {
     let registry = controller.core.registry().unwrap();
     assert_eq!(registry.enrollments().len(), 1);
     assert_eq!(registry.credentials().len(), 1);
-    // Recovery uses the origin-held confirmed application key, same semantic
-    // path as the public wire recovery after verifying its fresh signature.
+    let recovery_exporter = [9; 32];
+    let mut signed = b"semon-asi-recovery-pop-v1\0".to_vec();
+    signed.extend_from_slice(&t.digest());
+    signed.extend_from_slice(t.session_id.as_bytes());
+    signed.extend_from_slice(&recovery_exporter);
+    let recovery_proof = key.sign(&SystemRandom::new(), &signed).unwrap();
+    let recover = wire::Recover {
+        version: 1,
+        transcript: wire::RecoveryTranscript {
+            session_id: t.session_id.clone(),
+            endpoint: t.endpoint.clone(),
+            exporter: wire::encode(&t.exporter),
+            origin_key: wire::encode(&t.origin_key),
+            scope_commitment: wire::encode(&t.scope),
+            origin_nonce: wire::encode(&t.origin_nonce),
+            receiver_nonce: wire::encode(&t.receiver_nonce),
+        },
+        application_key: wire::encode(confirmed.recovery_key_for_test()),
+        proof: wire::encode(recovery_proof.as_ref()),
+    };
+    let recover_bytes = wire::encode_message(&recover).unwrap();
+    assert!(
+        controller
+            .handle(
+                wire::Request::parse(wire::Route::Recover, &recover_bytes).unwrap(),
+                [8; 32],
+                101,
+                |_, _| panic!("recovery code")
+            )
+            .is_err()
+    );
     let recovered = controller
-        .core
-        .deliver(
-            &confirmed,
-            wire::verify_possession(&t, &wire::encode(proof.as_ref())).unwrap(),
+        .handle(
+            wire::Request::parse(wire::Route::Recover, &recover_bytes).unwrap(),
+            recovery_exporter,
             101,
+            |_, _| panic!("recovery code"),
         )
         .unwrap();
+    let recovered: wire::Activated = serde_json::from_slice(&recovered).unwrap();
     assert_eq!(recovered.enrollment_id, activated.enrollment_id);
-    assert_eq!(
-        recovered.credentials[0].1.expose(),
-        activated.credentials[0].1
+    assert_eq!(recovered.credentials[0].1, activated.credentials[0].1);
+    assert!(
+        controller
+            .handle(
+                wire::Request::parse(wire::Route::Recover, &recover_bytes).unwrap(),
+                recovery_exporter,
+                102,
+                |_, _| panic!("recovery code")
+            )
+            .is_err()
     );
     assert!(
         controller
@@ -188,6 +225,47 @@ fn malformed_attempts_do_not_refund_and_foreign_connections_cannot_charge() {
     controller.malformed(exporter, 100);
     assert_eq!(
         controller.core.state(&opened.session_id, 100).unwrap(),
+        pairing::State::Rejected
+    );
+    assert!(controller.core.registry().unwrap().enrollments().is_empty());
+}
+#[test]
+fn wrong_code_charges_attempt_and_connection_replay_cannot_confirm() {
+    let fixture = Fixture::new();
+    let mut controller = fixture.controller();
+    let (created, code) = opened(&mut controller, [1; 32], 100);
+    let key = key();
+    let t = transcript(&created, &key, [1; 32], input(100).commitment());
+    let keys = pairing::derive_keys(&code, &t).unwrap();
+    let correct = keys.origin_confirmation(&t);
+    assert!(
+        controller
+            .handle(confirmation(&t, &correct), [2; 32], 100, |_, _| panic!(
+                "code"
+            ))
+            .is_err()
+    );
+    for _ in 0..3 {
+        assert!(
+            controller
+                .handle(
+                    confirmation(&t, &pairing::Mac::from_bytes([0; 32])),
+                    [1; 32],
+                    100,
+                    |_, _| panic!("code")
+                )
+                .is_err()
+        );
+    }
+    assert!(
+        controller
+            .handle(confirmation(&t, &correct), [1; 32], 100, |_, _| panic!(
+                "code"
+            ))
+            .is_err()
+    );
+    assert_eq!(
+        controller.core.state(&created.session_id, 100).unwrap(),
         pairing::State::Rejected
     );
     assert!(controller.core.registry().unwrap().enrollments().is_empty());

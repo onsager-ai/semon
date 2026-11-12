@@ -318,14 +318,15 @@ fn unknown_and_revoked_tokens_are_401() {
 
     // Revoked while the receiver runs: refused from the next request on.
     let mut store = Store::open(&receiving.dir).unwrap();
-    let mut registry = store.snapshot().unwrap();
-    registry
-        .enrollments
+    let registry = store.snapshot().unwrap();
+    let mut enrollments = registry.enrollments().to_vec();
+    enrollments
         .iter_mut()
         .find(|e| e.machine == "laptop")
         .unwrap()
         .revoked_at = Some(1);
-    store.commit(registry.revision(), &registry).unwrap();
+    let next = Registry::from_records(enrollments, registry.credentials().to_vec()).unwrap();
+    store.commit(registry.revision(), &next).unwrap();
     let more = append_body(LOG, b"one\n", 4, b"two\n");
     assert_eq!(
         post(receiving.address, APPEND, Some(&tokens[0]), &more).status,

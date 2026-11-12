@@ -264,6 +264,11 @@ pub struct ConfirmedKey {
     transcript: Transcript,
 }
 impl ConfirmedKey {
+    #[cfg(test)]
+    pub(crate) fn recovery_key_for_test(&self) -> &[u8; 32] {
+        &self.application
+    }
+
     /// Receiver recovery only. Caller must verify a fresh connection-bound origin
     /// signature; deliver() independently matches all persisted receipt hashes.
     pub(crate) fn recovered(application: [u8; 32], transcript: Transcript) -> Self {
