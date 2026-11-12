@@ -1,0 +1,26 @@
+# Test fixtures only. FIXTURE_CA_DIR points to a temporary OpenSSL CA database.
+[ ca ]
+default_ca = fixture_ca
+[ fixture_ca ]
+database = $ENV::FIXTURE_CA_DIR/index.txt
+serial = $ENV::FIXTURE_CA_DIR/serial
+new_certs_dir = $ENV::FIXTURE_CA_DIR
+policy = fixture_policy
+default_md = sha256
+unique_subject = no
+[ fixture_policy ]
+commonName = supplied
+[ req ]
+distinguished_name = fixture_dn
+[ fixture_dn ]
+[ ca_extensions ]
+basicConstraints = critical,CA:TRUE
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
+[ client_extensions ]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = clientAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid:always
