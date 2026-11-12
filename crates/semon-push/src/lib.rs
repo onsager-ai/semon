@@ -444,9 +444,14 @@ pub struct Client {
 
 impl Client {
     pub fn new(options: &PushOptions) -> Result<Self> {
+        Self::with_http_builder(options, reqwest::blocking::Client::builder())
+    }
+    fn with_http_builder(
+        options: &PushOptions,
+        http: reqwest::blocking::ClientBuilder,
+    ) -> Result<Self> {
         let url = check_url(&options.url)?;
         let token = options.credential.token()?;
-        let http = reqwest::blocking::Client::builder();
         #[cfg(unix)]
         let http = match &options.credential {
             Credential::MutualTls { identity, .. }
@@ -454,18 +459,25 @@ impl Client {
                 identity: Some(identity),
                 ..
             } => {
-                let mut pem = client_ca::pem(&identity.certificate);
-                let mut private = crate::provision_wire::encode(&identity.private)
-                    .replace('-', "+")
-                    .replace('_', "/");
+                let mut pem = zeroize::Zeroizing::new(client_ca::pem(&identity.certificate));
+                let mut private =
+                    zeroize::Zeroizing::new(crate::provision_wire::encode(&identity.private));
+                // Both substitutions preserve ASCII and byte length.
+                let mut bytes = zeroize::Zeroizing::new(std::mem::take(&mut *private).into_bytes());
+                for byte in bytes.iter_mut() {
+                    match *byte {
+                        b'-' => *byte = b'+',
+                        b'_' => *byte = b'/',
+                        _ => {}
+                    }
+                }
+                *private = String::from_utf8(std::mem::take(&mut *bytes)).expect("base64 ASCII");
                 while private.len() % 4 != 0 {
                     private.push('=');
                 }
                 pem.extend_from_slice(b"-----BEGIN PRIVATE KEY-----\n");
                 pem.extend_from_slice(private.as_bytes());
                 pem.extend_from_slice(b"\n-----END PRIVATE KEY-----\n");
-                let pem = zeroize::Zeroizing::new(pem);
-                let private = zeroize::Zeroizing::new(private);
                 let identity = reqwest::Identity::from_pem(&pem)
                     .map_err(|_| "invalid enrolled TLS identity")?;
                 drop(private);

@@ -250,6 +250,24 @@ fn confirmation_activation_and_recovery_preserve_one_registry_outcome() {
     let registry = controller.core.registry().unwrap();
     assert_eq!(registry.enrollments().len(), 1);
     assert_eq!(registry.credentials().len(), 1);
+    let serialized = serde_json::to_value(&registry).unwrap();
+    let (ca, _) = crate::client_ca::generate(100).unwrap();
+    let foreign_key = self::key();
+    let wrong_spki = crate::client_ca::issue(
+        &ca,
+        100,
+        foreign_key.public_key().as_ref(),
+        &activated.enrollment_id,
+        100,
+        100 + wire::INITIAL_CREDENTIAL_VALIDITY_SECONDS,
+    )
+    .unwrap();
+    for malformed in [vec![0], vec![48, 4, 1], wrong_spki] {
+        let mut altered = serialized.clone();
+        altered["pairing_receipts"][0]["client_certificate"] = serde_json::json!(malformed);
+        let altered: crate::enrollment::Registry = serde_json::from_value(altered).unwrap();
+        assert!(pairing::validate_receipts(&altered).is_err());
+    }
     let recovery_exporter = [9; 32];
     let mut signed = b"semon-asi-recovery-pop-v1\0".to_vec();
     signed.extend_from_slice(&t.digest());

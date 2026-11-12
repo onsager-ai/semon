@@ -157,6 +157,28 @@ pub fn install(
     private: &[u8],
     sources: &[PathBuf],
 ) -> Result<String> {
+    install_at(
+        base,
+        endpoint,
+        machine,
+        scope,
+        delivery,
+        private,
+        sources,
+        now()?,
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn install_at(
+    base: &Path,
+    endpoint: &str,
+    machine: &str,
+    scope: &ActivationInput,
+    delivery: &Activated,
+    private: &[u8],
+    sources: &[PathBuf],
+    now: u64,
+) -> Result<String> {
     if delivery.credentials.len() != 1
         || delivery.credentials[0].0 != crate::credentials::Kind::MirrorPush
     {
@@ -174,7 +196,12 @@ pub fn install(
         .as_deref()
         .map(decode_certificate)
         .transpose()?;
-    validate_certificate(scope, certificate.as_deref(), key.public_key().as_ref())?;
+    validate_certificate(
+        scope,
+        certificate.as_deref(),
+        key.public_key().as_ref(),
+        now,
+    )?;
     // Parents contain no credentials. Dedicated custody itself must be owned 0700.
     fs::DirBuilder::new()
         .recursive(true)
@@ -280,6 +307,13 @@ pub fn install(
 /// Select by the stable name printed by connect; an omitted name requires exactly
 /// one enrollment. No partially staged enrollment or absent/corrupt secret is used.
 pub fn load(base: &Path, receiver: Option<&str>) -> Result<(Configuration, crate::Credential)> {
+    load_at(base, receiver, now()?)
+}
+pub(crate) fn load_at(
+    base: &Path,
+    receiver: Option<&str>,
+    now: u64,
+) -> Result<(Configuration, crate::Credential)> {
     let root =
         Directory::open(base).map_err(|_| "no readable enrollment; run semon connect --to URL")?;
     let name = match receiver {
@@ -374,6 +408,7 @@ pub fn load(base: &Path, receiver: Option<&str>) -> Result<(Configuration, crate
         &config.scope,
         certificate.as_deref(),
         key.public_key().as_ref(),
+        now,
     )?;
     let credential = match certificate {
         Some(certificate) => crate::Credential::MutualTls {
@@ -442,6 +477,7 @@ fn validate_certificate(
     scope: &ActivationInput,
     certificate: Option<&[u8]>,
     public: &[u8],
+    now: u64,
 ) -> Result<()> {
     let required = scope.kinds.iter().any(|(_, required)| *required);
     if required != certificate.is_some() {
@@ -456,9 +492,16 @@ fn validate_certificate(
         return Err(ERROR.into());
     }
     if let Some(certificate) = certificate {
-        crate::client_ca::validate(certificate, public, scope.valid_until).map_err(|_| ERROR)?;
+        crate::client_ca::validate_at(certificate, public, scope.valid_until, now)
+            .map_err(str::to_owned)?;
     }
     Ok(())
+}
+fn now() -> Result<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .map_err(|_| "origin clock unavailable".into())
 }
 fn validate_size(name: &str, bytes: &[u8]) -> Result<()> {
     if bytes.len() > FILE_CAP {

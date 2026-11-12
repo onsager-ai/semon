@@ -211,7 +211,7 @@ impl Controller {
                     .iter()
                     .any(|(kind, _)| *kind == Kind::BodyChannel)
                 {
-                    Some("body_channel available after client-certificate issuance lands")
+                    Some("body_channel available after producer admission (#654) lands")
                 } else if message
                     .input
                     .kinds

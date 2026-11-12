@@ -665,6 +665,15 @@ pub(crate) fn validate_receipts(registry: &Registry) -> Result<()> {
         {
             return Err(Error::Invalid);
         }
+        if let Some(certificate) = &r.client_certificate {
+            crate::client_ca::validate_receipt(
+                certificate,
+                &r.origin_key_hash,
+                r.valid_until,
+                r.created,
+            )
+            .map_err(|_| Error::Invalid)?;
+        }
     }
     Ok(())
 }

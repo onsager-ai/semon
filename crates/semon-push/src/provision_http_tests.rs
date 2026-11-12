@@ -308,7 +308,7 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
         namespace
     );
     assert_eq!(fs::read_dir(&analytics_state).unwrap().count(), 1);
-    let (config, credential) = crate::origin_custody::load(&origin, Some(&name)).unwrap();
+    let (config, credential) = crate::origin_custody::load_at(&origin, Some(&name), 100).unwrap();
     assert_eq!(config.scope.receiver_id, config.receiver_id);
     assert!(matches!(
         config.scope.binding,
@@ -317,7 +317,51 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     let crate::Credential::MutualTls { token, identity } = credential else {
         panic!("required certificate was not installed")
     };
-    assert!(origin.join(&name).join("client-certificate.der").exists());
+    let certificate_path = origin.join(&name).join("client-certificate.der");
+    let certificate_bytes = fs::read(&certificate_path).unwrap();
+    fs::write(&certificate_path, [0]).unwrap();
+    assert!(crate::origin_custody::load_at(&origin, Some(&name), 100).is_err());
+    fs::remove_file(&certificate_path).unwrap();
+    assert!(crate::origin_custody::load_at(&origin, Some(&name), 100).is_err());
+    fs::write(&certificate_path, &certificate_bytes).unwrap();
+    assert!(
+        crate::origin_custody::load_at(&origin, Some(&name), config.scope.valid_until)
+            .err()
+            .unwrap()
+            .contains("expired")
+    );
+    // Exercise production Client identity configuration, with only server trust injected.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let shared = Arc::clone(&h.shared);
+    let push_worker = thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        let mut slot = Slot::admit(&shared, "127.0.0.1".parse().unwrap()).unwrap();
+        serve_connection(&mut slot, socket, Instant::now());
+    });
+    let options = crate::PushOptions {
+        url: format!("https://localhost:{}", address.port()),
+        credential: crate::Credential::MutualTls {
+            token: token.clone(),
+            identity: identity.clone(),
+        },
+        sessions: semon_sessions::Options::default(),
+        state: h.dir.0.join("production-push-state"),
+    };
+    let server_pem = fs::read(auth_tests::fixture("test-cert.pem")).unwrap();
+    let builder = reqwest::blocking::Client::builder()
+        .add_root_certificate(reqwest::Certificate::from_pem(&server_pem).unwrap())
+        .no_proxy();
+    let production = crate::Client::with_http_builder(&options, builder).unwrap();
+    production
+        .send_facts(&semon_sessions::Facts {
+            version: semon_sessions::FACTS_VERSION,
+            hostname: "laptop".into(),
+            ..Default::default()
+        })
+        .unwrap();
+    drop(production);
+    push_worker.join().unwrap();
     let (mut client, worker) = h.connect_identity(Some(&identity));
     let bytes = serde_json::to_vec(&semon_sessions::Facts {
         version: semon_sessions::FACTS_VERSION,
@@ -504,7 +548,7 @@ fn origin_substitution_mac_mismatch_and_delivery_recovery() {
         let registry = crate::enrollment::Registry::read_current(&h.dir.0).unwrap();
         if fault == "delivery" {
             let name = result.unwrap();
-            crate::origin_custody::load(&origin, Some(&name)).unwrap();
+            crate::origin_custody::load_at(&origin, Some(&name), 100).unwrap();
             assert_eq!(connections, 2);
             assert_eq!(registry.enrollments().len(), 1);
         } else {

@@ -7,7 +7,14 @@ use rcgen::{
 use ring::rand::{SecureRandom, SystemRandom};
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
+
+struct CaKey(KeyPair);
+impl Drop for CaKey {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
 type Result<T> = std::result::Result<T, ()>;
 const TEN_YEARS: u64 = 365 * 10 * 86400;
@@ -25,10 +32,8 @@ fn timestamp(now: u64) -> Result<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp(i64::try_from(now).map_err(|_| ())?).map_err(|_| ())
 }
 fn ca_params(created: u64) -> Result<CertificateParams> {
-    let mut p = CertificateParams {
-        distinguished_name: rcgen::DistinguishedName::new(),
-        ..Default::default()
-    };
+    let mut p = CertificateParams::default();
+    p.distinguished_name = rcgen::DistinguishedName::new();
     p.distinguished_name
         .push(DnType::CommonName, "Semon client issuer");
     p.not_before = timestamp(created.saturating_sub(300))?;
@@ -42,18 +47,19 @@ pub(crate) fn validate_ca(private: &[u8], certificate: &[u8]) -> Result<()> {
         &rustls::pki_types::PrivatePkcs8KeyDer::from(private),
         &rcgen::PKCS_ECDSA_P256_SHA256,
     )
+    .map(CaKey)
     .map_err(|_| ())?;
     let cert = rustls::pki_types::CertificateDer::from(certificate);
     let parsed = rustls::server::ParsedCertificate::try_from(&cert).map_err(|_| ())?;
-    if parsed.subject_public_key_info().as_ref() != key.subject_public_key_info() {
+    if parsed.subject_public_key_info().as_ref() != key.0.subject_public_key_info() {
         return Err(());
     }
     Ok(())
 }
 pub(crate) fn generate(created: u64) -> Result<(Zeroizing<Vec<u8>>, Vec<u8>)> {
-    let key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|_| ())?;
-    let cert = ca_params(created)?.self_signed(&key).map_err(|_| ())?;
-    Ok((Zeroizing::new(key.serialize_der()), cert.der().to_vec()))
+    let key = CaKey(KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).map_err(|_| ())?);
+    let cert = ca_params(created)?.self_signed(&key.0).map_err(|_| ())?;
+    Ok((Zeroizing::new(key.0.serialize_der()), cert.der().to_vec()))
 }
 pub(crate) fn pem(der: &[u8]) -> Vec<u8> {
     let mut base64 = crate::provision_wire::encode(der)
@@ -100,12 +106,11 @@ pub(crate) fn issue(
         &rustls::pki_types::PrivatePkcs8KeyDer::from(private),
         &rcgen::PKCS_ECDSA_P256_SHA256,
     )
+    .map(CaKey)
     .map_err(|_| ())?;
-    let issuer = rcgen::Issuer::new(ca_params(created)?, key);
-    let mut p = CertificateParams {
-        distinguished_name: rcgen::DistinguishedName::new(),
-        ..Default::default()
-    };
+    let issuer = rcgen::Issuer::new(ca_params(created)?, &key.0);
+    let mut p = CertificateParams::default();
+    p.distinguished_name = rcgen::DistinguishedName::new();
     p.distinguished_name.push(DnType::CommonName, enrollment);
     p.not_before = timestamp(now.saturating_sub(300))?;
     p.not_after = timestamp(until)?;
@@ -121,9 +126,9 @@ pub(crate) fn issue(
 }
 
 /// Validate public delivery without inventing client-CA trust at the origin.
-/// rustls validates the complete certificate structure; yasna reads exact validity
-/// and EKU values, which rustls's public ParsedCertificate API does not expose.
-pub(crate) fn validate(der: &[u8], public: &[u8], until: u64) -> Result<()> {
+/// rustls parses the certificate for SPKI extraction; yasna reads exact validity
+/// and EKU values. This does not establish issuer trust or check key usage.
+pub(crate) fn validate(der: &[u8], public: &[u8], until: u64) -> Result<(u64, u64)> {
     let certificate = rustls::pki_types::CertificateDer::from(der);
     let parsed = rustls::server::ParsedCertificate::try_from(&certificate).map_err(|_| ())?;
     if parsed.subject_public_key_info().as_ref() != OriginKey(public).subject_public_key_info() {
@@ -189,5 +194,53 @@ pub(crate) fn validate(der: &[u8], public: &[u8], until: u64) -> Result<()> {
         }
         Ok(())
     })
-    .map_err(|_| ())
+    .map_err(|_| ())?;
+    Ok((u64::try_from(from).map_err(|_| ())?, until))
+}
+
+pub(crate) fn validate_at(
+    der: &[u8],
+    public: &[u8],
+    until: u64,
+    now: u64,
+) -> std::result::Result<(), &'static str> {
+    let (from, to) =
+        validate(der, public, until).map_err(|_| "invalid origin client certificate")?;
+    if now >= to {
+        return Err("origin client certificate expired; reconnect with fresh enrollment");
+    }
+    if from > now.saturating_add(300) {
+        return Err("origin client certificate is not yet valid");
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_receipt(
+    der: &[u8],
+    origin_hash: &[u8; 32],
+    until: u64,
+    created: u64,
+) -> Result<()> {
+    let certificate = rustls::pki_types::CertificateDer::from(der);
+    let parsed = rustls::server::ParsedCertificate::try_from(&certificate).map_err(|_| ())?;
+    let spki = parsed.subject_public_key_info();
+    let public = yasna::parse_der(spki.as_ref(), |r| {
+        r.read_sequence(|r| {
+            r.next().read_der()?;
+            let (public, bits) = r.next().read_bitvec_bytes()?;
+            if bits != 520 {
+                return Err(yasna::ASN1Error::new(yasna::ASN1ErrorKind::Invalid));
+            }
+            Ok(public)
+        })
+    })
+    .map_err(|_| ())?;
+    if <[u8; 32]>::from(Sha256::digest(&public)) != *origin_hash {
+        return Err(());
+    }
+    let (from, _) = validate(der, &public, until)?;
+    if from != created.saturating_sub(300) {
+        return Err(());
+    }
+    Ok(())
 }

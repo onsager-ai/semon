@@ -411,7 +411,7 @@ pub(crate) fn connect_with(
     {
         return Err("invalid delivered credential kinds".into());
     }
-    crate::origin_custody::install(
+    crate::origin_custody::install_at(
         custody,
         endpoint,
         machine,
@@ -419,6 +419,7 @@ pub(crate) fn connect_with(
         &delivery,
         &private,
         &terminal.sources(),
+        now(),
     )
 }
 

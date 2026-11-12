@@ -496,7 +496,10 @@ padding, within the existing 8 KiB envelope.
 
 Origin custody verifies parsing, its own SPKI, clientAuth EKU and approved validity
 before atomic installation of `client-certificate.der` (0600), whose hash is covered
-by signed `enrollment.json`. No client-CA trust anchor is assumed at the origin.
+by signed `enrollment.json`. No client-CA trust anchor is assumed at the origin. Origin validation checks
+SPKI, clientAuth EKU and validity against its clock; it does not enforce
+BasicConstraints or KeyUsage. Expired and not-yet-valid certificates refuse with
+an explicit diagnostic, without falling back to certificate-less transport.
 `connect --require-client-certificate` enables this for mirror_push; `push` presents
 the leaf with the existing `origin-key.pk8`. The default stays off. Body and
 analytics activation remain refused pending producer/storage admission. Renewal,
