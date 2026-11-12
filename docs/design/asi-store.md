@@ -640,11 +640,16 @@ Parquet bytes, metadata, codecs or row groups. Compression and Parquet are refus
 so stored/decompressed payload lengths must both equal the canonical payload size.
 The manifest binds schema version, profile, namespace, encoding, session count and
 per-table row counts. SHA-256 and exact length cover the completed whole envelope,
-including the manifest. There is no self-referential digest field. This updates
-slice 2's one current exported ID contract: `Projection` retains its namespace,
-evidence IDs change from `opaque/receiver/...` to `<hex namespace>/receiver/...`,
-and source handles become `<hex namespace>/source/<random hex>`. No old-shape reader
-is retained; projection and admission tests use the same current shape. Struct field
+including the manifest. There is no self-referential digest field. The current
+exported handle contract is `<tag>:<64 lowercase hex>`: `src` for sources, `ses`
+for sessions (including parent/root references), `stp` for steps, `trn` for turns
+and `cmp` for compactions. The hex is the existing random 256-bit registry value;
+serialization adds the tag without changing stored data. `Projection` and the
+manifest retain the namespace; Hub keys are `(namespace, handle)`. Admission
+compares the manifest namespace and validates each field's exact tag and shape,
+rejecting duplicate entity/policy entries and opaque values reused across tags.
+Namespace membership is established by origin-local reverse lookup. No old-shape
+reader is retained; projection and admission tests use the same current shape. Struct field
 order, sorted maps and projection iteration order make the same projection produce
 identical bytes. Random handles must already exist; regenerated handle registries
 represent different projections. Unsupported schema/format/profile refuses; no
