@@ -323,12 +323,25 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     assert!(crate::origin_custody::load_at(&origin, Some(&name), 100).is_err());
     fs::remove_file(&certificate_path).unwrap();
     assert!(crate::origin_custody::load_at(&origin, Some(&name), 100).is_err());
-    fs::write(&certificate_path, &certificate_bytes).unwrap();
+    // Recreating a removed file uses the process umask, not custody's 0600 mode.
+    // Restore the full custody contract before checking certificate validity.
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut restored = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&certificate_path)
+            .unwrap();
+        restored.write_all(&certificate_bytes).unwrap();
+    }
+    crate::origin_custody::load_at(&origin, Some(&name), 100).unwrap();
+    let error = crate::origin_custody::load_at(&origin, Some(&name), config.scope.valid_until)
+        .err()
+        .unwrap();
     assert!(
-        crate::origin_custody::load_at(&origin, Some(&name), config.scope.valid_until)
-            .err()
-            .unwrap()
-            .contains("expired")
+        error.contains("expired"),
+        "unexpected expiry refusal: {error}"
     );
     // Exercise production Client identity configuration, with only server trust injected.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
