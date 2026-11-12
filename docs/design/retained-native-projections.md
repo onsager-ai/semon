@@ -15,6 +15,27 @@ native message/tool content for ASI search and focused view. It has the same
 custody as native logs and never enters analytics or the Hub; retained provenance
 does not grant authority over that content.
 
+## Cohort-bound index evidence
+
+`origin_projection::read_cohort_generations` qualifies the expected producer binding
+and native index incarnation inside one read-only SQLite transaction. It resolves
+all admitted witness contributors by exact session identity, checks their pinned
+source vectors against current Catalog, activity and slot evidence, and refuses
+missing, retained, pending, stale or unsupported evidence. Domain-separated hashes
+cover the sorted unique session UIDs and their activity or entry-wrapped transcript
+generations, namespace and index incarnation. Cohort IDs never enter these hashes.
+
+The same snapshot returns a deterministic native-ID map of stable archive chain
+IDs. Each exact-path retention marker must name a chain and agree with the pinned
+native ID, consumed boundary and prefix digest; its recorded physical length must
+cover that boundary. Missing markers (including sources never archived), absent
+chain identities and contradictory chain evidence refuse. These markers record
+index evidence, not the archive chain's current length or independently verified
+bytes. No archive file is read; the caller must verify archive custody, actual
+chain bytes and any later extension. Chain IDs do not enter the generation hashes.
+The accessor pins index evidence, not live filesystem state: callers keep their
+before/after authorization and source checks around body reads.
+
 Lifecycle describes the read projection. It does not establish or revoke
 credential custody, runtime ownership, harness authorization or current native
 selection. Exact Current identity may use qualified retained metadata when
