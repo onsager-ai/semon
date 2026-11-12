@@ -180,6 +180,14 @@ impl Registry {
     pub fn revision(&self) -> u64 {
         self.revision
     }
+    /// A bounded, custody-checked snapshot of the atomically published registry.
+    /// Readers need no transaction lock and never hold a lock while handling requests.
+    pub fn read_current(receiver_dir: &Path) -> Result<Self> {
+        let parent = Directory::open(receiver_dir)?;
+        let dir = parent.child()?;
+        dir.file(LOCK_FILE, libc::O_RDONLY)?;
+        dir.load()
+    }
     pub fn enrollments(&self) -> &[Enrollment] {
         &self.enrollments
     }

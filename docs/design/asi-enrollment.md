@@ -349,6 +349,22 @@ bodies; recovery cannot reconstruct missing source custody.
 
 ## Shared listener authentication and dispatch
 
+Implementation status (slice 4a PR2, part of #593): the existing receiver now
+classifies routes before body reads, verifies optional TLS client certificates,
+rechecks current registry authority per request, binds keep-alive connections to
+one enrollment, and exposes a revision handle for in-flight reauthorization.
+The single client-trust input is private, owned mode-0600 `DIR/client-trust.pem`
+(PEM roots); its absence disables client-certificate presentation. A small
+transitional authenticator preserves existing mirror `DIR/tokens` only when no
+enrollment directory exists, rechecking its absence on every request. Legacy
+requests may select different token machines on one connection; only registry
+mode binds the connection to one enrollment. Appearance of enrollment custody
+blocks legacy requests; legacy resumes only when that path truly does not exist.
+Mixed token/registry custody refuses startup without changing either file. This seam is removed in the pairing cutover PR, which
+completes the replacement described above. PR3 owns pairing/credential issuance
+and cutover; #594 owns body handlers and in-flight cancellation; slice 5 owns
+analytics handlers. Reserved analytics/body routes currently refuse closed.
+
 Extend rustls with optional client-certificate presentation/verification: analytics
 and mirror origins without certificates may complete TLS where their kind permits.
 Presented certificates must validate against configured client trust and match the
