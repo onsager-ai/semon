@@ -247,6 +247,9 @@ impl Authenticator {
     pub(super) fn open(dir: &Path) -> Result<Self, String> {
         RegistryAuthenticator::open(dir).map(Self)
     }
+    pub(super) fn registry(&self) -> &RegistryAuthenticator {
+        &self.0
+    }
     pub(super) fn count(&self) -> Result<usize, String> {
         Registry::read_current(&self.0.dir)
             .map(|r| r.credentials().len())
