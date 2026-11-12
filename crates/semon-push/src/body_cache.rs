@@ -363,16 +363,23 @@ impl<C: Clock> BodyCache<C> {
         record.extend_from_slice(&aad);
         record.extend_from_slice(&encrypted);
         let stage = self.dir.join(format!("{id}.stage"));
+        let mut renamed = false;
         let result = (|| -> Result<()> {
             let mut file = self.directory.create(&stage)?;
             file.write_all(&record)?;
             file.sync_all()?;
             self.directory.rename(&stage, &self.path(&id))?;
+            renamed = true;
+            #[cfg(test)]
+            tests::after_rename()?;
             self.directory.0.sync_all()?;
             Ok(())
         })();
         if result.is_err() {
             self.disabled = true;
+            if renamed {
+                self.directory.unlink(&self.path(&id))?;
+            }
             return result;
         }
         self.sequence += 1;
@@ -428,6 +435,16 @@ impl<C: Clock> BodyCache<C> {
             entry.used = self.sequence;
         }
         Ok(Some(body))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Remove a request's temporary entry if its final release decision fails.
+    pub(crate) fn discard(&mut self, key: &CacheKey) -> Result<()> {
+        self.remove(&key_id(key)?)
     }
 
     /// Policy/redactor changes, rewrites and access withdrawal all revoke an
@@ -905,6 +922,16 @@ impl CacheDirectory {
         Ok(bytes)
     }
 
+    /// Cleanup must unlink even when the failing operation was directory fsync.
+    fn unlink(&self, path: &Path) -> Result<()> {
+        let name = Self::name(path)?;
+        // SAFETY: the filename is validated and the pinned directory fd is live.
+        if unsafe { libc::unlinkat(self.0.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        self.0.sync_all()?;
+        Ok(())
+    }
     /// Destroy the wrapped key before unlink, without following any path component.
     fn destroy(&self, path: &Path) -> Result<()> {
         let mut file = self.open_file(path, libc::O_WRONLY)?;
@@ -1037,6 +1064,31 @@ mod tests {
         ReadAdmission::after_online_authorization_and_audit(key.clone(), None)
     }
 
+    thread_local! { static FAIL_RENAMED_SYNC: Cell<bool> = const { Cell::new(false) }; }
+    pub(super) fn after_rename() -> Result<()> {
+        FAIL_RENAMED_SYNC.with(|fail| {
+            if fail.get() {
+                Err(CacheError::Integrity)
+            } else {
+                Ok(())
+            }
+        })
+    }
+    #[test]
+    fn renamed_entry_is_unlinked_on_sync_failure_and_absent_after_reopen() {
+        let fixture = Fixture::new();
+        let body = b"private";
+        let key = key("page", "source", body);
+        let mut cache = fixture.open(Limits::default());
+        FAIL_RENAMED_SYNC.with(|fail| fail.set(true));
+        assert!(cache.insert(key.clone(), body, 1000, None).is_err());
+        FAIL_RENAMED_SYNC.with(|fail| fail.set(false));
+        assert!(!cache.path(&key_id(&key).unwrap()).exists());
+        assert_eq!(cache.entry_count(), 0);
+        drop(cache);
+        let mut reopened = fixture.open(Limits::default());
+        assert!(reopened.lookup(admission(&key)).unwrap().is_none());
+    }
     #[test]
     fn roundtrip_restart_and_no_plaintext_files() {
         let f = Fixture::new();

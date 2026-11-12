@@ -38,7 +38,11 @@ use serde::{Deserialize, Serialize};
 mod archives;
 pub mod body_assertion;
 #[cfg(unix)]
+pub mod body_broker;
+#[cfg(unix)]
 pub mod body_cache;
+#[cfg(unix)]
+pub mod body_wire;
 #[cfg(unix)]
 pub mod credentials;
 #[cfg(unix)]

@@ -14,6 +14,7 @@ use crate::{
         AuthorizationBinding, Decision, Destination, Identifier, Outcome, PermittedRange, Purpose,
     },
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 use zeroize::Zeroizing;
@@ -42,7 +43,8 @@ impl fmt::Display for Refused {
 impl std::error::Error for Refused {}
 
 /// Capped opaque integration identifier; never accepts paths or free text.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct OpaqueId(String);
 impl OpaqueId {
     pub fn new(value: &str) -> Result<Self> {
@@ -60,13 +62,25 @@ impl OpaqueId {
         &self.0
     }
 }
+impl TryFrom<String> for OpaqueId {
+    type Error = Refused;
+    fn try_from(value: String) -> Result<Self> {
+        Self::new(&value)
+    }
+}
+impl From<OpaqueId> for String {
+    fn from(value: OpaqueId) -> Self {
+        value.0
+    }
+}
 impl fmt::Debug for OpaqueId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("OpaqueId([redacted])")
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub enum EnrollmentKind {
     Analytics,
     BodyChannel,
@@ -75,7 +89,8 @@ pub enum EnrollmentKind {
 
 /// Logical authenticated_enrollment output only. No credentials, key custody,
 /// transport encoding or operator-visible setup is defined here.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EnrollmentScope {
     pub enrollment_id: OpaqueId,
     pub machine: OpaqueId,
@@ -127,7 +142,8 @@ pub trait HandleResolver {
     -> Result<Option<ResolvedSource>>;
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PinnedPolicy {
     /// Complete comparable contributor-policy, scan, redactor, source witness,
     /// enrollment, claim-epoch and revocation vector, not just a policy version.
@@ -149,7 +165,8 @@ pub trait PolicyVector {
 }
 
 /// Exact opaque anchor/mapping assertion; it is never a native byte proof.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExactMapping {
     pub anchor: OpaqueId,
     pub assertion: Identifier,
@@ -299,8 +316,10 @@ pub struct ReadRequest {
     pub destination: Destination,
 }
 
-/// Full internal response identity. No serde/channel envelope is defined here.
+/// Exact response identity, also carried by the strict body-channel header.
 /// Receiver verifies this binding then passes receiver_binding to authorize().
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResponseBinding {
     pub request_digest: [u8; 32],
     pub enrollment: EnrollmentScope,
@@ -316,6 +335,68 @@ pub struct ResponseBinding {
     pub deadline_millis: u64,
     pub receiver_binding: AuthorizationBinding,
 }
+impl ResponseBinding {
+    /// Recompute the origin's exact response identity using the signed claims.
+    pub fn verify_identity(&self, claims: &Claims, destination: Destination) -> Result<()> {
+        let target = match &self.cache_key.selector {
+            Selector::Page(id) => Target::Page(OpaqueId::new(id)?),
+            Selector::Field(id) => Target::Field(OpaqueId::new(id)?),
+        };
+        let request = ReadRequest {
+            source_handle: self.source_handle.clone(),
+            target,
+            anchor: self.mapping.anchor.clone(),
+            request_digest: self.request_digest,
+            channel_binding: claims.channel_binding,
+            max_bytes: self.max_bytes,
+            destination,
+        };
+        validate_claims(claims, &request, &self.enrollment)?;
+        let source = ResolvedSource {
+            admitted_source: self.source_handle.clone(),
+            cohort_id: self.cohort_id,
+            cohort: self.cache_key.cohort.clone(),
+            activity_generation: OpaqueId::new(&self.cache_key.activity_generation)?,
+            transcript_generation: OpaqueId::new(&self.cache_key.transcript_generation)?,
+        };
+        let plan = RenderPlan {
+            payload_bytes: self.permitted_range.len(),
+            export_view_generation: Some(OpaqueId::new(&self.cache_key.export_view_generation)?),
+            exact_mapping: Some(self.mapping.clone()),
+            continuation: self.continuation.clone(),
+        };
+        let key = cache_key(
+            &self.enrollment,
+            &source,
+            &request,
+            plan.export_view_generation
+                .as_ref()
+                .ok_or(Refused::InvalidRequest)?,
+            self.policy,
+            claims,
+            self.cache_key.payload_digest,
+        );
+        if key != self.cache_key
+            || self.receiver_binding.response_identity
+                != identifier(&binding_bytes_for_response(
+                    &self.enrollment,
+                    &source,
+                    &request,
+                    &key,
+                    &plan,
+                    self.policy,
+                    self.deadline_millis,
+                    self.max_bytes,
+                    self.origin_authorization,
+                    claims,
+                ))
+        {
+            return Err(Refused::InvalidRequest);
+        }
+        Ok(())
+    }
+}
+
 /// Non-Clone result. No egress has happened; use finish after actual delivery.
 pub struct Authorized {
     pub page: Option<TypedPage>,
