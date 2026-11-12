@@ -15,7 +15,7 @@ use crate::{
     Error, Manifest, Result,
     parquet_io::visit_batches,
     schema::SESSION_COLUMN,
-    store::{lock_file, read_live_map, read_manifest},
+    store::{LockGuard, read_live_map, read_manifest},
 };
 
 const ANALYTICS_DIR: &str = "analytics";
@@ -410,13 +410,12 @@ fn cleanup_destination(destination: &Path, created_destination: bool) {
     let _ = fs::remove_file(destination.join(RECEIPT_FILE));
 }
 
-pub(crate) fn open_lock(root: &Path, exclusive: bool) -> Result<File> {
+pub(crate) fn open_lock(root: &Path, exclusive: bool) -> Result<LockGuard> {
     require_directory(root, "analytics store")?;
     let path = root.join(LOCK_FILE);
     require_regular_file(&path, "analytics lock")?;
     let lock = OpenOptions::new().read(true).write(exclusive).open(&path)?;
-    lock_file(&lock, exclusive)?;
-    Ok(lock)
+    LockGuard::acquire(lock, exclusive)
 }
 
 pub(crate) fn validate_snapshot(root: &Path) -> Result<Manifest> {
@@ -647,6 +646,62 @@ mod tests {
         testutil::{TestClock, update},
     };
 
+    // Capture dup'd open descriptions at real acquisition sites, just as fork
+    // would inherit them. Keep them alive through the immediate reopen assertion.
+    fn inherited_during<T>(operation: impl FnOnce() -> T) -> (T, Vec<File>) {
+        crate::store::INHERITED_LOCKS.with(|capture| *capture.borrow_mut() = Some(Vec::new()));
+        let result = operation();
+        let files =
+            crate::store::INHERITED_LOCKS.with(|capture| capture.borrow_mut().take().unwrap());
+        assert!(!files.is_empty());
+        (result, files)
+    }
+    #[test]
+    fn real_lock_owners_release_inherited_descriptors_on_success_and_error() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().join("store");
+        let namespace = temporary.path().join("namespace");
+        fs::write(&namespace, "origin-test\n").unwrap();
+        let (_, writer_fds) = inherited_during(|| {
+            let mut store = Store::open(&root).unwrap();
+            store
+                .publish(&update(&[("origin-test/claude/session", 1)], "a", 0))
+                .unwrap();
+            assert!(matches!(Store::open(&root), Err(Error::WriterBusy)));
+            drop(store);
+        });
+        drop(Store::open(&root).unwrap());
+        let bundle = temporary.path().join("bundle");
+        let (result, export_fds) =
+            inherited_during(|| export_snapshot(&root, &namespace, "origin-test", &bundle));
+        result.unwrap();
+        drop(Store::open(&root).unwrap());
+        let (result, export_error_fds) = inherited_during(|| {
+            export_snapshot(
+                &root,
+                &namespace,
+                "wrong",
+                &temporary.path().join("bad-bundle"),
+            )
+        });
+        assert!(result.is_err());
+        drop(Store::open(&root).unwrap());
+        let (result, error_fds) =
+            inherited_during(|| reset_snapshot(&root, &namespace, "wrong", None, 1, None));
+        assert!(result.is_err());
+        drop(Store::open(&root).unwrap());
+        let (result, reset_fds) =
+            inherited_during(|| reset_snapshot(&root, &namespace, "origin-test", None, 1, None));
+        result.unwrap();
+        drop(Store::open(&root).unwrap());
+        drop((
+            writer_fds,
+            export_fds,
+            export_error_fds,
+            error_fds,
+            reset_fds,
+        ));
+    }
     #[test]
     fn custody_export_hashes_provenance_and_refuses_tampering() {
         let temporary = tempfile::tempdir().unwrap();

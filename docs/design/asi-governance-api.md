@@ -84,8 +84,12 @@ removing the namespace and syncing again. An interruption between removals keeps
 the old namespace usable with regenerated mappings; it cannot leave old mappings
 behind a retired namespace. There is no reconciliation across retired namespaces. Custody export bundles
 exclude this private operator state. Deleting it changes exported handles. Native IDs, log stems and source paths remain private.
-Opaque evidence keys use the schema's UID shapes with a fixed `opaque/receiver`
-prefix; they are handles, not native identity or filesystem authority.
+Slice 3 changes slice 2's one current export contract: `Projection` retains its
+namespace and replaces the former `opaque/receiver/...` shape. Opaque evidence
+keys use the schema's UID shapes with a hex-encoded namespace
+and `receiver` prefix. Source handles use `<hex namespace>/source/<random hex>`.
+The namespace binding lets the object validator refuse foreign handles; handles
+are not native identity or filesystem authority.
 
 `Snapshot::project` evaluates every retained contributor. Each exported session
 is atomic, including its actually referenced dimensions. Denied nullable fields
@@ -108,9 +112,9 @@ counts have no serializer and must stay local.
 is written automatically; callers own the returned bytes. Typed receiver names
 and paths follow D7 under the intersection and existing credential checks. Source
 paths are never emitted; permitted analytics target/repository paths are distinct
-D7 fields. This profile must not be sent to Hub. Hub tokenization, objects,
-isolated object admission, namespace claims/heads, withdrawals, transport and L1
-remain deferred. This slice exposes a library only; no CLI/default-on behavior.
+D7 fields. This profile must not be sent to Hub. The object layer and isolated
+admission are described in [ASI store](asi-store.md#receiver-publication-objects-593-slice-3).
+Hub tokenization, namespace claims/heads, withdrawals, transport and L1 remain deferred. This slice exposes a library only; no CLI/default-on behavior.
 Pinning materializes the snapshot in memory and requires a momentarily available
 shared writer lock; streaming/resource-budget admission is follow-up object work.
 

@@ -12,6 +12,7 @@ pub mod error;
 pub mod export;
 pub mod governance;
 pub mod input;
+pub mod objects;
 pub mod projection;
 pub mod provenance;
 pub mod publish;

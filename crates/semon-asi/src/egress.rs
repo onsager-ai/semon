@@ -262,6 +262,7 @@ impl Snapshot {
         }
         outcomes.exported = accepted.len();
         Ok(Projection {
+            namespace: self.namespace.clone(),
             sessions: accepted.into_values().collect(),
             outcomes,
         })
@@ -378,7 +379,11 @@ impl Snapshot {
         for id in &cohort {
             let registration = &registry.sources[id];
             policies.push(PolicyVersion {
-                source_handle: handles.get("source", id)?,
+                source_handle: format!(
+                    "{}/source/{}",
+                    hex::encode(handles.namespace.as_bytes()),
+                    handles.get("source", id)?
+                ),
                 policy_version: PolicyBundle {
                     baseline: registration.baseline.clone(),
                     local: registration.local.clone(),
@@ -431,11 +436,12 @@ fn opaque_keys(row: &mut Map<String, Value>, handles: &Handles) -> Result<()> {
                 field => field,
             };
             let opaque = handles.get(kind, native)?;
+            let namespace = hex::encode(handles.namespace.as_bytes());
             let value = match kind {
-                "step_uid" => format!("opaque/receiver/evidence/s/claude/{opaque}"),
-                "turn_uid" => format!("opaque/receiver/evidence/t/{opaque}"),
-                "compaction_uid" => format!("opaque/receiver/evidence/c/{opaque}"),
-                _ => format!("opaque/receiver/{opaque}"),
+                "step_uid" => format!("{namespace}/receiver/evidence/s/claude/{opaque}"),
+                "turn_uid" => format!("{namespace}/receiver/evidence/t/{opaque}"),
+                "compaction_uid" => format!("{namespace}/receiver/evidence/c/{opaque}"),
+                _ => format!("{namespace}/receiver/{opaque}"),
             };
             row.insert(field.into(), Value::String(value));
         }
@@ -451,6 +457,7 @@ pub struct LocalOutcomes {
     pub refused_provenance: usize,
 }
 pub struct Projection {
+    pub(crate) namespace: String,
     sessions: Vec<SessionExport>,
     pub outcomes: LocalOutcomes,
 }

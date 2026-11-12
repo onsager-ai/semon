@@ -111,6 +111,17 @@ fn project(snapshot: &Snapshot, registry: &Registry, handles: &Handles) -> Proje
         .unwrap()
 }
 #[test]
+fn reproducible_object_from_governed_projection() {
+    let (_directory, snapshot, handles) = setup();
+    let projection = project(&snapshot, &registry(), &handles);
+    let first = crate::objects::PublicationObject::from_projection(&projection).unwrap();
+    let second = crate::objects::PublicationObject::from_projection(&projection).unwrap();
+    assert_eq!(first.bytes(), second.bytes());
+    assert_eq!(first.identity(), second.identity());
+    crate::objects::validate(first.bytes(), "origin").unwrap();
+    assert!(crate::objects::validate(first.bytes(), "foreign").is_err());
+}
+#[test]
 fn complete_cohort_intersection_and_sanitized_bytes() {
     let (_directory, snapshot, handles) = setup();
     let mut registry = registry();
@@ -357,6 +368,7 @@ fn reset_preserves_or_retires_namespace_handles_and_export_excludes_them() {
             .unwrap()
     );
     drop(retained);
+    drop(snapshot);
     crate::reset_snapshot(
         &root,
         &namespace_file,

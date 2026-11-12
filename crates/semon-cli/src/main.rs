@@ -10,6 +10,14 @@ const DURABLE_VALUES_LIMIT: usize = 256 * 1024;
 const DURABLE_VALUES_TOO_LARGE: &str = "durable values exceed the 256 KiB authoring limit";
 
 fn main() -> ExitCode {
+    if env::args().skip(1).eq(["asi", "object-worker"]) {
+        use std::io::IsTerminal;
+        if std::io::stdin().is_terminal() {
+            eprintln!("internal worker; not a user command");
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::from(semon_asi::objects::worker_stdio() as u8);
+    }
     #[cfg(feature = "asi-query")]
     if env::args().skip(1).eq(["asi", "body-worker"]) {
         return ExitCode::from(semon_sessions::body_query::worker_stdio() as u8);

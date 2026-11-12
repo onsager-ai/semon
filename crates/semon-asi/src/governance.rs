@@ -624,7 +624,7 @@ fn known_export_field(name: &str) -> bool {
     })
 }
 
-fn validate_column_value(
+pub(crate) fn validate_column_value(
     column: &schema::Column,
     value: &Value,
     destination: Destination,
