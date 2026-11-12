@@ -30,6 +30,23 @@ pub trait EnrollmentSource {
     fn authenticated_enrollment(&self, required_kind: EnrollmentKind) -> Result<EnrollmentScope>;
     /// Compare the complete current scope, including credential/kind revocation.
     fn is_current(&self, scope: &EnrollmentScope) -> bool;
+    /// Capture request authority for pending work. Registry-backed sources return
+    /// the handle obtained at authentication; in-memory sources have no registry.
+    fn revision_handle(&self, _scope: &EnrollmentScope) -> Option<crate::serve::RevisionHandle> {
+        None
+    }
+}
+
+pub(crate) fn authority_is_current(
+    handle: Option<&crate::serve::RevisionHandle>,
+    source: &dyn EnrollmentSource,
+    scope: &EnrollmentScope,
+    now: u64,
+) -> bool {
+    match handle {
+        Some(handle) => handle.is_current_at(now),
+        None => source.is_current(scope),
+    }
 }
 #[derive(Clone, Copy)]
 pub struct Config {
@@ -46,6 +63,7 @@ impl Default for Config {
 }
 struct Work {
     scope: EnrollmentScope,
+    authority: Option<crate::serve::RevisionHandle>,
     channel: [u8; 32],
     request: Request,
     dispatched: bool,
@@ -68,10 +86,15 @@ pub struct VerifiedResponse {
     pub binding: ResponseBinding,
     pub payload: Vec<u8>,
 }
+struct Channel {
+    binding: [u8; 32],
+    scope: EnrollmentScope,
+    authority: Option<crate::serve::RevisionHandle>,
+}
 #[derive(Default)]
 struct State {
     polls: BTreeMap<String, [u8; 32]>,
-    channels: BTreeMap<String, [u8; 32]>,
+    channels: BTreeMap<String, Channel>,
     queues: BTreeMap<String, VecDeque<Identifier>>,
     work: BTreeMap<Identifier, Work>,
 }
@@ -126,7 +149,7 @@ impl<'a> Broker<'a> {
         if state
             .channels
             .get(id)
-            .is_some_and(|c| c != &poll.channel_binding)
+            .is_some_and(|c| c.binding != poll.channel_binding)
         {
             for work in state
                 .work
@@ -136,7 +159,14 @@ impl<'a> Broker<'a> {
                 fail(work, Reason::Unavailable);
             }
         }
-        state.channels.insert(id.into(), poll.channel_binding);
+        state.channels.insert(
+            id.into(),
+            Channel {
+                binding: poll.channel_binding,
+                authority: auth.revision_handle(&scope),
+                scope: scope.clone(),
+            },
+        );
         state.polls.insert(id.into(), poll.channel_binding);
         self.changed.notify_all();
         Ok(Poll {
@@ -152,7 +182,7 @@ impl<'a> Broker<'a> {
             .map_err(|_| Reason::Unavailable)?
             .channels
             .get(scope.enrollment_id.as_str())
-            .copied()
+            .map(|channel| channel.binding)
             .ok_or(Reason::Unavailable)
     }
     pub fn enqueue(
@@ -178,7 +208,12 @@ impl<'a> Broker<'a> {
         if request.deadline_millis <= self.clock.now_millis() {
             return Err(Reason::Deadline);
         }
-        if state.channels.get(scope.enrollment_id.as_str()) != Some(&channel) {
+        if state
+            .channels
+            .get(scope.enrollment_id.as_str())
+            .map(|c| c.binding)
+            != Some(channel)
+        {
             return Err(Reason::Unavailable);
         }
         if state.work.contains_key(&request.request_id) {
@@ -206,6 +241,7 @@ impl<'a> Broker<'a> {
         state.work.insert(
             request.request_id,
             Work {
+                authority: auth.revision_handle(&scope),
                 scope,
                 channel,
                 request,
@@ -227,7 +263,7 @@ impl<'a> Broker<'a> {
             .values_mut()
             .filter(|w| !matches!(w.result, Some(Err(_))))
         {
-            if !auth.is_current(&work.scope) {
+            if !authority_is_current(work.authority.as_ref(), auth, &work.scope, now / 1000) {
                 fail(work, Reason::Revoked);
             } else if now >= work.request.deadline_millis {
                 fail(work, Reason::Deadline);
@@ -260,13 +296,16 @@ impl<'a> Broker<'a> {
     pub fn revocation_changed(&self, auth: &dyn EnrollmentSource) -> Result<()> {
         let mut state = self.state.lock().map_err(|_| Reason::Unavailable)?;
         self.maintain(&mut state, auth);
-        let revoked: Vec<String> = state
-            .work
-            .values()
-            .filter(|w| !auth.is_current(&w.scope))
-            .map(|w| w.scope.enrollment_id.as_str().to_owned())
-            .collect();
-        state.channels.retain(|id, _| !revoked.contains(id));
+        // A delayed notification may follow fresh authentication at the new
+        // revision. Old work must not invalidate that replacement registration.
+        state.channels.retain(|_, channel| {
+            authority_is_current(
+                channel.authority.as_ref(),
+                auth,
+                &channel.scope,
+                self.clock.now_millis() / 1000,
+            )
+        });
         self.changed.notify_all();
         Ok(())
     }

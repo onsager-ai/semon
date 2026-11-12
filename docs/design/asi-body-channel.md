@@ -36,6 +36,30 @@ authenticated_enrollment(conn, request_credential, required_kind)
        index_incarnation, publisher_claim_epoch, kinds, verified_client_identity }
 ```
 
+`body_enrollment::RevocationWatcher` is the library-only revision notification
+hook. The host creates it before accepting work and calls
+`notify_if_revision_changed(source, broker)` when checking registry changes. It
+acknowledges a revision only after broker cleanup succeeds; registry read failures
+also invoke cleanup and return unavailable. Registry-backed work validates its own
+captured authority and fails closed on registry errors. For append leases the host additionally
+calls `AppendService::sweep_owner(original_scope, owner_source)` for each active
+owner; the watcher does not own append services or schedule background work.
+
+`RegistryEnrollmentSource::authenticate` repeats the registry decision for each
+request using verified connection evidence and its bearer credential, always
+passing `Kind::BodyChannel`; no request body selects the kind. The existing
+`TryFrom<&AuthenticatedEnrollment>` supplies the complete scope. Pending broker
+work and append leases retain the authentication's `RevisionHandle` independently
+of subsequent requests. Registry read errors fail closed.
+
+The current coarse check (option A) invalidates all captured authority on any
+registry revision change. Enrolling another machine, revoking authority, and every
+credential renewal drop all pending body work and append leases for every origin
+with `Revoked`. Origins must reconnect with a fresh grant. Even unchanged owners
+incur this churn. Option B, a credential-bound authority handle exposed by the
+origin lane in its planned renewal/revocation PR4, is the planned replacement;
+it will allow unaffected owners to retain their work.
+
 Body-route mTLS is settled, not an amendment. Slice 4a builds client-certificate
 support; #594 consumes this authenticated scope and never touches TLS configuration.
 See [enrollment](asi-enrollment.md#credential-kinds-and-custody) for kind separation,

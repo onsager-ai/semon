@@ -19,6 +19,7 @@ use zeroize::Zeroizing;
 struct Active {
     principal: Principal,
     scope: EnrollmentScope,
+    authority: Option<crate::serve::RevisionHandle>,
     template: Request,
     generation: Identifier,
     attempt: Option<AttemptId>,
@@ -101,6 +102,7 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
         self.active.insert(
             id,
             Active {
+                authority: self.enrollment.revision_handle(&scope),
                 principal,
                 scope,
                 template,
@@ -132,7 +134,13 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
         {
             return Err(Reason::LeaseClosed);
         }
-        if !owner.is_current(&active.scope) {
+        if !crate::body_broker::authority_is_current(
+            active.authority.as_ref(),
+            owner,
+            &active.scope,
+            self.broker.clock.now_millis() / 1000,
+        ) || !owner.is_current(&active.scope)
+        {
             return Err(Reason::Revoked);
         }
         if active.payload.is_some() && self.broker.clock.now_millis() >= active.page_deadline {
@@ -182,9 +190,15 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
     }
     pub fn maintain(&mut self) -> Result<()> {
         let owner = self.enrollment;
-        let scope =
-            owner.authenticated_enrollment(crate::origin_read::EnrollmentKind::BodyChannel)?;
-        self.sweep_owner(&scope, owner)
+        let scopes: Vec<_> = self
+            .active
+            .values()
+            .map(|active| active.scope.clone())
+            .collect();
+        for scope in scopes {
+            self.sweep_owner(&scope, owner)?;
+        }
+        Ok(())
     }
     /// Lifecycle cleanup uses the lease owner's enrollment source. A different
     /// authenticated connection cannot close or account for that owner's leases.
@@ -463,7 +477,14 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
         }
         // Revoked/changed channels cannot carry an old capability. The origin
         // independently expires its state, or clears it on disconnect/restart.
-        if self.enrollment.is_current(&active.scope) && self.broker.channel(&active.scope).is_ok() {
+        if crate::body_broker::authority_is_current(
+            active.authority.as_ref(),
+            self.enrollment,
+            &active.scope,
+            self.broker.clock.now_millis() / 1000,
+        ) && self.enrollment.is_current(&active.scope)
+            && self.broker.channel(&active.scope).is_ok()
+        {
             let mut request = active.template.clone();
             request.request_id = random_id()?;
             request.operation = operation;
