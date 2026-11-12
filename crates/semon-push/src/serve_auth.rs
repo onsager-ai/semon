@@ -58,6 +58,7 @@ pub struct AuthenticatedEnrollment {
     pub publisher_claim_epoch: Option<ClaimEpoch>,
     pub kinds: Vec<Kind>,
     pub verified_client_identity: Option<VerifiedClientIdentity>,
+    pub renewal_due: bool,
     pub authority: CredentialHandle,
 }
 impl TryFrom<&AuthenticatedEnrollment> for crate::origin_read::EnrollmentScope {
@@ -142,6 +143,7 @@ impl CredentialHandle {
 
 pub struct RegistryAuthenticator {
     dir: PathBuf,
+    renewal: std::sync::Mutex<crate::renewal::Receiver>,
 }
 impl RegistryAuthenticator {
     pub fn open(dir: &Path) -> Result<Self, String> {
@@ -150,7 +152,21 @@ impl RegistryAuthenticator {
             .map_err(|e| e.to_string().replace("DIR", &dir.display().to_string()))?;
         Ok(Self {
             dir: dir.to_owned(),
+            renewal: std::sync::Mutex::new(crate::renewal::Receiver::default()),
         })
+    }
+    pub(crate) fn renew(
+        &self,
+        request: crate::renewal_wire::Request,
+        exporter: [u8; 32],
+        identity: Option<&VerifiedClientIdentity>,
+        now: u64,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::provision_wire::Refused> {
+        enrollment::refuse_legacy_tokens(&self.dir).map_err(|_| crate::provision_wire::Refused)?;
+        self.renewal
+            .try_lock()
+            .map_err(|_| crate::provision_wire::Refused)?
+            .handle(&self.dir, request, exporter, identity, now)
     }
     /// Current state is read for every request; callers never receive local diagnostics.
     pub fn authenticated_enrollment(
@@ -248,6 +264,15 @@ impl RegistryAuthenticator {
                 .map(|k| k.kind)
                 .collect(),
             verified_client_identity: identity.cloned(),
+            renewal_due: credential
+                .valid_until
+                .saturating_sub(now.max(registry.latest))
+                <= crate::renewal_wire::WINDOW
+                || enrollment.credential_kinds.iter().any(|s| {
+                    s.enable_authorization
+                        .as_ref()
+                        .is_some_and(|a| a.consumed_renewal_id.is_none())
+                }),
             authority: CredentialHandle {
                 dir: self.dir.clone(),
                 credential_id: credential.credential_id.clone(),
@@ -276,6 +301,7 @@ impl Authenticator {
             .map(|r| r.credentials().len())
             .map_err(|e| e.to_string())
     }
+    #[cfg(test)]
     pub(super) fn authorize(
         &self,
         conn: &mut ConnectionAuthority,

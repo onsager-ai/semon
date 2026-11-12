@@ -989,9 +989,11 @@ fn classify_route(path: &str) -> Option<(Kind, Option<Endpoint>)> {
 fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
     use crate::provision_wire::{self, Request, Route};
     let refused = || Next::Refuse(401, "request refused", &[]);
-    let Some(route) = Route::from_path(&head.target) else {
+    let renewal_route = crate::renewal_wire::Route::from_path(&head.target);
+    let route = Route::from_path(&head.target);
+    if route.is_none() && renewal_route.is_none() {
         return refused();
-    };
+    }
     let Stream::Tls(stream) = &connection.stream else {
         return refused();
     };
@@ -1035,7 +1037,8 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
     };
     connection.limits.body = saved;
     let Ok(body) = body else {
-        if let Ok(exporter) = exporter
+        if renewal_route.is_none()
+            && let Ok(exporter) = exporter
             && let Some(controller) = slot.shared.provisioning.as_ref()
             && let Ok(mut controller) = controller.lock()
         {
@@ -1054,6 +1057,49 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
     };
     let body = zeroize::Zeroizing::new(body);
     let Ok(exporter) = exporter else {
+        return refused();
+    };
+    if let Some(route) = renewal_route {
+        let Ok(request) = crate::renewal_wire::Request::parse(route, &body) else {
+            return refused();
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |now| now.as_secs());
+        #[cfg(test)]
+        let now = slot
+            .shared
+            .provisioning_clock
+            .as_ref()
+            .map_or(now, |clock| clock());
+        let Ok(reply) = slot.shared.tokens.registry().renew(
+            request,
+            exporter,
+            connection.authority.verified_client_identity.as_ref(),
+            now,
+        ) else {
+            return refused();
+        };
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{}\r\n",
+            reply.len(),
+            if head.close {
+                "Connection: close\r\n"
+            } else {
+                ""
+            }
+        );
+        return if connection
+            .send(response.as_bytes())
+            .and_then(|()| connection.send(&reply))
+            .is_ok()
+        {
+            Next::Continue
+        } else {
+            Next::Close
+        };
+    }
+    let Some(route) = route else {
         return refused();
     };
     let Some(controller) = slot.shared.provisioning.as_ref() else {
@@ -1140,7 +1186,7 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
 /// Checks a request in order (endpoint, method, framing, token, size) and,
 /// only once all pass, reads its body and answers it.
 fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
-    if head.target.starts_with("/v1/provision/") {
+    if head.target.starts_with("/v1/provision/") || head.target.starts_with("/v1/renew/") {
         return answer_provisioning(slot, connection, head);
     }
     if head.transfer_encoding {
@@ -1171,7 +1217,7 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
     if kind == Kind::BodyChannel {
         return body::answer_body(shared, slot, connection, head, now);
     }
-    let Some(machine) = shared.tokens.authorize(
+    let Some(authenticated) = shared.tokens.registry().authenticated_enrollment(
         &mut connection.authority,
         head.authorization.as_deref(),
         kind,
@@ -1207,11 +1253,17 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         }
         Err(_) => return Next::Close,
     };
+    let machine = authenticated.machine;
     let reply = shared.receiver.handle(&machine, endpoint, &body);
     if reply.status >= 500 {
         eprintln!("semon receive: {machine}: {}", reply.body);
     }
-    match connection.respond(reply.status, &reply.body, head.close, &[]) {
+    let headers = if authenticated.renewal_due {
+        &[("Semon-Renewal", "due")][..]
+    } else {
+        &[]
+    };
+    match connection.respond(reply.status, &reply.body, head.close, headers) {
         Ok(()) => Next::Continue,
         Err(_) => Next::Close,
     }

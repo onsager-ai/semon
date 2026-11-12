@@ -346,6 +346,14 @@ impl Store {
         fault(Stage::Synced)?;
         let has_terminal = next.enrollments.iter().any(|e| e.revoked_at.is_some());
         let receipt_count = next.pairing_receipts.len();
+        let renewal_count = next.renewal_receipts.len();
+        let live_renewals: Vec<_> = next
+            .renewal_receipts
+            .iter()
+            .filter(|r| r.live(&next, now))
+            .cloned()
+            .collect();
+        next.renewal_receipts = live_renewals;
         next.pairing_receipts.retain(|r| {
             r.valid_until > now
                 && r.deliveries < 2
@@ -358,7 +366,11 @@ impl Store {
                             .all(|k| k.available && k.generations.current == 1)
                 })
         });
-        if records.is_empty() && !has_terminal && receipt_count == next.pairing_receipts.len() {
+        if records.is_empty()
+            && !has_terminal
+            && receipt_count == next.pairing_receipts.len()
+            && renewal_count == next.renewal_receipts.len()
+        {
             return Ok(());
         }
         next.credentials
@@ -400,6 +412,11 @@ impl Store {
             next.pairing_receipts
                 .retain(|r| r.enrollment_id != e.enrollment_id);
         }
+        next.renewal_admission.retain(|a| {
+            next.enrollments
+                .iter()
+                .any(|e| e.enrollment_id == a.enrollment_id)
+        });
         next.latest = now;
         self.commit_compacted(&next, fault)
     }

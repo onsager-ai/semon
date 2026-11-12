@@ -133,6 +133,31 @@ pub(crate) fn owner(receiver: &Path, record: &OwnerRecord) -> Result<(), Error> 
         },
     )
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RenewalRecord {
+    pub version: u32,
+    pub observed_at: u64,
+    pub enrollment_id: String,
+    pub renewal_id: String,
+    pub generations: Vec<crate::renewal_wire::Generation>,
+    pub action: String,
+}
+pub(crate) fn renewal(receiver: &Path, record: &RenewalRecord) -> Result<(), Error> {
+    append_records(
+        receiver,
+        "renewals.jsonl",
+        std::slice::from_ref(record),
+        |line| {
+            let record: RenewalRecord =
+                serde_json::from_slice(line).map_err(|_| Error::AuditUnavailable)?;
+            if record.version != 1 {
+                return Err(Error::AuditUnavailable);
+            }
+            Ok(())
+        },
+    )
+}
 fn append_records<T: Serialize>(
     receiver: &Path,
     name: &str,

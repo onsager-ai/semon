@@ -90,6 +90,10 @@ pub mod receiver_audit;
 #[cfg(unix)]
 pub mod receiver_custody;
 pub mod redact;
+#[cfg(unix)]
+pub mod renewal;
+#[cfg(unix)]
+pub mod renewal_wire;
 pub mod serve;
 mod status;
 mod stop;

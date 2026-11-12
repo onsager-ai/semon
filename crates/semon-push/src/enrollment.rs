@@ -18,7 +18,7 @@ use std::{
 pub const DIRECTORY: &str = "enrollment";
 pub const REGISTRY_FILE: &str = "registry.json";
 pub const LOCK_FILE: &str = "registry.lock";
-pub const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 3;
 pub const CAP: u64 = 4 * 1024 * 1024;
 pub const TERMINAL_RESERVE: u64 = 256 * 1024;
 pub const ADMISSION_CAP: u64 = CAP - TERMINAL_RESERVE;
@@ -208,6 +208,8 @@ pub struct Registry {
     pub(crate) enrollments: Vec<Enrollment>,
     pub(crate) credentials: Vec<Bearer>,
     pub(crate) pairing_receipts: Vec<crate::pairing::Receipt>,
+    pub(crate) renewal_receipts: Vec<crate::renewal::Receipt>,
+    pub(crate) renewal_admission: Vec<crate::renewal::Admission>,
     pub(crate) tombstones: Vec<Tombstone>,
     pub(crate) latest: u64,
     pub(crate) next_sequence: u64,
@@ -221,6 +223,8 @@ impl Registry {
             enrollments: vec![],
             credentials: vec![],
             pairing_receipts: vec![],
+            renewal_receipts: vec![],
+            renewal_admission: vec![],
             tombstones: vec![],
             latest: 0,
             next_sequence: 1,
@@ -283,6 +287,8 @@ impl Registry {
             enrollments,
             credentials,
             pairing_receipts: vec![],
+            renewal_receipts: vec![],
+            renewal_admission: vec![],
             tombstones: vec![],
             latest: 0,
             next_sequence,
@@ -474,6 +480,7 @@ impl Registry {
             }
         }
         crate::pairing::validate_receipts(self)?;
+        self.validate_renewal()?;
         Ok(())
     }
     fn follows(&self, old: &Self) -> Result<()> {
@@ -495,6 +502,29 @@ impl Registry {
             expected.deliveries = next.deliveries;
             if &expected != next || next.deliveries < receipt.deliveries {
                 return Err(Error::Terminal);
+            }
+        }
+        for receipt in &old.renewal_receipts {
+            let next = self
+                .renewal_receipts
+                .iter()
+                .find(|r| r.begun.renewal_id == receipt.begun.renewal_id)
+                .ok_or(Error::Terminal)?;
+            let mut expected = receipt.clone();
+            expected.deliveries = next.deliveries;
+            if &expected != next || next.deliveries < receipt.deliveries {
+                return Err(Error::Terminal);
+            }
+        }
+        for admission in &old.renewal_admission {
+            for time in &admission.creations {
+                if self.latest.saturating_sub(*time) < 3600
+                    && !self.renewal_admission.iter().any(|a| {
+                        a.enrollment_id == admission.enrollment_id && a.creations.contains(time)
+                    })
+                {
+                    return Err(Error::Terminal);
+                }
             }
         }
         self.validate()?;

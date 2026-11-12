@@ -229,7 +229,22 @@ pub(super) fn answer_body(
             Next::Close
         };
     }
-    match connection.respond(result.status, &body, head.close, &[]) {
+    let renewal_due = shared
+        .tokens
+        .registry()
+        .authenticated_enrollment(
+            &mut connection.authority,
+            head.authorization.as_deref(),
+            Kind::BodyChannel,
+            host.broker.clock.now_millis() / 1000,
+        )
+        .is_some_and(|e| e.renewal_due);
+    let headers = if renewal_due {
+        &[("Semon-Renewal", "due")][..]
+    } else {
+        &[]
+    };
+    match connection.respond(result.status, &body, head.close, headers) {
         Ok(()) => {
             dispatch.selected = None;
             Next::Continue
