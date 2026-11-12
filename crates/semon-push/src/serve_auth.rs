@@ -58,7 +58,7 @@ pub struct AuthenticatedEnrollment {
     pub publisher_claim_epoch: Option<ClaimEpoch>,
     pub kinds: Vec<Kind>,
     pub verified_client_identity: Option<VerifiedClientIdentity>,
-    pub revocation: RevisionHandle,
+    pub authority: CredentialHandle,
 }
 impl TryFrom<&AuthenticatedEnrollment> for crate::origin_read::EnrollmentScope {
     type Error = crate::origin_read::Refused;
@@ -104,31 +104,39 @@ impl From<crate::origin_read::EnrollmentKind> for Kind {
     }
 }
 
-/// A changed revision requires a new authorization decision before further release.
-/// An unreadable registry also invalidates this handle. No secret is retained.
+/// Authority of one authenticated credential, independent of registry churn.
+/// An unreadable registry invalidates this handle. No secret or digest is retained.
 #[derive(Clone, Debug)]
-pub struct RevisionHandle {
+pub struct CredentialHandle {
     dir: PathBuf,
-    revision: u64,
+    credential_id: String,
+    enrollment_id: String,
+    kind: Kind,
+    generation: u64,
+    verified_pin: Option<Pin>,
     valid_from: u64,
     valid_until: u64,
 }
-impl RevisionHandle {
-    /// Poll this lock-free snapshot comparison to observe changes by other processes.
-    pub fn revision_is_current(&self) -> bool {
-        enrollment::refuse_legacy_tokens(&self.dir).is_ok()
-            && Registry::read_current(&self.dir).is_ok_and(|r| r.revision() == self.revision)
-    }
+impl CredentialHandle {
     pub fn is_current(&self) -> bool {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .is_ok_and(|now| self.is_current_at(now.as_secs()))
     }
-    /// Conservatively requires reauthorization on any revision change. The same
-    /// revision preserves the enrollment, kind, credential generation and pins
-    /// already authorized; time can independently expire that authority.
+    /// Re-read current authority, including any cutover scheduled after admission.
     pub fn is_current_at(&self, now: u64) -> bool {
-        now >= self.valid_from && now < self.valid_until && self.revision_is_current()
+        now >= self.valid_from
+            && now < self.valid_until
+            && enrollment::refuse_legacy_tokens(&self.dir).is_ok()
+            && Registry::read_current(&self.dir).is_ok_and(|registry| {
+                registry
+                    .current_credential(&self.credential_id, self.verified_pin.as_ref(), now)
+                    .is_some_and(|credential| {
+                        credential.enrollment_id == self.enrollment_id
+                            && credential.kind == self.kind
+                            && credential.generation == self.generation
+                    })
+            })
     }
 }
 
@@ -166,12 +174,12 @@ impl RegistryAuthenticator {
             Some(identity) => vec![Some(&identity.spki), Some(&identity.leaf)],
             None => vec![None],
         };
-        let decision = pins.into_iter().find_map(|pin| {
+        let (decision, verified_pin) = pins.into_iter().find_map(|pin| {
             match registry
                 .authorize(required_kind, required_kind, &secret, pin, now)
                 .decision
             {
-                Decision::Allowed { enrollment_id, .. } => Some(enrollment_id),
+                Decision::Allowed { enrollment_id, .. } => Some((enrollment_id, pin.cloned())),
                 Decision::Refused => None,
             }
         })?;
@@ -231,9 +239,13 @@ impl RegistryAuthenticator {
                 .map(|k| k.kind)
                 .collect(),
             verified_client_identity: identity.cloned(),
-            revocation: RevisionHandle {
+            authority: CredentialHandle {
                 dir: self.dir.clone(),
-                revision: registry.revision(),
+                credential_id: credential.credential_id.clone(),
+                enrollment_id: credential.enrollment_id.clone(),
+                kind: credential.kind,
+                generation: credential.generation,
+                verified_pin,
                 valid_from: credential.valid_from,
                 valid_until,
             },

@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 struct Active {
     principal: Principal,
     scope: EnrollmentScope,
-    authority: Option<crate::serve::RevisionHandle>,
+    authority: Option<crate::serve::CredentialHandle>,
     template: Request,
     generation: Identifier,
     attempt: Option<AttemptId>,
@@ -102,7 +102,7 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
         self.active.insert(
             id,
             Active {
-                authority: self.enrollment.revision_handle(&scope),
+                authority: self.enrollment.credential_handle(&scope),
                 principal,
                 scope,
                 template,

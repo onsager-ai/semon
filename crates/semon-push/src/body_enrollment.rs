@@ -1,7 +1,7 @@
 //! Host-driven registry revision notifications for the body broker (Part of #594).
 //!
 //! Request authentication and host-driven revocation (Part of #594).
-//! Pending work retains its own registry revision handle, so a notifying request
+//! Pending work retains its own credential handle, so a notifying request
 //! cannot substitute its authority for another owner's. No transport is installed.
 use std::path::{Path, PathBuf};
 
@@ -13,10 +13,10 @@ use crate::{
 
 /// Body-kind authority for one request on an already verified connection.
 /// Construct a fresh source for every request, including keep-alive requests.
-/// Registry changes require fresh authentication and a new body grant.
+/// Pending authority survives unrelated registry changes until its credential ends.
 pub struct RegistryEnrollmentSource {
     scope: crate::origin_read::EnrollmentScope,
-    authority: crate::serve::RevisionHandle,
+    authority: crate::serve::CredentialHandle,
 }
 impl RegistryEnrollmentSource {
     pub fn authenticate(
@@ -37,7 +37,7 @@ impl RegistryEnrollmentSource {
             .map_err(|_| Reason::Forbidden)?;
         Ok(Self {
             scope,
-            authority: authenticated.revocation,
+            authority: authenticated.authority,
         })
     }
 }
@@ -55,12 +55,12 @@ impl EnrollmentSource for RegistryEnrollmentSource {
         Ok(self.scope.clone())
     }
     fn is_current(&self, scope: &crate::origin_read::EnrollmentScope) -> bool {
-        scope == &self.scope && self.authority.revision_is_current()
+        scope == &self.scope && self.authority.is_current()
     }
-    fn revision_handle(
+    fn credential_handle(
         &self,
         scope: &crate::origin_read::EnrollmentScope,
-    ) -> Option<crate::serve::RevisionHandle> {
+    ) -> Option<crate::serve::CredentialHandle> {
         (scope == &self.scope).then(|| self.authority.clone())
     }
 }
@@ -292,8 +292,21 @@ mod tests {
                 assert!(poll.try_take(&fresh).unwrap().is_some());
                 continue;
             }
-            if failure == "revision" {
-                advance(&dir.0);
+            advance(&dir.0);
+            assert_eq!(watcher.notify_if_revision_changed(&b, &broker), Ok(true));
+            for n in [1, 2] {
+                assert!(
+                    broker
+                        .take_result(&b, Identifier::from_bytes([n; 32]))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            if failure == "credential" {
+                let mut store = Store::open(&dir.0).unwrap();
+                let mut snapshot = store.snapshot().unwrap();
+                snapshot.credentials[0].revoked_at = Some(10);
+                store.commit(snapshot.revision(), &snapshot).unwrap();
             } else {
                 std::fs::write(dir.0.join("enrollment/registry.json"), b"invalid registry")
                     .unwrap();
@@ -408,7 +421,7 @@ mod tests {
             sha256: Secret::new("test-bearer".into()).hash(),
             generation: 1,
             valid_from: 0,
-            valid_until: 100,
+            valid_until: u64::MAX,
             revoked_at: None,
         };
         let mut store = Store::open(dir).unwrap();
@@ -431,17 +444,17 @@ mod tests {
                 10,
             )
             .unwrap();
-        // Broker lifecycle tests need real revision handles; scope conversion and
+        // Broker lifecycle tests need real credential handles; scope conversion and
         // verified body-kind authentication are covered by serve_auth_tests.
         RegistryEnrollmentSource {
             scope: scope(name),
-            authority: authenticated.revocation,
+            authority: authenticated.authority,
         }
     }
 
     #[test]
-    fn captured_work_authority_invalidates_all_owners() {
-        for failure in ["revision", "read"] {
+    fn captured_work_survives_churn_until_its_credential_ends() {
+        for failure in ["credential", "read"] {
             let dir = Directory::new();
             let a = source(&dir.0, "a");
             let b = source(&dir.0, "b");
@@ -458,7 +471,7 @@ mod tests {
                     .enqueue(owner, owner.scope.clone(), [3; 32], request(n))
                     .unwrap();
             }
-            // B's request must not revoke A while their captured revisions match.
+            // B's request must not revoke A while their captured credentials remain current.
             assert!(
                 broker
                     .take_result(&b, Identifier::from_bytes([1; 32]))
@@ -466,8 +479,21 @@ mod tests {
                     .is_none()
             );
             assert!(!watcher.notify_if_revision_changed(&b, &broker).unwrap());
-            if failure == "revision" {
-                advance(&dir.0);
+            advance(&dir.0);
+            assert_eq!(watcher.notify_if_revision_changed(&b, &broker), Ok(true));
+            for n in [1, 2] {
+                assert!(
+                    broker
+                        .take_result(&b, Identifier::from_bytes([n; 32]))
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            if failure == "credential" {
+                let mut store = Store::open(&dir.0).unwrap();
+                let mut snapshot = store.snapshot().unwrap();
+                snapshot.credentials[0].revoked_at = Some(10);
+                store.commit(snapshot.revision(), &snapshot).unwrap();
             } else {
                 std::fs::write(dir.0.join("enrollment/registry.json"), b"invalid registry")
                     .unwrap();
@@ -475,7 +501,7 @@ mod tests {
             let notified = watcher.notify_if_revision_changed(&b, &broker);
             assert_eq!(
                 notified,
-                if failure == "revision" {
+                if failure == "credential" {
                     Ok(true)
                 } else {
                     Err(Reason::Unavailable)

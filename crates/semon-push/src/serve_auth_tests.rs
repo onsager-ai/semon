@@ -154,8 +154,8 @@ fn leaf_pin_and_analytics_authorization() {
         let mut conn = ConnectionAuthority::default();
         conn.verified_client_identity = Some(identity());
         let authenticated = authorize(&auth, &mut conn, kind).unwrap();
-        assert!(authenticated.revocation.is_current_at(100));
-        assert!(!authenticated.revocation.is_current_at(u64::MAX));
+        assert!(authenticated.authority.is_current_at(100));
+        assert!(!authenticated.authority.is_current_at(u64::MAX));
         if kind == Kind::AnalyticsPublish {
             let scope = crate::origin_read::EnrollmentScope::try_from(&authenticated).unwrap();
             assert_eq!(scope.publisher_claim_epoch, None);
@@ -295,12 +295,12 @@ fn authorize(
     auth.authenticated_enrollment(conn, Some("Bearer test-bearer"), kind, 100)
 }
 #[test]
-fn body_enrollment_adapter_rechecks_revision_and_scope() {
+fn body_enrollment_adapter_rechecks_credential_and_scope() {
     use crate::{
         body_broker::EnrollmentSource, body_enrollment::RegistryEnrollmentSource,
         body_wire::Reason, origin_read::EnrollmentKind,
     };
-    for failure in ["revision", "read"] {
+    for failure in ["credential", "read"] {
         let dir = PrivateDir::new();
         let mut registry = records(true);
         registry.enrollments[0].credential_kinds[0].kind = Kind::BodyChannel;
@@ -343,11 +343,12 @@ fn body_enrollment_adapter_rechecks_revision_and_scope() {
         let mut changed = scope.clone();
         changed.publisher_claim_epoch = Some(8);
         assert!(!source.is_current(&changed));
-        let handle = source.revision_handle(&scope).unwrap();
+        let handle = source.credential_handle(&scope).unwrap();
         assert!(handle.is_current_at(10));
-        if failure == "revision" {
+        if failure == "credential" {
             let mut store = Store::open(&dir.0).unwrap();
-            let next = store.snapshot().unwrap();
+            let mut next = store.snapshot().unwrap();
+            next.credentials[0].revoked_at = Some(10);
             store.commit(next.revision(), &next).unwrap();
         } else {
             fs::write(dir.0.join("tokens"), b"legacy custody refuses reads").unwrap();
@@ -365,8 +366,7 @@ fn body_enrollment_adapter_rechecks_revision_and_scope() {
                 Some("Bearer test-bearer"),
                 10
             )
-            .is_ok()
-                == (failure == "revision")
+            .is_err()
         );
     }
 }
@@ -378,16 +378,132 @@ fn current_registry_and_connection_binding_and_revision() {
     let auth = RegistryAuthenticator::open(&dir.0).unwrap();
     let mut conn = ConnectionAuthority::default();
     let first = authorize(&auth, &mut conn, Kind::MirrorPush).unwrap();
-    assert!(first.revocation.is_current());
+    assert!(first.authority.is_current());
     assert!(authorize(&auth, &mut conn, Kind::AnalyticsPublish).is_none());
     assert!(authorize(&auth, &mut conn, Kind::BodyChannel).is_none());
     let mut store = Store::open(&dir.0).unwrap();
     let mut next = store.snapshot().unwrap();
     next.enrollments[0].revoked_at = Some(100);
     store.commit(next.revision(), &next).unwrap();
-    assert!(!first.revocation.is_current());
+    assert!(!first.authority.is_current());
     assert!(authorize(&auth, &mut conn, Kind::MirrorPush).is_none());
 }
+#[test]
+fn credential_handle_survives_unrelated_writes_and_sibling_renewal() {
+    let dir = PrivateDir::new();
+    install(&dir.0, &records(false));
+    let auth = RegistryAuthenticator::open(&dir.0).unwrap();
+    let first = authorize(&auth, &mut ConnectionAuthority::default(), Kind::MirrorPush).unwrap();
+    let handle = first.authority;
+    assert!(handle.is_current_at(100));
+    let mut store = Store::open(&dir.0).unwrap();
+    let mut next = store.snapshot().unwrap();
+    let mut other = next.enrollments[0].clone();
+    other.enrollment_id = "c".repeat(64);
+    other.machine = "desktop".into();
+    other.client_certificate_pins.clear();
+    next.enrollments.push(other);
+    store.commit(next.revision(), &next).unwrap();
+    assert!(handle.is_current_at(100));
+    let mut next = store.snapshot().unwrap();
+    next.enrollments[1].credential_kinds[0].revoked_at = Some(100);
+    store.commit(next.revision(), &next).unwrap();
+    assert!(handle.is_current_at(100));
+    let mut next = store.snapshot().unwrap();
+    let mut sibling = next.credentials[0].clone();
+    sibling.credential_id = "d".repeat(64);
+    sibling.sha256 = Secret::new("renewed-bearer".into()).hash();
+    sibling.generation = 2;
+    next.credentials.push(sibling);
+    next.enrollments[0].credential_kinds[0].generations = crate::credentials::Generations {
+        current: 2,
+        retiring: Some(crate::credentials::Retiring {
+            generation: 1,
+            cutover_at: 200,
+        }),
+    };
+    store.commit(next.revision(), &next).unwrap();
+    assert!(handle.is_current_at(199));
+    assert!(!handle.is_current_at(200));
+    let renewed = auth
+        .authenticated_enrollment(
+            &mut ConnectionAuthority::default(),
+            Some("Bearer renewed-bearer"),
+            Kind::MirrorPush,
+            100,
+        )
+        .unwrap();
+    assert!(renewed.authority.is_current_at(200));
+    let mut next = store.snapshot().unwrap();
+    next.credentials[0].revoked_at = Some(100);
+    store.commit(next.revision(), &next).unwrap();
+    assert!(!handle.is_current_at(100));
+    assert!(renewed.authority.is_current_at(100));
+}
+
+#[test]
+fn credential_handle_fails_closed_when_its_authority_ends() {
+    for failure in [
+        "credential",
+        "kind",
+        "enrollment",
+        "pin",
+        "pin_removed",
+        "expired",
+        "retired",
+        "read",
+        "legacy",
+    ] {
+        let dir = PrivateDir::new();
+        let mut registry = records(true);
+        registry.credentials[0].valid_from = 100;
+        registry.credentials[0].valid_until = 300;
+        install(&dir.0, &registry);
+        let auth = RegistryAuthenticator::open(&dir.0).unwrap();
+        let mut conn = ConnectionAuthority::default();
+        conn.verified_client_identity = Some(identity());
+        let handle = authorize(&auth, &mut conn, Kind::MirrorPush)
+            .unwrap()
+            .authority;
+        assert!(!handle.is_current_at(99));
+        assert!(handle.is_current_at(100));
+        let mut store = Store::open(&dir.0).unwrap();
+        let mut next = store.snapshot().unwrap();
+        match failure {
+            "credential" => next.credentials[0].revoked_at = Some(100),
+            "kind" => next.enrollments[0].credential_kinds[0].revoked_at = Some(100),
+            "enrollment" => next.enrollments[0].revoked_at = Some(100),
+            "pin" => next.enrollments[0].client_certificate_pins[0].revoked_at = Some(100),
+            "pin_removed" => {
+                next.enrollments[0].client_certificate_pins.clear();
+            }
+            "retired" => next.enrollments[0].credential_kinds[0].generations.current = 2,
+            "expired" | "read" | "legacy" => {}
+            _ => unreachable!(),
+        }
+        // Pin removal is rejected by terminal-history persistence; a current-format
+        // snapshot without that pin must still refuse a previously captured handle.
+        if failure == "pin_removed" {
+            fs::write(
+                dir.0.join("enrollment/registry.json"),
+                serde_json::to_vec(&next).unwrap(),
+            )
+            .unwrap();
+        } else {
+            store.commit(next.revision(), &next).unwrap();
+        }
+        if failure == "read" {
+            fs::write(dir.0.join("enrollment/registry.json"), b"invalid registry").unwrap();
+        } else if failure == "legacy" {
+            fs::write(dir.0.join("tokens"), b"legacy custody").unwrap();
+        }
+        assert!(
+            !handle.is_current_at(if failure == "expired" { 300 } else { 100 }),
+            "{failure}"
+        );
+    }
+}
+
 #[test]
 fn retiring_generation_obeys_lower_validity_and_exact_cutover() {
     let dir = PrivateDir::new();
@@ -415,8 +531,8 @@ fn retiring_generation_obeys_lower_validity_and_exact_cutover() {
     };
     assert!(check(99).is_none());
     let admitted = check(100).unwrap();
-    assert!(admitted.revocation.is_current_at(199));
-    assert!(!admitted.revocation.is_current_at(200));
+    assert!(admitted.authority.is_current_at(199));
+    assert!(!admitted.authority.is_current_at(200));
     assert!(check(200).is_none());
 }
 
@@ -433,12 +549,12 @@ fn listener_authentication_and_revision_ignore_missing_pairing_gate() {
     let auth = RegistryAuthenticator::open(&dir.0).unwrap();
     let mut conn = ConnectionAuthority::default();
     let first = authorize(&auth, &mut conn, Kind::MirrorPush).unwrap();
-    assert!(first.revocation.is_current());
+    assert!(first.authority.is_current());
     let mut store = Store::open(&dir.0).unwrap();
     let mut next = store.snapshot().unwrap();
     next.enrollments[0].revoked_at = Some(100);
     store.commit(next.revision(), &next).unwrap();
-    assert!(!first.revocation.is_current());
+    assert!(!first.authority.is_current());
     assert!(authorize(&auth, &mut conn, Kind::MirrorPush).is_none());
     assert!(
         !dir.0

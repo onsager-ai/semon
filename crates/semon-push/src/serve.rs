@@ -34,7 +34,7 @@ mod auth;
 use crate::credentials::Kind;
 use auth::Authenticator;
 pub use auth::{
-    AuthenticatedEnrollment, ConnectionAuthority, RegistryAuthenticator, RevisionHandle,
+    AuthenticatedEnrollment, ConnectionAuthority, CredentialHandle, RegistryAuthenticator,
     VerifiedClientIdentity,
 };
 

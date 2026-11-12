@@ -32,13 +32,16 @@ pub trait EnrollmentSource {
     fn is_current(&self, scope: &EnrollmentScope) -> bool;
     /// Capture request authority for pending work. Registry-backed sources return
     /// the handle obtained at authentication; in-memory sources have no registry.
-    fn revision_handle(&self, _scope: &EnrollmentScope) -> Option<crate::serve::RevisionHandle> {
+    fn credential_handle(
+        &self,
+        _scope: &EnrollmentScope,
+    ) -> Option<crate::serve::CredentialHandle> {
         None
     }
 }
 
 pub(crate) fn authority_is_current(
-    handle: Option<&crate::serve::RevisionHandle>,
+    handle: Option<&crate::serve::CredentialHandle>,
     source: &dyn EnrollmentSource,
     scope: &EnrollmentScope,
     now: u64,
@@ -63,7 +66,7 @@ impl Default for Config {
 }
 struct Work {
     scope: EnrollmentScope,
-    authority: Option<crate::serve::RevisionHandle>,
+    authority: Option<crate::serve::CredentialHandle>,
     channel: [u8; 32],
     request: Request,
     dispatched: bool,
@@ -89,7 +92,7 @@ pub struct VerifiedResponse {
 struct Channel {
     binding: [u8; 32],
     scope: EnrollmentScope,
-    authority: Option<crate::serve::RevisionHandle>,
+    authority: Option<crate::serve::CredentialHandle>,
 }
 #[derive(Default)]
 struct State {
@@ -163,7 +166,7 @@ impl<'a> Broker<'a> {
             id.into(),
             Channel {
                 binding: poll.channel_binding,
-                authority: auth.revision_handle(&scope),
+                authority: auth.credential_handle(&scope),
                 scope: scope.clone(),
             },
         );
@@ -241,7 +244,7 @@ impl<'a> Broker<'a> {
         state.work.insert(
             request.request_id,
             Work {
-                authority: auth.revision_handle(&scope),
+                authority: auth.credential_handle(&scope),
                 scope,
                 channel,
                 request,
