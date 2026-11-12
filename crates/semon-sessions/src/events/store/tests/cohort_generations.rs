@@ -6,6 +6,7 @@ use std::collections::BTreeMap;
 
 struct Fixture {
     root: PathBuf,
+    options: crate::Options,
     path: PathBuf,
     binding: Binding,
     cohorts: Vec<AdmittedCohort>,
@@ -60,9 +61,10 @@ impl Fixture {
                     .unwrap()
                     .unwrap();
                 assert!(chain.length >= source.offset);
+                let input = crate::native_evidence::source_input(&source.path, &options).unwrap();
                 let marker = serde_json::json!({
                     "version": 7, "chain_id": chain.chain_id, "parser_version": CACHE_VERSION,
-                    "source": {"root": row.harness, "path": "fixture.jsonl", "native_id": source.native_id,
+                    "source": {"root": input.root.as_str(), "path": input.path, "native_id": source.native_id,
                         "offset": source.offset, "prefix_sha256": source.prefix_sha256, "tail_sha256": source.tail_sha256},
                     "stat": {"dev": source.dev, "ino": source.ino, "size": chain.length,
                         "modified_ns": source.modified_ns, "changed_ns": source.changed_ns},
@@ -82,6 +84,7 @@ impl Fixture {
         }
         Self {
             root,
+            options,
             path,
             binding,
             cohorts,
@@ -90,6 +93,63 @@ impl Fixture {
     }
     fn read(&self, cohorts: &[AdmittedCohort]) -> Result<CohortGenerations, CohortReadError> {
         read_cohort_generations(&self.path, &self.binding, cohorts)
+    }
+    fn saved_markers(&self) -> BTreeMap<String, String> {
+        self.store
+            .connection
+            .prepare("SELECT key,value FROM meta WHERE key GLOB 'archive_event_index:*'")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+    fn repin(&mut self) {
+        let mut input = SqliteAnalyticsInput::open(&self.path, &self.binding.namespace).unwrap();
+        self.cohorts = input
+            .read_admitted(None, InputBudget::default())
+            .unwrap()
+            .changes
+            .into_iter()
+            .filter_map(|change| {
+                let SessionChange::Admitted(session) = change else {
+                    return None;
+                };
+                Some(AdmittedCohort {
+                    session_uid: session.session_uid.clone(),
+                    source_ids: session
+                        .source_witness
+                        .sources
+                        .iter()
+                        .map(|s| s.native_id.clone())
+                        .collect(),
+                    witnesses: BTreeMap::from([(
+                        session.session_uid.clone(),
+                        session.source_witness,
+                    )]),
+                })
+            })
+            .collect();
+    }
+    fn refresh_markers(
+        &self,
+        rows: &[crate::model::summary::CatalogRow],
+        saved: &BTreeMap<String, String>,
+    ) {
+        for source in rows.iter().flat_map(|row| &row.sources) {
+            let key = archive_index_key(source.path.to_str().unwrap());
+            let mut marker: serde_json::Value = serde_json::from_str(&saved[&key]).unwrap();
+            marker["source"]["offset"] = source.offset.into();
+            marker["source"]["prefix_sha256"] = serde_json::to_value(source.prefix_sha256).unwrap();
+            marker["stat"]["size"] = source.size.into();
+            self.store
+                .connection
+                .execute(
+                    "INSERT OR REPLACE INTO meta VALUES(?1,?2)",
+                    params![key, marker.to_string()],
+                )
+                .unwrap();
+        }
     }
     fn first_source(&self) -> &semon_asi::input::Source {
         &self.cohorts[0].witnesses.values().next().unwrap().sources[0]
@@ -119,7 +179,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn aggregates_exact_membership_and_stable_chain_evidence_without_writes() {
+fn aggregates_exact_membership_and_stable_chain_evidence_without_database_changes() {
     let f = Fixture::new();
     f.store
         .connection
@@ -171,7 +231,7 @@ fn aggregates_exact_membership_and_stable_chain_evidence_without_writes() {
     assert_eq!(before, fs::read(&f.path).unwrap());
     assert_eq!(modified, fs::metadata(&f.path).unwrap().modified().unwrap());
     assert_eq!(
-        fs::metadata(f.path.with_extension("sqlite-wal"))
+        fs::metadata(sidecar(&f.path, "-wal"))
             .map(|m| m.len())
             .unwrap_or(0),
         0
@@ -342,38 +402,113 @@ fn resolves_native_aliases_by_exact_identity_and_refuses_duplicate_identity() {
 #[test]
 fn append_republication_changes_generations_and_old_witness_is_stale() {
     use std::io::Write;
-    let root = scratch("cohort-append");
-    let (options, rows, slots) = catalog_native_fixture(&root, 2, false);
-    let path = crate::events::EventCache::path(&options.cache);
-    let (mut store, _) = opened(&path);
-    catalog_write(&mut store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
-    let mut input = SqliteAnalyticsInput::open(&path, "fixture").unwrap();
-    let before = input.read_admitted(None, InputBudget::default()).unwrap();
-    let source = rows.iter().find(|r| r.harness == "codex").unwrap();
-    writeln!(fs::OpenOptions::new().append(true).open(&source.sources[0].path).unwrap(), "{}", serde_json::json!({"type":"turn_context","timestamp":"2026-09-24T00:02:00Z","payload":{"model":"gpt-6-sol"}})).unwrap();
-    let (new_rows, slots) = catalog_fixture_projection(&options);
-    catalog_write(&mut store, &new_rows, &slots, false, CatalogWriter::Auto).unwrap();
-    let after = input.read_admitted(None, InputBudget::default()).unwrap();
-    let admitted = |batch: semon_asi::input::AdmittedBatch| {
-        batch
-            .changes
-            .into_iter()
-            .find_map(|c| match c {
-                SessionChange::Admitted(s) if s.session.harness == "codex" => Some(s),
-                _ => None,
-            })
-            .unwrap()
-    };
-    let before = admitted(before);
-    let after = admitted(after);
-    assert_ne!(before.source_witness, after.source_witness);
-    assert_ne!(
-        before.derivation.activity_generation,
-        after.derivation.activity_generation
+    let mut f = Fixture::new();
+    let before = f.read(&f.cohorts).unwrap();
+    let old = f.cohorts.clone();
+    let markers = f.saved_markers();
+    let source = old
+        .iter()
+        .flat_map(|c| &c.witnesses)
+        .find(|(uid, _)| uid.contains("/codex/"))
+        .unwrap()
+        .1
+        .sources[0]
+        .clone();
+    writeln!(fs::OpenOptions::new().append(true).open(&source.local_path).unwrap(), "{}", serde_json::json!({"type":"turn_context","timestamp":"2026-09-24T00:02:00Z","payload":{"model":"gpt-6-sol"}})).unwrap();
+    let (rows, slots) = catalog_fixture_projection(&f.options);
+    catalog_write(&mut f.store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    assert_eq!(f.read(&old), Err(CohortReadError::Stale));
+    // Restore fixture archive markers at the newly published indexed prefix.
+    // This test exercises index evidence; archive extension verification belongs
+    // to the archive writer and caller.
+    f.refresh_markers(&rows, &markers);
+    f.repin();
+    let after = f.read(&f.cohorts).unwrap();
+    assert_ne!(before.activity_generation, after.activity_generation);
+    assert_ne!(before.transcript_generation, after.transcript_generation);
+    assert_eq!(f.read(&old), Err(CohortReadError::Stale));
+}
+
+#[test]
+fn successful_rules_and_pricing_republication_changes_only_activity() {
+    let mut f = Fixture::new();
+    let before = f.read(&f.cohorts).unwrap();
+    let markers = f.saved_markers();
+    let (mut rows, slots) = catalog_fixture_projection(&f.options);
+    // Model the recomputed classification/cost result carried by a current
+    // publication after replacing obsolete rules/pricing headers.
+    let activity = &mut rows
+        .iter_mut()
+        .find_map(|row| row.session_activity.as_mut())
+        .unwrap()
+        .activity;
+    activity.aggregate.exclusive_cost_complete = !activity.aggregate.exclusive_cost_complete;
+    f.store.connection.execute("UPDATE session_activity_projections SET rules_version=0,pricing_fingerprint='obsolete'", []).unwrap();
+    assert_eq!(f.read(&f.cohorts), Err(CohortReadError::Stale));
+    catalog_write(&mut f.store, &rows, &slots, false, CatalogWriter::Auto).unwrap();
+    f.refresh_markers(&rows, &markers);
+    let after = f.read(&f.cohorts).unwrap();
+    assert_ne!(before.activity_generation, after.activity_generation);
+    assert_eq!(before.transcript_generation, after.transcript_generation);
+}
+
+#[test]
+fn refuses_marker_for_a_different_embedded_file() {
+    let f = Fixture::new();
+    for path in [
+        "projects/other/different.jsonl",
+        "../different.jsonl",
+        "/projects/different.jsonl",
+        "",
+    ] {
+        f.mutate_marker(|m| m["source"]["path"] = path.into());
+        assert_eq!(f.read(&f.cohorts[..1]), Err(CohortReadError::Stale));
+    }
+}
+
+fn sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    name.into()
+}
+
+#[test]
+fn leaves_database_and_wal_content_unchanged_with_open_writer_and_closed_index() {
+    let f = Fixture::new();
+    let wal = sidecar(&f.path, "-wal");
+    let database = fs::read(&f.path).unwrap();
+    let frames = fs::read(&wal).unwrap();
+    assert!(!frames.is_empty());
+    f.read(&f.cohorts).unwrap();
+    assert_eq!(database, fs::read(&f.path).unwrap());
+    assert_eq!(frames, fs::read(&wal).unwrap());
+
+    // Copy only SQLite files into a closed index with existing WAL frames.
+    // Shared-memory sidecars may be created/refreshed by ordinary SQLite reads.
+    let closed = f.root.join("closed.sqlite");
+    fs::copy(&f.path, &closed).unwrap();
+    fs::copy(&wal, sidecar(&closed, "-wal")).unwrap();
+    read_cohort_generations(&closed, &f.binding, &f.cohorts).unwrap();
+    assert_eq!(database, fs::read(&closed).unwrap());
+    assert_eq!(frames, fs::read(sidecar(&closed, "-wal")).unwrap());
+    // Reopening with existing sidecars has the same content guarantee.
+    read_cohort_generations(&closed, &f.binding, &f.cohorts).unwrap();
+    assert_eq!(frames, fs::read(sidecar(&closed, "-wal")).unwrap());
+
+    f.store
+        .connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+        .unwrap();
+    let cold = f.root.join("cold.sqlite");
+    fs::copy(&f.path, &cold).unwrap();
+    let bytes = fs::read(&cold).unwrap();
+    assert!(!sidecar(&cold, "-shm").exists());
+    read_cohort_generations(&cold, &f.binding, &f.cohorts).unwrap();
+    assert_eq!(bytes, fs::read(&cold).unwrap());
+    assert_eq!(
+        fs::read(sidecar(&cold, "-wal")).unwrap_or_default(),
+        Vec::<u8>::new()
     );
-    drop(input);
-    drop(store);
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]

@@ -5144,6 +5144,20 @@ pub(crate) fn cohort_chain(
         })?
         .ok_or(NotIndexed)?;
     let chain = marker.chain_id.ok_or(NotIndexed)?;
+    let relative = Path::new(&marker.source.path);
+    // The trusted writer binds root/path to the absolute marker key through
+    // Options. This reader has no Options: additionally check the embedded
+    // relative path without inferring a native home from the filesystem.
+    if marker.source.path.is_empty()
+        || !crate::is_input_path(&marker.source.root, &marker.source.path)
+        || !relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        || !Path::new(&source.local_path).ends_with(relative)
+        || relative.file_name() != Path::new(&source.local_path).file_name()
+    {
+        return Err(Stale);
+    }
     if chain.len() != 32
         || !chain
             .bytes()

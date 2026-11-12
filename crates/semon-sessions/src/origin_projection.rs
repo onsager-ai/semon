@@ -59,7 +59,9 @@ impl std::fmt::Display for CohortReadError {
 impl std::error::Error for CohortReadError {}
 
 /// Pin index evidence only. The caller retains authorization and before/after
-/// source checks around body reads. This never initializes or repairs an index.
+/// source checks around body reads. This never initializes or repairs an index,
+/// writes database content or WAL frames, or modifies index rows. SQLite may
+/// create or refresh WAL shared-memory sidecars when opening a closed WAL index.
 pub fn read_cohort_generations(
     index: &Path,
     expected: &crate::analytics::Binding,
