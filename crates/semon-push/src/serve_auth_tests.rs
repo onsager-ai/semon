@@ -325,6 +325,33 @@ fn current_registry_and_connection_binding_and_revision() {
     assert!(authorize(&auth, &mut conn, Kind::MirrorPush).is_none());
 }
 #[test]
+fn listener_authentication_and_revision_ignore_missing_pairing_gate() {
+    let dir = PrivateDir::new();
+    install(&dir.0, &records(false));
+    std::fs::remove_file(
+        dir.0
+            .join(crate::enrollment::DIRECTORY)
+            .join(crate::pairing::GATE_FILE),
+    )
+    .unwrap();
+    let auth = RegistryAuthenticator::open(&dir.0).unwrap();
+    let mut conn = ConnectionAuthority::default();
+    let first = authorize(&auth, &mut conn, Kind::MirrorPush).unwrap();
+    assert!(first.revocation.is_current());
+    let mut store = Store::open(&dir.0).unwrap();
+    let mut next = store.snapshot().unwrap();
+    next.enrollments[0].revoked_at = Some(100);
+    store.commit(next.revision(), &next).unwrap();
+    assert!(!first.revocation.is_current());
+    assert!(authorize(&auth, &mut conn, Kind::MirrorPush).is_none());
+    assert!(
+        !dir.0
+            .join(crate::enrollment::DIRECTORY)
+            .join(crate::pairing::GATE_FILE)
+            .exists()
+    );
+}
+#[test]
 fn certificate_and_credential_must_match_and_no_switch() {
     let dir = PrivateDir::new();
     let mut registry = records(true);

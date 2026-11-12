@@ -17,11 +17,17 @@ source authority.
 
 ## Existing implementation and delivery boundary
 
-At main `db8acabca`, [`serve.rs`](../../crates/semon-push/src/serve.rs) implements
-a blocking HTTP/1.1 thread-per-connection receiver with socket deadlines, operator
-server TLS and total/unauthenticated-per-IP limits. It uses
-`with_no_client_auth()` and dispatches mirror append, facts and status,
-authenticating requests before reading bodies.
+The blocking HTTP/1.1 receiver in [`serve.rs`](../../crates/semon-push/src/serve.rs)
+retains socket deadlines, operator server TLS and total/unauthenticated-per-IP
+limits. Slice 4a PR2 (#646) adds route classification before body reads, optional
+verified TLS client certificates, current registry authorization per request,
+keep-alive enrollment binding and revision handles for in-flight reauthorization.
+`serve_auth.rs` exposes `RegistryAuthenticator`, `AuthenticatedEnrollment` and
+`RevisionHandle`. The bounded registry reader and revision handle inspect registry
+custody only; missing pairing-gate custody does not disable existing authentication.
+Private owned mode-0600 `DIR/client-trust.pem` supplies PEM client roots; absence
+disables client-certificate presentation. Reserved analytics/body routes refuse
+closed until their owning integrations land.
 [`tokens.rs`](../../crates/semon-push/src/tokens.rs) stores `NAME SHA256(token)`
 lines in `DIR/tokens`; `Tokens::authorize` supplies a machine identity. The
 [mirror protocol](../mirror-protocol.md) and push client implement supported Push,
@@ -29,16 +35,42 @@ not the enrollment, client-certificate identity or remote body read defined here
 #630/#631 and #635 supply libraries, not integrated onboarding or body service.
 
 The receiver registry and kind-aware credential custody are implemented as Unix
-libraries in `semon-push::enrollment` and `semon-push::credentials`, unwired from
-`semon receive`, its listener, CLI and default paths. Explicit library
+libraries in `semon-push::enrollment` and `semon-push::credentials`, consumed by
+the listener's registry authenticator. Enrollment creation and pairing remain
+unwired from CLI and default provisioning paths. Explicit library
 initialization creates `DIR/enrollment/registry.json` (format 1) and
 `DIR/enrollment/registry.lock`, relative to the receiver state directory `DIR`.
 One atomic registry document contains enrollment bindings, generation-scoped
 certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
 serialized. The library also exposes legacy `DIR/tokens` refusal without importing
-or modifying it. Supported Push continues using the existing token path until a
-later end-to-end enrollment/pairing cutover. Pairing, renewal protocols and TLS/
-route integration remain unimplemented by these libraries. Updates compare a
+or modifying it. A transitional authenticator preserves mirror `DIR/tokens` only
+while no enrollment directory exists, rechecking absence on every request. Legacy
+requests may select different token machines on one connection; registry mode
+binds it to one enrollment. Appearance of enrollment custody blocks legacy
+requests; legacy resumes only when that path truly does not exist. Mixed token/
+registry custody refuses startup without changing either file. PR 3.2 removes
+this seam in the end-to-end pairing/token cutover. Renewal and provisioning route
+integration remain unimplemented. The `public_tls`
+pairing core is landed unwired in `crates/semon-push/src/pairing.rs` with deterministic
+coverage in `pairing_tests.rs`; PR 3.2 will wire provisioning routes, CLI, outputs
+and the tokens cutover, including receiver assertion-issuer signing-key custody;
+PR 3.1 provisions no signing key. `Core::registry()` exposes a fresh registry with
+all fields for the later `origin_read::EnrollmentScope` adapter. Revocation comes
+from a separate CLI process editing the registry and is observed through its
+revision; pairing holds `pairing.lock`, acquiring `registry.lock` only for short
+transactions so that external updates remain possible. Registry format 1 now includes immutable nonsecret pairing
+activation receipts in the same commit as enrollment and credential hashes. The
+activation input's commitment binds the exact machine, namespace/incarnation or
+mirror-only binding, kind settings, certificate pins and validity to B4. Secrets
+are independently domain-derived per kind from the confirmed application key;
+the registry stores hashes only. A receiver crash before commit leaves no enrollment;
+a crash after commit before delivery uses the confirmed origin key/session and
+application key to recover the same outcome. Each return durably reserves a delivery
+before exposing secrets: one initial delivery plus one interrupted-delivery recovery,
+then explicit revocation is required if delivery remains uncertain. Recovery checks
+current revocation and cannot issue a second enrollment or revive old authority.
+Cross-machine persistence remains non-atomic; origin activation waits for matching
+durable local trust/consent and receiver commit. Updates compare a
 persisted monotonic revision under the registry lock; replaced certificate pins
 remain as terminal revocation history. Per-kind re-enable is not implemented yet;
 its fresh-credential transition arrives with the renewal/revocation PR. Existing
@@ -82,12 +114,13 @@ counted by the journey; a conditional four-action target is not a clean-host cla
 | B3 | Enter the receiver code directly into that trusted origin prompt | Complete the reviewed pairing/bootstrap and mutual key confirmation. No transfer through chat, files, URLs, command arguments, logs or other untrusted channels. |
 | B4 | Approve one combined trust/source summary in `connect` | Confirm receiver-as-issuer trust, authenticated receiver owner, selected current sources, typed name/path disclosure and P1 restrictions. Bind the origin-generated public key, issue separate kind credentials and certificate, and atomically activate the enrollment. Persist source consent separately; downstream policy/producer/publication integrations consume the outputs. |
 
-The target is short-code PAKE (password-authenticated key exchange). The reviewed
-high-entropy one-use invitation is the fallback **only if** a maintained PAKE
-library and its bootstrap cannot pass protocol/library suitability and technical
-safety review. These are not parallel open product options. No library is selected
-here: bring the library choice to the PM/owner for approval before adding any
-dependency. A separate review is in progress.
+D4 selects `public_tls` short-code confirmation for receivers whose advertised
+HTTPS endpoint already has normal trusted certificate-chain and hostname validation.
+Private-root/LAN receivers keep the long `pinned_invitation` (71 characters).
+PAKE (password-authenticated key exchange) is a separate later track, only after a
+maintained implementation clears independent review and owner approval. No
+bootstrap TLS profile skips chain trust. Tailscale `ts.net` names appear in public
+certificate-transparency logs, disclosing the hostname.
 
 The fallback preserves the same trusted-device protected entry, combined approval,
 scope binding and single-use activation requirements. Neither mechanism adds a
@@ -98,17 +131,13 @@ the receiver owner's session or arbitrary administration authority.
 
 ## Pairing bootstrap and provisioning state
 
-For an already trusted HTTPS endpoint, normal TLS identity validation precedes
-pairing. A private-root/LAN receiver instead requires a distinct bounded reviewed
-bootstrap that cryptographically authenticates the endpoint and receiver TLS
-identity/pin through the PAKE-confirmed exchange. A private root/certificate must
-match the advertised HTTPS endpoint. Do not modify the system trust store, use a
-general TLS-verification bypass, or accept trust on first use (TOFU). A network
-peer's unverified certificate cannot install itself as trusted. Any dedicated
-bootstrap transport carries only bounded protocol material before confirmation;
-no application body, issued credential, source policy or grant goes over an
-unauthenticated channel. The fallback must independently authenticate/bind the
-same identities and pins through its reviewed invitation exchange.
+Normal TLS chain and endpoint validation precedes pairing for both profiles.
+A private-root/LAN receiver uses `pinned_invitation`: its protected transfer adds
+the receiver pin, while explicit trusted-root provisioning remains necessary.
+A matching pin never substitutes for chain trust. No system trust-store mutation,
+general verification bypass, TOFU or peer-installed unverified root is permitted.
+Before confirmation the channel carries only bounded protocol material, never
+application bodies, issued credentials, source policy or grants.
 
 The transcript binds receiver identity, exact advertised endpoint/TLS pin,
 origin-generated public key, both roles, fresh session identity, protocol version
@@ -122,7 +151,7 @@ cannot install issuer keys, change endpoints or relax trust.
 
 | State | Transition and authority |
 | --- | --- |
-| `pending` | Authenticated receiver admin allocates one bounded session, fresh code/invitation and intended scope. No active credential, user grant, claim or body authority. |
+| `pending` | After local owner authorization, the peer connection contacts the receiver and `create_session(connection_binding)` allocates a fresh connection-bound session and in-memory code. The local admin surface receives the code once through a redacting secret wrapper. No active credential, user grant, claim or body authority. |
 | `confirmed` | Both peers confirm the bound cryptographic transcript and origin key possession. Pending custody remains inactive; confirmation alone is not source approval. |
 | `approved` | Origin B4 approves the authenticated trust/source summary. Persist the exact approval and separate source-consent record before activation; no partial usable credentials or grants. |
 | `active` | One durable atomic activation consumes the single-use session, commits the scoped enrollment/credential generation and releases exact self-grant inputs. No claim/head is activated by this transaction. |
@@ -139,17 +168,93 @@ until durable local trust/consent and matching receiver activation are verified,
 the origin stays inactive. Failed or cancelled pending state cannot become active
 on restart; post-activation cancellation uses disconnect/revocation.
 
-Enforce tight guessing and pending-state bounds per session **and receiver-wide**
-across addresses, connections, retries and repeated issuance. Per-IP limits alone
-are insufficient. Code/invitation entropy, length, expiry, attempt limits and
-aggregate issuance/recovery bounds are **set by the protocol review in slice 4a
-and recorded in this document before implementation merges**. No values are
-selected here. On exhaustion, report a closed outcome; the authenticated local
-receiver admin cancels the pending session and explicitly starts recovery after
-the reviewed receiver-wide restriction permits it. Reissue cannot reset that
-restriction; there is no unbounded retry/reissue loop. Exact recovery timing and
-mechanism are part of that review. Codes, invitations, keys and bearer secrets
-never enter logs, URLs, assertions or errors.
+### Approved pairing parameters (2026-11-12)
+
+`public_tls` uses Crockford base32: nine uniformly sampled five-bit data characters
+(45 secret bits) plus one weighted mod-32 check character. Odd data weights are
+1, 3, 5, 7, 9, 11, 13, 15, 17. Display `XXXXX-XXXXX`; accept case-insensitive
+input, optional middle hyphen and surrounding whitespace, O as 0 and I/L as 1;
+reject U. At most ten significant characters are typed. The pure origin parser
+checks locally before sending or spending an attempt. Every single-character
+substitution is detected; transpositions are not all detected (adjacent unequal
+data pairs are detected in 30/31 cases; pairs differing by 16 can collide).
+
+Both profiles have ten minutes from creation to confirmation, ten minutes from
+confirmation to B4 approval, and an absolute twenty-minute session lifetime.
+Exact deadline instants are expired. The injected Unix-seconds wall clock is
+clamped to the latest persisted/observed value: backward jumps never reopen gates
+or extend sessions. Codes exist only in memory; restart destroys pending sessions,
+which cannot activate. Three guesses are atomically reserved before verification,
+never refunded for disconnect/timeout. The fourth request burns/rejects the session
+and destroys the code. Attempts charge only the connection-bound session; unknown
+or foreign session identifiers cannot charge another session. Bound malformed
+requests spend an attempt; the normal origin flow rejects malformed codes locally.
+
+`public_tls` permits four pending sessions and at most six creations per rolling
+hour across all connections/addresses. Three burns in a rolling hour impose a
+persisted thirty-minute pause, measured from the latest burn. The pause gates only
+NEW creations, never attempts in existing sessions. Reissue/restart cannot reset
+it; there is no override API. The creation limiter is the binding guessing bound;
+the pause is an additional abuse response. One session gives 3/2^45 = 8.5e-14.
+A pairing event lasts at most twenty minutes and fits within one rolling hour:
+at most 6 x 3 = 18 guesses, or 18/2^45 = 5.1e-13, within the <=1e-12 target.
+The yearly worst case is 18/hour x 8,760 = 157,680 guesses / 2^45 = 4.5e-9,
+within <=1e-8. These public_tls targets replace the earlier 2^-80 target.
+
+The gate is `DIR/enrollment/pairing-gate.json`, strict format 1, bounded to 4 KiB.
+It persists creation/burn timestamps, latest observed time and pause-until using
+registry custody helpers and an explicitly unlocked `pairing.lock` owner lock,
+atomic durable writes, 0700 directories,
+0600 single-link files and no-symlink opens. History drops entries at least one
+hour old. Creation history is capped at six; burn history at twelve to cover
+sessions created before the rolling window as well as its six new creations.
+Missing, corrupt, unreadable or unsupported gate state produces the typed
+`GateUnavailable` refusal. `Store::initialize` creates the gate before publishing
+the registry, under the same first-initialization lock; there is no standalone
+gate initializer on existing custody. Interrupted initialization remains refused,
+never repaired by reopening. A missing gate beside an existing registry is never
+recreated. Recovery requires an explicit operator-visible procedure outside this PR.
+
+Any gate persistence failure poisons the in-process Core before another operation
+can reload older disk state: creation and further gate operations fail closed,
+retaining unsaved creation/burn records and pause-until in memory. Restart loads
+only durable state and destroys all pending sessions. A crash between rejecting a
+session and persisting its burn can lose that one burn and therefore its pause
+trigger; its guesses were already spent and cannot be recovered by that session.
+This in-process poison is not a claim that an unpersisted burn survives a crash.
+
+Confirmation uses `ring` PBKDF2-HMAC-SHA256 at the named
+`PBKDF2_ITERATIONS = 600_000`. Salt is the canonical length-prefixed transcript
+prefix (version, session ID, both fresh nonces, roles). HKDF-SHA256 uses distinct
+origin-confirmation, receiver-confirmation and application labels. Directional
+HMAC-SHA256 covers the full length-prefixed transcript: version, roles, session ID,
+exact normalized advertised receiver HTTPS scheme/host/explicit port, caller-supplied
+TLS exporter, origin public key, intended scope commitment, nonces and profile.
+The origin MAC comes FIRST. Only after constant-time `ring::hmac::verify` succeeds
+may the receiver emit its MAC; an incorrect guess produces no receiver code-keyed
+MAC. The origin verifies that MAC before considering confirmation complete.
+
+PBKDF2 increases the cost of offline search of a captured 45-bit-code MAC:
+2^45 guesses x 600,000 iterations is about 2.1e19 HMAC-SHA256 evaluations.
+At ~1e10 evaluations/s per GPU, a 1,000-GPU attacker covers ~0.02% of the
+space during ten minutes. This is a review cost model, not measured attacker
+hardware. CI logs one real per-side derivation as `PAIRING_KDF_COST_MS` with no
+speed assertion. A mistyped hostname hands that host the code; endpoint/exporter
+binding and PBKDF2 cost bound what that host can do. PAKE is the real fix and
+remains a separate later reviewed track.
+
+`pinned_invitation` parameters, **implemented in PR 3b**: 128-bit secret, 64-bit
+session ID, 128-bit truncated receiver pin, 71-character protected invitation,
+three attempts, the same ten/ten/twenty-minute windows, pending cap two,
+six issuances/hour and three burns/hour causing the same persisted thirty-minute
+pause. Its admission limits are four concurrent provisioning connections,
+8 KiB maximum request, ten-second read deadline and thirty unknown-ID requests
+per minute. PR 3.1 does not implement this profile.
+
+Codes, invitations, keys and bearer secrets never enter Debug/Display output,
+logs, URLs, assertions or errors. Pairing does not persist P1 source consent;
+the caller supplies verified private-key signature evidence binding B4 to the
+transcript and exact summary digest, and must durably persist consent separately.
 
 ## Source consent and P1
 
@@ -373,21 +478,9 @@ bodies; recovery cannot reconstruct missing source custody.
 
 ## Shared listener authentication and dispatch
 
-Implementation status (slice 4a PR2, part of #593): the existing receiver now
-classifies routes before body reads, verifies optional TLS client certificates,
-rechecks current registry authority per request, binds keep-alive connections to
-one enrollment, and exposes a revision handle for in-flight reauthorization.
-The single client-trust input is private, owned mode-0600 `DIR/client-trust.pem`
-(PEM roots); its absence disables client-certificate presentation. A small
-transitional authenticator preserves existing mirror `DIR/tokens` only when no
-enrollment directory exists, rechecking its absence on every request. Legacy
-requests may select different token machines on one connection; only registry
-mode binds the connection to one enrollment. Appearance of enrollment custody
-blocks legacy requests; legacy resumes only when that path truly does not exist.
-Mixed token/registry custody refuses startup without changing either file. This seam is removed in the pairing cutover PR, which
-completes the replacement described above. PR3 owns pairing/credential issuance
-and cutover; #594 owns body handlers and in-flight cancellation; slice 5 owns
-analytics handlers. Reserved analytics/body routes currently refuse closed.
+The implementation status above covers PR2's listener hooks and PR 3.1's unwired
+pairing core. PR 3.2 owns provisioning and token cutover; #594 owns body handlers
+and in-flight cancellation; slice 5 owns analytics handlers.
 
 Extend rustls with optional client-certificate presentation/verification: analytics
 and mirror origins without certificates may complete TLS where their kind permits.
