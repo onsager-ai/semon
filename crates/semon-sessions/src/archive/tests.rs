@@ -964,6 +964,32 @@ fn archive_ahead_bounded_rebuild_compares_each_prefix_byte_once() {
 }
 
 #[test]
+fn archive_lock_unlocks_while_inherited_descriptor_stays_open() {
+    let (_scratch, archive) = archive();
+    INHERITED_LOCKS.with(|capture| *capture.borrow_mut() = Some(Vec::new()));
+    let guard = archive.lock(true).unwrap();
+    let inherited = INHERITED_LOCKS.with(|capture| capture.borrow_mut().take().unwrap());
+    assert_eq!(inherited.len(), 1);
+
+    // A dup'd descriptor shares the open file description, so closing the
+    // guard alone leaves flock held; explicit LOCK_UN releases it for all clones.
+    drop(guard);
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(archive.dir.join(LOCK))
+        .unwrap();
+    use std::os::fd::AsRawFd;
+    let locked = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    assert_eq!(
+        locked, 0,
+        "archive lock remained held by inherited descriptor"
+    );
+    drop(file);
+    drop(inherited);
+}
+
+#[test]
 fn unchanged_shorter_prefix_reuses_its_archived_comparison() {
     let (_scratch, archive) = archive();
     let log = lines(200_000, 1);
