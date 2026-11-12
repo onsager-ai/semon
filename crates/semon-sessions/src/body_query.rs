@@ -115,6 +115,17 @@ fn open(path: &std::path::Path, deadline: Instant) -> Result<Index, Value> {
                 "namespace",
             )
         })?;
+    let durable_root = crate::analytics_store_root(path).ok_or_else(unavailable)?;
+    if semon_asi::read_manifest(&durable_root)
+        .map_err(|_| unavailable())?
+        .is_none_or(|manifest| manifest.generation == 0 || manifest.live_map.is_none())
+    {
+        return Err(error(
+            "not_materialized",
+            "Materialize analytics before querying bodies",
+            "publication",
+        ));
+    }
     let connection = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY
@@ -151,7 +162,7 @@ fn open(path: &std::path::Path, deadline: Instant) -> Result<Index, Value> {
     Ok(Index {
         connection,
         namespace: encode_component(&namespace),
-        durable_root: crate::analytics_store_root(path).ok_or_else(unavailable)?,
+        durable_root,
     })
 }
 

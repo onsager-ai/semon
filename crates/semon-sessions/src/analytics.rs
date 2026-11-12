@@ -2,6 +2,10 @@
 //! Activity, timing, waits and costs are captured before output-window trimming;
 //! readers compute requested periods without a workspace model or source bodies.
 
+#[path = "analytics_initialize.rs"]
+mod initialize;
+pub use initialize::{Binding, Disposition, Error, ErrorKind, Initialized, Stage, initialize};
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,

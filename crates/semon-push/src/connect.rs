@@ -17,16 +17,20 @@ type Result<T> = std::result::Result<T, String>;
 const REFUSED: &str =
     "receiver refused provisioning (wrong code, expired session or invalid approval)";
 
-/// Option C's producer-startup seam. Option B can replace this decision without
-/// changing provisioning or creating a namespace as a side effect of pairing.
-/// Single swap point for explicit initialization option B, tracked in #652.
-/// Call before opening any transport; state_dir is beside the materialized index.
+/// Explicit producer initialization before pairing opens any transport.
+/// This revision has no expected enrollment binding input. Mirror-only admission
+/// skips initialization; analytics/body activation remains gated.
 pub fn producer_admission(kinds: &[Kind], state_dir: &std::path::Path) -> Result<()> {
     if kinds.iter().any(|k| *k != Kind::MirrorPush) {
-        if semon_sessions::read_analytics_namespace(state_dir)?.is_none() {
-            return Err("run `semon analytics materialize` first, then connect".into());
-        }
-        return Err("analytics/body enrollment available after producer admission / client-certificate issuance lands".into());
+        let _initialized = semon_sessions::analytics::initialize(
+            &state_dir.join("sessions-index.sqlite3"),
+            None,
+            || false,
+        )
+        .map_err(|error| error.to_string())?;
+        // This revision has no enrollment-supplied expected binding. Admission
+        // retains ownership until the still-closed activation gate refuses.
+        return Err("analytics/body enrollment available after producer admission and activation integration lands".into());
     }
     Ok(())
 }
@@ -464,36 +468,29 @@ mod deadline_tests {
         );
     }
     #[test]
-    fn producer_preflight_is_read_only_and_refuses_before_pairing() {
-        use std::os::unix::fs::PermissionsExt;
+    fn producer_initializes_before_closed_enrollment_gate_and_mirror_bypasses() {
         let state =
-            std::env::temp_dir().join(format!("semon-producer-preflight-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&state);
-        for kind in [Kind::AnalyticsPublish, Kind::BodyChannel] {
-            assert_eq!(
-                producer_admission(&[kind], &state).unwrap_err(),
-                "run `semon analytics materialize` first, then connect"
-            );
-        }
+            std::env::temp_dir().join(format!("semon-producer-init-{}", std::process::id()));
         assert!(!state.exists());
         assert!(producer_admission(&[Kind::MirrorPush], &state).is_ok());
         assert!(!state.exists());
-        std::fs::create_dir(&state).unwrap();
-        let path = state.join("analytics-namespace");
-        let namespace = format!("origin-{}", "a".repeat(64));
-        std::fs::write(&path, format!("{namespace}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         for kind in [Kind::AnalyticsPublish, Kind::BodyChannel] {
             assert_eq!(
                 producer_admission(&[kind], &state).unwrap_err(),
-                "analytics/body enrollment available after producer admission / client-certificate issuance lands"
+                "analytics/body enrollment available after producer admission and activation integration lands"
             );
         }
-        assert_eq!(
-            std::fs::read_to_string(path).unwrap(),
-            format!("{namespace}\n")
+        assert!(
+            semon_sessions::read_analytics_namespace(&state)
+                .unwrap()
+                .is_some()
         );
-        assert_eq!(std::fs::read_dir(&state).unwrap().count(), 1);
+        assert!(state.join("sessions-index.sqlite3").exists());
+        assert!(
+            !state
+                .join("analytics-store/analytics/manifest.json")
+                .exists()
+        );
         std::fs::remove_dir_all(state).unwrap();
     }
     #[test]

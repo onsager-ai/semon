@@ -728,6 +728,62 @@ pub(super) fn open_scoped(path: &Path) -> Result<(Box<dyn IndexStore>, Loaded), 
     Ok((Box::new(store), loaded))
 }
 
+/// Create only the current cold native index; no source discovery or recovery.
+pub(crate) fn initialize_analytics_index(path: &Path) -> Result<String, String> {
+    drop(open_scoped(path)?);
+    analytics_index_incarnation(path).map_err(|error| error.to_string())
+}
+
+pub(crate) fn analytics_index_incarnation(path: &Path) -> Result<String, crate::analytics::Error> {
+    use crate::analytics::{Error, ErrorKind, Stage};
+    let db = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| Error::new(ErrorKind::InconsistentState, Stage::Index))?;
+    match qualify_producer(&db) {
+        Ok(Init::Ready) => {}
+        Ok(Init::Unsupported(_)) => {
+            return Err(Error::new(ErrorKind::UnsupportedState, Stage::Index));
+        }
+        _ => return Err(Error::new(ErrorKind::InconsistentState, Stage::Index)),
+    }
+    let (stamp, bound) = crate::storage::sqlite::binding(&db)
+        .map_err(|_| Error::new(ErrorKind::InconsistentState, Stage::Index))?;
+    if stamp.as_deref() != Some(crate::storage::sqlite::stamp().as_str()) {
+        return Err(Error::new(ErrorKind::UnsupportedState, Stage::Index));
+    }
+    if bound.is_some_and(|bound| bound != "local") {
+        return Err(Error::new(ErrorKind::BindingMismatch, Stage::Index));
+    }
+    let incarnation: String = db
+        .query_row(
+            "SELECT value FROM meta WHERE key='incarnation'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| Error::new(ErrorKind::InconsistentState, Stage::Index))?;
+    if incarnation.len() != 32
+        || !incarnation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(Error::new(ErrorKind::InconsistentState, Stage::Index));
+    }
+    Ok(incarnation)
+}
+
+/// Install a foreign binding for admission-refusal tests through its owner.
+#[cfg(all(test, unix))]
+pub(crate) fn bind_foreign_analytics_index(path: &Path) -> rusqlite::Result<()> {
+    let db = Connection::open(path)?;
+    db.execute(
+        "INSERT INTO meta(key,value) VALUES('storage_namespace','foreign')",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Qualify an exact selected or recovery path without traversing unrelated
 /// archived markers. An existing database is never initialized or reset here.
 pub(crate) fn open_selected(path: &Path) -> Result<(), String> {

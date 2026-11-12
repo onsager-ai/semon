@@ -1447,28 +1447,6 @@ fn publish_materialization(
     }
 }
 
-fn admit_materialize_store_shape(root: &Path) -> Result<(), String> {
-    for path in [root.to_path_buf(), root.join("analytics")] {
-        match std::fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_dir() => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Ok(_) => {
-                return Err(format!(
-                    "analytics writer refused: {} is not a real directory",
-                    path.display()
-                ));
-            }
-            Err(error) => {
-                return Err(format!(
-                    "analytics writer refused: cannot inspect {}: {error}",
-                    path.display()
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Materialize the local Analytics Store from the native Event Index. The
 /// Catalog refresh drains the strict native producer used by the Viewer;
 /// analytics only opens its successfully published SQLite result.
@@ -1478,28 +1456,17 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
         ..args.home.options
     };
     let index_path = semon_sessions::analytics_index_path(&options.cache);
-    let state_dir = index_path.parent().ok_or_else(|| {
-        format!(
-            "analytics materialize requires an Event Index path with a parent: {}",
-            index_path.display()
-        )
-    })?;
     let store_root = semon_sessions::analytics_store_root(&index_path).ok_or_else(|| {
         format!(
             "analytics materialize requires an Event Index path with a parent: {}",
             index_path.display()
         )
     })?;
-    // Refuse invalid existing namespace state before creating a lock or recovering.
-    // Re-read under the writer lock because reset can change it after this preflight.
-    semon_sessions::read_analytics_namespace(state_dir)?;
-    admit_materialize_store_shape(&store_root)?;
-    let owner = semon_sessions::analytics_writer::Owner::acquire(&index_path, &store_root)?;
-    admit_materialize_store_shape(&store_root)?;
-    let namespace = match semon_sessions::read_analytics_namespace(state_dir)? {
-        Some(namespace) => namespace,
-        None => semon_sessions::load_or_create_analytics_namespace(state_dir)?,
-    };
+    let initialized = semon_sessions::analytics::initialize(&index_path, None, || false)
+        .map_err(|error| error.to_string())?;
+    println!("{}", initialized.disposition.message());
+    let namespace = initialized.binding.namespace;
+    let owner = initialized.owner;
     let mut config = semon_sessions::AnalyticsWriterConfig::new(
         namespace.clone(),
         index_path,

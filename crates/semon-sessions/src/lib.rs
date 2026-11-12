@@ -14,7 +14,7 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-mod analytics;
+pub mod analytics;
 mod analytics_namespace;
 pub mod analytics_writer;
 pub mod body_query;
@@ -23,7 +23,7 @@ mod causal_trace;
 mod origin_projection;
 mod overview;
 mod overview_repair;
-pub use analytics_namespace::{load_or_create_analytics_namespace, read_analytics_namespace};
+pub use analytics_namespace::read_analytics_namespace;
 pub use analytics_writer::{
     AnalyticsWriterConfig, AnalyticsWriterStatus, Handle, analytics_store_root, start,
 };

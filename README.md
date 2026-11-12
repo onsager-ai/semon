@@ -224,13 +224,17 @@ semon query get_session SESSION_ID --all                 # every log file
 `semon analytics materialize` is the explicit, local-only entry point for
 analytics publication. It drains the Viewer's native Catalog producer in strict
 mode, then writes Parquet under `<index parent>/analytics-store`; Viewer,
-MCP, push and receive never enable it implicitly. The first run records a
-random namespace in `<index parent>/analytics-namespace`, and later runs reuse
-it. Deleting that state directory creates a new namespace and new session IDs;
+MCP, push and receive never enable it implicitly. The shared library initializer
+creates an empty current native index and records a random namespace plus an
+independent origin incarnation together in the private JSON
+`<index parent>/analytics-namespace`. Later calls reuse all three identities;
+initialization alone leaves publication pending and writes no empty snapshot.
+Non-mirror connect admission uses this initializer but still refuses enrollment
+until its activation gate lands. Deleting that state directory creates a new namespace and new session IDs;
 there is no automatic reconciliation or rename/transfer workflow yet. Typed
 local paths can be present in the Parquet, so governed export remains a
 separate operation. Writer ownership is acquired before namespace creation or
-Catalog refresh; contention returns `analytics writer busy` without changing the
+Catalog refresh; contention explains that another process is writing local analytics without changing the
 index or namespace. Corrupt or unsupported indexes are refused unchanged.
 Catalog refresh is complete; `--since`/`--all` do not bound analytics input.
 `--batch-sessions N` limits sessions or journal entries per chunk (default 64),

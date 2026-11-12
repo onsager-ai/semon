@@ -112,6 +112,8 @@ pub struct Manifest {
     pub live_map: Option<String>,
     /// Opaque per-namespace input checkpoint (incarnation, snapshot and cursor).
     pub checkpoints: BTreeMap<String, String>,
+    /// Durable producer identities, independent of native index rebuilds.
+    pub origin_incarnations: BTreeMap<String, String>,
     /// Last durable revision exported to `fact_label`.
     pub durable_revision: u64,
     /// Live sessions whose native source is gone, by `session_uid`.
@@ -129,6 +131,7 @@ impl Manifest {
             files: Vec::new(),
             live_map: None,
             checkpoints: BTreeMap::new(),
+            origin_incarnations: BTreeMap::new(),
             durable_revision: 0,
             source_missing: BTreeMap::new(),
             unpublished: BTreeMap::new(),
@@ -294,6 +297,24 @@ impl<C: Clock> Store<C> {
         })
     }
 
+    /// Bind an admitted local producer in memory; publication persists it.
+    pub fn bind_origin(&mut self, namespace: &str, incarnation: &str) -> Result<()> {
+        if self
+            .manifest
+            .origin_incarnations
+            .get(namespace)
+            .is_some_and(|found| found != incarnation)
+        {
+            return Err(Error::invalid(
+                "local producer identity differs from manifest",
+            ));
+        }
+        self.manifest
+            .origin_incarnations
+            .insert(namespace.to_owned(), incarnation.to_owned());
+        Ok(())
+    }
+
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }
@@ -309,7 +330,7 @@ impl<C: Clock> Store<C> {
     /// made a generation visible. Writers use this before retrying such an
     /// operation so they do not publish from a stale checkpoint.
     pub fn reload_manifest(&mut self) -> Result<()> {
-        let manifest = match read_manifest_in(&self.analytics)? {
+        let mut manifest = match read_manifest_in(&self.analytics)? {
             Some(manifest) => manifest,
             None if self.manifest.generation == 0 => Manifest::empty(),
             None => {
@@ -323,6 +344,20 @@ impl<C: Clock> Store<C> {
             None => HashMap::new(),
         };
         crate::provenance::validate(&self.analytics, &manifest, &live)?;
+        for (namespace, incarnation) in &self.manifest.origin_incarnations {
+            if manifest
+                .origin_incarnations
+                .get(namespace)
+                .is_some_and(|found| found != incarnation)
+            {
+                return Err(Error::invalid(
+                    "local producer identity changed during reload",
+                ));
+            }
+            manifest
+                .origin_incarnations
+                .insert(namespace.clone(), incarnation.clone());
+        }
         self.manifest = manifest;
         self.live = live;
         Ok(())
@@ -504,6 +539,7 @@ impl<C: Clock> Store<C> {
             files,
             live_map,
             checkpoints,
+            origin_incarnations: self.manifest.origin_incarnations.clone(),
             durable_revision: update.durable_revision,
             source_missing,
         };
@@ -614,6 +650,67 @@ pub fn read_manifest(root: &Path) -> Result<Option<Manifest>> {
     read_manifest_in(&root.join(ANALYTICS_DIR))
 }
 
+/// Qualify local custody read-only, before any writer recovery.
+pub fn qualify_local_store(root: &Path, namespace: Option<&str>) -> Result<()> {
+    let Some(manifest) = read_manifest(root)? else {
+        let analytics = root.join(ANALYTICS_DIR);
+        if analytics.exists() && fs::read_dir(analytics)?.next().is_some() {
+            return Err(Error::invalid("unpublished store without a manifest"));
+        }
+        return Ok(());
+    };
+    let namespace =
+        namespace.ok_or_else(|| Error::invalid("published state without local identity"))?;
+    let analytics = root.join(ANALYTICS_DIR);
+    for relative in manifest
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(manifest.live_map.as_deref())
+    {
+        let relative = Path::new(relative);
+        if relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(Error::invalid("unsafe published path"));
+        }
+        let path = analytics.join(relative);
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_file() {
+            return Err(Error::invalid("unsafe published file"));
+        }
+        for parent in path
+            .ancestors()
+            .skip(1)
+            .take_while(|parent| *parent != root)
+        {
+            if !fs::symlink_metadata(parent)?.is_dir() {
+                return Err(Error::invalid("unsafe published directory"));
+            }
+        }
+    }
+    for file in &manifest.files {
+        if fs::metadata(analytics.join(&file.path))?.len() != file.bytes {
+            return Err(Error::invalid("published file size differs from manifest"));
+        }
+    }
+    let live = read_live_map(root, &manifest)?;
+    if live
+        .keys()
+        .any(|uid| !uid.starts_with(&format!("{namespace}/")))
+        || manifest.checkpoints.keys().any(|key| key != namespace)
+        || manifest
+            .origin_incarnations
+            .keys()
+            .any(|key| key != namespace)
+    {
+        return Err(Error::invalid("store is not owned by the local namespace"));
+    }
+    crate::provenance::validate(&root.join(ANALYTICS_DIR), &manifest, &live)?;
+    Ok(())
+}
+
 /// The live map a manifest names: `session_uid -> _gen`.
 pub fn read_live_map(root: &Path, manifest: &Manifest) -> Result<HashMap<String, i64>> {
     match &manifest.live_map {
@@ -628,7 +725,13 @@ fn read_manifest_in(analytics: &Path) -> Result<Option<Manifest>> {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let manifest: Manifest = serde_json::from_slice(&bytes)?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if value.get("origin_incarnations").is_none() {
+        return Err(Error::invalid(
+            "analytics schema version lacks producer identity",
+        ));
+    }
+    let manifest: Manifest = serde_json::from_value(value)?;
     if manifest.schema_version != ASI_SCHEMA_VERSION {
         return Err(Error::invalid(format!(
             "analytics schema version {} is not {ASI_SCHEMA_VERSION}; run `semon analytics export` then `semon analytics reset`",

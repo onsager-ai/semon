@@ -264,23 +264,22 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     let h = Harness::new();
     let origin = h.dir.0.join("origin");
     let analytics_state = h.dir.0.join("analytics-state");
-    fs::create_dir(&analytics_state).unwrap();
-    let namespace = format!("origin-{}\n", "b".repeat(64));
-    fs::write(analytics_state.join("analytics-namespace"), &namespace).unwrap();
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(
-            analytics_state.join("analytics-namespace"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-    }
     assert!(
         crate::connect::producer_admission(&[Kind::AnalyticsPublish], &analytics_state)
             .unwrap_err()
             .contains("available after producer admission")
     );
     assert!(!origin.exists());
+    let identity = fs::read(analytics_state.join("analytics-namespace")).unwrap();
+    let namespace = semon_sessions::read_analytics_namespace(&analytics_state)
+        .unwrap()
+        .unwrap();
+    assert!(!namespace.contains('/'));
+    assert!(
+        !analytics_state
+            .join("analytics-store/analytics/manifest.json")
+            .exists()
+    );
     let mut workers = vec![];
     let mut terminal = OriginTerminal {
         harness: &h,
@@ -304,10 +303,17 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     }
     assert!(!origin.join("analytics-namespace").exists());
     assert_eq!(
-        fs::read_to_string(analytics_state.join("analytics-namespace")).unwrap(),
-        namespace
+        fs::read(analytics_state.join("analytics-namespace")).unwrap(),
+        identity
     );
-    assert_eq!(fs::read_dir(&analytics_state).unwrap().count(), 1);
+    assert!(
+        !analytics_state
+            .join("analytics-store/analytics/manifest.json")
+            .exists()
+    );
+    // Explicit initialization owns the index and namespace; mirror connect reuses
+    // neither for enrollment and must not publish an analytics snapshot.
+    assert!(analytics_state.join("sessions-index.sqlite3").exists());
     let (config, credential) = crate::origin_custody::load_at(&origin, Some(&name), 100).unwrap();
     assert_eq!(config.scope.receiver_id, config.receiver_id);
     assert!(matches!(

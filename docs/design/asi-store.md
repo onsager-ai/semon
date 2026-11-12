@@ -262,18 +262,18 @@ tables.
   becomes the authoritative producer store's single writer. Other processes only
   read. Imported receiver heads are admitted publications, not locally rebuilt indexes.
   The local `semon-sessions` writer service is an explicit lifecycle primitive.
-  The [producer-lifecycle amendment](asi-producer-lifecycle.md) specifies one
-  explicit initializer shared by `analytics materialize`, analytics/body `connect`
-  and proposed `start`; these integrations are not all delivered. Only that entry
-  point may create the analytics namespace and request cold index/incarnation
-  creation from the native index producer; no caller generates them separately.
-  Native collection retains its independent index lifecycle. Viewer, MCP, query,
-  push and receive never initialize or start the analytics writer. Initialization
-  creates/reuses a random `origin-` namespace in
-  `<index parent>/analytics-namespace` and returns its validated index incarnation;
-  repeated calls preserve both. It does not publish a manifest or refresh sources.
-  `materialize` remains the low-level batch refresh/publication command. If the
-  state directory is deleted, the next explicit initialization has new session
+  `semon analytics materialize` enables publication after the library's explicit
+  `semon_sessions::analytics::initialize` call. Non-mirror connect admission also
+  initializes local state before its still-closed enrollment gate; it does not
+  start publication. Viewer, MCP, push and receive do not initialize. Initialization
+  installs a private versioned JSON `analytics-namespace` containing the random
+  `origin-` namespace and independent `producer-` origin incarnation in one durable
+  step, and creates a current empty native index through its cold initializer.
+  Later calls reuse all three IDs and preserve published bytes. The first actual
+  publication records the origin incarnation in the manifest; initialization alone
+  writes no manifest, live map, checkpoint or label revision. See the
+  [producer lifecycle](asi-producer-lifecycle.md). If the state directory is deleted, the
+  next explicit initialization has new session
   UIDs and no automatic reconciliation.
   Rename or transfer is a later explicit operator workflow. The writer opens a
   separate read-only index connection per cycle, and its store-root helper uses

@@ -20,14 +20,19 @@ fn store() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("state/analytics-store");
     Store::open(&root).unwrap();
+    let mut manifest = Manifest::empty();
+    manifest.origin_incarnations.insert(
+        format!("origin-{}", "0".repeat(64)),
+        format!("producer-{}", "a".repeat(64)),
+    );
     std::fs::write(
         root.join("analytics/manifest.json"),
-        serde_json::to_vec(&Manifest::empty()).unwrap(),
+        serde_json::to_vec(&manifest).unwrap(),
     )
     .unwrap();
     std::fs::write(
         dir.path().join("state/analytics-namespace"),
-        format!("origin-{}\n", "0".repeat(64)),
+        serde_json::json!({"format":"semon-producer-1", "namespace":format!("origin-{}", "0".repeat(64)), "origin_incarnation":format!("producer-{}", "a".repeat(64))}).to_string(),
     )
     .unwrap();
     dir
