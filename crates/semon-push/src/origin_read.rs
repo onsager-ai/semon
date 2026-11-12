@@ -365,6 +365,23 @@ impl OriginLimits for CacheLimits {
     }
 }
 
+/// Origin custody requirement. Receivers may tighten Cached to StreamThrough.
+/// No default: every origin integration must explicitly supply its source policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryMode {
+    Cached,
+    StreamThrough,
+}
+impl DeliveryMode {
+    fn bind(self, bytes: &mut Vec<u8>) {
+        bytes.push(match self {
+            Self::Cached => 0,
+            Self::StreamThrough => 1,
+        });
+    }
+}
+
 /// Exact response identity, also carried by the strict body-channel header.
 /// Receiver verifies this binding then passes receiver_binding to authorize().
 #[derive(Clone, Serialize, Deserialize)]
@@ -384,6 +401,7 @@ pub struct ResponseBinding {
     pub deadline_millis: u64,
     pub receiver_binding: AuthorizationBinding,
     pub cache_limits: CacheLimits,
+    pub delivery_mode: DeliveryMode,
 }
 impl ResponseBinding {
     /// Recompute the origin's exact response identity using the signed claims.
@@ -439,6 +457,7 @@ impl ResponseBinding {
             claims,
         );
         self.cache_limits.bind(&mut identity);
+        self.delivery_mode.bind(&mut identity);
         if key != self.cache_key || self.receiver_binding.response_identity != identifier(&identity)
         {
             return Err(Refused::InvalidRequest);
@@ -505,6 +524,8 @@ pub struct OriginRead<'a, C: Clock> {
     pub enrollment: &'a dyn AuthenticatedEnrollment,
     pub resolver: &'a dyn HandleResolver,
     pub policies: &'a dyn PolicyVector,
+    /// Injected origin source-policy decision; consent persistence belongs to #592.
+    pub delivery_mode: DeliveryMode,
     pub renderer: &'a dyn PageRenderer,
     pub clock: &'a dyn ReadClock,
     pub cancelled: &'a dyn Fn() -> bool,
@@ -582,6 +603,14 @@ impl<C: Clock> OriginRead<'_, C> {
         renderer: &dyn PageRenderer,
         streaming: bool,
     ) -> Result<Authorized> {
+        let delivery_mode = if streaming {
+            DeliveryMode::StreamThrough
+        } else {
+            self.delivery_mode
+        };
+        // A no-store response always carries freshly rendered bytes; candidate
+        // metadata cannot turn it into an authorization-only cache read.
+        let cached = cached.filter(|_| delivery_mode == DeliveryMode::Cached);
         let scope = self
             .enrollment
             .authenticated_enrollment()
@@ -688,6 +717,7 @@ impl<C: Clock> OriginRead<'_, C> {
         );
         id_bytes(&mut binding_bytes, Identifier::from_bytes([0; 32]));
         cache_limits.bind(&mut binding_bytes);
+        delivery_mode.bind(&mut binding_bytes);
         // Include the response identity digest in addition to all binding fields.
         let metadata_bytes = binding_bytes
             .len()
@@ -794,6 +824,7 @@ impl<C: Clock> OriginRead<'_, C> {
                 &scope, &source, request, &key, &plan, policy, deadline, limit, audit_id, claims,
             );
             cache_limits.bind(&mut binding_bytes);
+            delivery_mode.bind(&mut binding_bytes);
             let receiver_binding = AuthorizationBinding {
                 request_id: Identifier::from_bytes(claims.nonce),
                 response_identity: identifier(&binding_bytes),
@@ -822,6 +853,7 @@ impl<C: Clock> OriginRead<'_, C> {
                     deadline_millis: deadline,
                     receiver_binding,
                     cache_limits,
+                    delivery_mode,
                 },
             })
         })();
