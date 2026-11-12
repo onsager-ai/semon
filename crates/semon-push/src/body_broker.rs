@@ -110,6 +110,7 @@ pub struct Poll<'a, 'b> {
     scope: EnrollmentScope,
     channel: [u8; 32],
     consumed: AtomicBool,
+    deadline_millis: u64,
 }
 impl Drop for Poll<'_, '_> {
     fn drop(&mut self) {
@@ -174,6 +175,7 @@ impl<'a> Broker<'a> {
             scope,
             channel: poll.channel_binding,
             consumed: AtomicBool::new(false),
+            deadline_millis: self.clock.now_millis().saturating_add(20_000),
         })
     }
     pub fn channel(&self, scope: &EnrollmentScope) -> Result<[u8; 32]> {
@@ -465,10 +467,16 @@ impl Poll<'_, '_> {
         auth: &dyn EnrollmentSource,
     ) -> Result<Option<Request>> {
         self.broker.maintain(state, auth);
-        if !auth.is_current(&self.scope) {
+        if !auth.is_current(&self.scope)
+            || auth
+                .revision_handle(&self.scope)
+                .is_some_and(|handle| !handle.is_current_at(self.broker.clock.now_millis() / 1000))
+        {
             return Err(Reason::Revoked);
         }
-        if self.consumed.load(Ordering::Relaxed) {
+        if self.broker.clock.now_millis() >= self.deadline_millis
+            || self.consumed.load(Ordering::Relaxed)
+        {
             return Ok(None);
         }
         let id = state
@@ -494,7 +502,13 @@ impl Poll<'_, '_> {
             if let Some(request) = self.take_locked(&mut state, auth)? {
                 return Ok(Some(request));
             }
-            let remaining = until.saturating_duration_since(Instant::now());
+            let remaining =
+                until
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(
+                        self.deadline_millis
+                            .saturating_sub(self.broker.clock.now_millis()),
+                    ));
             if remaining.is_zero() {
                 return Ok(None);
             }
@@ -1179,6 +1193,34 @@ mod tests {
             channel_binding: [3; 32],
         })
         .unwrap()
+    }
+    #[test]
+    fn twenty_second_poll_deadline_uses_injected_clock() {
+        let at = At(AtomicU64::new(10_000));
+        let a = auth("a");
+        let broker = Broker::new(Config::default(), &at).unwrap();
+        let poll = broker.begin_poll(&a, &poll_bytes()).unwrap();
+        at.0.store(30_000, Ordering::Relaxed);
+        assert!(poll.wait(&a, Duration::from_secs(20)).unwrap().is_none());
+    }
+    #[test]
+    fn poll_wait_takes_arriving_work_without_a_real_time_wait() {
+        let at = At(AtomicU64::new(10_000));
+        let a = auth("a");
+        let broker = Broker::new(Config::default(), &at).unwrap();
+        let poll = broker.begin_poll(&a, &poll_bytes()).unwrap();
+        let (request, _) = signed(1);
+        broker
+            .enqueue(&a, a.scope.clone(), [3; 32], request)
+            .unwrap();
+        assert_eq!(
+            poll.wait(&a, Duration::from_secs(20))
+                .unwrap()
+                .unwrap()
+                .request_id,
+            id(1)
+        );
+        assert!(poll.try_take(&a).unwrap().is_none());
     }
     #[test]
     fn capacity_expiry_revocation_and_unsupported() {

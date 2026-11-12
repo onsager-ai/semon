@@ -74,6 +74,39 @@ queuing. Those caps are agreed interim limits. #594 confirms 20-second polls and
 lease deadlines, and consumes 4a admission/revocation hooks. Non-poll reservation
 split remains open. Body frames never enter analytics objects or reconnect spools.
 
+### Receiver route registration (Part of #594)
+
+The existing receiver HTTP/1.1 listener registers only `POST /v1/body/poll`
+and `POST /v1/body/requests/<opaque-request-id>/response`. Every exchange uses
+`RegistryEnrollmentSource` with the body kind and verified enrolled mTLS identity,
+including a fresh registry decision before release. Missing body configuration or
+client trust refuses uniformly. There is no redirect or alternate endpoint.
+`Expect: 100-continue` is refused for these bounded requests.
+
+`BodyHost` owns the broker, revision watcher and existing ceremony-created cache,
+issuer, ACL and audit custody. It opens existing state only when a body kind and
+client trust are present. Hosts with active append services retain their original
+owner sources and call `BodyHost::sweep_owner` at authorization/release decisions;
+transport requests create no append services or leases. Revision checks run before
+body authentication too, so a revoked caller still triggers pending-work cleanup.
+No background scheduler or second operator ceremony is introduced.
+
+Polls use total listener connections plus the separate broker poll quota: one per
+enrollment, globally 50% of configured connections (rounded down). Each poll
+returns at most one strict versioned control request or a versioned empty result
+within the 20-second read/wait budget. Responses use non-poll total slots and a
+20-second frame-read deadline; the 256 KiB Content-Length ceiling is checked before
+reading, then the u32/header and 16 KiB header bound before raw payload buffering.
+The broker enforces the cumulative response envelope, four pending requests per
+enrollment, binding/assertion/scope checks and frame ordering. Capacity refusals
+use closed reasons and HTTP 503 with connection close. Unknown, foreign and expired
+request IDs receive the same authority refusal. No body content enters access logs.
+
+This registration remains library/host integration: provisioning still refuses
+body-channel activation until the admitted-binding path lands. Production handle
+resolution and receiver Viewer delivery (#568) remain separate dependencies; this
+change exposes no reachable end-to-end body-reading workflow.
+
 ## Assertions and exact envelopes
 
 **Decision — receiver-issued Ed25519 assertions:** receiver-as-issuer is the
