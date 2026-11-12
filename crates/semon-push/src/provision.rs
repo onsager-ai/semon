@@ -29,8 +29,8 @@ impl Controller {
         if !semon_sessions::is_machine_name(&machine) {
             return Err("invalid enrollment machine".into());
         }
-        let custody = ReceiverCustody::open_or_initialize(dir).map_err(|e| e.to_string())?;
         let endpoint = pairing::normalize_endpoint(endpoint).map_err(|e| e.to_string())?;
+        let custody = ReceiverCustody::open_or_initialize(dir).map_err(|e| e.to_string())?;
         let core = Core::open(
             Store::open(dir).map_err(|e| e.to_string())?,
             &endpoint,
