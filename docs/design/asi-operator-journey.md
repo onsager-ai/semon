@@ -2,13 +2,13 @@
 
 Status: **accepted operator UX decisions; implementation and protocol review
 pending** (owner decisions relayed by the PM on 2026-11-11/12).
-Part of #549. The owner requested a step budget before further user-facing
-federation contracts merge. Single-owner-first and a four-action target remain
-approved. The short-code PAKE target, invitation fallback, no separate receiver
-identity check, confirmed-at-pairing P1 profile, and auto-renewal under valid
-trust are settled product decisions; protocol/library suitability and technical
-safety review remain required. This document does not release the PM-owned holds
-on #634, #632, #635, #593 slice 4a or #594.
+Part of #549. The four-action, single-owner-first target remains approved. PAKE
+remains the target, but no maintained PAKE library passed review; slice 4a is
+building the high-entropy one-use invitation first. Its protected transfer carries
+the receiver pin. No separate receiver identity check is added. Confirmed-at-pairing
+P1 and automatic renewal under valid trust remain settled; protocol and technical
+safety reviews remain required. #634 and #635 are merged; slice 4a has started.
+This status does not claim the remaining PM-owned holds are lifted.
 
 [ASI direction](asi-direction.md) owns product scope; [federation](asi-federation.md)
 owns accepted D1–D8. [Store](asi-store.md), [query](asi-query.md) and
@@ -16,13 +16,14 @@ owns accepted D1–D8. [Store](asi-store.md), [query](asi-query.md) and
 integration. Semon works without T3. No composer, control, SSH, Hub deployment or
 transcript redesign is proposed here.
 
-Baseline: main `649a8f130`; enrollment [#634 at 0757b085d](https://github.com/onsager-ai/semon/blob/0757b085d91a4efedd1aa1801342501a6319ba6a/docs/design/asi-enrollment.md)
-and body channel [#632 at a09e1308](https://github.com/onsager-ai/semon/blob/a09e130879811d6081af7273f913648017e063f2/docs/design/asi-body-channel.md).
-Those PR documents are proposals, not shipped commands. #630/#631 are libraries;
-#635 is a held library PR. Their files are integration inputs, not a functioning
-receiver onboarding flow. The body channel consumes the same enrollment as
-publication; it does not add a second enrollment.
-The #634 enrollment proposal is now reconciled in [asi-enrollment.md](asi-enrollment.md); implementation and review holds remain.
+Current baseline: main `194e600a6`, including journey #639 (`e701269`), enrollment
+#634 (`2fd6aa1`) and assertion/audit library #635. The current enrollment contract
+is [asi-enrollment.md](asi-enrollment.md); implementation and protocol review remain
+pending. These merges do not provide a functioning receiver onboarding flow.
+The [body-channel proposal #632](https://github.com/onsager-ai/semon/pull/632)
+consumes the same enrollment as publication; it adds no second enrollment.
+The historical inventory below records the pre-reconciliation #634 proposal at
+`0757b085d` and main `649a8f130`, not the updated enrollment contract.
 
 ## Counting steps and the proposed budget
 
@@ -46,12 +47,13 @@ commands imply only two actions:
 - C: hand-edited policy/grant configuration is allowed for real multi-user sharing.
 
 **Owner decision (2026-11-12): fewer than five actions; single-owner first;
-no separate human receiver identity check.** Target: two commands, one direct
-code entry into the origin command's protected prompt, and one combined origin
-trust/source approval = **four actions after installation**. The receiver owner
-authorizes one narrowly scoped enrollment; pairing confirms the peer cryptographically,
-not through a separate human identity review. Prompts remain counted even when part
-of a command.
+no separate human receiver identity check.** Four actions remains the target after
+installation: two commands, one protected invitation-and-pin transfer/entry, and
+one combined origin trust/source approval. The transfer action replaces direct
+short-code entry for the current invitation implementation; measure it against the
+target. The receiver owner authorizes one narrowly scoped enrollment; pairing
+confirms the peer cryptographically, not through a separate human identity review.
+Prompts remain counted even when part of a command.
 
 Endpoint reachability, firewall/DNS and unattended service installation are counted
 separately if needed. A fresh remote server requiring these has not met the four-
@@ -69,9 +71,10 @@ remote success means admitted analytics and an authorized online evidence read,
 not merely a connected socket or successful credential import. Receiver search
 remains unavailable under D8; local search stays available on each origin.
 
-### Today's design: twelve setup tasks and no complete runnable path
+### Historical design inventory: twelve setup tasks before reconciliation
 
-This is a **lower-bound design inventory**, not a measured successful install.
+This is the **2026-11-11 pre-reconciliation lower-bound inventory**, not a measured
+successful install or a description of the merged #634 contract.
 Each row counts one task even where implementation will require several commands,
 files or choices. Install is excluded. Only the local commands identified as
 shipped can be run at the baseline. There is no honest end-to-end command count
@@ -114,45 +117,41 @@ The three largest problems are:
 ### Target setup, commands proposed for review only
 
 The following spellings describe a **UX target, not commands to run today**.
-The settled primary flow is short-code PAKE; use a high-entropy one-use invitation
-only if a maintained PAKE implementation and its bootstrap cannot pass protocol/
-library suitability and technical safety review. Retain `receive enroll` as receiver
-administration. A single origin `connect` operation would perform reviewed
-provisioning and explicitly enable the local producer and outbound connection.
-This changes #634's provisioning design and the store's explicit materializer
-lifecycle; the PM-owned implementation hold remains in place.
+PAKE remains the target, but no maintained PAKE library passed review, so slice 4a
+is building a high-entropy one-use invitation first. Its protected transfer carries
+the receiver pin; protocol and technical safety review remain required. Retain
+`receive enroll` as receiver administration. A single origin `connect` operation
+would perform reviewed provisioning and explicitly enable the local producer and
+outbound connection. The store's explicit materializer lifecycle and downstream
+integrations remain separate work.
 
 | Action | Proposed operation | Generated state / understanding |
 | --- | --- | --- |
-| B1 | Receiver: `semon receive enroll --machine laptop --listen 0.0.0.0:8735 --advertise https://desk.example:8735` | Local authenticated OS owner authorizes one enrollment for the named machine. First run generates receiver identity/TLS custody, issuer key, separate cache key, owner principal, precise grants and audit directories. It starts receiver transport and a loopback-only owner Viewer in the foreground. Display a short-lived pairing code; subsequent enrollments use the already-owned service through a local administrative interface. No other OS user or remote machine gets an owner session. |
-| B2 | Origin: `semon connect --to https://desk.example:8735` | Address is nonsecret. Starts explicit local setup and prompts for the code without echo. No secret in command arguments, history or URLs. |
-| B3 | Enter the code directly from the receiver's trusted machine display into the origin's trusted Semon prompt | One direct-entry action. Never send a code through chat, files or other untrusted channels. Code length/entropy, expiry and limits await review; do not claim values before review. |
-| B4 | Approve one combined trust/source summary inside `connect` | Explicitly trust this receiver as user-assertion issuer and approve the listed local source set plus typed name/path disclosure. Generate the client key on origin, bind it through the reviewed PAKE exchange or reviewed high-entropy single-use invitation fallback, issue separate credentials and certificate, initialize the local producer, generate policy/registry from admitted sources, and connect. Receiver grants belong only to its OS-authenticated owner, not to the pairing participant. |
+| B1 | Proposed receiver operation (exact flags not established): `semon receive enroll` | Local authenticated OS owner authorizes one enrollment for the named machine. First run generates receiver identity/TLS custody, issuer key, separate cache key, owner principal, precise grants and audit directories. It starts receiver transport and a loopback-only owner Viewer in the foreground. Display a high-entropy one-use invitation with its receiver pin through the authenticated local administrative surface. No other OS user or remote machine gets an owner session. |
+| B2 | Proposed origin operation: `semon connect --to https://desk.example:8735` | Address is nonsecret. Starts explicit local setup and prompts for the invitation and receiver pin through a protected entry path. No secret in command arguments, history or URLs. |
+| B3 | Paste the one-use invitation from the trusted receiver into the trusted origin's protected Semon prompt | One paste action; the longer invitation includes the receiver pin, so there is no separate pin entry. Never send it through chat or put it in arguments, URLs or logs. Protocol parameters remain subject to review. Any extra transfer or setup steps observed in practice must be counted. |
+| B4 | Approve one combined trust/source summary inside `connect` | Explicitly trust this receiver as user-assertion issuer and approve the listed local source set plus typed name/path disclosure. Generate the client key on origin, bind it through the invitation transfer, issue separate credentials and certificate, initialize the local producer, generate policy/registry from admitted sources, and connect. Receiver grants belong only to its OS-authenticated owner, not to the pairing participant. |
 
-The settled primary is direct short-code PAKE, with high-entropy one-use
-invitation fallback only if the maintained PAKE implementation/bootstrap cannot
-pass suitability and technical safety review. No separate human receiver identity
-check is part of the four actions. Pairing delegates one enrollment, not arbitrary
-machine administration or body authority. PAKE choice, implementation, bootstrap,
-limits and protocol details require review; this UX document selects no library or
-parameters. Invitation fallback parameters likewise await review. Rejected,
-cancelled or expired attempts cannot activate grants or claims. Protect invitation
-state as credentials; never log a code or put it in URLs. Any fallback secret is
-shown only at the authenticated administrative terminal and entered only through a
-protected prompt. A retry after consumption does not enroll a new key. User-facing
-status names the pending/connected machine without secrets.
+PAKE remains the target, but no maintained PAKE library passed review; slice 4a is
+building the high-entropy one-use invitation first. The invitation and receiver pin
+travel together through a protected transfer. No separate human receiver identity
+check is part of the four-action target. Pairing delegates one enrollment, not
+arbitrary machine administration or body authority. Protocol, transfer, bounds and
+technical safety review remain required; no invitation parameters are selected here.
+Rejected, cancelled or expired attempts cannot activate grants or claims. Protect
+invitation state as credentials; never log it or put it in URLs. Show it only at the
+authenticated administrative terminal and enter it only through a protected path.
+A retry after consumption does not enroll a new key. User-facing status names the
+pending/connected machine without secrets.
 
-The origin validates receiver identity and advertised HTTPS endpoint through the
-reviewed PAKE-confirmed bootstrap, then proves possession of its new key. A
-high-entropy invitation fallback must bind the receiver identity/trust pin and
-origin key through its protected transfer. A generated private trust root/certificate
-with the correct endpoint identity can avoid an external certificate purchase; no
-system trust store is modified. This pinned private-root provisioning is new to
-#634 and the existing public-web-roots-only push client; implementation must update
-that boundary explicitly. It is **not TOFU**: trust is established through the
-independently trusted pairing exchange, not accepted from the unauthenticated network
-peer. Missing or wrong pins fail closed; redirects are refused. The bounded
-provisioning endpoint stays separate from body read routes.
+The origin validates the HTTPS certificate chain against trusted roots, the
+advertised hostname and the receiver pin carried by the invitation, then proves
+possession of its new key. A matching pin is an additional binding, never a
+replacement for chain trust. If a private CA is used, its trusted-root provisioning
+must be explicit and any extra operator action counted; do not promise that
+invitation generation alone supplies trusted HTTPS. Missing or wrong trust/pins
+fail closed; redirects are refused. No bootstrap TLS profile skips chain trust.
+The bounded provisioning endpoint stays separate from body read routes.
 
 Default selection is “all my currently discovered local sources,” with an
 expandable list shown before approval. This is an explicit selection/owner policy
@@ -216,8 +215,8 @@ receiver identity check.
 
 | Decision | Settled direction | Review boundary |
 | --- | --- | --- |
-| Pairing | Four-action direct short-code PAKE target, code entered on Semon on the other trusted machine; no chat delivery | Maintained PAKE library, bootstrap, protocol safety, and per-session plus receiver-wide bounds must pass review. If not, build the high-entropy one-use invitation fallback, with no invented parameters pending review. |
-| Receiver confirmation | No separate human receiver identity check; the receiver owner authorizes the one enrollment and PAKE confirms the cryptographic peer | PAKE proves shared session-key possession, not human identity or account identity. Do not add a fifth setup action. |
+| Pairing | PAKE remains the target; slice 4a builds the high-entropy one-use invitation first because no maintained PAKE library passed review. Protected transfer carries the receiver pin; no chat delivery. | Invitation protocol/transfer safety and per-session plus receiver-wide bounds must pass review. No parameters are selected here. |
+| Receiver confirmation | No separate human receiver identity check; the receiver owner authorizes one enrollment, and invitation redemption binds the TLS receiver identity and origin key possession | Possession of the invitation is not human/account identity. PAKE remains the later target. Do not add a separate fifth confirmation action. |
 | P1 source policy | Confirmed-at-pairing default: selected current sources, `internal` floor for currently unclassified sources, existing stricter floors/scans preserved | Unknown/failed/missing/unsupported scans remain closed. Future sources are never auto-approved. The user explicitly approves the summary in B4. |
 
 D2, mTLS and dual audit remain required. There is no offline grant,
@@ -225,7 +224,7 @@ receiver-only authorization or machine-token-as-user shortcut. Four actions is a
 product target conditional on reviewed safe implementation and full integration,
 not a claim that commands ship today.
 
-### Primary pairing target: direct short-code PAKE
+### Pairing target and current 4a implementation
 
 The PM supplied a T3 Code UX observation on 2026-11-11: account sign-in, an app
 pairing card, code entry on the other machine, selectable access, visible endpoint
@@ -243,22 +242,28 @@ and confirmation MACs. [RFC 8125](https://www.rfc-editor.org/rfc/rfc8125.html)
 (sections 1 and 4) describes PAKE requirements and interactive-guessing/denial-of-
 service tradeoffs. These references are not implementation approval.
 
-Proposed replacement for B1–B4, still **four counted actions**:
+The following remains an **unimplemented UX target**, not shipped syntax. Slice 4a
+is building the high-entropy one-use invitation first; its protected transfer carries
+the receiver pin. This does not claim the transfer method or invitation parameters
+are approved.
 
-1. Receiver owner runs `semon receive enroll --machine laptop --listen
-   0.0.0.0:8735 --advertise https://desk.example:8735`. Semon shows a short-lived
-   random code in its local authenticated pairing surface and waits for one peer.
-2. Origin owner runs `semon connect --to https://desk.example:8735`. Address is a
-   nonsecret command input. Choosing or discovering it is not authenticated pairing;
-   any extra lookup, picker or address-entry step is recorded in a usability run.
-3. They enter the code directly in the origin's non-echoing Semon prompt, never
-   through chat. Both peers automatically complete cryptographic key confirmation.
+1. Receiver owner authorizes one invitation through the authenticated local
+   administrative surface. No exact flags are established by this proposal.
+2. Origin owner starts the proposed `semon connect` flow with the nonsecret receiver
+   address. Any lookup or extra address-entry step is counted in usability runs.
+3. They transfer and enter the one-use invitation and receiver pin through the
+   protected path under review, never through chat. The peers confirm the bound
+   receiver identity and origin key possession.
 4. They approve the origin's authenticated receiver/issuer, read-only sharing and
    P1 source summary. Only then activate scoped enrollment and source publication.
 
-Code submission and permission approval remain separate counted actions, even if
-one UI button ultimately submits both. There is no separate human check of the
-origin on the receiver: the receiver owner authorizes one enrollment, and the
+Four actions remains the UX target, conditional on a reviewed implementation and
+integration; the current slice's invitation transfer needs measurement against that
+target.
+
+Invitation transfer/entry and permission approval are separate counted actions,
+even if one UI button ultimately submits both. There is no separate human check of
+the origin on the receiver: the receiver owner authorizes one enrollment, and the
 cryptographic exchange confirms the peer session. This is not a human's independent
 verification of a machine or signed-in account. Peer-provided names are labels, not
 identity evidence.
@@ -270,41 +275,34 @@ still supplies its principal and owner browser session; PAKE creates no user log
 and does not make remote headless-owner authentication free. The code chooses no
 source classification and cannot bypass source policy.
 
-**The selected PAKE target requires a reviewed bootstrap before implementation.**
-With an existing trusted HTTPS endpoint, normal TLS identity validation precedes
-PAKE. With a LAN/private certificate, a code alone does not supply its trusted
-root. A distinct bounded bootstrap protocol must authenticate and bind the endpoint,
-receiver TLS identity/pin, origin-generated public key, roles, fresh session,
-version and intended enrollment scope through the PAKE-confirmed channel before
-persistent trust or credentials activate. That might require a dedicated bootstrap
-transport; it is not a general “accept invalid certificates” switch. No application
-body, credential, grant or policy enters an unauthenticated channel. No silent
-TOFU or request-installed issuer pin on the body routes. Following provisioning,
-normal HTTPS hostname/pin checks and body mTLS remain mandatory. LAN/Tailscale
-reachability, where already available, is a transport convenience, not proof of
-Semon identity; neither is required infrastructure.
+**Invitation bootstrap requires review before implementation.** Normal TLS
+certificate-chain and endpoint identity checks remain mandatory; no bootstrap TLS
+profile may skip chain trust. The invitation carries the receiver pin; the
+subsequent authenticated exchange binds it to the origin-generated public key,
+roles, fresh session, version and intended enrollment scope before credentials
+activate. The initial invitation cannot contain an origin key generated later. No application body, credential, grant or policy enters an unauthenticated
+channel. No silent TOFU or request-installed issuer pin on body routes. Following
+provisioning, normal HTTPS hostname/pin checks and body mTLS remain mandatory.
+LAN/Tailscale reachability, where already available, is a transport convenience, not
+proof of Semon identity; neither is required infrastructure.
 
-The maintained implementation and protocol/library suitability **have not been
-assessed**. Independent technical safety review must approve the bootstrap, explicit
-peer confirmation, bounded pending state, activation and cancellation before any
-security claim. No exact construction, library, entropy, code length, expiry or
-attempt parameters are selected here. Guessing limits must apply both per
-session/invitation and receiver-wide across addresses, connections, retries and
-repeated issuance; per-IP limits alone are insufficient. Apply tight limits to any
-invitation fallback at both scopes. Lockout can deny legitimate pairing, so report
-the recovery action without an unbounded retry/reissue loop. Failed confirmation
-cannot activate partial enrollment. No code or key in logs, URLs, assertions or
-error text.
+The invitation implementation and protocol suitability require independent
+technical safety review before any security claim. Review must approve the protected
+transfer, peer confirmation, bounded pending state, activation and cancellation.
+No entropy, invitation length, expiry or attempt parameters are selected here.
+Bounds must apply per invitation and receiver-wide across addresses, connections,
+retries and repeated issuance; per-IP limits alone are insufficient. Lockout can deny
+legitimate pairing, so report recovery without an unbounded retry/reissue loop. Failed
+confirmation cannot activate partial enrollment. No invitation, pin or key in logs,
+URLs, assertions or error text.
 
-**Settled code handling:** enter the code directly from the trusted receiver
-display into Semon on the trusted origin machine; chat-based pairing is excluded.
-A network observer without the code cannot perform offline guessing against a
-sound PAKE transcript; an attacker who sees the actual code can race or impersonate
-a participant. PAKE does not make an untrusted messenger, screenshot or remote
-screen safe. Endpoint compromise or remote control of either device cannot be
-repaired by PAKE. The high-entropy one-use invitation is the fallback only if PAKE
-and bootstrap do not pass suitability and technical safety review; no library or
-parameters are selected by this document.
+**Invitation handling under the current 4a plan:** transfer the high-entropy
+one-use invitation and receiver pin only through the protected path approved by
+review; chat-based pairing is excluded. An attacker who obtains the invitation may
+race or impersonate a participant. A protected transfer does not repair endpoint
+compromise or remote control of either device. PAKE remains the target only if a
+maintained library and bootstrap later pass suitability and technical safety review;
+no library or parameters are selected by this document.
 
 ### Automatic renewal and manual trust recovery
 
@@ -336,8 +334,8 @@ auto-renewal and manual lost/compromised-trust recovery.
 
 The four-action case assumes two installed binaries, a known reachable receiver
 address and local access to its owner session. A LAN receiver may use an address
-already routable from the origin; B1 supplies it and generates a matching pinned
-certificate. A remote receiver may require DNS, firewall changes or a reachable
+already routable from the origin; it still needs a matching certificate whose
+chain the origin trusts, in addition to the invitation's pin. A remote receiver may require DNS, firewall changes or a reachable
 host before B1: record each action, provider login and monetary choice. Semon does
 not acquire infrastructure or change the firewall silently. Neither relay nor T3
 is required or offered as fallback.
@@ -381,7 +379,7 @@ or automatic deletion. A two-command setup budget does not waive lifecycle work.
 
 | Intent | Proposed operation / budget | State changes and observable result |
 | --- | --- | --- |
-| Add a third machine | Repeat B1–B4 for `desktop`: two commands, one code entry/protected fallback transfer, one approval | Reuse receiver custody and owner login; create a new enrollment and precise grants. Never copy another origin's namespace or private key. |
+| Add a third machine | Repeat B1–B4 for `desktop`: two commands, one protected invitation-and-pin transfer, one approval | Reuse receiver custody and owner login; create a new enrollment and precise grants. Never copy another origin's namespace or private key. |
 | Disconnect an available origin | Origin: `semon disconnect --receiver desk`; one command plus confirmation | Disable its local enrollment/channel and stop new publication to this receiver; keep local history, analytics, keys and audits. Receiver still retains its admitted facts. This alone is not receiver-side revocation. |
 | Remove a machine from receiver access | Receiver: `semon receive revoke --machine laptop`; one command plus confirmation | Revoke enrollment, all kind credentials, active requests and corresponding read grants; block new disclosure at the next authorization/release decision. Keep historical facts and audits, show disconnected/retired coverage. For bilateral removal also run the origin disconnect: two commands plus two confirmations. |
 | Lost origin | Run receiver `revoke` immediately; one command plus confirmation, no origin contact required | Reject its future transport/authentication, invalidate affected cache entries/keys under cache rules, preserve admitted facts and audit history. Cannot erase the lost disk or retract plaintext already read. A replacement receives a new enrollment; no automatic namespace authority transfer. |
@@ -579,11 +577,11 @@ stronger classification and identify which part is merely generation.
 | #630 cache master key | Needs a generated default | Create a separate random 32-byte key under private secret custody outside cache/backups; validate permissions, limits and exclusions. Fail closed on missing key; explicit rotation invalidates entries. Generating a key does not establish backup/swap/core-dump safety on an arbitrary host. |
 | #631 `grants.json` and audit directories | Needs a generated default | Derive exact self-grants from authenticated owner plus enrolled scope; generate separate private directories. Preserve deny-on-invalid and audit-before-release. Never derive the user from a push token. |
 | #633 strict source registry | Needs a design change | Add origin-side generation from admitted contributor identities and approved local policy/real scan output. No absent-registry fallback or default successful scan; source inclusion is not export authority. Provide local explanations of refusals. |
-| #634 enroll/import/provisioning | Needs a design change | Settled target is short-code PAKE, with high-entropy one-use invitation fallback if maintained-library/bootstrap review fails; no separate human receiver check. Auto-renew under valid enrolled trust; explicit immediate revocation and manual recovery after loss/compromise. Keep review requirements and one current contract. |
+| #634 enroll/import/provisioning | Needs a design change | PAKE remains the target; because no maintained PAKE library passed review, slice 4a builds the high-entropy one-use invitation first, with receiver pin in protected transfer; no separate human receiver check. Auto-renew under valid enrolled trust; explicit immediate revocation and manual recovery after loss/compromise. Keep review requirements and one current contract. |
 | #634 credential kinds / certs / issuer keys | Needs a generated default for creation; lifecycle needs a design change | Generate separate kinds and mTLS material internally; do not conflate transport/user grants. Keep analytics client cert optional for now, body cert mandatory. Keep issuer, server/root and cache-key custody/lifecycles distinct. Guided renewal under valid trust; explicit revocation and reviewed recovery. |
 | Existing `receive token` / `push` | Needs a design change already proposed by #634 | Preserve supported mirror as explicit separate custody, not the default ASI path. Refuse old `tokens` unchanged with re-issue guidance. No migration, deletion or alias that disguises kind changes. |
 | #632 body channel | Fits as internal transport | Consume the one enrollment; no extra pairing. Origin-rendered bounded typed pages, exact evidence mapping, online audit on cache hits and backpressure remain. No remote search or control shortcut. |
-| #635 assertion/audit libraries | Fits as internal enforcement | Keep explicit principal, audience/replay/version binding and both durable audits. They do not require a multi-user UI or second setup flow. Held status unchanged. |
+| #635 assertion/audit libraries | Fits as internal enforcement | Keep explicit principal, audience/replay/version binding and both durable audits. They do not require a multi-user UI or second setup flow. #635 is merged; body-route integration remains separate. |
 | Interim listener caps / #636 | Fits as internal limit, with honest errors | Keep bounded 503 refusals and fair response capacity; show retryable receiver-busy status, not empty success or a product fleet ceiling. No knob in the two-machine quickstart. |
 | Standalone Viewer / `/api/asi/*` | Needs a design change for integrated analytics UX | Keep sidebar/native Catalog/transcript owners and authenticated read-only browser; surface admitted analytics and exact evidence links. Remote admission/authentication is not established by local routes. Storybook and screenshot review precede implementation. |
 | Machine removal, loss and rotations | Needs a design change | Named explicit workflows above, clear preservation and revocation effects, no hand edits in B. Preserve frozen facts, history and credentials except deliberate cache invalidation/credential revocation state. |
@@ -595,11 +593,10 @@ membership. New spellings are proposals. Do not churn the working read/authoring
 API solely to make every verb live under the same noun, or retain deprecated
 aliases solely for old Semon versions.
 
-**Decision record — owner's decisions relayed by PM, 2026-11-11/12:** four-action direct short-code PAKE
-is the pairing target; use trusted-device entry and never chat. If maintained PAKE
-library/bootstrap suitability and technical safety review do not pass, build a
-high-entropy one-use invitation fallback with parameters set only by review. No
-separate human receiver identity check. Confirmed P1 default at pairing selects
+**Decision record — owner's decisions relayed by PM, 2026-11-11/12:** PAKE
+remains the target; no maintained PAKE library passed review, so slice 4a builds a
+high-entropy one-use invitation first, with receiver pin carried by protected
+transfer. Never pair through chat. No separate human receiver identity check. Confirmed P1 default at pairing selects
 current sources, applies an `internal` floor to currently unclassified sources,
 preserves stricter floors/scans, fails closed on unknown or failed scans, and never
 auto-approves future sources. Auto-renew transport credentials under valid enrolled
@@ -633,23 +630,18 @@ administrative action; unsupported-format errors preserve data and do not offer
 automatic reset. Machine-readable error codes stay stable within the current
 contract; human wording does not smuggle secrets into errors.
 
-## Ordered ask for #634 (PM-routed; hold remains PM-owned)
+## Ordered work for #634 (slice 4a started)
 
-This is the concrete proposed order for #634 slice 4a; it records scope and
-boundaries, not implementation acceptance or authority to lift the hold.
+This records remaining boundaries, not implementation acceptance or authority to
+lift any PM-owned hold.
 
-1. **Reconcile the contract first.** Update the current enrollment contract around
-the settled four-action PAKE target, one-use invitation fallback, no separate human
-receiver identity check, confirmed P1-at-pairing default and auto-renew under valid
-enrolled trust. Preserve protocol/library suitability and technical safety review.
-Keep the full protocol specification in its owned contract, not this UX document.
-2. **Review pairing and fallback.** Assess maintained PAKE library and bounded
-bootstrap for endpoint/trust pin, origin-generated public key, roles, freshness,
-version, scope, key confirmation, race/replay/cancellation and atomic activation.
-If suitability or safety does not pass, specify and review a high-entropy one-use
-invitation fallback. Set no unreviewed parameters. Enforce tight limits both per
-session/invitation and receiver-wide across addresses, connections, retries and
-repeated issuance.
+1. **Review the current invitation path.** The current enrollment contract is
+   reconciled. Review its protected invitation-and-pin transfer, receiver identity,
+   origin-generated public key, roles, freshness, version, scope, key confirmation,
+   race/replay/cancellation and atomic activation. Set no unreviewed parameters.
+   Enforce tight limits per invitation and receiver-wide across addresses,
+   connections, retries and repeated issuance. PAKE remains a target only if a
+   maintained library and bootstrap later pass suitability and safety review.
 3. **Generate enrollment identity and kinds with explicit scope.** Generate origin
 identity/bindings and kind-separated credentials, certificates and private custody;
 replace operator-supplied namespace/incarnation/kind/cert fields with generated
@@ -694,19 +686,10 @@ is added merely to finish 4a. The PM explicitly lifts all holds in order.
 
 ## Viewer scope wording and UX backlog
 
-At this baseline, `AGENTS.md` already calls read-only browsing a foundation and
-keeps sidebar/navigation and Catalog/transcript owners. It does **not** contain a
-blanket “do not invest in transcript polish” rule. The remaining reconciliation
-must be based on actual #532/#547/roadmap wording, not reintroduce a stale premise.
-Proposed product-scope wording for PM/owner review, not an edit to those contracts:
+Adopted by the owner on 2026-11-12 and recorded in `AGENTS.md` and
+[ASI direction](asi-direction.md):
 
-> The Viewer provides analytics and standalone read-only browsing of Semon's
-> durable session history. Preserve Semon's sidebar/navigation and native Catalog
-> and transcript ownership. Use T3's session-log presentation as a reference for
-> legibility and evidence navigation, without a T3 service, state or import
-> dependency. Improve transcript usability where it supports those tasks; cosmetic
-> pixel matching alone is not a goal. No composer, control, runtime or SSH features.
-> Review any copied code/assets for license obligations and preserve notices.
+> The Viewer provides analytics and standalone read-only browsing of Semon's durable session history. Preserve Semon's sidebar/navigation and native Catalog and transcript ownership. Use T3's session-log presentation as a reference for legibility and evidence navigation, without a T3 service, state or import dependency. Improve transcript usability where it supports those tasks; cosmetic pixel matching alone is not a goal. No composer, control, runtime or SSH features. Review any copied code/assets for license obligations and preserve notices.
 
 Backlog tracked in [#638](https://github.com/onsager-ai/semon/issues/638), in
 priority order; PM adds it to #549 after scope review:
@@ -719,8 +702,8 @@ priority order; PM adds it to #549 after scope review:
   sources, real scan status, rotation/loss/audit-capacity workflows; no default allow.
 - **P1: CLI guidance.** Explain command families, feature availability, export versus
   backup and refusal recovery; preserve structured codes and sensitive-output limits.
-- **P1: Viewer scope reconciliation.** Update #532/#547/#549 and authored scope text
-  after PM/owner approval, then design analytics-to-evidence workflows in Storybook.
+- **P1: Viewer analytics-to-evidence workflows.** Design in Storybook under the
+  adopted Viewer scope; coordinate any #532/#547/#549 backlog changes through the PM.
 - **Deferred: shared-user login/groups/grants UI, remote search, optional replica
   authority transfer and advanced external issuer administration.** Existing security
   requirements still apply wherever their underlying capabilities are delivered.

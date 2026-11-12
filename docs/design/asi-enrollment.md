@@ -28,6 +28,24 @@ lines in `DIR/tokens`; `Tokens::authorize` supplies a machine identity. The
 not the enrollment, client-certificate identity or remote body read defined here.
 #630/#631 and #635 supply libraries, not integrated onboarding or body service.
 
+The receiver registry and kind-aware credential custody are implemented as Unix
+libraries in `semon-push::enrollment` and `semon-push::credentials`, unwired from
+`semon receive`, its listener, CLI and default paths. Explicit library
+initialization creates `DIR/enrollment/registry.json` (format 1) and
+`DIR/enrollment/registry.lock`, relative to the receiver state directory `DIR`.
+One atomic registry document contains enrollment bindings, generation-scoped
+certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
+serialized. The library also exposes legacy `DIR/tokens` refusal without importing
+or modifying it. Supported Push continues using the existing token path until a
+later end-to-end enrollment/pairing cutover. Pairing, renewal protocols and TLS/
+route integration remain unimplemented by these libraries. Updates compare a
+persisted monotonic revision under the registry lock; replaced certificate pins
+remain as terminal revocation history. Per-kind re-enable is not implemented yet;
+its fresh-credential transition arrives with the renewal/revocation PR. Existing
+binding/issuer fields remain frozen; narrower issuer-rotation and mirror-to-
+analytics enablement transition APIs arrive later. Validating admitted namespace/
+incarnation continuity remains the provisioning caller's responsibility.
+
 | Slice / owner | Delivery boundary |
 | --- | --- |
 | #593 slice 4a, this contract | Reviewed pairing/bootstrap, enrollment registry, generated identity and kind credentials, persisted source-consent input, automatic renewal, revocation, TLS/route/admission hooks, provisioning outputs and owning CLI/token changes |
@@ -235,8 +253,14 @@ libraries. Keep secrets, policy/configuration, body cache and audit stores separ
 protect atomic updates against cross-store replacement. Ordinary enrollment/cache
 backups contain no private keys or bearer secrets. Explicit secret backups remain
 a separate protected custody procedure. A stale registry backup cannot establish
-current revocation state or resurrect an enrollment. Preserve namespace/handle
-continuity only where proven, and preserve facts, sources and audits on refusal.
+current revocation state or authorize resurrection of an enrollment. The checked
+library API rejects stale in-process snapshots, but replacing the registry file
+on disk with an older valid copy is not detectable: no revision high-water mark
+is persisted outside that file. Restoring such a copy does not itself establish
+current revocation state; stale-backup resurrection protection beyond the revision
+check needs a separate high-water-mark custody decision and is deferred. Preserve
+namespace/handle continuity only where proven, and preserve facts, sources and
+audits on refusal.
 
 Generating private files does not establish host safety. Receiver integration
 checks observable core/swap settings and requires reviewable external backup

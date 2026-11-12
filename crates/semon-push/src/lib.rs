@@ -43,6 +43,10 @@ pub mod body_broker;
 pub mod body_cache;
 #[cfg(unix)]
 pub mod body_wire;
+#[cfg(unix)]
+pub mod credentials;
+#[cfg(unix)]
+pub mod enrollment;
 mod lock;
 pub mod mirror;
 #[cfg(unix)]
