@@ -49,7 +49,7 @@ controller and `receive enroll` terminal. Receiver-side public_tls provisioning
 creates mirror-only enrollments; origin connect/client and optional client certificates
 are integrated. Independently validated analytics/body admission, renewal and
 revocation CLI remain follow-up integrations. Shipped custody creates
-`DIR/enrollment/registry.json` (format 1; PR4.2 replaces it as specified below)
+`DIR/enrollment/registry.json` (strict current format 2)
 and `DIR/enrollment/registry.lock`, relative to receiver state directory `DIR`.
 One atomic registry document contains enrollment bindings, generation-scoped
 certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
@@ -849,7 +849,7 @@ actual encoded size in CI; reject overlong fields before admission.
 | Pending renewal nonce/targets/authorization bindings and reserved outcome | 4 KiB; one per enrollment, four receiver-wide |
 | Live delivery receipt (pairing or renewal) | 8 KiB; at most one per enrollment; new attempts wait for recovery authority to end |
 | Live rolling admission records | 1 KiB per enrollment; prune timestamps outside the rolling window using the clamped clock |
-| Terminal enrollment tombstone: enrollment ID, one tagged pin and three kind high-water marks | 512 bytes; same pin appears once |
+| Terminal enrollment tombstone: enrollment ID, validated machine name (at most 63 bytes), insertion sequence, one tagged pin and three kind high-water marks | 512 bytes; same pin appears once; machine/sequence support state-idempotent lookup only |
 | Registry envelope, receiver-wide gates and allocation accounting | 64 KiB receiver-wide |
 
 A fully occupied live enrollment budgets 27 KiB (8 + 6 + 4 + 8 + 1), conservatively
@@ -1001,9 +1001,14 @@ show HOST; commands use URL. Never display userinfo or query parts. Connect, pus
 and disconnect use ONE endpoint normalization, including default ports and IPv6,
 without DNS alias guessing. `--receiver URL` accepts that HTTPS URL; the 64-hex
 custody key stays internal. No hash alias or operator-chosen alias is supported.
-The receiver computes receive enable's push URL from its advertised endpoint;
-multiple endpoints require retaining the exact enrolled endpoint, never guessing
-from a listen address. PR4.3 changes main's existing #651 push selector contract,
+Each receiver directory records exactly one normalized advertised endpoint in its
+strict `receiver.json` identity custody, initialized by `receive enroll --advertise
+URL`. Every later enroll must provide that same endpoint; a mismatch refuses
+without changing custody. A different endpoint requires a new empty receiver
+directory and pairing each origin again. Plain `receive --dir` keeps its invocation
+and loads the recorded endpoint. Enable and recovery guidance use this endpoint,
+including after enrollment compaction; they never guess from a listen address or
+choose between aliases. The origin custody name is SHA-256 of this endpoint. PR4.3 changes main's existing #651 push selector contract,
 with docs and tests updated together. `TARGET`
 is `machine M` or `kind K for machine M`. Do not substitute secrets. Prompts and
 confirmation feedback use the controlling terminal; no terminal means refuse.
@@ -1053,6 +1058,7 @@ exit 1; cancellation exits 0. No additional renewal prompts.
 | connect | Replacement line in combined approval summary | `This replaces the previous enrollment for receiver HOST. Its files and history will be kept.` | terminal; shown before B4 approval; no extra approval step |
 | receiver startup / owner command | Unsupported pre-renewal registry | `Receiver state uses an unsupported format. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See docs/design/asi-enrollment.md#offline-machines-and-missed-renewal.` | stderr; exit 1; [recovery section](#offline-machines-and-missed-renewal); never used for capacity |
 | Receiver admission | Actual live/tombstone capacity exhausted | `Receiver state is full. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See docs/design/asi-enrollment.md#offline-machines-and-missed-renewal.` | local stderr; exit 1; wire remains generic |
+| receive enroll | Advertised endpoint differs from recorded URL | `Receiver directory records endpoint URL. A different endpoint requires a new empty receiver directory and pairing each origin again.` | stderr; exit 1; preserve custody |
 | Receiver new authority | Audit unavailable | `Receiver audit is unavailable. Keep DIR unchanged; restore access to its audit storage before enrolling or renewing.` | local stderr; exit 1; wire remains generic; revoke/cutover still work |
 
 For watch, evaluate deadlines independently of file events, at least once per

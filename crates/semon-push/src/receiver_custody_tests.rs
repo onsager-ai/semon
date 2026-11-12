@@ -20,7 +20,7 @@ impl Fixture {
         Self(path)
     }
     fn open(&self) -> ReceiverCustody {
-        ReceiverCustody::open_or_initialize(&self.0).unwrap()
+        ReceiverCustody::open_or_initialize(&self.0, "https://receiver.example:443").unwrap()
     }
 }
 impl Drop for Fixture {
@@ -127,7 +127,7 @@ fn client_ca_and_trust_are_generated_once_and_modified_trust_refuses() {
     assert_eq!(fs::read(f.0.join(CLIENT_CA_CERTIFICATE)).unwrap(), cert);
     fs::write(f.0.join(CLIENT_TRUST), b"hand edited").unwrap();
     assert_eq!(
-        ReceiverCustody::open_or_initialize(&f.0).unwrap_err(),
+        ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443").unwrap_err(),
         Error::Invalid
     );
     assert_eq!(fs::read(f.0.join(CLIENT_TRUST)).unwrap(), b"hand edited");
@@ -141,7 +141,8 @@ fn old_receiver_refuses_without_deleting_or_repairing() {
     let f = Fixture::new();
     fs::write(f.0.join(IDENTITY), b"old receiver identity").unwrap();
     fs::set_permissions(f.0.join(IDENTITY), fs::Permissions::from_mode(0o600)).unwrap();
-    let error = ReceiverCustody::open_or_initialize(&f.0).unwrap_err();
+    let error =
+        ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443").unwrap_err();
     assert_eq!(
         error.to_string(),
         "receiver custody predates client certificates; initialize a fresh receiver directory"
@@ -214,7 +215,7 @@ fn corrupted_or_missing_pieces_never_regenerate_secrets() {
         let seed = fs::read(&seed_path).unwrap();
         fs::write(f.0.join(target), b"broken").unwrap();
         assert!(
-            ReceiverCustody::open_or_initialize(&f.0).is_err(),
+            ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443").is_err(),
             "{target}"
         );
         assert_eq!(fs::read(&seed_path).unwrap(), seed);
@@ -226,12 +227,12 @@ fn corrupted_or_missing_pieces_never_regenerate_secrets() {
         let f = Fixture::new();
         f.open();
         fs::write(f.0.join(IDENTITY), serde_json::to_vec(&value).unwrap()).unwrap();
-        assert!(ReceiverCustody::open_or_initialize(&f.0).is_err());
+        assert!(ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443").is_err());
     }
     let f = Fixture::new();
     let custody = f.open();
     fs::remove_file(custody.cache_key_path()).unwrap();
-    assert!(ReceiverCustody::open_or_initialize(&f.0).is_err());
+    assert!(ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443").is_err());
     assert!(!custody.cache_key_path().exists());
 }
 
@@ -251,7 +252,7 @@ fn modes_links_and_short_keys_refuse() {
         let path = f.0.join(target);
         fs::set_permissions(&path, fs::Permissions::from_mode(0o777)).unwrap();
         assert!(
-            ReceiverCustody::open_or_initialize(&f.0).is_err(),
+            ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443").is_err(),
             "{target}"
         );
     }
@@ -270,7 +271,7 @@ fn modes_links_and_short_keys_refuse() {
         fs::rename(&path, &moved).unwrap();
         symlink(&moved, &path).unwrap();
         assert!(
-            ReceiverCustody::open_or_initialize(&f.0).is_err(),
+            ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443").is_err(),
             "{target}"
         );
     }
@@ -281,7 +282,7 @@ fn modes_links_and_short_keys_refuse() {
             f.0.join(SECRETS)
                 .join(issuer_filename(&custody.issuer.key_id));
         fs::write(&path, vec![7; length]).unwrap();
-        assert!(ReceiverCustody::open_or_initialize(&f.0).is_err());
+        assert!(ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443").is_err());
         assert!(custody.load_signing_key().is_err());
     }
 }
@@ -296,7 +297,7 @@ fn crash_before_identity_refuses_without_replacing_keys() {
     assert!(!f.0.join(IDENTITY).exists());
     let key = fs::read(f.0.join(CACHE_SECRETS).join(CACHE_KEY)).unwrap();
     assert!(matches!(
-        ReceiverCustody::open_or_initialize(&f.0),
+        ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443"),
         Err(Error::Incomplete)
     ));
     assert_eq!(
@@ -443,11 +444,11 @@ fn ownership_hardlinks_and_unknown_secret_files_refuse() {
     let f = Fixture::new();
     let custody = f.open();
     fs::hard_link(custody.cache_key_path(), f.0.join("extra-link")).unwrap();
-    assert!(ReceiverCustody::open_or_initialize(&f.0).is_err());
+    assert!(ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443").is_err());
     let f = Fixture::new();
     f.open();
     fs::write(f.0.join(SECRETS).join("unknown"), b"unknown").unwrap();
-    assert!(ReceiverCustody::open_or_initialize(&f.0).is_err());
+    assert!(ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443").is_err());
     // A different owner can be exercised when the runner is privileged.
     // SAFETY: geteuid has no arguments.
     if unsafe { libc::geteuid() } == 0 {
@@ -457,7 +458,7 @@ fn ownership_hardlinks_and_unknown_secret_files_refuse() {
         let path = CString::new(f.0.as_os_str().as_bytes()).unwrap();
         // SAFETY: live NUL-terminated pathname and scalar UID/GID.
         assert_eq!(unsafe { libc::chown(path.as_ptr(), 1, 0) }, 0);
-        assert!(ReceiverCustody::open_or_initialize(&f.0).is_err());
+        assert!(ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example:443").is_err());
         // SAFETY: restore our fixture ownership before cleanup.
         assert_eq!(unsafe { libc::chown(path.as_ptr(), 0, 0) }, 0);
     }
@@ -508,7 +509,8 @@ fn initialization_keeps_registry_with_locked_root_after_path_swap() {
     );
     assert!(original.join(IDENTITY).is_file());
     assert!(fs::read_dir(&selected).unwrap().next().is_none());
-    let reopened = ReceiverCustody::open_or_initialize(&original).unwrap();
+    let reopened =
+        ReceiverCustody::open_or_initialize(&original, "https://receiver.example:443").unwrap();
     assert_eq!(custody.receiver_id(), reopened.receiver_id());
     assert_eq!(custody.issuer(), reopened.issuer());
 }
@@ -613,6 +615,7 @@ fn revoke_between_activation_and_install_never_restores_grants() {
         sequence: 1,
         origin_key: vec![4; 65],
         endpoint: "https://receiver.example:443".into(),
+        enrolled_pin: None,
         binding: Binding::Admitted {
             namespace: "asi-0123456789abcdef0123456789abcdef".into(),
             origin_incarnation: "origin-1".into(),

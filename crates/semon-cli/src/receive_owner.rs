@@ -90,7 +90,8 @@ pub(super) fn run(
         || format!("machine {machine}"),
         |k| format!("kind {k} for machine {machine}"),
     );
-    let success = |endpoint: &str| {
+    let endpoint = custody.endpoint();
+    let success = |_ignored_endpoint: &str| {
         if revoke {
             format!("Revoked {target}. History and audits kept.")
         } else {
@@ -128,7 +129,7 @@ pub(super) fn run(
                 kind_text.unwrap_or("")
             ));
         }
-        OwnerState::NoAuthority { endpoint } => {
+        OwnerState::NoAuthority { .. } => {
             return Err(format!(
                 "enable refused; no valid access remains.\nTo restore access, pair again: on the receiver, run semon receive enroll --machine {machine} with its listener/TLS options and confirm replacement if prompted; on the origin, run semon connect --to {endpoint}, enter the code, and approve replacement."
             ));

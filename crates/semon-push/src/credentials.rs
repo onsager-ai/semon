@@ -159,6 +159,7 @@ impl Registry {
         verified_pin: Option<&crate::enrollment::Pin>,
         now: u64,
     ) -> Option<&Bearer> {
+        let now = now.max(self.latest);
         let bearer = self
             .credentials
             .iter()
@@ -200,6 +201,7 @@ impl Registry {
         verified_pin: Option<&crate::enrollment::Pin>,
         now: u64,
     ) -> Authorization {
+        let now = now.max(self.latest);
         let hash = secret.hash();
         let valid = self.validate().is_ok();
         let mut selected = None;

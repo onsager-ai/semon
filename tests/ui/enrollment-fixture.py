@@ -26,6 +26,7 @@ registry = {
         "sequence": 1,
         "origin_key": [4] * 65,
         "endpoint": "https://receiver.example:443",
+        "enrolled_pin": None,
         "binding": {"state": "inapplicable"},
         "client_certificate_pins": [],
         "credential_kinds": [{

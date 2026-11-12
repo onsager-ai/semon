@@ -224,6 +224,7 @@ impl<C: Clock> AuditStore<C> {
             name != Path::new(AUDIT_FILE)
                 && name != Path::new("audit.lock")
                 && name != Path::new(crate::generation_audit::FILE)
+                && name != Path::new("generations.lock")
         }) {
             return Err(AuditError::Custody);
         }

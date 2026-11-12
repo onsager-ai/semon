@@ -72,6 +72,7 @@ struct Identity {
     issuer_key_id: String,
     client_ca_created: u64,
     client_ca_sha256: String,
+    endpoint: String,
 }
 
 /// Contains public identity and paths only; seeds are loaded into zeroizing memory.
@@ -194,12 +195,18 @@ impl ReceiverCustody {
         Self::load(dir, &root)
     }
 
-    pub fn open_or_initialize(dir: &Path) -> Result<Self> {
-        Self::open_with_fault(dir, || Ok(()))
+    pub fn open_or_initialize(dir: &Path, endpoint: &str) -> Result<Self> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Error::Invalid)?
+            .as_secs();
+        Self::open_with_clock(dir, || Ok(()), |_| {}, now, endpoint)
     }
+    #[cfg(test)]
     fn open_with_fault(dir: &Path, before_identity: impl FnOnce() -> Result<()>) -> Result<Self> {
         Self::open_with_hooks(dir, before_identity, |_| {})
     }
+    #[cfg(test)]
     fn open_with_hooks(
         dir: &Path,
         before_identity: impl FnOnce() -> Result<()>,
@@ -209,18 +216,26 @@ impl ReceiverCustody {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| Error::Invalid)?
             .as_secs();
-        Self::open_with_clock(dir, before_identity, locked, now)
+        Self::open_with_clock(
+            dir,
+            before_identity,
+            locked,
+            now,
+            "https://receiver.example:443",
+        )
     }
     #[cfg(test)]
     pub(crate) fn open_at(dir: &Path, now: u64) -> Result<Self> {
-        Self::open_with_clock(dir, || Ok(()), |_| {}, now)
+        Self::open_with_clock(dir, || Ok(()), |_| {}, now, "https://receiver.example:443")
     }
     fn open_with_clock(
         dir: &Path,
         before_identity: impl FnOnce() -> Result<()>,
         locked: impl FnOnce(&File),
         now: u64,
+        endpoint: &str,
     ) -> Result<Self> {
+        let endpoint = crate::pairing::normalize_endpoint(endpoint).map_err(|_| Error::Invalid)?;
         if !dir.try_exists().map_err(|_| Error::Custody)? {
             fs::DirBuilder::new()
                 .mode(0o700)
@@ -289,11 +304,12 @@ impl ReceiverCustody {
             root.publish(
                 IDENTITY,
                 &encode(&Identity {
-                    format: 1,
+                    format: 2,
                     receiver_id: enrollment::random_id().map_err(|_| Error::Random)?,
                     issuer_key_id: key_id,
                     client_ca_created,
                     client_ca_sha256: crate::wire::sha256_hex(&client_ca_certificate),
+                    endpoint,
                 })?,
                 false,
             )?;
@@ -323,7 +339,9 @@ impl ReceiverCustody {
         }
         let private = Zeroizing::new(ca_secrets.read(CLIENT_CA_KEY)?);
         crate::client_ca::validate_ca(&private, &certificate).map_err(|_| Error::Invalid)?;
-        if identity.format != 1
+        if identity.format != 2
+            || crate::pairing::normalize_endpoint(&identity.endpoint).map_err(|_| Error::Invalid)?
+                != identity.endpoint
             || !opaque(&identity.receiver_id, 64)
             || !opaque(&identity.issuer_key_id, 32)
         {
@@ -406,6 +424,9 @@ impl ReceiverCustody {
     }
     pub fn issuer(&self) -> &enrollment::IssuerKey {
         &self.issuer
+    }
+    pub fn endpoint(&self) -> &str {
+        &self.identity.endpoint
     }
     pub fn owner(&self) -> &Owner {
         &self.owner
@@ -494,7 +515,7 @@ impl ReceiverCustody {
             if enrollment
                 .credential_kinds
                 .iter()
-                .any(|kind| kind.revoked_at.is_some())
+                .any(|kind| !kind.available)
             {
                 return Err(Error::Invalid);
             }

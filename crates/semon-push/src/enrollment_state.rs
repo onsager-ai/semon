@@ -77,7 +77,15 @@ impl Registry {
                 .max_by_key(|e| e.sequence)
         });
         let Some(e) = target else {
-            return if self.tombstones.iter().any(|t| t.machine == machine) {
+            return if let Some(t) = self
+                .tombstones
+                .iter()
+                .filter(|t| t.machine == machine)
+                .max_by_key(|t| t.sequence)
+            {
+                if kind.is_some_and(|k| t.high_water[k.index()] == 0) {
+                    return OwnerState::UnknownKind;
+                }
                 if action == OwnerAction::Revoke {
                     OwnerState::Complete {
                         endpoint: String::new(),
@@ -248,7 +256,8 @@ impl Store {
             })
             .collect();
         generation_audit::append(receiver, &records)?;
-        if records.is_empty() {
+        let has_terminal = next.enrollments.iter().any(|e| e.revoked_at.is_some());
+        if records.is_empty() && !has_terminal {
             return Ok(());
         }
         next.credentials
@@ -260,6 +269,36 @@ impl Store {
                     .any(|b| b.enrollment_id == e.enrollment_id && b.generation == p.generation)
             });
         }
+        let terminal: Vec<_> = next
+            .enrollments
+            .iter()
+            .filter(|e| {
+                e.revoked_at.is_some()
+                    && !next
+                        .credentials
+                        .iter()
+                        .any(|b| b.enrollment_id == e.enrollment_id)
+            })
+            .cloned()
+            .collect();
+        for e in terminal {
+            let mut high_water = [0; 3];
+            for scope in &e.credential_kinds {
+                high_water[scope.kind.index()] = scope.generations.current;
+            }
+            let pin = e.enrolled_pin.clone();
+            next.tombstones.push(Tombstone {
+                enrollment_id: e.enrollment_id.clone(),
+                machine: e.machine,
+                sequence: e.sequence,
+                pin,
+                high_water,
+            });
+            next.enrollments
+                .retain(|item| item.enrollment_id != e.enrollment_id);
+            next.pairing_receipts
+                .retain(|r| r.enrollment_id != e.enrollment_id);
+        }
         next.latest = now;
         self.commit_compacted(&next)
     }
@@ -269,6 +308,16 @@ impl Store {
             return Err(Error::StaleSnapshot);
         }
         next.validate()?;
+        for t in &current.tombstones {
+            if !next.tombstones.contains(t) {
+                return Err(Error::Terminal);
+            }
+        }
+        for b in &current.credentials {
+            if !next.credentials.iter().any(|n| n == b) && current.ended(b, next.latest).is_none() {
+                return Err(Error::Terminal);
+            }
+        }
         let mut next = next.clone();
         next.revision += 1;
         self.write(&next, |_| Ok(()))

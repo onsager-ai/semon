@@ -8,9 +8,9 @@ use std::{
 };
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
-struct Fixture(PathBuf);
+pub(super) struct Fixture(pub(super) PathBuf);
 impl Fixture {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
             "semon-enrollment-{}-{}",
             std::process::id(),
@@ -34,7 +34,7 @@ impl Clock {
         self.0
     }
 }
-fn id(c: char) -> String {
+pub(super) fn id(c: char) -> String {
     c.to_string().repeat(64)
 }
 fn pin() -> Pin {
@@ -48,6 +48,7 @@ fn enrollment(kind: Kind) -> Enrollment {
         sequence: 1,
         origin_key: vec![4; 65],
         endpoint: "https://receiver.example:443".into(),
+        enrolled_pin: None,
         binding: if kind == Kind::MirrorPush {
             Binding::Inapplicable
         } else {
@@ -87,7 +88,7 @@ fn bearer(kind: Kind, secret: &Secret) -> Bearer {
         revoked_at: None,
     }
 }
-fn registry(kind: Kind) -> (Registry, Secret) {
+pub(super) fn registry(kind: Kind) -> (Registry, Secret) {
     let secret = Secret::new("private-test-bearer".into());
     (
         Registry::from_records(vec![enrollment(kind)], vec![bearer(kind, &secret)]).unwrap(),

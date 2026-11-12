@@ -264,6 +264,7 @@ pub(super) fn records(cert_required: bool) -> Registry {
         sequence: 1,
         origin_key: vec![4; 65],
         endpoint: "https://receiver.example:443".into(),
+        enrolled_pin: None,
         binding: Binding::Inapplicable,
         client_certificate_pins: vec![CertificatePin {
             pin: identity().spki().clone(),
@@ -430,6 +431,7 @@ fn credential_handle_survives_unrelated_writes_and_sibling_renewal() {
     store.commit(next.revision(), &next).unwrap();
     assert!(handle.is_current_at(199));
     assert!(!handle.is_current_at(200));
+    drop(store);
     let renewed = auth
         .authenticated_enrollment(
             &mut ConnectionAuthority::default(),
@@ -439,6 +441,7 @@ fn credential_handle_survives_unrelated_writes_and_sibling_renewal() {
         )
         .unwrap();
     assert!(renewed.authority.is_current_at(200));
+    let mut store = Store::open(&dir.0).unwrap();
     let mut next = store.snapshot().unwrap();
     next.credentials[0].revoked_at = Some(100);
     store.commit(next.revision(), &next).unwrap();

@@ -121,10 +121,13 @@ impl Harness {
     }
     fn input(&self) -> pairing::ActivationInput {
         pairing::ActivationInput {
-            receiver_id: crate::receiver_custody::ReceiverCustody::open_or_initialize(&self.dir.0)
-                .unwrap()
-                .receiver_id()
-                .into(),
+            receiver_id: crate::receiver_custody::ReceiverCustody::open_or_initialize(
+                &self.dir.0,
+                "https://receiver.example:443",
+            )
+            .unwrap()
+            .receiver_id()
+            .into(),
             machine: "laptop".into(),
             binding: crate::enrollment::Binding::Inapplicable,
             kinds: vec![(Kind::MirrorPush, false)],

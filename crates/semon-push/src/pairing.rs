@@ -799,6 +799,7 @@ impl Core {
             sequence: snapshot.next_sequence,
             origin_key: t.origin_key.clone(),
             endpoint: t.endpoint.clone(),
+            enrolled_pin: input.client_certificate_pins.first().map(|p| p.pin.clone()),
             binding: input.binding,
             client_certificate_pins: input.client_certificate_pins,
             credential_kinds: kinds,

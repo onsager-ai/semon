@@ -81,6 +81,7 @@ fn receiving_with(machines: &[&str], limits: Limits, tls: bool) -> (Receiving, V
             sequence: index as u64 + 1,
             origin_key: vec![4; 65],
             endpoint: "https://receiver.example:443".into(),
+            enrolled_pin: None,
             binding: Binding::Inapplicable,
             client_certificate_pins: vec![],
             credential_kinds: vec![KindScope::new(Kind::MirrorPush, 1)],

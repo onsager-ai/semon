@@ -193,6 +193,7 @@ pub struct Enrollment {
     pub sequence: u64,
     pub origin_key: Vec<u8>,
     pub endpoint: String,
+    pub enrolled_pin: Option<Pin>,
     pub binding: Binding,
     pub client_certificate_pins: Vec<CertificatePin>,
     pub credential_kinds: Vec<KindScope>,
@@ -379,6 +380,12 @@ impl Registry {
                 }
                 if k.available
                     && e.revoked_at.is_none()
+                    && self.credentials.iter().any(|b| {
+                        b.enrollment_id == e.enrollment_id
+                            && b.kind == k.kind
+                            && b.generation == k.generations.current
+                            && b.valid_until > self.latest
+                    })
                     && k.client_cert_required
                     && !e
                         .client_certificate_pins
@@ -387,6 +394,15 @@ impl Registry {
                 {
                     return Err(Error::Invalid);
                 }
+            }
+            if let Some(pin) = &e.enrolled_pin {
+                if pins
+                    .iter()
+                    .any(|(p, id)| *p == pin && *id != &e.enrollment_id)
+                {
+                    return Err(Error::Invalid);
+                }
+                pins.insert((pin, &e.enrollment_id));
             }
             let mut local_pins = BTreeSet::new();
             for p in &e.client_certificate_pins {
@@ -433,6 +449,14 @@ impl Registry {
         Ok(())
     }
     fn follows(&self, old: &Self) -> Result<()> {
+        if self.latest < old.latest || self.next_sequence < old.next_sequence {
+            return Err(Error::Terminal);
+        }
+        for tombstone in &old.tombstones {
+            if !self.tombstones.contains(tombstone) {
+                return Err(Error::Terminal);
+            }
+        }
         for receipt in &old.pairing_receipts {
             let next = self
                 .pairing_receipts
@@ -457,6 +481,7 @@ impl Registry {
                 || e.binding != next.binding
                 || e.origin_key != next.origin_key
                 || e.endpoint != next.endpoint
+                || e.enrolled_pin != next.enrolled_pin
                 || e.sequence != next.sequence
                 || (e.revoked_at.is_some() && e != next)
             {
@@ -835,6 +860,11 @@ impl Store {
             return Err(Error::StaleSnapshot);
         }
         next.follows(&current)?;
+        if next.enrollments.len() > current.enrollments.len()
+            || next.credentials.len() > current.credentials.len()
+        {
+            next.check_admission()?;
+        }
         let mut next = next.clone();
         next.revision = current.revision.checked_add(1).ok_or(Error::Invalid)?;
         self.write(&next, |_| Ok(()))
@@ -883,6 +913,9 @@ enum Stage {
 mod state;
 pub use state::{OwnerAction, OwnerState};
 
+#[cfg(test)]
+#[path = "enrollment_state_tests.rs"]
+mod state_tests;
 #[cfg(test)]
 #[path = "enrollment_tests.rs"]
 mod tests;

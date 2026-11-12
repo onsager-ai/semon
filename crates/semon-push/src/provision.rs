@@ -32,13 +32,17 @@ impl Controller {
             return Err("invalid enrollment machine".into());
         }
         let endpoint = pairing::normalize_endpoint(endpoint).map_err(|e| e.to_string())?;
-        let custody = ReceiverCustody::open_or_initialize(dir).map_err(|e| e.to_string())?;
-        let core = Core::open(
-            Store::open(dir).map_err(|e| e.to_string())?,
-            &endpoint,
-            custody.receiver_id().into(),
-        )
-        .map_err(|e| e.to_string())?;
+        let custody =
+            ReceiverCustody::open_or_initialize(dir, &endpoint).map_err(|e| e.to_string())?;
+        if custody.endpoint() != endpoint {
+            return Err(format!(
+                "Receiver directory records endpoint {}. A different endpoint requires a new empty receiver directory and pairing each origin again.",
+                custody.endpoint()
+            ));
+        }
+        let store = Store::open(dir).map_err(|e| e.to_string())?;
+        let core = Core::open(store, &endpoint, custody.receiver_id().into())
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             core,
             custody,
@@ -230,6 +234,12 @@ impl Controller {
                     return Err(Refused);
                 }
                 self.validate_input(&message.input, now)?;
+                Store::open(&self.dir)
+                    .and_then(|mut store| store.compact(&self.dir, now))
+                    .map_err(|_| {
+                        self.unavailable = Some(crate::enrollment::AUDIT_UNAVAILABLE);
+                        Refused
+                    })?;
                 crate::generation_audit::append(&self.dir, &[]).map_err(|_| {
                     self.unavailable = Some(crate::enrollment::AUDIT_UNAVAILABLE);
                     Refused

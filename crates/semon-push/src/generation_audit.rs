@@ -1,4 +1,4 @@
-//! Append-only ended-generation evidence, sharing receiver audit's append lock.
+//! Append-only ended-generation evidence under a dedicated audit append lock.
 use crate::{
     body_cache::CacheDirectory,
     credentials::{Bearer, Kind},
@@ -73,7 +73,7 @@ pub(crate) fn append(receiver: &Path, records: &[EndedGeneration]) -> Result<(),
     let directory = CacheDirectory::open(&receiver.join("receiver-audit"))
         .map_err(|_| Error::AuditUnavailable)?;
     let lock = directory
-        .open_file(Path::new("audit.lock"), libc::O_RDWR | libc::O_CREAT)
+        .open_file(Path::new("generations.lock"), libc::O_RDWR | libc::O_CREAT)
         .map_err(|_| Error::AuditUnavailable)?;
     lock.try_lock().map_err(|_| Error::AuditUnavailable)?;
     let mut file = directory
