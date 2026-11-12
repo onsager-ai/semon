@@ -30,6 +30,23 @@ pub trait EnrollmentSource {
     fn authenticated_enrollment(&self, required_kind: EnrollmentKind) -> Result<EnrollmentScope>;
     /// Compare the complete current scope, including credential/kind revocation.
     fn is_current(&self, scope: &EnrollmentScope) -> bool;
+    /// Capture request authority for pending work. Registry-backed sources return
+    /// the handle obtained at authentication; in-memory sources have no registry.
+    fn revision_handle(&self, _scope: &EnrollmentScope) -> Option<crate::serve::RevisionHandle> {
+        None
+    }
+}
+
+pub(crate) fn authority_is_current(
+    handle: Option<&crate::serve::RevisionHandle>,
+    source: &dyn EnrollmentSource,
+    scope: &EnrollmentScope,
+    now: u64,
+) -> bool {
+    match handle {
+        Some(handle) => handle.is_current_at(now),
+        None => source.is_current(scope),
+    }
 }
 #[derive(Clone, Copy)]
 pub struct Config {
@@ -46,6 +63,7 @@ impl Default for Config {
 }
 struct Work {
     scope: EnrollmentScope,
+    authority: Option<crate::serve::RevisionHandle>,
     channel: [u8; 32],
     request: Request,
     dispatched: bool,
@@ -206,6 +224,7 @@ impl<'a> Broker<'a> {
         state.work.insert(
             request.request_id,
             Work {
+                authority: auth.revision_handle(&scope),
                 scope,
                 channel,
                 request,
@@ -227,7 +246,7 @@ impl<'a> Broker<'a> {
             .values_mut()
             .filter(|w| !matches!(w.result, Some(Err(_))))
         {
-            if !auth.is_current(&work.scope) {
+            if !authority_is_current(work.authority.as_ref(), auth, &work.scope, now / 1000) {
                 fail(work, Reason::Revoked);
             } else if now >= work.request.deadline_millis {
                 fail(work, Reason::Deadline);
@@ -263,7 +282,14 @@ impl<'a> Broker<'a> {
         let revoked: Vec<String> = state
             .work
             .values()
-            .filter(|w| !auth.is_current(&w.scope))
+            .filter(|w| {
+                !authority_is_current(
+                    w.authority.as_ref(),
+                    auth,
+                    &w.scope,
+                    self.clock.now_millis() / 1000,
+                )
+            })
             .map(|w| w.scope.enrollment_id.as_str().to_owned())
             .collect();
         state.channels.retain(|id, _| !revoked.contains(id));

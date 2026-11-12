@@ -40,23 +40,25 @@ authenticated_enrollment(conn, request_credential, required_kind)
 hook. The host creates it before accepting work and calls
 `notify_if_revision_changed(source, broker)` when checking registry changes. It
 acknowledges a revision only after broker cleanup succeeds; registry read failures
-also invoke cleanup and return unavailable. The source must validate all queued
-owners and fail closed on registry errors. For append leases the host additionally
+also invoke cleanup and return unavailable. Registry-backed work validates its own
+captured authority and fails closed on registry errors. For append leases the host additionally
 calls `AppendService::sweep_owner(original_scope, owner_source)` for each active
 owner; the watcher does not own append services or schedule background work.
 
-The concrete `EnrollmentSource` adapter remains blocked on credential-specific
-revalidation. `RegistryAuthenticator` repeats the required-kind decision and
-`TryFrom<&AuthenticatedEnrollment>` supplies the complete scope, but that scope
-contains neither credential identity nor an authorization handle. Two credentials
-for one enrollment can yield identical scopes. `RevisionHandle` invalidates all
-old decisions on any registry change, so it cannot preserve unaffected owners
-while identifying pending work authorized by a revoked credential. Integration
-needs a credential-bound revalidation handle retained with each work/lease (and a
-registry API to refresh that exact authority), or an equivalent owner-validation
-hook. A request-bound source must not treat every foreign scope as revoked during
-broker-wide maintenance. Body authentication must always pass `Kind::BodyChannel`
-to the registry authenticator; no request body selects the kind.
+`RegistryEnrollmentSource::authenticate` repeats the registry decision for each
+request using verified connection evidence and its bearer credential, always
+passing `Kind::BodyChannel`; no request body selects the kind. The existing
+`TryFrom<&AuthenticatedEnrollment>` supplies the complete scope. Pending broker
+work and append leases retain the authentication's `RevisionHandle` independently
+of subsequent requests. Registry read errors fail closed.
+
+The current coarse check (option A) invalidates all captured authority on any
+registry revision change. Enrolling another machine, revoking authority, and every
+credential renewal drop all pending body work and append leases for every origin
+with `Revoked`. Origins must reconnect with a fresh grant. Even unchanged owners
+incur this churn. Option B, a credential-bound authority handle exposed by the
+origin lane in its planned renewal/revocation PR4, is the planned replacement;
+it will allow unaffected owners to retain their work.
 
 Body-route mTLS is settled, not an amendment. Slice 4a builds client-certificate
 support; #594 consumes this authenticated scope and never touches TLS configuration.

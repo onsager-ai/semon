@@ -1,8 +1,8 @@
 //! Host-driven registry revision notifications for the body broker (Part of #594).
 //!
-//! The host supplies an [`EnrollmentSource`] capable of checking every queued
-//! owner's authority. A source tied to just the notifying request is insufficient.
-//! No listener, background task, or enrollment custody is installed here.
+//! Request authentication and host-driven revocation (Part of #594).
+//! Pending work retains its own registry revision handle, so a notifying request
+//! cannot substitute its authority for another owner's. No transport is installed.
 use std::path::{Path, PathBuf};
 
 use crate::{
@@ -10,6 +10,60 @@ use crate::{
     body_wire::{Reason, Result},
     enrollment::{self, Registry},
 };
+
+/// Body-kind authority for one request on an already verified connection.
+/// Construct a fresh source for every request, including keep-alive requests.
+/// Registry changes require fresh authentication and a new body grant.
+pub struct RegistryEnrollmentSource {
+    scope: crate::origin_read::EnrollmentScope,
+    authority: crate::serve::RevisionHandle,
+}
+impl RegistryEnrollmentSource {
+    pub fn authenticate(
+        authenticator: &crate::serve::RegistryAuthenticator,
+        connection: &mut crate::serve::ConnectionAuthority,
+        request_credential: Option<&str>,
+        now: u64,
+    ) -> Result<Self> {
+        let authenticated = authenticator
+            .authenticated_enrollment(
+                connection,
+                request_credential,
+                crate::credentials::Kind::BodyChannel,
+                now,
+            )
+            .ok_or(Reason::Forbidden)?;
+        let scope = crate::origin_read::EnrollmentScope::try_from(&authenticated)
+            .map_err(|_| Reason::Forbidden)?;
+        Ok(Self {
+            scope,
+            authority: authenticated.revocation,
+        })
+    }
+}
+impl EnrollmentSource for RegistryEnrollmentSource {
+    fn authenticated_enrollment(
+        &self,
+        required_kind: crate::origin_read::EnrollmentKind,
+    ) -> Result<crate::origin_read::EnrollmentScope> {
+        if required_kind != crate::origin_read::EnrollmentKind::BodyChannel {
+            return Err(Reason::Forbidden);
+        }
+        if !self.is_current(&self.scope) {
+            return Err(Reason::Revoked);
+        }
+        Ok(self.scope.clone())
+    }
+    fn is_current(&self, scope: &crate::origin_read::EnrollmentScope) -> bool {
+        scope == &self.scope && self.authority.revision_is_current()
+    }
+    fn revision_handle(
+        &self,
+        scope: &crate::origin_read::EnrollmentScope,
+    ) -> Option<crate::serve::RevisionHandle> {
+        (scope == &self.scope).then(|| self.authority.clone())
+    }
+}
 
 /// One host-owned watcher per receiver registry and broker. Create it before
 /// accepting work. Calls are serialized by `&mut self`; failed notifications do
@@ -95,6 +149,103 @@ mod tests {
             10_000
         }
     }
+    impl crate::body_cache::Clock for &At {
+        fn now(&self) -> u64 {
+            10
+        }
+    }
+
+    #[test]
+    fn captured_append_authority_closes_all_owners() {
+        use crate::{
+            append_receiver::AppendService,
+            body_broker::Principal,
+            receiver_acl::Acls,
+            receiver_audit::{self, AuditStore},
+        };
+        use std::os::unix::fs::PermissionsExt;
+        for failure in ["revision", "read"] {
+            let dir = Directory::new();
+            let a = source(&dir.0, "a");
+            let b = source(&dir.0, "b");
+            let at = At;
+            let broker = Broker::new(Config::default(), &at).unwrap();
+            let acl = dir.0.join("acl");
+            std::fs::create_dir(&acl).unwrap();
+            std::fs::set_permissions(&acl, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let grants = acl.join("grants.json");
+            std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"machine","namespace":"namespace","permissions":["body_read"]}]}"#).unwrap();
+            std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let acls = Acls::new(acl);
+            let mut audit_a =
+                AuditStore::open(&dir.0.join("audit-a"), &at, receiver_audit::MAX_BYTES).unwrap();
+            let mut audit_b =
+                AuditStore::open(&dir.0.join("audit-b"), &at, receiver_audit::MAX_BYTES).unwrap();
+            let signing = MemoryKey::from_seed(Zeroizing::new([7; 32]));
+            let mut services = [
+                AppendService::new(
+                    &broker,
+                    &a,
+                    &acls,
+                    &signing,
+                    "issuer",
+                    Identifier::from_bytes([11; 32]),
+                    &mut audit_a,
+                ),
+                AppendService::new(
+                    &broker,
+                    &b,
+                    &acls,
+                    &signing,
+                    "issuer",
+                    Identifier::from_bytes([11; 32]),
+                    &mut audit_b,
+                ),
+            ];
+            let mut leases = Vec::new();
+            for (service, owner) in services.iter_mut().zip([&a, &b]) {
+                let bytes = wire::control(&wire::PollRequest {
+                    version: wire::VERSION,
+                    channel_binding: [3; 32],
+                })
+                .unwrap();
+                drop(broker.begin_poll(owner, &bytes).unwrap());
+                let mut template = request(77);
+                template.operation = Operation::ReadPage {
+                    page: opaque("append"),
+                };
+                leases.push(
+                    service
+                        .subscribe(
+                            Principal {
+                                subject: "subject".into(),
+                                audit_id: Identifier::from_bytes([9; 32]),
+                            },
+                            owner.scope.clone(),
+                            template,
+                            Identifier::from_bytes([4; 32]),
+                        )
+                        .unwrap(),
+                );
+            }
+            for (service, (lease, _)) in services.iter_mut().zip(&leases) {
+                service.maintain().unwrap();
+                assert!(service.collect(*lease).is_ok());
+            }
+            if failure == "revision" {
+                advance(&dir.0);
+            } else {
+                std::fs::write(dir.0.join("enrollment/registry.json"), b"invalid registry")
+                    .unwrap();
+            }
+            for (service, (lease, _)) in services.iter_mut().zip(&leases) {
+                assert_eq!(service.collect(*lease), Err(Reason::Revoked));
+                service.maintain().unwrap();
+                assert_eq!(service.collect(*lease), Err(Reason::LeaseClosed));
+            }
+        }
+    }
+
     struct Owners {
         revoked: AtomicBool,
         checks: AtomicUsize,
@@ -176,6 +327,109 @@ mod tests {
         ));
         request
     }
+    fn source(dir: &Path, name: &str) -> RegistryEnrollmentSource {
+        use crate::{
+            credentials::{Bearer, Kind, Secret},
+            enrollment::{Binding, Enrollment, KindScope},
+        };
+        let enrollment = Enrollment {
+            enrollment_id: "a".repeat(64),
+            receiver_id: "receiver-1".into(),
+            machine: "machine".into(),
+            binding: Binding::Inapplicable,
+            client_certificate_pins: vec![],
+            credential_kinds: vec![KindScope::new(Kind::MirrorPush, 1)],
+            revoked_at: None,
+        };
+        let credential = Bearer {
+            credential_id: "b".repeat(64),
+            enrollment_id: enrollment.enrollment_id.clone(),
+            kind: Kind::MirrorPush,
+            sha256: Secret::new("test-bearer".into()).hash(),
+            generation: 1,
+            valid_from: 0,
+            valid_until: 100,
+            revoked_at: None,
+        };
+        let mut store = Store::open(dir).unwrap();
+        let current = store.snapshot().unwrap();
+        if current.enrollments().is_empty() {
+            store
+                .commit(
+                    current.revision(),
+                    &Registry::from_records(vec![enrollment], vec![credential]).unwrap(),
+                )
+                .unwrap();
+        }
+        drop(store);
+        let authenticator = crate::serve::RegistryAuthenticator::open(dir).unwrap();
+        let authenticated = authenticator
+            .authenticated_enrollment(
+                &mut crate::serve::ConnectionAuthority::default(),
+                Some("Bearer test-bearer"),
+                Kind::MirrorPush,
+                10,
+            )
+            .unwrap();
+        // Broker lifecycle tests need real revision handles; scope conversion and
+        // verified body-kind authentication are covered by serve_auth_tests.
+        RegistryEnrollmentSource {
+            scope: scope(name),
+            authority: authenticated.revocation,
+        }
+    }
+
+    #[test]
+    fn captured_work_authority_invalidates_all_owners() {
+        for failure in ["revision", "read"] {
+            let dir = Directory::new();
+            let a = source(&dir.0, "a");
+            let b = source(&dir.0, "b");
+            let mut watcher = RevocationWatcher::new(&dir.0).unwrap();
+            let broker = Broker::new(Config::default(), &At).unwrap();
+            let bytes = wire::control(&wire::PollRequest {
+                version: wire::VERSION,
+                channel_binding: [3; 32],
+            })
+            .unwrap();
+            for (owner, n) in [(&a, 1), (&b, 2)] {
+                drop(broker.begin_poll(owner, &bytes).unwrap());
+                broker
+                    .enqueue(owner, owner.scope.clone(), [3; 32], request(n))
+                    .unwrap();
+            }
+            // B's request must not revoke A while their captured revisions match.
+            assert!(
+                broker
+                    .take_result(&b, Identifier::from_bytes([1; 32]))
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(!watcher.notify_if_revision_changed(&b, &broker).unwrap());
+            if failure == "revision" {
+                advance(&dir.0);
+            } else {
+                std::fs::write(dir.0.join("enrollment/registry.json"), b"invalid registry")
+                    .unwrap();
+            }
+            let notified = watcher.notify_if_revision_changed(&b, &broker);
+            assert_eq!(
+                notified,
+                if failure == "revision" {
+                    Ok(true)
+                } else {
+                    Err(Reason::Unavailable)
+                }
+            );
+            for n in [1, 2] {
+                assert!(matches!(
+                    broker.take_result(&b, Identifier::from_bytes([n; 32])),
+                    Err(Reason::Revoked)
+                ));
+            }
+        }
+    }
+
     fn advance(dir: &Path) {
         let mut store = Store::open(dir).unwrap();
         let snapshot = store.snapshot().unwrap();
