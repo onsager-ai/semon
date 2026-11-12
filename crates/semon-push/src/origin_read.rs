@@ -2,9 +2,9 @@
 //!
 //! Integrations supply one authenticated enrollment, admitted source resolution,
 //! complete contributor governance and a bounded typed renderer. No identifier is
-//! a path or authority. The body_query adapter remains an integration task: its
-//! origin-local view currently exposes neither a narrowed timeout nor an exact
-//! export-view witness. Never substitute its local UID lookup for remote authority.
+//! a path or authority. body_adapter supplies the bounded origin-local view;
+//! exact export-view evidence remains an integration dependency. Never substitute
+//! its local UID lookup for remote authority.
 
 use crate::{
     body_assertion::Claims,
@@ -174,7 +174,9 @@ pub struct ExactMapping {
 #[derive(Clone)]
 pub struct RenderPlan {
     /// Length of canonical typed payload, including its untrusted_text wrappers.
-    /// Preparation is metadata-only and must not render/read body content.
+    /// Preparation is metadata-only where supported. The body_query adapter's
+    /// documented bounded fallback discards a render to measure length; without
+    /// exact export evidence the core refuses before authorization or egress.
     pub payload_bytes: u64,
     pub export_view_generation: Option<OpaqueId>,
     pub exact_mapping: Option<ExactMapping>,

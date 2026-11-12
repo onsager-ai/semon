@@ -451,8 +451,23 @@ rendering and export-view validation. It defines no transport or enrollment stor
 A renderer first prepares metadata without reading/rendering bodies: exact canonical
 payload length, export-view generation, mapping and continuation. This lets the
 origin fsync an exact authorization range before rendering. Missing preparation or
-mapping evidence is unavailable. The `body_query::view` adapter remains follow-up:
-its current public API lacks a narrowed deadline and exact export-view witness.
+mapping evidence is unavailable. `body_adapter::BodyQueryRenderer` reuses
+`body_query::view` through its public narrowed-timeout entry. That API cannot
+prepare an exact canonical length without reading bodies, so this adapter performs
+one bounded render during preparation and immediately discards it. It returns no
+export-view generation or exact mapping; the core therefore refuses remote egress.
+Truncated views and unknown field kinds are unavailable. Cancellation is checked
+before and after SQLite; its progress handler enforces the narrowed deadline.
+
+The analytics registry already produces namespace-qualified source/evidence handles
+(`semon-asi::egress::Handles`), but exposes no reverse lookup or admitted native
+cohort fence. Its slash-qualified identifiers also do not fit `origin_read::OpaqueId`.
+A production resolver needs a reconciled current handle contract plus origin-owned
+source admission; local body UIDs are not a substitute. `HandleResolver`, the
+`LocalView` exact local target lookup, and the complete governance/scan-backed
+`PolicyVector` remain integration dependencies. No new remote handle format or
+policy bypass is introduced. Exact export-view witness production and validation
+remain required before remote reads or authorization-only cache hits can succeed.
 
 Audit ranges are half-open `[0, canonical_payload_bytes)` for each exported typed
 page/field. Continuations identify another typed payload; they never accumulate byte
