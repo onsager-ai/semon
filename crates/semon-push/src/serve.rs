@@ -29,9 +29,18 @@ use std::{
 
 use serde_json::{Value, json};
 
+#[path = "serve_auth.rs"]
+mod auth;
+use crate::credentials::Kind;
+use auth::Authenticator;
+pub use auth::{
+    AuthenticatedEnrollment, ConnectionAuthority, RegistryAuthenticator, RevisionHandle,
+    VerifiedClientIdentity,
+};
+
 use crate::{
     mirror::{DEFAULT_MAX_BYTES, Endpoint, MAX_BODY_BYTES, Receiver},
-    tokens::{Tokens, check_tokens_mode, prepare_private_dir, tokens_path},
+    tokens::{prepare_private_dir, tokens_path},
 };
 
 /// Where `semon receive` listens unless told otherwise.
@@ -183,7 +192,7 @@ struct Admission {
 
 struct Shared {
     receiver: Receiver,
-    tokens: Tokens,
+    tokens: Authenticator,
     tls: Option<Arc<rustls::ServerConfig>>,
     limits: Limits,
     admission: Mutex<Admission>,
@@ -253,8 +262,9 @@ impl Drop for Slot {
 /// A bound receiver, ready to [`Server::run`].
 pub struct Server {
     listener: TcpListener,
+    credential_count: usize,
     receiver: Receiver,
-    tokens: Tokens,
+    tokens: Authenticator,
     tls: Option<Arc<rustls::ServerConfig>>,
     limits: Limits,
 }
@@ -265,19 +275,24 @@ impl Server {
     pub fn bind(options: &ServeOptions) -> Result<Self, String> {
         let dir = &options.dir;
         prepare_private_dir(dir, true)?;
-        check_tokens_mode(dir)?;
-        let tokens = Tokens::open(dir)?;
+        let tokens = Authenticator::open(dir)?;
+        let credential_count = tokens.count()?;
         check_listen(
             options.listen,
             options.tls.is_some(),
-            tokens.len(),
+            credential_count,
             &tokens_path(dir),
         )?;
-        let tls = options.tls.as_ref().map(tls_config).transpose()?;
+        let tls = options
+            .tls
+            .as_ref()
+            .map(|files| tls_config(files, dir))
+            .transpose()?;
         let listener = TcpListener::bind(options.listen)
             .map_err(|error| format!("cannot listen on {}: {error}", options.listen))?;
         Ok(Self {
             listener,
+            credential_count,
             receiver: Receiver::new(dir.clone())
                 .map_err(|error| error.to_string())?
                 .with_max_bytes(options.max_bytes),
@@ -303,9 +318,9 @@ impl Server {
         if self.tls.is_some() { "https" } else { "http" }
     }
 
-    /// How many machines have a token now.
+    /// Number of configured credentials observed at startup.
     pub fn tokens(&self) -> usize {
-        self.tokens.len()
+        self.credential_count
     }
 
     /// Serves until the process ends.
@@ -353,7 +368,7 @@ impl Server {
     }
 }
 
-fn tls_config(files: &TlsFiles) -> Result<Arc<rustls::ServerConfig>, String> {
+fn tls_config(files: &TlsFiles, dir: &Path) -> Result<Arc<rustls::ServerConfig>, String> {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
     let read = |path: &Path| {
         fs::read(path).map_err(|error| format!("cannot read TLS file {}: {error}", path.display()))
@@ -370,16 +385,73 @@ fn tls_config(files: &TlsFiles) -> Result<Arc<rustls::ServerConfig>, String> {
     }
     let key = PrivateKeyDer::from_pem_slice(&private_key)
         .map_err(|error| format!("{}: {error}", files.private_key.display()))?;
+    let trust = client_trust(dir)?;
+    let verifier = match trust {
+        Some(roots) => rustls::server::WebPkiClientVerifier::builder_with_provider(
+            Arc::new(roots),
+            Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .allow_unauthenticated()
+        .build()
+        .map_err(|e| e.to_string())?,
+        None => rustls::server::WebPkiClientVerifier::no_client_auth(),
+    };
     let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
     .with_safe_default_protocol_versions()
     .map_err(|error| error.to_string())?
-    .with_no_client_auth()
+    .with_client_cert_verifier(verifier)
     .with_single_cert(chain, key)
     .map_err(|error| format!("the TLS certificate and key: {error}"))?;
     config.alpn_protocols = vec![b"http/1.1".to_vec()];
     Ok(Arc::new(config))
+}
+
+/// The sole client-trust input: a private, owned, non-symlink PEM root bundle.
+const CLIENT_TRUST_FILE: &str = "client-trust.pem";
+fn client_trust(dir: &Path) -> Result<Option<rustls::RootCertStore>, String> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject};
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let path = dir.join(CLIENT_TRUST_FILE);
+    let file = match fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&path)
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    // SAFETY: geteuid has no memory preconditions.
+    if !meta.is_file()
+        || meta.uid() != unsafe { libc::geteuid() }
+        || meta.nlink() != 1
+        || meta.mode() & 0o777 != 0o600
+    {
+        return Err(format!(
+            "{} must be an owned private 0600 regular file",
+            path.display()
+        ));
+    }
+    let mut bytes = Vec::new();
+    file.take(1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > 1024 * 1024 {
+        return Err("client trust bundle too large".into());
+    }
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in CertificateDer::pem_slice_iter(&bytes) {
+        roots
+            .add(cert.map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+    }
+    if roots.is_empty() {
+        return Err("client trust bundle contains no certificates".into());
+    }
+    Ok(Some(roots))
 }
 
 /// The socket, with a deadline that every read and write honors: before
@@ -491,6 +563,7 @@ enum NoHead {
 struct Connection {
     stream: Stream,
     head_only: bool,
+    authority: ConnectionAuthority,
     /// Bytes read and not yet used.
     buffer: Vec<u8>,
     limits: Limits,
@@ -539,7 +612,13 @@ impl Connection {
                 return Err(NoHead::Refused(431, "the request head is too large"));
             }
             searched = self.buffer.len().saturating_sub(3);
-            match self.read_more(deadline.unwrap_or(wait)) {
+            self.stream.timed().deadline = deadline.unwrap_or(wait);
+            let mut byte = [0u8; 1];
+            let read = self.stream.read(&mut byte);
+            if let Ok(1) = read {
+                self.buffer.push(byte[0]);
+            }
+            match read {
                 Ok(0) => return Err(NoHead::Closed),
                 Ok(_) => {
                     let head = self.limits.head;
@@ -786,6 +865,7 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
     let mut connection = Connection {
         stream,
         head_only: false,
+        authority: ConnectionAuthority::default(),
         buffer: Vec::new(),
         limits,
     };
@@ -803,6 +883,16 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
                 return connection.close();
             }
         };
+        if let Stream::Tls(stream) = &connection.stream {
+            connection.authority.verified_client_identity =
+                match stream.conn.peer_certificates().and_then(|c| c.first()) {
+                    Some(cert) => match VerifiedClientIdentity::from_verified_der(cert) {
+                        Ok(identity) => Some(identity),
+                        Err(_) => return connection.close(),
+                    },
+                    None => None,
+                };
+        }
         connection.head_only = head.method == "HEAD";
         match answer(shared, slot, &mut connection, &head) {
             Next::Continue if !head.close => {}
@@ -824,11 +914,55 @@ enum Next {
     Refuse(u16, &'static str, &'static [(&'static str, &'static str)]),
 }
 
+fn authority_refusal() -> Next {
+    Next::Refuse(401, "request refused", &[("WWW-Authenticate", "Bearer")])
+}
+fn classify_route(path: &str) -> Option<(Kind, Option<Endpoint>)> {
+    if let Some(endpoint) = Endpoint::from_path(path) {
+        Some((Kind::MirrorPush, Some(endpoint)))
+    } else if path.starts_with("/v1/analytics/") {
+        Some((Kind::AnalyticsPublish, None))
+    } else if path.starts_with("/v1/body/") {
+        Some((Kind::BodyChannel, None))
+    } else {
+        None
+    }
+}
+
 /// Checks a request in order (endpoint, method, framing, token, size) and,
 /// only once all pass, reads its body and answers it.
 fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
-    let Some(endpoint) = Endpoint::from_path(&head.target) else {
-        return Next::Refuse(404, "no such endpoint", &[]);
+    if head.transfer_encoding {
+        return Next::Refuse(
+            411,
+            "a Content-Length is required; chunked bodies are not accepted",
+            &[],
+        );
+    }
+    if head.expect_other {
+        return Next::Refuse(417, "only Expect: 100-continue is understood", &[]);
+    }
+    let Some((kind, endpoint)) = classify_route(&head.target) else {
+        return authority_refusal();
+    };
+    if kind != Kind::MirrorPush && shared.tls.is_none() {
+        return authority_refusal();
+    }
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(now) => now.as_secs(),
+        Err(_) => return authority_refusal(),
+    };
+    let Some(machine) = shared.tokens.authorize(
+        &mut connection.authority,
+        head.authorization.as_deref(),
+        kind,
+        now,
+    ) else {
+        return authority_refusal();
+    };
+    // Classified routes are closed until their owning slices install handlers.
+    let Some(endpoint) = endpoint else {
+        return authority_refusal();
     };
     if head.method != "POST" {
         return Next::Refuse(
@@ -837,25 +971,8 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
             &[("Allow", "POST")],
         );
     }
-    if head.transfer_encoding {
-        return Next::Refuse(
-            411,
-            "a Content-Length is required; chunked bodies are not accepted",
-            &[],
-        );
-    }
     let Some(length) = head.content_length else {
         return Next::Refuse(411, "a Content-Length is required", &[]);
-    };
-    if head.expect_other {
-        return Next::Refuse(417, "only Expect: 100-continue is understood", &[]);
-    }
-    let Some(machine) = shared.tokens.authorize(head.authorization.as_deref()) else {
-        return Next::Refuse(
-            401,
-            "the token is unknown or revoked",
-            &[("WWW-Authenticate", "Bearer")],
-        );
     };
     slot.authenticated();
     if length > MAX_BODY_BYTES as u64 {
@@ -880,6 +997,10 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         Err(_) => Next::Close,
     }
 }
+
+#[cfg(test)]
+#[path = "serve_auth_tests.rs"]
+mod auth_tests;
 
 #[cfg(test)]
 mod tests {

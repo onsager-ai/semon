@@ -361,13 +361,13 @@ fn only_post_to_the_two_endpoints() {
     ] {
         assert_eq!(
             post(receiving.address, route, Some(&tokens[0]), b"{}").status,
-            404,
+            401,
             "{route}"
         );
         let get = format!("GET {route} HTTP/1.1\r\n\r\n");
         assert_eq!(
             exchange(receiving.address, get.as_bytes()).status,
-            404,
+            401,
             "{route}"
         );
     }
@@ -824,7 +824,7 @@ fn status_head_advertises_post_without_body_and_unknown_routes_stay_unsupported(
     assert!(answer.body.is_null());
     assert_eq!(answer.body_bytes, 0, "HEAD must not send an error body");
     let unknown = head.replace("/v1/mirror/status", "/v1/mirror/unknown-status");
-    assert_eq!(exchange(receiving.address, unknown.as_bytes()).status, 404);
+    assert_eq!(exchange(receiving.address, unknown.as_bytes()).status, 401);
     let unauthorized = post(
         receiving.address,
         "/v1/mirror/status",
