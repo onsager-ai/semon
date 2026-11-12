@@ -834,7 +834,8 @@ fn real_tls_exporter_completes_receiver_pairing_and_activation() {
     let dir = PrivateDir::new();
     // Custody initializes only an absent/empty receiver root.
     let mut controller =
-        provision::Controller::open(&dir.0, "https://localhost:443", "laptop".into()).unwrap();
+        provision::Controller::open(&dir.0, "https://localhost:443", "laptop".into(), None)
+            .unwrap();
     let (mut tls, mut client) = tls_pair(None);
     handshake(&mut tls, &mut client).unwrap();
     assert_eq!(

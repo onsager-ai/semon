@@ -414,7 +414,7 @@ fn address_change_atomically_ends_authority_without_mutating_enrollments() {
             .decision,
         Decision::Refused
     );
-    assert!(!after.usable_machine("laptop", 20));
+    assert!(after.usable_machine("laptop", 20).is_none());
     assert!(matches!(
         after.owner_state("laptop", Some(Kind::MirrorPush), OwnerAction::Enable, 20),
         OwnerState::NoAuthority { .. }
@@ -423,6 +423,60 @@ fn address_change_atomically_ends_authority_without_mutating_enrollments() {
     assert!(Store::authorize_cutover(&f.0, Kind::MirrorPush, &secret, None, 20).is_err());
     let current = Store::open(&f.0).unwrap().snapshot().unwrap();
     assert_eq!(current.enrollments[0], enrollment);
+}
+
+#[test]
+fn revoked_new_address_tombstone_remains_the_owner_target() {
+    let f = Fixture::new();
+    audit(&f);
+    let mut store = Store::initialize(&f.0).unwrap();
+    let (r, _) = registry(Kind::MirrorPush);
+    store.commit(0, &r).unwrap();
+    store
+        .change_endpoint(
+            &f.0,
+            "https://receiver.example:443",
+            "https://new.example",
+            "owner",
+            20,
+        )
+        .unwrap();
+    let mut next = store.snapshot().unwrap();
+    let mut replacement = r.enrollments[0].clone();
+    replacement.enrollment_id = id('c');
+    replacement.sequence = 2;
+    replacement.endpoint = "https://new.example:443".into();
+    replacement.client_certificate_pins.clear();
+    next.enrollments.push(replacement);
+    next.next_sequence = 3;
+    let mut bearer = r.credentials[0].clone();
+    bearer.credential_id = id('d');
+    bearer.enrollment_id = id('c');
+    bearer.sha256 = Secret::new("new-address".into()).hash();
+    next.credentials.push(bearer);
+    store.commit(next.revision(), &next).unwrap();
+    store
+        .owner_update(&f.0, None, OwnerAction::Revoke, "owner", &id('c'), 20)
+        .unwrap();
+    store.compact(&f.0, 20).unwrap();
+    let current = store.snapshot().unwrap();
+    assert!(
+        current
+            .enrollments
+            .iter()
+            .any(|e| e.enrollment_id == id('a') && e.revoked_at.is_none())
+    );
+    assert!(
+        current
+            .tombstones
+            .iter()
+            .any(|t| t.enrollment_id == id('c'))
+    );
+    assert!(matches!(
+        current.owner_state("laptop", None, OwnerAction::Revoke, 20),
+        OwnerState::Complete { .. }
+    ));
+    assert_eq!(store.snapshot().unwrap(), current);
 }
 
 #[test]

@@ -680,9 +680,14 @@ fn recorded_endpoint_is_normalized_and_retained() {
     );
     assert_eq!(fs::read(f.0.join(IDENTITY)).unwrap(), before);
     assert!(
-        crate::provision::Controller::open(&f.0, "https://different.example", "laptop".into())
-            .err()
-            .unwrap()
-            .contains("Receiver directory records endpoint https://receiver.example:443.")
+        crate::provision::Controller::open(
+            &f.0,
+            "https://different.example",
+            "laptop".into(),
+            None
+        )
+        .err()
+        .unwrap()
+        .contains("Receiver directory records endpoint https://receiver.example:443.")
     );
 }

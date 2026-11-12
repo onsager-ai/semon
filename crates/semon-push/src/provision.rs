@@ -27,7 +27,12 @@ pub struct Controller {
 impl Controller {
     /// The caller is the authenticated local OS owner and authorizes exactly one
     /// machine. Codes must be delivered only to its trusted terminal callback.
-    pub fn open(dir: &Path, endpoint: &str, machine: String) -> Result<Self, String> {
+    pub fn open(
+        dir: &Path,
+        endpoint: &str,
+        machine: String,
+        predecessor: Option<String>,
+    ) -> Result<Self, String> {
         if !semon_sessions::is_machine_name(&machine) {
             return Err("invalid enrollment machine".into());
         }
@@ -51,8 +56,9 @@ impl Controller {
                 .commit(registry.revision(), &registry)
                 .map_err(|e| e.to_string())?;
         }
-        let core = Core::open(store, &endpoint, custody.receiver_id().into())
+        let mut core = Core::open(store, &endpoint, custody.receiver_id().into())
             .map_err(|e| e.to_string())?;
+        core.bind_predecessor(predecessor);
         Ok(Self {
             core,
             custody,

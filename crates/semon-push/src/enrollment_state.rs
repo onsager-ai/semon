@@ -37,10 +37,12 @@ impl Registry {
         }
         Ok(())
     }
-    pub fn usable_machine(&self, machine: &str, now: u64) -> bool {
+    pub fn usable_machine(&self, machine: &str, now: u64) -> Option<&str> {
         self.enrollments
             .iter()
-            .any(|e| e.machine == machine && self.usable(e, now))
+            .filter(|e| e.machine == machine && self.usable(e, now))
+            .max_by_key(|e| e.sequence)
+            .map(|e| e.enrollment_id.as_str())
     }
     pub(super) fn usable(&self, e: &Enrollment, now: u64) -> bool {
         let now = now.max(self.latest);
@@ -76,7 +78,7 @@ impl Registry {
         let live = self
             .enrollments
             .iter()
-            .filter(|e| e.machine == machine && e.revoked_at.is_none())
+            .filter(|e| e.machine == machine && self.usable(e, now))
             .max_by_key(|e| e.sequence);
         let target = live.or_else(|| {
             self.enrollments
@@ -84,13 +86,15 @@ impl Registry {
                 .filter(|e| e.machine == machine)
                 .max_by_key(|e| e.sequence)
         });
+        let tombstone = self
+            .tombstones
+            .iter()
+            .filter(|t| t.machine == machine)
+            .max_by_key(|t| t.sequence);
+        let target =
+            target.filter(|e| live.is_some() || tombstone.is_none_or(|t| e.sequence > t.sequence));
         let Some(e) = target else {
-            return if let Some(t) = self
-                .tombstones
-                .iter()
-                .filter(|t| t.machine == machine)
-                .max_by_key(|t| t.sequence)
-            {
+            return if let Some(t) = tombstone {
                 if kind.is_some_and(|k| t.high_water[k.index()] == 0) {
                     return OwnerState::UnknownKind;
                 }

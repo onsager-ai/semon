@@ -31,7 +31,8 @@ impl Harness {
         )
         .unwrap();
         let controller =
-            provision::Controller::open(&dir.0, "https://localhost:443", "laptop".into()).unwrap();
+            provision::Controller::open(&dir.0, "https://localhost:443", "laptop".into(), None)
+                .unwrap();
         let clock = Arc::new(AtomicU64::new(100));
         let codes = Arc::new(Mutex::new(HashMap::new()));
         let clock_hook = Arc::clone(&clock);

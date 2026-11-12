@@ -294,6 +294,7 @@ pub enum State {
     Revoked,
 }
 struct Session {
+    predecessor: Option<String>,
     binding: String,
     created: u64,
     confirmed: Option<u64>,
@@ -400,6 +401,7 @@ pub struct Core {
     gate: Gate,
     sessions: BTreeMap<String, Session>,
     gate_unavailable: bool,
+    predecessor: Option<String>,
 }
 impl Core {
     /// Fresh registry fields populate origin_read::EnrollmentScope; no extra
@@ -420,7 +422,11 @@ impl Core {
             gate,
             sessions: BTreeMap::new(),
             gate_unavailable: false,
+            predecessor: None,
         })
+    }
+    pub(crate) fn bind_predecessor(&mut self, predecessor: Option<String>) {
+        self.predecessor = predecessor;
     }
     fn observe(&mut self, now: u64) -> Result<u64> {
         if self.gate_unavailable {
@@ -503,6 +509,7 @@ impl Core {
         self.sessions.insert(
             session_id.clone(),
             Session {
+                predecessor: self.predecessor.clone(),
                 binding: connection_binding,
                 created: now,
                 confirmed: None,
@@ -854,18 +861,12 @@ impl Core {
                     return Err(Error::Terminal);
                 }
                 fresh.endpoint = Some(enrollment.endpoint.clone());
-                let replaced: Vec<_> = fresh
-                    .enrollments
-                    .iter()
-                    .filter(|e| {
-                        e.machine == enrollment.machine
-                            && e.revoked_at.is_none()
-                            && e.endpoint == enrollment.endpoint
-                    })
-                    .map(|e| e.enrollment_id.clone())
-                    .collect();
-                for id in replaced {
-                    fresh.revoke_enrollment(&id, None, now);
+                if fresh.usable_machine(&enrollment.machine, now) != session.predecessor.as_deref()
+                {
+                    return Err(Error::Terminal);
+                }
+                if let Some(id) = &session.predecessor {
+                    fresh.revoke_enrollment(id, None, now);
                 }
                 let mut enrollment = enrollment;
                 enrollment.sequence = fresh.next_sequence;

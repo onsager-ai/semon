@@ -627,8 +627,10 @@ confirmed and approved phases, the old enrollment stays usable and unchanged; no
 old authority is revoked merely by generating a code. After origin pairing, key
 confirmation and B4 approval complete, the single durable activation registry
 commit creates the new enrollment's authority and terminally revokes the exact
-prior enrollment. Serialize and recheck that predecessor under the commit lock;
-a changed predecessor refuses activation rather than revoking another enrollment.
+prior enrollment. Carry the predecessor ID observed before the terminal prompt,
+or explicit absence when no usable enrollment existed, into the pairing session.
+Serialize and recheck that observation under the commit lock; a changed predecessor
+refuses activation rather than revoking another enrollment.
 Cancellation, expiry or failure before that commit leaves old authority intact.
 This changes no namespace/claim transfer rules.
 

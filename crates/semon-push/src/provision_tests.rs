@@ -17,7 +17,13 @@ impl Fixture {
         )))
     }
     fn controller(&self) -> Controller {
-        Controller::open(&self.0, "https://receiver.example:443", "laptop".into()).unwrap()
+        Controller::open(
+            &self.0,
+            "https://receiver.example:443",
+            "laptop".into(),
+            None,
+        )
+        .unwrap()
     }
 }
 impl Drop for Fixture {
