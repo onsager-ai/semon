@@ -85,6 +85,12 @@ jobs:
       - name: Session URL shared vectors (ordinary PR gate)
         run: cargo test --locked -p semon-sessions session_route_shared_vectors -- --nocapture
 
+      - name: Diagnose unresolved published dependency lock
+        if: failure()
+        run: |
+          cargo update --workspace
+          git diff -- Cargo.lock
+
       - name: Session activity coverage and bounded cold preparation
         run: |
           cargo test --locked -p semon-sessions events::store::tests::bounded_input:: -- --nocapture
