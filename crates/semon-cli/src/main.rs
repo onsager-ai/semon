@@ -65,7 +65,14 @@ fn main() -> ExitCode {
     match parse_args().and_then(run) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("semon: {error}");
+            if error.starts_with("Receiver state ")
+                || error.starts_with("Receiver audit ")
+                || error.starts_with("Receiver directory ")
+            {
+                eprintln!("{error}");
+            } else {
+                eprintln!("semon: {error}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -221,6 +228,12 @@ struct PushArgs {
 /// `semon receive`: serve pushes, or manage the tokens that may push.
 enum ReceiveArgs {
     Serve(semon_push::serve::ServeOptions),
+    Owner {
+        dir: PathBuf,
+        machine: String,
+        kind: Option<String>,
+        action: semon_push::enrollment::OwnerAction,
+    },
     Enroll {
         options: semon_push::serve::ServeOptions,
         advertise: String,
@@ -963,6 +976,37 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
     if arguments.peek().is_some_and(|argument| argument == "token") {
         return Err("legacy token commands retired; re-pair with receive enroll; preserve existing tokens and history".into());
     }
+    if arguments
+        .peek()
+        .is_some_and(|a| a == "revoke" || a == "enable")
+    {
+        let action = if arguments.next().as_deref() == Some("revoke") {
+            semon_push::enrollment::OwnerAction::Revoke
+        } else {
+            semon_push::enrollment::OwnerAction::Enable
+        };
+        let (mut dir, mut machine, mut kind) = (None, None, None);
+        while let Some(arg) = arguments.next() {
+            let value = arguments
+                .next()
+                .ok_or_else(|| format!("{arg} requires a value"))?;
+            match arg.as_str() {
+                "--dir" => dir = Some(PathBuf::from(value)),
+                "--machine" => machine = Some(value),
+                "--kind" => kind = Some(value),
+                _ => return Err(format!("unknown receive argument: {arg}")),
+            }
+        }
+        if action == semon_push::enrollment::OwnerAction::Enable && kind.is_none() {
+            return Err("receive enable requires --kind K".into());
+        }
+        return Ok(ReceiveArgs::Owner {
+            dir: dir.ok_or("receive requires --dir DIR")?,
+            machine: machine.ok_or("receive requires --machine M")?,
+            kind,
+            action,
+        });
+    }
     let enroll = arguments
         .peek()
         .is_some_and(|argument| argument == "enroll");
@@ -1049,8 +1093,17 @@ fn parse_size(raw: &str) -> Result<u64, String> {
         .ok_or_else(invalid)
 }
 
+#[path = "receive_owner.rs"]
+mod receive_owner;
+
 fn run_receive(args: ReceiveArgs) -> Result<(), String> {
     match args {
+        ReceiveArgs::Owner {
+            dir,
+            machine,
+            kind,
+            action,
+        } => receive_owner::run(&dir, &machine, kind.as_deref(), action),
         ReceiveArgs::Enroll {
             options,
             advertise,
@@ -1071,10 +1124,71 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
             if !terminal.is_terminal() {
                 return Err("receive enroll requires a trusted local terminal".into());
             }
+            let mut predecessor = None;
+            if options.dir.join("enrollment").exists() {
+                let mut registry = semon_push::enrollment::Registry::read_current(&options.dir)
+                    .map_err(|e| {
+                        e.to_string()
+                            .replace("DIR", &options.dir.display().to_string())
+                    })?;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| e.to_string())?
+                    .as_secs();
+                let endpoint = semon_push::pairing::normalize_endpoint(&advertise)
+                    .map_err(|e| e.to_string())?;
+                if let Some(recorded) = registry.endpoint().filter(|recorded| *recorded != endpoint)
+                {
+                    let recorded = recorded.to_owned();
+                    let owner =
+                        semon_push::receiver_custody::ReceiverCustody::open_existing(&options.dir)
+                            .map_err(|e| e.to_string())?;
+                    if !receive_owner::confirm(
+                        &mut terminal,
+                        &format!(
+                            "Change this receiver's address from {recorded} to {endpoint}? Existing origins must pair again. Type yes to confirm: "
+                        ),
+                    )? {
+                        writeln!(terminal, "Address change cancelled; nothing changed.")
+                            .map_err(|e| e.to_string())?;
+                        return Ok(());
+                    }
+                    writeln!(terminal, "Confirmation received.").map_err(|e| e.to_string())?;
+                    let mut store = semon_push::enrollment::Store::open(&options.dir)
+                        .map_err(|e| e.to_string())?;
+                    store
+                        .change_endpoint(
+                            &options.dir,
+                            &recorded,
+                            &endpoint,
+                            &owner.owner().principal,
+                            now,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    registry = store.snapshot().map_err(|e| e.to_string())?;
+                }
+                predecessor = registry.usable_machine(&machine, now).map(str::to_owned);
+                if predecessor.is_some()
+                    && !receive_owner::confirm(
+                        &mut terminal,
+                        &format!(
+                            "Replace the active enrollment for machine {machine}? Its access will stop when pairing completes. Type yes to confirm: "
+                        ),
+                    )?
+                {
+                    writeln!(
+                        terminal,
+                        "Enrollment replacement cancelled; nothing changed."
+                    )
+                    .map_err(|e| e.to_string())?;
+                    return Ok(());
+                }
+            }
             let controller = Arc::new(Mutex::new(semon_push::provision::Controller::open(
                 &options.dir,
                 &advertise,
                 machine,
+                predecessor,
             )?));
             let server = semon_push::serve::Server::bind(&options)?
                 .with_provisioning(Arc::clone(&controller))?;

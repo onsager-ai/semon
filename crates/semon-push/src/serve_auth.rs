@@ -146,7 +146,8 @@ pub struct RegistryAuthenticator {
 impl RegistryAuthenticator {
     pub fn open(dir: &Path) -> Result<Self, String> {
         enrollment::refuse_legacy_tokens(dir).map_err(|e| e.to_string())?;
-        Registry::read_current(dir).map_err(|e| e.to_string())?;
+        Registry::read_current(dir)
+            .map_err(|e| e.to_string().replace("DIR", &dir.display().to_string()))?;
         Ok(Self {
             dir: dir.to_owned(),
         })
@@ -190,6 +191,14 @@ impl RegistryAuthenticator {
         {
             return None;
         }
+        let registry = enrollment::Store::authorize_cutover(
+            &self.dir,
+            required_kind,
+            &secret,
+            verified_pin.as_ref(),
+            now,
+        )
+        .ok()?;
         let enrollment = registry
             .enrollments()
             .iter()
@@ -235,7 +244,7 @@ impl RegistryAuthenticator {
             kinds: enrollment
                 .credential_kinds
                 .iter()
-                .filter(|k| k.revoked_at.is_none())
+                .filter(|k| k.available)
                 .map(|k| k.kind)
                 .collect(),
             verified_client_identity: identity.cloned(),

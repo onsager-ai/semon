@@ -24,9 +24,15 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         let dir = auth_tests::PrivateDir::new();
-        crate::receiver_custody::ReceiverCustody::open_at(&dir.0, 100).unwrap();
+        crate::receiver_custody::ReceiverCustody::open_at_endpoint(
+            &dir.0,
+            100,
+            "https://localhost:443",
+        )
+        .unwrap();
         let controller =
-            provision::Controller::open(&dir.0, "https://localhost:443", "laptop".into()).unwrap();
+            provision::Controller::open(&dir.0, "https://localhost:443", "laptop".into(), None)
+                .unwrap();
         let clock = Arc::new(AtomicU64::new(100));
         let codes = Arc::new(Mutex::new(HashMap::new()));
         let clock_hook = Arc::clone(&clock);
@@ -121,10 +127,13 @@ impl Harness {
     }
     fn input(&self) -> pairing::ActivationInput {
         pairing::ActivationInput {
-            receiver_id: crate::receiver_custody::ReceiverCustody::open_or_initialize(&self.dir.0)
-                .unwrap()
-                .receiver_id()
-                .into(),
+            receiver_id: crate::receiver_custody::ReceiverCustody::open_or_initialize(
+                &self.dir.0,
+                "https://receiver.example:443",
+            )
+            .unwrap()
+            .receiver_id()
+            .into(),
             machine: "laptop".into(),
             binding: crate::enrollment::Binding::Inapplicable,
             kinds: vec![(Kind::MirrorPush, false)],

@@ -22,22 +22,43 @@ pub struct Controller {
     machine: String,
     pending: BTreeMap<String, Pending>,
     unavailable: Option<&'static str>,
+    dir: std::path::PathBuf,
 }
 impl Controller {
     /// The caller is the authenticated local OS owner and authorizes exactly one
     /// machine. Codes must be delivered only to its trusted terminal callback.
-    pub fn open(dir: &Path, endpoint: &str, machine: String) -> Result<Self, String> {
+    pub fn open(
+        dir: &Path,
+        endpoint: &str,
+        machine: String,
+        predecessor: Option<String>,
+    ) -> Result<Self, String> {
         if !semon_sessions::is_machine_name(&machine) {
             return Err("invalid enrollment machine".into());
         }
         let endpoint = pairing::normalize_endpoint(endpoint).map_err(|e| e.to_string())?;
-        let custody = ReceiverCustody::open_or_initialize(dir).map_err(|e| e.to_string())?;
-        let core = Core::open(
-            Store::open(dir).map_err(|e| e.to_string())?,
-            &endpoint,
-            custody.receiver_id().into(),
-        )
-        .map_err(|e| e.to_string())?;
+        if dir.join("enrollment").exists() {
+            crate::enrollment::Registry::read_current(dir).map_err(|e| e.to_string())?;
+        }
+        let custody =
+            ReceiverCustody::open_or_initialize(dir, &endpoint).map_err(|e| e.to_string())?;
+        let mut store = Store::open(dir).map_err(|e| e.to_string())?;
+        let mut registry = store.snapshot().map_err(|e| e.to_string())?;
+        if let Some(recorded) = registry.endpoint() {
+            if recorded != endpoint {
+                return Err(format!(
+                    "Receiver directory records endpoint {recorded}. To change address, run semon receive enroll --advertise {endpoint} with its listener/TLS options and confirm the address change."
+                ));
+            }
+        } else {
+            registry.endpoint = Some(endpoint.clone());
+            store
+                .commit(registry.revision(), &registry)
+                .map_err(|e| e.to_string())?;
+        }
+        let mut core = Core::open(store, &endpoint, custody.receiver_id().into())
+            .map_err(|e| e.to_string())?;
+        core.bind_predecessor(predecessor);
         Ok(Self {
             core,
             custody,
@@ -45,6 +66,7 @@ impl Controller {
             machine,
             pending: BTreeMap::new(),
             unavailable: None,
+            dir: dir.to_owned(),
         })
     }
     pub fn pending(&mut self, now: u64) -> Vec<(String, pairing::State)> {
@@ -228,6 +250,16 @@ impl Controller {
                     return Err(Refused);
                 }
                 self.validate_input(&message.input, now)?;
+                Store::open(&self.dir)
+                    .and_then(|mut store| store.compact(&self.dir, now))
+                    .map_err(|_| {
+                        self.unavailable = Some(crate::enrollment::AUDIT_UNAVAILABLE);
+                        Refused
+                    })?;
+                crate::generation_audit::append(&self.dir, &[]).map_err(|_| {
+                    self.unavailable = Some(crate::enrollment::AUDIT_UNAVAILABLE);
+                    Refused
+                })?;
                 let expected = if message.input.kinds.iter().any(|(_, required)| *required) {
                     vec![crate::client_ca::pin(&transcript.origin_key).map_err(|_| Refused)?]
                 } else {

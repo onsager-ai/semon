@@ -64,6 +64,8 @@ pub mod credentials;
 #[cfg(unix)]
 pub mod enrollment;
 #[cfg(unix)]
+pub mod generation_audit;
+#[cfg(unix)]
 pub mod handle_resolver;
 mod lock;
 pub mod mirror;

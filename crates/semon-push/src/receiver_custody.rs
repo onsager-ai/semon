@@ -194,12 +194,18 @@ impl ReceiverCustody {
         Self::load(dir, &root)
     }
 
-    pub fn open_or_initialize(dir: &Path) -> Result<Self> {
-        Self::open_with_fault(dir, || Ok(()))
+    pub fn open_or_initialize(dir: &Path, endpoint: &str) -> Result<Self> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| Error::Invalid)?
+            .as_secs();
+        Self::open_with_clock(dir, || Ok(()), |_| {}, now, endpoint)
     }
+    #[cfg(test)]
     fn open_with_fault(dir: &Path, before_identity: impl FnOnce() -> Result<()>) -> Result<Self> {
         Self::open_with_hooks(dir, before_identity, |_| {})
     }
+    #[cfg(test)]
     fn open_with_hooks(
         dir: &Path,
         before_identity: impl FnOnce() -> Result<()>,
@@ -209,18 +215,30 @@ impl ReceiverCustody {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| Error::Invalid)?
             .as_secs();
-        Self::open_with_clock(dir, before_identity, locked, now)
+        Self::open_with_clock(
+            dir,
+            before_identity,
+            locked,
+            now,
+            "https://receiver.example:443",
+        )
     }
     #[cfg(test)]
     pub(crate) fn open_at(dir: &Path, now: u64) -> Result<Self> {
-        Self::open_with_clock(dir, || Ok(()), |_| {}, now)
+        Self::open_at_endpoint(dir, now, "https://receiver.example:443")
+    }
+    #[cfg(test)]
+    pub(crate) fn open_at_endpoint(dir: &Path, now: u64, endpoint: &str) -> Result<Self> {
+        Self::open_with_clock(dir, || Ok(()), |_| {}, now, endpoint)
     }
     fn open_with_clock(
         dir: &Path,
         before_identity: impl FnOnce() -> Result<()>,
         locked: impl FnOnce(&File),
         now: u64,
+        endpoint: &str,
     ) -> Result<Self> {
+        let endpoint = crate::pairing::normalize_endpoint(endpoint).map_err(|_| Error::Invalid)?;
         if !dir.try_exists().map_err(|_| Error::Custody)? {
             fs::DirBuilder::new()
                 .mode(0o700)
@@ -262,7 +280,14 @@ impl ReceiverCustody {
             root.create_child(AUDIT)?;
             let acl = root.create_child(ACL)?;
             // Registry owns its own directory, lock and durable format.
-            drop(enrollment::Store::initialize_at(&root.fd).map_err(|_| Error::Custody)?);
+            let mut store =
+                enrollment::Store::initialize_at(&root.fd).map_err(|_| Error::Custody)?;
+            let mut registry = store.snapshot().map_err(|_| Error::Custody)?;
+            registry.endpoint = Some(endpoint);
+            store
+                .commit(registry.revision(), &registry)
+                .map_err(|_| Error::Custody)?;
+            drop(store);
             // MemoryKey takes ownership; the additional seed copy is zeroized too.
             let seed = random_secret()?;
             let key = MemoryKey::from_seed(Zeroizing::new(*seed));
@@ -289,7 +314,7 @@ impl ReceiverCustody {
             root.publish(
                 IDENTITY,
                 &encode(&Identity {
-                    format: 1,
+                    format: 2,
                     receiver_id: enrollment::random_id().map_err(|_| Error::Random)?,
                     issuer_key_id: key_id,
                     client_ca_created,
@@ -323,7 +348,7 @@ impl ReceiverCustody {
         }
         let private = Zeroizing::new(ca_secrets.read(CLIENT_CA_KEY)?);
         crate::client_ca::validate_ca(&private, &certificate).map_err(|_| Error::Invalid)?;
-        if identity.format != 1
+        if identity.format != 2
             || !opaque(&identity.receiver_id, 64)
             || !opaque(&identity.issuer_key_id, 32)
         {
@@ -494,7 +519,7 @@ impl ReceiverCustody {
             if enrollment
                 .credential_kinds
                 .iter()
-                .any(|kind| kind.revoked_at.is_some())
+                .any(|kind| !kind.available)
             {
                 return Err(Error::Invalid);
             }
@@ -586,7 +611,7 @@ impl ReceiverCustody {
                             .and_then(|d| d.read(name))
                             .and_then(|b| {
                                 let i: Identity = decode(&b)?;
-                                if i.format == 1
+                                if i.format == 2
                                     && opaque(&i.receiver_id, 64)
                                     && opaque(&i.issuer_key_id, 32)
                                 {
