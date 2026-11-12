@@ -43,13 +43,11 @@ initialization creates `DIR/enrollment/registry.json` (format 1) and
 One atomic registry document contains enrollment bindings, generation-scoped
 certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
 serialized. The library also exposes legacy `DIR/tokens` refusal without importing
-or modifying it. A transitional authenticator preserves mirror `DIR/tokens` only
-while no enrollment directory exists, rechecking absence on every request. Legacy
-requests may select different token machines on one connection; registry mode
-binds it to one enrollment. Appearance of enrollment custody blocks legacy
-requests; legacy resumes only when that path truly does not exist. Mixed token/
-registry custody refuses startup without changing either file. PR 3.2 removes
-this seam in the end-to-end pairing/token cutover. Renewal and provisioning route
+or modifying it. The listener now authenticates only through the current registry;
+legacy `DIR/tokens` custody refuses startup and every request with explicit
+re-pair/re-issue guidance, preserving the file and all retained history. A connection
+is bound to one enrollment and cannot switch machines between requests. The old
+flat-token issue/revoke/list commands and reader are retired. Renewal and provisioning route
 integration remain unimplemented. The `public_tls`
 pairing core is landed unwired in `crates/semon-push/src/pairing.rs` with deterministic
 coverage in `pairing_tests.rs`; PR 3.2 will wire provisioning routes, CLI, outputs

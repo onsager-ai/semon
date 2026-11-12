@@ -68,45 +68,23 @@ fn revocation_between_requests_on_one_live_connection() {
 }
 
 #[test]
-fn legacy_rechecks_custody_and_preserves_per_request_machine_selection() {
-    for condition in ["complete", "revoked", "incomplete", "empty"] {
-        let dir = PrivateDir::new();
-        let first = crate::tokens::add_token(&dir.0, "laptop").unwrap();
-        let second = crate::tokens::add_token(&dir.0, "desktop").unwrap();
-        let auth = Authenticator::open(&dir.0).unwrap();
-        let mut conn = ConnectionAuthority::default();
-        let check = |token: &str, conn: &mut ConnectionAuthority| {
-            auth.authorize(
-                conn,
-                Some(&format!("Bearer {token}")),
-                Kind::MirrorPush,
-                100,
-            )
-        };
-        assert_eq!(check(&first, &mut conn).as_deref(), Some("laptop"));
-        assert_eq!(check(&second, &mut conn).as_deref(), Some("desktop"));
-        match condition {
-            "complete" | "revoked" => {
-                let mut registry = records(false);
-                if condition == "revoked" {
-                    registry.enrollments[0].revoked_at = Some(100);
-                }
-                install(&dir.0, &registry);
-            }
-            _ => {
-                fs::create_dir(dir.0.join("enrollment")).unwrap();
-                if condition == "incomplete" {
-                    fs::write(dir.0.join("enrollment/registry.json"), b"incomplete").unwrap();
-                }
-            }
-        }
-        let tokens = fs::read(dir.0.join("tokens")).unwrap();
-        assert!(check(&first, &mut conn).is_none(), "{condition}");
-        assert!(check(&second, &mut conn).is_none(), "{condition}");
-        assert_eq!(fs::read(dir.0.join("tokens")).unwrap(), tokens);
-        fs::remove_dir_all(dir.0.join("enrollment")).unwrap();
-        assert_eq!(check(&first, &mut conn).as_deref(), Some("laptop"));
-    }
+fn legacy_custody_refuses_startup_and_routes_without_modification() {
+    let dir = PrivateDir::new();
+    install(&dir.0, &records(false));
+    let auth = Authenticator::open(&dir.0).unwrap();
+    let bytes = b"preserve legacy token bytes";
+    fs::write(dir.0.join("tokens"), bytes).unwrap();
+    assert!(Authenticator::open(&dir.0).is_err());
+    assert!(
+        auth.authorize(
+            &mut ConnectionAuthority::default(),
+            Some("Bearer test-bearer"),
+            Kind::MirrorPush,
+            100
+        )
+        .is_none()
+    );
+    assert_eq!(fs::read(dir.0.join("tokens")).unwrap(), bytes);
 }
 
 #[test]
@@ -195,7 +173,8 @@ fn leaf_pin_and_analytics_authorization() {
 #[test]
 fn pipelined_body_reads_stop_at_each_authorized_boundary() {
     let dir = PrivateDir::new();
-    let token = crate::tokens::add_token(&dir.0, "laptop").unwrap();
+    install(&dir.0, &records(false));
+    let token = "test-bearer";
     let shared = Arc::new(Shared {
         receiver: Receiver::new(dir.0.clone()).unwrap(),
         tokens: Authenticator::open(&dir.0).unwrap(),
@@ -326,6 +305,38 @@ fn current_registry_and_connection_binding_and_revision() {
     assert!(!first.revocation.is_current());
     assert!(authorize(&auth, &mut conn, Kind::MirrorPush).is_none());
 }
+#[test]
+fn retiring_generation_obeys_lower_validity_and_exact_cutover() {
+    let dir = PrivateDir::new();
+    let mut registry = records(false);
+    registry.credentials[0].valid_from = 100;
+    registry.credentials[0].valid_until = 300;
+    registry.enrollments[0].credential_kinds[0]
+        .generations
+        .current = 2;
+    registry.enrollments[0].credential_kinds[0]
+        .generations
+        .retiring = Some(crate::credentials::Retiring {
+        generation: 1,
+        cutover_at: 200,
+    });
+    install(&dir.0, &registry);
+    let auth = RegistryAuthenticator::open(&dir.0).unwrap();
+    let check = |now| {
+        auth.authenticated_enrollment(
+            &mut ConnectionAuthority::default(),
+            Some("Bearer test-bearer"),
+            Kind::MirrorPush,
+            now,
+        )
+    };
+    assert!(check(99).is_none());
+    let admitted = check(100).unwrap();
+    assert!(admitted.revocation.is_current_at(199));
+    assert!(!admitted.revocation.is_current_at(200));
+    assert!(check(200).is_none());
+}
+
 #[test]
 fn listener_authentication_and_revision_ignore_missing_pairing_gate() {
     let dir = PrivateDir::new();
@@ -484,6 +495,92 @@ fn handshake(
     panic!("handshake made no progress");
 }
 #[test]
+fn resumed_tls_preserves_verified_peer_but_changes_pairing_exporter() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = PrivateDir::new();
+    fs::copy(fixture("client-auth/ca.pem"), dir.0.join(CLIENT_TRUST_FILE)).unwrap();
+    fs::set_permissions(
+        dir.0.join(CLIENT_TRUST_FILE),
+        fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let server_config = tls_config(
+        &TlsFiles {
+            certificate: fixture("test-cert.pem"),
+            private_key: fixture("test-key.pem"),
+        },
+        &dir.0,
+    )
+    .unwrap();
+    let mut roots = rustls::RootCertStore::empty();
+    roots
+        .add(CertificateDer::from_pem_slice(&fs::read(fixture("test-cert.pem")).unwrap()).unwrap())
+        .unwrap();
+    let client_config = Arc::new(
+        rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .with_root_certificates(roots)
+        .with_client_auth_cert(
+            vec![
+                CertificateDer::from_pem_slice(
+                    &fs::read(fixture("client-auth/client.pem")).unwrap(),
+                )
+                .unwrap(),
+            ],
+            PrivateKeyDer::from_pem_slice(
+                &fs::read(fixture("client-auth/client-key.pem")).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    );
+    let connect = || {
+        (
+            rustls::ServerConnection::new(Arc::clone(&server_config)).unwrap(),
+            rustls::ClientConnection::new(
+                Arc::clone(&client_config),
+                ServerName::try_from("localhost").unwrap(),
+            )
+            .unwrap(),
+        )
+    };
+    let (mut server, mut client) = connect();
+    handshake(&mut server, &mut client).unwrap();
+    // Drain post-handshake tickets into the client's shared resumption cache.
+    let mut tickets = Vec::new();
+    server.write_tls(&mut tickets).unwrap();
+    if !tickets.is_empty() {
+        client.read_tls(&mut Cursor::new(tickets)).unwrap();
+        client.process_new_packets().unwrap();
+    }
+    let first = server
+        .export_keying_material([0; 32], crate::provision_wire::EXPORTER_LABEL, Some(&[]))
+        .unwrap();
+    let (mut resumed, mut resumed_client) = connect();
+    handshake(&mut resumed, &mut resumed_client).unwrap();
+    assert_eq!(
+        resumed.handshake_kind(),
+        Some(rustls::HandshakeKind::Resumed)
+    );
+    let peer = VerifiedClientIdentity::from_verified_der(&resumed.peer_certificates().unwrap()[0])
+        .unwrap();
+    assert_eq!(peer, identity());
+    let second = resumed
+        .export_keying_material([0; 32], crate::provision_wire::EXPORTER_LABEL, Some(&[]))
+        .unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        second,
+        resumed_client
+            .export_keying_material([0; 32], crate::provision_wire::EXPORTER_LABEL, Some(&[]))
+            .unwrap()
+    );
+}
+
+#[test]
 fn optional_verified_tls_and_foreign_refusal_and_known_pins() {
     let (mut server, mut client) = tls_pair(None);
     handshake(&mut server, &mut client).unwrap();
@@ -511,8 +608,158 @@ fn optional_verified_tls_and_foreign_refusal_and_known_pins() {
     assert!(handshake(&mut server, &mut client).is_err());
 }
 #[test]
+fn real_tls_exporter_completes_receiver_pairing_and_activation() {
+    use crate::{pairing, provision, provision_wire as wire};
+    use ring::signature::KeyPair;
+    let dir = PrivateDir::new();
+    // Custody initializes only an absent/empty receiver root.
+    let mut controller =
+        provision::Controller::open(&dir.0, "https://localhost:443", "laptop".into()).unwrap();
+    let (mut tls, mut client) = tls_pair(None);
+    handshake(&mut tls, &mut client).unwrap();
+    assert_eq!(
+        tls.protocol_version(),
+        Some(rustls::ProtocolVersion::TLSv1_3)
+    );
+    let exporter = tls
+        .export_keying_material([0; 32], wire::EXPORTER_LABEL, Some(&[]))
+        .unwrap();
+    assert_eq!(
+        exporter,
+        client
+            .export_keying_material([0; 32], wire::EXPORTER_LABEL, Some(&[]))
+            .unwrap()
+    );
+    let mut code = None;
+    let opened = controller
+        .handle(
+            wire::Request::parse(wire::Route::Open, br#"{"version":1}"#).unwrap(),
+            exporter,
+            100,
+            |_, secret| {
+                code = Some(pairing::parse_code(secret.expose()).unwrap());
+                Ok(())
+            },
+        )
+        .unwrap();
+    let opened: wire::Opened = serde_json::from_slice(&opened).unwrap();
+    let random = ring::rand::SystemRandom::new();
+    let pkcs8 = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &random,
+    )
+    .unwrap();
+    let key = ring::signature::EcdsaKeyPair::from_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        pkcs8.as_ref(),
+        &random,
+    )
+    .unwrap();
+    let input = pairing::ActivationInput {
+        machine: "laptop".into(),
+        binding: Binding::Inapplicable,
+        kinds: vec![(Kind::MirrorPush, false)],
+        client_certificate_pins: vec![],
+        valid_until: 1000,
+    };
+    let transcript = pairing::Transcript {
+        version: 1,
+        session_id: opened.session_id.clone(),
+        endpoint: opened.endpoint,
+        exporter: exporter.to_vec(),
+        origin_key: key.public_key().as_ref().to_vec(),
+        scope: input.commitment(),
+        origin_nonce: [3; 32],
+        receiver_nonce: wire::decode_fixed(&opened.receiver_nonce).unwrap(),
+        origin_role: "origin".into(),
+        receiver_role: "receiver".into(),
+        profile: "public_tls".into(),
+    };
+    let keys = pairing::derive_keys(&code.unwrap(), &transcript).unwrap();
+    let message = wire::Confirm {
+        version: 1,
+        session_id: transcript.session_id.clone(),
+        origin_key: wire::encode(&transcript.origin_key),
+        origin_nonce: wire::encode(&transcript.origin_nonce),
+        scope_commitment: wire::encode(&transcript.scope),
+        origin_mac: wire::encode(keys.origin_confirmation(&transcript).expose()),
+    };
+    let response = controller
+        .handle(
+            wire::Request::parse(
+                wire::Route::Confirm,
+                &wire::encode_message(&message).unwrap(),
+            )
+            .unwrap(),
+            exporter,
+            100,
+            |_, _| panic!("duplicate code"),
+        )
+        .unwrap();
+    let response: wire::Confirmed = serde_json::from_slice(&response).unwrap();
+    let _confirmed = keys
+        .confirm_receiver(
+            &transcript,
+            &pairing::Mac::from_bytes(wire::decode_fixed(&response.receiver_mac).unwrap()),
+        )
+        .unwrap();
+    let signature = key
+        .sign(&random, &wire::possession_message(&transcript))
+        .unwrap();
+    let approve = wire::Approve {
+        version: 1,
+        session_id: transcript.session_id,
+        proof: wire::encode(signature.as_ref()),
+        input,
+    };
+    let activated = controller
+        .handle(
+            wire::Request::parse(
+                wire::Route::Approve,
+                &wire::encode_message(&approve).unwrap(),
+            )
+            .unwrap(),
+            exporter,
+            100,
+            |_, _| panic!("duplicate code"),
+        )
+        .unwrap();
+    let activated: wire::Activated = serde_json::from_slice(&activated).unwrap();
+    let auth = RegistryAuthenticator::open(&dir.0).unwrap();
+    let bearer = format!("Bearer {}", activated.credentials[0].1);
+    assert!(
+        auth.authenticated_enrollment(
+            &mut ConnectionAuthority::default(),
+            Some(&bearer),
+            Kind::MirrorPush,
+            100
+        )
+        .is_some()
+    );
+    assert!(
+        auth.authenticated_enrollment(
+            &mut ConnectionAuthority::default(),
+            Some(&bearer),
+            Kind::AnalyticsPublish,
+            100
+        )
+        .is_none()
+    );
+    assert!(
+        auth.authenticated_enrollment(
+            &mut ConnectionAuthority::default(),
+            Some(&bearer),
+            Kind::BodyChannel,
+            100
+        )
+        .is_none()
+    );
+}
+
+#[test]
 fn unknown_routes_refuse_with_no_body_read_and_one_response_class() {
     let dir = PrivateDir::new();
+    install(&dir.0, &records(false));
     let shared = Arc::new(Shared {
         receiver: Receiver::new(dir.0.clone()).unwrap(),
         tokens: Authenticator::open(&dir.0).unwrap(),

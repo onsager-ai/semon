@@ -47,8 +47,8 @@ impl Controller {
     }
     pub fn pending(&mut self, now: u64) -> Vec<(String, pairing::State)> {
         self.pending
-            .iter()
-            .filter_map(|(id, _)| {
+            .keys()
+            .filter_map(|id| {
                 self.core
                     .state(id, now)
                     .ok()
@@ -267,13 +267,11 @@ impl Controller {
             assertion_issuer_keys,
             ..
         } = &input.binding
-        {
-            if issuer.kind != IssuerKind::Receiver
+            && (issuer.kind != IssuerKind::Receiver
                 || !issuer.origin_trust_acknowledged
-                || assertion_issuer_keys.as_slice() != [self.custody.issuer().clone()]
-            {
-                return Err(Refused);
-            }
+                || assertion_issuer_keys.as_slice() != [self.custody.issuer().clone()])
+        {
+            return Err(Refused);
         }
         Ok(())
     }

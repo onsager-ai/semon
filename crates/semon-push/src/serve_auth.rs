@@ -4,7 +4,6 @@ use std::path::{Path, PathBuf};
 use crate::{
     credentials::{Decision, Kind, Secret},
     enrollment::{self, Binding, ClaimEpoch, Pin, Registry},
-    tokens::{Tokens, check_tokens_mode},
 };
 use sha2::{Digest, Sha256};
 
@@ -242,39 +241,16 @@ impl RegistryAuthenticator {
     }
 }
 
-/// The sole transitional seam, removed in the pairing cutover PR.
-pub(super) enum Authenticator {
-    // removed in the pairing cutover PR
-    Legacy {
-        tokens: Tokens,
-        dir: PathBuf,
-        blocked: std::sync::Mutex<bool>,
-    },
-    Registry(RegistryAuthenticator),
-}
+/// Registry-only authentication; legacy custody never enables another path.
+pub(super) struct Authenticator(RegistryAuthenticator);
 impl Authenticator {
     pub(super) fn open(dir: &Path) -> Result<Self, String> {
-        // An incomplete or invalid enrollment directory must never enable legacy auth.
-        match std::fs::symlink_metadata(dir.join(enrollment::DIRECTORY)) {
-            Ok(_) => RegistryAuthenticator::open(dir).map(Self::Registry),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                check_tokens_mode(dir)?;
-                Tokens::open(dir).map(|tokens| Self::Legacy {
-                    tokens,
-                    dir: dir.to_owned(),
-                    blocked: std::sync::Mutex::new(false),
-                })
-            }
-            Err(e) => Err(e.to_string()),
-        }
+        RegistryAuthenticator::open(dir).map(Self)
     }
     pub(super) fn count(&self) -> Result<usize, String> {
-        match self {
-            Self::Legacy { tokens, .. } => Ok(tokens.len()),
-            Self::Registry(auth) => Registry::read_current(&auth.dir)
-                .map(|r| r.credentials().len())
-                .map_err(|e| e.to_string()),
-        }
+        Registry::read_current(&self.0.dir)
+            .map(|r| r.credentials().len())
+            .map_err(|e| e.to_string())
     }
     pub(super) fn authorize(
         &self,
@@ -283,37 +259,8 @@ impl Authenticator {
         kind: Kind,
         now: u64,
     ) -> Option<String> {
-        match self {
-            Self::Registry(auth) => auth
-                .authenticated_enrollment(conn, credential, kind, now)
-                .map(|e| e.machine),
-            Self::Legacy {
-                tokens,
-                dir,
-                blocked,
-            } => {
-                let absent = matches!(std::fs::symlink_metadata(dir.join(enrollment::DIRECTORY)), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
-                {
-                    let mut was_blocked = blocked
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if *was_blocked == absent {
-                        eprintln!(
-                            "semon receive: legacy authentication {}",
-                            if absent {
-                                "resumed: enrollment custody absent"
-                            } else {
-                                "refused: enrollment custody present or unreadable"
-                            }
-                        );
-                        *was_blocked = !absent;
-                    }
-                }
-                if !absent || kind != Kind::MirrorPush || conn.verified_client_identity.is_some() {
-                    return None;
-                }
-                tokens.authorize(credential)
-            }
-        }
+        self.0
+            .authenticated_enrollment(conn, credential, kind, now)
+            .map(|e| e.machine)
     }
 }

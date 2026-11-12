@@ -108,13 +108,23 @@ same archive after every batch or restart; see the
 
 `semon receive` is a receiver for `semon push`, for one person with several machines, and the [mirror protocol](docs/mirror-protocol.md)'s reference implementation (`semon_push::mirror::Receiver`). Each machine pushes with its own token, and its copy lands in `DIR/machines/NAME/`: `claude/` and `codex/` hold the input files at their paths under each home, and `facts.json` holds the machine's facts. A token decides the machine, so one machine's token can't write another's files.
 
-On the machine that receives, make a token per machine. It is printed once, and `DIR/tokens` (0600, in a 0700 directory) keeps only its SHA-256 and the name. A name is 1 to 63 of `a-z`, `0-9` and `-`. A missing `DIR` is created 0700; an existing `DIR`, or `DIR/tokens`, that its group or others can use is refused with the `chmod` that fixes it, and never changed.
+The receiver uses the enrollment registry and separate kind-scoped credentials.
+Legacy `DIR/tokens` and `receive token` commands are refused. Preserve those files
+and retained history; explicitly re-pair machines without importing or deleting
+old state. A machine name is 1 to 63 of `a-z`, `0-9` and `-`.
+
+Receiver-side pairing starts in a trusted local terminal:
 
 ```sh
-(umask 077; semon receive token add laptop --dir ~/semon-mirror > laptop.token)
-semon receive token list --dir ~/semon-mirror
-semon receive --dir ~/semon-mirror            # listens on 127.0.0.1:8735
+semon receive enroll --machine laptop --dir ~/semon-mirror \
+  --advertise https://receiver.example:8735 --listen 0.0.0.0:8735 \
+  --tls-cert /private/server.pem --tls-key /private/server-key.pem
 ```
+
+The terminal displays a code when the origin connects and accepts `pending` or
+`cancel SESSION_ID`. Origin `connect` and automatic credential installation arrive
+in the next integration slice; this receiver-side slice alone is not complete
+cross-machine onboarding.
 
 Put the token on that machine in a 0600 file, and point `semon push` at the receiver. For a receiver on this machine, plain `http` to loopback is allowed. Across machines, use an operator-provisioned TLS receiver with a publicly trusted certificate:
 
@@ -122,9 +132,11 @@ Put the token on that machine in a 0600 file, and point `semon push` at the rece
 semon push --to http://127.0.0.1:8735 --token-file ~/.config/semon/laptop.token --watch
 ```
 
-`semon receive token revoke laptop --dir ~/semon-mirror` removes a token. A running receiver re-reads `DIR/tokens` when the file changes, so the next request with that token gets 401 without a restart. If the file stops parsing, or its mode is loosened, no token is accepted until it is fixed.
+A running receiver checks current enrollment, kind and credential validity and
+revocation on each request, including kept-alive connections. Machine credentials
+never establish user identity or source authority. Revocation CLI arrives in PR4.
 
-The receiver listens on `127.0.0.1:8735` unless `--listen ADDR` says otherwise. A non-loopback address is refused unless `--tls-cert PEM --tls-key PEM` are given and `DIR/tokens` holds at least one token; plain HTTP off loopback is always refused. These are the generic `semon receive` rules, implemented in `semon-push`. Semon never opens a port or obtains a certificate: the address, the firewall, DNS and the certificate stay your choices. `semon push` checks a certificate against the standard web roots only, so a TLS receiver needs a certificate that chains to them; configure a trusted certificate before using a remote receiver.
+The receiver listens on `127.0.0.1:8735` unless `--listen ADDR` says otherwise. A non-loopback address is refused unless `--tls-cert PEM --tls-key PEM` are given; plain HTTP off loopback is always refused. These are the generic `semon receive` rules, implemented in `semon-push`. Semon never opens a port or obtains a certificate: the address, the firewall, DNS and the certificate stay your choices. `semon push` checks a certificate against the standard web roots only, so a TLS receiver needs a certificate that chains to them; configure a trusted certificate before using a remote receiver.
 
 Its limits:
 

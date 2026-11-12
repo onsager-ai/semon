@@ -185,17 +185,6 @@ enum ReceiveArgs {
         advertise: String,
         machine: String,
     },
-    TokenAdd {
-        dir: PathBuf,
-        name: String,
-    },
-    TokenRevoke {
-        dir: PathBuf,
-        name: String,
-    },
-    TokenList {
-        dir: PathBuf,
-    },
 }
 
 struct SessionsArgs {
@@ -919,8 +908,7 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
 fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<ReceiveArgs, String> {
     let mut arguments = arguments.peekable();
     if arguments.peek().is_some_and(|argument| argument == "token") {
-        arguments.next();
-        return parse_receive_token_args(arguments);
+        return Err("legacy token commands retired; re-pair with receive enroll; preserve existing tokens and history".into());
     }
     let enroll = arguments
         .peek()
@@ -1008,46 +996,7 @@ fn parse_size(raw: &str) -> Result<u64, String> {
         .ok_or_else(invalid)
 }
 
-fn parse_receive_token_args(
-    mut arguments: impl Iterator<Item = String>,
-) -> Result<ReceiveArgs, String> {
-    let action = arguments
-        .next()
-        .ok_or("receive token requires add NAME, revoke NAME or list")?;
-    let mut name = None;
-    let mut dir = None;
-    while let Some(argument) = arguments.next() {
-        match argument.as_str() {
-            "--dir" => {
-                dir = Some(PathBuf::from(
-                    arguments.next().ok_or("--dir requires a value")?,
-                ));
-            }
-            "-h" | "--help" => return Err(usage()),
-            flag if flag.starts_with('-') => {
-                return Err(format!("unknown receive token argument: {flag}"));
-            }
-            _ if name.is_none() && action != "list" => name = Some(argument.clone()),
-            _ => return Err(format!("unexpected receive token argument: {argument}")),
-        }
-    }
-    let dir = dir.ok_or("receive token requires --dir DIR")?;
-    let name = || {
-        name.clone()
-            .ok_or_else(|| format!("receive token {action} requires NAME"))
-    };
-    match action.as_str() {
-        "add" => Ok(ReceiveArgs::TokenAdd { name: name()?, dir }),
-        "revoke" => Ok(ReceiveArgs::TokenRevoke { name: name()?, dir }),
-        "list" => Ok(ReceiveArgs::TokenList { dir }),
-        _ => Err(format!(
-            "unknown receive token action: {action} (add, revoke or list)"
-        )),
-    }
-}
-
 fn run_receive(args: ReceiveArgs) -> Result<(), String> {
-    use semon_push::tokens;
     match args {
         ReceiveArgs::Enroll {
             options,
@@ -1102,32 +1051,11 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
             );
             if server.tokens() == 0 {
                 eprintln!(
-                    "semon receive: no token yet, so every push is refused (401); add one with `semon receive token add NAME --dir {}`",
+                    "semon receive: no enrolled credentials; authorize pairing with receive enroll --dir {}",
                     options.dir.display()
                 );
             }
             server.run()
-        }
-        ReceiveArgs::TokenAdd { dir, name } => {
-            let token = tokens::add_token(&dir, &name)?;
-            println!("{token}");
-            eprintln!(
-                "semon receive: added a token for {name}. It is shown only this once: put it in a 0600 file on {name} and run `semon push --to URL --token-file FILE` there."
-            );
-            Ok(())
-        }
-        ReceiveArgs::TokenRevoke { dir, name } => {
-            tokens::revoke_token(&dir, &name)?;
-            eprintln!(
-                "semon receive: revoked {name}'s token; a running receiver refuses it from its next request"
-            );
-            Ok(())
-        }
-        ReceiveArgs::TokenList { dir } => {
-            for name in tokens::token_names(&dir)? {
-                println!("{name}");
-            }
-            Ok(())
         }
     }
 }
@@ -2377,10 +2305,9 @@ fn usage() -> String {
          Usage: semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--max-bytes SIZE]\n\
          Usage: semon receive enroll --machine NAME --advertise HTTPS_URL --dir DIR [--listen ADDR] --tls-cert PEM --tls-key PEM\n\
          Enrollment stays in the foreground; its trusted terminal displays codes and accepts pending or cancel SESSION_ID.\n\
-         Usage: semon receive token (add NAME | revoke NAME | list) --dir DIR\n\
          A mirror-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
          DIR/machines/NAME/. It listens on 127.0.0.1:8735 by default; another address needs TLS (an operator-supplied\n\
-         certificate and key) and at least one token. A token, printed once by token add, decides its machine.\n\
+         certificate and key). Enrollment supplies separate kind credentials; legacy DIR/tokens is refused.\n\
          --max-bytes caps each machine's copy (20G by default); a push past it gets 507."
 .to_owned()
 }

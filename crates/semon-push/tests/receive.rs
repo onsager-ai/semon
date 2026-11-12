@@ -17,9 +17,10 @@ use std::{
 };
 
 use semon_push::{
+    credentials::{Bearer, Kind, Secret},
+    enrollment::{Binding, Enrollment, KindScope, Registry, Store},
     mirror::MAX_BODY_BYTES,
     serve::{Limits, ServeOptions, Server, TlsFiles},
-    tokens::{add_token, revoke_token},
     wire::{Append, base64_encode, head_sha256},
 };
 use serde_json::{Value, json};
@@ -65,10 +66,44 @@ fn receiving_with(machines: &[&str], limits: Limits, tls: bool) -> (Receiving, V
         NEXT.fetch_add(1, Ordering::Relaxed)
     ));
     let _ = fs::remove_dir_all(&dir);
-    let tokens = machines
+    semon_push::tokens::prepare_private_dir(&dir, true).unwrap();
+    let tokens: Vec<String> = machines
         .iter()
-        .map(|name| add_token(&dir, name).unwrap())
+        .map(|name| format!("test-bearer-{name}"))
         .collect();
+    let enrollments: Vec<_> = machines
+        .iter()
+        .enumerate()
+        .map(|(index, name)| Enrollment {
+            enrollment_id: format!("{:064x}", index + 1),
+            receiver_id: "receiver-1".into(),
+            machine: (*name).into(),
+            binding: Binding::Inapplicable,
+            client_certificate_pins: vec![],
+            credential_kinds: vec![KindScope::new(Kind::MirrorPush, 1)],
+            revoked_at: None,
+        })
+        .collect();
+    let credentials = enrollments
+        .iter()
+        .zip(&tokens)
+        .enumerate()
+        .map(|(index, (enrollment, token))| Bearer {
+            credential_id: format!("{:064x}", index + 100),
+            enrollment_id: enrollment.enrollment_id.clone(),
+            kind: Kind::MirrorPush,
+            sha256: Secret::new(token.clone()).hash(),
+            generation: 1,
+            valid_from: 0,
+            valid_until: u64::MAX,
+            revoked_at: None,
+        })
+        .collect();
+    let registry = Registry::from_records(enrollments, credentials).unwrap();
+    Store::initialize(&dir)
+        .unwrap()
+        .commit(0, &registry)
+        .unwrap();
     let mut options = ServeOptions::new(&dir);
     options.listen = "127.0.0.1:0".parse().unwrap();
     if tls {
@@ -282,7 +317,15 @@ fn unknown_and_revoked_tokens_are_401() {
     );
 
     // Revoked while the receiver runs: refused from the next request on.
-    revoke_token(&receiving.dir, "laptop").unwrap();
+    let mut store = Store::open(&receiving.dir).unwrap();
+    let mut registry = store.snapshot().unwrap();
+    registry
+        .enrollments
+        .iter_mut()
+        .find(|e| e.machine == "laptop")
+        .unwrap()
+        .revoked_at = Some(1);
+    store.commit(registry.revision(), &registry).unwrap();
     let more = append_body(LOG, b"one\n", 4, b"two\n");
     assert_eq!(
         post(receiving.address, APPEND, Some(&tokens[0]), &more).status,
@@ -649,7 +692,7 @@ fn a_post_without_a_length_is_411() {
 }
 
 #[test]
-fn legacy_keep_alive_authenticates_each_machine_independently() {
+fn registry_keep_alive_cannot_switch_enrollments() {
     let (receiving, tokens) = receiving(&["laptop", "desktop"]);
     let mut stream = TcpStream::connect(receiving.address).unwrap();
     stream
@@ -664,7 +707,12 @@ fn legacy_keep_alive_authenticates_each_machine_independently() {
         stream.write_all(head.as_bytes()).unwrap();
         stream.write_all(&body).unwrap();
         let answer = read_one(&mut stream);
-        assert_eq!(answer.status, 200, "machine {index}: {}", answer.body);
+        assert_eq!(
+            answer.status,
+            if index == 0 { 200 } else { 401 },
+            "machine {index}: {}",
+            answer.body
+        );
     }
 }
 

@@ -156,33 +156,6 @@ impl ServeOptions {
     }
 }
 
-/// The generic mirror listen rule: any loopback address;
-/// any other only with TLS and at least one token. Plain HTTP off loopback
-/// is always refused.
-pub fn check_listen(
-    listen: SocketAddr,
-    tls: bool,
-    tokens: usize,
-    tokens_file: &Path,
-) -> Result<(), String> {
-    if listen.ip().is_loopback() {
-        return Ok(());
-    }
-    if !tls {
-        return Err(
-            "non-loopback receiver requires --tls-cert and --tls-key; plain HTTP is served on loopback only"
-                .into(),
-        );
-    }
-    if tokens == 0 {
-        return Err(format!(
-            "non-loopback receiver requires at least one token in {} (semon receive token add NAME --dir DIR)",
-            tokens_file.display()
-        ));
-    }
-    Ok(())
-}
-
 /// Who is connected: in all, and, not yet authenticated, from each address.
 #[derive(Default)]
 struct Admission {
@@ -295,12 +268,12 @@ impl Server {
     /// existing one others can read is refused), and binds.
     pub fn bind(options: &ServeOptions) -> Result<Self, String> {
         let dir = &options.dir;
-        prepare_private_dir(dir, true)?;
-        let tokens = Authenticator::open(dir)?;
-        let credential_count = tokens.count()?;
         if !options.listen.ip().is_loopback() && options.tls.is_none() {
             return Err("non-loopback receiver requires --tls-cert and --tls-key".into());
         }
+        prepare_private_dir(dir, true)?;
+        let tokens = Authenticator::open(dir)?;
+        let credential_count = tokens.count()?;
         let tls = options
             .tls
             .as_ref()
@@ -1039,6 +1012,19 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
             return refused();
         }
     };
+    if let Request::Approve(message) = &request
+        && message
+            .input
+            .kinds
+            .iter()
+            .any(|(kind, _)| *kind == Kind::BodyChannel)
+    {
+        return Next::Refuse(
+            409,
+            "body_channel available after client-certificate issuance lands",
+            &[],
+        );
+    }
     let reply = controller.handle(request, exporter, now, |id, code| {
         use std::io::IsTerminal;
         use std::os::unix::fs::OpenOptionsExt;
@@ -1228,18 +1214,5 @@ mod tests {
             assert!(!duration.is_zero());
         }
         assert_eq!(Limits::default().clamped(), Limits::default());
-    }
-
-    #[test]
-    fn only_loopback_serves_plain_http() {
-        let file = Path::new("/receiver/tokens");
-        let at = |text: &str| text.parse::<SocketAddr>().unwrap();
-        assert!(check_listen(at("127.0.0.1:8735"), false, 0, file).is_ok());
-        assert!(check_listen(at("[::1]:8735"), false, 0, file).is_ok());
-        let plain = check_listen(at("0.0.0.0:8735"), false, 3, file).unwrap_err();
-        assert!(plain.contains("--tls-cert"), "{plain}");
-        let untokened = check_listen(at("192.0.2.1:8735"), true, 0, file).unwrap_err();
-        assert!(untokened.contains("at least one token"), "{untokened}");
-        assert!(check_listen(at("0.0.0.0:8735"), true, 1, file).is_ok());
     }
 }
