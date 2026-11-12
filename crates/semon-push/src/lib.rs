@@ -36,6 +36,8 @@ use semon_sessions::{Facts, FactsSource, Input, Options};
 use serde::{Deserialize, Serialize};
 
 #[cfg(unix)]
+pub mod append_receiver;
+#[cfg(unix)]
 pub mod append_source;
 mod archives;
 #[cfg(unix)]

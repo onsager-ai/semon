@@ -443,6 +443,19 @@ Emit complete admitted records only. Appends may extend a verified prefix; a
 rewrite creates a new source generation and invalidates continuations. Never
 splice old and new bytes or use a first-4-KiB hash as proof of an entire prefix.
 
+The library lease window is 60 seconds, explicitly renewed by acknowledgement;
+there are at most two leases per enrollment, one unacknowledged page per lease,
+256 KiB per complete framed page and 512 KiB buffered per enrollment. Each page
+gets a fresh assertion, receiver attempt/authorization, origin authorization and
+one receiver range receipt followed by completion. This attempt-per-page choice
+stays below the existing 16-receipt reservation. Append pages stream through
+memory without cache admission. Acknowledgement names the previous request and
+exact opaque continuation; source/cohort generation, export view and pinned policy
+must remain qualified. Cancellation travels in the next bounded origin poll.
+The host drives the nonblocking receiver maintenance hook at each exchange and
+revocation notification. Native complete-record tail rendering is supplied through
+`AppendPageSource`; the library does not define a production source-handle format.
+
 ### Origin read library integration
 
 The Unix `semon-push::origin_read` core consumes one authenticated enrollment
