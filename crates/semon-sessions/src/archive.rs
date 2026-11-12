@@ -218,7 +218,13 @@ impl Verification {
 }
 
 /// Holds the archive's advisory lock until dropped.
-struct Guard(#[allow(dead_code)] fs::File);
+struct Guard(fs::File);
+
+impl Drop for Guard {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
 
 pub(crate) struct NativeRead {
     pub(crate) file: fs::File,
@@ -1058,12 +1064,19 @@ impl Archive {
                 return Err(io::Error::last_os_error());
             }
         }
-        let held = crate::events::Stat::from_metadata(&file.metadata()?)?;
+        let guard = Guard(file);
+        #[cfg(test)]
+        INHERITED_LOCKS.with(|capture| {
+            if let Some(files) = capture.borrow_mut().as_mut() {
+                files.push(guard.0.try_clone().unwrap());
+            }
+        });
+        let held = crate::events::Stat::from_metadata(&guard.0.metadata()?)?;
         let named = crate::events::Stat::from_metadata(&crate::open_input(&path)?.metadata()?)?;
         if (held.dev, held.ino) != (named.dev, named.ino) {
             return Err(invalid("archive lock identity changed"));
         }
-        Ok(Guard(file))
+        Ok(guard)
     }
 }
 
@@ -1506,6 +1519,7 @@ thread_local! {
     /// Fails the next [`publish`] after its temporary file is synced and
     /// before the rename, as a crash there would.
     static FAIL_BEFORE_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static INHERITED_LOCKS: std::cell::RefCell<Option<Vec<fs::File>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// A new exclusive file, 0600; never follows a planted symlink.
