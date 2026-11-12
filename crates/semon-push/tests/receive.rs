@@ -648,6 +648,26 @@ fn a_post_without_a_length_is_411() {
     assert_eq!(exchange(receiving.address, request.as_bytes()).status, 411);
 }
 
+#[test]
+fn legacy_keep_alive_authenticates_each_machine_independently() {
+    let (receiving, tokens) = receiving(&["laptop", "desktop"]);
+    let mut stream = TcpStream::connect(receiving.address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    for (index, token) in tokens.iter().enumerate() {
+        let body = append_body(LOG, b"", 0, b"hello\n");
+        let head = format!(
+            "POST {APPEND} HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(&body).unwrap();
+        let answer = read_one(&mut stream);
+        assert_eq!(answer.status, 200, "machine {index}: {}", answer.body);
+    }
+}
+
 /// Reads one answer off a kept-alive connection: its head, then
 /// Content-Length bytes.
 fn read_one(stream: &mut TcpStream) -> Answer {

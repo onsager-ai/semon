@@ -20,6 +20,17 @@ impl VerifiedClientIdentity {
     pub fn leaf(&self) -> &Pin {
         &self.leaf
     }
+    /// Domain-separated identifier; does not expose the certificate pin itself.
+    pub fn opaque_id(&self) -> crate::origin_read::OpaqueId {
+        let Pin::Spki(pin) = &self.spki else {
+            unreachable!("verified identity always has an SPKI pin")
+        };
+        let mut hash = Sha256::new();
+        hash.update(b"semon.verified-client-identity.v1\0");
+        hash.update(pin);
+        let id: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        crate::origin_read::OpaqueId::new(&id).expect("SHA-256 hex is an opaque identifier")
+    }
     pub(super) fn from_verified_der(
         der: &rustls::pki_types::CertificateDer<'_>,
     ) -> Result<Self, rustls::Error> {
@@ -50,6 +61,49 @@ pub struct AuthenticatedEnrollment {
     pub verified_client_identity: Option<VerifiedClientIdentity>,
     pub revocation: RevisionHandle,
 }
+impl TryFrom<&AuthenticatedEnrollment> for crate::origin_read::EnrollmentScope {
+    type Error = crate::origin_read::Refused;
+    fn try_from(value: &AuthenticatedEnrollment) -> Result<Self, Self::Error> {
+        use crate::origin_read::{OpaqueId, Refused};
+        let required =
+            |v: &Option<String>| OpaqueId::new(v.as_deref().ok_or(Refused::InvalidRequest)?);
+        Ok(Self {
+            enrollment_id: OpaqueId::new(&value.enrollment_id)?,
+            machine: OpaqueId::new(&value.machine)?,
+            namespace: required(&value.namespace)?,
+            origin_incarnation: required(&value.origin_incarnation)?,
+            index_incarnation: required(&value.index_incarnation)?,
+            publisher_claim_epoch: match &value.publisher_claim_epoch {
+                Some(ClaimEpoch::Assigned(epoch)) => Some(*epoch),
+                _ => None,
+            },
+            kinds: value.kinds.iter().copied().map(Into::into).collect(),
+            verified_client_identity: value
+                .verified_client_identity
+                .as_ref()
+                .ok_or(Refused::InvalidRequest)?
+                .opaque_id(),
+        })
+    }
+}
+impl From<Kind> for crate::origin_read::EnrollmentKind {
+    fn from(kind: Kind) -> Self {
+        match kind {
+            Kind::AnalyticsPublish => Self::Analytics,
+            Kind::BodyChannel => Self::BodyChannel,
+            Kind::MirrorPush => Self::Mirror,
+        }
+    }
+}
+impl From<crate::origin_read::EnrollmentKind> for Kind {
+    fn from(kind: crate::origin_read::EnrollmentKind) -> Self {
+        match kind {
+            crate::origin_read::EnrollmentKind::Analytics => Self::AnalyticsPublish,
+            crate::origin_read::EnrollmentKind::BodyChannel => Self::BodyChannel,
+            crate::origin_read::EnrollmentKind::Mirror => Self::MirrorPush,
+        }
+    }
+}
 
 /// A changed revision requires a new authorization decision before further release.
 /// An unreadable registry also invalidates this handle. No secret is retained.
@@ -57,10 +111,25 @@ pub struct AuthenticatedEnrollment {
 pub struct RevisionHandle {
     dir: PathBuf,
     revision: u64,
+    valid_from: u64,
+    valid_until: u64,
 }
 impl RevisionHandle {
+    /// Poll this lock-free snapshot comparison to observe changes by other processes.
+    pub fn revision_is_current(&self) -> bool {
+        enrollment::refuse_legacy_tokens(&self.dir).is_ok()
+            && Registry::read_current(&self.dir).is_ok_and(|r| r.revision() == self.revision)
+    }
     pub fn is_current(&self) -> bool {
-        Registry::read_current(&self.dir).is_ok_and(|r| r.revision() == self.revision)
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .is_ok_and(|now| self.is_current_at(now.as_secs()))
+    }
+    /// Conservatively requires reauthorization on any revision change. The same
+    /// revision preserves the enrollment, kind, credential generation and pins
+    /// already authorized; time can independently expire that authority.
+    pub fn is_current_at(&self, now: u64) -> bool {
+        now >= self.valid_from && now < self.valid_until && self.revision_is_current()
     }
 }
 
@@ -133,6 +202,21 @@ impl RegistryAuthenticator {
                 Some(publisher_claim_epoch.clone()),
             ),
         };
+        let credential = registry.credentials().iter().find(|c| {
+            c.enrollment_id == decision && c.kind == required_kind && c.sha256 == secret.hash()
+        })?;
+        let scope = enrollment
+            .credential_kinds
+            .iter()
+            .find(|s| s.kind == required_kind)?;
+        let valid_until = scope
+            .generations
+            .retiring
+            .as_ref()
+            .filter(|old| old.generation == credential.generation)
+            .map_or(credential.valid_until, |old| {
+                credential.valid_until.min(old.cutover_at)
+            });
         conn.enrollment_id = Some(decision.clone());
         Some(AuthenticatedEnrollment {
             enrollment_id: decision,
@@ -151,6 +235,8 @@ impl RegistryAuthenticator {
             revocation: RevisionHandle {
                 dir: self.dir.clone(),
                 revision: registry.revision(),
+                valid_from: credential.valid_from,
+                valid_until,
             },
         })
     }
@@ -159,7 +245,11 @@ impl RegistryAuthenticator {
 /// The sole transitional seam, removed in the pairing cutover PR.
 pub(super) enum Authenticator {
     // removed in the pairing cutover PR
-    Legacy(Tokens),
+    Legacy {
+        tokens: Tokens,
+        dir: PathBuf,
+        blocked: std::sync::Mutex<bool>,
+    },
     Registry(RegistryAuthenticator),
 }
 impl Authenticator {
@@ -169,14 +259,18 @@ impl Authenticator {
             Ok(_) => RegistryAuthenticator::open(dir).map(Self::Registry),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 check_tokens_mode(dir)?;
-                Tokens::open(dir).map(Self::Legacy)
+                Tokens::open(dir).map(|tokens| Self::Legacy {
+                    tokens,
+                    dir: dir.to_owned(),
+                    blocked: std::sync::Mutex::new(false),
+                })
             }
             Err(e) => Err(e.to_string()),
         }
     }
     pub(super) fn count(&self) -> Result<usize, String> {
         match self {
-            Self::Legacy(tokens) => Ok(tokens.len()),
+            Self::Legacy { tokens, .. } => Ok(tokens.len()),
             Self::Registry(auth) => Registry::read_current(&auth.dir)
                 .map(|r| r.credentials().len())
                 .map_err(|e| e.to_string()),
@@ -193,17 +287,33 @@ impl Authenticator {
             Self::Registry(auth) => auth
                 .authenticated_enrollment(conn, credential, kind, now)
                 .map(|e| e.machine),
-            Self::Legacy(tokens)
-                if kind == Kind::MirrorPush && conn.verified_client_identity.is_none() =>
-            {
-                let machine = tokens.authorize(credential)?;
-                if conn.enrollment_id.as_ref().is_some_and(|id| id != &machine) {
+            Self::Legacy {
+                tokens,
+                dir,
+                blocked,
+            } => {
+                let absent = matches!(std::fs::symlink_metadata(dir.join(enrollment::DIRECTORY)), Err(e) if e.kind() == std::io::ErrorKind::NotFound);
+                {
+                    let mut was_blocked = blocked
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if *was_blocked == absent {
+                        eprintln!(
+                            "semon receive: legacy authentication {}",
+                            if absent {
+                                "resumed: enrollment custody absent"
+                            } else {
+                                "refused: enrollment custody present or unreadable"
+                            }
+                        );
+                        *was_blocked = !absent;
+                    }
+                }
+                if !absent || kind != Kind::MirrorPush || conn.verified_client_identity.is_some() {
                     return None;
                 }
-                conn.enrollment_id = Some(machine.clone());
-                Some(machine)
+                tokens.authorize(credential)
             }
-            Self::Legacy(_) => None,
         }
     }
 }

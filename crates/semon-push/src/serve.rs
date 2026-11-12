@@ -460,6 +460,8 @@ fn client_trust(dir: &Path) -> Result<Option<rustls::RootCertStore>, String> {
 /// rustls reads through it too, so a TLS record, or a handshake, trickled
 /// in a byte at a time still ends at the deadline.
 struct Timed {
+    #[cfg(test)]
+    bytes_read: usize,
     socket: TcpStream,
     deadline: Instant,
     gap: Duration,
@@ -479,7 +481,12 @@ impl Read for Timed {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let timeout = self.remaining()?;
         self.socket.set_read_timeout(Some(timeout))?;
-        self.socket.read(buffer)
+        let read = self.socket.read(buffer)?;
+        #[cfg(test)]
+        {
+            self.bytes_read += read;
+        }
+        Ok(read)
     }
 }
 
@@ -578,10 +585,11 @@ fn is_timeout(error: &io::Error) -> bool {
 
 impl Connection {
     /// Reads once, by `deadline`.
-    fn read_more(&mut self, deadline: Instant) -> io::Result<usize> {
+    fn read_more(&mut self, deadline: Instant, remaining: usize) -> io::Result<usize> {
         self.stream.timed().deadline = deadline;
         let mut chunk = [0u8; 16 * 1024];
-        let read = self.stream.read(&mut chunk)?;
+        let bound = remaining.min(chunk.len());
+        let read = self.stream.read(&mut chunk[..bound])?;
         self.buffer.extend_from_slice(&chunk[..read]);
         Ok(read)
     }
@@ -638,7 +646,7 @@ impl Connection {
     fn read_body(&mut self, length: usize) -> io::Result<Vec<u8>> {
         let deadline = Instant::now() + self.limits.body;
         while self.buffer.len() < length {
-            if self.read_more(deadline)? == 0 {
+            if self.read_more(deadline, length - self.buffer.len())? == 0 {
                 return Err(io::ErrorKind::UnexpectedEof.into());
             }
         }
@@ -851,6 +859,8 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
     let _ = socket.set_nodelay(true);
     let limits = shared.limits;
     let timed = Timed {
+        #[cfg(test)]
+        bytes_read: 0,
         socket,
         deadline: accepted + limits.head,
         gap: limits.gap,
