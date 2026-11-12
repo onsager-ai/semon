@@ -3936,7 +3936,7 @@ impl SqliteStore {
                 {
                     transaction.execute(
                         "INSERT INTO native_chain_evidence VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(source_path) DO UPDATE SET native_id=excluded.native_id,chain_id=excluded.chain_id,consumed_offset=excluded.consumed_offset,prefix_sha256=excluded.prefix_sha256,recorded_size=excluded.recorded_size",
-                        params![path.as_ref(), native_id, admitted.chain_id, admitted.consumed_offset, admitted.prefix_sha256.iter().map(|byte| format!("{byte:02x}")).collect::<String>(), admitted.recorded_size],
+                        params![path.as_ref(), native_id, admitted.chain_id, int(admitted.consumed_offset), admitted.prefix_sha256.iter().map(|byte| format!("{byte:02x}")).collect::<String>(), int(admitted.recorded_size)],
                     ).map_err(failure)?;
                 }
             }
@@ -5197,7 +5197,7 @@ pub(crate) fn cohort_chain(
     let evidence = connection.query_row(
         "SELECT native_id,chain_id,consumed_offset,prefix_sha256,recorded_size FROM native_chain_evidence WHERE source_path=?1",
         [&source.local_path],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, u64>(2)?, row.get::<_, String>(3)?, row.get::<_, u64>(4)?)),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, uint(row.get::<_, i64>(2)?), row.get::<_, String>(3)?, uint(row.get::<_, i64>(4)?))),
     ).optional().map_err(|error| match error {
         rusqlite::Error::SqliteFailure(_, _) => Unavailable,
         _ => Stale,
