@@ -556,7 +556,15 @@ pub struct ReadService<'a, 'b, C: Clock> {
     pub origin_limits: Limits,
 }
 impl<C: Clock> ReadService<'_, '_, C> {
-    pub fn read(&mut self, principal: &Principal, mut input: ReadInput) -> Result<TypedPage> {
+    pub fn read(&mut self, principal: &Principal, input: ReadInput) -> Result<TypedPage> {
+        self.read_with(principal, input, &mut |_, _| {})
+    }
+    fn read_with(
+        &mut self,
+        principal: &Principal,
+        mut input: ReadInput,
+        exchange: &mut dyn FnMut(&Broker<'_>, &Request),
+    ) -> Result<TypedPage> {
         let grant = match self.acls.decide(
             &principal.subject,
             input.scope.machine.as_str(),
@@ -577,7 +585,7 @@ impl<C: Clock> ReadService<'_, '_, C> {
             };
             // The current origin validator refuses this. Never read cache bytes
             // on that path; a fresh request/nonce is required after unavailable.
-            match self.round_trip(principal, &input, grant.version()) {
+            match self.round_trip(principal, &input, grant.version(), exchange) {
                 Err(Reason::Unavailable) => {
                     let mut nonce = [0; 32];
                     getrandom::fill(&mut nonce).map_err(|_| Reason::Unavailable)?;
@@ -588,13 +596,14 @@ impl<C: Clock> ReadService<'_, '_, C> {
                 Ok(_) => return Err(Reason::Unavailable),
             }
         }
-        self.round_trip(principal, &input, grant.version())
+        self.round_trip(principal, &input, grant.version(), exchange)
     }
     fn round_trip(
         &mut self,
         principal: &Principal,
         input: &ReadInput,
         grant_version: &str,
+        exchange: &mut dyn FnMut(&Broker<'_>, &Request),
     ) -> Result<TypedPage> {
         let request = &input.request;
         if serde_json::to_vec(&request.destination).ok()
@@ -658,8 +667,13 @@ impl<C: Clock> ReadService<'_, '_, C> {
                 .map_err(|_| Reason::Unavailable)?;
             let mut outgoing = request.clone();
             outgoing.assertion = hex::encode(body_assertion::encode(&assertion));
-            self.broker
-                .enqueue(self.enrollment, input.scope.clone(), channel, outgoing)?;
+            self.broker.enqueue(
+                self.enrollment,
+                input.scope.clone(),
+                channel,
+                outgoing.clone(),
+            )?;
+            exchange(self.broker, &outgoing);
             let verified = self.broker.await_result(
                 self.enrollment,
                 request.request_id,
@@ -706,9 +720,14 @@ impl<C: Clock> ReadService<'_, '_, C> {
             AclDecision::Granted(current) if current.version() == grant_version => {}
             _ => return Err(Reason::Forbidden),
         }
+        let binding = verified.binding.receiver_binding.clone();
+        #[cfg(test)]
+        let binding = tests::authorization_binding(binding);
         self.audit
-            .authorize(attempt, verified.binding.receiver_binding.clone())
+            .authorize(attempt, binding)
             .map_err(|_| Reason::AuditFailure)?;
+        #[cfg(test)]
+        tests::observe_admission(&verified.binding.receiver_binding);
         // Admission is constructed only after authorize() has fsynced.
         let admission = ReadAdmission::after_online_authorization_and_audit(
             verified.binding.cache_key.clone(),
@@ -719,14 +738,6 @@ impl<C: Clock> ReadService<'_, '_, C> {
         let _cached = self
             .cache
             .lookup(admission)
-            .map_err(|_| Reason::Unavailable)?;
-        self.cache
-            .insert(
-                verified.binding.cache_key,
-                &verified.payload,
-                fetched / 1000,
-                Some(self.origin_limits),
-            )
             .map_err(|_| Reason::Unavailable)?;
         if !self.enrollment.is_current(&input.scope) {
             return Err(Reason::Revoked);
@@ -743,12 +754,39 @@ impl<C: Clock> ReadService<'_, '_, C> {
         if self.broker.clock.now_millis() >= verified.binding.deadline_millis {
             return Err(Reason::Unavailable);
         }
-        let bytes = verified.payload.len() as u64;
-        // Page/field reads use completion accounting. Range receipts are
-        // reserved by receiver_audit for streaming attempts in a later slice.
-        self.audit
-            .complete(attempt, Outcome::Completed, bytes)
-            .map_err(|_| Reason::AuditFailure)?;
+        let key = verified.binding.cache_key;
+        self.cache
+            .insert(
+                key.clone(),
+                &verified.payload,
+                fetched / 1000,
+                Some(self.origin_limits),
+            )
+            .map_err(|_| Reason::Unavailable)?;
+        let release = (|| {
+            if !self.enrollment.is_current(&input.scope) {
+                return Err(Reason::Revoked);
+            }
+            if self.broker.clock.now_millis() >= verified.binding.deadline_millis {
+                return Err(Reason::Unavailable);
+            }
+            match self.acls.decide(
+                &principal.subject,
+                input.scope.machine.as_str(),
+                input.scope.namespace.as_str(),
+                Permission::BodyRead,
+            ) {
+                AclDecision::Granted(current) if current.version() == grant_version => {}
+                _ => return Err(Reason::Forbidden),
+            }
+            self.audit
+                .complete(attempt, Outcome::Completed, verified.payload.len() as u64)
+                .map_err(|_| Reason::AuditFailure)
+        })();
+        if let Err(reason) = release {
+            self.cache.discard(&key).map_err(|_| Reason::Unavailable)?;
+            return Err(reason);
+        }
         Ok(page)
     }
 }
@@ -1321,6 +1359,363 @@ mod tests {
         }
         drop(audit);
         std::fs::remove_dir_all(path).unwrap();
+    }
+    thread_local! {
+        static FAIL_AUTHORIZE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        static ADMISSION: std::cell::RefCell<Option<(std::path::PathBuf, usize)>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn authorization_binding(
+        mut binding: receiver_audit::AuthorizationBinding,
+    ) -> receiver_audit::AuthorizationBinding {
+        FAIL_AUTHORIZE.with(|fail| {
+            if fail.get() {
+                binding.request_id = id(99);
+            }
+        });
+        binding
+    }
+    pub(super) fn observe_admission(binding: &receiver_audit::AuthorizationBinding) {
+        ADMISSION.with(|slot| {
+            if let Some((path, count)) = slot.borrow_mut().as_mut() {
+                let journal = std::fs::read_to_string(path).unwrap();
+                let events: Vec<serde_json::Value> = journal.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+                let expected = serde_json::to_value(binding).unwrap();
+                assert!(events.iter().any(|event| event["event"] == "authorized" && event["binding"] == expected));
+                *count += 1;
+            }
+        });
+    }
+    #[derive(Clone, Copy, Debug)]
+    enum Failure {
+        Mismatch,
+        Digest,
+        Audit,
+        Unavailable,
+        Timeout,
+        Revoked,
+        Oversize,
+        Fallback,
+    }
+    #[test]
+    fn service_failures_do_not_cache_and_fallback_requires_admission() {
+        use std::os::unix::fs::PermissionsExt;
+        for (index, mode) in [
+            Failure::Mismatch,
+            Failure::Digest,
+            Failure::Audit,
+            Failure::Unavailable,
+            Failure::Timeout,
+            Failure::Revoked,
+            Failure::Oversize,
+            Failure::Fallback,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let at = At(AtomicU64::new(10_000));
+            let a = auth("a");
+            let broker = Broker::new(Config::default(), &at).unwrap();
+            let registration = broker.begin_poll(&a, &poll_bytes()).unwrap();
+            drop(registration);
+            let root =
+                std::env::temp_dir().join(format!("body-service-{}-{index}", std::process::id()));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let acl = root.join("acl");
+            std::fs::create_dir(&acl).unwrap();
+            std::fs::set_permissions(&acl, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let grants = acl.join("grants.json");
+            std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"machine","namespace":"namespace","permissions":["body_read"]}]}"#).unwrap();
+            std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let key_path = root.join("key");
+            std::fs::write(&key_path, [7; 32]).unwrap();
+            std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let cache_dir = root.join("cache");
+            let mut cache = BodyCache::open(&cache_dir, &key_path, &at, Limits::default()).unwrap();
+            let audit_dir = root.join("audit");
+            let mut receiver =
+                AuditStore::open(&audit_dir, &at, receiver_audit::MAX_BYTES).unwrap();
+            let mut origin = crate::origin_audit::AuditStore::open(
+                &root.join("origin"),
+                &at,
+                crate::origin_audit::MAX_BYTES,
+            )
+            .unwrap();
+            let journal_path = audit_dir.join(receiver_audit::AUDIT_FILE);
+            ADMISSION.with(|slot| *slot.borrow_mut() = Some((journal_path.clone(), 0)));
+            let acls = Acls::new(acl);
+            let signing = body_assertion::MemoryKey::from_seed(Zeroizing::new([7; 32]));
+            let principal = Principal {
+                subject: "subject".into(),
+                audit_id: id(9),
+            };
+            let (request, _) = signed(21);
+            // Candidate is metadata only; seed a real encrypted candidate for the
+            // fallback case, then prove the returned text comes from fresh origin.
+            let seed_claims = body_assertion::decode(&hex::decode(&request.assertion).unwrap())
+                .unwrap()
+                .claims;
+            let seed_request = ReadRequest {
+                source_handle: request.source_handle.clone(),
+                target: Target::Field(opaque("assistant")),
+                anchor: request.anchor.clone(),
+                request_digest: request.digest().unwrap(),
+                channel_binding: [3; 32],
+                max_bytes: wire::RESPONSE_CAP,
+                destination: Destination::Viewer,
+            };
+            let seed = OriginRead {
+                enrollment: &a,
+                resolver: &Resolver,
+                policies: &Policies,
+                renderer: &Renderer,
+                clock: &at,
+                cancelled: &|| false,
+                audit: &mut origin,
+            }
+            .read(&seed_claims, &seed_request)
+            .unwrap();
+            let mut candidate = None;
+            if matches!(mode, Failure::Fallback) {
+                let old = TypedPage {
+                    fields: vec![TypedField {
+                        field: Field::Assistant,
+                        text: UntrustedText::new("cached stale body".into()),
+                    }],
+                }
+                .canonical_bytes()
+                .unwrap();
+                let mut old_key = seed.response_binding.cache_key.clone();
+                old_key.payload_digest = Sha256::digest(&*old).into();
+                cache.insert(old_key.clone(), &old, 10, None).unwrap();
+                candidate = Some(wire::Candidate {
+                    key: old_key,
+                    anchor: opaque("anchor"),
+                    mapping: id(8),
+                    continuation: None,
+                    payload_bytes: old.len() as u64,
+                });
+            }
+            seed.finish(&mut origin, Outcome::Cancelled, 0).unwrap();
+            let input = ReadInput {
+                scope: a.scope.clone(),
+                request,
+                generation: id(4),
+                destination: Destination::Viewer,
+                candidate,
+            };
+            let mut calls = 0;
+            let mut service = ReadService {
+                broker: &broker,
+                enrollment: &a,
+                acls: &acls,
+                signing_key: &signing,
+                issuer_key_id: "issuer",
+                receiver_policy_version: id(11),
+                audit: &mut receiver,
+                cache: &mut cache,
+                origin_limits: Limits::default(),
+            };
+            FAIL_AUTHORIZE.with(|fail| fail.set(matches!(mode, Failure::Audit)));
+            let result = service.read_with(&principal, input, &mut |broker, outgoing| {
+                calls += 1;
+                let poll = broker.begin_poll(&a, &poll_bytes()).unwrap();
+                let dispatched = poll.try_take(&a).unwrap().unwrap();
+                assert_eq!(dispatched.request_id, outgoing.request_id);
+                if matches!(mode, Failure::Timeout) {
+                    at.0.store(20_000, Ordering::Relaxed);
+                    return;
+                }
+                if matches!(mode, Failure::Revoked) {
+                    a.revoked.store(true, Ordering::Relaxed);
+                    broker.revocation_changed(&a).unwrap();
+                    return;
+                }
+                if matches!(mode, Failure::Unavailable)
+                    || (matches!(mode, Failure::Fallback) && calls == 1)
+                {
+                    if matches!(mode, Failure::Fallback) {
+                        assert!(matches!(
+                            outgoing.operation,
+                            wire::Operation::Resolve {
+                                authorization_only: Some(_),
+                                ..
+                            }
+                        ));
+                        ADMISSION.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().1, 0));
+                    }
+                    broker
+                        .accept_response(
+                            &a,
+                            outgoing.request_id,
+                            &frame(
+                                outgoing.request_id,
+                                0,
+                                true,
+                                FrameContent::Refused {
+                                    reason: Reason::Unavailable,
+                                    retryable: true,
+                                },
+                                Vec::new(),
+                            ),
+                        )
+                        .unwrap();
+                    return;
+                }
+                if matches!(mode, Failure::Fallback) {
+                    assert!(matches!(
+                        outgoing.operation,
+                        wire::Operation::ReadField { .. }
+                    ));
+                    assert_ne!(outgoing.request_id, id(21));
+                }
+                let claims = body_assertion::decode(&hex::decode(&outgoing.assertion).unwrap())
+                    .unwrap()
+                    .claims;
+                let request = ReadRequest {
+                    source_handle: outgoing.source_handle.clone(),
+                    target: Target::Field(opaque("assistant")),
+                    anchor: outgoing.anchor.clone(),
+                    request_digest: outgoing.digest().unwrap(),
+                    channel_binding: [3; 32],
+                    max_bytes: outgoing.max_bytes as usize,
+                    destination: outgoing.destination,
+                };
+                let authorized = OriginRead {
+                    enrollment: &a,
+                    resolver: &Resolver,
+                    policies: &Policies,
+                    renderer: &Renderer,
+                    clock: &at,
+                    cancelled: &|| false,
+                    audit: &mut origin,
+                }
+                .read(&claims, &request)
+                .unwrap();
+                let mut binding = authorized.response_binding.clone();
+                if matches!(mode, Failure::Mismatch) {
+                    binding.mapping.anchor = opaque("wrong");
+                }
+                let mut payload = authorized
+                    .page
+                    .as_ref()
+                    .unwrap()
+                    .canonical_bytes()
+                    .unwrap()
+                    .to_vec();
+                if matches!(mode, Failure::Digest) {
+                    payload[0] ^= 1;
+                }
+                let header = frame(
+                    outgoing.request_id,
+                    0,
+                    false,
+                    FrameContent::Header {
+                        binding: Box::new(binding),
+                    },
+                    Vec::new(),
+                );
+                let accepted = broker.accept_response(&a, outgoing.request_id, &header);
+                if matches!(mode, Failure::Mismatch) {
+                    assert_eq!(accepted, Err(Reason::BindingMismatch));
+                } else {
+                    accepted.unwrap();
+                    if matches!(mode, Failure::Oversize) {
+                        let work = broker
+                            .state
+                            .lock()
+                            .unwrap()
+                            .work
+                            .get(&outgoing.request_id)
+                            .unwrap()
+                            .encoded_bytes;
+                        let oversized = frame(
+                            outgoing.request_id,
+                            1,
+                            true,
+                            FrameContent::Data,
+                            vec![0; wire::RESPONSE_CAP - work + 1],
+                        );
+                        assert_eq!(
+                            broker.accept_response(&a, outgoing.request_id, &oversized),
+                            Err(Reason::OverBudget)
+                        );
+                    } else {
+                        let accepted = broker.accept_response(
+                            &a,
+                            outgoing.request_id,
+                            &frame(
+                                outgoing.request_id,
+                                1,
+                                true,
+                                FrameContent::Data,
+                                payload.clone(),
+                            ),
+                        );
+                        if matches!(mode, Failure::Digest) {
+                            assert_eq!(accepted, Err(Reason::BindingMismatch));
+                        } else {
+                            accepted.unwrap();
+                        }
+                    }
+                }
+                authorized
+                    .finish(&mut origin, Outcome::Cancelled, 0)
+                    .unwrap();
+            });
+            if matches!(mode, Failure::Fallback) {
+                assert_eq!(result.unwrap().fields[0].text.as_str(), "safe typed body");
+                assert_eq!(calls, 2);
+                ADMISSION.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().1, 1));
+            } else {
+                let expected = match mode {
+                    Failure::Mismatch | Failure::Digest => Reason::BindingMismatch,
+                    Failure::Audit => Reason::AuditFailure,
+                    Failure::Unavailable => Reason::Unavailable,
+                    Failure::Timeout => Reason::Deadline,
+                    Failure::Revoked => Reason::Revoked,
+                    Failure::Oversize => Reason::OverBudget,
+                    Failure::Fallback => unreachable!(),
+                };
+                assert!(
+                    matches!(result, Err(reason) if reason == expected),
+                    "{mode:?}"
+                );
+                assert_eq!(service.cache.entry_count(), 0, "{mode:?}");
+                assert_eq!(
+                    std::fs::read_dir(&cache_dir)
+                        .unwrap()
+                        .filter_map(|e| e.ok())
+                        .filter(|e| e.path().extension().is_some_and(|ext| ext == "entry"))
+                        .count(),
+                    0,
+                    "{mode:?}"
+                );
+                let events: Vec<serde_json::Value> = std::fs::read_to_string(&journal_path)
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert!(
+                    events.iter().any(|e| e["event"] == "completion"
+                        && e["outcome"] == "failed"
+                        && e["bytes"] == 0),
+                    "{mode:?}"
+                );
+                assert!(
+                    !events
+                        .iter()
+                        .any(|e| e["event"] == "completion" && e["outcome"] == "completed")
+                );
+                ADMISSION.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().1, 0));
+            }
+            FAIL_AUTHORIZE.with(|fail| fail.set(false));
+            ADMISSION.with(|slot| *slot.borrow_mut() = None);
+            drop(cache);
+            drop(receiver);
+            drop(origin);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
     #[test]
     fn typed_payload_refuses_trailing_unknown_tags_and_empty() {

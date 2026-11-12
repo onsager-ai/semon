@@ -430,6 +430,16 @@ impl<C: Clock> BodyCache<C> {
         Ok(Some(body))
     }
 
+    #[cfg(test)]
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Remove a request's temporary entry if its final release decision fails.
+    pub(crate) fn discard(&mut self, key: &CacheKey) -> Result<()> {
+        self.remove(&key_id(key)?)
+    }
+
     /// Policy/redactor changes, rewrites and access withdrawal all revoke an
     /// entire affected source, across authorization scopes and cohort members.
     pub fn invalidate_source(
