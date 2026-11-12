@@ -54,6 +54,7 @@ impl Harness {
                 ..Limits::default()
             },
             admission: Mutex::new(Admission::default()),
+            body: None,
             provisioning: Some(Arc::new(Mutex::new(controller))),
             provisioning_clock: Some(Arc::new(move || clock_hook.load(Ordering::Relaxed))),
             provisioning_timeout: Some(Arc::new(std::sync::atomic::AtomicBool::new(false))),

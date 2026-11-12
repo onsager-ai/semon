@@ -49,16 +49,13 @@ owner; the watcher does not own append services or schedule background work.
 request using verified connection evidence and its bearer credential, always
 passing `Kind::BodyChannel`; no request body selects the kind. The existing
 `TryFrom<&AuthenticatedEnrollment>` supplies the complete scope. Pending broker
-work and append leases retain the authentication's `RevisionHandle` independently
-of subsequent requests. Registry read errors fail closed.
-
-The current coarse check (option A) invalidates all captured authority on any
-registry revision change. Enrolling another machine, revoking authority, and every
-credential renewal drop all pending body work and append leases for every origin
-with `Revoked`. Origins must reconnect with a fresh grant. Even unchanged owners
-incur this churn. Option B, a credential-bound authority handle exposed by the
-origin lane in its planned renewal/revocation PR4, is the planned replacement;
-it will allow unaffected owners to retain their work.
+work, prepared deliveries and append leases retain the authentication's
+`CredentialHandle` independently of subsequent requests. Registry read errors fail
+closed. Registry revision notifications recheck each captured credential's current
+authority; unrelated enrollment writes and sibling renewal preserve pending work.
+Revocation of the captured credential, kind, enrollment or authenticated pin,
+expiry and generation cutover end its authority at the next authorization/release
+decision.
 
 Body-route mTLS is settled, not an amendment. Slice 4a builds client-certificate
 support; #594 consumes this authenticated scope and never touches TLS configuration.
@@ -73,6 +70,50 @@ queuing. Those caps are agreed interim limits. #594 confirms 20-second polls and
 16 KiB control envelopes, owns read/
 lease deadlines, and consumes 4a admission/revocation hooks. Non-poll reservation
 split remains open. Body frames never enter analytics objects or reconnect spools.
+
+### Receiver route registration (Part of #594)
+
+The existing receiver HTTP/1.1 listener registers only `POST /v1/body/poll`
+and `POST /v1/body/requests/<opaque-request-id>/response`. Every exchange uses
+`RegistryEnrollmentSource` with the body kind and verified enrolled mTLS identity,
+including a fresh registry decision before release. Missing body configuration or
+client trust refuses uniformly. There is no redirect or alternate endpoint.
+`Expect: 100-continue` is refused for these bounded requests.
+
+`BodyHost` owns the broker, revision watcher and existing ceremony-created cache,
+issuer, ACL and audit custody. It opens existing state only when a body kind and
+client trust are present. Hosts with active append services retain their original
+owner sources and call `BodyHost::sweep_owner` at authorization/release decisions;
+transport requests create no append services or leases. Revision checks run before
+body authentication too, so a revoked caller still triggers pending-work cleanup.
+No background scheduler or second operator ceremony is introduced.
+
+Polls use total listener connections plus the separate broker poll quota: one per
+enrollment, globally 50% of configured connections (rounded down). Admission is
+reserved immediately after authentication and route/framing selection, before
+reading the control body; an RAII guard releases it on every return/disconnect
+path and retains it through the response write. Each poll
+returns at most one strict versioned control request or a versioned empty result
+within the 20-second read/wait budget. Responses use non-poll total slots and a
+20-second frame-read deadline; the 256 KiB Content-Length ceiling is checked before
+reading, then the u32/header and 16 KiB header bound before raw payload buffering.
+The broker enforces the cumulative response envelope, four pending requests per
+enrollment, binding/assertion/scope checks and frame ordering. Capacity refusals
+use closed reasons and HTTP 503 with connection close. Unknown, foreign and expired
+request IDs receive the same authority refusal. No body content enters access logs.
+A failed transport write fails the selected request with `unavailable` and wakes its
+requester. This listener has no disconnect notification during a condvar wait:
+an abandoned poll can retain its slot until work arrives or the 20-second deadline.
+That bounded thread-per-connection limitation remains for #636.
+
+Route tests exercise handlers with injected verified identity and deterministic
+broker triggers; TLS handshake plus `Server::run` end-to-end coverage is still
+pending. These tests do not establish a reachable production body workflow.
+
+This registration remains library/host integration: provisioning still refuses
+body-channel activation until the admitted-binding path lands. Production handle
+resolution and receiver Viewer delivery (#568) remain separate dependencies; this
+change exposes no reachable end-to-end body-reading workflow.
 
 ## Assertions and exact envelopes
 

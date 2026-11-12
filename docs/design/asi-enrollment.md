@@ -21,9 +21,9 @@ The blocking HTTP/1.1 receiver in [`serve.rs`](../../crates/semon-push/src/serve
 retains socket deadlines, operator server TLS and total/unauthenticated-per-IP
 limits. Slice 4a PR2 (#646) adds route classification before body reads, optional
 verified TLS client certificates, current registry authorization per request,
-keep-alive enrollment binding and revision handles for in-flight reauthorization.
+keep-alive enrollment binding and credential handles for in-flight reauthorization.
 `serve_auth.rs` exposes `RegistryAuthenticator`, `AuthenticatedEnrollment` and
-`RevisionHandle`. The bounded registry reader and revision handle inspect registry
+`CredentialHandle`. The bounded registry reader and credential handle inspect registry
 custody only; missing pairing-gate custody does not disable existing authentication.
 Private owned mode-0600 `DIR/client-trust.pem` supplies PEM client roots; absence
 disables client-certificate presentation. Reserved analytics/body routes refuse

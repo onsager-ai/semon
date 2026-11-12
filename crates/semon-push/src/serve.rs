@@ -1,7 +1,7 @@
 //! `semon receive`'s listener: the mirror protocol over HTTP/1.1, plain on
 //! loopback or TLS with an operator-supplied certificate and key. It serves
-//! `POST /v1/mirror/append` and `POST /v1/mirror/facts` to [`Receiver`] and
-//! nothing else.
+//! mirror routes to [`Receiver`], protected provisioning, and the closed reverse
+//! body poll/response routes when body custody is configured.
 //!
 //! Each connection has its own thread, up to [`Limits::connections`] in
 //! all. Until one of its requests passes the token check, a connection also
@@ -31,6 +31,8 @@ use serde_json::{Value, json};
 
 #[path = "serve_auth.rs"]
 mod auth;
+#[path = "serve_body.rs"]
+mod body;
 use crate::credentials::Kind;
 use auth::Authenticator;
 pub use auth::{
@@ -175,6 +177,7 @@ struct Shared {
     tls: Option<Arc<rustls::ServerConfig>>,
     limits: Limits,
     admission: Mutex<Admission>,
+    body: Option<crate::body_host::BodyHost<'static>>,
     provisioning: Option<Arc<Mutex<crate::provision::Controller>>>,
     #[cfg(test)]
     provisioning_clock: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
@@ -339,12 +342,26 @@ impl Server {
 
     /// Serves until the process ends.
     pub fn run(self) -> Result<(), String> {
+        let body = if self.tls.is_some() {
+            crate::body_host::BodyHost::configured(
+                self.receiver.dir(),
+                crate::body_broker::Config {
+                    max_connections: self.limits.connections,
+                    poll_share_percent: 50,
+                },
+                &crate::body_host::CLOCK,
+            )
+            .map_err(|_| "body channel unavailable".to_owned())?
+        } else {
+            None
+        };
         let shared = Arc::new(Shared {
             receiver: self.receiver,
             tokens: self.tokens,
             tls: self.tls,
             limits: self.limits,
             admission: Mutex::new(Admission::default()),
+            body,
             provisioning: self.provisioning,
             #[cfg(test)]
             provisioning_clock: None,
@@ -1151,6 +1168,9 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         .provisioning_clock
         .as_ref()
         .map_or(now, |clock| clock());
+    if kind == Kind::BodyChannel {
+        return body::answer_body(shared, slot, connection, head, now);
+    }
     let Some(machine) = shared.tokens.authorize(
         &mut connection.authority,
         head.authorization.as_deref(),
