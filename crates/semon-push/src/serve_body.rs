@@ -6,6 +6,18 @@ use crate::{
     receiver_audit::Identifier,
 };
 
+struct Dispatch<'a, 'b> {
+    broker: &'a crate::body_broker::Broker<'b>,
+    selected: Option<Identifier>,
+}
+impl Drop for Dispatch<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(id) = self.selected {
+            let _ = self.broker.dispatch_failed(id);
+        }
+    }
+}
+
 enum Route {
     Poll,
     Response(Identifier),
@@ -90,6 +102,14 @@ pub(super) fn answer_body(
     let Some(length) = head.content_length else {
         return Next::Refuse(411, "a Content-Length is required", &[]);
     };
+    let reservation = if matches!(route, Route::Poll) {
+        match host.broker.reserve_poll(&source) {
+            Ok(reservation) => Some(reservation),
+            Err(reason) => return error(connection, reason),
+        }
+    } else {
+        None
+    };
     slot.authenticated();
     let poll_started = Instant::now();
     if length > route.cap() as u64 {
@@ -106,6 +126,8 @@ pub(super) fn answer_body(
     }
     let saved = connection.limits.body;
     connection.limits.body = saved.min(Duration::from_secs(20));
+    #[cfg(test)]
+    tests::before_body_read();
     let bytes = match route {
         Route::Poll => connection.read_body(length as usize),
         Route::Response(_) => read_frame(connection, length as usize),
@@ -119,13 +141,45 @@ pub(super) fn answer_body(
         }
         Err(_) => return Next::Close,
     };
+    let poll = match reservation {
+        Some(reservation) => match reservation.begin(&source, &bytes) {
+            Ok(poll) => Some(poll),
+            Err(reason) => return error(connection, reason),
+        },
+        None => None,
+    };
+    let mut dispatch = Dispatch {
+        broker: &host.broker,
+        selected: None,
+    };
     let result = match route {
-        Route::Poll => crate::body_broker::handle_poll(
-            &host.broker,
-            &source,
-            &bytes,
-            Duration::from_secs(20).saturating_sub(poll_started.elapsed()),
-        ),
+        Route::Poll => {
+            let response = match poll.as_ref().unwrap().wait(
+                &source,
+                Duration::from_secs(20).saturating_sub(poll_started.elapsed()),
+            ) {
+                Ok(Some(request)) => {
+                    dispatch.selected = Some(request.request_id);
+                    wire::PollResponse::Request {
+                        version: wire::VERSION,
+                        request: Box::new(request),
+                    }
+                }
+                Ok(None) => wire::PollResponse::Empty {
+                    version: wire::VERSION,
+                },
+                Err(reason) => return error(connection, reason),
+            };
+            let bytes = match wire::control(&response) {
+                Ok(bytes) => bytes,
+                Err(reason) => return error(connection, reason),
+            };
+            crate::body_broker::HandlerResult {
+                status: 200,
+                reason: None,
+                bytes,
+            }
+        }
         Route::Response(id) => {
             crate::body_broker::handle_response(&host.broker, &source, id, &bytes)
         }
@@ -176,7 +230,10 @@ pub(super) fn answer_body(
         };
     }
     match connection.respond(result.status, &body, head.close, &[]) {
-        Ok(()) => Next::Continue,
+        Ok(()) => {
+            dispatch.selected = None;
+            Next::Continue
+        }
         Err(_) => Next::Close,
     }
 }
@@ -226,6 +283,69 @@ fn read_frame(connection: &mut Connection, length: usize) -> io::Result<Vec<u8>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    thread_local! {
+        static BEFORE_BODY: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    }
+    pub(super) fn before_body_read() {
+        BEFORE_BODY.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+    }
+    #[test]
+    fn short_control_body_holds_quota_before_read_and_releases_on_eof() {
+        let (_dir, shared) = shared(true);
+        let (client, mut conn) = connection(true);
+        client.shutdown(Shutdown::Write).unwrap();
+        let checked = Arc::clone(&shared);
+        BEFORE_BODY.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let mut authority = ConnectionAuthority::default();
+                authority.verified_client_identity = Some(auth_tests::identity());
+                let source = RegistryEnrollmentSource::authenticate(
+                    checked.tokens.registry(),
+                    &mut authority,
+                    Some("Bearer test-bearer"),
+                    100,
+                )
+                .unwrap();
+                assert!(matches!(
+                    checked.body.as_ref().unwrap().broker.reserve_poll(&source),
+                    Err(Reason::PollCapacity)
+                ));
+            }))
+        });
+        let mut slot = Slot::admit(&shared, "127.0.0.1".parse().unwrap()).unwrap();
+        let head = Head {
+            method: "POST".into(),
+            target: "/v1/body/poll".into(),
+            authorization: Some("Bearer test-bearer".into()),
+            content_length: Some(100),
+            ..Head::default()
+        };
+        assert!(matches!(
+            answer(&shared, &mut slot, &mut conn, &head),
+            Next::Close
+        ));
+        assert_eq!(conn.stream.timed().bytes_read, 0);
+        let source = RegistryEnrollmentSource::authenticate(
+            shared.tokens.registry(),
+            &mut conn.authority,
+            Some("Bearer test-bearer"),
+            100,
+        )
+        .unwrap();
+        assert!(
+            shared
+                .body
+                .as_ref()
+                .unwrap()
+                .broker
+                .reserve_poll(&source)
+                .is_ok()
+        );
+    }
     struct At;
     impl crate::origin_read::ReadClock for At {
         fn now_millis(&self) -> u64 {
@@ -364,6 +484,13 @@ mod tests {
     }
     #[test]
     fn listener_dispatches_pending_request_and_delivers_origin_refusal() {
+        dispatch_exchange(false);
+    }
+    #[test]
+    fn failed_poll_write_fails_selected_request_and_releases_quota() {
+        dispatch_exchange(true);
+    }
+    fn dispatch_exchange(fail_write: bool) {
         use crate::{
             body_assertion::{self, Audience, Claims, MemoryKey},
             body_broker::EnrollmentSource,
@@ -431,6 +558,13 @@ mod tests {
             .unwrap();
         let (mut client, mut conn) = connection(true);
         client.write_all(&poll_bytes).unwrap();
+        if fail_write {
+            conn.stream
+                .timed()
+                .socket
+                .shutdown(Shutdown::Write)
+                .unwrap();
+        }
         let mut slot = Slot::admit(&shared, "127.0.0.1".parse().unwrap()).unwrap();
         let head = Head {
             method: "POST".into(),
@@ -439,10 +573,17 @@ mod tests {
             content_length: Some(poll_bytes.len() as u64),
             ..Head::default()
         };
-        assert!(matches!(
-            answer(&shared, &mut slot, &mut conn, &head),
-            Next::Continue
-        ));
+        let outcome = answer(&shared, &mut slot, &mut conn, &head);
+        if fail_write {
+            assert!(matches!(outcome, Next::Close));
+            assert!(matches!(
+                host.broker.take_result(&source, id),
+                Err(Reason::Unavailable)
+            ));
+            assert!(host.broker.reserve_poll(&source).is_ok());
+            return;
+        }
+        assert!(matches!(outcome, Next::Continue));
         let bytes = wire::encode_frame(&wire::Frame {
             header: wire::FrameHeader {
                 version: wire::VERSION,
@@ -526,13 +667,15 @@ mod tests {
             channel_binding: [3; 32],
         })
         .unwrap();
-        let _reservation = shared
-            .body
-            .as_ref()
-            .unwrap()
-            .broker
-            .begin_poll(&source, &bytes)
-            .unwrap();
+        let mut reservation = Some(
+            shared
+                .body
+                .as_ref()
+                .unwrap()
+                .broker
+                .begin_poll(&source, &bytes)
+                .unwrap(),
+        );
         for (body, reason) in [
             (bytes, "poll_capacity"),
             (
@@ -540,6 +683,9 @@ mod tests {
                 "invalid_request",
             ),
         ] {
+            if reason == "invalid_request" {
+                drop(reservation.take());
+            }
             let (mut client, mut connection) = connection(true);
             client.write_all(&body).unwrap();
             let mut slot = Slot::admit(&shared, "127.0.0.1".parse().unwrap()).unwrap();

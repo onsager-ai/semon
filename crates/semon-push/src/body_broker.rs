@@ -104,6 +104,65 @@ pub struct Broker<'a> {
     state: Mutex<State>,
     changed: Condvar,
 }
+/// Admission held before reading an origin's control body.
+pub struct PollReservation<'a, 'b> {
+    broker: &'a Broker<'b>,
+    scope: EnrollmentScope,
+    deadline_millis: u64,
+    transferred: bool,
+}
+impl Drop for PollReservation<'_, '_> {
+    fn drop(&mut self) {
+        if self.transferred {
+            return;
+        }
+        if let Ok(mut state) = self.broker.state.lock() {
+            state.polls.remove(self.scope.enrollment_id.as_str());
+        }
+    }
+}
+impl<'a, 'b> PollReservation<'a, 'b> {
+    pub fn begin(mut self, auth: &dyn EnrollmentSource, bytes: &[u8]) -> Result<Poll<'a, 'b>> {
+        if authenticate(auth)? != self.scope {
+            return Err(Reason::Forbidden);
+        }
+        let poll = wire::parse_poll(bytes)?;
+        let mut state = self.broker.state.lock().map_err(|_| Reason::Unavailable)?;
+        let id = self.scope.enrollment_id.as_str();
+        if state
+            .channels
+            .get(id)
+            .is_some_and(|c| c.binding != poll.channel_binding)
+        {
+            for work in state
+                .work
+                .values_mut()
+                .filter(|w| w.scope.enrollment_id == self.scope.enrollment_id && w.result.is_none())
+            {
+                fail(work, Reason::Unavailable);
+            }
+        }
+        state.channels.insert(
+            id.into(),
+            Channel {
+                binding: poll.channel_binding,
+                authority: auth.revision_handle(&self.scope),
+                scope: self.scope.clone(),
+            },
+        );
+        state.polls.insert(id.into(), poll.channel_binding);
+        self.broker.changed.notify_all();
+        self.transferred = true;
+        Ok(Poll {
+            broker: self.broker,
+            scope: self.scope.clone(),
+            channel: poll.channel_binding,
+            consumed: AtomicBool::new(false),
+            deadline_millis: self.deadline_millis,
+        })
+    }
+}
+
 /// A live poll reservation, released on every return/drop path.
 pub struct Poll<'a, 'b> {
     broker: &'a Broker<'b>,
@@ -138,45 +197,40 @@ impl<'a> Broker<'a> {
         auth: &dyn EnrollmentSource,
         bytes: &[u8],
     ) -> Result<Poll<'b, 'a>> {
+        // Preserve authentication and strict control validation for library callers.
+        authenticate(auth)?;
+        wire::parse_poll(bytes)?;
+        self.reserve_poll(auth)?.begin(auth, bytes)
+    }
+    pub fn reserve_poll<'b>(
+        &'b self,
+        auth: &dyn EnrollmentSource,
+    ) -> Result<PollReservation<'b, 'a>> {
         let scope = authenticate(auth)?;
-        let poll = wire::parse_poll(bytes)?;
         let mut state = self.state.lock().map_err(|_| Reason::Unavailable)?;
         self.maintain(&mut state, auth);
         let id = scope.enrollment_id.as_str();
         if state.polls.contains_key(id) || state.polls.len() >= self.poll_cap {
             return Err(Reason::PollCapacity);
         }
-        // Restarted origin channel invalidates every request signed for the old loop.
-        if state
-            .channels
-            .get(id)
-            .is_some_and(|c| c.binding != poll.channel_binding)
-        {
-            for work in state
-                .work
-                .values_mut()
-                .filter(|w| w.scope.enrollment_id == scope.enrollment_id && w.result.is_none())
-            {
+        state.polls.insert(id.into(), [0; 32]);
+        Ok(PollReservation {
+            broker: self,
+            scope,
+            deadline_millis: self.clock.now_millis().saturating_add(20_000),
+            transferred: false,
+        })
+    }
+    /// A selected request whose transport failed cannot remain dispatched forever.
+    pub fn dispatch_failed(&self, id: Identifier) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| Reason::Unavailable)?;
+        if let Some(work) = state.work.get_mut(&id) {
+            if work.dispatched && work.result.is_none() {
                 fail(work, Reason::Unavailable);
             }
         }
-        state.channels.insert(
-            id.into(),
-            Channel {
-                binding: poll.channel_binding,
-                authority: auth.revision_handle(&scope),
-                scope: scope.clone(),
-            },
-        );
-        state.polls.insert(id.into(), poll.channel_binding);
         self.changed.notify_all();
-        Ok(Poll {
-            broker: self,
-            scope,
-            channel: poll.channel_binding,
-            consumed: AtomicBool::new(false),
-            deadline_millis: self.clock.now_millis().saturating_add(20_000),
-        })
+        Ok(())
     }
     pub fn channel(&self, scope: &EnrollmentScope) -> Result<[u8; 32]> {
         self.state

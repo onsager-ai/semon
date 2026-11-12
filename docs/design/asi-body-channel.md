@@ -92,7 +92,10 @@ body authentication too, so a revoked caller still triggers pending-work cleanup
 No background scheduler or second operator ceremony is introduced.
 
 Polls use total listener connections plus the separate broker poll quota: one per
-enrollment, globally 50% of configured connections (rounded down). Each poll
+enrollment, globally 50% of configured connections (rounded down). Admission is
+reserved immediately after authentication and route/framing selection, before
+reading the control body; an RAII guard releases it on every return/disconnect
+path and retains it through the response write. Each poll
 returns at most one strict versioned control request or a versioned empty result
 within the 20-second read/wait budget. Responses use non-poll total slots and a
 20-second frame-read deadline; the 256 KiB Content-Length ceiling is checked before
@@ -101,6 +104,14 @@ The broker enforces the cumulative response envelope, four pending requests per
 enrollment, binding/assertion/scope checks and frame ordering. Capacity refusals
 use closed reasons and HTTP 503 with connection close. Unknown, foreign and expired
 request IDs receive the same authority refusal. No body content enters access logs.
+A failed transport write fails the selected request with `unavailable` and wakes its
+requester. This listener has no disconnect notification during a condvar wait:
+an abandoned poll can retain its slot until work arrives or the 20-second deadline.
+That bounded thread-per-connection limitation remains for #636.
+
+Route tests exercise handlers with injected verified identity and deterministic
+broker triggers; TLS handshake plus `Server::run` end-to-end coverage is still
+pending. These tests do not establish a reachable production body workflow.
 
 This registration remains library/host integration: provisioning still refuses
 body-channel activation until the admitted-binding path lands. Production handle
