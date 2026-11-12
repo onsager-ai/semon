@@ -596,7 +596,7 @@ mod tests {
                     retryable: true,
                 },
             },
-            payload: vec![],
+            payload: Default::default(),
         })
         .unwrap();
         let (mut client, mut conn) = connection(true);
@@ -631,7 +631,7 @@ mod tests {
                     retryable: true,
                 },
             },
-            payload: vec![],
+            payload: Default::default(),
         })
         .unwrap();
         let (mut client, mut connection) = connection(true);
