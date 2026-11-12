@@ -366,7 +366,7 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
         let active = self.active.get_mut(&id).ok_or(Reason::LeaseClosed)?;
         active.page_deadline = verified.binding.deadline_millis;
         active.continuation = verified.binding.continuation;
-        active.payload = Some(Zeroizing::new(verified.payload));
+        active.payload = Some(verified.payload);
         Ok(true)
     }
     pub fn release(&mut self, id: Identifier) -> Result<TypedPage> {

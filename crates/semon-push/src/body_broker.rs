@@ -23,6 +23,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use zeroize::{Zeroize, Zeroizing};
 
 /// Implemented by 4a using verified connection evidence and the request's kind
 /// credential. Connection/credential data stays private to the implementation.
@@ -73,7 +74,7 @@ struct Work {
     next_frame: u32,
     encoded_bytes: usize,
     binding: Option<ResponseBinding>,
-    payload: Vec<u8>,
+    payload: Zeroizing<Vec<u8>>,
     result: Option<Result<VerifiedResponse>>,
 }
 struct RequestCleanup<'a, 'b> {
@@ -87,7 +88,7 @@ impl Drop for RequestCleanup<'_, '_> {
 }
 pub struct VerifiedResponse {
     pub binding: ResponseBinding,
-    pub payload: Vec<u8>,
+    pub payload: Zeroizing<Vec<u8>>,
 }
 struct Channel {
     binding: [u8; 32],
@@ -252,7 +253,7 @@ impl<'a> Broker<'a> {
                 next_frame: 0,
                 encoded_bytes: 0,
                 binding: None,
-                payload: Vec::new(),
+                payload: Zeroizing::new(Vec::new()),
                 result: None,
             },
         );
@@ -426,11 +427,17 @@ impl<'a> Broker<'a> {
                 if binding.deadline_millis <= self.clock.now_millis() {
                     return Err(Reason::Deadline);
                 }
+                // Allocate the validated ceiling before any plaintext enters;
+                // later frames must never relocate a body-bearing allocation.
+                work.payload
+                    .reserve_exact(binding.permitted_range.len() as usize);
                 work.binding = Some(*binding);
             }
             FrameContent::Data => {
-                if work.binding.is_none() {
-                    return Err(Reason::FrameOrder);
+                let binding = work.binding.as_ref().ok_or(Reason::FrameOrder)?;
+                if work.payload.len() + frame.payload.len() > binding.permitted_range.len() as usize
+                {
+                    return Err(Reason::OverBudget);
                 }
                 work.payload.extend_from_slice(&frame.payload);
             }
@@ -445,7 +452,7 @@ impl<'a> Broker<'a> {
         if frame.header.final_frame {
             let binding = work.binding.take().ok_or(Reason::FrameOrder)?;
             if work.payload.len() as u64 != binding.permitted_range.len()
-                || Sha256::digest(&work.payload).as_slice() != binding.cache_key.payload_digest
+                || Sha256::digest(&*work.payload).as_slice() != binding.cache_key.payload_digest
             {
                 return Err(Reason::BindingMismatch);
             }
@@ -513,6 +520,7 @@ impl Poll<'_, '_> {
     }
 }
 fn fail(work: &mut Work, reason: Reason) {
+    work.payload.zeroize();
     work.payload.clear();
     work.binding = None;
     work.result = Some(Err(reason));
@@ -632,6 +640,8 @@ pub struct ReadInput {
     pub generation: Identifier,
     pub destination: Destination,
     pub candidate: Option<wire::Candidate>,
+    /// Receiver may prohibit caching regardless of the origin's delivery mode.
+    pub stream_through: bool,
 }
 pub struct ReadService<'a, 'b, C: Clock> {
     pub broker: &'a Broker<'b>,
@@ -648,6 +658,8 @@ struct Prepared {
     page: TypedPage,
     attempt: receiver_audit::AttemptId,
     key: crate::body_cache::CacheKey,
+    stream_through: bool,
+    authority: Option<crate::serve::CredentialHandle>,
     deadline: u64,
 }
 /// One audited delivery. The page is accessible only through a fresh release
@@ -664,9 +676,18 @@ pub struct PendingDelivery<'s, 'a, 'b, C: Clock> {
     grant: String,
 }
 impl<C: Clock> PendingDelivery<'_, '_, '_, C> {
+    /// The future HTTP route MUST apply `Cache-Control: no-store` when true.
+    pub fn no_store(&self) -> bool {
+        self.prepared.as_ref().is_some_and(|p| p.stream_through)
+    }
     pub fn release(&mut self) -> Result<&TypedPage> {
         let prepared = self.prepared.as_ref().ok_or(Reason::LateResponse)?;
-        let decision = if !self.service.enrollment.is_current(&self.scope) {
+        let decision = if !authority_is_current(
+            prepared.authority.as_ref(),
+            self.service.enrollment,
+            &self.scope,
+            self.service.broker.clock.now_millis() / 1000,
+        ) {
             Err(Reason::Revoked)
         } else if self.service.broker.clock.now_millis() >= prepared.deadline {
             Err(Reason::Deadline)
@@ -710,11 +731,14 @@ impl<C: Clock> PendingDelivery<'_, '_, '_, C> {
     }
     fn abandon_inner(&mut self) -> Result<()> {
         if let Some(prepared) = self.prepared.take() {
-            let discard = self
-                .service
-                .cache
-                .discard(&prepared.key)
-                .map_err(|_| Reason::Unavailable);
+            let discard = if prepared.stream_through {
+                Ok(())
+            } else {
+                self.service
+                    .cache
+                    .discard(&prepared.key)
+                    .map_err(|_| Reason::Unavailable)
+            };
             let audit = self
                 .service
                 .audit
@@ -784,6 +808,9 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             return Err(Reason::UnsupportedVerb);
         }
         let original = input.request.operation.clone();
+        if input.stream_through {
+            input.candidate = None;
+        }
         if let Some(candidate) = input.candidate.take() {
             let candidate_key = candidate.key.clone();
             input.request.operation = wire::Operation::Resolve {
@@ -806,6 +833,7 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
                     input.request.operation = original;
                 }
                 Err(reason) => return Err(reason),
+                Ok(prepared) if prepared.stream_through => return Ok(prepared),
                 Ok(_) => return Err(Reason::Unavailable),
             }
         }
@@ -945,6 +973,21 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             .map_err(|_| Reason::AuditFailure)?;
         #[cfg(test)]
         tests::observe_admission(&verified.binding.receiver_binding);
+        let stream_through = input.stream_through
+            || verified.binding.delivery_mode == crate::origin_read::DeliveryMode::StreamThrough;
+        if stream_through {
+            if self.broker.clock.now_millis() >= verified.binding.deadline_millis {
+                return Err(Reason::Deadline);
+            }
+            return Ok(Prepared {
+                page,
+                attempt,
+                key: verified.binding.cache_key,
+                stream_through: true,
+                authority: self.enrollment.credential_handle(&input.scope),
+                deadline: verified.binding.deadline_millis,
+            });
+        }
         let origin_limits = verified.binding.cache_limits.narrowed(self.origin_limits);
         // Admission is constructed only after authorize() has fsynced.
         let admission = ReadAdmission::after_online_authorization_and_audit(
@@ -1010,6 +1053,8 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             page,
             attempt,
             key,
+            stream_through: false,
+            authority: self.enrollment.credential_handle(&input.scope),
             deadline: verified.binding.deadline_millis,
         })
     }
@@ -1333,7 +1378,7 @@ mod tests {
         final_frame: bool,
         content: FrameContent,
         payload: Vec<u8>,
-    ) -> Vec<u8> {
+    ) -> Zeroizing<Vec<u8>> {
         wire::encode_frame(&wire::Frame {
             header: wire::FrameHeader {
                 version: 1,
@@ -1343,7 +1388,7 @@ mod tests {
                 payload_bytes: payload.len() as u32,
                 content,
             },
-            payload,
+            payload: Zeroizing::new(payload),
         })
         .unwrap()
     }
@@ -1380,6 +1425,7 @@ mod tests {
                 enrollment: &a,
                 resolver: &Resolver,
                 policies: &Policies,
+                delivery_mode: crate::origin_read::DeliveryMode::Cached,
                 renderer: &Renderer,
                 clock: &at,
                 cancelled: &|| false,
@@ -1487,6 +1533,7 @@ mod tests {
                         generation: id(4),
                         destination: Destination::Viewer,
                         candidate: None,
+                        stream_through: false,
                     };
                     let grant = match acls.decide(
                         "subject",
@@ -1560,7 +1607,7 @@ mod tests {
                     // admission or cache insertion, even with verified bytes.
                     let invalid = VerifiedResponse {
                         binding: authorized.response_binding.clone(),
-                        payload: payload.clone(),
+                        payload: Zeroizing::new(payload.clone()),
                     };
                     assert!(matches!(
                         service.admit(
@@ -1579,6 +1626,7 @@ mod tests {
                         generation: id(4),
                         destination: Destination::Viewer,
                         candidate: None,
+                        stream_through: false,
                     };
                     denied.request.source_handle = opaque("unknown");
                     assert!(matches!(
@@ -1642,6 +1690,9 @@ mod tests {
         Fallback,
         FallbackDeadline,
         FallbackDrop,
+        StreamRevoked,
+        StreamExpired,
+        StreamOversize,
     }
     #[test]
     fn service_failures_do_not_cache_and_fallback_requires_admission() {
@@ -1657,6 +1708,9 @@ mod tests {
             Failure::Fallback,
             Failure::FallbackDeadline,
             Failure::FallbackDrop,
+            Failure::StreamRevoked,
+            Failure::StreamExpired,
+            Failure::StreamOversize,
         ]
         .into_iter()
         .enumerate()
@@ -1717,6 +1771,7 @@ mod tests {
                 enrollment: &a,
                 resolver: &Resolver,
                 policies: &Policies,
+                delivery_mode: crate::origin_read::DeliveryMode::Cached,
                 renderer: &Renderer,
                 clock: &at,
                 cancelled: &|| false,
@@ -1755,6 +1810,7 @@ mod tests {
                 generation: id(4),
                 destination: Destination::Viewer,
                 candidate,
+                stream_through: false,
             };
             let mut calls = 0;
             let mut service = ReadService {
@@ -1862,6 +1918,14 @@ mod tests {
                     enrollment: &a,
                     resolver: &Resolver,
                     policies: &Policies,
+                    delivery_mode: if matches!(
+                        mode,
+                        Failure::StreamRevoked | Failure::StreamExpired | Failure::StreamOversize
+                    ) {
+                        crate::origin_read::DeliveryMode::StreamThrough
+                    } else {
+                        crate::origin_read::DeliveryMode::Cached
+                    },
                     renderer: &Renderer,
                     clock: &at,
                     cancelled: &|| false,
@@ -1897,7 +1961,75 @@ mod tests {
                     assert_eq!(accepted, Err(Reason::BindingMismatch));
                 } else {
                     accepted.unwrap();
-                    if matches!(mode, Failure::Oversize) {
+                    if matches!(
+                        mode,
+                        Failure::StreamRevoked | Failure::StreamExpired | Failure::StreamOversize
+                    ) {
+                        let split = payload.len() / 2;
+                        let allocation = {
+                            let state = broker.state.lock().unwrap();
+                            let payload = &state.work[&outgoing.request_id].payload;
+                            assert!(
+                                payload.capacity()
+                                    >= authorized.response_binding.permitted_range.len() as usize
+                            );
+                            (payload.as_ptr(), payload.capacity())
+                        };
+                        broker
+                            .accept_response(
+                                &a,
+                                outgoing.request_id,
+                                &frame(
+                                    outgoing.request_id,
+                                    1,
+                                    false,
+                                    FrameContent::Data,
+                                    payload[..split].to_vec(),
+                                ),
+                            )
+                            .unwrap();
+                        {
+                            let state = broker.state.lock().unwrap();
+                            let payload = &state.work[&outgoing.request_id].payload;
+                            assert_eq!((payload.as_ptr(), payload.capacity()), allocation);
+                        }
+                        let expected = match mode {
+                            Failure::StreamRevoked => {
+                                a.revoked.store(true, Ordering::Relaxed);
+                                Reason::Revoked
+                            }
+                            Failure::StreamExpired => {
+                                at.0.store(20_000, Ordering::Relaxed);
+                                Reason::Deadline
+                            }
+                            _ => Reason::OverBudget,
+                        };
+                        let final_frame = if matches!(mode, Failure::StreamOversize) {
+                            frame(
+                                outgoing.request_id,
+                                2,
+                                true,
+                                FrameContent::Data,
+                                vec![0; wire::RESPONSE_CAP - 1024],
+                            )
+                        } else {
+                            frame(
+                                outgoing.request_id,
+                                2,
+                                true,
+                                FrameContent::Data,
+                                payload[split..].to_vec(),
+                            )
+                        };
+                        assert_eq!(
+                            broker.accept_response(&a, outgoing.request_id, &final_frame),
+                            Err(if matches!(mode, Failure::StreamExpired) {
+                                Reason::LateResponse
+                            } else {
+                                expected
+                            })
+                        );
+                    } else if matches!(mode, Failure::Oversize) {
                         let work = broker
                             .state
                             .lock()
@@ -2008,9 +2140,9 @@ mod tests {
                     Failure::Mismatch | Failure::Digest => Reason::BindingMismatch,
                     Failure::Audit => Reason::AuditFailure,
                     Failure::Unavailable => Reason::Unavailable,
-                    Failure::Timeout => Reason::Deadline,
-                    Failure::Revoked => Reason::Revoked,
-                    Failure::Oversize => Reason::OverBudget,
+                    Failure::Timeout | Failure::StreamExpired => Reason::Deadline,
+                    Failure::Revoked | Failure::StreamRevoked => Reason::Revoked,
+                    Failure::Oversize | Failure::StreamOversize => Reason::OverBudget,
                     Failure::Fallback | Failure::FallbackDeadline | Failure::FallbackDrop => {
                         unreachable!()
                     }
@@ -2211,6 +2343,7 @@ mod tests {
                     enrollment: &a,
                     resolver: &Resolver,
                     policies: &Policies,
+                    delivery_mode: crate::origin_read::DeliveryMode::Cached,
                     renderer: &Renderer,
                     clock: &at,
                     cancelled: &is_cancelled,
@@ -2260,13 +2393,26 @@ mod tests {
     }
     #[test]
     fn client_loopback_service_delivery_and_dual_audit() {
+        loopback_delivery(false, false, 0);
+    }
+    #[test]
+    fn stream_through_delivery_never_touches_cache() {
+        for receiver_stricter in [false, true] {
+            for failure in 0..4 {
+                loopback_delivery(true, receiver_stricter, failure);
+            }
+        }
+    }
+    fn loopback_delivery(stream_through: bool, receiver_stricter: bool, failure: u8) {
         use crate::origin_client::{OriginClient, Step};
         use std::os::unix::fs::PermissionsExt;
         let at = At(AtomicU64::new(10_000));
         let a = auth("client-loopback");
         let broker = Broker::new(Config::default(), &at).unwrap();
-        let root =
-            std::env::temp_dir().join(format!("body-client-loopback-{}", std::process::id()));
+        let root = std::env::temp_dir().join(format!(
+            "body-client-loopback-{}-{stream_through}-{receiver_stricter}-{failure}",
+            std::process::id()
+        ));
         std::fs::create_dir(&root).unwrap();
         std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let acl = root.join("acl");
@@ -2298,6 +2444,7 @@ mod tests {
                 enrollment: &a,
                 resolver: &Resolver,
                 policies: &Policies,
+                delivery_mode: crate::origin_read::DeliveryMode::Cached,
                 renderer: &Renderer,
                 clock: &at,
                 cancelled: &cancelled,
@@ -2314,6 +2461,11 @@ mod tests {
             &lookup,
             &UnavailableExportView,
         );
+        client.origin.delivery_mode = if stream_through && !receiver_stricter {
+            crate::origin_read::DeliveryMode::StreamThrough
+        } else {
+            crate::origin_read::DeliveryMode::Cached
+        };
         let limits = CacheLimits {
             cache_ttl_seconds: std::num::NonZeroU64::new(1),
             ..CacheLimits::default()
@@ -2338,6 +2490,57 @@ mod tests {
         };
         let journal = root.join("receiver").join(receiver_audit::AUDIT_FILE);
         ADMISSION.with(|slot| *slot.borrow_mut() = Some((journal.clone(), 0)));
+        if stream_through {
+            let required_mode = client.origin.delivery_mode;
+            client.origin.delivery_mode = crate::origin_read::DeliveryMode::Cached;
+            let seed = service
+                .read_with(
+                    &principal,
+                    ReadInput {
+                        scope: a.scope.clone(),
+                        request: signed(76).0,
+                        generation: id(4),
+                        destination: Destination::Viewer,
+                        candidate: None,
+                        stream_through: false,
+                    },
+                    &mut |_, _| assert_eq!(client.step(), Step::Delivered),
+                )
+                .unwrap();
+            // Seed stale bytes alongside the exact fresh entry. No-store must
+            // neither consult nor replace either previously cached copy.
+            let old = TypedPage {
+                fields: vec![TypedField {
+                    field: Field::Assistant,
+                    text: UntrustedText::new("cached stale body".into()),
+                }],
+            }
+            .canonical_bytes()
+            .unwrap();
+            let mut old_key = seed.key.clone();
+            old_key.payload_digest = Sha256::digest(&*old).into();
+            service.cache.insert(old_key, &old, 10, None).unwrap();
+            service
+                .audit
+                .complete(seed.attempt, Outcome::Completed, 0)
+                .unwrap();
+            client.origin.delivery_mode = required_mode;
+        }
+        let cache_snapshot = || {
+            let mut files: Vec<_> = std::fs::read_dir(root.join("cache"))
+                .unwrap()
+                .map(|entry| {
+                    let path = entry.unwrap().path();
+                    (
+                        path.file_name().unwrap().to_owned(),
+                        std::fs::read(&path).unwrap(),
+                    )
+                })
+                .collect();
+            files.sort();
+            files
+        };
+        let before = cache_snapshot();
         let prepared = service
             .read_with(
                 &principal,
@@ -2347,6 +2550,7 @@ mod tests {
                     generation: id(4),
                     destination: Destination::Viewer,
                     candidate: None,
+                    stream_through: receiver_stricter,
                 },
                 &mut |_, _| {
                     assert_eq!(client.step(), Step::Delivered);
@@ -2367,10 +2571,52 @@ mod tests {
             scope: a.scope.clone(),
             grant,
         };
-        assert_eq!(
-            pending.release().unwrap().fields[0].text.as_str(),
-            "safe typed body"
-        );
+        if failure == 0 {
+            assert_eq!(
+                pending.release().unwrap().fields[0].text.as_str(),
+                "safe typed body"
+            );
+        }
+        assert_eq!(pending.no_store(), stream_through);
+        if stream_through {
+            assert_eq!(cache_snapshot(), before);
+            match failure {
+                1 => {
+                    a.revoked.store(true, Ordering::Relaxed);
+                    assert!(matches!(pending.release(), Err(Reason::Revoked)));
+                    drop(pending);
+                }
+                2 => {
+                    at.0.store(20_000, Ordering::Relaxed);
+                    assert!(matches!(pending.release(), Err(Reason::Deadline)));
+                    drop(pending);
+                }
+                3 => drop(pending),
+                _ => pending.delivered(7).unwrap(),
+            }
+            assert_eq!(cache_snapshot(), before);
+            let events: Vec<serde_json::Value> = std::fs::read_to_string(&journal)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let completion = events
+                .iter()
+                .rev()
+                .find(|e| e["event"] == "completion")
+                .unwrap();
+            assert_eq!(completion["bytes"], if failure == 0 { 7 } else { 0 });
+            assert_eq!(
+                completion["outcome"],
+                if failure == 0 { "completed" } else { "failed" }
+            );
+            ADMISSION.with(|slot| *slot.borrow_mut() = None);
+            drop(cache);
+            drop(receiver);
+            drop(origin_audit);
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
         pending.delivered(bytes).unwrap();
         ADMISSION.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().1, 1));
         ADMISSION.with(|slot| *slot.borrow_mut() = None);
@@ -2397,6 +2643,7 @@ mod tests {
                 generation: id(4),
                 destination: Destination::Viewer,
                 candidate: None,
+                stream_through: false,
             },
             &mut |_, _| assert_eq!(client.step(), Step::Delivered),
         );
@@ -2541,6 +2788,7 @@ mod tests {
                 enrollment: &a,
                 resolver: &Resolver,
                 policies: &Policies,
+                delivery_mode: crate::origin_read::DeliveryMode::Cached,
                 renderer: &Renderer,
                 clock: &at,
                 cancelled: &cancelled,
@@ -2790,6 +3038,7 @@ mod tests {
                     enrollment: &a,
                     resolver: &Resolver,
                     policies: &Policies,
+                    delivery_mode: crate::origin_read::DeliveryMode::Cached,
                     renderer: &Renderer,
                     clock: &at,
                     cancelled: &cancelled,
