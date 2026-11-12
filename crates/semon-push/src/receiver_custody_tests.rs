@@ -633,7 +633,9 @@ fn revoke_between_activation_and_install_never_restores_grants() {
     };
     let mut store = Store::open(&fixture.0).unwrap();
     let active = Registry::from_records(vec![enrollment], vec![]).unwrap();
-    store.commit(0, &active).unwrap();
+    store
+        .commit(store.snapshot().unwrap().revision(), &active)
+        .unwrap();
     drop(store);
     let grants = owner_grants(
         custody.owner(),
