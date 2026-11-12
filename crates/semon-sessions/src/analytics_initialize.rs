@@ -225,6 +225,29 @@ fn qualify(
     Ok((identity, incarnation))
 }
 
+fn safe_ancestors(path: &Path) -> Result<(), Error> {
+    for ancestor in path.ancestors() {
+        directory(ancestor)?;
+    }
+    Ok(())
+}
+fn directory(path: &Path) -> Result<(), Error> {
+    shape(path, true)
+}
+fn regular(path: &Path) -> Result<(), Error> {
+    shape(path, false)
+}
+fn shape(path: &Path, directory: bool) -> Result<(), Error> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if (directory && metadata.is_dir()) || (!directory && metadata.is_file()) => {
+            Ok(())
+        }
+        Ok(_) => Err(Error::new(ErrorKind::InconsistentState, Stage::Preflight)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(Error::new(ErrorKind::Io, Stage::Preflight)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,28 +635,5 @@ mod tests {
             assert!(!error.guidance().contains("/home/"));
             assert!(error.guidance().len() < 600);
         }
-    }
-}
-
-fn safe_ancestors(path: &Path) -> Result<(), Error> {
-    for ancestor in path.ancestors() {
-        directory(ancestor)?;
-    }
-    Ok(())
-}
-fn directory(path: &Path) -> Result<(), Error> {
-    shape(path, true)
-}
-fn regular(path: &Path) -> Result<(), Error> {
-    shape(path, false)
-}
-fn shape(path: &Path, directory: bool) -> Result<(), Error> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if (directory && metadata.is_dir()) || (!directory && metadata.is_file()) => {
-            Ok(())
-        }
-        Ok(_) => Err(Error::new(ErrorKind::InconsistentState, Stage::Preflight)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(Error::new(ErrorKind::Io, Stage::Preflight)),
     }
 }
