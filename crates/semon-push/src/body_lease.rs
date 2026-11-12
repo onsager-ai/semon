@@ -181,9 +181,10 @@ impl LeaseManager {
         {
             return Err(Reason::BindingMismatch);
         }
-        if let Some(previous) = &lease.binding
-            && !same_generation(previous, &binding)
-        {
+        if lease.binding.as_ref().map_or_else(
+            || !binding.append_continuity.is_empty(),
+            |previous| !append_extension(previous, &binding),
+        ) {
             return Err(Reason::ContinuationInvalid);
         }
         let total: usize = self
@@ -262,25 +263,57 @@ impl LeaseManager {
         })
     }
 }
-pub(crate) fn same_generation(a: &ResponseBinding, b: &ResponseBinding) -> bool {
+/// Both endpoints use the same acknowledged-prefix extension contract.
+pub(crate) fn append_extension(a: &ResponseBinding, b: &ResponseBinding) -> bool {
+    let grown = a
+        .cache_key
+        .cohort
+        .iter()
+        .filter(|old| {
+            b.cache_key.cohort.iter().any(|new| {
+                new.source_id == old.source_id && new.consumed_boundary > old.consumed_boundary
+            })
+        })
+        .count();
     a.enrollment == b.enrollment
         && a.source_handle == b.source_handle
         && a.cohort_id == b.cohort_id
         && a.cache_key.cohort.len() == b.cache_key.cohort.len()
-        && a.cache_key
-            .cohort
-            .iter()
-            .zip(&b.cache_key.cohort)
-            .all(|(a, b)| {
-                a.source_id == b.source_id
-                    && a.chain == b.chain
-                    && a.generation == b.generation
-                    && a.consumed_boundary <= b.consumed_boundary
-            })
+        && b.append_continuity.len() == grown
+        && a.cache_key.cohort.iter().enumerate().all(|(i, old)| {
+            !a.cache_key.cohort[..i]
+                .iter()
+                .any(|s| s.source_id == old.source_id)
+                && b.cache_key
+                    .cohort
+                    .iter()
+                    .filter(|s| s.source_id == old.source_id)
+                    .count()
+                    == 1
+                && b.cache_key
+                    .cohort
+                    .iter()
+                    .find(|s| s.source_id == old.source_id)
+                    .is_some_and(|new| {
+                        old.chain == new.chain
+                            && old.consumed_boundary <= new.consumed_boundary
+                            && if old.consumed_boundary == new.consumed_boundary {
+                                old.prefix_sha256 == new.prefix_sha256
+                            } else {
+                                let mut evidence = b
+                                    .append_continuity
+                                    .iter()
+                                    .filter(|e| e.source_id.as_str() == old.source_id);
+                                evidence.next().is_some_and(|e| {
+                                    e.chain.as_str() == old.chain
+                                        && e.previous_boundary == old.consumed_boundary
+                                        && String::from(e.prefix_sha256) == old.prefix_sha256
+                                }) && evidence.next().is_none()
+                            }
+                    })
+        })
         && a.cache_key.selector == b.cache_key.selector
         && a.mapping.anchor == b.mapping.anchor
         && a.cache_key.export_view_generation == b.cache_key.export_view_generation
-        && a.cache_key.activity_generation == b.cache_key.activity_generation
-        && a.cache_key.transcript_generation == b.cache_key.transcript_generation
         && a.policy == b.policy
 }

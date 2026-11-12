@@ -1449,6 +1449,7 @@ mod tests {
                     assertion: id(8),
                 }),
                 continuation: None,
+                append_continuity: Vec::new(),
             })
         }
         fn render(
@@ -1467,6 +1468,7 @@ mod tests {
                     assertion: id(8),
                 }),
                 continuation: None,
+                append_continuity: Vec::new(),
             })
         }
     }
@@ -3557,6 +3559,8 @@ mod tests {
         }
         assert!(broker.state.lock().unwrap().work.len() <= 16);
     }
+    include!("body_broker_append_tests.rs");
+
     #[test]
     fn typed_payload_refuses_trailing_unknown_tags_and_empty() {
         let mut bytes = page().canonical_bytes().unwrap().to_vec();

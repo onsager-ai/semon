@@ -450,8 +450,24 @@ gets a fresh assertion, receiver attempt/authorization, origin authorization and
 one receiver range receipt followed by completion. This attempt-per-page choice
 stays below the existing 16-receipt reservation. Append pages stream through
 memory without cache admission. Acknowledgement names the previous request and
-exact opaque continuation; source/cohort generation, export view and pinned policy
-must remain qualified. Cancellation travels in the next bounded origin poll.
+exact opaque continuation. A strict append extension keeps enrollment, source
+handle, cohort membership/ID, member chains, selector, anchor, export view and policy
+equal, while source/activity/transcript generations may change. Boundaries cannot
+shrink. Unchanged boundaries retain the same prefix digest. Each grown member has
+exactly one authenticated `ResponseBinding.append_continuity` entry with its source
+ID, chain, acknowledged `previous_boundary` and the digest recomputed from the
+current pinned source over that old prefix. The required list may be empty and is
+capped at 128; missing/duplicate/extra/mismatched evidence, rewrites, truncation or
+membership changes close with `continuation_invalid`, release capacity and deliver
+no page across the break. Initial pages carry an empty list. Both endpoints use
+`body_lease::append_extension`. The list enters response identity and origin audit
+binding digests. The injected seam is `AppendPageSource::prepare` /
+`RenderPlan::append_continuity`, matched by `AppendPageSource::render` /
+`RenderedPage::append_continuity`, with `AppendCursor::previous_cohort` supplying old
+boundaries. The origin adapter owns production hashing: one extra pass over
+`[0, previous_boundary)` per grown member per page within the existing operation
+budget. See [the body-channel contract](asi-body-channel.md#chain-cohort-and-snapshot-identity).
+Cancellation travels in the next bounded origin poll.
 The host drives the nonblocking receiver maintenance hook at each exchange and
 revocation notification. Native complete-record tail rendering is supplied through
 `AppendPageSource`; the library does not define a production source-handle format.
