@@ -33,6 +33,7 @@ fn revocation_between_requests_on_one_live_connection() {
         tls: server.tls,
         limits: server.limits,
         admission: Mutex::new(Admission::default()),
+        body: None,
         provisioning: None,
         provisioning_clock: None,
         provisioning_timeout: None,
@@ -184,6 +185,7 @@ fn pipelined_body_reads_stop_at_each_authorized_boundary() {
         tls: None,
         limits: Limits::default(),
         admission: Mutex::new(Admission::default()),
+        body: None,
         provisioning: None,
         provisioning_clock: None,
         provisioning_timeout: None,
@@ -249,12 +251,12 @@ pub(super) fn fixture(name: &str) -> PathBuf {
         .join("tests/fixtures")
         .join(name)
 }
-fn identity() -> VerifiedClientIdentity {
+pub(super) fn identity() -> VerifiedClientIdentity {
     let bytes = fs::read(fixture("client-auth/client.pem")).unwrap();
     let cert = CertificateDer::from_pem_slice(&bytes).unwrap();
     VerifiedClientIdentity::from_verified_der(&cert).unwrap()
 }
-fn records(cert_required: bool) -> Registry {
+pub(super) fn records(cert_required: bool) -> Registry {
     let enrollment = Enrollment {
         enrollment_id: "a".repeat(64),
         receiver_id: "receiver-1".into(),
@@ -850,6 +852,7 @@ fn unknown_routes_refuse_with_no_body_read_and_one_response_class() {
         tls: None,
         limits: Limits::default(),
         admission: Mutex::new(Admission::default()),
+        body: None,
         provisioning: None,
         provisioning_clock: None,
         provisioning_timeout: None,

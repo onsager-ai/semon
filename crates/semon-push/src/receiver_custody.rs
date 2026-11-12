@@ -187,6 +187,13 @@ fn validate_grants(grants: &[OwnerGrant]) -> Result<()> {
 }
 
 impl ReceiverCustody {
+    /// Open ceremony-created custody without initializing absent state.
+    pub fn open_existing(dir: &Path) -> Result<Self> {
+        let root = Directory::open(dir)?;
+        let _lock = root.lock("custody.lock")?;
+        Self::load(dir, &root)
+    }
+
     pub fn open_or_initialize(dir: &Path) -> Result<Self> {
         Self::open_with_fault(dir, || Ok(()))
     }
