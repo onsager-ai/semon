@@ -1,5 +1,5 @@
 use super::*;
-use crate::credentials::{Decision, Refusal, Retiring, Secret};
+use crate::credentials::{Authorization, Decision, Refusal, Retiring, Secret};
 use serde_json::{Value, json};
 use std::{
     os::unix::fs::{DirBuilderExt, PermissionsExt, symlink},
@@ -66,6 +66,7 @@ fn enrollment(kind: Kind) -> Enrollment {
         client_certificate_pins: vec![CertificatePin {
             pin: pin(),
             generation: 2,
+            revoked_at: None,
         }],
         credential_kinds: vec![KindScope::new(kind, 2)],
         revoked_at: None,
@@ -90,8 +91,24 @@ fn registry(kind: Kind) -> (Registry, Secret) {
         secret,
     )
 }
-fn refused(reason: Refusal) -> Decision {
-    Decision::Refused(reason)
+fn refused(reason: Refusal) -> Authorization {
+    Authorization {
+        decision: Decision::Refused,
+        local_diagnostic: Some(reason),
+    }
+}
+fn allowed(enrollment_id: String, kind: Kind, generation: u64) -> Authorization {
+    Authorization {
+        decision: Decision::Allowed {
+            enrollment_id,
+            kind,
+            generation,
+        },
+        local_diagnostic: None,
+    }
+}
+fn commit(store: &mut Store, next: &Registry) -> Result<()> {
+    store.commit(store.snapshot()?.revision(), next)
 }
 
 #[test]
@@ -99,8 +116,9 @@ fn round_trip_restart_and_explicit_initialization() {
     let f = Fixture::new();
     assert!(matches!(Store::open(&f.0), Err(Error::Custody)));
     let mut store = Store::initialize(&f.0).unwrap();
-    let (r, secret) = registry(Kind::BodyChannel);
-    store.commit(&r).unwrap();
+    let (mut r, secret) = registry(Kind::BodyChannel);
+    commit(&mut store, &r).unwrap();
+    r.revision = 1;
     assert_eq!(store.snapshot().unwrap(), r);
     assert_eq!(
         fs::metadata(f.member(REGISTRY_FILE))
@@ -325,23 +343,23 @@ fn revocation_history_and_generations_are_terminal_through_real_commit() {
     let f = Fixture::new();
     let mut store = Store::initialize(&f.0).unwrap();
     let (mut r, secret) = registry(Kind::MirrorPush);
-    store.commit(&r).unwrap();
+    commit(&mut store, &r).unwrap();
     r.credentials[0].revoked_at = Some(20);
-    store.commit(&r).unwrap();
+    commit(&mut store, &r).unwrap();
     let mut cleared = r.clone();
     cleared.credentials[0].revoked_at = None;
-    assert_eq!(store.commit(&cleared), Err(Error::Terminal));
+    assert_eq!(commit(&mut store, &cleared), Err(Error::Terminal));
     r.enrollments[0].credential_kinds[0].revoked_at = Some(21);
-    store.commit(&r).unwrap();
+    commit(&mut store, &r).unwrap();
     cleared = r.clone();
     cleared.enrollments[0].credential_kinds[0].revoked_at = None;
-    assert_eq!(store.commit(&cleared), Err(Error::Terminal));
+    assert_eq!(commit(&mut store, &cleared), Err(Error::Terminal));
     r.enrollments[0].revoked_at = Some(22);
-    store.commit(&r).unwrap();
+    commit(&mut store, &r).unwrap();
     cleared = r.clone();
     cleared.enrollments[0].revoked_at = None;
-    assert_eq!(store.commit(&cleared), Err(Error::Terminal));
-    assert_eq!(store.commit(&Registry::empty()), Err(Error::Terminal));
+    assert_eq!(commit(&mut store, &cleared), Err(Error::Terminal));
+    assert_eq!(commit(&mut store, &Registry::empty()), Err(Error::Terminal));
     assert_eq!(
         store.snapshot().unwrap().authorize(
             Kind::MirrorPush,
@@ -352,6 +370,7 @@ fn revocation_history_and_generations_are_terminal_through_real_commit() {
         ),
         refused(Refusal::Revoked)
     );
+    r.revision = store.snapshot().unwrap().revision();
     drop(store);
     assert_eq!(Store::open(&f.0).unwrap().snapshot().unwrap(), r);
 }
@@ -366,7 +385,7 @@ fn kind_route_certificate_and_validity_matrix() {
             for route in kinds {
                 let result = r.authorize(kind, route, &secret, Some(&pin()), Clock(20).now());
                 if kind == stored_kind && route == stored_kind {
-                    assert!(matches!(result, Decision::Allowed { .. }));
+                    assert!(matches!(result.decision, Decision::Allowed { .. }));
                 } else {
                     assert_eq!(result, refused(Refusal::InvalidCredential));
                 }
@@ -381,11 +400,7 @@ fn kind_route_certificate_and_validity_matrix() {
             if stored_kind == Kind::BodyChannel {
                 refused(Refusal::ClientCertificate)
             } else {
-                Decision::Allowed {
-                    enrollment_id: id('a'),
-                    kind: stored_kind,
-                    generation: 2,
-                }
+                allowed(id('a'), stored_kind, 2)
             }
         );
         for cert in [Pin::Spki([8; 32]), Pin::Leaf([7; 32])] {
@@ -403,7 +418,10 @@ fn kind_route_certificate_and_validity_matrix() {
         for now in [10, 99] {
             assert!(matches!(
                 r.authorize(stored_kind, stored_kind, &secret, Some(&pin()), now),
-                Decision::Allowed { .. }
+                Authorization {
+                    decision: Decision::Allowed { .. },
+                    ..
+                }
             ));
         }
         let mut required = r.clone();
@@ -457,7 +475,10 @@ fn per_kind_revocation_does_not_revoke_other_kinds_and_whole_overrides() {
             Some(&pin()),
             20
         ),
-        Decision::Allowed { .. }
+        Authorization {
+            decision: Decision::Allowed { .. },
+            ..
+        }
     ));
     r.enrollments[0].revoked_at = Some(16);
     assert_eq!(
@@ -490,6 +511,7 @@ fn overlap_cutover_and_same_enrollment_generation_certificate_binding() {
         .push(CertificatePin {
             pin: old_pin.clone(),
             generation: 1,
+            revoked_at: None,
         });
     r.validate().unwrap();
     assert!(matches!(
@@ -500,7 +522,10 @@ fn overlap_cutover_and_same_enrollment_generation_certificate_binding() {
             Some(&old_pin),
             49
         ),
-        Decision::Allowed { generation: 1, .. }
+        Authorization {
+            decision: Decision::Allowed { generation: 1, .. },
+            ..
+        }
     ));
     assert_eq!(
         r.authorize(
@@ -576,4 +601,172 @@ fn secrets_redact_all_formatting_and_registry_only_holds_hashes() {
     }
     assert_eq!(format!("{secret:?}"), "Secret(<redacted>)");
     assert_ne!(random_id().unwrap(), random_id().unwrap());
+}
+
+#[test]
+fn stale_snapshots_cannot_restore_replaced_pins_or_other_authority() {
+    let f = Fixture::new();
+    let mut store = Store::initialize(&f.0).unwrap();
+    let (r, secret) = registry(Kind::BodyChannel);
+    store.commit(0, &r).unwrap();
+    let snapshot_a = store.snapshot().unwrap();
+    drop(store);
+    // A distinct transaction replaces P with Q and revokes the old bearer.
+    let mut store = Store::open(&f.0).unwrap();
+    let mut replacement = store.snapshot().unwrap();
+    replacement.enrollments[0].client_certificate_pins[0].revoked_at = Some(20);
+    let q = Pin::Spki([8; 32]);
+    replacement.enrollments[0]
+        .client_certificate_pins
+        .push(CertificatePin {
+            pin: q.clone(),
+            generation: 2,
+            revoked_at: None,
+        });
+    store.commit(replacement.revision(), &replacement).unwrap();
+    let current = store.snapshot().unwrap();
+    assert_eq!(
+        current.authorize(
+            Kind::BodyChannel,
+            Kind::BodyChannel,
+            &secret,
+            Some(&pin()),
+            25
+        ),
+        refused(Refusal::ClientCertificate)
+    );
+    assert!(matches!(
+        current
+            .authorize(Kind::BodyChannel, Kind::BodyChannel, &secret, Some(&q), 25)
+            .decision,
+        Decision::Allowed { .. }
+    ));
+    // The exact stale P->Q regression: unrelated enrollment addition cannot
+    // restore P/remove Q, even though all the old generation checks would pass.
+    let mut stale = snapshot_a.clone();
+    let mut other = enrollment(Kind::MirrorPush);
+    other.enrollment_id = id('d');
+    other.machine = "desktop".into();
+    other.client_certificate_pins.clear();
+    stale.enrollments.push(other);
+    assert_eq!(
+        store.commit(snapshot_a.revision(), &stale),
+        Err(Error::StaleSnapshot)
+    );
+    // Even a caller supplying the latest revision cannot clear pin tombstones.
+    assert_eq!(
+        store.commit(current.revision(), &stale),
+        Err(Error::Terminal)
+    );
+    let mut restored = current.clone();
+    restored.enrollments[0].client_certificate_pins[0].revoked_at = None;
+    assert_eq!(
+        store.commit(current.revision(), &restored),
+        Err(Error::Terminal)
+    );
+    let mut revoked = current.clone();
+    revoked.credentials[0].revoked_at = Some(26);
+    store.commit(current.revision(), &revoked).unwrap();
+    let after_revocation = store.snapshot().unwrap();
+    assert_eq!(
+        store.commit(current.revision(), &current),
+        Err(Error::StaleSnapshot)
+    );
+    assert_eq!(
+        store.commit(after_revocation.revision(), &current),
+        Err(Error::Terminal)
+    );
+    // Retirement cannot be undone by an old generation snapshot.
+    let mut retired = after_revocation.clone();
+    retired.enrollments[0].credential_kinds[0]
+        .generations
+        .current = 3;
+    retired.enrollments[0]
+        .client_certificate_pins
+        .push(CertificatePin {
+            pin: Pin::Leaf([9; 32]),
+            generation: 3,
+            revoked_at: None,
+        });
+    store.commit(after_revocation.revision(), &retired).unwrap();
+    let after_retirement = store.snapshot().unwrap();
+    assert_eq!(
+        store.commit(after_revocation.revision(), &after_revocation),
+        Err(Error::StaleSnapshot)
+    );
+    assert_eq!(
+        store.commit(after_retirement.revision(), &after_revocation),
+        Err(Error::Terminal)
+    );
+    assert_eq!(store.snapshot().unwrap(), after_retirement);
+}
+
+#[test]
+fn all_external_refusals_are_identical_with_local_diagnostics() {
+    let (r, secret) = registry(Kind::BodyChannel);
+    let unknown = Secret::new("unknown".into());
+    let mut revoked = r.clone();
+    revoked.credentials[0].revoked_at = Some(20);
+    let mut retired = r.clone();
+    retired.credentials[0].generation = 1;
+    let cases = [
+        (
+            r.authorize(
+                Kind::BodyChannel,
+                Kind::BodyChannel,
+                &unknown,
+                Some(&pin()),
+                25,
+            ),
+            Refusal::InvalidCredential,
+        ),
+        (
+            r.authorize(
+                Kind::MirrorPush,
+                Kind::MirrorPush,
+                &secret,
+                Some(&pin()),
+                25,
+            ),
+            Refusal::InvalidCredential,
+        ),
+        (
+            revoked.authorize(
+                Kind::BodyChannel,
+                Kind::BodyChannel,
+                &secret,
+                Some(&pin()),
+                25,
+            ),
+            Refusal::Revoked,
+        ),
+        (
+            retired.authorize(
+                Kind::BodyChannel,
+                Kind::BodyChannel,
+                &secret,
+                Some(&pin()),
+                25,
+            ),
+            Refusal::RetiredGeneration,
+        ),
+        (
+            r.authorize(
+                Kind::BodyChannel,
+                Kind::BodyChannel,
+                &secret,
+                Some(&pin()),
+                100,
+            ),
+            Refusal::OutsideValidity,
+        ),
+        (
+            r.authorize(Kind::BodyChannel, Kind::BodyChannel, &secret, None, 25),
+            Refusal::ClientCertificate,
+        ),
+    ];
+    for (result, diagnostic) in cases {
+        assert_eq!(result.decision, Decision::Refused);
+        assert_eq!(result.local_diagnostic, Some(diagnostic));
+    }
 }

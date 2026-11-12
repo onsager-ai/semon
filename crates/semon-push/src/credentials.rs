@@ -1,11 +1,9 @@
 //! Kind-scoped bearer custody and pure authorization. No transport or issuance protocol.
-use std::fmt;
-
+use crate::enrollment::Registry;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fmt;
 use zeroize::Zeroizing;
-
-use crate::enrollment::{Enrollment, Registry};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,8 +13,7 @@ pub enum Kind {
     MirrorPush,
 }
 
-/// A secret has no serializer and always redacts formatting. Exposure is explicit
-/// for the future protected provisioning transport, never registry persistence.
+/// No serializer; exposure is explicit for future protected provisioning only.
 pub struct Secret(Zeroizing<String>);
 impl Secret {
     pub fn new(value: String) -> Self {
@@ -42,7 +39,6 @@ impl fmt::Display for Secret {
         f.write_str("<redacted>")
     }
 }
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Bearer {
@@ -57,9 +53,7 @@ pub struct Bearer {
     pub valid_until: u64,
     pub revoked_at: Option<u64>,
 }
-
-/// At most one previous generation can overlap the current one. Old bearer
-/// records remain as terminal history after the overlap ends.
+/// Retain old bearer records as terminal history after overlap ends.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Generations {
@@ -81,7 +75,7 @@ impl Generations {
                 .is_some_and(|old| old.generation == generation && now < old.cutover_at)
     }
 }
-
+/// The only outcome a transport may expose to a peer. All refusals are identical.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     Allowed {
@@ -89,22 +83,30 @@ pub enum Decision {
         kind: Kind,
         generation: u64,
     },
-    Refused(Refusal),
+    Refused,
 }
+/// Local audit diagnostic only. Deliberately has no Display or serialization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// Unknown secret, wrong kind and wrong route deliberately share one outcome.
     InvalidCredential,
     Revoked,
     OutsideValidity,
     RetiredGeneration,
     ClientCertificate,
 }
-
+/// Not a wire response. Send only `decision` to transport response mapping;
+/// `local_diagnostic` is solely for authenticated local audit/debug consumers.
+/// No Display or serialization is implemented for this container.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Authorization {
+    pub decision: Decision,
+    pub local_diagnostic: Option<Refusal>,
+}
 impl Registry {
-    /// `verified_pin` must come from successful TLS client-certificate verification;
-    /// parsing a request-supplied fingerprint does not establish that evidence.
-    /// `now` is injected Unix time; this function does no I/O and reads no clock.
+    /// `verified_pin` must come from verified TLS evidence, never a request field.
+    /// Time is injected Unix seconds. The scan schedule depends on stored state,
+    /// not whether the presented digest matches. This is not a constant-time
+    /// promise for the whole Rust function; every digest comparison is fixed-work.
     pub fn authorize(
         &self,
         kind: Kind,
@@ -112,73 +114,71 @@ impl Registry {
         secret: &Secret,
         verified_pin: Option<&crate::enrollment::Pin>,
         now: u64,
-    ) -> Decision {
-        if self.validate().is_err() {
-            return Decision::Refused(Refusal::InvalidCredential);
-        }
+    ) -> Authorization {
         let hash = secret.hash();
-        let mut matched = None;
+        let valid = self.validate().is_ok();
+        let mut selected = None;
         for bearer in &self.credentials {
-            // Compare every digest, including records of other kinds.
             let equal = ct_eq(&hash, &bearer.sha256);
-            if equal && bearer.kind == kind && kind == route_kind {
-                matched = Some(bearer);
+            let mut found = None;
+            // Perform the same enrollment/scope/pin scans for misses and hits.
+            for enrollment in &self.enrollments {
+                let mut certificate = false;
+                for pin in &enrollment.client_certificate_pins {
+                    certificate |= (Some(&pin.pin) == verified_pin)
+                        & (pin.generation == bearer.generation)
+                        & pin.revoked_at.is_none();
+                }
+                for scope in &enrollment.credential_kinds {
+                    let revoked = enrollment.revoked_at.is_some()
+                        | scope.revoked_at.is_some()
+                        | bearer.revoked_at.is_some();
+                    let in_window = (now >= bearer.valid_from) & (now < bearer.valid_until);
+                    let generation = scope.generations.accepts(bearer.generation, now);
+                    let certificate_required = scope.client_cert_required | verified_pin.is_some();
+                    let reason = if revoked {
+                        Some(Refusal::Revoked)
+                    } else if !in_window {
+                        Some(Refusal::OutsideValidity)
+                    } else if !generation {
+                        Some(Refusal::RetiredGeneration)
+                    } else if certificate_required & !certificate {
+                        Some(Refusal::ClientCertificate)
+                    } else {
+                        None
+                    };
+                    if (enrollment.enrollment_id == bearer.enrollment_id)
+                        & (scope.kind == bearer.kind)
+                    {
+                        found = Some(reason);
+                    }
+                }
+            }
+            if equal & (bearer.kind == kind) & (kind == route_kind) {
+                selected = Some((bearer, found.unwrap_or(Some(Refusal::InvalidCredential))));
             }
         }
-        let Some(bearer) = matched else {
-            return Decision::Refused(Refusal::InvalidCredential);
-        };
-        let Some(enrollment) = self
-            .enrollments
-            .iter()
-            .find(|e| e.enrollment_id == bearer.enrollment_id)
-        else {
-            return Decision::Refused(Refusal::InvalidCredential);
-        };
-        authorize_enrollment(enrollment, bearer, verified_pin, now)
-    }
-}
-fn authorize_enrollment(
-    enrollment: &Enrollment,
-    bearer: &Bearer,
-    pin: Option<&crate::enrollment::Pin>,
-    now: u64,
-) -> Decision {
-    let Some(scope) = enrollment
-        .credential_kinds
-        .iter()
-        .find(|s| s.kind == bearer.kind)
-    else {
-        return Decision::Refused(Refusal::InvalidCredential);
-    };
-    let refused = if enrollment.revoked_at.is_some()
-        || scope.revoked_at.is_some()
-        || bearer.revoked_at.is_some()
-    {
-        Some(Refusal::Revoked)
-    } else if now < bearer.valid_from || now >= bearer.valid_until {
-        Some(Refusal::OutsideValidity)
-    } else if !scope.generations.accepts(bearer.generation, now) {
-        Some(Refusal::RetiredGeneration)
-    } else if (scope.client_cert_required || pin.is_some())
-        && !pin.is_some_and(|pin| {
-            enrollment
-                .client_certificate_pins
-                .iter()
-                .any(|p| &p.pin == pin && p.generation == bearer.generation)
-        })
-    {
-        Some(Refusal::ClientCertificate)
-    } else {
-        None
-    };
-    match refused {
-        Some(reason) => Decision::Refused(reason),
-        None => Decision::Allowed {
-            enrollment_id: enrollment.enrollment_id.clone(),
-            kind: bearer.kind,
-            generation: bearer.generation,
-        },
+        if valid && let Some((bearer, None)) = selected {
+            Authorization {
+                decision: Decision::Allowed {
+                    enrollment_id: bearer.enrollment_id.clone(),
+                    kind: bearer.kind,
+                    generation: bearer.generation,
+                },
+                local_diagnostic: None,
+            }
+        } else {
+            Authorization {
+                decision: Decision::Refused,
+                local_diagnostic: Some(if valid {
+                    selected
+                        .and_then(|(_, reason)| reason)
+                        .unwrap_or(Refusal::InvalidCredential)
+                } else {
+                    Refusal::InvalidCredential
+                }),
+            }
+        }
     }
 }
 fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {

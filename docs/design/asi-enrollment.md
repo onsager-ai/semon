@@ -38,7 +38,13 @@ certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
 serialized. The library also exposes legacy `DIR/tokens` refusal without importing
 or modifying it. Supported Push continues using the existing token path until a
 later end-to-end enrollment/pairing cutover. Pairing, renewal protocols and TLS/
-route integration remain unimplemented by these libraries.
+route integration remain unimplemented by these libraries. Updates compare a
+persisted monotonic revision under the registry lock; replaced certificate pins
+remain as terminal revocation history. Per-kind re-enable is not implemented yet;
+its fresh-credential transition arrives with the renewal/revocation PR. Existing
+binding/issuer fields remain frozen; narrower issuer-rotation and mirror-to-
+analytics enablement transition APIs arrive later. Validating admitted namespace/
+incarnation continuity remains the provisioning caller's responsibility.
 
 | Slice / owner | Delivery boundary |
 | --- | --- |

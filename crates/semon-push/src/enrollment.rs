@@ -28,6 +28,7 @@ pub enum Error {
     Invalid,
     UnsupportedVersion,
     Terminal,
+    StaleSnapshot,
     Random,
     Write,
     CommitUncertain,
@@ -41,6 +42,7 @@ impl fmt::Display for Error {
             Self::Invalid => "invalid enrollment registry",
             Self::UnsupportedVersion => "unsupported enrollment registry version",
             Self::Terminal => "terminal enrollment or credential history cannot be cleared; recover with a new enrollment ID",
+            Self::StaleSnapshot => "stale enrollment snapshot; reload before updating",
             Self::Random => "system random source failed",
             Self::Write => "enrollment update failed before commit",
             Self::CommitUncertain => "enrollment update was renamed; reopen custody to resolve commit outcome",
@@ -77,6 +79,8 @@ pub enum Pin {
 pub struct CertificatePin {
     pub pin: Pin,
     pub generation: u64,
+    /// Terminal pin history is retained rather than deleting replaced authority.
+    pub revoked_at: Option<u64>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -160,6 +164,7 @@ pub struct Enrollment {
 #[serde(deny_unknown_fields)]
 pub struct Registry {
     format: u32,
+    revision: u64,
     pub(crate) enrollments: Vec<Enrollment>,
     pub(crate) credentials: Vec<Bearer>,
 }
@@ -167,9 +172,13 @@ impl Registry {
     pub fn empty() -> Self {
         Self {
             format: FORMAT,
+            revision: 0,
             enrollments: vec![],
             credentials: vec![],
         }
+    }
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
     pub fn enrollments(&self) -> &[Enrollment] {
         &self.enrollments
@@ -190,6 +199,7 @@ impl Registry {
     pub fn from_records(enrollments: Vec<Enrollment>, credentials: Vec<Bearer>) -> Result<Self> {
         let registry = Self {
             format: FORMAT,
+            revision: 0,
             enrollments,
             credentials,
         };
@@ -276,7 +286,7 @@ impl Registry {
                     && !e
                         .client_certificate_pins
                         .iter()
-                        .any(|p| p.generation == k.generations.current)
+                        .any(|p| p.generation == k.generations.current && p.revoked_at.is_none())
                 {
                     return Err(Error::Invalid);
                 }
@@ -337,6 +347,16 @@ impl Registry {
                 || (e.revoked_at.is_some() && e != next)
             {
                 return Err(Error::Terminal);
+            }
+            for pin in &e.client_certificate_pins {
+                let n = next
+                    .client_certificate_pins
+                    .iter()
+                    .find(|n| n.pin == pin.pin && n.generation == pin.generation)
+                    .ok_or(Error::Terminal)?;
+                if pin.revoked_at.is_some() && pin.revoked_at != n.revoked_at {
+                    return Err(Error::Terminal);
+                }
             }
             for scope in &e.credential_kinds {
                 let n = next
@@ -560,9 +580,17 @@ impl Store {
             self.dir.load()
         }
     }
-    pub fn commit(&mut self, next: &Registry) -> Result<()> {
-        next.follows(&self.snapshot()?)?;
-        self.write(next, |_| Ok(()))
+    /// Compare-and-swap a snapshot revision under the exclusive lock. Callers
+    /// must supply the revision they read, including for newly built records.
+    pub fn commit(&mut self, expected_revision: u64, next: &Registry) -> Result<()> {
+        let current = self.snapshot()?;
+        if expected_revision != current.revision {
+            return Err(Error::StaleSnapshot);
+        }
+        next.follows(&current)?;
+        let mut next = next.clone();
+        next.revision = current.revision.checked_add(1).ok_or(Error::Invalid)?;
+        self.write(&next, |_| Ok(()))
     }
     fn write(&mut self, next: &Registry, mut fault: impl FnMut(Stage) -> Result<()>) -> Result<()> {
         next.validate()?;
