@@ -216,6 +216,31 @@ impl ExportViewValidator for Valid {
 }
 
 #[test]
+fn canonical_serialization_reserves_complete_bounded_capacity() {
+    let page = TypedPage {
+        fields: (0..32)
+            .map(|_| TypedField {
+                field: Field::Assistant,
+                text: UntrustedText::new(SECRET.repeat(16)),
+            })
+            .collect(),
+    };
+    let bytes = page.canonical_bytes().unwrap();
+    let expected = b"semon/typed-body/v1\0".len()
+        + 8
+        + 32 * (1 + 8 + b"untrusted_text".len() + 8 + SECRET.len() * 16);
+    assert_eq!(bytes.len(), expected);
+    assert_eq!(bytes.capacity(), expected);
+    let oversized = TypedPage {
+        fields: vec![TypedField {
+            field: Field::Assistant,
+            text: UntrustedText::new("x".repeat(MAX_BYTES)),
+        }],
+    };
+    assert_eq!(oversized.canonical_bytes().err(), Some(Refused::OverBudget));
+}
+
+#[test]
 fn happy_path_digest_binding_and_explicit_completion() {
     let f = Fixture::new();
     let at = At(Cell::new(10_000));

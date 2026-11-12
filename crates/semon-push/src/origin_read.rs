@@ -220,8 +220,22 @@ impl TypedPage {
     /// Every value is explicitly tagged untrusted_text. Framing is big-endian u64
     /// lengths and fixed field tags, independent of JSON/object-map ordering.
     pub fn canonical_bytes(&self) -> Result<Zeroizing<Vec<u8>>> {
-        let mut out = Zeroizing::new(Vec::new());
-        out.extend_from_slice(b"semon/typed-body/v1\0");
+        let prefix = b"semon/typed-body/v1\0";
+        let mut capacity = prefix.len() + 8;
+        for field in &self.fields {
+            let extra = 1usize
+                .checked_add(8 + b"untrusted_text".len())
+                .and_then(|n| n.checked_add(8))
+                .and_then(|n| n.checked_add(field.text.as_str().len()))
+                .ok_or(Refused::OverBudget)?;
+            capacity = capacity.checked_add(extra).ok_or(Refused::OverBudget)?;
+            if capacity > MAX_BYTES {
+                return Err(Refused::OverBudget);
+            }
+        }
+        // Compute and validate the complete length before copying any body text.
+        let mut out = Zeroizing::new(Vec::with_capacity(capacity));
+        out.extend_from_slice(prefix);
         out.extend_from_slice(&(self.fields.len() as u64).to_be_bytes());
         for field in &self.fields {
             let tag = match field.field {
@@ -231,14 +245,6 @@ impl TypedPage {
                 Field::ToolOutput => 3,
                 Field::Error => 4,
             };
-            let extra = 1usize
-                .checked_add(8 + b"untrusted_text".len())
-                .and_then(|n| n.checked_add(8))
-                .and_then(|n| n.checked_add(field.text.as_str().len()))
-                .ok_or(Refused::OverBudget)?;
-            if out.len().checked_add(extra).is_none_or(|n| n > MAX_BYTES) {
-                return Err(Refused::OverBudget);
-            }
             out.push(tag);
             append(&mut out, b"untrusted_text");
             append(&mut out, field.text.as_str().as_bytes());

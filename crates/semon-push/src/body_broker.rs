@@ -400,7 +400,7 @@ impl<'a> Broker<'a> {
         self.changed.notify_all();
         result
     }
-    fn accept_frame(&self, work: &mut Work, mut frame: wire::Frame, length: usize) -> Result<()> {
+    fn accept_frame(&self, work: &mut Work, frame: wire::Frame, length: usize) -> Result<()> {
         if frame.header.frame != work.next_frame {
             return Err(Reason::FrameOrder);
         }
@@ -424,16 +424,19 @@ impl<'a> Broker<'a> {
                 if binding.deadline_millis <= self.clock.now_millis() {
                     return Err(Reason::Deadline);
                 }
+                // Allocate the validated ceiling before any plaintext enters;
+                // later frames must never relocate a body-bearing allocation.
+                work.payload
+                    .reserve_exact(binding.permitted_range.len() as usize);
                 work.binding = Some(*binding);
             }
             FrameContent::Data => {
-                if work.binding.is_none() {
-                    return Err(Reason::FrameOrder);
+                let binding = work.binding.as_ref().ok_or(Reason::FrameOrder)?;
+                if work.payload.len() + frame.payload.len() > binding.permitted_range.len() as usize
+                {
+                    return Err(Reason::OverBudget);
                 }
-                // Avoid geometric growth beyond the bounded response ceiling.
-                work.payload.reserve_exact(frame.payload.len());
                 work.payload.extend_from_slice(&frame.payload);
-                frame.payload.zeroize();
             }
         }
         if work
@@ -1372,7 +1375,7 @@ mod tests {
         final_frame: bool,
         content: FrameContent,
         payload: Vec<u8>,
-    ) -> Vec<u8> {
+    ) -> Zeroizing<Vec<u8>> {
         wire::encode_frame(&wire::Frame {
             header: wire::FrameHeader {
                 version: 1,
@@ -1382,7 +1385,7 @@ mod tests {
                 payload_bytes: payload.len() as u32,
                 content,
             },
-            payload,
+            payload: Zeroizing::new(payload),
         })
         .unwrap()
     }
@@ -1960,6 +1963,15 @@ mod tests {
                         Failure::StreamRevoked | Failure::StreamExpired | Failure::StreamOversize
                     ) {
                         let split = payload.len() / 2;
+                        let allocation = {
+                            let state = broker.state.lock().unwrap();
+                            let payload = &state.work[&outgoing.request_id].payload;
+                            assert!(
+                                payload.capacity()
+                                    >= authorized.response_binding.permitted_range.len() as usize
+                            );
+                            (payload.as_ptr(), payload.capacity())
+                        };
                         broker
                             .accept_response(
                                 &a,
@@ -1973,6 +1985,11 @@ mod tests {
                                 ),
                             )
                             .unwrap();
+                        {
+                            let state = broker.state.lock().unwrap();
+                            let payload = &state.work[&outgoing.request_id].payload;
+                            assert_eq!((payload.as_ptr(), payload.capacity()), allocation);
+                        }
                         let expected = match mode {
                             Failure::StreamRevoked => {
                                 a.revoked.store(true, Ordering::Relaxed);
