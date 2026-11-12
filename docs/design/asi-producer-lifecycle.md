@@ -43,11 +43,29 @@ invoke the CLI instead of sharing the library contract.
 
 Inputs are the trusted local index/state location using existing path helpers,
 explicit local producer intent, and an optional expected namespace/index binding
-from existing enrollment. It returns `{ namespace, index_incarnation, disposition:
-created | existing }` plus retained writer ownership for the caller to transfer to
-the writer. `created` means at least one allowed missing component was created.
-No caller may separately generate an analytics namespace or invent an incarnation.
-The native index producer retains ownership of schema/incarnation creation.
+from existing enrollment. It returns `{ namespace, origin_incarnation,
+index_incarnation, disposition: created | existing }` plus retained writer ownership
+for the caller to transfer to the writer. `created` means at least one allowed
+missing component was created. No caller may separately generate an analytics
+namespace or invent an incarnation. The native index producer retains ownership of
+schema/index-incarnation creation.
+
+The two incarnations keep one meaning each (agreed with the origin lane, #634):
+
+- `origin_incarnation` identifies the origin's producer instance: an opaque ID
+  created once, in the same persisted step as the namespace. It stays constant
+  across index rebuilds and changes only when the namespace is created anew or
+  transferred (re-initialization, a copied or restored store, a whole-namespace
+  transfer).
+- `index_incarnation` is the analytics index generation. It changes on rebuild or
+  reconcile, which triggers a complete namespace reconciliation, never a reset to
+  empty.
+
+The initializer creates `origin_incarnation` with the namespace, persists both IDs
+with it, and validates continuity against the store manifest, as
+`read_analytics_namespace` does for the namespace today. The receiver only records
+both and checks syntax and exact equality; it never infers either from contact
+time, hostname or path.
 
 Before mutation, qualify existing namespace, index and store, including supported
 format, local ownership, manifest/live-map integrity and namespace membership.
@@ -87,16 +105,23 @@ job; rebuilds still require available authorized sources and custody proof.
 - `analytics materialize` calls initialize, then keeps its existing strict Catalog
   refresh, bounded publication, compaction and optional watch semantics.
 - Analytics/body `connect` calls initialize before pairing begins. The replacement
-  point is `connect::producer_admission(kinds, analytics_state_dir)` (#651, not on
-  `main` yet): replace its interim read-only producer-binding precheck (the seam
+  point is `connect::producer_admission(kinds, analytics_state_dir)` (#651, on
+  `main`). That seam needs only a read-only function returning exactly those three
+  values, or the refusal “run `semon analytics materialize` first, then connect”;
+  nothing else. Replace its interim read-only producer-binding precheck (the seam
   returning “run `semon analytics materialize` first, then connect”) with this call,
   retaining its expected-binding validation. Mirror-only connect skips it. Local
   initialization grants no sharing permission; B4 still gates enrollment/source publication.
 - Proposed `start` calls initialize, then runs the local producer and authenticated
   Viewer. Merely opening Viewer, MCP, query, push or receive never initializes.
 
-Enrollment consumes the returned namespace/index incarnation plus the separately
-validated origin incarnation; this API does not invent the latter. Claim epoch
+Enrollment consumes the returned `{ namespace, origin_incarnation,
+index_incarnation }`; `Binding::Admitted` already carries both incarnations, and the
+body cache and assertions key on namespace + `origin_incarnation`, so they survive
+index rebuilds. No rename or collapse. Consequences: a changed `origin_incarnation`
+makes the receiver refuse the old enrollment and the operator re-pairs with a new
+enrollment ID; a changed `index_incarnation` under the same origin needs a
+receiver-side rebind, which the origin lane defines in PR4/4b, not here. Claim epoch
 remains unassigned until slice 4b. The caller must revalidate the binding at
 activation if ownership was released while waiting for user input. See
 [enrollment bindings](asi-enrollment.md#claims-epochs-and-heads).
@@ -105,7 +130,7 @@ Reset keeps its existing confirmation/export-or-waiver and lock requirements.
 Ordinary reset retains namespace **and Event Index**, so initialization reuses both
 and leaves publication pending. `reset --new-namespace` removes the namespace and
 egress handles, not the index: the next explicit initialization creates a fresh
-namespace but reuses a valid index incarnation. Any namespace or index-incarnation
+namespace and a fresh `origin_incarnation` but reuses a valid index incarnation. Any namespace, origin- or index-incarnation
 change requires explicit enrollment rebinding/4b reconciliation; no silent claim
 reuse or transfer.
 
@@ -153,7 +178,7 @@ after installation; browser-opening fallback and external setup stay separately
 counted. This amendment alone does not deliver integrated startup.
 
 The implementation PR must test fresh and existing-index initialization; repeat
-calls preserving IDs and published bytes; zero-source initialization without a
+calls preserving all three IDs and published bytes; `origin_incarnation` persisted with the namespace, constant across index rebuild, new for a new namespace, and its continuity checked against the manifest; zero-source initialization without a
 fake manifest/revision; concurrent initialization/writer/reset exclusion and
 continuous ownership handoff; every refusal kind with existing bytes preserved;
 crash/partial-state refusal; expected-binding mismatch before pairing; mirror-only
@@ -161,8 +186,3 @@ bypass; connect cancellation without grants; ordinary/new-namespace reset and
 explicit rebinding; the pending state (no zero totals, empty-success view or “no history” claim before the first valid publication, distinct from a completed zero-source publication, existing snapshot kept visible while updating); an actionable, path-free message for every refusal kind; unchanged read-only `not_materialized` behavior; and materialize
 still draining strict native publication without a recovery/reset fallback. Run
 Rust gates in CI; this proposal adds no implementation or local cargo/node checks.
-
-## Questions for PM/owner
-
-1. Which provisioning-owned validator supplies `origin_incarnation`? The inspected
-   producer path establishes index incarnation, not a separate origin lifecycle ID.
