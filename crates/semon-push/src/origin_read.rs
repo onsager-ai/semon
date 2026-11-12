@@ -427,13 +427,34 @@ pub struct ResponseBinding {
 fn deserialize_append_continuity<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> std::result::Result<Vec<AppendContinuity>, D::Error> {
-    let entries = Vec::<AppendContinuity>::deserialize(deserializer)?;
-    if entries.len() > 128 {
-        return Err(serde::de::Error::custom(
-            "append continuity exceeds cohort cap",
-        ));
+    struct BoundedContinuity;
+    impl<'de> serde::de::Visitor<'de> for BoundedContinuity {
+        type Value = Vec<AppendContinuity>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("at most 128 append continuity entries")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut entries = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(128));
+            while entries.len() < 128 {
+                let Some(entry) = sequence.next_element::<AppendContinuity>()? else {
+                    return Ok(entries);
+                };
+                entries.push(entry);
+            }
+            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom(
+                    "append continuity exceeds cohort cap",
+                ));
+            }
+            Ok(entries)
+        }
     }
-    Ok(entries)
+    deserializer.deserialize_seq(BoundedContinuity)
 }
 impl ResponseBinding {
     /// Recompute the origin's exact response identity using the signed claims.

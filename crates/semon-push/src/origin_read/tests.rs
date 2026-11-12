@@ -371,6 +371,43 @@ fn delivery_mode_is_required_and_binds_identity_and_origin_audit() {
 }
 
 #[test]
+fn append_continuity_deserialization_stops_at_the_cap() {
+    let entry = serde_json::to_value(AppendContinuity {
+        source_id: opaque("source"),
+        chain: opaque("chain"),
+        previous_boundary: 99,
+        prefix_sha256: id(10),
+    })
+    .unwrap();
+    for length in [128, 129, 10_000] {
+        let consumed = Cell::new(0);
+        let elements = (0..length).map(|index| {
+            consumed.set(consumed.get() + 1);
+            if index < 128 {
+                entry.clone()
+            } else {
+                // This cannot deserialize as AppendContinuity. The visitor must
+                // detect overflow through IgnoredAny, without constructing it.
+                serde_json::Value::Null
+            }
+        });
+        let deserializer = serde::de::value::SeqDeserializer::<_, serde_json::Error>::new(elements);
+        let result = deserialize_append_continuity(deserializer);
+        if length == 128 {
+            assert_eq!(result.unwrap().len(), 128);
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("exceeds cohort cap")
+            );
+        }
+        assert_eq!(consumed.get(), length.min(129));
+    }
+}
+
+#[test]
 fn append_continuity_is_required_strict_and_bound_to_identity_and_audit() {
     struct WithEvidence<'a> {
         renderer: Renderer<'a>,
