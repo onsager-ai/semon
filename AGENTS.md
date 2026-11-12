@@ -4,11 +4,13 @@ Agent Session Intelligence (ASI): durable storage, query and analytics over
 harness-native agent sessions, built on native collection, synchronization and the
 Session Event Index. Analytics is the core; read-only viewing of raw session logs
 is its foundation: analytics evidence links into it, so it is not optional polish.
-The Viewer is an analytics UI plus standalone, read-only browsing of Semon-stored
-history. It keeps the existing sidebar/navigation and
-catalog/transcript owners, and it works without T3 Code. T3's transcript is a
-presentation reference only. Two-way harness control is not a product goal: do not
-add a composer or control, runtime or SSH features. Follow
+The Viewer provides analytics and standalone read-only browsing of Semon's
+durable session history. Preserve Semon's sidebar/navigation and native Catalog
+and transcript ownership. Use T3's session-log presentation as a reference for
+legibility and evidence navigation, without a T3 service, state or import
+dependency. Improve transcript usability where it supports those tasks; cosmetic
+pixel matching alone is not a goal. No composer, control, runtime or SSH features.
+Review any copied code/assets for license obligations and preserve notices. Follow
 [the ASI direction](docs/design/asi-direction.md) for scope and sequencing.
 Encrypted Relay
 and Canonical Trace Store are retired pre-release experiments. Their historical
