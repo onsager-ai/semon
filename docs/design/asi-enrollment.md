@@ -981,7 +981,15 @@ and its behavior is not decided.
 This is the single wording inventory for PR4 and the UI/UX Manager's wording/step
 review. `M`, `K`, `NAME`, `N` and `D` below are substitutions for validated machine,
 kind, receiver selector, generation and whole days remaining (rounded up). `DIR`
-is the receiver directory and `URL` its configured HTTPS endpoint. `TARGET`
+is the receiver directory and `URL` its configured HTTPS endpoint. `NAME` is the
+lowercase hex SHA-256 of the origin's normalized endpoint bytes: first apply
+`pairing::normalize_endpoint` (HTTPS host plus explicit port), then the same
+`check_url` normalization used to validate stored custody. The receiver MUST compute
+and print this selector from its own advertised endpoint, which connect requires
+to equal the origin's normalized endpoint. The current controller has one advertised
+endpoint; multiple advertised URLs require retaining the exact enrolled endpoint
+per enrollment and computing its selector, never guessing from the listen address
+or another alias. `TARGET`
 is `machine M` or `kind K for machine M`. Do not substitute secrets. Prompts and
 confirmation feedback use the controlling terminal; no terminal means refuse.
 Only literal `yes` confirms; any other input/EOF cancels without changing state.
@@ -1074,7 +1082,7 @@ be recalled; disconnected origins cannot receive instantaneous remote updates.
 | `semon disconnect --receiver <name>` | Origin command plus confirmation disables local enrollment/channel and receiver/issuer trust in active use; cancel active delivery and stop new publication. Preserve local history, analytics, keys and audits. This alone is not receiver-side revocation. |
 | `semon receive revoke --machine <name>` | Authenticated receiver admin command plus confirmation revokes enrollment, all kinds/generations, associated grants and in-flight hooks; invalidate affected cache entries under cache rules. Preserve admitted facts/audits and report retired/disconnected coverage. Requires no origin contact. |
 | Lost origin | Receiver revokes immediately; replacement pairs with a new enrollment ID. No automatic namespace/claim transfer or erasure of the lost disk. |
-| Lost/compromised receiver | Each surviving origin disconnects before reconnecting; explicitly revoke affected authority and repeat fresh pairing for recovery. An offline origin must be handled locally. |
+| Lost/compromised receiver | Recover through fresh independently trusted pairing with a new enrollment ID. Connect replaces existing origin custody under the single B4 approval and retains its old files; no separate disconnect is required. Receiver replacement confirmation applies if a usable predecessor remains there. Handle offline origins locally; disconnect remains a standalone way to stop local use. |
 | Audit full/invalid | Proposed `semon receive audit status`, then `semon receive audit roll --preserve-to /private/archive` plus confirmation preserves exact journal custody before a fresh private directory is used. Reads stop; no automatic pruning/repair. Origin requires an equivalent local audit operation specified by its owner. |
 
 Bilateral removal uses both disconnect and revoke, with their confirmations. New
@@ -1266,7 +1274,10 @@ CI must verify the implementation, not infer safety from this docs PR:
   watch without source events, first-failure immediacy, changed outcomes/severity,
   threshold crossings, daily reminder ceiling and suppressed duplicate due/failure
   lines. A running watch never advises another push; every one-shot push instruction
-  names the receiver. Distinguish client-certificate expiry and unsupported-format
+  names the receiver. The receiver's printed NAME must exactly equal the name
+  connect prints for the same advertised endpoint, including case, trailing slash
+  and explicit/default port normalization; reject ambiguous multi-endpoint selection.
+  Distinguish client-certificate expiry and unsupported-format
   versus capacity guidance; all recovery strings use code/invitation consistently.
   Inject wall/monotonic clocks and scheduler advancement, clamp backward wall time,
   and use no real-time sleeps (#623), including deadline and race tests.
