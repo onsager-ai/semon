@@ -28,6 +28,18 @@ lines in `DIR/tokens`; `Tokens::authorize` supplies a machine identity. The
 not the enrollment, client-certificate identity or remote body read defined here.
 #630/#631 and #635 supply libraries, not integrated onboarding or body service.
 
+The receiver registry and kind-aware credential custody are implemented as Unix
+libraries in `semon-push::enrollment` and `semon-push::credentials`, unwired from
+`semon receive`, its listener, CLI and default paths. Explicit library
+initialization creates `DIR/enrollment/registry.json` (format 1) and
+`DIR/enrollment/registry.lock`, relative to the receiver state directory `DIR`.
+One atomic registry document contains enrollment bindings, generation-scoped
+certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
+serialized. The library also exposes legacy `DIR/tokens` refusal without importing
+or modifying it. Supported Push continues using the existing token path until a
+later end-to-end enrollment/pairing cutover. Pairing, renewal protocols and TLS/
+route integration remain unimplemented by these libraries.
+
 | Slice / owner | Delivery boundary |
 | --- | --- |
 | #593 slice 4a, this contract | Reviewed pairing/bootstrap, enrollment registry, generated identity and kind credentials, persisted source-consent input, automatic renewal, revocation, TLS/route/admission hooks, provisioning outputs and owning CLI/token changes |
