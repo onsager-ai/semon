@@ -41,6 +41,8 @@ const CLOCK_TOLERANCE: u64 = 2;
 pub struct SourceWitness {
     pub source_id: String,
     pub chain: String,
+    /// SHA-256 of the pinned prefix [0, consumed_boundary); continuity evidence.
+    pub prefix_sha256: String,
     pub generation: String,
     pub consumed_boundary: u64,
 }
@@ -339,6 +341,8 @@ impl<C: Clock> BodyCache<C> {
                             source.source_id == new.source_id
                                 && (source.generation != new.generation
                                     || source.chain != new.chain
+                                    || source.prefix_sha256 != new.prefix_sha256
+                                    || source.consumed_boundary != new.consumed_boundary
                                     || old.policy_versions != metadata.key.policy_versions)
                         })
                     })
@@ -747,7 +751,20 @@ fn validate_key(key: &CacheKey) -> Result<()> {
         &key.authorization_scope,
     ];
     for source in &key.cohort {
-        fields.extend([&source.source_id, &source.chain, &source.generation]);
+        if source.prefix_sha256.len() != 64
+            || !source
+                .prefix_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(CacheError::InvalidEnvelope);
+        }
+        fields.extend([
+            &source.source_id,
+            &source.chain,
+            &source.generation,
+            &source.prefix_sha256,
+        ]);
     }
     fields.extend(&key.policy_versions);
     if fields.iter().any(|s| s.is_empty())
@@ -1102,6 +1119,7 @@ mod tests {
             cohort: vec![SourceWitness {
                 source_id: source.into(),
                 chain: "chain".into(),
+                prefix_sha256: "a".repeat(64),
                 generation: "generation-1".into(),
                 consumed_boundary: 100,
             }],
@@ -1114,6 +1132,33 @@ mod tests {
             authorization_scope: "principal-1".into(),
         }
     }
+    #[test]
+    fn prefix_is_required_and_binds_cache_serialization() {
+        let original = key("page", "source", b"body");
+        let encoded = serde_json::to_value(&original).unwrap();
+        assert_eq!(encoded["cohort"][0]["prefix_sha256"], "a".repeat(64));
+        assert_eq!(
+            serde_json::from_value::<CacheKey>(encoded.clone()).unwrap(),
+            original
+        );
+        let mut missing = encoded;
+        missing["cohort"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("prefix_sha256");
+        assert!(serde_json::from_value::<CacheKey>(missing).is_err());
+        let mut appended = original.clone();
+        appended.cohort[0].prefix_sha256 = "b".repeat(64);
+        appended.cohort[0].consumed_boundary += 1;
+        assert_ne!(key_id(&original).unwrap(), key_id(&appended).unwrap());
+        assert_ne!(
+            serde_json::to_vec(&original).unwrap(),
+            serde_json::to_vec(&appended).unwrap()
+        );
+        appended.cohort[0].prefix_sha256 = "invalid".into();
+        assert!(validate_key(&appended).is_err());
+    }
+
     fn admission(key: &CacheKey) -> ReadAdmission {
         ReadAdmission::after_online_authorization_and_audit(key.clone(), None)
     }
