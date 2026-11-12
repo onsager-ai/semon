@@ -426,6 +426,27 @@ fn address_change_atomically_ends_authority_without_mutating_enrollments() {
 }
 
 #[test]
+fn compacted_generation_cannot_be_reintroduced_at_its_high_water_mark() {
+    let f = Fixture::new();
+    audit(&f);
+    let mut store = Store::initialize(&f.0).unwrap();
+    let (r, _) = registry(Kind::MirrorPush);
+    store.commit(0, &r).unwrap();
+    store.compact(&f.0, 100).unwrap();
+    let current = store.snapshot().unwrap();
+    assert!(current.credentials.is_empty());
+    let mut next = current.clone();
+    let mut credential = r.credentials[0].clone();
+    credential.credential_id = id('d');
+    next.credentials.push(credential);
+    assert_eq!(
+        store.commit(current.revision(), &next),
+        Err(Error::Terminal)
+    );
+    assert_eq!(store.snapshot().unwrap(), current);
+}
+
+#[test]
 fn address_commit_crashes_never_mix_old_records_and_endpoint_authority() {
     for point in [
         Stage::Written,
