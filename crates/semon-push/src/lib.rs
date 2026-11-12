@@ -52,6 +52,8 @@ pub mod body_lease;
 #[cfg(unix)]
 pub mod body_wire;
 #[cfg(unix)]
+pub mod connect;
+#[cfg(unix)]
 pub mod credentials;
 #[cfg(unix)]
 pub mod enrollment;
@@ -61,6 +63,8 @@ pub mod mirror;
 pub mod origin_audit;
 #[cfg(unix)]
 pub mod origin_client;
+#[cfg(unix)]
+pub mod origin_custody;
 #[cfg(unix)]
 pub mod origin_read;
 #[cfg(unix)]
@@ -129,6 +133,9 @@ pub enum Credential {
     /// A token an embedding app holds in memory, from its OS credential
     /// store for instance. It is never written to disk.
     Memory(Token),
+    /// Stored origin consent constrains discovery, including future watch passes.
+    #[cfg(unix)]
+    Enrolled { token: Token, sources: Vec<PathBuf> },
 }
 
 impl Credential {
@@ -136,6 +143,8 @@ impl Credential {
         match self {
             Self::File(path) => read_token(path).map(Token),
             Self::Memory(token) => Ok(token.clone()),
+            #[cfg(unix)]
+            Self::Enrolled { token, .. } => Ok(token.clone()),
         }
     }
 }
@@ -405,6 +414,7 @@ pub struct Client {
     archives: archives::Cache,
     sources: BTreeMap<String, Source>,
     catchup_pending: bool,
+    allowed_sources: Option<BTreeSet<PathBuf>>,
 }
 
 impl Client {
@@ -412,6 +422,7 @@ impl Client {
         let url = check_url(&options.url)?;
         let token = options.credential.token()?;
         let http = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(120))
             .user_agent(concat!("semon-push/", env!("CARGO_PKG_VERSION")))
             .build()
@@ -442,6 +453,11 @@ impl Client {
             archives: archives::Cache::new(&options.state),
             sources: BTreeMap::new(),
             catchup_pending: false,
+            allowed_sources: match &options.credential {
+                #[cfg(unix)]
+                Credential::Enrolled { sources, .. } => Some(sources.iter().cloned().collect()),
+                _ => None,
+            },
         })
     }
 
@@ -811,6 +827,13 @@ impl Client {
         // must agree over their common prefix before selecting the longer one.
         let mut inputs = BTreeMap::<String, (Input, Source)>::new();
         for source in discovered {
+            if self
+                .allowed_sources
+                .as_ref()
+                .is_some_and(|allowed| !allowed.contains(&source.full_path(sessions)))
+            {
+                continue;
+            }
             let mut input = source.clone();
             let archive = input.path.ends_with(".jsonl.zst");
             if archive {

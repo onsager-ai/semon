@@ -125,6 +125,17 @@ would perform reviewed provisioning and explicitly enable the local producer and
 outbound connection. The store's explicit materializer lifecycle and downstream
 integrations remain separate work.
 
+Current mirror-only PR3.2c implementation uses the reviewed public_tls code
+profile in [ASI enrollment](asi-enrollment.md#public_tls-provisioning-wire-contract):
+B1 authorizes `receive enroll`, B2 runs `connect --to URL [--machine NAME]`, B3
+enters its short code through a non-echoing controlling terminal, and B4 approves
+one receiver identity/endpoint, mirror_push scope and selected current-file list.
+The source list can be narrowed before explicit `yes`. This separately authorizes
+redacted raw-log custody, plain paths and machine facts; it does not claim P1
+analytics/body activation, issuer authority, a client certificate or producer
+startup. Mirror-only binding commits receiver ID and no issuer pins. The broader
+four-action target below still depends on those later integrations.
+
 | Action | Proposed operation | Generated state / understanding |
 | --- | --- | --- |
 | B1 | Proposed receiver operation (exact flags not established): `semon receive enroll` | Local authenticated OS owner authorizes one enrollment for the named machine. First run generates receiver identity/TLS custody, issuer key, separate cache key, owner principal, precise grants and audit directories. It starts receiver transport and a loopback-only owner Viewer in the foreground. Display a high-entropy one-use invitation with its receiver pin through the authenticated local administrative surface. No other OS user or remote machine gets an owner session. |

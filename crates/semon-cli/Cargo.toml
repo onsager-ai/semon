@@ -15,6 +15,7 @@ path = "src/main.rs"
 asi-query = ["semon-asi/query-engine"]
 
 [dependencies]
+libc.workspace = true
 semon-asi = { path = "../semon-asi" }
 semon-push = { path = "../semon-push" }
 semon-sessions = { path = "../semon-sessions" }

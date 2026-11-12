@@ -77,7 +77,8 @@ separately reported native billing field.
 Use the existing mirror transport, with the same explicit native home:
 
 ```sh
-semon push --to https://receiver.example --token-file /private/mirror-token \
+semon connect --to https://receiver.example --machine laptop
+semon push \
   --copilot-home /path/to/copilot --watch
 semon sessions --machines /path/to/received --no-local --serve
 ```

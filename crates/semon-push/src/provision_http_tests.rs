@@ -91,6 +91,10 @@ impl Harness {
     }
     fn input(&self) -> pairing::ActivationInput {
         pairing::ActivationInput {
+            receiver_id: crate::receiver_custody::ReceiverCustody::open_or_initialize(&self.dir.0)
+                .unwrap()
+                .receiver_id()
+                .into(),
             machine: "laptop".into(),
             binding: crate::enrollment::Binding::Inapplicable,
             kinds: vec![(Kind::MirrorPush, false)],
@@ -99,6 +103,40 @@ impl Harness {
         }
     }
 }
+#[test]
+fn production_origin_connection_validates_roots_and_hostname() {
+    for (host, trusted, accepted) in [
+        ("localhost", true, true),
+        ("127.0.0.2", true, false),
+        ("localhost", false, false),
+    ] {
+        let h = Harness::new();
+        let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let shared = Arc::clone(&h.shared);
+        let worker = thread::spawn(move || {
+            let (server, _) = listener.accept().unwrap();
+            let mut slot = Slot::admit(&shared, "127.0.0.1".parse().unwrap()).unwrap();
+            serve_connection(&mut slot, server, Instant::now());
+        });
+        let mut roots = rustls::RootCertStore::empty();
+        if trusted {
+            roots
+                .add(
+                    CertificateDer::from_pem_slice(
+                        &fs::read(auth_tests::fixture("test-cert.pem")).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let connection = crate::connect::Connection::open(&format!("https://{host}:{port}"), roots);
+        assert_eq!(connection.is_ok(), accepted);
+        drop(connection);
+        worker.join().unwrap();
+    }
+}
+
 fn post(client: &mut Client, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
     write!(client, "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
     client.write_all(body).unwrap();
@@ -129,6 +167,233 @@ fn open(client: &mut Client) -> wire::Opened {
     assert_eq!(status, 200);
     serde_json::from_slice(&body).unwrap()
 }
+struct OriginTerminal<'a> {
+    harness: &'a Harness,
+    approve: bool,
+    malformed: bool,
+    expired: bool,
+    wrong: bool,
+}
+impl crate::connect::Terminal for OriginTerminal<'_> {
+    fn code(&mut self) -> crate::Result<crate::credentials::Secret> {
+        if self.expired {
+            self.harness.clock.store(701, Ordering::Relaxed);
+        }
+        if self.malformed {
+            return Ok(crate::credentials::Secret::new("bad-check-digit".into()));
+        }
+        let codes = self.harness.codes.lock().unwrap();
+        if self.wrong {
+            let actual = codes.values().next().unwrap().expose();
+            let wrong = if actual == "0000000000" {
+                "1000000001"
+            } else {
+                "0000000000"
+            };
+            return Ok(pairing::parse_code(wrong).unwrap());
+        }
+        Ok(crate::credentials::Secret::new(
+            codes.values().next().unwrap().expose().into(),
+        ))
+    }
+    fn approve(&mut self, _: &str, _: &str, _: &str) -> crate::Result<bool> {
+        assert!(
+            !self.harness.dir.0.join("origin").exists(),
+            "custody must not exist before approval"
+        );
+        Ok(self.approve)
+    }
+    fn sources(&self) -> Vec<std::path::PathBuf> {
+        vec![]
+    }
+}
+fn origin_transport(
+    h: &Harness,
+    workers: &mut Vec<thread::JoinHandle<()>>,
+) -> crate::Result<crate::connect::Connection> {
+    let (mut stream, worker) = h.connect();
+    while stream.conn.is_handshaking() {
+        stream.conn.complete_io(&mut stream.sock).unwrap();
+    }
+    let exporter = stream
+        .conn
+        .export_keying_material([0; 32], wire::EXPORTER_LABEL, Some(&[]))
+        .unwrap();
+    workers.push(worker);
+    Ok(crate::connect::Connection {
+        stream,
+        host: "localhost".into(),
+        exporter,
+        fault: None,
+    })
+}
+#[test]
+fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
+    let h = Harness::new();
+    let origin = h.dir.0.join("origin");
+    let analytics_state = h.dir.0.join("analytics-state");
+    fs::create_dir(&analytics_state).unwrap();
+    let namespace = format!("origin-{}\n", "b".repeat(64));
+    fs::write(analytics_state.join("analytics-namespace"), &namespace).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            analytics_state.join("analytics-namespace"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    assert!(
+        crate::connect::producer_admission(&[Kind::AnalyticsPublish], &analytics_state)
+            .unwrap_err()
+            .contains("available after producer admission")
+    );
+    assert!(!origin.exists());
+    let mut workers = vec![];
+    let mut terminal = OriginTerminal {
+        harness: &h,
+        approve: true,
+        malformed: false,
+        expired: false,
+        wrong: false,
+    };
+    let name = crate::connect::connect_with(
+        "https://localhost:443",
+        "laptop",
+        &mut terminal,
+        &origin,
+        &h.dir.0.join("analytics-state"),
+        &|| 100,
+        &mut || origin_transport(&h, &mut workers),
+    )
+    .unwrap();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    assert!(!origin.join("analytics-namespace").exists());
+    assert_eq!(
+        fs::read_to_string(analytics_state.join("analytics-namespace")).unwrap(),
+        namespace
+    );
+    assert_eq!(fs::read_dir(&analytics_state).unwrap().count(), 1);
+    let (config, credential) = crate::origin_custody::load(&origin, Some(&name)).unwrap();
+    assert_eq!(config.scope.receiver_id, config.receiver_id);
+    assert!(matches!(
+        config.scope.binding,
+        crate::enrollment::Binding::Inapplicable
+    ));
+    let crate::Credential::Memory(token) = credential else {
+        panic!()
+    };
+    let (mut client, worker) = h.connect();
+    let bytes = serde_json::to_vec(&semon_sessions::Facts {
+        version: semon_sessions::FACTS_VERSION,
+        hostname: "laptop".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    write!(client, "POST /v1/mirror/facts HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n", token.expose(), bytes.len()).unwrap();
+    client.write_all(&bytes).unwrap();
+    client.flush().unwrap();
+    assert_eq!(response(&mut client).0, 200);
+    assert!(h.dir.0.join("machines/laptop/facts.json").exists());
+    drop(client);
+    worker.join().unwrap();
+}
+#[test]
+fn origin_decline_malformed_and_expired_never_write_custody() {
+    for (approve, malformed, expired, wrong) in [
+        (false, false, false, false),
+        (true, true, false, false),
+        (true, false, true, false),
+        (true, false, false, true),
+    ] {
+        let h = Harness::new();
+        let origin = h.dir.0.join("origin");
+        let mut workers = vec![];
+        let mut terminal = OriginTerminal {
+            harness: &h,
+            approve,
+            malformed,
+            expired,
+            wrong,
+        };
+        assert!(
+            crate::connect::connect_with(
+                "https://localhost:443",
+                "laptop",
+                &mut terminal,
+                &origin,
+                &h.dir.0.join("analytics-state"),
+                &|| 100,
+                &mut || origin_transport(&h, &mut workers)
+            )
+            .is_err()
+        );
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(!origin.exists());
+        assert!(
+            crate::enrollment::Registry::read_current(&h.dir.0)
+                .unwrap()
+                .enrollments()
+                .is_empty()
+        );
+        if malformed {
+            let mut controller = h.shared.provisioning.as_ref().unwrap().lock().unwrap();
+            assert_eq!(controller.pending(100)[0].1, pairing::State::Pending);
+        }
+    }
+}
+
+#[test]
+fn origin_substitution_mac_mismatch_and_delivery_recovery() {
+    for fault in ["receiver_id", "receiver_mac", "delivery"] {
+        let h = Harness::new();
+        let origin = h.dir.0.join("origin");
+        let mut workers = vec![];
+        let mut terminal = OriginTerminal {
+            harness: &h,
+            approve: true,
+            malformed: false,
+            expired: false,
+            wrong: false,
+        };
+        let mut connections = 0;
+        let result = crate::connect::connect_with(
+            "https://localhost:443",
+            "laptop",
+            &mut terminal,
+            &origin,
+            &h.dir.0.join("analytics-state"),
+            &|| 100,
+            &mut || {
+                let mut connection = origin_transport(&h, &mut workers)?;
+                connections += 1;
+                if connections == 1 {
+                    connection.fault = Some(fault);
+                }
+                Ok(connection)
+            },
+        );
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let registry = crate::enrollment::Registry::read_current(&h.dir.0).unwrap();
+        if fault == "delivery" {
+            let name = result.unwrap();
+            crate::origin_custody::load(&origin, Some(&name)).unwrap();
+            assert_eq!(connections, 2);
+            assert_eq!(registry.enrollments().len(), 1);
+        } else {
+            assert!(result.is_err());
+            assert!(!origin.exists());
+            assert!(registry.enrollments().is_empty());
+        }
+    }
+}
+
 fn wrong_confirmation(id: &str) -> Vec<u8> {
     let mut key = [1; 65];
     key[0] = 4;
