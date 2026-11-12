@@ -427,8 +427,22 @@ fn requires_exact_source_path_and_ignores_retention_markers() {
     let before = f.read(&f.cohorts).unwrap();
     let key = archive_index_key(&f.first_source().local_path);
     let (rows, slots) = catalog_fixture_projection(&f.options);
-    // A well-formed marker of the supported format that names no indexed chain.
-    let marker = format!("{{\"version\":7,\"parser_version\":{CACHE_VERSION}}}");
+    // A well-formed marker of the supported format that carries no chain identity.
+    let source = rows
+        .iter()
+        .flat_map(|row| &row.sources)
+        .find(|source| source.path.to_str() == Some(f.first_source().local_path.as_str()))
+        .unwrap();
+    let input = crate::native_evidence::source_input(&source.path, &f.options).unwrap();
+    let marker = serde_json::json!({
+        "version": 7, "chain_id": null, "parser_version": CACHE_VERSION,
+        "source": {"root": input.root.as_str(), "path": input.path, "native_id": source.native_id,
+            "offset": source.offset, "prefix_sha256": source.prefix_sha256, "tail_sha256": source.tail_sha256},
+        "stat": {"dev": source.dev, "ino": source.ino, "size": source.size,
+            "modified_ns": source.modified_ns, "changed_ns": source.changed_ns},
+        "projection_version": crate::slot_projection::VERSION, "projection_generation": "fixture"
+    })
+    .to_string();
     f.store
         .connection
         .execute("INSERT INTO meta VALUES(?1,?2)", [&key, &marker])
