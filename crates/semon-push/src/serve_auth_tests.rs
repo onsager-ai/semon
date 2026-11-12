@@ -457,6 +457,17 @@ fn credential_handle_fails_closed_when_its_authority_ends() {
     ] {
         let dir = PrivateDir::new();
         let mut registry = records(true);
+        // Keep valid current certificate custody when the authenticated pin ends
+        // or the kind advances; the captured handle must still lose its authority.
+        for generation in [1, 2] {
+            registry.enrollments[0]
+                .client_certificate_pins
+                .push(CertificatePin {
+                    pin: Pin::Spki([9; 32]),
+                    generation,
+                    revoked_at: None,
+                });
+        }
         registry.credentials[0].valid_from = 100;
         registry.credentials[0].valid_until = 300;
         install(&dir.0, &registry);
@@ -476,7 +487,7 @@ fn credential_handle_fails_closed_when_its_authority_ends() {
             "enrollment" => next.enrollments[0].revoked_at = Some(100),
             "pin" => next.enrollments[0].client_certificate_pins[0].revoked_at = Some(100),
             "pin_removed" => {
-                next.enrollments[0].client_certificate_pins.clear();
+                next.enrollments[0].client_certificate_pins.remove(0);
             }
             "credential_removed" => next.credentials.clear(),
             "retired" => next.enrollments[0].credential_kinds[0].generations.current = 2,
