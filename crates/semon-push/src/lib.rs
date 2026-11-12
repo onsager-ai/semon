@@ -472,7 +472,7 @@ impl Client {
                     }
                 }
                 *private = String::from_utf8(std::mem::take(&mut *bytes)).expect("base64 ASCII");
-                while private.len() % 4 != 0 {
+                while !private.len().is_multiple_of(4) {
                     private.push('=');
                 }
                 pem.extend_from_slice(b"-----BEGIN PRIVATE KEY-----\n");

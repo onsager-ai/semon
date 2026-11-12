@@ -65,7 +65,7 @@ pub(crate) fn pem(der: &[u8]) -> Vec<u8> {
     let mut base64 = crate::provision_wire::encode(der)
         .replace('-', "+")
         .replace('_', "/");
-    while base64.len() % 4 != 0 {
+    while !base64.len().is_multiple_of(4) {
         base64.push('=');
     }
     let mut out = String::from("-----BEGIN CERTIFICATE-----\n");
