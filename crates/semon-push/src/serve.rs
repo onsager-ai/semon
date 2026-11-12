@@ -683,7 +683,9 @@ impl Connection {
 
     /// Exactly `length` body bytes, within [`Limits::body`].
     fn read_body(&mut self, length: usize) -> io::Result<Vec<u8>> {
-        let deadline = Instant::now() + self.limits.body;
+        self.read_body_until(length, Instant::now() + self.limits.body)
+    }
+    fn read_body_until(&mut self, length: usize, deadline: Instant) -> io::Result<Vec<u8>> {
         while self.buffer.len() < length {
             if self.read_more(deadline, length - self.buffer.len())? == 0 {
                 return Err(io::ErrorKind::UnexpectedEof.into());
@@ -1017,11 +1019,16 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
     {
         return refused();
     }
+    // read_head leaves the absolute request deadline on the live socket.
+    // Keep that deadline through the body instead of granting another ten seconds.
+    let read_deadline = connection
+        .stream
+        .timed()
+        .deadline
+        .min(Instant::now() + Duration::from_secs(provision_wire::READ_SECONDS));
     if head.expect_continue && connection.send(b"HTTP/1.1 100 Continue\r\n\r\n").is_err() {
         return Next::Close;
     }
-    let saved = connection.limits.body;
-    connection.limits.body = Duration::from_secs(provision_wire::READ_SECONDS);
     #[cfg(test)]
     let injected_timeout = slot
         .shared
@@ -1033,9 +1040,8 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
     let body = if injected_timeout {
         Err(io::ErrorKind::TimedOut.into())
     } else {
-        connection.read_body(head.content_length.unwrap_or(0) as usize)
+        connection.read_body_until(head.content_length.unwrap_or(0) as usize, read_deadline)
     };
-    connection.limits.body = saved;
     let Ok(body) = body else {
         if renewal_route.is_none()
             && let Ok(exporter) = exporter

@@ -493,11 +493,21 @@ impl Registry {
             }
         }
         for receipt in &old.pairing_receipts {
-            let next = self
+            let Some(next) = self
                 .pairing_receipts
                 .iter()
                 .find(|r| r.session_id == receipt.session_id)
-                .ok_or(Error::Terminal)?;
+            else {
+                // Renewal atomically supersedes pairing recovery. A stale
+                // pairing outcome must never coexist as another live delivery.
+                if self.renewal_receipts.iter().any(|r| {
+                    r.begun.enrollment_id == receipt.enrollment_id
+                        && r.credentials.iter().all(|b| b.generation > 1)
+                }) {
+                    continue;
+                }
+                return Err(Error::Terminal);
+            };
             let mut expected = receipt.clone();
             expected.deliveries = next.deliveries;
             if &expected != next || next.deliveries < receipt.deliveries {

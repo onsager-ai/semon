@@ -301,6 +301,43 @@ fn authorize(
     auth.authenticated_enrollment(conn, Some("Bearer test-bearer"), kind, 100)
 }
 #[test]
+fn renewal_hint_requires_authenticated_authority_and_includes_exact_boundary() {
+    let dir = PrivateDir::new();
+    let mut registry = records(false);
+    registry.credentials[0].valid_until = 100 + crate::renewal_wire::WINDOW;
+    install(&dir.0, &registry);
+    let auth = RegistryAuthenticator::open(&dir.0).unwrap();
+    let allowed = |now| {
+        auth.authenticated_enrollment(
+            &mut ConnectionAuthority::default(),
+            Some("Bearer test-bearer"),
+            Kind::MirrorPush,
+            now,
+        )
+        .unwrap()
+    };
+    assert!(!allowed(99).renewal_due);
+    assert!(allowed(100).renewal_due);
+    assert!(
+        auth.authenticated_enrollment(
+            &mut ConnectionAuthority::default(),
+            Some("Bearer wrong"),
+            Kind::MirrorPush,
+            100
+        )
+        .is_none()
+    );
+    assert!(
+        auth.authenticated_enrollment(
+            &mut ConnectionAuthority::default(),
+            Some("Bearer test-bearer"),
+            Kind::MirrorPush,
+            100 + crate::renewal_wire::WINDOW
+        )
+        .is_none()
+    );
+}
+#[test]
 fn body_enrollment_adapter_rechecks_credential_and_scope() {
     use crate::{
         body_broker::EnrollmentSource, body_enrollment::RegistryEnrollmentSource,

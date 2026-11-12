@@ -128,6 +128,11 @@ impl Drop for Fixture {
 }
 #[test]
 fn enable_is_bound_at_begin_consumed_once_and_recovery_uses_old_set() {
+    enabled_renewal(false);
+    enabled_renewal(true);
+    enable_after_begin_stays_pending();
+}
+fn enabled_renewal(cancel_bound: bool) {
     let f = Fixture::new();
     let store = Store::open(&f.dir).unwrap();
     let mut registry = store.snapshot().unwrap();
@@ -167,6 +172,36 @@ fn enable_is_bound_at_begin_consumed_once_and_recovery_uses_old_set() {
     let begun = f.begin(&mut receiver, 100).unwrap();
     assert_eq!(begun.enable_authorization_ids, vec!["c".repeat(64)]);
     assert_eq!(begun.generations.len(), 2);
+    if cancel_bound {
+        Store::open(&f.dir)
+            .unwrap()
+            .owner_update(
+                &f.dir,
+                Some(Kind::AnalyticsPublish),
+                crate::enrollment::OwnerAction::Revoke,
+                "owner",
+                &begun.enrollment_id,
+                101,
+            )
+            .unwrap();
+        let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+        assert!(
+            receiver
+                .finish(&f.dir, &commit, &[4; 32], None, 101)
+                .is_err()
+        );
+        let registry = Registry::read_current(&f.dir).unwrap();
+        assert!(registry.renewal_receipts.is_empty());
+        assert!(
+            !registry.enrollments[0]
+                .credential_kinds
+                .iter()
+                .find(|s| s.kind == Kind::AnalyticsPublish)
+                .unwrap()
+                .available
+        );
+        return;
+    }
     let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
     let initial = receiver
         .finish(&f.dir, &commit, &[4; 32], None, 101)
@@ -201,6 +236,128 @@ fn enable_is_bound_at_begin_consumed_once_and_recovery_uses_old_set() {
             .finish(&f.dir, &recover, &[5; 32], None, 102)
             .unwrap()
     );
+}
+fn enable_after_begin_stays_pending() {
+    let f = Fixture::new();
+    let original = Registry::read_current(&f.dir).unwrap();
+    let mut enrollments = original.enrollments.clone();
+    enrollments[0].binding = Binding::Admitted {
+        namespace: "namespace".into(),
+        origin_incarnation: "origin".into(),
+        index_incarnation: "index".into(),
+        publisher_claim_epoch: crate::enrollment::ClaimEpoch::Unassigned,
+        issuer: crate::enrollment::Issuer {
+            kind: crate::enrollment::IssuerKind::Receiver,
+            origin_trust_acknowledged: true,
+        },
+        assertion_issuer_keys: vec![crate::enrollment::IssuerKey {
+            key_id: "issuer".into(),
+            public_key: [1; 32],
+        }],
+    };
+    let mut scope = KindScope::new(Kind::AnalyticsPublish, 1);
+    scope.available = false;
+    enrollments[0].credential_kinds.push(scope);
+    let registry = Registry::from_records(enrollments, original.credentials.clone()).unwrap();
+    fs::write(
+        f.dir.join("enrollment/registry.json"),
+        serde_json::to_vec(&registry).unwrap(),
+    )
+    .unwrap();
+    let mut receiver = Receiver::default();
+    let begun = f.begin(&mut receiver, 2_000_000).unwrap();
+    Store::open(&f.dir)
+        .unwrap()
+        .owner_update(
+            &f.dir,
+            Some(Kind::AnalyticsPublish),
+            crate::enrollment::OwnerAction::Enable,
+            "owner",
+            &begun.enrollment_id,
+            2_000_001,
+        )
+        .unwrap();
+    let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    receiver
+        .finish(&f.dir, &commit, &[4; 32], None, 2_000_002)
+        .unwrap();
+    let registry = Registry::read_current(&f.dir).unwrap();
+    let scope = registry.enrollments[0]
+        .credential_kinds
+        .iter()
+        .find(|s| s.kind == Kind::AnalyticsPublish)
+        .unwrap();
+    assert!(!scope.available);
+    assert!(
+        scope
+            .enable_authorization
+            .as_ref()
+            .unwrap()
+            .consumed_renewal_id
+            .is_none()
+    );
+    assert_eq!(registry.renewal_receipts[0].credentials.len(), 1);
+}
+#[test]
+fn pending_capacity_expires_before_admission_and_never_evicts_live_attempts() {
+    let f = Fixture::new();
+    let store = Store::open(&f.dir).unwrap();
+    let original = store.snapshot().unwrap();
+    drop(store);
+    let mut enrollments = Vec::new();
+    let mut credentials = Vec::new();
+    for n in 1..=5 {
+        let mut e = original.enrollments[0].clone();
+        e.enrollment_id = format!("{n:064x}");
+        e.machine = format!("origin-{n}");
+        e.sequence = n;
+        let mut b = original.credentials[0].clone();
+        b.enrollment_id = e.enrollment_id.clone();
+        b.credential_id = format!("{:064x}", n + 10);
+        b.sha256 = Secret::new(format!("secret-{n}")).hash();
+        enrollments.push(e);
+        credentials.push(b);
+    }
+    let registry = Registry::from_records(enrollments, credentials).unwrap();
+    fs::write(
+        f.dir.join("enrollment/registry.json"),
+        serde_json::to_vec(&registry).unwrap(),
+    )
+    .unwrap();
+    let mut receiver = Receiver::default();
+    let request = |n| wire::Begin {
+        version: 1,
+        enrollment_id: format!("{n:064x}"),
+        credentials: vec![Credential {
+            kind: Kind::MirrorPush,
+            generation: 1,
+            bearer: format!("secret-{n}"),
+        }],
+    };
+    let mut first = None;
+    for n in 1..=4 {
+        let begun = receiver
+            .begin(&f.dir, &request(n), None, 2_000_000)
+            .unwrap();
+        if n == 1 {
+            first = Some(begun);
+        }
+    }
+    assert!(
+        receiver
+            .begin(&f.dir, &request(5), None, 2_000_001)
+            .is_err()
+    );
+    assert_eq!(
+        Some(
+            receiver
+                .begin(&f.dir, &request(1), None, 2_000_001)
+                .unwrap()
+        ),
+        first
+    );
+    assert!(receiver.begin(&f.dir, &request(5), None, 2_000_600).is_ok());
+    assert_eq!(receiver.pending.len(), 1);
 }
 #[test]
 fn exact_window_idempotent_begin_and_restart_rate_limit() {

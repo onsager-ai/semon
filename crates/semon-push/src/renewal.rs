@@ -139,13 +139,44 @@ impl Receiver {
         identity: Option<&VerifiedClientIdentity>,
         now: u64,
     ) -> Result<Zeroizing<Vec<u8>>> {
-        let bytes = match request {
+        let (id, renewal_id) = match &request {
+            wire::Request::Begin(m) => (m.enrollment_id.clone(), String::new()),
+            wire::Request::Finish(m) => (m.enrollment_id.clone(), m.renewal_id.clone()),
+        };
+        let result = match request {
             wire::Request::Begin(message) => self
                 .begin(dir, &message, identity, now)
                 .and_then(|m| provision_wire::encode_message(&m)),
             wire::Request::Finish(message) => self.finish(dir, &message, &exporter, identity, now),
-        }?;
-        Ok(Zeroizing::new(bytes))
+        };
+        if result.is_err() {
+            let _ = crate::generation_audit::renewal(
+                dir,
+                &crate::generation_audit::RenewalRecord {
+                    version: 1,
+                    observed_at: now.max(self.latest),
+                    enrollment_id: id,
+                    renewal_id,
+                    generations: vec![],
+                    action: "refused".into(),
+                },
+            );
+        }
+        result.map(Zeroizing::new)
+    }
+    fn expire(&mut self, dir: &Path, now: u64) -> Result<()> {
+        let expired: Vec<_> = self
+            .pending
+            .values()
+            .filter(|p| now >= p.begun.expires_at)
+            .map(|p| p.begun.clone())
+            .collect();
+        for begun in expired {
+            audit(dir, &begun, "expired", now)?;
+            self.pending.remove(&begun.enrollment_id);
+        }
+        self.terminal.retain(|_, expires| now < *expires);
+        Ok(())
     }
     fn begin(
         &mut self,
@@ -166,8 +197,31 @@ impl Receiver {
                 .map_err(|_| Refused)?;
             registry = store.snapshot().map_err(|_| Refused)?;
         }
-        self.pending.retain(|_, p| now < p.begun.expires_at);
-        self.terminal.retain(|_, expires| now < *expires);
+        self.expire(dir, now)?;
+        self.pending.retain(|id, pending| {
+            registry.enrollments.iter().any(|e| {
+                e.enrollment_id == *id
+                    && e.revoked_at.is_none()
+                    && registry.endpoint() == Some(e.endpoint.as_str())
+                    && pending.authentication.iter().all(|g| {
+                        e.credential_kinds.iter().any(|s| {
+                            s.kind == g.kind && s.available && s.generations.current == g.generation
+                        })
+                    })
+                    && pending
+                        .begun
+                        .enable_authorization_ids
+                        .iter()
+                        .all(|authorization_id| {
+                            e.credential_kinds.iter().any(|s| {
+                                s.enable_authorization.as_ref().is_some_and(|a| {
+                                    a.authorization_id == *authorization_id
+                                        && a.consumed_renewal_id.is_none()
+                                })
+                            })
+                        })
+            })
+        });
         let authentication = wire::identities(&message.credentials)?;
         if let Some(receipt) = registry.renewal_receipts.iter().find(|r| {
             r.begun.enrollment_id == message.enrollment_id
@@ -364,8 +418,7 @@ impl Receiver {
                 .map_err(|_| Refused)?;
             registry = store.snapshot().map_err(|_| Refused)?;
         }
-        self.pending.retain(|_, p| now < p.begun.expires_at);
-        self.terminal.retain(|_, expires| now < *expires);
+        self.expire(dir, now)?;
         let application = Zeroizing::new(provision_wire::decode_fixed::<32>(
             &message.application_key,
         )?);
@@ -467,7 +520,9 @@ impl Receiver {
             }
         }
         if message.action == Action::Cancel {
-            audit(dir, &pending.begun, "cancel", now)?;
+            // Cancellation removes pending authority even if audit custody is
+            // unavailable; it uses the same terminal rule as owner revocation.
+            let _ = audit(dir, &pending.begun, "cancel", now);
             registry.latest = now;
             store
                 .commit(registry.revision(), &registry)
@@ -610,6 +665,9 @@ impl Receiver {
         };
         let bytes = delivery(&receipt, &application)?;
         registry.credentials.extend(issued);
+        registry
+            .pairing_receipts
+            .retain(|r| r.enrollment_id != message.enrollment_id);
         registry.renewal_receipts.push(receipt);
         registry.latest = now;
         registry
@@ -807,6 +865,31 @@ impl Registry {
                     .is_some_and(|c| c.len() > 1536)
             {
                 return Err(Error::Invalid);
+            }
+            let mut receipt_ids = std::collections::BTreeSet::new();
+            let mut receipt_kinds = std::collections::BTreeSet::new();
+            for b in &r.credentials {
+                if wire::identifier(&b.credential_id).is_err()
+                    || !receipt_ids.insert(&b.credential_id)
+                    || !receipt_kinds.insert(b.kind)
+                    || !e
+                        .credential_kinds
+                        .iter()
+                        .any(|s| s.kind == b.kind && b.generation <= s.generations.current)
+                {
+                    return Err(Error::Invalid);
+                }
+                if let Some(current) = self
+                    .credentials
+                    .iter()
+                    .find(|current| current.credential_id == b.credential_id)
+                {
+                    let mut expected = b.clone();
+                    expected.revoked_at = current.revoked_at;
+                    if &expected != current {
+                        return Err(Error::Invalid);
+                    }
+                }
             }
             for g in &r.begun.generations {
                 if !r.credentials.iter().any(|b| {

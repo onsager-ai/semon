@@ -65,7 +65,7 @@ receiver identity/assertion-issuer custody comes from ReceiverCustody.
 all fields for the later `origin_read::EnrollmentScope` adapter. Revocation comes
 from a separate CLI process editing the registry and is observed through its
 revision; pairing holds `pairing.lock`, acquiring `registry.lock` only for short
-transactions so that external updates remain possible. Registry format 2 includes live nonsecret pairing
+transactions so that external updates remain possible. Registry format 3 includes live nonsecret pairing
 activation receipts in the same commit as enrollment and credential hashes. The
 activation input's commitment binds the exact machine, namespace/incarnation or
 mirror-only binding, kind settings, certificate pins and validity to B4. Secrets
@@ -933,7 +933,7 @@ owner-authorized extension to the normal unrevoked-kind result set. No client
 request can choose it, add a never-enrolled kind, alter consent/binding/pin or
 resurrect a revoked generation. A revoked enrollment is never reactivated.
 
-The PR4.2 registry is one strict current format, replacing format 1. Keep live
+The PR4.2 registry is one strict current format (3 for renewal), replacing earlier formats directly. Keep live
 credential records and compact tombstones; move ended-generation evidence to
 append-only audit custody using the audit-before-compaction rule above. Replace
 the terminal whole-kind `KindScope.revoked_at` shape with current kind availability
