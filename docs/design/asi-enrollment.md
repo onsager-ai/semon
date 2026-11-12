@@ -65,7 +65,7 @@ receiver identity/assertion-issuer custody comes from ReceiverCustody.
 all fields for the later `origin_read::EnrollmentScope` adapter. Revocation comes
 from a separate CLI process editing the registry and is observed through its
 revision; pairing holds `pairing.lock`, acquiring `registry.lock` only for short
-transactions so that external updates remain possible. Registry format 1 now includes immutable nonsecret pairing
+transactions so that external updates remain possible. Registry format 2 includes live nonsecret pairing
 activation receipts in the same commit as enrollment and credential hashes. The
 activation input's commitment binds the exact machine, namespace/incarnation or
 mirror-only binding, kind settings, certificate pins and validity to B4. Secrets
@@ -444,8 +444,8 @@ Later enrollments reuse receiver identity, owner, keys and directories.
 
 Implementation status (slice 4a PR3.2a, part of #593): `receiver_custody`
 is a Unix library consumed by receiver-side provisioning. Under `DIR`, mode-0700 directories are `enrollment/`
-(existing registry format 1), `issuer-secrets/`, `cache-secrets/`, `body-cache/`, `acl/` and
-`receiver-audit/`. Mode-0600 files are `receiver.json` (strict JSON format 1:
+(current registry format 2), `issuer-secrets/`, `cache-secrets/`, `body-cache/`, `acl/` and
+`receiver-audit/`. Mode-0600 files are `receiver.json` (strict JSON format 2:
 random receiver ID and current issuer key ID), `custody.lock`,
 `issuer-secrets/issuer-<key-id>.seed` (raw 32-byte Ed25519 seed),
 `cache-secrets/cache-master.key` (independent raw 32-byte key), `acl/grants.json`
@@ -1001,14 +1001,28 @@ show HOST; commands use URL. Never display userinfo or query parts. Connect, pus
 and disconnect use ONE endpoint normalization, including default ports and IPv6,
 without DNS alias guessing. `--receiver URL` accepts that HTTPS URL; the 64-hex
 custody key stays internal. No hash alias or operator-chosen alias is supported.
-Each receiver directory records exactly one normalized advertised endpoint in its
-strict `receiver.json` identity custody, initialized by `receive enroll --advertise
-URL`. Every later enroll must provide that same endpoint; a mismatch refuses
-without changing custody. A different endpoint requires a new empty receiver
-directory and pairing each origin again. Plain `receive --dir` keeps its invocation
-and loads the recorded endpoint. Enable and recovery guidance use this endpoint,
-including after enrollment compaction; they never guess from a listen address or
-choose between aliases. The origin custody name is SHA-256 of this endpoint. PR4.3 changes main's existing #651 push selector contract,
+The registry is authoritative for one current normalized advertised endpoint,
+initialized by `receive enroll --advertise URL`. Immutable `receiver.json` identity
+custody contains no endpoint. Every live enrollment retains its own normalized
+enrolled endpoint within its 8 KiB budget. Plain `receive --dir` keeps its invocation
+and loads the registry endpoint. Enable's push command uses the target enrollment's
+own endpoint; the common fresh-pairing recovery block uses the receiver's CURRENT
+endpoint, including after compaction. Neither guesses from a listen address. The
+origin custody name is SHA-256 of its enrolled endpoint.
+
+An address change is exceptional and is not a four-action enrollment claim. On an
+existing directory, `receive enroll --advertise NEW` requires the authenticated
+owner's literal `yes` at the address-change prompt BEFORE any code is displayed.
+Decline/EOF changes nothing. Confirmation replaces only the current endpoint in ONE
+registry commit, with requested/committed owner audit metadata; unavailable audit
+must not preserve old authority, following revoke's rule. Prior enrollments remain
+unchanged and are not revoked or deleted. The shared credential authority predicate
+refuses an enrollment whose enrolled endpoint differs from the current endpoint;
+this applies to every route, first-use cutover and in-flight `CredentialHandle`
+checks. Such an enrollment has no usable kind, freeing its machine name without a
+replacement prompt; enable refuses with current-endpoint fresh-pairing guidance.
+Old endpoint enrollments remain budgeted live state until credentials end and
+audit-first compaction applies. PR4.3 changes main's existing #651 push selector contract,
 with docs and tests updated together. `TARGET`
 is `machine M` or `kind K for machine M`. Do not substitute secrets. Prompts and
 confirmation feedback use the controlling terminal; no terminal means refuse.
@@ -1058,7 +1072,9 @@ exit 1; cancellation exits 0. No additional renewal prompts.
 | connect | Replacement line in combined approval summary | `This replaces the previous enrollment for receiver HOST. Its files and history will be kept.` | terminal; shown before B4 approval; no extra approval step |
 | receiver startup / owner command | Unsupported pre-renewal registry | `Receiver state uses an unsupported format. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See docs/design/asi-enrollment.md#offline-machines-and-missed-renewal.` | stderr; exit 1; [recovery section](#offline-machines-and-missed-renewal); never used for capacity |
 | Receiver admission | Actual live/tombstone capacity exhausted | `Receiver state is full. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See docs/design/asi-enrollment.md#offline-machines-and-missed-renewal.` | local stderr; exit 1; wire remains generic |
-| receive enroll | Advertised endpoint differs from recorded URL | `Receiver directory records endpoint URL. A different endpoint requires a new empty receiver directory and pairing each origin again.` | stderr; exit 1; preserve custody |
+| receive enroll | Address change confirmation | `Change this receiver's address from OLD to NEW? Existing origins must pair again. Type yes to confirm: ` | owner terminal; literal yes; before any code |
+| receive enroll | Address change declined or EOF | `Address change cancelled; nothing changed.` | terminal; exit 0; preserve custody |
+| receive enroll | Endpoint mismatch without confirmed change | `Receiver directory records endpoint URL. To change address, run semon receive enroll --advertise NEW with its listener/TLS options and confirm the address change.` | stderr; exit 1; preserve custody |
 | Receiver new authority | Audit unavailable | `Receiver audit is unavailable. Keep DIR unchanged; restore access to its audit storage before enrolling or renewing.` | local stderr; exit 1; wire remains generic; revoke/cutover still work |
 
 For watch, evaluate deadlines independently of file events, at least once per
@@ -1272,10 +1288,14 @@ CI must verify the implementation, not infer safety from this docs PR:
   whole-enrollment revocation. Refuse last-kind per-kind revoke and enable without
   valid remaining authority before writing. Enable after begin stays pending;
   cancellation/revoke of a bound authorization makes finish refuse.
-- Check receiver endpoint mismatch refusal, enable/recovery strings using the
-  recorded endpoint after compaction, and the origin custody name equaling SHA-256
-  of the same normalized endpoint. Plain receive loads that endpoint without a new
-  --advertise argument.
+- Check normalized endpoint mismatch refusal on every route, in-flight handles and
+  first-use cutover. Address change uses one registry commit; crashes before/after
+  commit preserve a coherent endpoint and leave old enrollments unchanged. Decline
+  changes nothing; old-endpoint machine names are freed. Enable's push line uses
+  the enrolled endpoint; fresh-pairing recovery uses the current endpoint after
+  change/compaction. Test default-port/IPv6 normalization and origin custody names
+  equaling SHA-256 of the enrolled endpoint. Plain receive loads the registry
+  endpoint without a new --advertise argument.
 - Rerun each revoke/enable/disconnect command after durable commit and report the
   existing end state without a prompt or repeated authorization. After replacement,
   rerun prompts for the replacement and declining changes nothing. Exercise crashes

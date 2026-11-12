@@ -55,6 +55,9 @@ pub(super) fn run(
     } else {
         "enable could not be confirmed; rerun the same command to check its earlier outcome before retrying."
     };
+    // Read registry version before identity decoding so old receiver directories
+    // consistently receive the normative unsupported-format recovery message.
+    let registry = Registry::read_current(dir).map_err(|e| custody_error(e, dir, uncertain))?;
     let custody = semon_push::receiver_custody::ReceiverCustody::open_existing(dir)
         .map_err(|_| owner_error.to_owned())?;
     let mut terminal = OpenOptions::new()
@@ -86,8 +89,8 @@ pub(super) fn run(
         || format!("machine {machine}"),
         |k| format!("kind {k} for machine {machine}"),
     );
-    let endpoint = custody.endpoint();
-    let success = |_ignored_endpoint: &str| {
+    let endpoint = registry.endpoint().ok_or_else(|| uncertain.to_owned())?;
+    let success = |endpoint: &str| {
         if revoke {
             format!("Revoked {target}. History and audits kept.")
         } else {
@@ -97,7 +100,6 @@ pub(super) fn run(
             )
         }
     };
-    let registry = Registry::read_current(dir).map_err(|e| custody_error(e, dir, uncertain))?;
     let state = registry.owner_state(machine, parsed_kind, action, now()?);
     let id = match state {
         OwnerState::Complete { endpoint } => {

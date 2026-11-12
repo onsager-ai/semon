@@ -178,6 +178,7 @@ impl Registry {
                 && p.revoked_at.is_none()
         });
         credential_authority_refusal(
+            self.endpoint.as_deref(),
             enrollment,
             scope,
             bearer,
@@ -218,6 +219,7 @@ impl Registry {
                 }
                 for scope in &enrollment.credential_kinds {
                     let reason = credential_authority_refusal(
+                        self.endpoint.as_deref(),
                         enrollment,
                         scope,
                         bearer,
@@ -263,6 +265,7 @@ impl Registry {
     }
 }
 fn credential_authority_refusal(
+    endpoint: Option<&str>,
     enrollment: &crate::enrollment::Enrollment,
     scope: &crate::enrollment::KindScope,
     bearer: &Bearer,
@@ -270,7 +273,9 @@ fn credential_authority_refusal(
     certificate: bool,
     now: u64,
 ) -> Option<Refusal> {
-    if enrollment.revoked_at.is_some() | !scope.available | bearer.revoked_at.is_some() {
+    if endpoint != Some(enrollment.endpoint.as_str()) {
+        Some(Refusal::InvalidCredential)
+    } else if enrollment.revoked_at.is_some() | !scope.available | bearer.revoked_at.is_some() {
         Some(Refusal::Revoked)
     } else if !((now >= bearer.valid_from) & (now < bearer.valid_until)) {
         Some(Refusal::OutsideValidity)

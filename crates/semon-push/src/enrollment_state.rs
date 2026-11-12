@@ -42,8 +42,11 @@ impl Registry {
             .iter()
             .any(|e| e.machine == machine && self.usable(e, now))
     }
-    fn usable(&self, e: &Enrollment, now: u64) -> bool {
+    pub(super) fn usable(&self, e: &Enrollment, now: u64) -> bool {
         let now = now.max(self.latest);
+        if self.endpoint.as_deref() != Some(e.endpoint.as_str()) {
+            return false;
+        }
         self.credentials
             .iter()
             .filter(|b| b.enrollment_id == e.enrollment_id)
@@ -187,6 +190,44 @@ impl Registry {
     }
 }
 impl Store {
+    pub fn change_endpoint(
+        &mut self,
+        receiver: &Path,
+        expected: &str,
+        endpoint: &str,
+        owner: &str,
+        now: u64,
+    ) -> Result<()> {
+        let endpoint = crate::pairing::normalize_endpoint(endpoint)?;
+        let mut next = self.snapshot()?;
+        if next.endpoint.as_deref() != Some(expected) {
+            return Err(Error::StaleSnapshot);
+        }
+        if expected == endpoint {
+            return Ok(());
+        }
+        let now = now.max(next.latest);
+        let mut audit = generation_audit::OwnerRecord {
+            version: 1,
+            observed_at: now,
+            owner: owner.into(),
+            enrollment_id: String::new(),
+            kind: None,
+            action: "change_address".into(),
+            outcome: generation_audit::OwnerOutcome::Requested,
+        };
+        let _ = generation_audit::owner(receiver, &audit);
+        next.endpoint = Some(endpoint);
+        next.latest = now;
+        // Bound address changes to the reserved terminal headroom as well.
+        if serde_json::to_vec(&next).map_err(|_| Error::Invalid)?.len() as u64 > CAP {
+            return Err(Error::Full);
+        }
+        self.commit(next.revision(), &next)?;
+        audit.outcome = generation_audit::OwnerOutcome::Committed;
+        let _ = generation_audit::owner(receiver, &audit);
+        Ok(())
+    }
     pub fn owner_update(
         &mut self,
         receiver: &Path,
@@ -212,6 +253,23 @@ impl Store {
         // A confirmation for one enrollment never authorizes its replacement.
         if enrollment_id != confirmed_id {
             return Err(Error::StaleSnapshot);
+        }
+        let mut audit = generation_audit::OwnerRecord {
+            version: 1,
+            observed_at: now,
+            owner: owner.into(),
+            enrollment_id: confirmed_id.into(),
+            kind,
+            action: match action {
+                OwnerAction::Revoke => "revoke",
+                OwnerAction::Enable => "enable",
+            }
+            .into(),
+            outcome: generation_audit::OwnerOutcome::Requested,
+        };
+        let audited = generation_audit::owner(receiver, &audit);
+        if action == OwnerAction::Enable {
+            audited?;
         }
         match action {
             OwnerAction::Revoke => next.revoke_enrollment(confirmed_id, kind, now),
@@ -241,6 +299,11 @@ impl Store {
             next.check_admission()?;
         }
         self.commit(next.revision(), &next)?;
+        audit.outcome = generation_audit::OwnerOutcome::Committed;
+        let committed_audit = generation_audit::owner(receiver, &audit);
+        if action == OwnerAction::Enable {
+            committed_audit?;
+        }
         Ok(OwnerState::Complete {
             endpoint: match state {
                 OwnerState::Confirm { endpoint, .. } => endpoint,
@@ -251,6 +314,14 @@ impl Store {
     /// Audit-first compaction. The store's exclusive registry lock prevents a
     /// generation changing between the evidence check and the durable replacement.
     pub fn compact(&mut self, receiver: &Path, now: u64) -> Result<()> {
+        self.compact_with_fault(receiver, now, |_| Ok(()))
+    }
+    pub(super) fn compact_with_fault(
+        &mut self,
+        receiver: &Path,
+        now: u64,
+        mut fault: impl FnMut(Stage) -> Result<()>,
+    ) -> Result<()> {
         let mut next = self.snapshot()?;
         let now = now.max(next.latest);
         let records: Vec<_> = next
@@ -268,6 +339,7 @@ impl Store {
             })
             .collect();
         generation_audit::append(receiver, &records)?;
+        fault(Stage::Synced)?;
         let has_terminal = next.enrollments.iter().any(|e| e.revoked_at.is_some());
         let receipt_count = next.pairing_receipts.len();
         next.pairing_receipts.retain(|r| {
@@ -275,6 +347,7 @@ impl Store {
                 && r.deliveries < 2
                 && next.enrollments.iter().any(|e| {
                     e.enrollment_id == r.enrollment_id
+                        && next.endpoint.as_deref() == Some(e.endpoint.as_str())
                         && e.revoked_at.is_none()
                         && e.credential_kinds
                             .iter()
@@ -297,7 +370,7 @@ impl Store {
             .enrollments
             .iter()
             .filter(|e| {
-                e.revoked_at.is_some()
+                (e.revoked_at.is_some() || next.endpoint.as_deref() != Some(e.endpoint.as_str()))
                     && !next
                         .credentials
                         .iter()
@@ -324,9 +397,13 @@ impl Store {
                 .retain(|r| r.enrollment_id != e.enrollment_id);
         }
         next.latest = now;
-        self.commit_compacted(&next)
+        self.commit_compacted(&next, fault)
     }
-    fn commit_compacted(&mut self, next: &Registry) -> Result<()> {
+    fn commit_compacted(
+        &mut self,
+        next: &Registry,
+        fault: impl FnMut(Stage) -> Result<()>,
+    ) -> Result<()> {
         let current = self.snapshot()?;
         if current.revision != next.revision {
             return Err(Error::StaleSnapshot);
@@ -344,7 +421,7 @@ impl Store {
         }
         let mut next = next.clone();
         next.revision += 1;
-        self.write(&next, |_| Ok(()))
+        self.write(&next, fault)
     }
     pub(crate) fn authorize_cutover(
         receiver: &Path,

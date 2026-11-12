@@ -24,7 +24,12 @@ struct Harness {
 impl Harness {
     fn new() -> Self {
         let dir = auth_tests::PrivateDir::new();
-        crate::receiver_custody::ReceiverCustody::open_at(&dir.0, 100).unwrap();
+        crate::receiver_custody::ReceiverCustody::open_at_endpoint(
+            &dir.0,
+            100,
+            "https://localhost:443",
+        )
+        .unwrap();
         let controller =
             provision::Controller::open(&dir.0, "https://localhost:443", "laptop".into()).unwrap();
         let clock = Arc::new(AtomicU64::new(100));

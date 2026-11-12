@@ -19,6 +19,7 @@ registry = {
     "next_sequence": 2,
     "tombstones": [],
     "revision": 1,
+    "endpoint": "https://receiver.example:443",
     "enrollments": [{
         "enrollment_id": enrollment_id,
         "receiver_id": "ci-receiver",

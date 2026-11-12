@@ -70,6 +70,75 @@ impl EndedGeneration {
 /// Append and fsync before the caller may remove registry evidence. Duplicate IDs
 /// are intentionally permitted: they describe the same ended generation.
 pub(crate) fn append(receiver: &Path, records: &[EndedGeneration]) -> Result<(), Error> {
+    append_records(receiver, FILE, records, |line| {
+        let record: EndedGeneration =
+            serde_json::from_slice(line).map_err(|_| Error::AuditUnavailable)?;
+        let bearer = Bearer {
+            credential_id: record.credential_id.clone(),
+            enrollment_id: record.enrollment_id.clone(),
+            kind: record.kind,
+            sha256: [0; 32],
+            generation: record.generation,
+            valid_from: record.valid_from,
+            valid_until: record.valid_until,
+            revoked_at: record.revoked_at,
+        };
+        if record.version != 1
+            || record.record_type != "credential_generation_ended"
+            || record.event_id
+                != EndedGeneration::new(
+                    &bearer,
+                    record.pin.clone(),
+                    record.ended_reason,
+                    record.observed_at,
+                )
+                .event_id
+            || record.valid_from >= record.valid_until
+            || record.generation == 0
+        {
+            return Err(Error::AuditUnavailable);
+        }
+        Ok(())
+    })
+}
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum OwnerOutcome {
+    Requested,
+    Committed,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct OwnerRecord {
+    pub version: u32,
+    pub observed_at: u64,
+    pub owner: String,
+    pub enrollment_id: String,
+    pub kind: Option<Kind>,
+    pub action: String,
+    pub outcome: OwnerOutcome,
+}
+pub(crate) fn owner(receiver: &Path, record: &OwnerRecord) -> Result<(), Error> {
+    append_records(
+        receiver,
+        "owners.jsonl",
+        std::slice::from_ref(record),
+        |line| {
+            let record: OwnerRecord =
+                serde_json::from_slice(line).map_err(|_| Error::AuditUnavailable)?;
+            if record.version != 1 {
+                return Err(Error::AuditUnavailable);
+            }
+            Ok(())
+        },
+    )
+}
+fn append_records<T: Serialize>(
+    receiver: &Path,
+    name: &str,
+    records: &[T],
+    validate: impl Fn(&[u8]) -> Result<(), Error>,
+) -> Result<(), Error> {
     let directory = CacheDirectory::open(&receiver.join("receiver-audit"))
         .map_err(|_| Error::AuditUnavailable)?;
     let lock = directory
@@ -78,7 +147,7 @@ pub(crate) fn append(receiver: &Path, records: &[EndedGeneration]) -> Result<(),
     lock.try_lock().map_err(|_| Error::AuditUnavailable)?;
     let mut file = directory
         .open_file(
-            Path::new(FILE),
+            Path::new(name),
             libc::O_RDWR | libc::O_CREAT | libc::O_APPEND,
         )
         .map_err(|_| Error::AuditUnavailable)?;
@@ -95,16 +164,16 @@ pub(crate) fn append(receiver: &Path, records: &[EndedGeneration]) -> Result<(),
         if size > 8192 || line.last() != Some(&b'\n') {
             return Err(Error::AuditUnavailable);
         }
-        let record: EndedGeneration =
-            serde_json::from_slice(&line).map_err(|_| Error::AuditUnavailable)?;
-        if record.version != 1 || record.record_type != "credential_generation_ended" {
-            return Err(Error::AuditUnavailable);
-        }
+        validate(&line)?;
     }
     let mut bytes = Vec::new();
     for record in records {
+        let start = bytes.len();
         serde_json::to_writer(&mut bytes, record).map_err(|_| Error::AuditUnavailable)?;
         bytes.push(b'\n');
+        if bytes.len() - start > 8192 {
+            return Err(Error::AuditUnavailable);
+        }
     }
     if file
         .metadata()

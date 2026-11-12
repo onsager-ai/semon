@@ -51,7 +51,7 @@ fn transcript(created: &Created) -> Transcript {
         session_id: created.session_id.clone(),
         endpoint: "https://desk.example:443".into(),
         exporter: vec![2; 32],
-        origin_key: vec![3; 32],
+        origin_key: vec![3; 65],
         scope: input().commitment(),
         origin_nonce: [4; 32],
         receiver_nonce: created.receiver_nonce,

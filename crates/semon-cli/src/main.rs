@@ -1125,12 +1125,47 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
                 return Err("receive enroll requires a trusted local terminal".into());
             }
             if options.dir.join("enrollment").exists() {
-                let registry = semon_push::enrollment::Registry::read_current(&options.dir)
-                    .map_err(|e| e.to_string())?;
+                let mut registry = semon_push::enrollment::Registry::read_current(&options.dir)
+                    .map_err(|e| {
+                        e.to_string()
+                            .replace("DIR", &options.dir.display().to_string())
+                    })?;
                 let now = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_err(|e| e.to_string())?
                     .as_secs();
+                let endpoint = semon_push::pairing::normalize_endpoint(&advertise)
+                    .map_err(|e| e.to_string())?;
+                if let Some(recorded) = registry.endpoint().filter(|recorded| *recorded != endpoint)
+                {
+                    let recorded = recorded.to_owned();
+                    let owner =
+                        semon_push::receiver_custody::ReceiverCustody::open_existing(&options.dir)
+                            .map_err(|e| e.to_string())?;
+                    if !receive_owner::confirm(
+                        &mut terminal,
+                        &format!(
+                            "Change this receiver's address from {recorded} to {endpoint}? Existing origins must pair again. Type yes to confirm: "
+                        ),
+                    )? {
+                        writeln!(terminal, "Address change cancelled; nothing changed.")
+                            .map_err(|e| e.to_string())?;
+                        return Ok(());
+                    }
+                    writeln!(terminal, "Confirmation received.").map_err(|e| e.to_string())?;
+                    let mut store = semon_push::enrollment::Store::open(&options.dir)
+                        .map_err(|e| e.to_string())?;
+                    store
+                        .change_endpoint(
+                            &options.dir,
+                            &recorded,
+                            &endpoint,
+                            &owner.owner().principal,
+                            now,
+                        )
+                        .map_err(|e| e.to_string())?;
+                    registry = store.snapshot().map_err(|e| e.to_string())?;
+                }
                 if registry.usable_machine(&machine, now)
                     && !receive_owner::confirm(
                         &mut terminal,

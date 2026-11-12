@@ -146,7 +146,8 @@ pub struct RegistryAuthenticator {
 impl RegistryAuthenticator {
     pub fn open(dir: &Path) -> Result<Self, String> {
         enrollment::refuse_legacy_tokens(dir).map_err(|e| e.to_string())?;
-        Registry::read_current(dir).map_err(|e| e.to_string())?;
+        Registry::read_current(dir)
+            .map_err(|e| e.to_string().replace("DIR", &dir.display().to_string()))?;
         Ok(Self {
             dir: dir.to_owned(),
         })

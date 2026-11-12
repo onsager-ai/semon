@@ -204,6 +204,7 @@ pub struct Enrollment {
 pub struct Registry {
     format: u32,
     revision: u64,
+    pub(crate) endpoint: Option<String>,
     pub(crate) enrollments: Vec<Enrollment>,
     pub(crate) credentials: Vec<Bearer>,
     pub(crate) pairing_receipts: Vec<crate::pairing::Receipt>,
@@ -216,6 +217,7 @@ impl Registry {
         Self {
             format: FORMAT,
             revision: 0,
+            endpoint: None,
             enrollments: vec![],
             credentials: vec![],
             pairing_receipts: vec![],
@@ -223,6 +225,9 @@ impl Registry {
             latest: 0,
             next_sequence: 1,
         }
+    }
+    pub fn endpoint(&self) -> Option<&str> {
+        self.endpoint.as_deref()
     }
     pub fn revision(&self) -> u64 {
         self.revision
@@ -270,9 +275,11 @@ impl Registry {
             .unwrap_or(0)
             .checked_add(1)
             .ok_or(Error::Invalid)?;
+        let endpoint = enrollments.first().map(|e| e.endpoint.clone());
         let registry = Self {
             format: FORMAT,
             revision: 0,
+            endpoint,
             enrollments,
             credentials,
             pairing_receipts: vec![],
@@ -286,6 +293,14 @@ impl Registry {
     pub(crate) fn validate(&self) -> Result<()> {
         if self.format != FORMAT {
             return Err(Error::UnsupportedVersion);
+        }
+        if self
+            .endpoint
+            .as_ref()
+            .is_some_and(|e| crate::pairing::normalize_endpoint(e).as_ref() != Ok(e))
+            || (self.endpoint.is_none() && !self.enrollments.is_empty())
+        {
+            return Err(Error::Invalid);
         }
         let mut identities = BTreeSet::new();
         let mut machines = BTreeSet::new();
@@ -322,7 +337,10 @@ impl Registry {
                 return Err(Error::Invalid);
             }
             receiver = Some(&e.receiver_id);
-            if e.revoked_at.is_none() && !machines.insert(&e.machine) {
+            if e.revoked_at.is_none()
+                && self.endpoint.as_deref() == Some(e.endpoint.as_str())
+                && !machines.insert(&e.machine)
+            {
                 return Err(Error::Invalid);
             }
             let full = e

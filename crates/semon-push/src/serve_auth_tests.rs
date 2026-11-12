@@ -1040,3 +1040,45 @@ fn unknown_routes_refuse_with_no_body_read_and_one_response_class() {
         ));
     }
 }
+
+#[test]
+fn address_change_invalidates_existing_handle_and_request_authority() {
+    let dir = PrivateDir::new();
+    install(&dir.0, &records(false));
+    let auth = RegistryAuthenticator::open(&dir.0).unwrap();
+    let admitted = auth
+        .authenticated_enrollment(
+            &mut ConnectionAuthority::default(),
+            Some("Bearer test-bearer"),
+            Kind::MirrorPush,
+            100,
+        )
+        .unwrap();
+    assert!(admitted.authority.is_current_at(100));
+    let mut store = Store::open(&dir.0).unwrap();
+    let before = store.snapshot().unwrap().enrollments().to_vec();
+    store
+        .change_endpoint(
+            &dir.0,
+            "https://receiver.example:443",
+            "https://new.example",
+            "owner",
+            100,
+        )
+        .unwrap();
+    drop(store);
+    assert!(!admitted.authority.is_current_at(100));
+    assert!(
+        auth.authenticated_enrollment(
+            &mut ConnectionAuthority::default(),
+            Some("Bearer test-bearer"),
+            Kind::MirrorPush,
+            100
+        )
+        .is_none()
+    );
+    assert_eq!(
+        Registry::read_current(&dir.0).unwrap().enrollments(),
+        before
+    );
+}

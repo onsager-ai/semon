@@ -846,10 +846,22 @@ impl Core {
                 if fresh.pairing_receipts.iter().any(|r| r.session_id == id) {
                     return Err(Error::Terminal);
                 }
+                if fresh
+                    .endpoint
+                    .as_ref()
+                    .is_some_and(|endpoint| endpoint != &enrollment.endpoint)
+                {
+                    return Err(Error::Terminal);
+                }
+                fresh.endpoint = Some(enrollment.endpoint.clone());
                 let replaced: Vec<_> = fresh
                     .enrollments
                     .iter()
-                    .filter(|e| e.machine == enrollment.machine && e.revoked_at.is_none())
+                    .filter(|e| {
+                        e.machine == enrollment.machine
+                            && e.revoked_at.is_none()
+                            && e.endpoint == enrollment.endpoint
+                    })
                     .map(|e| e.enrollment_id.clone())
                     .collect();
                 for id in replaced {
@@ -907,7 +919,8 @@ impl Core {
                 .iter()
                 .find(|e| e.enrollment_id == receipt.enrollment_id)
                 .ok_or(Error::Invalid)?;
-            if enrollment.revoked_at.is_some()
+            if snapshot.endpoint.as_deref() != Some(enrollment.endpoint.as_str())
+                || enrollment.revoked_at.is_some()
                 || enrollment
                     .credential_kinds
                     .iter()

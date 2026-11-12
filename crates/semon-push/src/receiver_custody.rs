@@ -72,7 +72,6 @@ struct Identity {
     issuer_key_id: String,
     client_ca_created: u64,
     client_ca_sha256: String,
-    endpoint: String,
 }
 
 /// Contains public identity and paths only; seeds are loaded into zeroizing memory.
@@ -226,7 +225,11 @@ impl ReceiverCustody {
     }
     #[cfg(test)]
     pub(crate) fn open_at(dir: &Path, now: u64) -> Result<Self> {
-        Self::open_with_clock(dir, || Ok(()), |_| {}, now, "https://receiver.example:443")
+        Self::open_at_endpoint(dir, now, "https://receiver.example:443")
+    }
+    #[cfg(test)]
+    pub(crate) fn open_at_endpoint(dir: &Path, now: u64, endpoint: &str) -> Result<Self> {
+        Self::open_with_clock(dir, || Ok(()), |_| {}, now, endpoint)
     }
     fn open_with_clock(
         dir: &Path,
@@ -277,7 +280,14 @@ impl ReceiverCustody {
             root.create_child(AUDIT)?;
             let acl = root.create_child(ACL)?;
             // Registry owns its own directory, lock and durable format.
-            drop(enrollment::Store::initialize_at(&root.fd).map_err(|_| Error::Custody)?);
+            let mut store =
+                enrollment::Store::initialize_at(&root.fd).map_err(|_| Error::Custody)?;
+            let mut registry = store.snapshot().map_err(|_| Error::Custody)?;
+            registry.endpoint = Some(endpoint);
+            store
+                .commit(registry.revision(), &registry)
+                .map_err(|_| Error::Custody)?;
+            drop(store);
             // MemoryKey takes ownership; the additional seed copy is zeroized too.
             let seed = random_secret()?;
             let key = MemoryKey::from_seed(Zeroizing::new(*seed));
@@ -309,7 +319,6 @@ impl ReceiverCustody {
                     issuer_key_id: key_id,
                     client_ca_created,
                     client_ca_sha256: crate::wire::sha256_hex(&client_ca_certificate),
-                    endpoint,
                 })?,
                 false,
             )?;
@@ -340,8 +349,6 @@ impl ReceiverCustody {
         let private = Zeroizing::new(ca_secrets.read(CLIENT_CA_KEY)?);
         crate::client_ca::validate_ca(&private, &certificate).map_err(|_| Error::Invalid)?;
         if identity.format != 2
-            || crate::pairing::normalize_endpoint(&identity.endpoint).map_err(|_| Error::Invalid)?
-                != identity.endpoint
             || !opaque(&identity.receiver_id, 64)
             || !opaque(&identity.issuer_key_id, 32)
         {
@@ -424,9 +431,6 @@ impl ReceiverCustody {
     }
     pub fn issuer(&self) -> &enrollment::IssuerKey {
         &self.issuer
-    }
-    pub fn endpoint(&self) -> &str {
-        &self.identity.endpoint
     }
     pub fn owner(&self) -> &Owner {
         &self.owner
@@ -607,7 +611,7 @@ impl ReceiverCustody {
                             .and_then(|d| d.read(name))
                             .and_then(|b| {
                                 let i: Identity = decode(&b)?;
-                                if i.format == 1
+                                if i.format == 2
                                     && opaque(&i.receiver_id, 64)
                                     && opaque(&i.issuer_key_id, 32)
                                 {

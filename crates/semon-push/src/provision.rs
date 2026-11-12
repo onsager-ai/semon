@@ -32,15 +32,25 @@ impl Controller {
             return Err("invalid enrollment machine".into());
         }
         let endpoint = pairing::normalize_endpoint(endpoint).map_err(|e| e.to_string())?;
+        if dir.join("enrollment").exists() {
+            crate::enrollment::Registry::read_current(dir).map_err(|e| e.to_string())?;
+        }
         let custody =
             ReceiverCustody::open_or_initialize(dir, &endpoint).map_err(|e| e.to_string())?;
-        if custody.endpoint() != endpoint {
-            return Err(format!(
-                "Receiver directory records endpoint {}. A different endpoint requires a new empty receiver directory and pairing each origin again.",
-                custody.endpoint()
-            ));
+        let mut store = Store::open(dir).map_err(|e| e.to_string())?;
+        let mut registry = store.snapshot().map_err(|e| e.to_string())?;
+        if let Some(recorded) = registry.endpoint() {
+            if recorded != endpoint {
+                return Err(format!(
+                    "Receiver directory records endpoint {recorded}. To change address, run semon receive enroll --advertise {endpoint} with its listener/TLS options and confirm the address change."
+                ));
+            }
+        } else {
+            registry.endpoint = Some(endpoint.clone());
+            store
+                .commit(registry.revision(), &registry)
+                .map_err(|e| e.to_string())?;
         }
-        let store = Store::open(dir).map_err(|e| e.to_string())?;
         let core = Core::open(store, &endpoint, custody.receiver_id().into())
             .map_err(|e| e.to_string())?;
         Ok(Self {

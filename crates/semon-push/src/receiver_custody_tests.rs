@@ -665,11 +665,17 @@ fn revoke_between_activation_and_install_never_restores_grants() {
 #[test]
 fn recorded_endpoint_is_normalized_and_retained() {
     let f = Fixture::new();
-    let first = ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example").unwrap();
-    assert_eq!(first.endpoint(), "https://receiver.example:443");
+    ReceiverCustody::open_or_initialize(&f.0, "https://receiver.example").unwrap();
+    assert_eq!(
+        enrollment::Registry::read_current(&f.0).unwrap().endpoint(),
+        Some("https://receiver.example:443")
+    );
     let before = fs::read(f.0.join(IDENTITY)).unwrap();
-    let second = ReceiverCustody::open_or_initialize(&f.0, "https://different.example").unwrap();
-    assert_eq!(second.endpoint(), first.endpoint());
+    ReceiverCustody::open_or_initialize(&f.0, "https://different.example").unwrap();
+    assert_eq!(
+        enrollment::Registry::read_current(&f.0).unwrap().endpoint(),
+        Some("https://receiver.example:443")
+    );
     assert_eq!(fs::read(f.0.join(IDENTITY)).unwrap(), before);
     assert!(
         crate::provision::Controller::open(&f.0, "https://different.example", "laptop".into())
