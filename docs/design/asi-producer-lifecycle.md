@@ -86,10 +86,11 @@ job; rebuilds still require available authorized sources and custody proof.
 
 - `analytics materialize` calls initialize, then keeps its existing strict Catalog
   refresh, bounded publication, compaction and optional watch semantics.
-- Analytics/body `connect` calls initialize before pairing begins. Replace the
-  interim read-only producer-binding precheck (the seam returning “run
-  `semon analytics materialize` first, then connect”) with this call, retaining its
-  expected-binding validation. Mirror-only connect skips it. Local initialization
+- Analytics/body `connect` calls initialize before pairing begins. The replacement
+  point is `connect::producer_admission(kinds, analytics_state_dir)` (#651, not on
+  `main` yet): replace its interim read-only producer-binding precheck (the seam
+  returning “run `semon analytics materialize` first, then connect”) with this call,
+  retaining its expected-binding validation. Mirror-only connect skips it. Local initialization
   grants no sharing permission; B4 still gates enrollment/source publication.
 - Proposed `start` calls initialize, then runs the local producer and authenticated
   Viewer. Merely opening Viewer, MCP, query, push or receive never initializes.
