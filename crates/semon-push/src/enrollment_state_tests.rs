@@ -329,7 +329,7 @@ fn terminal_revoke_works_at_the_admission_boundary_without_audit() {
         pin: None,
         high_water: [u64::MAX; 3],
     };
-    let available = ADMISSION_CAP as usize - serde_json::to_vec(&r).unwrap().len();
+    let available = ADMISSION_CAP as usize - 4 * 8192 - serde_json::to_vec(&r).unwrap().len();
     let count = available / (serde_json::to_vec(&sample).unwrap().len() + 1);
     for n in 1..=count {
         let mut t = sample.clone();
@@ -343,7 +343,7 @@ fn terminal_revoke_works_at_the_admission_boundary_without_audit() {
     assert!(r.check_admission().is_ok());
     let bytes = serde_json::to_vec(&r).unwrap().len();
     assert!(bytes <= ADMISSION_CAP as usize);
-    assert!(bytes > ADMISSION_CAP as usize - 512);
+    assert!(bytes + 4 * 8192 > ADMISSION_CAP as usize - 512);
     store.commit(0, &r).unwrap();
     store
         .owner_update(&f.0, None, OwnerAction::Revoke, "owner", &id('a'), 20)

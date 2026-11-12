@@ -5,7 +5,7 @@ use crate::{
     enrollment::{CertificatePin, Error, Registry, Store},
     provision_wire::{self, Refused},
     renewal_wire::{self as wire, Action, Begun, Credential, Generation},
-    serve_auth::VerifiedClientIdentity,
+    serve::VerifiedClientIdentity,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -43,6 +43,8 @@ struct Pending {
 #[derive(Default)]
 pub struct Receiver {
     pending: BTreeMap<String, Pending>,
+    latest: u64,
+    terminal: BTreeMap<String, u64>,
 }
 
 fn enrollment<'a>(registry: &'a Registry, id: &str) -> Result<&'a crate::enrollment::Enrollment> {
@@ -155,8 +157,17 @@ impl Receiver {
         let mut store = Store::open(dir).map_err(|_| Refused)?;
         store.compact(dir, now).map_err(|_| Refused)?;
         let mut registry = store.snapshot().map_err(|_| Refused)?;
-        let now = now.max(registry.latest);
+        let now = now.max(registry.latest).max(self.latest);
+        self.latest = now;
+        if now > registry.latest {
+            registry.latest = now;
+            store
+                .commit(registry.revision(), &registry)
+                .map_err(|_| Refused)?;
+            registry = store.snapshot().map_err(|_| Refused)?;
+        }
         self.pending.retain(|_, p| now < p.begun.expires_at);
+        self.terminal.retain(|_, expires| now < *expires);
         let authentication = wire::identities(&message.credentials)?;
         if let Some(receipt) = registry.renewal_receipts.iter().find(|r| {
             r.begun.enrollment_id == message.enrollment_id
@@ -344,8 +355,17 @@ impl Receiver {
     ) -> Result<Vec<u8>> {
         let mut store = Store::open(dir).map_err(|_| Refused)?;
         let mut registry = store.snapshot().map_err(|_| Refused)?;
-        let now = now.max(registry.latest);
+        let now = now.max(registry.latest).max(self.latest);
+        self.latest = now;
+        if now > registry.latest {
+            registry.latest = now;
+            store
+                .commit(registry.revision(), &registry)
+                .map_err(|_| Refused)?;
+            registry = store.snapshot().map_err(|_| Refused)?;
+        }
         self.pending.retain(|_, p| now < p.begun.expires_at);
+        self.terminal.retain(|_, expires| now < *expires);
         let application = Zeroizing::new(provision_wire::decode_fixed::<32>(
             &message.application_key,
         )?);
@@ -396,6 +416,9 @@ impl Receiver {
                 .commit(registry.revision(), &registry)
                 .map_err(|_| Refused)?;
             return Ok(bytes);
+        }
+        if self.terminal.contains_key(&message.renewal_id) {
+            return Err(Refused);
         }
         let pending = self
             .pending
@@ -450,6 +473,8 @@ impl Receiver {
                 .commit(registry.revision(), &registry)
                 .map_err(|_| Refused)?;
             self.pending.remove(&message.enrollment_id);
+            self.terminal
+                .insert(message.renewal_id.clone(), pending.begun.expires_at);
             return provision_wire::encode_message(&wire::Cancelled {
                 version: 1,
                 enrollment_id: message.enrollment_id.clone(),
@@ -740,6 +765,46 @@ impl Registry {
                 || r.begun.generations.len() > 3
                 || r.credentials.len() != r.begun.generations.len()
                 || serde_json::to_vec(r).map_err(|_| Error::Invalid)?.len() > 8192
+            {
+                return Err(Error::Invalid);
+            }
+            for list in [&r.authentication, &r.begun.generations] {
+                if list.iter().any(|g| g.generation == 0)
+                    || list
+                        .windows(2)
+                        .any(|w| w[0].kind.wire_name() >= w[1].kind.wire_name())
+                {
+                    return Err(Error::Invalid);
+                }
+            }
+            if r.begun.enable_authorization_ids.len() > 3
+                || r.begun
+                    .enable_authorization_ids
+                    .iter()
+                    .any(|id| wire::identifier(id).is_err())
+                || r.begun
+                    .enable_authorization_ids
+                    .windows(2)
+                    .any(|w| w[0] >= w[1])
+            {
+                return Err(Error::Invalid);
+            }
+            if r.authentication.iter().any(|old| {
+                !r.begun.generations.iter().any(|new| {
+                    new.kind == old.kind && old.generation.checked_add(1) == Some(new.generation)
+                })
+            }) {
+                return Err(Error::Invalid);
+            }
+            let certificate_required = r.begun.generations.iter().any(|g| {
+                e.credential_kinds
+                    .iter()
+                    .any(|s| s.kind == g.kind && s.client_cert_required)
+            });
+            if certificate_required != r.client_certificate.is_some()
+                || r.client_certificate
+                    .as_ref()
+                    .is_some_and(|c| c.len() > 1536)
             {
                 return Err(Error::Invalid);
             }

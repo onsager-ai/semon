@@ -127,6 +127,82 @@ impl Drop for Fixture {
     }
 }
 #[test]
+fn enable_is_bound_at_begin_consumed_once_and_recovery_uses_old_set() {
+    let f = Fixture::new();
+    let store = Store::open(&f.dir).unwrap();
+    let mut registry = store.snapshot().unwrap();
+    let e = &mut registry.enrollments[0];
+    e.binding = Binding::Admitted {
+        namespace: "namespace".into(),
+        origin_incarnation: "origin".into(),
+        index_incarnation: "index".into(),
+        publisher_claim_epoch: crate::enrollment::ClaimEpoch::Unassigned,
+        issuer: crate::enrollment::Issuer {
+            kind: crate::enrollment::IssuerKind::Receiver,
+            origin_trust_acknowledged: true,
+        },
+        assertion_issuer_keys: vec![crate::enrollment::IssuerKey {
+            key_id: "issuer".into(),
+            public_key: [1; 32],
+        }],
+    };
+    let mut enabled = KindScope::new(Kind::AnalyticsPublish, 7);
+    enabled.available = false;
+    enabled.enable_authorization = Some(crate::enrollment::EnableAuthorization {
+        enrollment_id: e.enrollment_id.clone(),
+        kind: Kind::AnalyticsPublish,
+        owner: "owner".into(),
+        authorization_id: "c".repeat(64),
+        created_at: 100,
+        consumed_renewal_id: None,
+    });
+    e.credential_kinds.push(enabled);
+    // Build this fixture as initial custody; ordinary APIs cannot widen bindings.
+    let initial =
+        Registry::from_records(registry.enrollments.clone(), registry.credentials.clone()).unwrap();
+    drop(store);
+    let path = f.dir.join("enrollment/registry.json");
+    fs::write(path, serde_json::to_vec(&initial).unwrap()).unwrap();
+    let mut receiver = Receiver::default();
+    let begun = f.begin(&mut receiver, 100).unwrap();
+    assert_eq!(begun.enable_authorization_ids, vec!["c".repeat(64)]);
+    assert_eq!(begun.generations.len(), 2);
+    let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    let initial = receiver
+        .finish(&f.dir, &commit, &[4; 32], None, 101)
+        .unwrap();
+    let registry = Registry::read_current(&f.dir).unwrap();
+    let scope = registry.enrollments[0]
+        .credential_kinds
+        .iter()
+        .find(|s| s.kind == Kind::AnalyticsPublish)
+        .unwrap();
+    assert!(scope.available);
+    assert!(scope.generations.retiring.is_none());
+    assert_eq!(scope.generations.current, 8);
+    assert_eq!(
+        scope
+            .enable_authorization
+            .as_ref()
+            .unwrap()
+            .consumed_renewal_id
+            .as_ref(),
+        Some(&begun.renewal_id)
+    );
+    assert_eq!(
+        registry.renewal_receipts[0].recovery_until,
+        101 + wire::OVERLAP
+    );
+    assert_eq!(registry.renewal_receipts[0].authentication.len(), 1);
+    let recover = f.finish(&begun, Action::Recover, [3; 32], [5; 32]);
+    assert_eq!(
+        initial,
+        receiver
+            .finish(&f.dir, &recover, &[5; 32], None, 102)
+            .unwrap()
+    );
+}
+#[test]
 fn exact_window_idempotent_begin_and_restart_rate_limit() {
     let f = Fixture::new();
     let mut receiver = Receiver::default();
@@ -229,6 +305,77 @@ fn exact_pending_deadline_cancel_restart_and_bad_bearer() {
     };
     bad.credentials[0].bearer = "stolen-key-without-bearer".into();
     assert!(receiver.begin(&f.dir, &bad, None, 2_001_003).is_err());
+}
+#[test]
+fn overlap_caps_at_old_expiry_and_exact_deadline_refuses_recovery() {
+    let f = Fixture::new();
+    let mut receiver = Receiver::default();
+    let now = 3_999_990;
+    let begun = f.begin(&mut receiver, now).unwrap();
+    let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    receiver
+        .finish(&f.dir, &commit, &[4; 32], None, now)
+        .unwrap();
+    let registry = Registry::read_current(&f.dir).unwrap();
+    assert_eq!(registry.renewal_receipts[0].recovery_until, 4_000_000);
+    assert_eq!(
+        registry.enrollments[0].credential_kinds[0]
+            .generations
+            .retiring
+            .as_ref()
+            .unwrap()
+            .cutover_at,
+        4_000_000
+    );
+    let recover = f.finish(&begun, Action::Recover, [3; 32], [4; 32]);
+    assert!(
+        receiver
+            .finish(&f.dir, &recover, &[4; 32], None, 4_000_000)
+            .is_err()
+    );
+    assert!(
+        receiver
+            .finish(&f.dir, &recover, &[4; 32], None, now)
+            .is_err()
+    );
+}
+#[test]
+fn wrong_key_and_revoke_between_begin_and_finish_refuse() {
+    let f = Fixture::new();
+    let other = Fixture::new();
+    let mut receiver = Receiver::default();
+    let now = 2_000_000;
+    let begun = f.begin(&mut receiver, now).unwrap();
+    let mut wrong = other.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    wrong.credentials = f.credentials();
+    assert!(
+        receiver
+            .finish(&f.dir, &wrong, &[4; 32], None, now)
+            .is_err()
+    );
+    Store::open(&f.dir)
+        .unwrap()
+        .owner_update(
+            &f.dir,
+            None,
+            crate::enrollment::OwnerAction::Revoke,
+            "owner",
+            &begun.enrollment_id,
+            now,
+        )
+        .unwrap();
+    let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    assert!(
+        receiver
+            .finish(&f.dir, &commit, &[4; 32], None, now)
+            .is_err()
+    );
+    assert!(
+        Registry::read_current(&f.dir)
+            .unwrap()
+            .renewal_receipts
+            .is_empty()
+    );
 }
 #[test]
 fn first_use_ends_recovery_and_preserves_new_authority() {

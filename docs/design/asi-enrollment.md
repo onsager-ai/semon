@@ -49,7 +49,7 @@ controller and `receive enroll` terminal. Receiver-side public_tls provisioning
 creates mirror-only enrollments; origin connect/client and optional client certificates
 are integrated. Independently validated analytics/body admission, renewal and
 revocation CLI remain follow-up integrations. Shipped custody creates
-`DIR/enrollment/registry.json` (strict current format 2)
+`DIR/enrollment/registry.json` (strict current format 3)
 and `DIR/enrollment/registry.lock`, relative to receiver state directory `DIR`.
 One atomic registry document contains enrollment bindings, generation-scoped
 certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
@@ -444,7 +444,7 @@ Later enrollments reuse receiver identity, owner, keys and directories.
 
 Implementation status (slice 4a PR3.2a, part of #593): `receiver_custody`
 is a Unix library consumed by receiver-side provisioning. Under `DIR`, mode-0700 directories are `enrollment/`
-(current registry format 2), `issuer-secrets/`, `cache-secrets/`, `body-cache/`, `acl/` and
+(current registry format 3), `issuer-secrets/`, `cache-secrets/`, `body-cache/`, `acl/` and
 `receiver-audit/`. Mode-0600 files are `receiver.json` (strict JSON format 2:
 random receiver ID and current issuer key ID), `custody.lock`,
 `issuer-secrets/issuer-<key-id>.seed` (raw 32-byte Ed25519 seed),
@@ -726,7 +726,9 @@ generation list, the SHA-256 of the sorted bound enable-authorization ID list
 (compact JSON array), and SHA-256 of the application key. Use pairing's eight-byte
 big-endian length prefix for each field; sort kind lists by their wire names and
 encode each list as compact JSON with the field order shown above, excluding
-bearer values from the identity list (`{ kind, generation }`). Sign with
+bearer values from the identity list (`{ kind, generation }`). The scope digest
+hashes the authentication-list JSON followed by the target-list JSON, each with
+its own eight-byte big-endian length prefix. Sign with
 `ECDSA_P256_SHA256_FIXED` and verify against the enrolled origin key. The receiver
 must retain that verified key from pairing in integrity-protected registry custody;
 a pin alone is not a proof-verification key. The nonce, action and live exporter
@@ -986,7 +988,8 @@ concurrent renewal cannot publish active custody after disconnect wins the lock.
 | --- | --- |
 | 4.0, this docs-only PR | Accepted renewal/revoke/enable contract, exact operator strings and CI obligations; no runtime implementation |
 | 4.1, separately in flight | Credential-bound authority handle and in-flight checks independent of unrelated registry revisions |
-| 4.2 | Receiver renewal routes, current registry format, revoke/enable, audit-before-compaction, credential_generation_ended audit record, tombstones and live-state admission integration |
+| 4.2a (#665), shipped | Current registry, revoke/enable, audit-before-compaction, credential_generation_ended records, tombstones and first-use cutover |
+| 4.2b, implementation draft | Receiver renewal begin/finish during ordinary receive, enrolled-key proof, generation receipts and reserved recovery deliveries; strict registry format 3 adds renewal receipts and persisted admission. Receiver CI and independent review remain required. |
 | 4.3 | Origin push/watch renewal, staged installation/recovery, local disconnect and URL-based --receiver on connect/push/disconnect using one endpoint normalization; replace #651's hash selector in docs/tests together |
 
 PR3b private-root follows PR4; a future `--trust-root FILE` is outside this contract

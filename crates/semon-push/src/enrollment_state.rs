@@ -32,7 +32,13 @@ impl Registry {
         // Reserve the maximum terminal timestamp/availability deltas per record.
         let terminal_delta =
             self.credentials.len() as u64 * 20 + self.enrollments.len() as u64 * (20 + 512);
-        if size > ADMISSION_CAP || size.saturating_add(terminal_delta) > CAP {
+        // Four process-local pending attempts can each commit a receipt. Reserve
+        // their maximum encoded outcomes for every authority-producing writer,
+        // including pairing and owner enables in other processes.
+        let pending_outcomes = 4 * 8192;
+        if size.saturating_add(pending_outcomes) > ADMISSION_CAP
+            || size.saturating_add(terminal_delta) > CAP
+        {
             return Err(Error::Full);
         }
         Ok(())

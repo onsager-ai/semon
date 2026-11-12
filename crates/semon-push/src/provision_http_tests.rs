@@ -143,6 +143,123 @@ impl Harness {
     }
 }
 #[test]
+fn ordinary_receive_renews_without_pairing_controller_or_terminal() {
+    use crate::{
+        credentials::{Bearer, Secret},
+        enrollment::{Binding, Enrollment, KindScope, Registry, Store},
+        renewal_wire as renewal,
+    };
+    let mut h = Harness::new();
+    let shared = Arc::get_mut(&mut h.shared).unwrap();
+    shared.provisioning = None;
+    shared.provisioning_terminal = None;
+    let rng = ring::rand::SystemRandom::new();
+    let private = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &rng,
+    )
+    .unwrap();
+    let key = ring::signature::EcdsaKeyPair::from_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        private.as_ref(),
+        &rng,
+    )
+    .unwrap();
+    let id = "a".repeat(64);
+    let secret = "existing-test-credential";
+    let registry = Registry::from_records(
+        vec![Enrollment {
+            enrollment_id: id.clone(),
+            receiver_id: "receiver".into(),
+            machine: "laptop".into(),
+            sequence: 1,
+            origin_key: key.public_key().as_ref().to_vec(),
+            endpoint: "https://localhost:443".into(),
+            enrolled_pin: None,
+            binding: Binding::Inapplicable,
+            client_certificate_pins: vec![],
+            credential_kinds: vec![KindScope::new(Kind::MirrorPush, 1)],
+            revoked_at: None,
+        }],
+        vec![Bearer {
+            credential_id: "b".repeat(64),
+            enrollment_id: id.clone(),
+            kind: Kind::MirrorPush,
+            sha256: Secret::new(secret.into()).hash(),
+            generation: 1,
+            valid_from: 0,
+            valid_until: 4_000_000,
+            revoked_at: None,
+        }],
+    )
+    .unwrap();
+    let mut store = Store::open(&h.dir.0).unwrap();
+    let revision = store.snapshot().unwrap().revision();
+    store.commit(revision, &registry).unwrap();
+    drop(store);
+    h.clock.store(2_000_000, Ordering::Relaxed);
+    let (mut client, worker) = h.connect();
+    let begin = renewal::Begin {
+        version: 1,
+        enrollment_id: id.clone(),
+        credentials: vec![renewal::Credential {
+            kind: Kind::MirrorPush,
+            generation: 1,
+            bearer: secret.into(),
+        }],
+    };
+    let (status, body) = post(
+        &mut client,
+        "/v1/renew/begin",
+        &wire::encode_message(&begin).unwrap(),
+    );
+    assert_eq!(status, 200);
+    let begun: renewal::Begun = serde_json::from_slice(&body).unwrap();
+    let exporter = client
+        .conn
+        .export_keying_material([0; 32], wire::EXPORTER_LABEL, Some(&[]))
+        .unwrap();
+    let authentication = vec![renewal::Generation {
+        kind: Kind::MirrorPush,
+        generation: 1,
+    }];
+    let signed = renewal::possession_message(
+        "receiver",
+        "https://localhost:443",
+        &begun,
+        &authentication,
+        &exporter,
+        renewal::Action::Commit,
+        &[3; 32],
+    )
+    .unwrap();
+    let proof = key.sign(&rng, &signed).unwrap();
+    let finish = renewal::Finish {
+        version: 1,
+        enrollment_id: id,
+        renewal_id: begun.renewal_id.clone(),
+        action: renewal::Action::Commit,
+        credentials: vec![renewal::Credential {
+            kind: Kind::MirrorPush,
+            generation: 1,
+            bearer: secret.into(),
+        }],
+        application_key: wire::encode(&[3; 32]),
+        proof: wire::encode(proof.as_ref()),
+    };
+    let (status, body) = post(
+        &mut client,
+        "/v1/renew/finish",
+        &wire::encode_message(&finish).unwrap(),
+    );
+    assert_eq!(status, 200);
+    let delivered: renewal::Delivered = serde_json::from_slice(&body).unwrap();
+    assert_eq!(delivered.credentials[0].generation, 2);
+    drop(client);
+    worker.join().unwrap();
+    assert_eq!(h.shared.admission().provisioning, 0);
+}
+#[test]
 fn production_origin_connection_validates_roots_and_hostname() {
     for (host, trusted, accepted) in [
         ("localhost", true, true),
