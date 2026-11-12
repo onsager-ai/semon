@@ -211,7 +211,7 @@ impl Controller {
                     .iter()
                     .any(|(kind, _)| *kind == Kind::BodyChannel)
                 {
-                    Some("body_channel available after client-certificate issuance lands")
+                    Some("body_channel available after producer admission (#654) lands")
                 } else if message
                     .input
                     .kinds
@@ -228,11 +228,19 @@ impl Controller {
                     return Err(Refused);
                 }
                 self.validate_input(&message.input, now)?;
+                let expected = if message.input.kinds.iter().any(|(_, required)| *required) {
+                    vec![crate::client_ca::pin(&transcript.origin_key).map_err(|_| Refused)?]
+                } else {
+                    vec![]
+                };
+                if message.input.client_certificate_pins != expected {
+                    return Err(Refused);
+                }
                 let grants = self.grants(&message.input.binding)?;
                 self.core.approve(evidence, now).map_err(|_| Refused)?;
                 let delivery = self
                     .core
-                    .activate(&message.session_id, message.input, now)
+                    .activate_with_issuer(&message.session_id, message.input, now, &self.custody)
                     .map_err(|_| Refused)?;
                 // Fresh activation decision is held here; grants never precede commit.
                 if let Some(grants) = grants {
@@ -341,12 +349,11 @@ impl Controller {
             || input.machine != self.machine
             || input.valid_until <= now
             || input.valid_until > now.saturating_add(wire::INITIAL_CREDENTIAL_VALIDITY_SECONDS)
-            || !input.client_certificate_pins.is_empty()
             || input.kinds.is_empty()
             || input
                 .kinds
                 .iter()
-                .any(|(kind, certificate)| *certificate || *kind != Kind::MirrorPush)
+                .any(|(kind, _)| *kind != Kind::MirrorPush)
             || !matches!(input.binding, Binding::Inapplicable)
             || input.kinds.len() != 1
         {
@@ -363,6 +370,7 @@ fn delivery_bytes(delivery: pairing::Delivery) -> Result<Vec<u8>, Refused> {
     wire::encode_message(&wire::Activated {
         version: wire::VERSION,
         enrollment_id: delivery.enrollment_id,
+        client_certificate: delivery.client_certificate.as_deref().map(wire::encode),
         credentials: delivery
             .credentials
             .into_iter()

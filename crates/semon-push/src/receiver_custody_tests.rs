@@ -103,6 +103,57 @@ fn first_run_reuses_identity_secrets_and_storage_outputs() {
 }
 
 #[test]
+fn client_ca_and_trust_are_generated_once_and_modified_trust_refuses() {
+    let f = Fixture::new();
+    let first = ReceiverCustody::open_at(&f.0, 1_800_000_000).unwrap();
+    let key = fs::read(f.0.join(CLIENT_CA_SECRETS).join(CLIENT_CA_KEY)).unwrap();
+    let cert = fs::read(f.0.join(CLIENT_CA_CERTIFICATE)).unwrap();
+    let trust = fs::read(f.0.join(CLIENT_TRUST)).unwrap();
+    assert_eq!(trust, crate::client_ca::pem(&cert));
+    assert_eq!(mode(&f.0.join(CLIENT_CA_SECRETS)), 0o700);
+    for name in [
+        CLIENT_CA_CERTIFICATE,
+        CLIENT_TRUST,
+        "client-ca-secrets/client-ca.pk8",
+    ] {
+        assert_eq!(mode(&f.0.join(name)), 0o600);
+    }
+    let second = ReceiverCustody::open_at(&f.0, 1_800_000_100).unwrap();
+    assert_eq!(first.receiver_id(), second.receiver_id());
+    assert_eq!(
+        fs::read(f.0.join(CLIENT_CA_SECRETS).join(CLIENT_CA_KEY)).unwrap(),
+        key
+    );
+    assert_eq!(fs::read(f.0.join(CLIENT_CA_CERTIFICATE)).unwrap(), cert);
+    fs::write(f.0.join(CLIENT_TRUST), b"hand edited").unwrap();
+    assert_eq!(
+        ReceiverCustody::open_or_initialize(&f.0).unwrap_err(),
+        Error::Invalid
+    );
+    assert_eq!(fs::read(f.0.join(CLIENT_TRUST)).unwrap(), b"hand edited");
+    assert_eq!(
+        fs::read(f.0.join(CLIENT_CA_SECRETS).join(CLIENT_CA_KEY)).unwrap(),
+        key
+    );
+}
+#[test]
+fn old_receiver_refuses_without_deleting_or_repairing() {
+    let f = Fixture::new();
+    fs::write(f.0.join(IDENTITY), b"old receiver identity").unwrap();
+    fs::set_permissions(f.0.join(IDENTITY), fs::Permissions::from_mode(0o600)).unwrap();
+    let error = ReceiverCustody::open_or_initialize(&f.0).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "receiver custody predates client certificates; initialize a fresh receiver directory"
+    );
+    assert_eq!(
+        fs::read(f.0.join(IDENTITY)).unwrap(),
+        b"old receiver identity"
+    );
+    assert!(!f.0.join(CLIENT_CA_SECRETS).exists());
+}
+
+#[test]
 fn generated_key_signs_and_verifies_pinned_assertion() {
     let f = Fixture::new();
     let custody = f.open();

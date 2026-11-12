@@ -150,6 +150,7 @@ impl Fixture {
         let delivery = Activated {
             version: 1,
             enrollment_id: "enrollment-test".into(),
+            client_certificate: None,
             credentials: vec![(
                 Kind::MirrorPush,
                 fs::read_to_string(self.path("token")).unwrap(),

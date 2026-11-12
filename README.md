@@ -129,6 +129,13 @@ semon connect --to https://receiver.example:8735 --machine laptop
 semon push --watch
 ```
 
+Use `connect --require-client-certificate` to require mutual TLS for mirror Push.
+Receiver enrollment generates its own client-issuing CA and `client-trust.pem`;
+no hand-editing or certificate transfer is needed. Origin custody installs the
+issued certificate with its existing private key, and `push` presents it automatically.
+Receivers initialized before client certificates must use a fresh receiver directory;
+existing custody is preserved and never migrated or deleted.
+
 Enter the receiver's code in the non-echoing controlling-terminal prompt, then
 review the authenticated receiver identity, mirror-only scope and current source
 list and enter `yes` to approve. No code, bearer or private key belongs in argv,

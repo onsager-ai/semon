@@ -471,6 +471,40 @@ body service disabled and reports analytics-only partial setup. Stream-through i
 an explicit policy choice, not a silent fallback. Enrollment installs no OS service
 or firewall change; foreground lifetime and service setup follow the journey.
 
+### Receiver client-certificate issuance (slice 4a)
+
+Receiver initialization generates an independent ECDSA P-256 client-issuing CA.
+Its 0700 `client-ca-secrets/` contains only `client-ca.pk8` (0600); it is distinct
+from assertion `issuer-secrets/` and `cache-secrets/`. The public `client-ca.der`
+and its creation time/hash in `receiver.json` bind custody. The CA lasts ten years,
+has CA basic constraints with path length zero and only keyCertSign usage.
+`client-trust.pem` is generated atomically as the exact CA PEM, mode 0600. Reopening
+reuses this state and refuses a changed trust file; operators never edit it.
+Existing receiver custody without the CA refuses with
+“receiver custody predates client certificates; initialize a fresh receiver directory”.
+Nothing is deleted, migrated or silently repaired.
+
+Activation issues one clientAuth-only P-256 leaf for the existing origin pairing
+key whenever any enabled kind requires a certificate. The scope MAC commits
+exactly that key's tagged SHA-256 SPKI pin; foreign pins refuse before registry
+commit. The leaf has CA:false, digitalSignature only, an opaque enrollment subject,
+a random 128-bit serial, notBefore five minutes before activation and notAfter
+exactly the approved credential expiry. Certificate issuance and enrollment are
+one registry commit. The public DER is retained in the nonsecret delivery receipt;
+approval and the single recovery delivery return identical base64url DER, without
+padding, within the existing 8 KiB envelope.
+
+Origin custody verifies parsing, its own SPKI, clientAuth EKU and approved validity
+before atomic installation of `client-certificate.der` (0600), whose hash is covered
+by signed `enrollment.json`. No client-CA trust anchor is assumed at the origin. Origin validation checks
+SPKI, clientAuth EKU and validity against its clock; it does not enforce
+BasicConstraints or KeyUsage. Expired and not-yet-valid certificates refuse with
+an explicit diagnostic, without falling back to certificate-less transport.
+`connect --require-client-certificate` enables this for mirror_push; `push` presents
+the leaf with the existing `origin-key.pk8`. The default stays off. Body and
+analytics activation remain refused pending producer/storage admission. Renewal,
+rotation and private-root provisioning remain outside this slice.
+
 ## Credential kinds and custody
 
 Slice 4a replaces the single-kind token file with one current versioned kind-aware
@@ -704,7 +738,7 @@ analytics_publish/body_channel kinds before pairing or network activity. It pass
 no expected binding until enrollment supplies one. Initialization creates or reuses
 the current local producer binding without publication, sharing, rebuild or reset.
 Successful initialization still refuses with `analytics/body enrollment available
-after producer admission / client-certificate issuance lands`, because the receiver
+after producer admission and activation integration lands`, because the receiver
 still refuses those kinds. Mirror-only connect skips initialization and works
 without a namespace. See the [producer lifecycle](asi-producer-lifecycle.md) for
 identity persistence, pending publication and refusal behavior.
