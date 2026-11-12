@@ -90,8 +90,8 @@ job; rebuilds still require available authorized sources and custody proof.
   point is `connect::producer_admission(kinds, analytics_state_dir)` (#651, not on
   `main` yet): replace its interim read-only producer-binding precheck (the seam
   returning “run `semon analytics materialize` first, then connect”) with this call,
-  retaining its expected-binding validation. Mirror-only connect skips it. Local initialization
-  grants no sharing permission; B4 still gates enrollment/source publication.
+  retaining its expected-binding validation. Mirror-only connect skips it. Local
+  initialization grants no sharing permission; B4 still gates enrollment/source publication.
 - Proposed `start` calls initialize, then runs the local producer and authenticated
   Viewer. Merely opening Viewer, MCP, query, push or receive never initializes.
 
@@ -111,11 +111,39 @@ reuse or transfer.
 
 ## Operator outcome and implementation gates
 
-Draft messages for UI/UX Manager review: “Local analytics initialized; preparing
-history.” / “Using existing local analytics; preparing history.” / “Local analytics
-is busy; stop its writer and retry.” / “Local analytics state is unsupported or
-inconsistent; existing data was preserved.” Initialization success is not pairing,
-first publication, source availability or body-read readiness.
+Messages (UI/UX reviewed). They state only what has happened and never echo paths,
+source contents or secrets.
+
+- Initializer returns `created`: “Local analytics initialized.” `existing`: “Using
+  existing local analytics.” Neither claims work the initializer did not do.
+- “Preparing history; analytics is not ready yet.” appears only once the producer has
+  actually started. If a published snapshot already exists, keep showing it with its
+  freshness while updating; do not call all analytics unavailable.
+- Every refusal ends progress visibly with a next step:
+  - `writer_busy`: “Another process is writing local analytics. Wait for it to
+    finish, or stop the Semon analytics writer you started, then retry.”
+  - `unsupported_state` / `inconsistent_state`: “Local analytics state is
+    unsupported or inconsistent; existing data was preserved. See the analytics
+    export/reset recovery guidance before retrying. Do not delete the state
+    directory.” Link the [existing guidance](asi-store.md#generations-publication-and-versions).
+    Do not prescribe reset where export/reset cannot safely read the state (an
+    unsupported or ambiguous store needs the matching older binary for custody
+    export first).
+  - `binding_mismatch`: say the local analytics do not match the requested
+    enrollment and the existing data was preserved; re-run connect against the
+    matching setup, or use the same recovery guidance when ownership is unclear.
+  - `io` and `randomness_unavailable`: say setup could not complete and nothing was
+    deleted; check the state directory's permissions and free space (or system
+    randomness), then retry.
+  - `cancelled`: say setup was stopped before completion, no sharing was granted and
+    existing data was preserved; retry connect when ready.
+
+**Pending state.** Before the first valid publication show pending/unavailable: no
+zero totals, no empty-success dashboard and no “no history” claim. An error ends
+progress visibly with a next step. A real completed zero-source publication is
+distinct from pending and may show empty results. Initialization alone never marks
+pairing or evidence ready, nor first publication, source availability or body-read
+readiness.
 
 B returns from the interim **five actions** (four target actions plus separate
 materialize) to **four**: receiver command, origin connect, protected invitation
@@ -130,15 +158,11 @@ fake manifest/revision; concurrent initialization/writer/reset exclusion and
 continuous ownership handoff; every refusal kind with existing bytes preserved;
 crash/partial-state refusal; expected-binding mismatch before pairing; mirror-only
 bypass; connect cancellation without grants; ordinary/new-namespace reset and
-explicit rebinding; unchanged read-only `not_materialized` behavior; and materialize
+explicit rebinding; the pending state (no zero totals, empty-success view or “no history” claim before the first valid publication, distinct from a completed zero-source publication, existing snapshot kept visible while updating); an actionable, path-free message for every refusal kind; unchanged read-only `not_materialized` behavior; and materialize
 still draining strict native publication without a recovery/reset fallback. Run
 Rust gates in CI; this proposal adds no implementation or local cargo/node checks.
 
 ## Questions for PM/owner
 
-1. Confirm the library-only initializer recommendation, with no standalone `init`
-   command or extra onboarding action.
-2. Confirm UI/UX wording for “initialized, publication pending” and the busy/refusal
-   messages; keep identities internal in normal setup.
-3. Which provisioning-owned validator supplies `origin_incarnation`? The inspected
+1. Which provisioning-owned validator supplies `origin_incarnation`? The inspected
    producer path establishes index incarnation, not a separate origin lifecycle ID.
