@@ -427,12 +427,11 @@ fn requires_exact_source_path_and_ignores_retention_markers() {
     let before = f.read(&f.cohorts).unwrap();
     let key = archive_index_key(&f.first_source().local_path);
     let (rows, slots) = catalog_fixture_projection(&f.options);
+    // A well-formed marker of the supported format that names no indexed chain.
+    let marker = format!("{{\"version\":7,\"parser_version\":{CACHE_VERSION}}}");
     f.store
         .connection
-        .execute(
-            "INSERT INTO meta VALUES(?1,'unrelated retention value')",
-            [&key],
-        )
+        .execute("INSERT INTO meta VALUES(?1,?2)", [&key, &marker])
         .unwrap();
     assert_eq!(before, f.read(&f.cohorts).unwrap());
     admit_sources(&mut f.store, &f.options, &rows);
@@ -443,7 +442,7 @@ fn requires_exact_source_path_and_ignores_retention_markers() {
             .query_row("SELECT value FROM meta WHERE key=?1", [&key], |r| r
                 .get::<_, String>(0))
             .unwrap(),
-        "unrelated retention value"
+        marker
     );
     f.store
         .connection
