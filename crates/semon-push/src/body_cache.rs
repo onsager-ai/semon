@@ -348,7 +348,11 @@ impl<C: Clock> BodyCache<C> {
         for id in stale {
             self.remove(&id)?;
         }
-        self.enforce(size, &sources, limits)?;
+        // Origin ceilings govern only this namespace/incarnation's custody.
+        // Check them before receiver-wide eviction, so a refused origin budget
+        // cannot evict another origin while attempting an insertion.
+        self.enforce_scoped(size, &sources, limits, Some(&metadata.key))?;
+        self.enforce(size, &sources, self.limits)?;
         let id = key_id(&metadata.key)?;
         // Existing entries count while staging a replacement. Removing first
         // also makes a crash during replacement a miss rather than stale data.
@@ -402,7 +406,7 @@ impl<C: Clock> BodyCache<C> {
         let limits = self
             .limits
             .narrowed(admission.origin_limits.unwrap_or_default());
-        self.enforce(0, &[], limits)?;
+        self.enforce(0, &[], self.limits)?;
         let id = key_id(&admission.key)?;
         let Some(entry) = self.entries.get(&id) else {
             return Ok(None);
@@ -411,8 +415,10 @@ impl<C: Clock> BodyCache<C> {
             return Err(CacheError::Integrity);
         }
         if now.saturating_sub(entry.metadata.fetched) >= limits.ttl_seconds {
-            self.remove(&id)?;
             return Ok(None);
+        }
+        if entry.bytes > limits.source_bytes || entry.bytes > limits.global_bytes {
+            return Err(CacheError::ResourceLimit);
         }
         let path = self.path(&id);
         let result = self.decode(&path);
@@ -572,15 +578,38 @@ impl<C: Clock> BodyCache<C> {
     }
 
     fn enforce(&mut self, staged: u64, sources: &[String], limits: Limits) -> Result<()> {
-        // Two clock records coexist during its atomic replacement. Lock is empty.
-        let fixed = 2 * STATE_BYTES;
+        self.enforce_scoped(staged, sources, limits, None)
+    }
+
+    fn enforce_scoped(
+        &mut self,
+        staged: u64,
+        sources: &[String],
+        limits: Limits,
+        scope: Option<&CacheKey>,
+    ) -> Result<()> {
+        // Enrollment scope is not independently represented in CacheKey. Scope
+        // origin custody by its existing namespace and enrolled incarnation.
+        let in_scope = |key: &CacheKey| {
+            scope.is_none_or(|scope| {
+                key.namespace == scope.namespace
+                    && key.origin_incarnation == scope.origin_incarnation
+            })
+        };
+        // Clock bookkeeping belongs to receiver-wide custody only.
+        let fixed = if scope.is_none() { 2 * STATE_BYTES } else { 0 };
         if staged.saturating_add(fixed) > limits.global_bytes || staged > limits.source_bytes {
             return Err(CacheError::ResourceLimit);
         }
         loop {
-            let total: u64 = self.entries.values().map(|e| e.bytes).sum();
+            let total: u64 = self
+                .entries
+                .values()
+                .filter(|e| in_scope(&e.metadata.key))
+                .map(|e| e.bytes)
+                .sum();
             let mut usage = BTreeMap::<String, u64>::new();
-            for entry in self.entries.values() {
+            for entry in self.entries.values().filter(|e| in_scope(&e.metadata.key)) {
                 for source in source_scopes(&entry.metadata.key) {
                     *usage.entry(source).or_default() += entry.bytes;
                 }
@@ -602,10 +631,11 @@ impl<C: Clock> BodyCache<C> {
                 .entries
                 .iter()
                 .filter(|(_, e)| {
-                    global_over
-                        || source_scopes(&e.metadata.key)
-                            .iter()
-                            .any(|s| over_sources.contains(s))
+                    in_scope(&e.metadata.key)
+                        && (global_over
+                            || source_scopes(&e.metadata.key)
+                                .iter()
+                                .any(|s| over_sources.contains(s)))
                 })
                 .min_by_key(|(_, e)| e.used)
                 .map(|(id, _)| id.clone())
@@ -1328,6 +1358,86 @@ mod tests {
                 .unwrap_err(),
             CacheError::ResourceLimit
         );
+    }
+
+    #[test]
+    fn origin_limits_cannot_evict_other_origins() {
+        let f = Fixture::new();
+        let mut cache = f.open(Limits::default());
+        let a = key("a", "shared-source", b"body");
+        let mut b = key("b", "shared-source", b"body");
+        b.origin_incarnation = "other-origin".into();
+        cache.insert(b.clone(), b"body", 1000, None).unwrap();
+        cache.insert(a.clone(), b"body", 1000, None).unwrap();
+        let a_id = key_id(&a).unwrap();
+        let b_id = key_id(&b).unwrap();
+        let b_path = cache.path(&b_id);
+        let b_record = fs::read(&b_path).unwrap();
+        let tiny = Limits {
+            global_bytes: 1,
+            source_bytes: 1,
+            ..Limits::default()
+        };
+        assert_eq!(
+            cache
+                .lookup(ReadAdmission::after_online_authorization_and_audit(
+                    a.clone(),
+                    Some(tiny)
+                ))
+                .unwrap_err(),
+            CacheError::ResourceLimit
+        );
+        assert!(cache.entries.contains_key(&a_id));
+        assert!(cache.entries.contains_key(&b_id));
+        assert_eq!(fs::read(&b_path).unwrap(), b_record);
+        let next = key("next", "shared-source", b"body");
+        assert_eq!(
+            cache
+                .insert(next.clone(), b"body", 1000, Some(tiny))
+                .unwrap_err(),
+            CacheError::ResourceLimit
+        );
+        assert!(cache.entries.contains_key(&b_id));
+        assert_eq!(fs::read(&b_path).unwrap(), b_record);
+        // A's insertion evicts A's old entry under both scoped total/source
+        // ceilings, even though B shares the same native source identifier.
+        let size = cache.entries[&a_id].bytes;
+        let narrow = Limits {
+            global_bytes: size + 128,
+            source_bytes: size + 128,
+            ..Limits::default()
+        };
+        cache
+            .insert(next.clone(), b"body", 1000, Some(narrow))
+            .unwrap();
+        assert!(!cache.entries.contains_key(&a_id));
+        assert!(cache.entries.contains_key(&b_id));
+        assert_eq!(fs::read(&b_path).unwrap(), b_record);
+        f.clock.0.set(1001);
+        let short = Limits {
+            ttl_seconds: 1,
+            ..Limits::default()
+        };
+        assert!(
+            cache
+                .lookup(ReadAdmission::after_online_authorization_and_audit(
+                    next.clone(),
+                    Some(short)
+                ))
+                .unwrap()
+                .is_none()
+        );
+        assert!(cache.entries.contains_key(&key_id(&next).unwrap()));
+        assert!(cache.entries.contains_key(&b_id));
+        assert_eq!(fs::read(&b_path).unwrap(), b_record);
+        // Receiver custody retains global LRU authority across origins.
+        let total: u64 = cache.entries.values().map(|e| e.bytes).sum();
+        cache.limits.global_bytes = total + 2 * STATE_BYTES;
+        cache
+            .insert(key("third", "third-source", b"body"), b"body", 1000, None)
+            .unwrap();
+        assert!(!cache.entries.contains_key(&b_id));
+        assert!(!b_path.exists());
     }
 
     #[test]

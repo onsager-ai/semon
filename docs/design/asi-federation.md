@@ -492,7 +492,11 @@ Frame-zero bindings now carry optional positive origin cache TTL, per-source and
 total-byte limits from an `OriginLimits` provider. They bind the audited response
 identity. Receiver admission and insertion take the minimum of these values,
 receiver limits and the default hard ceilings; absent values do not narrow, larger
-values clamp, and malformed/zero values refuse during strict parsing.
+values clamp, and malformed/zero values refuse during strict parsing. Origin byte
+budgets count and evict only entries in the request's namespace and enrolled origin
+incarnation; the cache key has no separate enrollment identifier. Receiver ceilings
+retain global LRU enforcement. Lookup applies origin limits as admission checks
+without origin-driven eviction, including a miss for a narrowed TTL.
 
 ### Body wire library framing (#594 slice 2)
 
