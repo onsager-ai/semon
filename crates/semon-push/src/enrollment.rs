@@ -167,6 +167,7 @@ pub struct Registry {
     revision: u64,
     pub(crate) enrollments: Vec<Enrollment>,
     pub(crate) credentials: Vec<Bearer>,
+    pub(crate) pairing_receipts: Vec<crate::pairing::Receipt>,
 }
 impl Registry {
     pub fn empty() -> Self {
@@ -175,6 +176,7 @@ impl Registry {
             revision: 0,
             enrollments: vec![],
             credentials: vec![],
+            pairing_receipts: vec![],
         }
     }
     pub fn revision(&self) -> u64 {
@@ -202,6 +204,7 @@ impl Registry {
             revision: 0,
             enrollments,
             credentials,
+            pairing_receipts: vec![],
         };
         registry.validate()?;
         Ok(registry)
@@ -331,9 +334,22 @@ impl Registry {
                 return Err(Error::Invalid);
             }
         }
+        crate::pairing::validate_receipts(self)?;
         Ok(())
     }
     fn follows(&self, old: &Self) -> Result<()> {
+        for receipt in &old.pairing_receipts {
+            let next = self
+                .pairing_receipts
+                .iter()
+                .find(|r| r.session_id == receipt.session_id)
+                .ok_or(Error::Terminal)?;
+            let mut expected = receipt.clone();
+            expected.deliveries = next.deliveries;
+            if &expected != next || next.deliveries < receipt.deliveries {
+                return Err(Error::Terminal);
+            }
+        }
         self.validate()?;
         for e in &old.enrollments {
             let next = self
@@ -493,9 +509,9 @@ impl Directory {
         }
         Ok(file)
     }
-    fn rename(&self, from: &str) -> Result<()> {
+    fn rename(&self, from: &str, to: &str) -> Result<()> {
         let from = std::ffi::CString::new(from).map_err(|_| Error::Write)?;
-        let to = c"registry.json";
+        let to = std::ffi::CString::new(to).map_err(|_| Error::Write)?;
         // SAFETY: valid C strings and a live directory descriptor.
         if unsafe {
             libc::renameat(
@@ -540,6 +556,7 @@ pub struct Store {
     dir: Directory,
     _lock: LockGuard,
     failed: bool,
+    pairing_owner: bool,
 }
 impl Store {
     /// Explicit first initialization only. Existing/missing registry is never
@@ -566,6 +583,7 @@ impl Store {
             dir,
             _lock: LockGuard(file),
             failed: false,
+            pairing_owner: false,
         })
     }
     pub fn open(receiver_dir: &Path) -> Result<Self> {
@@ -573,17 +591,109 @@ impl Store {
         store.dir.load()?;
         Ok(store)
     }
+    pub(crate) fn into_pairing_owner(mut self) -> Result<Self> {
+        let file = self
+            .dir
+            .file("pairing.lock", libc::O_RDWR | libc::O_CREAT)?;
+        file.try_lock().map_err(|_| Error::InUse)?;
+        self._lock = LockGuard(file); // explicitly releases registry lock
+        self.pairing_owner = true;
+        Ok(self)
+    }
+    fn registry_transaction(&self) -> Result<Option<LockGuard>> {
+        if !self.pairing_owner {
+            return Ok(None);
+        }
+        let file = self.dir.file(LOCK_FILE, libc::O_RDWR)?;
+        file.try_lock().map_err(|_| Error::InUse)?;
+        Ok(Some(LockGuard(file)))
+    }
+    /// Pairing gate custody shares the pairing owner's exclusive lock and directory.
+    pub(crate) fn read_pairing_file(&self) -> Result<Vec<u8>> {
+        if self.failed {
+            return Err(Error::CommitUncertain);
+        }
+        let mut bytes = vec![];
+        self.dir
+            .file(crate::pairing::GATE_FILE, libc::O_RDONLY)?
+            .take(crate::pairing::GATE_CAP + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error::Custody)?;
+        if bytes.len() as u64 > crate::pairing::GATE_CAP {
+            return Err(Error::Invalid);
+        }
+        Ok(bytes)
+    }
+    pub(crate) fn initialize_pairing_file(&mut self, bytes: &[u8]) -> Result<()> {
+        // Explicit, exclusive first initialization; never reinterpret a missing file as empty.
+        let mut file = self.dir.file(
+            crate::pairing::GATE_FILE,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL,
+        )?;
+        file.write_all(bytes).map_err(|_| Error::Write)?;
+        file.sync_all().map_err(|_| Error::Write)?;
+        self.dir.0.sync_all().map_err(|_| Error::CommitUncertain)
+    }
+    pub(crate) fn write_pairing_file(&mut self, bytes: &[u8]) -> Result<()> {
+        self.read_pairing_file()?;
+        let stage = format!("stage-{}", random_id()?);
+        let mut file = self
+            .dir
+            .file(&stage, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
+        let result = (|| {
+            file.write_all(bytes).map_err(|_| Error::Write)?;
+            file.sync_all().map_err(|_| Error::Write)?;
+            self.dir.rename(&stage, crate::pairing::GATE_FILE)
+        })();
+        if result.is_err() {
+            self.dir.remove(&stage);
+            self.failed = true;
+            return result;
+        }
+        if self.dir.0.sync_all().is_err() {
+            self.failed = true;
+            return Err(Error::CommitUncertain);
+        }
+        Ok(())
+    }
     pub fn snapshot(&self) -> Result<Registry> {
+        let _transaction = self.registry_transaction()?;
         if self.failed {
             Err(Error::CommitUncertain)
         } else {
             self.dir.load()
         }
     }
+    /// Re-read once under the registry lock when a pairing caller observed a
+    /// stale revision. The closure edits only that fresh snapshot; no retry loop.
+    pub(crate) fn pairing_transaction<T>(
+        &mut self,
+        expected: u64,
+        edit: impl FnOnce(&mut Registry) -> Result<T>,
+    ) -> Result<T> {
+        let _transaction = self.registry_transaction()?;
+        if self.failed {
+            return Err(Error::CommitUncertain);
+        }
+        let current = self.dir.load()?;
+        // Expected revision is advisory here: a stale observation is resolved by
+        // the fresh read under this lock, never by committing cached authority.
+        let _stale = expected != current.revision();
+        let mut next = current.clone();
+        let output = edit(&mut next)?;
+        next.follows(&current)?;
+        next.revision = current.revision.checked_add(1).ok_or(Error::Invalid)?;
+        self.write(&next, |_| Ok(()))?;
+        Ok(output)
+    }
     /// Compare-and-swap a snapshot revision under the exclusive lock. Callers
     /// must supply the revision they read, including for newly built records.
     pub fn commit(&mut self, expected_revision: u64, next: &Registry) -> Result<()> {
-        let current = self.snapshot()?;
+        let _transaction = self.registry_transaction()?;
+        if self.failed {
+            return Err(Error::CommitUncertain);
+        }
+        let current = self.dir.load()?;
         if expected_revision != current.revision {
             return Err(Error::StaleSnapshot);
         }
@@ -607,7 +717,7 @@ impl Store {
             fault(Stage::Written)?;
             file.sync_all().map_err(|_| Error::Write)?;
             fault(Stage::Synced)?;
-            self.dir.rename(&stage)
+            self.dir.rename(&stage, REGISTRY_FILE)
         })();
         if let Err(e) = before {
             self.dir.remove(&stage);
