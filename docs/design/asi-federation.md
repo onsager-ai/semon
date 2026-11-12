@@ -482,14 +482,25 @@ export-view generation or exact mapping; the core therefore refuses remote egres
 Truncated views and unknown field kinds are unavailable. Cancellation is checked
 before and after SQLite; its progress handler enforces the narrowed deadline.
 
-The analytics registry already produces namespace-qualified source/evidence handles
-(`semon-asi::egress::Handles`), but exposes no reverse lookup or admitted native
-cohort fence. Its slash-qualified identifiers also do not fit `origin_read::OpaqueId`.
-A production resolver needs a reconciled current handle contract plus origin-owned
-source admission; local body UIDs are not a substitute. `HandleResolver`, the
-`LocalView` exact local target lookup, and the complete governance/scan-backed
-`PolicyVector` remain integration dependencies. No new remote handle format or
-policy bypass is introduced. Exact export-view witness production and validation
+The analytics registry produces flat `<tag>:<64 lowercase hex>` handles;
+`Handles::resolve` and pinned `Snapshot::admitted_cohorts` supply the reverse lookup
+and native cohort fence. `semon-push::handle_resolver::OriginHandleResolver` accepts
+source (`src`) handles, compares the complete existing producer binding with the
+authenticated enrollment, and maps the union of admitted contributing sessions and
+relation witnesses. Missing, foreign and withheld handles all return no admission.
+Contributor IDs use existing published source handles; prefix digests conservatively
+identify chains (an append changes the chain), and pinned witness generations and
+consumed boundaries remain exact. Local body UIDs never supply remote authority.
+
+Activity and transcript generations still require an origin-index API that reads
+both against that exact pinned cohort. The existing internal activity reader and
+transcript slot reader have separate admission checks; `LocalView` and `body_query`
+do not expose a cohort-bound pair. The resolver's `Generations` seam requires that
+contract; its concrete `UnavailableGenerations` implementation always refuses.
+This is a producer/index integration dependency for the PM and origin/storage lanes,
+not permission to substitute analytics generations or synthesize index evidence.
+`LocalView` exact target lookup and the complete governance/scan-backed `PolicyVector`
+remain integration dependencies. Exact export-view witness production and validation
 remain required before remote reads or authorization-only cache hits can succeed.
 
 Audit ranges are half-open `[0, canonical_payload_bytes)` for each exported typed

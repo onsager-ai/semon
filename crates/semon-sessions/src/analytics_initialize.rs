@@ -164,6 +164,18 @@ pub fn initialize(
     })
 }
 
+/// Read and qualify an existing producer binding without creating any state.
+pub fn read_binding(index: &Path) -> Result<Option<Binding>, Error> {
+    let state = index
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .ok_or_else(|| Error::new(ErrorKind::InconsistentState, Stage::Preflight))?;
+    let (identity, incarnation) = qualify(index, state, None)?;
+    Ok(identity
+        .zip(incarnation)
+        .map(|(identity, incarnation)| identity.binding(incarnation)))
+}
+
 fn check_cancelled(cancelled: &impl Fn() -> bool, stage: Stage) -> Result<(), Error> {
     if cancelled() {
         Err(Error::new(ErrorKind::Cancelled, stage))

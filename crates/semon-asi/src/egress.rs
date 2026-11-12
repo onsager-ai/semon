@@ -151,6 +151,23 @@ impl Handles {
             .map_err(|_| Failure::Handles)
     }
 
+    /// Read an already published handle for a native cohort contributor.
+    /// Unlike projection this never creates a mapping.
+    pub fn existing(&self, tag: &str, native: &str) -> Result<Option<String>> {
+        let Some(kind) = handle_kind(tag) else {
+            return Ok(None);
+        };
+        self.connection
+            .query_row(
+                "SELECT opaque FROM handles WHERE kind=?1 AND native=?2",
+                params![kind, native],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map(|value| value.map(|opaque| format!("{tag}:{opaque}")))
+            .map_err(|_| Failure::Handles)
+    }
+
     fn get(&self, kind: &str, native: &str) -> Result<String> {
         self.connection
             .execute(
