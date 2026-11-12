@@ -138,6 +138,7 @@ struct OriginTerminal<'a> {
     approve: bool,
     malformed: bool,
     expired: bool,
+    wrong: bool,
 }
 impl crate::connect::Terminal for OriginTerminal<'_> {
     fn code(&mut self) -> crate::Result<crate::credentials::Secret> {
@@ -148,11 +149,24 @@ impl crate::connect::Terminal for OriginTerminal<'_> {
             return Ok(crate::credentials::Secret::new("bad-check-digit".into()));
         }
         let codes = self.harness.codes.lock().unwrap();
+        if self.wrong {
+            let actual = codes.values().next().unwrap().expose();
+            let wrong = if actual == "0000000000" {
+                "1000000001"
+            } else {
+                "0000000000"
+            };
+            return Ok(pairing::parse_code(wrong).unwrap());
+        }
         Ok(crate::credentials::Secret::new(
             codes.values().next().unwrap().expose().into(),
         ))
     }
     fn approve(&mut self, _: &str, _: &str, _: &str) -> crate::Result<bool> {
+        assert!(
+            !self.harness.dir.0.join("origin").exists(),
+            "custody must not exist before approval"
+        );
         Ok(self.approve)
     }
     fn sources(&self) -> Vec<std::path::PathBuf> {
@@ -176,6 +190,7 @@ fn origin_transport(
         stream,
         host: "localhost".into(),
         exporter,
+        fault: None,
     })
 }
 #[test]
@@ -188,6 +203,7 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
         approve: true,
         malformed: false,
         expired: false,
+        wrong: false,
     };
     let name = crate::connect::connect_with(
         "https://localhost:443",
@@ -211,20 +227,27 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
         panic!()
     };
     let (mut client, worker) = h.connect();
-    let bytes = b"{}";
-    write!(client, "PUT /v1/mirror/facts HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n", token.expose(), bytes.len()).unwrap();
-    client.write_all(bytes).unwrap();
+    let bytes = serde_json::to_vec(&semon_sessions::Facts {
+        version: semon_sessions::FACTS_VERSION,
+        hostname: "laptop".into(),
+        ..Default::default()
+    })
+    .unwrap();
+    write!(client, "POST /v1/mirror/facts HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n", token.expose(), bytes.len()).unwrap();
+    client.write_all(&bytes).unwrap();
     client.flush().unwrap();
-    assert_ne!(response(&mut client).0, 401);
+    assert_eq!(response(&mut client).0, 200);
+    assert!(h.dir.0.join("machines/laptop/facts.json").exists());
     drop(client);
     worker.join().unwrap();
 }
 #[test]
 fn origin_decline_malformed_and_expired_never_write_custody() {
-    for (approve, malformed, expired) in [
-        (false, false, false),
-        (true, true, false),
-        (true, false, true),
+    for (approve, malformed, expired, wrong) in [
+        (false, false, false, false),
+        (true, true, false, false),
+        (true, false, true, false),
+        (true, false, false, true),
     ] {
         let h = Harness::new();
         let origin = h.dir.0.join("origin");
@@ -234,6 +257,7 @@ fn origin_decline_malformed_and_expired_never_write_custody() {
             approve,
             malformed,
             expired,
+            wrong,
         };
         assert!(
             crate::connect::connect_with(
@@ -259,6 +283,52 @@ fn origin_decline_malformed_and_expired_never_write_custody() {
         if malformed {
             let mut controller = h.shared.provisioning.as_ref().unwrap().lock().unwrap();
             assert_eq!(controller.pending(100)[0].1, pairing::State::Pending);
+        }
+    }
+}
+
+#[test]
+fn origin_substitution_mac_mismatch_and_delivery_recovery() {
+    for fault in ["receiver_id", "receiver_mac", "delivery"] {
+        let h = Harness::new();
+        let origin = h.dir.0.join("origin");
+        let mut workers = vec![];
+        let mut terminal = OriginTerminal {
+            harness: &h,
+            approve: true,
+            malformed: false,
+            expired: false,
+            wrong: false,
+        };
+        let mut connections = 0;
+        let result = crate::connect::connect_with(
+            "https://localhost:443",
+            "laptop",
+            &mut terminal,
+            &origin,
+            &|| 100,
+            &mut || {
+                let mut connection = origin_transport(&h, &mut workers)?;
+                connections += 1;
+                if connections == 1 {
+                    connection.fault = Some(fault);
+                }
+                Ok(connection)
+            },
+        );
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        let registry = crate::enrollment::Registry::read_current(&h.dir.0).unwrap();
+        if fault == "delivery" {
+            let name = result.unwrap();
+            crate::origin_custody::load(&origin, Some(&name)).unwrap();
+            assert_eq!(connections, 2);
+            assert_eq!(registry.enrollments().len(), 1);
+        } else {
+            assert!(result.is_err());
+            assert!(!origin.exists());
+            assert!(registry.enrollments().is_empty());
         }
     }
 }

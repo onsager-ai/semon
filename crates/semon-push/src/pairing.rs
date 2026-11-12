@@ -709,7 +709,7 @@ impl Core {
         }
         let t = session.transcript.as_ref().ok_or(Error::Invalid)?;
         let application = session.application.as_ref().ok_or(Error::Invalid)?;
-        if input.commitment() != t.scope {
+        if input.receiver_id != self.receiver_id || input.commitment() != t.scope {
             return Err(Error::Invalid);
         }
         let mut snapshot = self.store.snapshot()?; // fresh under lock; no stale cached authority

@@ -412,6 +412,7 @@ impl Client {
         let url = check_url(&options.url)?;
         let token = options.credential.token()?;
         let http = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(120))
             .user_agent(concat!("semon-push/", env!("CARGO_PKG_VERSION")))
             .build()

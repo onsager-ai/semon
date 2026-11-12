@@ -1146,6 +1146,11 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         Ok(now) => now.as_secs(),
         Err(_) => return authority_refusal(),
     };
+    #[cfg(test)]
+    let now = shared
+        .provisioning_clock
+        .as_ref()
+        .map_or(now, |clock| clock());
     let Some(machine) = shared.tokens.authorize(
         &mut connection.authority,
         head.authorization.as_deref(),

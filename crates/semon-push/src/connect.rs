@@ -42,6 +42,8 @@ pub(crate) struct Connection {
     pub(crate) stream: rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
     pub(crate) host: String,
     pub(crate) exporter: [u8; 32],
+    #[cfg(test)]
+    pub(crate) fault: Option<&'static str>,
 }
 impl Connection {
     fn open(endpoint: &str, roots: rustls::RootCertStore) -> Result<Self> {
@@ -77,6 +79,8 @@ impl Connection {
             stream: rustls::StreamOwned::new(conn, socket),
             host: format!("{host}:{port}"),
             exporter,
+            #[cfg(test)]
+            fault: None,
         })
     }
     pub(crate) fn post<T: DeserializeOwned>(
@@ -132,6 +136,24 @@ impl Connection {
             .ok_or("invalid receiver length")?;
         let mut body = Zeroizing::new(vec![0; length]);
         self.stream.read_exact(&mut body).map_err(io_error)?;
+        #[cfg(test)]
+        {
+            if path.ends_with("/approve") && self.fault == Some("delivery") {
+                return Err("injected delivery interruption".into());
+            }
+            if (path.ends_with("/open") && self.fault == Some("receiver_id"))
+                || (path.ends_with("/confirm") && self.fault == Some("receiver_mac"))
+            {
+                let mut value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                if path.ends_with("/open") {
+                    value["receiver_id"] = "substituted".into();
+                } else {
+                    value["receiver_mac"] = wire::encode(&[0; 32]).into();
+                }
+                return serde_json::from_value(value)
+                    .map_err(|_| "invalid injected response".into());
+            }
+        }
         serde_json::from_slice(&body).map_err(|_| "invalid receiver response".into())
     }
 }

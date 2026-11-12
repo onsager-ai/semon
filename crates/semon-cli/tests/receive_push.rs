@@ -128,12 +128,58 @@ impl Fixture {
         }
     }
 
-    /// `semon push --to URL` from the synthetic home.
+    fn install_origin(&self, url: &str) {
+        use semon_push::{
+            credentials::Kind, enrollment::Binding, pairing::ActivationInput,
+            provision_wire::Activated,
+        };
+        let base = self.path("config/semon/origin");
+        if base.exists() {
+            return;
+        }
+        let encoded = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgL_E8qFEyPcpHM_jv-bQj0alxU3tkrY_1OSwOWVOwhs-hRANCAATA08frMi95YZiy3BekFDqwQHAS2SIpv7yA1ckqs3drjLLJqCyFKRx7VY_MJawLw_RbjwOyGKFasQHvnfrO1MUQ";
+        let private = semon_push::provision_wire::decode_fixed::<138>(encoded).unwrap();
+        let scope = ActivationInput {
+            receiver_id: "receiver-test".into(),
+            machine: "laptop".into(),
+            binding: Binding::Inapplicable,
+            kinds: vec![(Kind::MirrorPush, false)],
+            client_certificate_pins: vec![],
+            valid_until: u64::MAX,
+        };
+        let delivery = Activated {
+            version: 1,
+            enrollment_id: "enrollment-test".into(),
+            credentials: vec![(
+                Kind::MirrorPush,
+                fs::read_to_string(self.path("token")).unwrap(),
+            )],
+        };
+        let home = self.path("home");
+        let options = semon_sessions::Options {
+            claude_home: home.join("claude"),
+            codex_home: home.join("codex"),
+            copilot_home: home.join("copilot"),
+            proc_root: home.join("proc"),
+            ..Default::default()
+        };
+        let sources = semon_sessions::inputs(&options)
+            .unwrap()
+            .iter()
+            .map(|input| input.full_path(&options))
+            .collect::<Vec<_>>();
+        semon_push::origin_custody::install(
+            &base, url, "laptop", &scope, &delivery, &private, &sources,
+        )
+        .unwrap();
+    }
+
+    /// `semon push` from the synthetic home.
     fn push(&self, url: &str) -> Output {
+        self.install_origin(url);
         let home = self.path("home");
         semon()
-            .args(["push", "--to", url, "--token-file"])
-            .arg(self.path("token"))
+            .args(["push"])
             .arg("--state")
             .arg(self.path("state/push.json"))
             .arg("--claude-home")
@@ -145,6 +191,7 @@ impl Fixture {
             .arg("--cache")
             .arg(self.path("state/index.json"))
             .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", self.path("config"))
             .env("XDG_STATE_HOME", self.path("state"))
             .output()
             .unwrap()
@@ -336,10 +383,21 @@ fn push_mirrors_a_home_into_semon_receive() {
     assert_eq!(overview["machines"][0]["up"], true);
     core.close();
 
+    // New files after enrollment are not silently included in source consent.
+    fixture.write(
+        "home/claude/projects/-work-app/unapproved.jsonl",
+        claude("future source").as_bytes(),
+    );
+
     // Rewritten shorter: sent again whole, with replace.
     fixture.write(&log, claude("rewritten").as_bytes());
     let pushed = fixture.push(&url);
     assert_ok(&pushed, "the push after a rewrite");
+    assert!(
+        !machine
+            .join("claude/projects/-work-app/unapproved.jsonl")
+            .exists()
+    );
     assert!(
         stderr(&pushed).contains("1 sent again whole"),
         "{}",
@@ -400,7 +458,7 @@ fn push_watch_stops_on_sigterm_and_holds_its_state_alone_until_then() {
 /// free.
 #[cfg(unix)]
 fn push_watch_stops_on(name: &str, number: i32) {
-    use std::{os::unix::process::ExitStatusExt, time::Instant};
+    use std::os::unix::process::ExitStatusExt;
 
     let mut fixture = Fixture::new();
     let dir = fixture.dir();
@@ -412,9 +470,10 @@ fn push_watch_stops_on(name: &str, number: i32) {
     fixture.write(&log, claude("watched").as_bytes());
 
     let home = fixture.path("home");
+    fixture.install_origin(&url);
     let mut watch = semon()
-        .args(["push", "--watch", "--to", &url, "--token-file"])
-        .arg(fixture.path("token"))
+        .args(["push", "--watch"])
+        .env("XDG_CONFIG_HOME", fixture.path("config"))
         .arg("--state")
         .arg(fixture.path("state/push.json"))
         .arg("--claude-home")
@@ -454,13 +513,14 @@ fn push_watch_stops_on(name: &str, number: i32) {
         }
     });
 
-    // The first pass and facts are in: the watch sleeps between passes.
-    let facts = dir.join("machines/laptop/facts.json");
-    let deadline = Instant::now() + Duration::from_secs(60);
-    while !facts.exists() {
-        assert!(Instant::now() < deadline, "no facts from the watch");
-        assert!(watch.try_wait().unwrap().is_none(), "the watch ended");
-        thread::sleep(Duration::from_millis(20));
+    // Synchronize with the completed initial pass through its progress event.
+    loop {
+        let line = said
+            .recv_timeout(Duration::from_secs(60))
+            .expect("watch initial pass");
+        if line.starts_with("semon push: ") && line.contains(" files, ") {
+            break;
+        }
     }
     assert_eq!(fixture.copy(LOG), fixture.redacted(LOG));
 
@@ -477,14 +537,7 @@ fn push_watch_stops_on(name: &str, number: i32) {
         .status()
         .unwrap();
     assert!(interrupted.success());
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let status = loop {
-        if let Some(status) = watch.try_wait().unwrap() {
-            break status;
-        }
-        assert!(Instant::now() < deadline, "the watch ignored SIG{name}");
-        thread::sleep(Duration::from_millis(10));
-    };
+    let status = watch.wait().unwrap();
     assert_eq!(status.signal(), Some(number), "{status:?}");
     let mut stopped = false;
     while let Ok(line) = said.recv_timeout(Duration::from_secs(5)) {

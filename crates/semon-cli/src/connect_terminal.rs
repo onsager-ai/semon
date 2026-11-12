@@ -2,7 +2,7 @@
 use semon_push::{connect::Terminal, credentials::Secret};
 use std::{
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, Write},
     os::fd::AsRawFd,
     path::PathBuf,
 };
@@ -27,11 +27,30 @@ impl Drop for Echo {
 impl Prompt {
     fn line(&mut self) -> Result<String> {
         let mut line = String::new();
-        self.reader
-            .by_ref()
-            .take(1025)
-            .read_line(&mut line)
-            .map_err(|_| "cannot read controlling terminal")?;
+        loop {
+            let bytes = self
+                .reader
+                .fill_buf()
+                .map_err(|_| "cannot read controlling terminal")?;
+            if bytes.is_empty() {
+                return Err("controlling terminal closed".into());
+            }
+            let count = bytes
+                .iter()
+                .position(|b| *b == b'\n')
+                .map_or(bytes.len(), |index| index + 1);
+            if line.len() + count > 1024 {
+                return Err("invalid terminal input".into());
+            }
+            let end = bytes[count - 1] == b'\n';
+            line.push_str(
+                std::str::from_utf8(&bytes[..count]).map_err(|_| "invalid terminal input")?,
+            );
+            self.reader.consume(count);
+            if end {
+                break;
+            }
+        }
         if line.len() > 1024 || !line.ends_with('\n') {
             return Err("invalid terminal input".into());
         }
@@ -64,6 +83,43 @@ impl Terminal for Prompt {
     }
     fn approve(&mut self, receiver: &str, receiver_id: &str, machine: &str) -> Result<bool> {
         writeln!(self.tty, "Receiver: {receiver}\nAuthenticated receiver identity: {receiver_id}\nMachine: {machine}\nEnabled kinds: mirror_push\nThis grants the receiver operator custody of redacted native logs, plain source names/paths and machine facts (hostname, processes, locks and repositories). Redaction is best effort. Analytics/body and issuer authority are not enabled.\nSelected current sources:").map_err(|e| e.to_string())?;
+        for (index, source) in self.sources.iter().enumerate() {
+            writeln!(self.tty, "  {}. {:?}", index + 1, source).map_err(|e| e.to_string())?;
+        }
+        writeln!(
+            self.tty,
+            "Select source numbers separated by commas (Enter selects all, none selects no files):"
+        )
+        .map_err(|e| e.to_string())?;
+        self.tty.flush().map_err(|e| e.to_string())?;
+        let selection = self.line()?;
+        if selection == "none" {
+            self.sources.clear();
+        } else if !selection.is_empty() {
+            let indices = selection
+                .split(',')
+                .map(|value| {
+                    value
+                        .trim()
+                        .parse::<usize>()
+                        .map_err(|_| "invalid source selection".to_owned())
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if indices
+                .iter()
+                .any(|index| *index == 0 || *index > self.sources.len())
+            {
+                return Err("invalid source selection".into());
+            }
+            self.sources = self
+                .sources
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| indices.contains(&(index + 1)))
+                .map(|(_, source)| source.clone())
+                .collect();
+        }
+        writeln!(self.tty, "Approved source selection:").map_err(|e| e.to_string())?;
         for source in &self.sources {
             writeln!(self.tty, "  {:?}", source).map_err(|e| e.to_string())?;
         }

@@ -11,8 +11,9 @@ authority, never user identity or source authority. Legacy `DIR/tokens` state an
 `receive token` commands are refused; preserve old tokens/history and explicitly
 re-pair through the enrollment flow in a fresh receiver directory. No import, conversion or deletion occurs.
 Local receiver enrollment starts with `receive enroll --machine NAME --advertise
-HTTPS_URL --dir DIR --tls-cert PEM --tls-key PEM`; origin connect delivery is the
-next integration slice. A kept-alive connection cannot switch enrollments.
+HTTPS_URL --dir DIR --tls-cert PEM --tls-key PEM`; origin `connect --to HTTPS_URL`
+confirms the code and trust/source summary and atomically installs mirror custody.
+A kept-alive connection cannot switch enrollments.
 
 The reference receiver takes an exclusive, non-blocking OS lock on its store directory for its lifetime. A second receiver on that directory is refused at startup, so preservation and replacement cannot interleave across receiver instances.
 

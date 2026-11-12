@@ -15,6 +15,9 @@ use std::{
 use zeroize::Zeroizing;
 type Result<T> = std::result::Result<T, String>;
 const ERROR: &str = "invalid or unreadable origin enrollment custody";
+#[cfg(test)]
+#[path = "origin_custody_tests.rs"]
+mod tests;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -29,6 +32,8 @@ pub struct Configuration {
     pub credential_file: String,
     pub private_key_file: String,
     pub consent_file: String,
+    pub consent_sha256: String,
+    pub credential_sha256: String,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -117,7 +122,10 @@ impl Directory {
     }
 }
 
-pub(crate) fn install(
+/// Install delivery from an approved, mutually confirmed provisioning exchange.
+/// Embedders own that exchange and must verify receiver confirmation and send
+/// approval before calling this custody primitive. Normal callers use connect.
+pub fn install(
     base: &Path,
     endpoint: &str,
     machine: &str,
@@ -163,6 +171,13 @@ pub(crate) fn install(
     let scope: ActivationInput =
         serde_json::from_slice(&serde_json::to_vec(scope).map_err(|_| ERROR)?)
             .map_err(|_| ERROR)?;
+    let consent = Consent {
+        receiver_id: scope.receiver_id.clone(),
+        enrollment_id: delivery.enrollment_id.clone(),
+        machine: machine.into(),
+        sources: sources.to_vec(),
+    };
+    let consent_bytes = serde_json::to_vec(&consent).map_err(|_| ERROR)?;
     let configuration = Configuration {
         version: 1,
         endpoint: endpoint.into(),
@@ -174,6 +189,8 @@ pub(crate) fn install(
         credential_file: "mirror-push.secret".into(),
         private_key_file: "origin-key.pk8".into(),
         consent_file: "source-consent.json".into(),
+        consent_sha256: crate::wire::sha256_hex(&consent_bytes),
+        credential_sha256: crate::wire::sha256_hex(delivery.credentials[0].1.as_bytes()),
     };
     let key = EcdsaKeyPair::from_pkcs8(
         &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
@@ -190,16 +207,7 @@ pub(crate) fn install(
         public_key: crate::provision_wire::encode(key.public_key().as_ref()),
         signature: crate::provision_wire::encode(signature.as_ref()),
     };
-    let consent = Consent {
-        receiver_id: configuration_receiver(&signed),
-        enrollment_id: delivery.enrollment_id.clone(),
-        machine: machine.into(),
-        sources: sources.to_vec(),
-    };
-    dir.write(
-        "source-consent.json",
-        &serde_json::to_vec(&consent).map_err(|_| ERROR)?,
-    )?;
+    dir.write("source-consent.json", &consent_bytes)?;
     dir.write("origin-key.pk8", private)?;
     dir.write("mirror-push.secret", delivery.credentials[0].1.as_bytes())?;
     dir.write(
@@ -278,8 +286,7 @@ pub fn load(base: &Path, receiver: Option<&str>) -> Result<(Configuration, crate
             crate::enrollment::Binding::Inapplicable
         )
         || !config.scope.client_certificate_pins.is_empty()
-        || crate::pairing::normalize_endpoint(&config.endpoint).map_err(|_| ERROR)?
-            != config.endpoint
+        || crate::check_url(&config.endpoint).map_err(|_| ERROR)? != config.endpoint
         || hex::encode(
             ring::digest::digest(&ring::digest::SHA256, config.endpoint.as_bytes()).as_ref(),
         ) != name
@@ -306,6 +313,9 @@ pub fn load(base: &Path, receiver: Option<&str>) -> Result<(Configuration, crate
     )
     .map_err(|_| ERROR)?;
     let secret = dir.read("mirror-push.secret")?;
+    if crate::wire::sha256_hex(&secret) != config.credential_sha256 {
+        return Err(ERROR.into());
+    }
     let token = crate::Token::new(std::str::from_utf8(&secret).map_err(|_| ERROR)?)?;
     Ok((config, crate::Credential::Memory(token)))
 }
@@ -318,13 +328,16 @@ pub struct Consent {
     pub machine: String,
     pub sources: Vec<PathBuf>,
 }
-fn configuration_receiver(signed: &Signed) -> String {
-    signed.configuration.receiver_id.clone()
-}
 pub fn consent(base: &Path, receiver: &str, config: &Configuration) -> Result<Vec<PathBuf>> {
+    if receiver.len() != 64 || !receiver.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(ERROR.into());
+    }
     let dir = Directory::open(base)?.child(receiver)?;
-    let consent: Consent =
-        serde_json::from_slice(&dir.read("source-consent.json")?).map_err(|_| ERROR)?;
+    let bytes = dir.read("source-consent.json")?;
+    if crate::wire::sha256_hex(&bytes) != config.consent_sha256 {
+        return Err(ERROR.into());
+    }
+    let consent: Consent = serde_json::from_slice(&bytes).map_err(|_| ERROR)?;
     if consent.receiver_id != config.receiver_id
         || consent.enrollment_id != config.enrollment_id
         || consent.machine != config.machine
