@@ -1331,6 +1331,24 @@ mod tests {
     }
 
     #[test]
+    fn origin_header_source_limit_refuses_insertion() {
+        let f = Fixture::new();
+        let mut cache = f.open(Limits::default());
+        let limits = crate::origin_read::CacheLimits {
+            cache_per_source_bytes: std::num::NonZeroU64::new(1),
+            ..crate::origin_read::CacheLimits::default()
+        }
+        .narrowed(Limits::default());
+        assert_eq!(
+            cache
+                .insert(key("page", "source", b"body"), b"body", 1000, Some(limits))
+                .unwrap_err(),
+            CacheError::ResourceLimit
+        );
+        assert_eq!(cache.entry_count(), 0);
+    }
+
+    #[test]
     fn authenticated_but_inconsistent_ttl_is_swept() {
         let f = Fixture::new();
         let mut cache = f.open(Limits::default());

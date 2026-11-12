@@ -467,6 +467,18 @@ or cancellation. Dropping/crashing leaves an attempted authorization. Page/field
 completion uses the existing audit completion event; streaming receipts remain in
 the lease/append integration.
 
+The `origin_client` library runs serial poll/response steps over an injected
+transport, clock and entropy source. Reconnect rotates the channel binding and
+never resumes body bytes. Backoff is a bounded next-poll timestamp; the host owns
+scheduling. Posting succeeds for a complete accepted frame or fails the response;
+a transport cannot report partial-frame progress, so completion counts accepted
+payload frames only. No socket, HTTP client or enrollment custody is wired here.
+Frame-zero bindings now carry optional positive origin cache TTL, per-source and
+total-byte limits from an `OriginLimits` provider. They bind the audited response
+identity. Receiver admission and insertion take the minimum of these values,
+receiver limits and the default hard ceilings; absent values do not narrow, larger
+values clamp, and malformed/zero values refuse during strict parsing.
+
 ### Body wire library framing (#594 slice 2)
 
 Version 1 control envelopes use strict JSON, capped at 16 KiB. A response frame

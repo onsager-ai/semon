@@ -892,10 +892,11 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             .map_err(|_| Reason::AuditFailure)?;
         #[cfg(test)]
         tests::observe_admission(&verified.binding.receiver_binding);
+        let origin_limits = verified.binding.cache_limits.narrowed(self.origin_limits);
         // Admission is constructed only after authorize() has fsynced.
         let admission = ReadAdmission::after_online_authorization_and_audit(
             verified.binding.cache_key.clone(),
-            Some(self.origin_limits),
+            Some(origin_limits),
         );
         // A fresh fetch is already in memory; lookup consumes admission but
         // never substitutes unverified cached bytes for the fetched response.
@@ -925,7 +926,7 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
                 key.clone(),
                 &verified.payload,
                 fetched / 1000,
-                Some(self.origin_limits),
+                Some(origin_limits),
             )
             .map_err(|_| Reason::Unavailable);
         if let Err(reason) = insertion {
@@ -1193,8 +1194,11 @@ mod tests {
         fn resolve(
             &self,
             _: &EnrollmentScope,
-            _: &OpaqueId,
+            handle: &OpaqueId,
         ) -> std::result::Result<Option<ResolvedSource>, Refused> {
+            if handle.as_str() == "unknown" {
+                return Ok(None);
+            }
             Ok(Some(ResolvedSource {
                 admitted_source: opaque("admitted"),
                 cohort_id: id(4),
@@ -1999,6 +2003,354 @@ mod tests {
             drop(origin);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+    struct Loopback<'a, 'b> {
+        broker: &'a Broker<'b>,
+        auth: &'a Auth,
+        fail_after_header: bool,
+        posts: usize,
+    }
+    impl crate::origin_client::PollTransport for Loopback<'_, '_> {
+        fn poll(
+            &mut self,
+            channel: [u8; 32],
+            _: u64,
+        ) -> std::result::Result<
+            crate::origin_client::PollOutcome,
+            crate::origin_client::TransportError,
+        > {
+            let bytes = wire::control(&wire::PollRequest {
+                version: 1,
+                channel_binding: channel,
+            })
+            .unwrap();
+            // Zero timeout takes the handler's nonblocking path with the fake clock.
+            let result = handle_poll(self.broker, self.auth, &bytes, Duration::ZERO);
+            assert_eq!(result.status, 200);
+            Ok(match wire::parse_poll_response(&result.bytes).unwrap() {
+                PollResponse::Request { request, .. } => {
+                    crate::origin_client::PollOutcome::Request(wire::control(&request).unwrap())
+                }
+                PollResponse::Empty { .. } => crate::origin_client::PollOutcome::Empty,
+            })
+        }
+        fn post_response(
+            &mut self,
+            id: Identifier,
+            bytes: &[u8],
+        ) -> std::result::Result<(), crate::origin_client::TransportError> {
+            if self.fail_after_header && self.posts == 1 {
+                return Err(crate::origin_client::TransportError::Unavailable);
+            }
+            self.posts += 1;
+            let response = handle_response(self.broker, self.auth, id, bytes);
+            if response.status == 204 {
+                Ok(())
+            } else {
+                Err(crate::origin_client::TransportError::Unavailable)
+            }
+        }
+    }
+    struct FixedEntropy;
+    impl crate::origin_client::Entropy for FixedEntropy {
+        fn channel_binding(
+            &mut self,
+        ) -> std::result::Result<[u8; 32], crate::origin_client::TransportError> {
+            Ok([3; 32])
+        }
+    }
+    #[test]
+    fn client_refusals_and_interrupted_response() {
+        use crate::origin_client::{
+            OriginClient, PollOutcome, PollTransport, Step, TransportError,
+        };
+        struct Raw {
+            input: Option<Vec<u8>>,
+            output: Vec<Vec<u8>>,
+            fail: bool,
+        }
+        impl PollTransport for Raw {
+            fn poll(
+                &mut self,
+                _: [u8; 32],
+                _: u64,
+            ) -> std::result::Result<PollOutcome, TransportError> {
+                Ok(self
+                    .input
+                    .take()
+                    .map_or(PollOutcome::Empty, PollOutcome::Request))
+            }
+            fn post_response(
+                &mut self,
+                _: Identifier,
+                bytes: &[u8],
+            ) -> std::result::Result<(), TransportError> {
+                if self.fail && !self.output.is_empty() {
+                    return Err(TransportError::Unavailable);
+                }
+                self.output.push(bytes.to_vec());
+                Ok(())
+            }
+        }
+        let at = At(AtomicU64::new(10_000));
+        let a = auth("raw-client");
+        let key = body_assertion::MemoryKey::from_seed(Zeroizing::new([7; 32]));
+        let public = key.public_key().unwrap();
+        let lookup = |_: &str| Some(public);
+        for case in 0..12 {
+            let path = std::env::temp_dir()
+                .join(format!("body-client-refuse-{}-{case}", std::process::id()));
+            let mut audit =
+                crate::origin_audit::AuditStore::open(&path, &at, crate::origin_audit::MAX_BYTES)
+                    .unwrap();
+            let mut replay = body_assertion::ReplayCache::new(32);
+            let (mut request, mut claims) = signed(61);
+            match case {
+                0 => {
+                    request.operation = wire::Operation::Cancel {
+                        request_id: id(1),
+                        lease_id: None,
+                    }
+                }
+                2 => claims.audience.namespace = "foreign".into(),
+                3 => claims.channel_binding = [9; 32],
+                4 => {
+                    claims.issued_at = 1;
+                    claims.expiry = 9;
+                    claims.deadline = 9;
+                }
+                5 => claims.request_digest = [0; 32],
+                _ => {}
+            }
+            if (2..=5).contains(&case) {
+                request.assertion = hex::encode(body_assertion::encode(
+                    &body_assertion::sign(claims, &key, || if case == 4 { 1 } else { 10 }).unwrap(),
+                ));
+            }
+            if case == 10 {
+                request.source_handle = opaque("unknown");
+                let mut claims = signed(61).1;
+                claims.request_digest = request.digest().unwrap();
+                request.assertion = hex::encode(body_assertion::encode(
+                    &body_assertion::sign(claims, &key, || 10).unwrap(),
+                ));
+            }
+            if case == 11 {
+                let mut assertion =
+                    body_assertion::decode(&hex::decode(&request.assertion).unwrap()).unwrap();
+                assertion.signature[0] ^= 1;
+                request.assertion = hex::encode(body_assertion::encode(&assertion));
+            }
+            let mut input = wire::control(&request).unwrap();
+            if case == 1 {
+                let mut value: serde_json::Value = serde_json::from_slice(&input).unwrap();
+                value["extra"] = true.into();
+                input = serde_json::to_vec(&value).unwrap();
+            }
+            if case == 6 {
+                input = vec![b' '; wire::CONTROL_CAP + 1];
+            }
+            if case == 7 {
+                input = b"{malformed".to_vec();
+            }
+            let cancelled = std::cell::Cell::new(false);
+            let is_cancelled = || cancelled.get();
+            let mut client = OriginClient::new(
+                OriginRead {
+                    enrollment: &a,
+                    resolver: &Resolver,
+                    policies: &Policies,
+                    renderer: &Renderer,
+                    clock: &at,
+                    cancelled: &is_cancelled,
+                    audit: &mut audit,
+                },
+                Raw {
+                    input: Some(input),
+                    output: Vec::new(),
+                    fail: case == 8,
+                },
+                FixedEntropy,
+                &mut replay,
+                &lookup,
+                &UnavailableExportView,
+            );
+            let result = client.step();
+            match case {
+                0 => assert_eq!(result, Step::Refused(Reason::UnsupportedVerb)),
+                1 => assert_eq!(result, Step::Refused(Reason::InvalidRequest)),
+                2..=5 | 10 | 11 => assert_eq!(result, Step::Refused(Reason::Forbidden)),
+                6 | 7 => assert_eq!(result, Step::Dropped),
+                8 => {
+                    assert_eq!(result, Step::Disconnected);
+                    assert_eq!(client.transport.output.len(), 1);
+                }
+                9 => {
+                    assert_eq!(result, Step::Delivered);
+                    client.transport.input = Some(wire::control(&request).unwrap());
+                    assert_eq!(client.step(), Step::Refused(Reason::Forbidden));
+                    cancelled.set(true);
+                    assert_eq!(
+                        client.step(),
+                        Step::Stopped(crate::origin_client::StopReason::Cancelled)
+                    );
+                }
+                _ => unreachable!(),
+            }
+            drop(audit);
+            if case == 8 {
+                let journal =
+                    std::fs::read_to_string(path.join(crate::origin_audit::AUDIT_FILE)).unwrap();
+                assert!(journal.contains("\"outcome\":\"failed\""));
+                assert!(!journal.contains("safe typed body"));
+            }
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+    #[test]
+    fn client_loopback_service_delivery_and_dual_audit() {
+        use crate::origin_client::{OriginClient, Step};
+        use std::os::unix::fs::PermissionsExt;
+        let at = At(AtomicU64::new(10_000));
+        let a = auth("client-loopback");
+        let broker = Broker::new(Config::default(), &at).unwrap();
+        let root =
+            std::env::temp_dir().join(format!("body-client-loopback-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let acl = root.join("acl");
+        std::fs::create_dir(&acl).unwrap();
+        std::fs::set_permissions(&acl, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let grants = acl.join("grants.json");
+        std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"machine","namespace":"namespace","permissions":["body_read"]}]}"#).unwrap();
+        std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let key_path = root.join("key");
+        std::fs::write(&key_path, [7; 32]).unwrap();
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut cache =
+            BodyCache::open(&root.join("cache"), &key_path, &at, Limits::default()).unwrap();
+        let mut receiver =
+            AuditStore::open(&root.join("receiver"), &at, receiver_audit::MAX_BYTES).unwrap();
+        let mut origin_audit = crate::origin_audit::AuditStore::open(
+            &root.join("origin"),
+            &at,
+            crate::origin_audit::MAX_BYTES,
+        )
+        .unwrap();
+        let signing = body_assertion::MemoryKey::from_seed(Zeroizing::new([7; 32]));
+        let public = signing.public_key().unwrap();
+        let lookup = |_: &str| Some(public);
+        let mut replay = body_assertion::ReplayCache::new(32);
+        let cancelled = || false;
+        let mut client = OriginClient::new(
+            OriginRead {
+                enrollment: &a,
+                resolver: &Resolver,
+                policies: &Policies,
+                renderer: &Renderer,
+                clock: &at,
+                cancelled: &cancelled,
+                audit: &mut origin_audit,
+            },
+            Loopback {
+                broker: &broker,
+                auth: &a,
+                fail_after_header: false,
+                posts: 0,
+            },
+            FixedEntropy,
+            &mut replay,
+            &lookup,
+            &UnavailableExportView,
+        );
+        let limits = CacheLimits {
+            cache_ttl_seconds: std::num::NonZeroU64::new(1),
+            ..CacheLimits::default()
+        };
+        client.limits = &limits;
+        assert_eq!(client.step(), Step::Empty);
+        let acls = Acls::new(acl);
+        let principal = Principal {
+            subject: "subject".into(),
+            audit_id: id(9),
+        };
+        let mut service = ReadService {
+            broker: &broker,
+            enrollment: &a,
+            acls: &acls,
+            signing_key: &signing,
+            issuer_key_id: "issuer",
+            receiver_policy_version: id(11),
+            audit: &mut receiver,
+            cache: &mut cache,
+            origin_limits: Limits::default(),
+        };
+        let journal = root.join("receiver").join(receiver_audit::AUDIT_FILE);
+        ADMISSION.with(|slot| *slot.borrow_mut() = Some((journal.clone(), 0)));
+        let prepared = service
+            .read_with(
+                &principal,
+                ReadInput {
+                    scope: a.scope.clone(),
+                    request: signed(77).0,
+                    generation: id(4),
+                    destination: Destination::Viewer,
+                    candidate: None,
+                },
+                &mut |_, _| {
+                    assert_eq!(client.step(), Step::Delivered);
+                },
+            )
+            .unwrap();
+        let cache_key = prepared.key.clone();
+        let bytes = prepared.page.canonical_bytes().unwrap().len() as u64;
+        let grant = match acls.decide("subject", "machine", "namespace", Permission::BodyRead) {
+            AclDecision::Granted(g) => g.version().to_owned(),
+            _ => panic!("grant"),
+        };
+        let mut pending = PendingDelivery {
+            service: &mut service,
+            prepared: Some(prepared),
+            released: false,
+            principal: "subject".into(),
+            scope: a.scope.clone(),
+            grant,
+        };
+        assert_eq!(
+            pending.release().unwrap().fields[0].text.as_str(),
+            "safe typed body"
+        );
+        pending.delivered(bytes).unwrap();
+        ADMISSION.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().1, 1));
+        ADMISSION.with(|slot| *slot.borrow_mut() = None);
+        // The header's one-second limit reached insertion, not just parsing.
+        at.0.store(11_000, Ordering::Relaxed);
+        assert!(
+            service
+                .cache
+                .lookup(ReadAdmission::after_online_authorization_and_audit(
+                    cache_key, None
+                ))
+                .unwrap()
+                .is_none()
+        );
+        for (dir, file) in [
+            ("origin", crate::origin_audit::AUDIT_FILE),
+            ("receiver", receiver_audit::AUDIT_FILE),
+        ] {
+            let journal = std::fs::read_to_string(root.join(dir).join(file)).unwrap();
+            assert!(journal.contains("\"outcome\":\"completed\""));
+            assert!(!journal.contains("safe typed body"));
+        }
+        a.revoked.store(true, Ordering::Relaxed);
+        assert_eq!(
+            client.step(),
+            Step::Stopped(crate::origin_client::StopReason::Revoked)
+        );
+        drop(cache);
+        drop(receiver);
+        drop(origin_audit);
+        std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn abandoned_expired_requests_release_capacity_and_cancel_cleans_queue() {

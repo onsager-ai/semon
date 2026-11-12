@@ -52,6 +52,8 @@ pub mod mirror;
 #[cfg(unix)]
 pub mod origin_audit;
 #[cfg(unix)]
+pub mod origin_client;
+#[cfg(unix)]
 pub mod origin_read;
 #[cfg(unix)]
 pub mod receiver_acl;
