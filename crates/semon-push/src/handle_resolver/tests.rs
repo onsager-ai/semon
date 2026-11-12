@@ -182,10 +182,17 @@ fn opaque(s: &str) -> OpaqueId {
 }
 struct Available;
 impl Generations for Available {
-    fn read(&self, cohorts: &[AdmittedCohort]) -> Result<(OpaqueId, OpaqueId)> {
+    fn read(&self, cohorts: &[AdmittedCohort]) -> Result<CohortEvidence> {
         assert_eq!(cohorts.len(), 1);
         assert_eq!(cohorts[0].source_ids.len(), 2);
-        Ok((opaque("activity"), opaque("transcript")))
+        Ok(CohortEvidence {
+            activity_generation: opaque("activity"),
+            transcript_generation: opaque("transcript"),
+            chains: ["native-a", "native-b"]
+                .into_iter()
+                .map(|id| (id.into(), format!("chain-{id}")))
+                .collect(),
+        })
     }
 }
 #[test]
@@ -208,7 +215,8 @@ fn resolves_real_handles_and_maps_complete_pinned_cohort() {
             .iter()
             .find(|m| m.source_id == expected)
             .unwrap();
-        assert_eq!(member.chain, format!("{i:064x}"));
+        assert_eq!(member.chain, format!("chain-{id}"));
+        assert_eq!(member.prefix_sha256, format!("{i:064x}"));
         assert_eq!(member.generation, "source-generation");
         assert_eq!(member.consumed_boundary, 42 + i as u64);
     }
@@ -255,6 +263,44 @@ fn missing_generations_refuse_without_fabrication() {
         Err(Refused::Unavailable)
     ));
 }
+#[test]
+fn membership_is_stable_across_snapshot_changes() {
+    let f = Fixture::new();
+    let source = f
+        .resolver(&Available)
+        .resolve(&f.scope(), &f.handle)
+        .unwrap()
+        .unwrap();
+    let mut newer = source.cohort.clone();
+    for member in &mut newer {
+        member.consumed_boundary += 100;
+        member.prefix_sha256 = "f".repeat(64);
+        member.generation = "new-generation".into();
+        member.chain = "other-chain".into();
+    }
+    newer.reverse();
+    assert_eq!(source.cohort_id, membership_id(&newer));
+    newer.pop();
+    assert_ne!(source.cohort_id, membership_id(&newer));
+}
+
+#[test]
+fn missing_chain_evidence_refuses() {
+    struct MissingChain;
+    impl Generations for MissingChain {
+        fn read(&self, cohorts: &[AdmittedCohort]) -> Result<CohortEvidence> {
+            let mut evidence = Available.read(cohorts)?;
+            evidence.chains.remove("native-b");
+            Ok(evidence)
+        }
+    }
+    let f = Fixture::new();
+    assert!(matches!(
+        f.resolver(&MissingChain).resolve(&f.scope(), &f.handle),
+        Err(Refused::Unavailable)
+    ));
+}
+
 #[test]
 fn reading_binding_never_initializes_missing_state() {
     let path =

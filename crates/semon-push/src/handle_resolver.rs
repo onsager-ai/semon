@@ -17,14 +17,22 @@ type Result<T> = std::result::Result<T, Refused>;
 /// cohorts, refusing stale/missing/ambiguous evidence. Registry generations are
 /// not activity or transcript generations.
 pub trait Generations {
-    fn read(&self, cohorts: &[AdmittedCohort]) -> Result<(OpaqueId, OpaqueId)>;
+    fn read(&self, cohorts: &[AdmittedCohort]) -> Result<CohortEvidence>;
+}
+
+/// Index evidence read together against the exact pinned cohort. Each chain ID
+/// must identify the archive chain whose bytes extend that member's pinned prefix.
+pub struct CohortEvidence {
+    pub activity_generation: OpaqueId,
+    pub transcript_generation: OpaqueId,
+    pub chains: BTreeMap<String, String>,
 }
 
 /// No public cohort-bound generation reader exists yet. Production integrations
 /// must retain this refusal until the index supplies that reader.
 pub struct UnavailableGenerations;
 impl Generations for UnavailableGenerations {
-    fn read(&self, _: &[AdmittedCohort]) -> Result<(OpaqueId, OpaqueId)> {
+    fn read(&self, _: &[AdmittedCohort]) -> Result<CohortEvidence> {
         Err(Refused::Unavailable)
     }
 }
@@ -99,11 +107,14 @@ impl HandleResolver for OriginHandleResolver<'_> {
         }
         // A source can contribute to several sessions. Pin their full union;
         // never select an arbitrary first session and lose relation witnesses.
-        let cohort = map_cohorts(&handles, &cohorts)?;
-        let cohort_id = Identifier::from_bytes(
-            Sha256::digest(serde_json::to_vec(&cohort).map_err(|_| Refused::Unavailable)?).into(),
-        );
-        let (activity_generation, transcript_generation) = self.generations.read(&cohorts)?;
+        let evidence = self.generations.read(&cohorts)?;
+        let cohort = map_cohorts(&handles, &cohorts, &evidence.chains)?;
+        let cohort_id = membership_id(&cohort);
+        let CohortEvidence {
+            activity_generation,
+            transcript_generation,
+            ..
+        } = evidence;
         Ok(Some(ResolvedSource {
             admitted_source: handle.clone(),
             cohort_id,
@@ -114,7 +125,23 @@ impl HandleResolver for OriginHandleResolver<'_> {
     }
 }
 
-fn map_cohorts(handles: &Handles, cohorts: &[AdmittedCohort]) -> Result<Vec<SourceWitness>> {
+fn membership_id(cohort: &[SourceWitness]) -> Identifier {
+    let handles: std::collections::BTreeSet<_> =
+        cohort.iter().map(|member| &member.source_id).collect();
+    let mut hash = Sha256::new();
+    hash.update(b"semon-body-cohort-membership-v1\0");
+    for handle in handles {
+        hash.update((handle.len() as u64).to_be_bytes());
+        hash.update(handle.as_bytes());
+    }
+    Identifier::from_bytes(hash.finalize().into())
+}
+
+fn map_cohorts(
+    handles: &Handles,
+    cohorts: &[AdmittedCohort],
+    chains: &BTreeMap<String, String>,
+) -> Result<Vec<SourceWitness>> {
     let mut members = BTreeMap::new();
     for cohort in cohorts {
         let mut seen = std::collections::BTreeSet::new();
@@ -125,11 +152,12 @@ fn map_cohorts(handles: &Handles, cohorts: &[AdmittedCohort]) -> Result<Vec<Sour
                     .existing("src", &source.native_id)
                     .map_err(|_| Refused::Unavailable)?
                     .ok_or(Refused::Unavailable)?;
-                // Prefix digest conservatively changes the chain on any prefix
-                // change, including append. No archive-chain continuity is claimed.
+                let chain = chains.get(&source.native_id).ok_or(Refused::Unavailable)?;
+                OpaqueId::new(chain).map_err(|_| Refused::Unavailable)?;
                 let member = SourceWitness {
                     source_id: source_id.clone(),
-                    chain: source.prefix_sha256.clone(),
+                    chain: chain.clone(),
+                    prefix_sha256: source.prefix_sha256.clone(),
                     generation: witness.generation.clone(),
                     consumed_boundary: source.consumed_offset,
                 };

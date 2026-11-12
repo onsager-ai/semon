@@ -208,6 +208,24 @@ withheld anchors return unavailable, never approximate matches or masked origina
 byte proofs. No whole-session replay/model inference. #594 owns page/field-to-numeric
 exported-audit-range mapping; transformed offsets are not native evidence.
 
+### Chain, cohort and snapshot identity
+
+Stable archive `chain_id` is source chain identity. `SourceWitness.prefix_sha256`
+is the continuity witness for `[0, consumed_boundary)`, separate from identity.
+The cohort ID is a domain-separated SHA-256 of sorted opaque source handles only:
+it identifies membership and stays stable across appends. An exact snapshot is
+(cohort ID, activity generation, transcript generation), together with every
+member's chain ID, prefix digest and consumed boundary. The origin-index evidence
+reader must supply chain IDs and both generations against the same pinned cohort
+in one qualified read; missing evidence refuses uniformly.
+
+An append lease may survive newer generations only on a strict append extension:
+the chain ID is unchanged and the prefix digest at the acknowledged offset is
+unchanged. Rewrite, truncation or membership change closes the lease with
+`continuation_invalid`, as #653 specifies. The storage lane owns that lease
+continuity integration. Cache keys include the prefix digest and consumed boundary
+and invalidate conservatively on append.
+
 ## Leases, failures and implementation
 
 **Decision — subscriptions repeat bounded pull pages:** scoped lease ID/expiry,

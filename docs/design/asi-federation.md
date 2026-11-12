@@ -488,12 +488,19 @@ and native cohort fence. `semon-push::handle_resolver::OriginHandleResolver` acc
 source (`src`) handles, compares the complete existing producer binding with the
 authenticated enrollment, and maps the union of admitted contributing sessions and
 relation witnesses. Missing, foreign and withheld handles all return no admission.
-Contributor IDs use existing published source handles; prefix digests conservatively
-identify chains (an append changes the chain), and pinned witness generations and
-consumed boundaries remain exact. Local body UIDs never supply remote authority.
+Contributor IDs use existing published source handles. Stable archive `chain_id`
+identifies each chain; the pinned prefix SHA-256 and consumed boundary are separate
+continuity witnesses. The domain-separated cohort ID hashes sorted source handles
+only, identifying membership across appends; the cohort ID plus activity/transcript
+generations and each member's chain/prefix/boundary identify the exact snapshot.
+Cache keys include the prefix witness and invalidate conservatively on append.
+Local body UIDs never supply remote authority.
 
 Activity and transcript generations still require an origin-index API that reads
-both against that exact pinned cohort. The existing internal activity reader and
+both against that exact pinned cohort, together with every native member's stable
+archive chain ID from the same qualified transaction. Missing chain evidence refuses.
+The planned `origin_projection::read_cohort_generations` accessor owns this read;
+the adapter never reads archives itself. The existing internal activity reader and
 transcript slot reader have separate admission checks; `LocalView` and `body_query`
 do not expose a cohort-bound pair. The resolver's `Generations` seam requires that
 contract; its concrete `UnavailableGenerations` implementation always refuses.
