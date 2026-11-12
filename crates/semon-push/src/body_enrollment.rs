@@ -164,7 +164,7 @@ mod tests {
             receiver_audit::{self, AuditStore},
         };
         use std::os::unix::fs::PermissionsExt;
-        for failure in ["revision", "read", "delayed"] {
+        for failure in ["credential", "read", "delayed"] {
             let dir = Directory::new();
             let a = source(&dir.0, "a");
             let b = source(&dir.0, "b");
@@ -281,7 +281,7 @@ mod tests {
                 assert_eq!(service.collect(lease), Ok(false));
                 assert!(matches!(
                     broker.take_result(&fresh, Identifier::from_bytes([1; 32])),
-                    Err(Reason::Revoked)
+                    Err(Reason::Unavailable)
                 ));
                 assert!(
                     broker
@@ -293,14 +293,9 @@ mod tests {
                 continue;
             }
             advance(&dir.0);
-            assert_eq!(watcher.notify_if_revision_changed(&b, &broker), Ok(true));
-            for n in [1, 2] {
-                assert!(
-                    broker
-                        .take_result(&b, Identifier::from_bytes([n; 32]))
-                        .unwrap()
-                        .is_none()
-                );
+            for (service, (lease, _)) in services.iter_mut().zip(&leases) {
+                service.maintain().unwrap();
+                assert!(service.collect(*lease).is_ok());
             }
             if failure == "credential" {
                 let mut store = Store::open(&dir.0).unwrap();

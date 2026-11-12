@@ -449,6 +449,7 @@ fn credential_handle_fails_closed_when_its_authority_ends() {
         "enrollment",
         "pin",
         "pin_removed",
+        "credential_removed",
         "expired",
         "retired",
         "read",
@@ -477,13 +478,14 @@ fn credential_handle_fails_closed_when_its_authority_ends() {
             "pin_removed" => {
                 next.enrollments[0].client_certificate_pins.clear();
             }
+            "credential_removed" => next.credentials.clear(),
             "retired" => next.enrollments[0].credential_kinds[0].generations.current = 2,
             "expired" | "read" | "legacy" => {}
             _ => unreachable!(),
         }
-        // Pin removal is rejected by terminal-history persistence; a current-format
-        // snapshot without that pin must still refuse a previously captured handle.
-        if failure == "pin_removed" {
+        // Removal is rejected by terminal-history persistence; a current-format
+        // snapshot missing the authority must still refuse a captured handle.
+        if matches!(failure, "pin_removed" | "credential_removed") {
             fs::write(
                 dir.0.join("enrollment/registry.json"),
                 serde_json::to_vec(&next).unwrap(),
