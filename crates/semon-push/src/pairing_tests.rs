@@ -15,8 +15,7 @@ impl Fixture {
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
-        let mut store = Store::initialize(&path).unwrap();
-        Core::initialize_gate(&mut store, 100).unwrap();
+        drop(Store::initialize(&path).unwrap());
         Self(path)
     }
     fn core(&self) -> Core {
@@ -274,7 +273,7 @@ fn gate_cap_issuance_pause_restart_and_existing_attempts() {
     drop(core);
     let mut core = f.core();
     assert!(core.create_session("restart".into(), 1).is_err());
-    assert!(Core::initialize_gate(&mut core.store, 1).is_err());
+    assert!(Store::initialize(&f.0).is_err());
     assert!(core.create_session("before".into(), 1899).is_err());
     let a = core.create_session("after".into(), 1900).unwrap();
     core.cancel(&a.session_id, 1900).unwrap();
@@ -290,6 +289,71 @@ fn gate_cap_issuance_pause_restart_and_existing_attempts() {
     }
     assert!(core2.create_session("cap-5".into(), 100).is_err());
     assert!(core2.create_session("after-expiry".into(), 700).is_ok());
+}
+#[test]
+fn failed_third_burn_stage_creation_poison_preserves_unsaved_pause() {
+    let f = Fixture::new();
+    let mut core = f.core();
+    burn(&mut core, "a", 100);
+    burn(&mut core, "b", 100);
+    let c = core.create_session("c".into(), 100).unwrap();
+    let t = transcript(&c);
+    for _ in 0..3 {
+        drop(core.reserve("c", t.clone(), 100).unwrap());
+    }
+    // The next reserve first persists observed time, then persists the burn.
+    // Fail precisely the second staging-file creation, after the third burn.
+    core.store.fail_pairing_stage_creation = 2;
+    assert!(matches!(
+        core.reserve("c", t, 100),
+        Err(Error::GateUnavailable)
+    ));
+    assert_eq!(core.sessions[&c.session_id].state, State::Rejected);
+    assert_eq!(core.gate.burns.len(), 3);
+    assert_eq!(core.gate.pause_until, 1900);
+    assert!(matches!(
+        core.create_session("blocked".into(), 100),
+        Err(Error::GateUnavailable)
+    ));
+    assert_eq!(core.gate.burns.len(), 3); // observe never reloads older disk state
+    assert_eq!(core.gate.pause_until, 1900);
+    let durable = Gate::parse(&fs::read(f.gate()).unwrap()).unwrap();
+    assert_eq!(durable.burns.len(), 2);
+    drop(core);
+    // A crash loses that last non-durable burn, never restores pending attempts.
+    let core = f.core();
+    assert!(core.sessions.is_empty());
+    assert_eq!(core.gate.burns.len(), 2);
+}
+#[test]
+fn missing_gate_cannot_be_reinitialized_in_existing_registry() {
+    let f = Fixture::new();
+    assert!(f.gate().is_file());
+    assert!(
+        f.0.join(enrollment::DIRECTORY)
+            .join(enrollment::REGISTRY_FILE)
+            .is_file()
+    );
+    let mut core = f.core();
+    burn(&mut core, "a", 100);
+    burn(&mut core, "b", 100);
+    burn(&mut core, "c", 100);
+    fs::remove_file(f.gate()).unwrap();
+    assert!(matches!(
+        core.create_session("blocked".into(), 100),
+        Err(Error::GateUnavailable)
+    ));
+    drop(core);
+    assert!(matches!(
+        Core::open(
+            Store::open(&f.0).unwrap(),
+            "https://desk.example",
+            "receiver-1".into()
+        ),
+        Err(Error::GateUnavailable)
+    ));
+    assert!(Store::initialize(&f.0).is_err());
+    assert!(!f.gate().exists());
 }
 #[test]
 fn rolling_creation_bound_with_pending_and_burn_pause_interplay() {

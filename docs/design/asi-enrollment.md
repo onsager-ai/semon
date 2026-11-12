@@ -196,8 +196,20 @@ atomic durable writes, 0700 directories,
 0600 single-link files and no-symlink opens. History drops entries at least one
 hour old. Creation history is capped at six; burn history at twelve to cover
 sessions created before the rolling window as well as its six new creations.
-Missing, corrupt, unreadable or unsupported gate state refuses creation; only an
-explicit exclusive first initialization creates it, never open/restart recovery.
+Missing, corrupt, unreadable or unsupported gate state produces the typed
+`GateUnavailable` refusal. `Store::initialize` creates the gate before publishing
+the registry, under the same first-initialization lock; there is no standalone
+gate initializer on existing custody. Interrupted initialization remains refused,
+never repaired by reopening. A missing gate beside an existing registry is never
+recreated. Recovery requires an explicit operator-visible procedure outside this PR.
+
+Any gate persistence failure poisons the in-process Core before another operation
+can reload older disk state: creation and further gate operations fail closed,
+retaining unsaved creation/burn records and pause-until in memory. Restart loads
+only durable state and destroys all pending sessions. A crash between rejecting a
+session and persisting its burn can lose that one burn and therefore its pause
+trigger; its guesses were already spent and cannot be recovered by that session.
+This in-process poison is not a claim that an unpersisted burn survives a crash.
 
 Confirmation uses `ring` PBKDF2-HMAC-SHA256 at the named
 `PBKDF2_ITERATIONS = 600_000`. Salt is the canonical length-prefixed transcript

@@ -380,6 +380,7 @@ pub struct Core {
     receiver_id: String,
     gate: Gate,
     sessions: BTreeMap<String, Session>,
+    gate_unavailable: bool,
 }
 impl Core {
     /// Fresh registry fields populate origin_read::EnrollmentScope; no extra
@@ -387,38 +388,41 @@ impl Core {
     pub fn registry(&self) -> Result<Registry> {
         self.store.snapshot()
     }
-    /// Explicit once-only gate initialization in already initialized registry
-    /// custody. Missing/corrupt gates are never recreated by open/create.
-    pub fn initialize_gate(store: &mut Store, now: u64) -> Result<()> {
-        let gate = Gate {
-            format: FORMAT,
-            latest: now,
-            creations: vec![],
-            burns: vec![],
-            pause_until: 0,
-        };
-        store.initialize_pairing_file(&serde_json::to_vec(&gate).map_err(|_| Error::Invalid)?)
-    }
     pub fn open(store: Store, endpoint: &str, receiver_id: String) -> Result<Self> {
         let store = store.into_pairing_owner()?;
-        let gate = Gate::parse(&store.read_pairing_file()?)?;
+        let gate = store
+            .read_pairing_file()
+            .and_then(|bytes| Gate::parse(&bytes))
+            .map_err(|_| Error::GateUnavailable)?;
         Ok(Self {
             store,
             endpoint: normalize_endpoint(endpoint)?,
             receiver_id,
             gate,
             sessions: BTreeMap::new(),
+            gate_unavailable: false,
         })
     }
     fn observe(&mut self, now: u64) -> Result<u64> {
-        // Re-read current custody even for an already-running Core: corruption
-        // never turns into unrestricted operation or gets silently overwritten.
-        let mut gate = Gate::parse(&self.store.read_pairing_file()?)?;
+        if self.gate_unavailable {
+            return Err(Error::GateUnavailable);
+        }
+        // Never discard unsaved gate changes after any persistence failure.
+        let loaded = self
+            .store
+            .read_pairing_file()
+            .and_then(|bytes| Gate::parse(&bytes));
+        let mut gate = match loaded {
+            Ok(gate) => gate,
+            Err(_) => {
+                self.gate_unavailable = true;
+                return Err(Error::GateUnavailable);
+            }
+        };
         gate.latest = gate.latest.max(self.gate.latest);
         let now = gate.observe(now);
-        self.store
-            .write_pairing_file(&serde_json::to_vec(&gate).map_err(|_| Error::Invalid)?)?;
         self.gate = gate;
+        self.save_gate()?;
         for session in self.sessions.values_mut() {
             if matches!(
                 session.state,
@@ -437,8 +441,17 @@ impl Core {
         Ok(now)
     }
     fn save_gate(&mut self) -> Result<()> {
-        self.store
-            .write_pairing_file(&serde_json::to_vec(&self.gate).map_err(|_| Error::Invalid)?)
+        if self.gate_unavailable {
+            return Err(Error::GateUnavailable);
+        }
+        let result = serde_json::to_vec(&self.gate)
+            .map_err(|_| Error::Invalid)
+            .and_then(|bytes| self.store.write_pairing_file(&bytes));
+        if result.is_err() {
+            self.gate_unavailable = true;
+            return Err(Error::GateUnavailable);
+        }
+        Ok(())
     }
     pub fn create_session(&mut self, connection_binding: String, now: u64) -> Result<Created> {
         let now = self.observe(now)?;

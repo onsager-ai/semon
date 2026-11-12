@@ -24,6 +24,7 @@ const CAP: u64 = 4 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Custody,
+    GateUnavailable,
     InUse,
     Invalid,
     UnsupportedVersion,
@@ -38,6 +39,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Custody => "enrollment custody is missing, unreadable or insecure",
+            Self::GateUnavailable => "pairing gate is unavailable; session creation refused",
             Self::InUse => "enrollment registry is locked",
             Self::Invalid => "invalid enrollment registry",
             Self::UnsupportedVersion => "unsupported enrollment registry version",
@@ -557,6 +559,8 @@ pub struct Store {
     _lock: LockGuard,
     failed: bool,
     pairing_owner: bool,
+    #[cfg(test)]
+    pub(crate) fail_pairing_stage_creation: u8,
 }
 impl Store {
     /// Explicit first initialization only. Existing/missing registry is never
@@ -569,6 +573,12 @@ impl Store {
             return Err(Error::Custody);
         }
         let mut store = Self::acquire(receiver_dir)?;
+        // Gate and registry are initialized once under the same exclusive lock.
+        // Publish the gate first: an interrupted initialization never leaves a
+        // usable registry whose gate may be silently recreated.
+        store.initialize_pairing_file(
+            br#"{"format":1,"latest":0,"creations":[],"burns":[],"pause_until":0}"#,
+        )?;
         store.write(&Registry::empty(), |_| Ok(()))?;
         parent.0.sync_all().map_err(|_| Error::CommitUncertain)?;
         Ok(store)
@@ -584,6 +594,8 @@ impl Store {
             _lock: LockGuard(file),
             failed: false,
             pairing_owner: false,
+            #[cfg(test)]
+            fail_pairing_stage_creation: 0,
         })
     }
     pub fn open(receiver_dir: &Path) -> Result<Self> {
@@ -624,7 +636,7 @@ impl Store {
         }
         Ok(bytes)
     }
-    pub(crate) fn initialize_pairing_file(&mut self, bytes: &[u8]) -> Result<()> {
+    fn initialize_pairing_file(&mut self, bytes: &[u8]) -> Result<()> {
         // Explicit, exclusive first initialization; never reinterpret a missing file as empty.
         let mut file = self.dir.file(
             crate::pairing::GATE_FILE,
@@ -636,6 +648,13 @@ impl Store {
     }
     pub(crate) fn write_pairing_file(&mut self, bytes: &[u8]) -> Result<()> {
         self.read_pairing_file()?;
+        #[cfg(test)]
+        if self.fail_pairing_stage_creation > 0 {
+            self.fail_pairing_stage_creation -= 1;
+            if self.fail_pairing_stage_creation == 0 {
+                return Err(Error::Write);
+            }
+        }
         let stage = format!("stage-{}", random_id()?);
         let mut file = self
             .dir
