@@ -9,6 +9,8 @@ pub const EXPORTER_LABEL: &[u8] = b"EXPORTER-semon-asi-pairing-v1";
 pub const EXPORTER_LENGTH: usize = 32;
 pub const READ_SECONDS: u64 = 10;
 pub const MAX_CONNECTIONS: usize = 8;
+/// Initial validity ceiling; renewal PR4 may revise this reviewed parameter.
+pub const INITIAL_CREDENTIAL_VALIDITY_SECONDS: u64 = 7_776_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
@@ -16,6 +18,7 @@ pub enum Route {
     Confirm,
     Approve,
     Cancel,
+    Recover,
 }
 impl Route {
     pub fn from_path(path: &str) -> Option<Self> {
@@ -24,6 +27,7 @@ impl Route {
             "/v1/provision/confirm" => Some(Self::Confirm),
             "/v1/provision/approve" => Some(Self::Approve),
             "/v1/provision/cancel" => Some(Self::Cancel),
+            "/v1/provision/recover" => Some(Self::Recover),
             _ => None,
         }
     }
@@ -46,6 +50,9 @@ pub struct Opened {
     pub session_id: String,
     pub receiver_nonce: String,
     pub endpoint: String,
+    pub receiver_id: String,
+    pub issuer_key_id: String,
+    pub issuer_public_key: String,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +78,67 @@ pub struct Approve {
     pub version: u32,
     pub session_id: String,
     pub proof: String,
+    pub input: pairing::ActivationInput,
+}
+/// Original canonical transcript, including its original connection exporter.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecoveryTranscript {
+    pub session_id: String,
+    pub endpoint: String,
+    pub exporter: String,
+    pub origin_key: String,
+    pub scope_commitment: String,
+    pub origin_nonce: String,
+    pub receiver_nonce: String,
+}
+impl RecoveryTranscript {
+    pub fn rebuild(&self) -> Result<Transcript, Refused> {
+        session_id(&self.session_id)?;
+        if pairing::normalize_endpoint(&self.endpoint).map_err(|_| Refused)? != self.endpoint {
+            return Err(Refused);
+        }
+        Ok(Transcript {
+            version: VERSION,
+            session_id: self.session_id.clone(),
+            endpoint: self.endpoint.clone(),
+            exporter: decode_fixed::<32>(&self.exporter)?.to_vec(),
+            origin_key: decode_fixed::<65>(&self.origin_key)?.to_vec(),
+            scope: decode_fixed(&self.scope_commitment)?,
+            origin_nonce: decode_fixed(&self.origin_nonce)?,
+            receiver_nonce: decode_fixed(&self.receiver_nonce)?,
+            origin_role: "origin".into(),
+            receiver_role: "receiver".into(),
+            profile: "public_tls".into(),
+        })
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Recover {
+    pub version: u32,
+    pub transcript: RecoveryTranscript,
+    pub application_key: String,
+    pub proof: String,
+}
+impl Drop for Recover {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.application_key);
+    }
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Activated {
+    pub version: u32,
+    pub enrollment_id: String,
+    pub credentials: Vec<(crate::credentials::Kind, String)>,
+}
+impl Drop for Activated {
+    fn drop(&mut self) {
+        for (_, secret) in &mut self.credentials {
+            zeroize::Zeroize::zeroize(secret);
+        }
+    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +157,7 @@ pub enum Request {
     Confirm(Confirm),
     Approve(Approve),
     Cancel(Cancel),
+    Recover(Recover),
 }
 impl Request {
     pub fn parse(route: Route, bytes: &[u8]) -> Result<Self, Refused> {
@@ -100,9 +169,15 @@ impl Request {
             Route::Confirm => Self::Confirm(serde_json::from_slice(bytes).map_err(|_| Refused)?),
             Route::Approve => Self::Approve(serde_json::from_slice(bytes).map_err(|_| Refused)?),
             Route::Cancel => Self::Cancel(serde_json::from_slice(bytes).map_err(|_| Refused)?),
+            Route::Recover => Self::Recover(serde_json::from_slice(bytes).map_err(|_| Refused)?),
         };
         match &request {
             Self::Open(m) if m.version == VERSION => {}
+            Self::Recover(m) if m.version == VERSION => {
+                m.transcript.rebuild()?;
+                decode_fixed::<32>(&m.application_key)?;
+                decode_fixed::<64>(&m.proof)?;
+            }
             Self::Confirm(m) if m.version == VERSION => {
                 session_id(&m.session_id)?;
                 let key = decode_fixed::<65>(&m.origin_key)?;
@@ -272,6 +347,13 @@ mod tests {
                     version: 1,
                     session_id: "a".repeat(64),
                     proof: encode(&[0; 64]),
+                    input: pairing::ActivationInput {
+                        machine: "laptop".into(),
+                        binding: crate::enrollment::Binding::Inapplicable,
+                        kinds: vec![(crate::credentials::Kind::MirrorPush, false)],
+                        client_certificate_pins: vec![],
+                        valid_until: 1000,
+                    },
                 })
                 .unwrap(),
             ),

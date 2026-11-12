@@ -40,7 +40,7 @@ pub use auth::{
 
 use crate::{
     mirror::{DEFAULT_MAX_BYTES, Endpoint, MAX_BODY_BYTES, Receiver},
-    tokens::{prepare_private_dir, tokens_path},
+    tokens::prepare_private_dir,
 };
 
 /// Where `semon receive` listens unless told otherwise.
@@ -197,6 +197,7 @@ struct Shared {
     tls: Option<Arc<rustls::ServerConfig>>,
     limits: Limits,
     admission: Mutex<Admission>,
+    provisioning: Option<Arc<Mutex<crate::provision::Controller>>>,
 }
 
 impl Shared {
@@ -286,6 +287,7 @@ pub struct Server {
     tokens: Authenticator,
     tls: Option<Arc<rustls::ServerConfig>>,
     limits: Limits,
+    provisioning: Option<Arc<Mutex<crate::provision::Controller>>>,
 }
 
 impl Server {
@@ -296,12 +298,9 @@ impl Server {
         prepare_private_dir(dir, true)?;
         let tokens = Authenticator::open(dir)?;
         let credential_count = tokens.count()?;
-        check_listen(
-            options.listen,
-            options.tls.is_some(),
-            credential_count,
-            &tokens_path(dir),
-        )?;
+        if !options.listen.ip().is_loopback() && options.tls.is_none() {
+            return Err("non-loopback receiver requires --tls-cert and --tls-key".into());
+        }
         let tls = options
             .tls
             .as_ref()
@@ -318,7 +317,19 @@ impl Server {
             tokens,
             tls,
             limits: Limits::default(),
+            provisioning: None,
         })
+    }
+
+    pub fn with_provisioning(
+        mut self,
+        controller: Arc<Mutex<crate::provision::Controller>>,
+    ) -> Result<Self, String> {
+        if self.tls.is_none() {
+            return Err("pairing requires TLS".into());
+        }
+        self.provisioning = Some(controller);
+        Ok(self)
     }
 
     /// Other limits than the defaults (tests use short ones), with any
@@ -350,6 +361,7 @@ impl Server {
             tls: self.tls,
             limits: self.limits,
             admission: Mutex::new(Admission::default()),
+            provisioning: self.provisioning,
         });
         for accepted in self.listener.incoming() {
             let socket = match accepted {
@@ -965,8 +977,7 @@ fn classify_route(path: &str) -> Option<(Kind, Option<Endpoint>)> {
     }
 }
 
-/// Separate bounded dispatcher. The initial draft deliberately has no owner
-/// authorization source, so valid messages also refuse before allocating state.
+/// Separate bounded dispatcher, enabled only through local owner authorization.
 /// No machine credential, cookie or body route can authorize this surface.
 fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
     use crate::provision_wire::{self, Request, Route};
@@ -1007,11 +1018,62 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
     let Ok(body) = body else {
         return refused();
     };
-    let _request = match Request::parse(route, &body) {
-        Ok(request) => request,
+    let Ok(exporter) = exporter else {
+        return refused();
+    };
+    let Some(controller) = slot.shared.provisioning.as_ref() else {
+        return refused();
+    };
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(now) => now.as_secs(),
         Err(_) => return refused(),
     };
-    refused()
+    let mut controller = match controller.lock() {
+        Ok(controller) => controller,
+        Err(_) => return refused(),
+    };
+    let request = match Request::parse(route, &body) {
+        Ok(request) => request,
+        Err(_) => {
+            controller.malformed(exporter, now);
+            return refused();
+        }
+    };
+    let reply = controller.handle(request, exporter, now, |id, code| {
+        use std::io::IsTerminal;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut terminal = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open("/dev/tty")
+            .map_err(|_| provision_wire::Refused)?;
+        if !terminal.is_terminal() {
+            return Err(provision_wire::Refused);
+        }
+        writeln!(terminal, "Pairing {id}: {}", code.expose()).map_err(|_| provision_wire::Refused)
+    });
+    drop(controller);
+    let Ok(reply) = reply else {
+        return refused();
+    };
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{}\r\n",
+        reply.len(),
+        if head.close {
+            "Connection: close\r\n"
+        } else {
+            ""
+        }
+    );
+    if connection
+        .send(head.as_bytes())
+        .and_then(|()| connection.send(&reply))
+        .is_err()
+    {
+        Next::Close
+    } else {
+        Next::Continue
+    }
 }
 
 /// Checks a request in order (endpoint, method, framing, token, size) and,

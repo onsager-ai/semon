@@ -282,14 +282,26 @@ No redirects are emitted or followed; cookies and Authorization headers confer
 no provisioning authority.
 
 `open` carries only version; its response carries version, session ID, receiver
-nonce and canonical advertised endpoint. The code is delivered once only to the
+nonce, canonical advertised endpoint, receiver ID, assertion issuer key ID and
+public key. This revises the earlier proposed open-time scope commitment: the
+origin first needs those issuer pins to construct its full ActivationInput.
+The origin commits the full input in `confirm`'s scope commitment; the code-bound
+MACs authenticate the returned issuer metadata through that commitment. The code is delivered once only to the
 receiver's trusted local terminal. It has no request or response field.
 `confirm` carries version, session ID, 65-byte origin public key, 32-byte origin
 nonce, 32-byte scope commitment and 32-byte origin MAC. The receiver reconstructs
 the existing pairing.rs transcript with its own exporter/nonce/endpoint. Only a
 verified origin MAC permits a `confirmed` response (version and receiver MAC).
-`approve` carries version, session ID and 64-byte proof; `cancel` carries version
-and session ID. Cancellation remains bound to the same TLS connection.
+`approve` carries version, session ID, the full strict ActivationInput and 64-byte
+proof. Recompute input.commitment() and require transcript.scope equality. Apply
+receiver policy: named authorized machine, valid binding, offered kinds only,
+empty certificate pins and no client-cert requirement for analytics/mirror.
+Body-channel enrollment is available after client-certificate issuance lands.
+The **initial credential validity ceiling** is 90 days (7,776,000 seconds) from
+activation now, exclusive lower bound (`valid_until > now`) and inclusive upper
+bound. This is a Manager-chosen parameter for PM review; renewal under valid
+enrolled trust arrives in PR4, which may change this value. `cancel` carries
+version and session ID and remains bound to the same TLS connection.
 
 The origin key is an uncompressed P-256 point. Proof of possession uses
 `ring::signature::ECDSA_P256_SHA256_FIXED` over
@@ -298,8 +310,23 @@ The transcript digest is pairing.rs's existing SHA-256 canonical transcript
 commitment, including the exact B4 scope digest. Verify this signature before
 constructing `VerifiedApproval` or activating authority. The wire module does not
 choose enrollment scope, install grants, or certify durable origin consent.
-Activation/delivery response integration remains pending in the initial draft;
-the dispatcher stays closed until the local owner authorizes pairing.
+`recover` carries version, original canonical transcript fields, application key
+(32 bytes) and proof (64 bytes) on a new normally validated TLS connection. Sign
+`b"semon-asi-recovery-pop-v1\\0" || transcript.digest() || session_id.as_bytes()
+|| new_connection_exporter`. Rebuild the origin-held ConfirmedKey only after proof
+verification; deliver independently matches origin-key, transcript and application
+hashes in the durable receipt, expiry, revocation and the two-delivery cap.
+Application key custody is equivalent to its derived bearer authority; it travels
+only to the enrolled TLS endpoint. The new exporter binds recovery to its current
+connection; generic failures and provisioning admission bounds apply. No raw
+application key or bearer is persisted. After two interrupted deliveries explicit
+revocation is required; recovery cannot revive authority.
+
+The receiver controller is enabled only by local `receive enroll` authorization.
+Codes go directly to `/dev/tty`, never stdout/stderr or a wire field. Its local
+terminal accepts `pending` and `cancel SESSION_ID`. Activation commits enrollment,
+kind hashes and receipt together, followed by exact owner grant installation;
+recovery revalidates committed authority before repairing interrupted grants.
 
 ## Source consent and P1
 

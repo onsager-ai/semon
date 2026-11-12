@@ -33,6 +33,7 @@ fn revocation_between_requests_on_one_live_connection() {
         tls: server.tls,
         limits: server.limits,
         admission: Mutex::new(Admission::default()),
+        provisioning: None,
     });
     let mut slot = Slot::admit(&shared, "127.0.0.1".parse().unwrap()).unwrap();
     let worker = thread::spawn(move || serve_connection(&mut slot, socket, Instant::now()));
@@ -201,6 +202,7 @@ fn pipelined_body_reads_stop_at_each_authorized_boundary() {
         tls: None,
         limits: Limits::default(),
         admission: Mutex::new(Admission::default()),
+        provisioning: None,
     });
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -517,6 +519,7 @@ fn unknown_routes_refuse_with_no_body_read_and_one_response_class() {
         tls: None,
         limits: Limits::default(),
         admission: Mutex::new(Admission::default()),
+        provisioning: None,
     });
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
