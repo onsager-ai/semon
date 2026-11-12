@@ -551,6 +551,8 @@ fn first_use_ends_recovery_and_preserves_new_authority() {
         &begun.generations[0],
     );
     Store::authorize_cutover(&f.dir, Kind::MirrorPush, &new_secret, None, now + 1).unwrap();
+    let audit = fs::read_to_string(f.dir.join("receiver-audit/renewals.jsonl")).unwrap();
+    assert!(audit.contains("first_use_cutover"));
     let recover = f.finish(&begun, Action::Recover, [3; 32], [4; 32]);
     assert!(
         receiver

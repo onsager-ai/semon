@@ -499,7 +499,29 @@ impl Store {
         if scope.generations.current == generation && scope.generations.retiring.take().is_some() {
             next.latest = now.max(next.latest);
             store.commit(next.revision(), &next)?;
-            return store.snapshot();
+            let committed = store.snapshot()?;
+            if let Some(receipt) = committed.renewal_receipts.iter().find(|r| {
+                r.begun.enrollment_id == enrollment_id
+                    && r.begun
+                        .generations
+                        .iter()
+                        .any(|g| g.kind == kind && g.generation == generation)
+            }) {
+                // Terminal cutover must remain available without audit custody.
+                // It never creates or releases credentials.
+                let _ = generation_audit::renewal(
+                    receiver,
+                    &generation_audit::RenewalRecord {
+                        version: 1,
+                        observed_at: now.max(committed.latest),
+                        enrollment_id,
+                        renewal_id: receipt.begun.renewal_id.clone(),
+                        generations: vec![crate::renewal_wire::Generation { kind, generation }],
+                        action: "first_use_cutover".into(),
+                    },
+                );
+            }
+            return Ok(committed);
         }
         Ok(next)
     }
