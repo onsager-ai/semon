@@ -241,13 +241,20 @@ pub fn connect(
     machine: &str,
     terminal: &mut dyn Terminal,
     custody: &std::path::Path,
+    analytics_state: &std::path::Path,
     now: &dyn Fn() -> u64,
 ) -> Result<String> {
     let endpoint = pairing::normalize_endpoint(endpoint)
         .map_err(|_| "connect requires an HTTPS receiver URL without path, credentials or query")?;
-    connect_with(&endpoint, machine, terminal, custody, now, &mut || {
-        Connection::open(&endpoint, roots())
-    })
+    connect_with(
+        &endpoint,
+        machine,
+        terminal,
+        custody,
+        analytics_state,
+        now,
+        &mut || Connection::open(&endpoint, roots()),
+    )
 }
 
 pub(crate) fn connect_with(
@@ -255,13 +262,14 @@ pub(crate) fn connect_with(
     machine: &str,
     terminal: &mut dyn Terminal,
     custody: &std::path::Path,
+    analytics_state: &std::path::Path,
     now: &dyn Fn() -> u64,
     transport: &mut dyn FnMut() -> Result<Connection>,
 ) -> Result<String> {
     if !semon_sessions::is_machine_name(machine) {
         return Err("invalid machine name; use --machine NAME".into());
     }
-    producer_admission(&[Kind::MirrorPush], custody)?;
+    producer_admission(&[Kind::MirrorPush], analytics_state)?;
     let mut connection = transport()?;
     let opened: wire::Opened = connection.post(
         "/v1/provision/open",
@@ -462,7 +470,7 @@ mod deadline_tests {
         std::fs::create_dir(&state).unwrap();
         let path = state.join("analytics-namespace");
         let namespace = format!("origin-{}", "a".repeat(64));
-        std::fs::write(&path, &namespace).unwrap();
+        std::fs::write(&path, format!("{namespace}\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         for kind in [Kind::AnalyticsPublish, Kind::BodyChannel] {
             assert_eq!(
@@ -470,7 +478,10 @@ mod deadline_tests {
                 "analytics/body enrollment available after producer admission / client-certificate issuance lands"
             );
         }
-        assert_eq!(std::fs::read_to_string(path).unwrap(), namespace);
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            format!("{namespace}\n")
+        );
         assert_eq!(std::fs::read_dir(&state).unwrap().count(), 1);
         std::fs::remove_dir_all(state).unwrap();
     }

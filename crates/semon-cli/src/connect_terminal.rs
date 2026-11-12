@@ -137,11 +137,14 @@ pub(super) fn run(endpoint: &str, machine: &str) -> Result<()> {
         tty,
         sources,
     };
+    let index_path = semon_sessions::analytics_index_path(&options.cache);
+    let analytics_state = index_path.parent().ok_or("analytics index has no parent")?;
     let name = semon_push::connect::connect(
         endpoint,
         machine,
         &mut prompt,
         &semon_push::origin_custody::default_directory()?,
+        analytics_state,
         &|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

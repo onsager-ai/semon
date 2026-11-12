@@ -231,6 +231,24 @@ fn origin_transport(
 fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     let h = Harness::new();
     let origin = h.dir.0.join("origin");
+    let analytics_state = h.dir.0.join("analytics-state");
+    fs::create_dir(&analytics_state).unwrap();
+    let namespace = format!("origin-{}\n", "b".repeat(64));
+    fs::write(analytics_state.join("analytics-namespace"), &namespace).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(
+            analytics_state.join("analytics-namespace"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+    }
+    assert!(
+        crate::connect::producer_admission(&[Kind::AnalyticsPublish], &analytics_state)
+            .unwrap_err()
+            .contains("available after producer admission")
+    );
+    assert!(!origin.exists());
     let mut workers = vec![];
     let mut terminal = OriginTerminal {
         harness: &h,
@@ -244,6 +262,7 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
         "laptop",
         &mut terminal,
         &origin,
+        &h.dir.0.join("analytics-state"),
         &|| 100,
         &mut || origin_transport(&h, &mut workers),
     )
@@ -251,6 +270,12 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     for worker in workers {
         worker.join().unwrap();
     }
+    assert!(!origin.join("analytics-namespace").exists());
+    assert_eq!(
+        fs::read_to_string(analytics_state.join("analytics-namespace")).unwrap(),
+        namespace
+    );
+    assert_eq!(fs::read_dir(&analytics_state).unwrap().count(), 1);
     let (config, credential) = crate::origin_custody::load(&origin, Some(&name)).unwrap();
     assert_eq!(config.scope.receiver_id, config.receiver_id);
     assert!(matches!(
@@ -299,6 +324,7 @@ fn origin_decline_malformed_and_expired_never_write_custody() {
                 "laptop",
                 &mut terminal,
                 &origin,
+                &h.dir.0.join("analytics-state"),
                 &|| 100,
                 &mut || origin_transport(&h, &mut workers)
             )
@@ -340,6 +366,7 @@ fn origin_substitution_mac_mismatch_and_delivery_recovery() {
             "laptop",
             &mut terminal,
             &origin,
+            &h.dir.0.join("analytics-state"),
             &|| 100,
             &mut || {
                 let mut connection = origin_transport(&h, &mut workers)?;
