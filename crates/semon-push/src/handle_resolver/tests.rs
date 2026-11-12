@@ -302,6 +302,83 @@ fn missing_chain_evidence_refuses() {
 }
 
 #[test]
+fn index_generation_mapping_closes_all_accessor_refusals() {
+    use semon_sessions::origin_projection::CohortReadError;
+    for error in [
+        CohortReadError::Unavailable,
+        CohortReadError::Unsupported,
+        CohortReadError::Malformed,
+        CohortReadError::NotIndexed,
+        CohortReadError::Stale,
+    ] {
+        assert!(matches!(
+            map_index_evidence(Err(error)),
+            Err(Refused::Unavailable)
+        ));
+    }
+}
+
+#[test]
+fn index_generation_mapping_preserves_digests_and_native_chain_keys() {
+    use semon_sessions::origin_projection::{ChainEvidence, CohortGenerations};
+    let evidence = || CohortGenerations {
+        activity_generation: "a".repeat(64),
+        transcript_generation: "b".repeat(64),
+        chains: BTreeMap::from([
+            (
+                "native-a".into(),
+                ChainEvidence {
+                    chain_id: "c".repeat(32),
+                },
+            ),
+            (
+                "native-b".into(),
+                ChainEvidence {
+                    chain_id: "d".repeat(32),
+                },
+            ),
+        ]),
+    };
+    let mapped = map_index_evidence(Ok(evidence())).unwrap();
+    assert_eq!(mapped.activity_generation.as_str(), "a".repeat(64));
+    assert_eq!(mapped.transcript_generation.as_str(), "b".repeat(64));
+    assert_eq!(
+        mapped.chains,
+        BTreeMap::from([
+            ("native-a".into(), "c".repeat(32)),
+            ("native-b".into(), "d".repeat(32))
+        ])
+    );
+    let mut invalid = evidence();
+    invalid.activity_generation = "invalid/generation".into();
+    assert!(matches!(
+        map_index_evidence(Ok(invalid)),
+        Err(Refused::Unavailable)
+    ));
+    let mut invalid = evidence();
+    invalid.transcript_generation.clear();
+    assert!(matches!(
+        map_index_evidence(Ok(invalid)),
+        Err(Refused::Unavailable)
+    ));
+}
+
+#[test]
+fn index_generations_uses_the_real_accessor_and_host_binding() {
+    let f = Fixture::new();
+    let generations = IndexGenerations::new(&f.index, &f.binding);
+    // This fixture has analytics publication but no native indexed cohort.
+    // The concrete adapter must preserve the accessor's closed refusal.
+    assert!(matches!(generations.read(&[]), Err(Refused::Unavailable)));
+    let missing = f.state.join("missing-index.sqlite3");
+    assert!(matches!(
+        IndexGenerations::new(&missing, &f.binding).read(&[]),
+        Err(Refused::Unavailable)
+    ));
+    assert!(!missing.exists());
+}
+
+#[test]
 fn reading_binding_never_initializes_missing_state() {
     let path =
         std::env::temp_dir().join(format!("semon-binding-{}", hex::encode(getrandom_bytes())));
