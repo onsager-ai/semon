@@ -289,9 +289,9 @@ mod tests {
         fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(decide(), Decision::Denied);
         fs::set_permissions(&fixture.0, fs::Permissions::from_mode(0o700)).unwrap();
-        let token = crate::tokens::add_token(&fixture.0, "laptop").unwrap();
+        let token = crate::credentials::Secret::new("machine-bearer-is-not-user-identity".into());
         assert_eq!(
-            acls.decide(&token, "laptop", "work", Permission::BodyRead),
+            acls.decide(token.expose(), "laptop", "work", Permission::BodyRead),
             Decision::Denied
         );
         assert_eq!(

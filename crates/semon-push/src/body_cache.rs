@@ -814,6 +814,10 @@ impl CacheDirectory {
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)?;
+        Self::from_file(file)
+    }
+
+    pub(crate) fn from_file(file: File) -> Result<Self> {
         let meta = file.metadata()?;
         // SAFETY: geteuid has no arguments or memory preconditions.
         let owner = unsafe { libc::geteuid() };

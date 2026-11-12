@@ -180,9 +180,11 @@ struct PushArgs {
 /// `semon receive`: serve pushes, or manage the tokens that may push.
 enum ReceiveArgs {
     Serve(semon_push::serve::ServeOptions),
-    TokenAdd { dir: PathBuf, name: String },
-    TokenRevoke { dir: PathBuf, name: String },
-    TokenList { dir: PathBuf },
+    Enroll {
+        options: semon_push::serve::ServeOptions,
+        advertise: String,
+        machine: String,
+    },
 }
 
 struct SessionsArgs {
@@ -902,13 +904,20 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
 }
 
 /// `semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM]`,
-/// or `semon receive token (add NAME | revoke NAME | list) --dir DIR`.
+/// or `semon receive enroll --machine NAME --advertise HTTPS_URL ...`.
 fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<ReceiveArgs, String> {
     let mut arguments = arguments.peekable();
     if arguments.peek().is_some_and(|argument| argument == "token") {
-        arguments.next();
-        return parse_receive_token_args(arguments);
+        return Err("legacy token commands retired; re-pair with receive enroll; preserve existing tokens and history".into());
     }
+    let enroll = arguments
+        .peek()
+        .is_some_and(|argument| argument == "enroll");
+    if enroll {
+        arguments.next();
+    }
+    let mut advertise = None;
+    let mut machine = None;
     let mut dir = None;
     let mut listen = semon_push::serve::DEFAULT_LISTEN.to_owned();
     let mut certificate = None;
@@ -926,6 +935,8 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
             "--tls-cert" => certificate = Some(PathBuf::from(value()?)),
             "--tls-key" => private_key = Some(PathBuf::from(value()?)),
             "--max-bytes" => max_bytes = parse_size(&value()?)?,
+            "--advertise" if enroll => advertise = Some(value()?),
+            "--machine" if enroll => machine = Some(value()?),
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown receive argument: {argument}")),
         }
@@ -942,12 +953,21 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
         (None, None) => None,
         _ => return Err("TLS requires both --tls-cert and --tls-key".into()),
     };
-    Ok(ReceiveArgs::Serve(semon_push::serve::ServeOptions {
+    let options = semon_push::serve::ServeOptions {
         dir,
         listen,
         tls,
         max_bytes,
-    }))
+    };
+    if enroll {
+        Ok(ReceiveArgs::Enroll {
+            options,
+            advertise: advertise.ok_or("receive enroll requires --advertise HTTPS_URL")?,
+            machine: machine.ok_or("receive enroll requires --machine NAME")?,
+        })
+    } else {
+        Ok(ReceiveArgs::Serve(options))
+    }
 }
 
 /// A byte count: digits, optionally followed by K, M, G or T (powers of
@@ -976,47 +996,51 @@ fn parse_size(raw: &str) -> Result<u64, String> {
         .ok_or_else(invalid)
 }
 
-fn parse_receive_token_args(
-    mut arguments: impl Iterator<Item = String>,
-) -> Result<ReceiveArgs, String> {
-    let action = arguments
-        .next()
-        .ok_or("receive token requires add NAME, revoke NAME or list")?;
-    let mut name = None;
-    let mut dir = None;
-    while let Some(argument) = arguments.next() {
-        match argument.as_str() {
-            "--dir" => {
-                dir = Some(PathBuf::from(
-                    arguments.next().ok_or("--dir requires a value")?,
-                ));
-            }
-            "-h" | "--help" => return Err(usage()),
-            flag if flag.starts_with('-') => {
-                return Err(format!("unknown receive token argument: {flag}"));
-            }
-            _ if name.is_none() && action != "list" => name = Some(argument.clone()),
-            _ => return Err(format!("unexpected receive token argument: {argument}")),
-        }
-    }
-    let dir = dir.ok_or("receive token requires --dir DIR")?;
-    let name = || {
-        name.clone()
-            .ok_or_else(|| format!("receive token {action} requires NAME"))
-    };
-    match action.as_str() {
-        "add" => Ok(ReceiveArgs::TokenAdd { name: name()?, dir }),
-        "revoke" => Ok(ReceiveArgs::TokenRevoke { name: name()?, dir }),
-        "list" => Ok(ReceiveArgs::TokenList { dir }),
-        _ => Err(format!(
-            "unknown receive token action: {action} (add, revoke or list)"
-        )),
-    }
-}
-
 fn run_receive(args: ReceiveArgs) -> Result<(), String> {
-    use semon_push::tokens;
     match args {
+        ReceiveArgs::Enroll {
+            options,
+            advertise,
+            machine,
+        } => {
+            use std::io::{BufRead, IsTerminal, Write};
+            use std::sync::{Arc, Mutex};
+            semon_push::enrollment::refuse_legacy_tokens(&options.dir)
+                .map_err(|e| format!("{e}; choose a fresh receiver directory to enroll"))?;
+            if options.tls.is_none() {
+                return Err("receive enroll requires --tls-cert and --tls-key".into());
+            }
+            let mut terminal = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+                .map_err(|_| "receive enroll requires a trusted local terminal")?;
+            if !terminal.is_terminal() {
+                return Err("receive enroll requires a trusted local terminal".into());
+            }
+            let controller = Arc::new(Mutex::new(semon_push::provision::Controller::open(
+                &options.dir,
+                &advertise,
+                machine,
+            )?));
+            let server = semon_push::serve::Server::bind(&options)?
+                .with_provisioning(Arc::clone(&controller))?;
+            std::thread::Builder::new().name("semon-receive-owner".into()).spawn(move || {
+                let input = match terminal.try_clone() { Ok(input) => input, Err(_) => return };
+                let _ = writeln!(terminal, "Pairing authorized. Local commands: pending; cancel SESSION_ID. Codes appear here when an origin connects.");
+                for line in std::io::BufReader::new(input).lines() {
+                    let Ok(line) = line else { break; };
+                    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) { Ok(now) => now.as_secs(), Err(_) => break };
+                    let Ok(mut controller) = controller.lock() else { break; };
+                    if line.trim() == "pending" {
+                        for (id, state) in controller.pending(now) { let _ = writeln!(terminal, "{id} {state:?}"); }
+                    } else if let Some(id) = line.trim().strip_prefix("cancel ") {
+                        let _ = writeln!(terminal, "{}", if controller.cancel(id, now).is_ok() { "cancelled" } else { "request refused" });
+                    } else { let _ = writeln!(terminal, "Use pending or cancel SESSION_ID"); }
+                }
+            }).map_err(|e| e.to_string())?;
+            server.run()
+        }
         ReceiveArgs::Serve(options) => {
             let server = semon_push::serve::Server::bind(&options)?;
             let address = server
@@ -1029,32 +1053,11 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
             );
             if server.tokens() == 0 {
                 eprintln!(
-                    "semon receive: no token yet, so every push is refused (401); add one with `semon receive token add NAME --dir {}`",
+                    "semon receive: no enrolled credentials; authorize pairing with receive enroll --dir {}",
                     options.dir.display()
                 );
             }
             server.run()
-        }
-        ReceiveArgs::TokenAdd { dir, name } => {
-            let token = tokens::add_token(&dir, &name)?;
-            println!("{token}");
-            eprintln!(
-                "semon receive: added a token for {name}. It is shown only this once: put it in a 0600 file on {name} and run `semon push --to URL --token-file FILE` there."
-            );
-            Ok(())
-        }
-        ReceiveArgs::TokenRevoke { dir, name } => {
-            tokens::revoke_token(&dir, &name)?;
-            eprintln!(
-                "semon receive: revoked {name}'s token; a running receiver refuses it from its next request"
-            );
-            Ok(())
-        }
-        ReceiveArgs::TokenList { dir } => {
-            for name in tokens::token_names(&dir)? {
-                println!("{name}");
-            }
-            Ok(())
         }
     }
 }
@@ -2302,10 +2305,11 @@ fn usage() -> String {
          Explicit archive maintenance. Omit retention to keep every chain indefinitely; native logs are never deleted.\n\
          \n\
          Usage: semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--max-bytes SIZE]\n\
-         Usage: semon receive token (add NAME | revoke NAME | list) --dir DIR\n\
+         Usage: semon receive enroll --machine NAME --advertise HTTPS_URL --dir DIR [--listen ADDR] --tls-cert PEM --tls-key PEM\n\
+         Enrollment stays in the foreground; its trusted terminal displays codes and accepts pending or cancel SESSION_ID.\n\
          A mirror-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
          DIR/machines/NAME/. It listens on 127.0.0.1:8735 by default; another address needs TLS (an operator-supplied\n\
-         certificate and key) and at least one token. A token, printed once by token add, decides its machine.\n\
+         certificate and key). Enrollment supplies separate kind credentials; legacy DIR/tokens is refused.\n\
          --max-bytes caps each machine's copy (20G by default); a push past it gets 507."
 .to_owned()
 }

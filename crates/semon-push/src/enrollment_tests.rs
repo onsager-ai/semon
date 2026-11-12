@@ -306,6 +306,36 @@ fn lock_exclusion_and_explicit_unlock_with_duplicated_descriptor() {
 }
 
 #[test]
+fn pairing_owner_explicit_unlock_and_external_registry_transactions() {
+    let f = Fixture::new();
+    let first = Store::initialize(&f.0)
+        .unwrap()
+        .into_pairing_owner()
+        .unwrap();
+    let inherited = first._lock.0.try_clone().unwrap();
+    let mut external = Store::open(&f.0).unwrap();
+    assert!(matches!(first.snapshot(), Err(Error::InUse)));
+    external.commit(0, &Registry::empty()).unwrap();
+    drop(external);
+    assert_eq!(first.snapshot().unwrap().revision(), 1);
+    assert!(matches!(
+        Store::open(&f.0).unwrap().into_pairing_owner(),
+        Err(Error::InUse)
+    ));
+    drop(first);
+    assert!(inherited.metadata().is_ok());
+    let mut again = Store::open(&f.0).unwrap().into_pairing_owner().unwrap();
+    // A stale expected revision re-reads under the lock and keeps the update.
+    again
+        .pairing_transaction(0, |snapshot| {
+            assert_eq!(snapshot.revision(), 1);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(again.snapshot().unwrap().revision(), 2);
+}
+
+#[test]
 fn insecure_or_missing_custody_never_appears_empty() {
     for member in [REGISTRY_FILE, LOCK_FILE] {
         let f = Fixture::new();

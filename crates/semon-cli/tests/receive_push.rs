@@ -223,25 +223,51 @@ fn private(path: &Path) {
 #[cfg(not(unix))]
 fn private(_path: &Path) {}
 
+fn enroll_fixture(dir: &Path) -> String {
+    use semon_push::{
+        credentials::{Bearer, Kind, Secret},
+        enrollment::{Binding, Enrollment, KindScope, Registry, Store},
+    };
+    semon_push::tokens::prepare_private_dir(dir, true).unwrap();
+    let token = "enrolled-test-mirror-bearer".to_owned();
+    let id = "a".repeat(64);
+    let registry = Registry::from_records(
+        vec![Enrollment {
+            enrollment_id: id.clone(),
+            receiver_id: "receiver-1".into(),
+            machine: "laptop".into(),
+            binding: Binding::Inapplicable,
+            client_certificate_pins: vec![],
+            credential_kinds: vec![KindScope::new(Kind::MirrorPush, 1)],
+            revoked_at: None,
+        }],
+        vec![Bearer {
+            credential_id: "b".repeat(64),
+            enrollment_id: id,
+            kind: Kind::MirrorPush,
+            sha256: Secret::new(token.clone()).hash(),
+            generation: 1,
+            valid_from: 0,
+            valid_until: u64::MAX,
+            revoked_at: None,
+        }],
+    )
+    .unwrap();
+    Store::initialize(dir)
+        .unwrap()
+        .commit(0, &registry)
+        .unwrap();
+    token
+}
+
 #[test]
 fn push_mirrors_a_home_into_semon_receive() {
     let mut fixture = Fixture::new();
     let dir = fixture.dir();
 
-    // A token for the machine, printed once.
-    let added = fixture.receive(&["token", "add", "laptop", "--dir", dir.to_str().unwrap()]);
-    assert_ok(&added, "token add");
-    let token = String::from_utf8(added.stdout).unwrap().trim().to_owned();
-    assert_eq!(token.len(), 43, "{token}");
+    let token = enroll_fixture(&dir);
     fixture.write("token", token.as_bytes());
     private(&fixture.path("token"));
-    let listed = fixture.receive(&["token", "list", "--dir", dir.to_str().unwrap()]);
-    assert_eq!(String::from_utf8_lossy(&listed.stdout), "laptop\n");
-    assert!(
-        !fs::read_to_string(dir.join("tokens"))
-            .unwrap()
-            .contains(&token)
-    );
 
     let url = fixture.start_receiver();
     assert!(url.starts_with("http://127.0.0.1:"), "{url}");
@@ -334,8 +360,16 @@ fn push_mirrors_a_home_into_semon_receive() {
     );
 
     // Revoked while the receiver runs: the next push is refused.
-    let revoked = fixture.receive(&["token", "revoke", "laptop", "--dir", dir.to_str().unwrap()]);
-    assert_ok(&revoked, "token revoke");
+    let mut store = semon_push::enrollment::Store::open(&dir).unwrap();
+    let registry = store.snapshot().unwrap();
+    let mut enrollments = registry.enrollments().to_vec();
+    enrollments[0].revoked_at = Some(1);
+    let next = semon_push::enrollment::Registry::from_records(
+        enrollments,
+        registry.credentials().to_vec(),
+    )
+    .unwrap();
+    store.commit(registry.revision(), &next).unwrap();
     fixture.append(&log, claude("after the revoke").as_bytes());
     let pushed = fixture.push(&url);
     assert!(!pushed.status.success());
@@ -370,9 +404,7 @@ fn push_watch_stops_on(name: &str, number: i32) {
 
     let mut fixture = Fixture::new();
     let dir = fixture.dir();
-    let added = fixture.receive(&["token", "add", "laptop", "--dir", dir.to_str().unwrap()]);
-    assert_ok(&added, "token add");
-    let token = String::from_utf8(added.stdout).unwrap().trim().to_owned();
+    let token = enroll_fixture(&dir);
     fixture.write("token", token.as_bytes());
     private(&fixture.path("token"));
     let url = fixture.start_receiver();
@@ -491,4 +523,31 @@ fn receive_refuses_plain_http_off_loopback() {
         "{}",
         stderr(&refused)
     );
+}
+
+#[test]
+fn enroll_refuses_legacy_tokens_before_terminal_or_custody_initialization() {
+    let fixture = Fixture::new();
+    let dir = fixture.dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let tokens = b"preserve legacy receiver bytes";
+    std::fs::write(dir.join("tokens"), tokens).unwrap();
+    let output = fixture.receive(&[
+        "enroll",
+        "--machine",
+        "laptop",
+        "--advertise",
+        "https://receiver.example",
+        "--dir",
+        dir.to_str().unwrap(),
+        "--tls-cert",
+        "unused.pem",
+        "--tls-key",
+        "unused-key.pem",
+    ]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("legacy tokens found"));
+    assert!(stderr(&output).contains("fresh receiver directory"));
+    assert_eq!(std::fs::read(dir.join("tokens")).unwrap(), tokens);
+    assert!(!dir.join("receiver.json").exists());
 }
