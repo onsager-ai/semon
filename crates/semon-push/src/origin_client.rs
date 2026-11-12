@@ -386,9 +386,8 @@ impl<'a, C: Clock, T: PollTransport, E: Entropy> OriginClient<'a, C, T, E> {
             if stop() {
                 return self.stop(StopReason::Cancelled);
             }
-            match self.step() {
-                terminal @ (Step::Waiting { .. } | Step::Stopped(_)) => return terminal,
-                _ => {}
+            if let terminal @ (Step::Waiting { .. } | Step::Stopped(_)) = self.step() {
+                return terminal;
             }
         }
     }
