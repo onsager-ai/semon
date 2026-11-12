@@ -14,6 +14,7 @@ use std::{
 };
 use zeroize::Zeroizing;
 type Result<T> = std::result::Result<T, String>;
+const FILE_CAP: usize = 4 * 1024 * 1024;
 const ERROR: &str = "invalid or unreadable origin enrollment custody";
 #[cfg(test)]
 #[path = "origin_custody_tests.rs"]
@@ -43,15 +44,35 @@ struct Signed {
     signature: String,
 }
 
-pub fn default_directory() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        })
-        .join("semon/origin")
+pub fn default_directory() -> Result<PathBuf> {
+    configuration_directory(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
 }
+fn configuration_directory(
+    xdg: Option<&std::ffi::OsStr>,
+    home: Option<&std::ffi::OsStr>,
+) -> Result<PathBuf> {
+    let base = xdg
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            home.map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .map(|p| p.join(".config"))
+        })
+        .ok_or("origin custody requires absolute XDG_CONFIG_HOME or HOME")?;
+    Ok(base.join("semon/origin"))
+}
+struct InstallLock(fs::File);
+impl Drop for InstallLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+#[cfg(test)]
+thread_local! { static LOCK_DUPLICATE: std::cell::RefCell<Option<fs::File>> = const { std::cell::RefCell::new(None) }; }
 struct Directory {
     fd: fs::File,
     checked: CacheDirectory,
@@ -100,15 +121,16 @@ impl Directory {
             .open_file(Path::new(name), libc::O_RDONLY)
             .map_err(|_| ERROR)?;
         let mut bytes = Zeroizing::new(Vec::new());
-        file.take(65_537)
+        file.take((FILE_CAP + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|_| ERROR)?;
-        if bytes.len() > 65_536 {
+        if bytes.len() > FILE_CAP {
             return Err(ERROR.into());
         }
         Ok(bytes)
     }
     fn write(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        validate_size(name, bytes)?;
         let mut file = self
             .checked
             .open_file(
@@ -152,6 +174,9 @@ pub fn install(
         .open_file(Path::new("install.lock"), libc::O_RDWR | libc::O_CREAT)
         .map_err(|_| ERROR)?;
     lock.try_lock().map_err(|_| "origin custody is in use")?;
+    let _lock = InstallLock(lock);
+    #[cfg(test)]
+    LOCK_DUPLICATE.with(|slot| *slot.borrow_mut() = Some(_lock.0.try_clone().unwrap()));
     let name =
         hex::encode(ring::digest::digest(&ring::digest::SHA256, endpoint.as_bytes()).as_ref());
     if root
@@ -207,13 +232,19 @@ pub fn install(
         public_key: crate::provision_wire::encode(key.public_key().as_ref()),
         signature: crate::provision_wire::encode(signature.as_ref()),
     };
+    let signed_bytes = serde_json::to_vec(&signed).map_err(|_| ERROR)?;
+    for (name, bytes) in [
+        ("source-consent.json", consent_bytes.as_slice()),
+        ("origin-key.pk8", private),
+        ("mirror-push.secret", delivery.credentials[0].1.as_bytes()),
+        ("enrollment.json", signed_bytes.as_slice()),
+    ] {
+        validate_size(name, bytes)?;
+    }
     dir.write("source-consent.json", &consent_bytes)?;
     dir.write("origin-key.pk8", private)?;
     dir.write("mirror-push.secret", delivery.credentials[0].1.as_bytes())?;
-    dir.write(
-        "enrollment.json",
-        &serde_json::to_vec(&signed).map_err(|_| ERROR)?,
-    )?;
+    dir.write("enrollment.json", &signed_bytes)?;
     dir.checked.sync().map_err(|_| ERROR)?;
     let from = std::ffi::CString::new(stage).map_err(|_| ERROR)?;
     let to = std::ffi::CString::new(name.clone()).map_err(|_| ERROR)?;
@@ -345,4 +376,13 @@ pub fn consent(base: &Path, receiver: &str, config: &Configuration) -> Result<Ve
         return Err(ERROR.into());
     }
     Ok(consent.sources)
+}
+
+fn validate_size(name: &str, bytes: &[u8]) -> Result<()> {
+    if bytes.len() > FILE_CAP {
+        return Err(format!(
+            "origin {name} exceeds the 4 MiB custody limit; narrow source selection"
+        ));
+    }
+    Ok(())
 }

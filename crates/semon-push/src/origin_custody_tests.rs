@@ -15,6 +15,10 @@ impl Fixture {
         )))
     }
     fn install(&self) -> String {
+        self.install_sources(&[PathBuf::from("/native/approved.jsonl")])
+            .unwrap()
+    }
+    fn install_sources(&self, sources: &[PathBuf]) -> Result<String> {
         let private = EcdsaKeyPair::generate_pkcs8(
             &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
             &ring::rand::SystemRandom::new(),
@@ -38,9 +42,8 @@ impl Fixture {
                 credentials: vec![(Kind::MirrorPush, "secret-origin-bearer".into())],
             },
             private.as_ref(),
-            &[PathBuf::from("/native/approved.jsonl")],
+            sources,
         )
-        .unwrap()
     }
 }
 impl Drop for Fixture {
@@ -116,4 +119,68 @@ fn symlink_and_world_readable_custody_refuse() {
     fs::rename(&secret, &moved).unwrap();
     symlink(&moved, &secret).unwrap();
     assert!(load(&f.0, None).is_err());
+}
+
+#[test]
+fn realistic_source_list_roundtrips_and_oversize_never_publishes() {
+    let f = Fixture::new();
+    let sources: Vec<_> = (0..5000)
+        .map(|n| {
+            PathBuf::from(format!(
+                "/native/projects/a-realistic-project/sessions/rollout-{n:08}.jsonl"
+            ))
+        })
+        .collect();
+    let name = f.install_sources(&sources).unwrap();
+    let (config, _) = load(&f.0, Some(&name)).unwrap();
+    assert_eq!(consent(&f.0, &name, &config).unwrap(), sources);
+    let oversized = Fixture::new();
+    assert!(
+        oversized
+            .install_sources(&[PathBuf::from("x".repeat(FILE_CAP + 1))])
+            .unwrap_err()
+            .contains("4 MiB")
+    );
+    assert!(load(&oversized.0, None).is_err());
+    assert!(
+        !fs::read_dir(&oversized.0)
+            .unwrap()
+            .any(|entry| entry.unwrap().file_name().len() == 64)
+    );
+}
+#[test]
+fn install_explicitly_unlocks_even_with_duplicated_descriptor() {
+    let f = Fixture::new();
+    f.install();
+    let duplicate = LOCK_DUPLICATE.with(|slot| slot.borrow_mut().take().unwrap());
+    let root = Directory::open(&f.0).unwrap();
+    let next = root
+        .checked
+        .open_file(Path::new("install.lock"), libc::O_RDWR)
+        .unwrap();
+    next.try_lock()
+        .expect("install must unlock even while duplicate remains live");
+    next.unlock().unwrap();
+    drop(duplicate);
+}
+#[test]
+fn config_roots_require_absolute_paths() {
+    use std::ffi::OsStr;
+    assert_eq!(
+        configuration_directory(Some(OsStr::new("relative")), Some(OsStr::new("/home/test")))
+            .unwrap(),
+        PathBuf::from("/home/test/.config/semon/origin")
+    );
+    assert_eq!(
+        configuration_directory(Some(OsStr::new("/config")), None).unwrap(),
+        PathBuf::from("/config/semon/origin")
+    );
+    assert!(
+        configuration_directory(
+            Some(OsStr::new("relative")),
+            Some(OsStr::new("relative-home"))
+        )
+        .is_err()
+    );
+    assert!(configuration_directory(None, None).is_err());
 }

@@ -103,6 +103,40 @@ impl Harness {
         }
     }
 }
+#[test]
+fn production_origin_connection_validates_roots_and_hostname() {
+    for (host, trusted, accepted) in [
+        ("localhost", true, true),
+        ("127.0.0.2", true, false),
+        ("localhost", false, false),
+    ] {
+        let h = Harness::new();
+        let listener = TcpListener::bind("0.0.0.0:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let shared = Arc::clone(&h.shared);
+        let worker = thread::spawn(move || {
+            let (server, _) = listener.accept().unwrap();
+            let mut slot = Slot::admit(&shared, "127.0.0.1".parse().unwrap()).unwrap();
+            serve_connection(&mut slot, server, Instant::now());
+        });
+        let mut roots = rustls::RootCertStore::empty();
+        if trusted {
+            roots
+                .add(
+                    CertificateDer::from_pem_slice(
+                        &fs::read(auth_tests::fixture("test-cert.pem")).unwrap(),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let connection = crate::connect::Connection::open(&format!("https://{host}:{port}"), roots);
+        assert_eq!(connection.is_ok(), accepted);
+        drop(connection);
+        worker.join().unwrap();
+    }
+}
+
 fn post(client: &mut Client, path: &str, body: &[u8]) -> (u16, Vec<u8>) {
     write!(client, "POST {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", body.len()).unwrap();
     client.write_all(body).unwrap();

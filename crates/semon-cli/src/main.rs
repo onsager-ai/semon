@@ -920,7 +920,7 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
-    let base = semon_push::origin_custody::default_directory();
+    let base = semon_push::origin_custody::default_directory()?;
     let (config, credential) = semon_push::origin_custody::load(&base, receiver.as_deref())?;
     let name = semon_push::wire::sha256_hex(config.endpoint.as_bytes());
     let sources = semon_push::origin_custody::consent(&base, &name, &config)?;
@@ -2338,7 +2338,7 @@ fn usage() -> String {
          Usage: semon connect --to URL [--machine NAME]\n\
          Usage: semon push [--receiver NAME] [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\
-         (docs/mirror-protocol.md), appending as they grow. The token file must be mode 0600. --watch keeps going:\n\
+         (docs/mirror-protocol.md), appending as they grow. Run connect first to install private enrollment custody. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s.\n\
          \n\
          Usage: semon archive prune [--retention-days N] [--cache PATH]\n\

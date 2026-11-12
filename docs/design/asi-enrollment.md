@@ -135,7 +135,10 @@ general verification bypass, TOFU or peer-installed unverified root is permitted
 Before confirmation the channel carries only bounded protocol material, never
 application bodies, issued credentials, source policy or grants.
 
-The transcript binds receiver identity, exact advertised endpoint/TLS pin,
+The transcript binds receiver identity and exact advertised endpoint; the
+pinned_invitation profile additionally binds its TLS pin. public_tls validates
+public CA roots and hostname and records no receiver certificate fingerprint.
+Both profiles bind the
 origin-generated public key, both roles, fresh session identity, protocol version
 and intended enrollment/kind/scope. Require mutual key confirmation and proof of
 origin key possession before approval can activate authority. The origin client
@@ -394,7 +397,7 @@ lineage and provenance rules remain unchanged.
 ## Origin configuration and custody
 
 Origin configuration records enrollment/receiver identity, exact endpoint and
-explicit server root/pins, machine/namespace/incarnations, assigned-or-unassigned
+explicit TLS trust profile (public CA roots for public_tls), machine/namespace/incarnations, assigned-or-unassigned
 claim epoch, enabled kinds/certificate requirements, issuer acknowledgement and
 pinned public keys, client certificate/pins and protected secret references.
 Requests cannot overwrite configuration. Provisioning installs this state through
@@ -699,3 +702,10 @@ uses the full endpoint hash; an omitted name requires one enrolled receiver.
 `connect::producer_admission` is the option-C swap point for option B: it requires
 an existing local namespace binding for analytics/body and currently refuses
 those kinds until producer admission / client-certificate issuance lands.
+
+Public-TLS origin custody records the canonical endpoint and public CA trust
+profile, not a receiver certificate fingerprint. The code-bound ActivationInput
+commitment authenticates receiver_id; issuer pins apply only to future admitted
+analytics/body bindings. Custody files have a shared 4 MiB encoded ceiling. Every
+file is size-validated before publication; larger source lists require narrowing.
+Relative XDG_CONFIG_HOME is ignored; an absolute HOME fallback is required.

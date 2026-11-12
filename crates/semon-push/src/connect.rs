@@ -7,9 +7,9 @@ use ring::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     io::{Read, Write},
-    net::TcpStream,
+    net::{TcpStream, ToSocketAddrs},
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use zeroize::Zeroizing;
 
@@ -46,24 +46,36 @@ pub(crate) struct Connection {
     pub(crate) fault: Option<&'static str>,
 }
 impl Connection {
-    fn open(endpoint: &str, roots: rustls::RootCertStore) -> Result<Self> {
+    pub(crate) fn open(endpoint: &str, roots: rustls::RootCertStore) -> Result<Self> {
         let url = reqwest::Url::parse(endpoint).map_err(|_| "invalid receiver URL")?;
         let host = url.host_str().ok_or("receiver URL has no host")?.to_owned();
         let port = url
             .port_or_known_default()
             .ok_or("receiver URL has no port")?;
-        let socket = TcpStream::connect((host.as_str(), port))
-            .map_err(|e| format!("connect receiver: {e}"))?;
+        let addresses = (host.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|_| "receiver DNS lookup failed")?;
+        let started = Instant::now();
+        let mut connected = None;
+        for address in addresses {
+            let remaining = remaining_response(&|| started.elapsed())?;
+            if let Ok(socket) = TcpStream::connect_timeout(&address, remaining) {
+                connected = Some(socket);
+                break;
+            }
+        }
+        let socket = connected.ok_or("receiver TCP connection failed or timed out")?;
         let timeout = Some(Duration::from_secs(wire::READ_SECONDS));
         socket.set_read_timeout(timeout).map_err(io_error)?;
         socket.set_write_timeout(timeout).map_err(io_error)?;
-        let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|_| "TLS 1.3 unavailable")?
         .with_root_certificates(roots)
         .with_no_client_auth();
+        config.resumption = rustls::client::Resumption::disabled();
         let name = rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|_| "invalid receiver hostname")?;
         let mut conn = rustls::ClientConnection::new(Arc::new(config), name)
@@ -88,6 +100,15 @@ impl Connection {
         path: &str,
         message: &impl Serialize,
     ) -> Result<T> {
+        let start = Instant::now();
+        self.post_with_clock(path, message, &|| start.elapsed())
+    }
+    fn post_with_clock<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        message: &impl Serialize,
+        elapsed: &dyn Fn() -> Duration,
+    ) -> Result<T> {
         let bytes = Zeroizing::new(
             wire::encode_message(message).map_err(|_| "invalid provisioning request")?,
         );
@@ -96,6 +117,7 @@ impl Connection {
         self.stream.flush().map_err(io_error)?;
         let mut head = Vec::new();
         while !head.ends_with(b"\r\n\r\n") {
+            self.response_deadline(elapsed)?;
             if head.len() >= 8192 {
                 return Err("oversized receiver headers".into());
             }
@@ -135,7 +157,15 @@ impl Connection {
             .filter(|n| *n <= wire::MAX_MESSAGE_BYTES)
             .ok_or("invalid receiver length")?;
         let mut body = Zeroizing::new(vec![0; length]);
-        self.stream.read_exact(&mut body).map_err(io_error)?;
+        let mut offset = 0;
+        while offset < body.len() {
+            self.response_deadline(elapsed)?;
+            let count = self.stream.read(&mut body[offset..]).map_err(io_error)?;
+            if count == 0 {
+                return Err("receiver response interrupted".into());
+            }
+            offset += count;
+        }
         #[cfg(test)]
         {
             if path.ends_with("/approve") && self.fault == Some("delivery") {
@@ -155,6 +185,13 @@ impl Connection {
             }
         }
         serde_json::from_slice(&body).map_err(|_| "invalid receiver response".into())
+    }
+    fn response_deadline(&self, elapsed: &dyn Fn() -> Duration) -> Result<()> {
+        let remaining = remaining_response(elapsed)?;
+        self.stream
+            .sock
+            .set_read_timeout(Some(remaining))
+            .map_err(io_error)
     }
 }
 fn io_error(_: std::io::Error) -> String {
@@ -332,4 +369,23 @@ pub(crate) fn connect_with(
         &private,
         &terminal.sources(),
     )
+}
+
+fn remaining_response(elapsed: &dyn Fn() -> Duration) -> Result<Duration> {
+    Duration::from_secs(wire::READ_SECONDS)
+        .checked_sub(elapsed())
+        .filter(|d| !d.is_zero())
+        .ok_or_else(|| "receiver response deadline exceeded".into())
+}
+
+#[cfg(test)]
+mod deadline_tests {
+    use super::*;
+    #[test]
+    fn elapsed_response_budget_is_not_reset_per_byte() {
+        let elapsed = std::cell::Cell::new(Duration::ZERO);
+        assert!(remaining_response(&|| elapsed.get()).is_ok());
+        elapsed.set(Duration::from_secs(wire::READ_SECONDS));
+        assert!(remaining_response(&|| elapsed.get()).is_err());
+    }
 }

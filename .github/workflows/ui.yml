@@ -358,8 +358,9 @@ jobs:
             sleep 0.2
           done
           [ -n "$url" ] || { cat "$RUNNER_TEMP/receive.log"; exit 1; }
-          XDG_STATE_HOME="$RUNNER_TEMP/push-state" SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon push --watch \
-            --to "$url" --token-file "$RUNNER_TEMP/recv.token" --state "$RUNNER_TEMP/push-state.json" \
+          python3 -I tests/ui/origin-enrollment-fixture.py "$RUNNER_TEMP/origin-config/semon/origin" "$recv" "$RUNNER_TEMP/recv.token" "$url" "$fixture_root"
+          XDG_CONFIG_HOME="$RUNNER_TEMP/origin-config" XDG_STATE_HOME="$RUNNER_TEMP/push-state" SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon push --watch \
+            --state "$RUNNER_TEMP/push-state.json" \
             --claude-home "$fixture_root/claude" --claude-json "$fixture_root/.claude.json" --codex-home "$fixture_root/codex" --copilot-home "$fixture_root/copilot" --proc-root "$fixture_root/proc" --cache "$RUNNER_TEMP/push-index.json" \
             < /dev/null > "$RUNNER_TEMP/push.log" 2>&1 &
           SEMON_TEST_NOW="$SEMON_NOW" node tests/ui/pushed-parity.mjs --home "$fixture_root" --received "$recv" --scratch "$RUNNER_TEMP/pushed"

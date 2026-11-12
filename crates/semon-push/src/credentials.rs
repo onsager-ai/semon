@@ -3,7 +3,7 @@ use crate::enrollment::Registry;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use zeroize::Zeroizing;
+pub use zeroize::Zeroizing;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
