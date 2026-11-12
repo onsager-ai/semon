@@ -23,6 +23,7 @@ webpki-roots = { version = "=1.0.9", default-features = false }
 # Already built for reqwest (same version and features); used directly for
 # `semon receive`'s TLS listener and its token randomness.
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+semon-asi = { path = "../semon-asi" }
 semon-sessions = { path = "../semon-sessions" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json.workspace = true

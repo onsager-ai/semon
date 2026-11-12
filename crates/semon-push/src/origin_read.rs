@@ -906,6 +906,14 @@ fn validate_source(source: &ResolvedSource) -> Result<()> {
         return Err(Refused::Unavailable);
     }
     for (i, s) in source.cohort.iter().enumerate() {
+        if s.prefix_sha256.len() != 64
+            || !s
+                .prefix_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(Refused::Unavailable);
+        }
         for id in [&s.source_id, &s.chain, &s.generation] {
             OpaqueId::new(id).map_err(|_| Refused::Unavailable)?;
         }
@@ -1030,7 +1038,12 @@ fn binding_bytes(
     id_bytes(&mut out, source.cohort_id);
     out.extend_from_slice(&(source.cohort.len() as u64).to_be_bytes());
     for member in &source.cohort {
-        for id in [&member.source_id, &member.chain, &member.generation] {
+        for id in [
+            &member.source_id,
+            &member.chain,
+            &member.generation,
+            &member.prefix_sha256,
+        ] {
             append(&mut out, id.as_bytes());
         }
         out.extend_from_slice(&member.consumed_boundary.to_be_bytes());
