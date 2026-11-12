@@ -19,10 +19,12 @@ const REFUSED: &str =
 
 /// Option C's producer-startup seam. Option B can replace this decision without
 /// changing provisioning or creating a namespace as a side effect of pairing.
-pub fn producer_admission(kinds: &[Kind], local_namespace_binding: bool) -> Result<()> {
+/// Single swap point for explicit initialization option B, tracked in #652.
+/// Call before opening any transport; state_dir is beside the materialized index.
+pub fn producer_admission(kinds: &[Kind], state_dir: &std::path::Path) -> Result<()> {
     if kinds.iter().any(|k| *k != Kind::MirrorPush) {
-        if !local_namespace_binding {
-            return Err("analytics/body enrollment requires an existing local namespace binding; available after producer admission / client-certificate issuance lands".into());
+        if semon_sessions::read_analytics_namespace(state_dir)?.is_none() {
+            return Err("run `semon analytics materialize` first, then connect".into());
         }
         return Err("analytics/body enrollment available after producer admission / client-certificate issuance lands".into());
     }
@@ -109,20 +111,25 @@ impl Connection {
         message: &impl Serialize,
         elapsed: &dyn Fn() -> Duration,
     ) -> Result<T> {
+        let mut socket = DeadlineSocket {
+            socket: &mut self.stream.sock,
+            elapsed,
+        };
+        let mut stream = rustls::Stream::new(&mut self.stream.conn, &mut socket);
         let bytes = Zeroizing::new(
             wire::encode_message(message).map_err(|_| "invalid provisioning request")?,
         );
-        write!(self.stream, "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", self.host, bytes.len()).map_err(io_error)?;
-        self.stream.write_all(&bytes).map_err(io_error)?;
-        self.stream.flush().map_err(io_error)?;
+        write!(stream, "POST {path} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n", self.host, bytes.len()).map_err(io_error)?;
+        stream.write_all(&bytes).map_err(io_error)?;
+        stream.flush().map_err(io_error)?;
         let mut head = Vec::new();
         while !head.ends_with(b"\r\n\r\n") {
-            self.response_deadline(elapsed)?;
+            remaining_response(elapsed)?;
             if head.len() >= 8192 {
                 return Err("oversized receiver headers".into());
             }
             let mut byte = [0];
-            self.stream.read_exact(&mut byte).map_err(io_error)?;
+            stream.read_exact(&mut byte).map_err(io_error)?;
             head.push(byte[0]);
         }
         let head = std::str::from_utf8(&head).map_err(|_| "invalid receiver headers")?;
@@ -159,8 +166,8 @@ impl Connection {
         let mut body = Zeroizing::new(vec![0; length]);
         let mut offset = 0;
         while offset < body.len() {
-            self.response_deadline(elapsed)?;
-            let count = self.stream.read(&mut body[offset..]).map_err(io_error)?;
+            remaining_response(elapsed)?;
+            let count = stream.read(&mut body[offset..]).map_err(io_error)?;
             if count == 0 {
                 return Err("receiver response interrupted".into());
             }
@@ -186,14 +193,40 @@ impl Connection {
         }
         serde_json::from_slice(&body).map_err(|_| "invalid receiver response".into())
     }
-    fn response_deadline(&self, elapsed: &dyn Fn() -> Duration) -> Result<()> {
-        let remaining = remaining_response(elapsed)?;
-        self.stream
-            .sock
-            .set_read_timeout(Some(remaining))
-            .map_err(io_error)
+}
+
+/// Bound each ciphertext operation, including rustls's internal fragment reads.
+struct DeadlineSocket<'a> {
+    socket: &'a mut TcpStream,
+    elapsed: &'a dyn Fn() -> Duration,
+}
+impl DeadlineSocket<'_> {
+    fn remaining(&self) -> std::io::Result<Duration> {
+        remaining_response(self.elapsed).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "receiver response deadline exceeded",
+            )
+        })
     }
 }
+impl Read for DeadlineSocket<'_> {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.socket.set_read_timeout(Some(self.remaining()?))?;
+        self.socket.read(bytes)
+    }
+}
+impl Write for DeadlineSocket<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.socket.set_write_timeout(Some(self.remaining()?))?;
+        self.socket.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.socket.set_write_timeout(Some(self.remaining()?))?;
+        self.socket.flush()
+    }
+}
+
 fn io_error(_: std::io::Error) -> String {
     "receiver TLS connection interrupted or certificate validation failed".into()
 }
@@ -228,7 +261,7 @@ pub(crate) fn connect_with(
     if !semon_sessions::is_machine_name(machine) {
         return Err("invalid machine name; use --machine NAME".into());
     }
-    producer_admission(&[Kind::MirrorPush], false)?;
+    producer_admission(&[Kind::MirrorPush], custody)?;
     let mut connection = transport()?;
     let opened: wire::Opened = connection.post(
         "/v1/provision/open",
@@ -381,6 +414,66 @@ fn remaining_response(elapsed: &dyn Fn() -> Duration) -> Result<Duration> {
 #[cfg(test)]
 mod deadline_tests {
     use super::*;
+    #[test]
+    fn socket_fragments_share_one_total_budget() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut socket, _) = listener.accept().unwrap();
+        peer.write_all(b"fragmented-record").unwrap();
+        let ticks = std::cell::Cell::new(0);
+        let clock = || {
+            let tick = ticks.get();
+            ticks.set(tick + 1);
+            Duration::from_secs(tick * 4)
+        };
+        let mut deadline = DeadlineSocket {
+            socket: &mut socket,
+            elapsed: &clock,
+        };
+        let mut byte = [0];
+        for _ in 0..3 {
+            assert_eq!(deadline.read(&mut byte).unwrap(), 1);
+        }
+        assert_eq!(
+            deadline.read(&mut byte).unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(
+            deadline.write(b"x").unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+    #[test]
+    fn producer_preflight_is_read_only_and_refuses_before_pairing() {
+        use std::os::unix::fs::PermissionsExt;
+        let state =
+            std::env::temp_dir().join(format!("semon-producer-preflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        for kind in [Kind::AnalyticsPublish, Kind::BodyChannel] {
+            assert_eq!(
+                producer_admission(&[kind], &state).unwrap_err(),
+                "run `semon analytics materialize` first, then connect"
+            );
+        }
+        assert!(!state.exists());
+        assert!(producer_admission(&[Kind::MirrorPush], &state).is_ok());
+        assert!(!state.exists());
+        std::fs::create_dir(&state).unwrap();
+        let path = state.join("analytics-namespace");
+        let namespace = format!("origin-{}", "a".repeat(64));
+        std::fs::write(&path, &namespace).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        for kind in [Kind::AnalyticsPublish, Kind::BodyChannel] {
+            assert_eq!(
+                producer_admission(&[kind], &state).unwrap_err(),
+                "analytics/body enrollment available after producer admission / client-certificate issuance lands"
+            );
+        }
+        assert_eq!(std::fs::read_to_string(path).unwrap(), namespace);
+        assert_eq!(std::fs::read_dir(&state).unwrap().count(), 1);
+        std::fs::remove_dir_all(state).unwrap();
+    }
     #[test]
     fn elapsed_response_budget_is_not_reset_per_byte() {
         let elapsed = std::cell::Cell::new(Duration::ZERO);

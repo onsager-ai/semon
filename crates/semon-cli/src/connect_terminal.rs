@@ -287,6 +287,7 @@ mod tests {
         let after = unsafe { after.assume_init() };
         assert_eq!(after.c_lflag, before.c_lflag);
         assert!(read_code_ready(fd, || interrupted(libc::SIGTERM)).is_err());
+        assert!(read_code_ready(fd, || interrupted(libc::SIGHUP)).is_err());
         assert!(
             std::panic::catch_unwind(|| read_code_ready(fd, || panic!("injected prompt panic")))
                 .is_err()

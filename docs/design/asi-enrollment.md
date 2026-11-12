@@ -699,9 +699,17 @@ only the final directory is admitted. Interrupted staging is retained, never
 silently deleted or loaded. No credential is written before receiver confirmation
 and approval delivery. `install.lock` serializes publication. Receiver selection
 uses the full endpoint hash; an omitted name requires one enrolled receiver.
-`connect::producer_admission` is the option-C swap point for option B: it requires
-an existing local namespace binding for analytics/body and currently refuses
-those kinds until producer admission / client-certificate issuance lands.
+Producer startup uses option C now; option B must land before analytics/body
+pairing becomes user-facing. `connect::producer_admission` is the single swap
+point for B (#652). For requested analytics_publish/body_channel it reads the
+existing `analytics-namespace` from `semon analytics materialize` (#611) through
+`read_analytics_namespace`, before pairing or any network activity. No binding
+refuses with `run \`semon analytics materialize\` first, then connect`. A binding
+still refuses with `analytics/body enrollment available after producer admission /
+client-certificate issuance lands`, because the receiver still refuses those kinds.
+Mirror-only connect works without a namespace. B is tracked in #652: an explicit
+initialization entry point shared by materialize, connect and start, with no
+implicit rebuild or reset. B is not implemented here.
 
 Public-TLS origin custody records the canonical endpoint and public CA trust
 profile, not a receiver certificate fingerprint. The code-bound ActivationInput
