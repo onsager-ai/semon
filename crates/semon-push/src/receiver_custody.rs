@@ -353,16 +353,74 @@ impl ReceiverCustody {
         }
         self.update_grants(enrollment_id, Some(grants))
     }
+    /// Hold owners.lock and a fresh registry lock through installation. Concurrent
+    /// revoke/retire either wins first (installation refuses) or runs afterward.
+    /// Locks are nonblocking, so opposite acquisition order refuses rather than
+    /// deadlocking. A busy registry never authorizes cached grants.
+    /// Caller generates the permission scope (currently analytics-only); this API
+    /// checks owner and exact machine/namespace, not permissions derived from
+    /// credential kinds. Future integrations must authorize permissions separately.
+    pub fn install_current_owner_grants(
+        &self,
+        enrollment_id: &str,
+        grants: &[OwnerGrant],
+    ) -> Result<()> {
+        validate_grants(grants)?;
+        if grants
+            .iter()
+            .any(|grant| grant.principal != self.owner.principal)
+        {
+            return Err(Error::Invalid);
+        }
+        self.update_grants_checked(enrollment_id, Some(grants), true)
+    }
     pub fn retire_owner_grants(&self, enrollment_id: &str) -> Result<()> {
         self.update_grants(enrollment_id, None)
     }
     fn update_grants(&self, enrollment_id: &str, grants: Option<&[OwnerGrant]>) -> Result<()> {
+        self.update_grants_checked(enrollment_id, grants, false)
+    }
+    fn update_grants_checked(
+        &self,
+        enrollment_id: &str,
+        grants: Option<&[OwnerGrant]>,
+        current: bool,
+    ) -> Result<()> {
         if !opaque(enrollment_id, 64) {
             return Err(Error::Invalid);
         }
         let root = Directory::open(&self.dir)?;
         let acl = root.child(ACL)?;
         let _lock = acl.lock("owners.lock")?;
+        let _registry = if current {
+            let store = enrollment::Store::open(&self.dir).map_err(|_| Error::Custody)?;
+            let registry = store.snapshot().map_err(|_| Error::Custody)?;
+            let enrollment = registry
+                .enrollments()
+                .iter()
+                .find(|e| e.enrollment_id == enrollment_id && e.revoked_at.is_none())
+                .ok_or(Error::Invalid)?;
+            if enrollment
+                .credential_kinds
+                .iter()
+                .any(|kind| kind.revoked_at.is_some())
+            {
+                return Err(Error::Invalid);
+            }
+            let enrollment::Binding::Admitted { namespace, .. } = &enrollment.binding else {
+                return Err(Error::Invalid);
+            };
+            if grants.is_none_or(|grants| {
+                grants
+                    .iter()
+                    .any(|g| g.machine != enrollment.machine || &g.namespace != namespace)
+            }) {
+                return Err(Error::Invalid);
+            }
+            Some(store)
+        } else {
+            None
+        };
         let mut ledger = load_ledger(&acl)?;
         recover(&acl, &mut ledger)?;
         let mut policy: PolicyDocument = decode(&acl.read(receiver_acl::ACL_FILE)?)?;

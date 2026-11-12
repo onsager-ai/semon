@@ -349,10 +349,7 @@ jobs:
         run: |
           recv="$RUNNER_TEMP/recv"; fixture_root="$RUNNER_TEMP/sample"
           mkdir -p "$RUNNER_TEMP/recv-home" "$RUNNER_TEMP/pushed"
-          (umask 077; target/debug/semon receive token add laptop --dir "$recv" \
-            2> "$RUNNER_TEMP/token-add.log" | tr -d '\n' > "$RUNNER_TEMP/recv.token")
-          chmod 600 "$RUNNER_TEMP/recv.token"
-          [ "$(wc -c < "$RUNNER_TEMP/recv.token")" -eq 43 ] || { cat "$RUNNER_TEMP/token-add.log"; echo "no token was written"; exit 1; }
+          python3 -I tests/ui/enrollment-fixture.py "$recv" "$RUNNER_TEMP/recv.token"
           setsid nohup target/debug/semon receive --listen 127.0.0.1:0 --dir "$recv" \
             < /dev/null > "$RUNNER_TEMP/receive.log" 2>&1 &
           for _ in $(seq 1 100); do

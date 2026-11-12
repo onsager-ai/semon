@@ -544,3 +544,63 @@ fn host_observations_never_claim_swap_or_backup_safety() {
     assert_eq!(host_custody(Some(1)).core_dumps, Observation::Failed);
     assert_eq!(host_custody(None).core_dumps, Observation::Unknown);
 }
+
+#[test]
+fn revoke_between_activation_and_install_never_restores_grants() {
+    use crate::{
+        credentials::Kind,
+        enrollment::{
+            Binding, ClaimEpoch, Enrollment, Issuer, IssuerKind, KindScope, Registry, Store,
+        },
+    };
+    let fixture = Fixture::new();
+    let custody = fixture.open();
+    let enrollment = Enrollment {
+        enrollment_id: id(1),
+        receiver_id: custody.receiver_id().into(),
+        machine: "laptop".into(),
+        binding: Binding::Admitted {
+            namespace: "asi-0123456789abcdef0123456789abcdef".into(),
+            origin_incarnation: "origin-1".into(),
+            index_incarnation: "index-1".into(),
+            publisher_claim_epoch: ClaimEpoch::Unassigned,
+            issuer: Issuer {
+                kind: IssuerKind::Receiver,
+                origin_trust_acknowledged: true,
+            },
+            assertion_issuer_keys: vec![custody.issuer().clone()],
+        },
+        client_certificate_pins: vec![],
+        credential_kinds: vec![KindScope::new(Kind::AnalyticsPublish, 1)],
+        revoked_at: None,
+    };
+    let mut store = Store::open(&fixture.0).unwrap();
+    let active = Registry::from_records(vec![enrollment], vec![]).unwrap();
+    store.commit(0, &active).unwrap();
+    drop(store);
+    let grants = owner_grants(
+        custody.owner(),
+        "laptop",
+        "asi-0123456789abcdef0123456789abcdef",
+        false,
+    )
+    .unwrap();
+    // Deterministic interleaving: activation committed, revoker commits and retires,
+    // then the delayed activation caller attempts installation.
+    let mut store = Store::open(&fixture.0).unwrap();
+    let mut revoked = store.snapshot().unwrap();
+    revoked.enrollments[0].revoked_at = Some(100);
+    store.commit(revoked.revision(), &revoked).unwrap();
+    drop(store);
+    custody.retire_owner_grants(&id(1)).unwrap();
+    let before = fs::read(custody.acl_dir().join(receiver_acl::ACL_FILE)).unwrap();
+    assert!(
+        custody
+            .install_current_owner_grants(&id(1), &grants)
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(custody.acl_dir().join(receiver_acl::ACL_FILE)).unwrap(),
+        before
+    );
+}

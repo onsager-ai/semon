@@ -40,7 +40,7 @@ pub use auth::{
 
 use crate::{
     mirror::{DEFAULT_MAX_BYTES, Endpoint, MAX_BODY_BYTES, Receiver},
-    tokens::{prepare_private_dir, tokens_path},
+    tokens::prepare_private_dir,
 };
 
 /// Where `semon receive` listens unless told otherwise.
@@ -156,39 +156,18 @@ impl ServeOptions {
     }
 }
 
-/// The generic mirror listen rule: any loopback address;
-/// any other only with TLS and at least one token. Plain HTTP off loopback
-/// is always refused.
-pub fn check_listen(
-    listen: SocketAddr,
-    tls: bool,
-    tokens: usize,
-    tokens_file: &Path,
-) -> Result<(), String> {
-    if listen.ip().is_loopback() {
-        return Ok(());
-    }
-    if !tls {
-        return Err(
-            "non-loopback receiver requires --tls-cert and --tls-key; plain HTTP is served on loopback only"
-                .into(),
-        );
-    }
-    if tokens == 0 {
-        return Err(format!(
-            "non-loopback receiver requires at least one token in {} (semon receive token add NAME --dir DIR)",
-            tokens_file.display()
-        ));
-    }
-    Ok(())
-}
-
 /// Who is connected: in all, and, not yet authenticated, from each address.
 #[derive(Default)]
 struct Admission {
     open: usize,
+    provisioning: usize,
     per_ip: HashMap<IpAddr, usize>,
 }
+
+#[cfg(test)]
+type ProvisioningTerminal = dyn Fn(&str, &crate::credentials::Secret) -> Result<(), crate::provision_wire::Refused>
+    + Send
+    + Sync;
 
 struct Shared {
     receiver: Receiver,
@@ -196,6 +175,13 @@ struct Shared {
     tls: Option<Arc<rustls::ServerConfig>>,
     limits: Limits,
     admission: Mutex<Admission>,
+    provisioning: Option<Arc<Mutex<crate::provision::Controller>>>,
+    #[cfg(test)]
+    provisioning_clock: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+    #[cfg(test)]
+    provisioning_timeout: Option<Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(test)]
+    provisioning_terminal: Option<Arc<ProvisioningTerminal>>,
 }
 
 impl Shared {
@@ -211,6 +197,7 @@ struct Slot {
     shared: Arc<Shared>,
     /// The address it counts against, until it authenticates.
     ip: Option<IpAddr>,
+    provisioning: bool,
 }
 
 fn release_ip(admission: &mut Admission, ip: IpAddr) {
@@ -237,7 +224,21 @@ impl Slot {
         Some(Self {
             shared: Arc::clone(shared),
             ip: Some(ip),
+            provisioning: false,
         })
+    }
+
+    fn admit_provisioning(&mut self) -> bool {
+        if self.provisioning {
+            return true;
+        }
+        let mut admission = self.shared.admission();
+        if admission.provisioning >= crate::provision_wire::MAX_CONNECTIONS {
+            return false;
+        }
+        admission.provisioning += 1;
+        self.provisioning = true;
+        true
     }
 
     /// A request on this connection passed the token check: from now on it
@@ -253,6 +254,9 @@ impl Drop for Slot {
     fn drop(&mut self) {
         let mut admission = self.shared.admission();
         admission.open = admission.open.saturating_sub(1);
+        if self.provisioning {
+            admission.provisioning -= 1;
+        }
         if let Some(ip) = self.ip.take() {
             release_ip(&mut admission, ip);
         }
@@ -267,6 +271,7 @@ pub struct Server {
     tokens: Authenticator,
     tls: Option<Arc<rustls::ServerConfig>>,
     limits: Limits,
+    provisioning: Option<Arc<Mutex<crate::provision::Controller>>>,
 }
 
 impl Server {
@@ -274,15 +279,12 @@ impl Server {
     /// existing one others can read is refused), and binds.
     pub fn bind(options: &ServeOptions) -> Result<Self, String> {
         let dir = &options.dir;
+        if !options.listen.ip().is_loopback() && options.tls.is_none() {
+            return Err("non-loopback receiver requires --tls-cert and --tls-key".into());
+        }
         prepare_private_dir(dir, true)?;
         let tokens = Authenticator::open(dir)?;
         let credential_count = tokens.count()?;
-        check_listen(
-            options.listen,
-            options.tls.is_some(),
-            credential_count,
-            &tokens_path(dir),
-        )?;
         let tls = options
             .tls
             .as_ref()
@@ -299,7 +301,19 @@ impl Server {
             tokens,
             tls,
             limits: Limits::default(),
+            provisioning: None,
         })
+    }
+
+    pub fn with_provisioning(
+        mut self,
+        controller: Arc<Mutex<crate::provision::Controller>>,
+    ) -> Result<Self, String> {
+        if self.tls.is_none() {
+            return Err("pairing requires TLS".into());
+        }
+        self.provisioning = Some(controller);
+        Ok(self)
     }
 
     /// Other limits than the defaults (tests use short ones), with any
@@ -331,6 +345,13 @@ impl Server {
             tls: self.tls,
             limits: self.limits,
             admission: Mutex::new(Admission::default()),
+            provisioning: self.provisioning,
+            #[cfg(test)]
+            provisioning_clock: None,
+            #[cfg(test)]
+            provisioning_timeout: None,
+            #[cfg(test)]
+            provisioning_terminal: None,
         });
         for accepted in self.listener.incoming() {
             let socket = match accepted {
@@ -554,6 +575,7 @@ struct Head {
     /// An `Expect` other than `100-continue`.
     expect_other: bool,
     authorization: Option<String>,
+    content_type: Option<String>,
 }
 
 /// Why no request head was read.
@@ -838,6 +860,12 @@ fn parse_head(bytes: &[u8]) -> Result<Head, (u16, &'static str)> {
                     head.expect_other = true;
                 }
             }
+            "content-type" => {
+                if head.content_type.is_some() {
+                    return Err(MALFORMED);
+                }
+                head.content_type = Some(value.to_owned());
+            }
             "authorization" => {
                 if head.authorization.is_some() {
                     return Err(MALFORMED);
@@ -939,9 +967,165 @@ fn classify_route(path: &str) -> Option<(Kind, Option<Endpoint>)> {
     }
 }
 
+/// Separate bounded dispatcher, enabled only through local owner authorization.
+/// No machine credential, cookie or body route can authorize this surface.
+fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
+    use crate::provision_wire::{self, Request, Route};
+    let refused = || Next::Refuse(401, "request refused", &[]);
+    let Some(route) = Route::from_path(&head.target) else {
+        return refused();
+    };
+    let Stream::Tls(stream) = &connection.stream else {
+        return refused();
+    };
+    if stream.conn.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3) {
+        return refused();
+    }
+    let exporter = stream.conn.export_keying_material(
+        [0u8; provision_wire::EXPORTER_LENGTH],
+        provision_wire::EXPORTER_LABEL,
+        Some(&[]),
+    );
+    if exporter.is_err()
+        || head.method != "POST"
+        || head.content_type.as_deref() != Some("application/json")
+        || head.transfer_encoding
+        || head.expect_other
+        || !head
+            .content_length
+            .is_some_and(|n| n <= provision_wire::MAX_MESSAGE_BYTES as u64)
+        || !slot.admit_provisioning()
+    {
+        return refused();
+    }
+    if head.expect_continue && connection.send(b"HTTP/1.1 100 Continue\r\n\r\n").is_err() {
+        return Next::Close;
+    }
+    let saved = connection.limits.body;
+    connection.limits.body = Duration::from_secs(provision_wire::READ_SECONDS);
+    #[cfg(test)]
+    let injected_timeout = slot
+        .shared
+        .provisioning_timeout
+        .as_ref()
+        .is_some_and(|flag| flag.swap(false, std::sync::atomic::Ordering::Relaxed));
+    #[cfg(not(test))]
+    let injected_timeout = false;
+    let body = if injected_timeout {
+        Err(io::ErrorKind::TimedOut.into())
+    } else {
+        connection.read_body(head.content_length.unwrap_or(0) as usize)
+    };
+    connection.limits.body = saved;
+    let Ok(body) = body else {
+        if let Ok(exporter) = exporter
+            && let Some(controller) = slot.shared.provisioning.as_ref()
+            && let Ok(mut controller) = controller.lock()
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |now| now.as_secs());
+            #[cfg(test)]
+            let now = slot
+                .shared
+                .provisioning_clock
+                .as_ref()
+                .map_or(now, |clock| clock());
+            controller.malformed(exporter, now);
+        }
+        return refused();
+    };
+    let body = zeroize::Zeroizing::new(body);
+    let Ok(exporter) = exporter else {
+        return refused();
+    };
+    let Some(controller) = slot.shared.provisioning.as_ref() else {
+        return refused();
+    };
+    let mut controller = match controller.lock() {
+        Ok(controller) => controller,
+        Err(_) => return refused(),
+    };
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(now) => now.as_secs(),
+        Err(_) => return refused(),
+    };
+    #[cfg(test)]
+    let now = slot
+        .shared
+        .provisioning_clock
+        .as_ref()
+        .map_or(now, |clock| clock());
+    let request = match Request::parse(route, &body) {
+        Ok(request) => request,
+        Err(_) => {
+            controller.malformed(exporter, now);
+            return refused();
+        }
+    };
+    let clock = || {
+        let current = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(now, |now| now.as_secs());
+        #[cfg(test)]
+        let current = slot
+            .shared
+            .provisioning_clock
+            .as_ref()
+            .map_or(current, |clock| clock());
+        current
+    };
+    let reply = controller.handle_with_clock(request, exporter, &clock, |id, code| {
+        #[cfg(test)]
+        if let Some(terminal) = &slot.shared.provisioning_terminal {
+            return terminal(id, code);
+        }
+        use std::io::IsTerminal;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut terminal = fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open("/dev/tty")
+            .map_err(|_| provision_wire::Refused)?;
+        if !terminal.is_terminal() {
+            return Err(provision_wire::Refused);
+        }
+        writeln!(terminal, "Pairing {id}: {}", code.expose()).map_err(|_| provision_wire::Refused)
+    });
+    let unavailable = controller.take_unavailable();
+    drop(controller);
+    if let Some(message) = unavailable {
+        return Next::Refuse(409, message, &[]);
+    }
+    let Ok(reply) = reply else {
+        return refused();
+    };
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{}\r\n",
+        reply.len(),
+        if head.close {
+            "Connection: close\r\n"
+        } else {
+            ""
+        }
+    );
+    if connection
+        .send(head.as_bytes())
+        .and_then(|()| connection.send(&reply))
+        .is_err()
+    {
+        Next::Close
+    } else {
+        Next::Continue
+    }
+}
+
 /// Checks a request in order (endpoint, method, framing, token, size) and,
 /// only once all pass, reads its body and answers it.
 fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
+    if head.target.starts_with("/v1/provision/") {
+        return answer_provisioning(slot, connection, head);
+    }
     if head.transfer_encoding {
         return Next::Refuse(
             411,
@@ -1011,6 +1195,9 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
 #[cfg(test)]
 #[path = "serve_auth_tests.rs"]
 mod auth_tests;
+#[cfg(test)]
+#[path = "provision_http_tests.rs"]
+mod provision_http_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1088,18 +1275,5 @@ mod tests {
             assert!(!duration.is_zero());
         }
         assert_eq!(Limits::default().clamped(), Limits::default());
-    }
-
-    #[test]
-    fn only_loopback_serves_plain_http() {
-        let file = Path::new("/receiver/tokens");
-        let at = |text: &str| text.parse::<SocketAddr>().unwrap();
-        assert!(check_listen(at("127.0.0.1:8735"), false, 0, file).is_ok());
-        assert!(check_listen(at("[::1]:8735"), false, 0, file).is_ok());
-        let plain = check_listen(at("0.0.0.0:8735"), false, 3, file).unwrap_err();
-        assert!(plain.contains("--tls-cert"), "{plain}");
-        let untokened = check_listen(at("192.0.2.1:8735"), true, 0, file).unwrap_err();
-        assert!(untokened.contains("at least one token"), "{untokened}");
-        assert!(check_listen(at("0.0.0.0:8735"), true, 1, file).is_ok());
     }
 }

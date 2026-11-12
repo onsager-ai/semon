@@ -28,33 +28,29 @@ custody only; missing pairing-gate custody does not disable existing authenticat
 Private owned mode-0600 `DIR/client-trust.pem` supplies PEM client roots; absence
 disables client-certificate presentation. Reserved analytics/body routes refuse
 closed until their owning integrations land.
-[`tokens.rs`](../../crates/semon-push/src/tokens.rs) stores `NAME SHA256(token)`
-lines in `DIR/tokens`; `Tokens::authorize` supplies a machine identity. The
-[mirror protocol](../mirror-protocol.md) and push client implement supported Push,
-not the enrollment, client-certificate identity or remote body read defined here.
-#630/#631 and #635 supply libraries, not integrated onboarding or body service.
+The listener uses kind-scoped enrollment-registry authentication; the former
+flat-file token reader and commands are removed. Legacy `DIR/tokens` custody
+refuses startup/routes without import or deletion. The [mirror protocol](../mirror-protocol.md)
+and Push client retain supported mirror transport with enrolled mirror_push bearers.
+#630/#631 and #635 supply libraries, not integrated body service.
 
-The receiver registry and kind-aware credential custody are implemented as Unix
-libraries in `semon-push::enrollment` and `semon-push::credentials`, consumed by
-the listener's registry authenticator. Enrollment creation and pairing remain
-unwired from CLI and default provisioning paths. Explicit library
-initialization creates `DIR/enrollment/registry.json` (format 1) and
-`DIR/enrollment/registry.lock`, relative to the receiver state directory `DIR`.
+The Unix enrollment/credential libraries now feed the receiver provisioning
+controller and `receive enroll` terminal. Receiver-side public_tls provisioning
+creates mirror-only enrollments; origin connect/client, independently validated
+analytics admission, certificate issuance, renewal and revocation CLI remain
+follow-up integrations. Custody creates `DIR/enrollment/registry.json` (format 1)
+and `DIR/enrollment/registry.lock`, relative to receiver state directory `DIR`.
 One atomic registry document contains enrollment bindings, generation-scoped
 certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
 serialized. The library also exposes legacy `DIR/tokens` refusal without importing
-or modifying it. A transitional authenticator preserves mirror `DIR/tokens` only
-while no enrollment directory exists, rechecking absence on every request. Legacy
-requests may select different token machines on one connection; registry mode
-binds it to one enrollment. Appearance of enrollment custody blocks legacy
-requests; legacy resumes only when that path truly does not exist. Mixed token/
-registry custody refuses startup without changing either file. PR 3.2 removes
-this seam in the end-to-end pairing/token cutover. Renewal and provisioning route
-integration remain unimplemented. The `public_tls`
-pairing core is landed unwired in `crates/semon-push/src/pairing.rs` with deterministic
-coverage in `pairing_tests.rs`; PR 3.2 will wire provisioning routes, CLI, outputs
-and the tokens cutover, including receiver assertion-issuer signing-key custody;
-PR 3.1 provisions no signing key. `Core::registry()` exposes a fresh registry with
+or modifying it. The listener now authenticates only through the current registry;
+legacy `DIR/tokens` custody refuses startup and every request with explicit
+re-pair/re-issue guidance, preserving the file and all retained history. A connection
+is bound to one enrollment and cannot switch machines between requests. The old
+flat-token issue/revoke/list commands and reader are retired. The public_tls core
+in `pairing.rs` is wired through strict provisioning routes and local owner CLI;
+receiver identity/assertion-issuer custody comes from ReceiverCustody.
+`Core::registry()` exposes a fresh registry with
 all fields for the later `origin_read::EnrollmentScope` adapter. Revocation comes
 from a separate CLI process editing the registry and is observed through its
 revision; pairing holds `pairing.lock`, acquiring `registry.lock` only for short
@@ -256,6 +252,78 @@ logs, URLs, assertions or errors. Pairing does not persist P1 source consent;
 the caller supplies verified private-key signature evidence binding B4 to the
 transcript and exact summary digest, and must durably persist consent separately.
 
+### public_tls provisioning wire contract
+
+Contract additions for review (receiver PR3.2b-1): provisioning uses the existing
+listener, with dedicated HTTPS POST routes `/v1/provision/open`, `confirm`,
+`approve` and `cancel`. The dispatcher precedes analytics/body classification.
+TLS 1.3 is mandatory before allocating pairing state. Obtain exactly 32 bytes
+from the live rustls connection's `export_keying_material` with label
+`EXPORTER-semon-asi-pairing-v1` and empty context. Bind the session to that
+connection's exporter; never accept exporter bytes from a request. Resumption is
+permitted, but a resumed connection has its own exporter and cannot inherit a
+pending session's authority.
+
+Messages are strict JSON objects (`Content-Type: application/json`), with explicit
+`version: 1`, no unknown or duplicate fields, and canonical base64url without
+padding for binary fields. Session IDs retain pairing.rs's 64 lowercase hex
+characters. Every request and response has an exact 8,192-byte encoded ceiling;
+check Content-Length before reading and bound the reader. Provisioning has a
+10-second request read deadline and at most eight admitted connections across the
+receiver, separate from body/analytics dispatch. Core retains the four-pending,
+six-creations/hour and ten/ten/twenty-minute session limits. Excess admission
+allocates no session. All external protocol failures are the same generic
+refusal, including unknown session, wrong code, expiry and exhausted budgets.
+No redirects are emitted or followed; cookies and Authorization headers confer
+no provisioning authority.
+
+`open` carries only version; its response carries version, session ID, receiver
+nonce, canonical advertised endpoint, receiver ID, assertion issuer key ID and
+public key. This revises the earlier proposed open-time scope commitment: the
+origin first needs those issuer pins to construct its full ActivationInput.
+The origin commits the full input in `confirm`'s scope commitment; the code-bound
+MACs authenticate the returned issuer metadata through that commitment. The code is delivered once only to the
+receiver's trusted local terminal. It has no request or response field.
+`confirm` carries version, session ID, 65-byte origin public key, 32-byte origin
+nonce, 32-byte scope commitment and 32-byte origin MAC. The receiver reconstructs
+the existing pairing.rs transcript with its own exporter/nonce/endpoint. Only a
+verified origin MAC permits a `confirmed` response (version and receiver MAC).
+`approve` carries version, session ID, the full strict ActivationInput and 64-byte
+proof. Recompute input.commitment() and require transcript.scope equality. Apply
+receiver policy: named authorized machine, valid binding, offered kinds only,
+empty certificate pins and no client-cert requirement for mirror. Only mirror_push activates in this slice; analytics_publish refuses until origin connect / independently validated producer admission lands. Peer-supplied namespace/incarnation bindings cannot authorize activation.
+Unsupported-kind diagnostics are released only after connection/session binding, current confirmed state, exact commitment and origin possession proof verify; earlier failures remain generic. Body-channel enrollment is available after client-certificate issuance lands.
+The **initial credential validity ceiling** is 90 days (7,776,000 seconds) from
+activation now, exclusive lower bound (`valid_until > now`) and inclusive upper
+bound. This is a Manager-chosen parameter for PM review; renewal under valid
+enrolled trust arrives in PR4, which may change this value. `cancel` carries
+version and session ID and remains bound to the same TLS connection.
+
+The origin key is an uncompressed P-256 point. Proof of possession uses
+`ring::signature::ECDSA_P256_SHA256_FIXED` over
+`b"semon-asi-pairing-pop-v1\0" || transcript.digest() || session_id.as_bytes()`.
+The transcript digest is pairing.rs's existing SHA-256 canonical transcript
+commitment, including the exact B4 scope digest. Verify this signature before
+constructing `VerifiedApproval` or activating authority. The wire module does not
+choose enrollment scope, install grants, or certify durable origin consent.
+`recover` carries version, original canonical transcript fields, application key
+(32 bytes) and proof (64 bytes) on a new normally validated TLS connection. Sign
+`b"semon-asi-recovery-pop-v1\0" || transcript.digest() || session_id.as_bytes()
+|| new_connection_exporter`. Rebuild the origin-held ConfirmedKey only after proof
+verification; deliver independently matches origin-key, transcript and application
+hashes in the durable receipt, expiry, revocation and the two-delivery cap.
+Application key custody is equivalent to its derived bearer authority; it travels
+only to the enrolled TLS endpoint. The new exporter binds recovery to its current
+connection; generic failures and provisioning admission bounds apply. No raw
+application key or bearer is persisted. After two interrupted deliveries explicit
+revocation is required; recovery cannot revive authority. Receiver recovery refuses receipts with any kind not currently offered (mirror_push only) before reserving another delivery.
+
+The receiver controller is enabled only by local `receive enroll` authorization.
+Codes go directly to `/dev/tty`, never stdout/stderr or a wire field. Its local
+terminal accepts `pending` and `cancel SESSION_ID`. Activation commits enrollment,
+kind hashes and receipt together, followed by exact owner grant installation;
+recovery revalidates committed authority before repairing interrupted grants. Grant installation holds owners.lock and a fresh registry lock through the authority check and ACL write; busy/revoked state refuses. The mutex-held KDF and /dev/tty write are known limits: other provisioning and local pending/cancel actions wait without a mutex deadline; existing authenticated routes use separate locks.
+
 ## Source consent and P1
 
 B4 confirms the journey's accepted first-owner policy profile P1. Show the selected
@@ -353,7 +421,7 @@ an enrollment has an approved scope and atomic activation; no early active grant
 Later enrollments reuse receiver identity, owner, keys and directories.
 
 Implementation status (slice 4a PR3.2a, part of #593): `receiver_custody`
-is an unwired Unix library. Under `DIR`, mode-0700 directories are `enrollment/`
+is a Unix library consumed by receiver-side provisioning. Under `DIR`, mode-0700 directories are `enrollment/`
 (existing registry format 1), `issuer-secrets/`, `cache-secrets/`, `body-cache/`, `acl/` and
 `receiver-audit/`. Mode-0600 files are `receiver.json` (strict JSON format 1:
 random receiver ID and current issuer key ID), `custody.lock`,
@@ -478,8 +546,8 @@ bodies; recovery cannot reconstruct missing source custody.
 
 ## Shared listener authentication and dispatch
 
-The implementation status above covers PR2's listener hooks and PR 3.1's unwired
-pairing core. PR 3.2 owns provisioning and token cutover; #594 owns body handlers
+The implementation status above covers listener hooks and receiver-side public_tls
+provisioning/token cutover. Origin connect remains follow-up; #594 owns body handlers
 and in-flight cancellation; slice 5 owns analytics handlers.
 
 Extend rustls with optional client-certificate presentation/verification: analytics

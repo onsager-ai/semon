@@ -263,6 +263,21 @@ pub struct ConfirmedKey {
     application: Zeroizing<[u8; 32]>,
     transcript: Transcript,
 }
+impl ConfirmedKey {
+    #[cfg(test)]
+    pub(crate) fn recovery_key_for_test(&self) -> &[u8; 32] {
+        &self.application
+    }
+
+    /// Receiver recovery only. Caller must verify a fresh connection-bound origin
+    /// signature; deliver() independently matches all persisted receipt hashes.
+    pub(crate) fn recovered(application: Zeroizing<[u8; 32]>, transcript: Transcript) -> Self {
+        Self {
+            application,
+            transcript,
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
     Pending,
@@ -607,7 +622,7 @@ impl Core {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Receipt {
     pub(crate) session_id: String,
-    enrollment_id: String,
+    pub(crate) enrollment_id: String,
     origin_key_hash: [u8; 32],
     transcript_digest: [u8; 32],
     application_hash: [u8; 32],
@@ -632,7 +647,8 @@ pub(crate) fn validate_receipts(registry: &Registry) -> Result<()> {
     }
     Ok(())
 }
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActivationInput {
     pub machine: String,
     pub binding: Binding,

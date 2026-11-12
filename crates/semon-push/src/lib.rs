@@ -56,6 +56,10 @@ pub mod origin_read;
 #[cfg(unix)]
 pub mod pairing;
 #[cfg(unix)]
+pub mod provision;
+#[cfg(unix)]
+pub mod provision_wire;
+#[cfg(unix)]
 pub mod receiver_acl;
 #[cfg(unix)]
 pub mod receiver_audit;
