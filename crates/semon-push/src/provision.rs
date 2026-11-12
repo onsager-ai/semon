@@ -59,6 +59,27 @@ impl Controller {
     pub fn cancel(&mut self, id: &str, now: u64) -> Result<(), Refused> {
         self.core.cancel(id, now).map_err(|_| Refused)
     }
+    #[cfg(test)]
+    pub(crate) fn reserve_probe(&mut self, id: &str, exporter: [u8; 32], now: u64) -> bool {
+        let Some(pending) = self.pending.get(id) else {
+            return false;
+        };
+        let malformed = Transcript {
+            version: 0,
+            session_id: id.into(),
+            endpoint: self.endpoint.clone(),
+            exporter: exporter.to_vec(),
+            origin_key: vec![],
+            scope: [0; 32],
+            origin_nonce: [0; 32],
+            receiver_nonce: pending.nonce,
+            origin_role: "origin".into(),
+            receiver_role: "receiver".into(),
+            profile: "public_tls".into(),
+        };
+        let _ = self.core.reserve(&wire::encode(&exporter), malformed, now);
+        self.core.state(id, now) == Ok(pairing::State::Rejected)
+    }
     /// Malformed messages on a known pending connection spend an attempt. Foreign
     /// identifiers never charge another connection. Dropping a reserved ticket
     /// does not refund attempts, including timeout/disconnect paths.

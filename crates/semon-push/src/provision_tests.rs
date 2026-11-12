@@ -119,6 +119,24 @@ fn confirmation_activation_and_recovery_preserve_one_registry_outcome() {
     let proof = key
         .sign(&SystemRandom::new(), &wire::possession_message(&t))
         .unwrap();
+    let mut substituted: pairing::ActivationInput =
+        serde_json::from_slice(&serde_json::to_vec(&input).unwrap()).unwrap();
+    substituted.valid_until -= 1;
+    assert!(
+        controller
+            .handle(
+                Request::Approve(wire::Approve {
+                    version: 1,
+                    session_id: t.session_id.clone(),
+                    proof: wire::encode(proof.as_ref()),
+                    input: substituted,
+                }),
+                exporter,
+                100,
+                |_, _| panic!("code shown twice")
+            )
+            .is_err()
+    );
     let response = controller
         .handle(
             Request::Approve(wire::Approve {

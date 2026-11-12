@@ -164,6 +164,11 @@ struct Admission {
     per_ip: HashMap<IpAddr, usize>,
 }
 
+#[cfg(test)]
+type ProvisioningTerminal = dyn Fn(&str, &crate::credentials::Secret) -> Result<(), crate::provision_wire::Refused>
+    + Send
+    + Sync;
+
 struct Shared {
     receiver: Receiver,
     tokens: Authenticator,
@@ -171,6 +176,12 @@ struct Shared {
     limits: Limits,
     admission: Mutex<Admission>,
     provisioning: Option<Arc<Mutex<crate::provision::Controller>>>,
+    #[cfg(test)]
+    provisioning_clock: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
+    #[cfg(test)]
+    provisioning_timeout: Option<Arc<std::sync::atomic::AtomicBool>>,
+    #[cfg(test)]
+    provisioning_terminal: Option<Arc<ProvisioningTerminal>>,
 }
 
 impl Shared {
@@ -335,6 +346,12 @@ impl Server {
             limits: self.limits,
             admission: Mutex::new(Admission::default()),
             provisioning: self.provisioning,
+            #[cfg(test)]
+            provisioning_clock: None,
+            #[cfg(test)]
+            provisioning_timeout: None,
+            #[cfg(test)]
+            provisioning_terminal: None,
         });
         for accepted in self.listener.incoming() {
             let socket = match accepted {
@@ -986,9 +1003,36 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
     }
     let saved = connection.limits.body;
     connection.limits.body = Duration::from_secs(provision_wire::READ_SECONDS);
-    let body = connection.read_body(head.content_length.unwrap_or(0) as usize);
+    #[cfg(test)]
+    let injected_timeout = slot
+        .shared
+        .provisioning_timeout
+        .as_ref()
+        .is_some_and(|flag| flag.swap(false, std::sync::atomic::Ordering::Relaxed));
+    #[cfg(not(test))]
+    let injected_timeout = false;
+    let body = if injected_timeout {
+        Err(io::ErrorKind::TimedOut.into())
+    } else {
+        connection.read_body(head.content_length.unwrap_or(0) as usize)
+    };
     connection.limits.body = saved;
     let Ok(body) = body else {
+        if let Ok(exporter) = exporter
+            && let Some(controller) = slot.shared.provisioning.as_ref()
+            && let Ok(mut controller) = controller.lock()
+        {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |now| now.as_secs());
+            #[cfg(test)]
+            let now = slot
+                .shared
+                .provisioning_clock
+                .as_ref()
+                .map_or(now, |clock| clock());
+            controller.malformed(exporter, now);
+        }
         return refused();
     };
     let Ok(exporter) = exporter else {
@@ -1001,6 +1045,12 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
         Ok(now) => now.as_secs(),
         Err(_) => return refused(),
     };
+    #[cfg(test)]
+    let now = slot
+        .shared
+        .provisioning_clock
+        .as_ref()
+        .map_or(now, |clock| clock());
     let mut controller = match controller.lock() {
         Ok(controller) => controller,
         Err(_) => return refused(),
@@ -1026,6 +1076,10 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
         );
     }
     let reply = controller.handle(request, exporter, now, |id, code| {
+        #[cfg(test)]
+        if let Some(terminal) = &slot.shared.provisioning_terminal {
+            return terminal(id, code);
+        }
         use std::io::IsTerminal;
         use std::os::unix::fs::OpenOptionsExt;
         let mut terminal = fs::OpenOptions::new()
@@ -1137,6 +1191,9 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
 #[cfg(test)]
 #[path = "serve_auth_tests.rs"]
 mod auth_tests;
+#[cfg(test)]
+#[path = "provision_http_tests.rs"]
+mod provision_http_tests;
 
 #[cfg(test)]
 mod tests {

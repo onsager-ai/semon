@@ -303,14 +303,14 @@ version and session ID and remains bound to the same TLS connection.
 
 The origin key is an uncompressed P-256 point. Proof of possession uses
 `ring::signature::ECDSA_P256_SHA256_FIXED` over
-`b"semon-asi-pairing-pop-v1\\0" || transcript.digest() || session_id.as_bytes()`.
+`b"semon-asi-pairing-pop-v1\0" || transcript.digest() || session_id.as_bytes()`.
 The transcript digest is pairing.rs's existing SHA-256 canonical transcript
 commitment, including the exact B4 scope digest. Verify this signature before
 constructing `VerifiedApproval` or activating authority. The wire module does not
 choose enrollment scope, install grants, or certify durable origin consent.
 `recover` carries version, original canonical transcript fields, application key
 (32 bytes) and proof (64 bytes) on a new normally validated TLS connection. Sign
-`b"semon-asi-recovery-pop-v1\\0" || transcript.digest() || session_id.as_bytes()
+`b"semon-asi-recovery-pop-v1\0" || transcript.digest() || session_id.as_bytes()
 || new_connection_exporter`. Rebuild the origin-held ConfirmedKey only after proof
 verification; deliver independently matches origin-key, transcript and application
 hashes in the durable receipt, expiry, revocation and the two-delivery cap.

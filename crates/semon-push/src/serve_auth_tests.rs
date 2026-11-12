@@ -34,6 +34,9 @@ fn revocation_between_requests_on_one_live_connection() {
         limits: server.limits,
         admission: Mutex::new(Admission::default()),
         provisioning: None,
+        provisioning_clock: None,
+        provisioning_timeout: None,
+        provisioning_terminal: None,
     });
     let mut slot = Slot::admit(&shared, "127.0.0.1".parse().unwrap()).unwrap();
     let worker = thread::spawn(move || serve_connection(&mut slot, socket, Instant::now()));
@@ -182,6 +185,9 @@ fn pipelined_body_reads_stop_at_each_authorized_boundary() {
         limits: Limits::default(),
         admission: Mutex::new(Admission::default()),
         provisioning: None,
+        provisioning_clock: None,
+        provisioning_timeout: None,
+        provisioning_terminal: None,
     });
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -221,9 +227,9 @@ fn pipelined_body_reads_stop_at_each_authorized_boundary() {
 }
 
 static NEXT: AtomicU64 = AtomicU64::new(0);
-struct PrivateDir(PathBuf);
+pub(super) struct PrivateDir(pub(super) PathBuf);
 impl PrivateDir {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let dir = std::env::temp_dir().join(format!(
             "semon-listener-auth-{}-{}",
             std::process::id(),
@@ -238,7 +244,7 @@ impl Drop for PrivateDir {
         let _ = fs::remove_dir_all(&self.0);
     }
 }
-fn fixture(name: &str) -> PathBuf {
+pub(super) fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")
         .join(name)
@@ -767,6 +773,9 @@ fn unknown_routes_refuse_with_no_body_read_and_one_response_class() {
         limits: Limits::default(),
         admission: Mutex::new(Admission::default()),
         provisioning: None,
+        provisioning_clock: None,
+        provisioning_timeout: None,
+        provisioning_terminal: None,
     });
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
