@@ -9,6 +9,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 pub const VERSION: u8 = 1;
 pub const CONTROL_CAP: usize = 16 * 1024;
@@ -231,7 +232,7 @@ pub enum FrameContent {
 }
 pub struct Frame {
     pub header: FrameHeader,
-    pub payload: Vec<u8>,
+    pub payload: Zeroizing<Vec<u8>>,
 }
 
 pub fn parse_poll(bytes: &[u8]) -> Result<PollRequest> {
@@ -278,12 +279,12 @@ fn version(value: u8) -> Result<()> {
         Ok(())
     }
 }
-pub fn encode_frame(frame: &Frame) -> Result<Vec<u8>> {
+pub fn encode_frame(frame: &Frame) -> Result<Zeroizing<Vec<u8>>> {
     if frame.payload.len() != frame.header.payload_bytes as usize {
         return Err(Reason::InvalidRequest);
     }
     let header = control(&frame.header)?;
-    let mut bytes = Vec::with_capacity(4 + header.len() + frame.payload.len());
+    let mut bytes = Zeroizing::new(Vec::with_capacity(4 + header.len() + frame.payload.len()));
     bytes.extend_from_slice(&(header.len() as u32).to_be_bytes());
     bytes.extend_from_slice(&header);
     bytes.extend_from_slice(&frame.payload);
@@ -341,7 +342,7 @@ pub fn parse_frame(bytes: &[u8]) -> Result<Frame> {
     }
     Ok(Frame {
         header,
-        payload: payload.to_vec(),
+        payload: Zeroizing::new(payload.to_vec()),
     })
 }
 pub(crate) fn validate_key(key: &CacheKey) -> Result<()> {
@@ -461,10 +462,13 @@ mod tests {
                 payload_bytes: 1,
                 content: FrameContent::Data,
             },
-            payload: vec![42],
+            payload: Zeroizing::new(vec![42]),
         };
         let mut encoded = encode_frame(&f).unwrap();
-        assert_eq!(parse_frame(&encoded).unwrap().payload, vec![42]);
+        // Successful parsing transfers only zeroizing plaintext ownership,
+        // including validation temporaries and callers that reject the frame.
+        let payload: Zeroizing<Vec<u8>> = parse_frame(&encoded).unwrap().payload;
+        assert_eq!(payload.as_slice(), &[42]);
         encoded.push(0);
         assert!(parse_frame(&encoded).is_err());
         assert!(parse_frame(&vec![0; RESPONSE_CAP + 1]).is_err());

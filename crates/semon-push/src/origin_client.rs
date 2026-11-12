@@ -572,7 +572,7 @@ fn encode(
     content: FrameContent,
     payload: Vec<u8>,
 ) -> wire::Result<Zeroizing<Vec<u8>>> {
-    let mut frame = Frame {
+    let frame = Frame {
         header: FrameHeader {
             version: wire::VERSION,
             request_id: id,
@@ -581,12 +581,9 @@ fn encode(
             payload_bytes: payload.len() as u32,
             content,
         },
-        payload,
+        payload: Zeroizing::new(payload),
     };
-    let result = wire::encode_frame(&frame).map(Zeroizing::new);
-    use zeroize::Zeroize;
-    frame.payload.zeroize();
-    result
+    wire::encode_frame(&frame)
 }
 type EncodedFrames = Vec<(Zeroizing<Vec<u8>>, u64)>;
 fn response_frames(
