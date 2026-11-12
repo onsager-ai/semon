@@ -351,7 +351,8 @@ impl<C: Clock> BodyCache<C> {
         // Origin ceilings govern only this namespace/incarnation's custody.
         // Check them before receiver-wide eviction, so a refused origin budget
         // cannot evict another origin while attempting an insertion.
-        self.enforce_scoped(size, &sources, limits, Some(&metadata.key))?;
+        let origin_limits = Limits::default().narrowed(origin.unwrap_or_default());
+        self.enforce_scoped(size, &sources, origin_limits, Some(&metadata.key))?;
         self.enforce(size, &sources, self.limits)?;
         let id = key_id(&metadata.key)?;
         // Existing entries count while staging a replacement. Removing first
@@ -1445,7 +1446,15 @@ mod tests {
         assert!(cache.entries.contains_key(&key_id(&next).unwrap()));
         assert!(cache.entries.contains_key(&b_id));
         assert_eq!(fs::read(&b_path).unwrap(), b_record);
-        // Receiver custody retains global LRU authority across origins.
+        // The TTL miss did not touch recency: B was inserted first (1), A
+        // second (2), then next replaced A (3). Both expire at 1900, not 1001.
+        let next_id = key_id(&next).unwrap();
+        assert_eq!(cache.entries[&b_id].used, 1);
+        assert_eq!(cache.entries[&next_id].used, 3);
+        assert_eq!(cache.entries[&b_id].metadata.expires, 1900);
+        assert_eq!(cache.entries[&next_id].metadata.expires, 1900);
+        // Receiver custody retains global LRU authority across origins. The
+        // scoped pass must not consume the receiver ceiling and evict next first.
         let total: u64 = cache.entries.values().map(|e| e.bytes).sum();
         cache.limits.global_bytes = total + 2 * STATE_BYTES;
         cache
