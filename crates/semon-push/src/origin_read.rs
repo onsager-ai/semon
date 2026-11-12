@@ -522,7 +522,7 @@ impl<C: Clock> OriginRead<'_, C> {
         request: &ReadRequest,
         limits: CacheLimits,
     ) -> Result<Authorized> {
-        self.run(claims, request, None, limits)
+        self.run(claims, request, None, limits, self.renderer, false)
     }
     pub fn authorization_only(
         &mut self,
@@ -547,7 +547,31 @@ impl<C: Clock> OriginRead<'_, C> {
         validator: &dyn ExportViewValidator,
         limits: CacheLimits,
     ) -> Result<Authorized> {
-        self.run(claims, request, Some((candidate, validator)), limits)
+        self.run(
+            claims,
+            request,
+            Some((candidate, validator)),
+            limits,
+            self.renderer,
+            false,
+        )
+    }
+    /// Append pages share the complete authorization, audit and witness fences.
+    /// The injected renderer must emit only complete admitted records.
+    pub fn read_append(
+        &mut self,
+        claims: &Claims,
+        request: &ReadRequest,
+        renderer: &dyn PageRenderer,
+    ) -> Result<Authorized> {
+        self.run(
+            claims,
+            request,
+            None,
+            CacheLimits::default(),
+            renderer,
+            true,
+        )
     }
     fn run(
         &mut self,
@@ -555,6 +579,8 @@ impl<C: Clock> OriginRead<'_, C> {
         request: &ReadRequest,
         cached: Option<(&CachedCandidate, &dyn ExportViewValidator)>,
         cache_limits: CacheLimits,
+        renderer: &dyn PageRenderer,
+        streaming: bool,
     ) -> Result<Authorized> {
         let scope = self
             .enrollment
@@ -607,7 +633,7 @@ impl<C: Clock> OriginRead<'_, C> {
                 continuation: candidate.continuation.clone(),
             }
         } else {
-            self.renderer.prepare(
+            renderer.prepare(
                 &source,
                 &request.target,
                 policy,
@@ -682,7 +708,11 @@ impl<C: Clock> OriginRead<'_, C> {
                 source_handle: identifier(request.source_handle.as_str().as_bytes()),
                 generation: source.cohort_id,
                 permitted_range: range,
-                purpose: request.target.purpose(),
+                purpose: if streaming {
+                    Purpose::StreamRange
+                } else {
+                    request.target.purpose()
+                },
                 receiver_policy_version: identifier(claims.receiver_policy_version.as_bytes()),
                 origin_policy_version: policy.policy_version,
                 origin_redactor_version: policy.redactor_version,
@@ -701,7 +731,7 @@ impl<C: Clock> OriginRead<'_, C> {
             let page = if cached.is_some() {
                 None
             } else {
-                let rendered = self.renderer.render(
+                let rendered = renderer.render(
                     &source,
                     &request.target,
                     policy,

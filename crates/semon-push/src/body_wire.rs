@@ -33,6 +33,13 @@ pub enum Reason {
     BindingMismatch,
     AuditFailure,
     PolicyChanged,
+    LeaseCapacity,
+    LeaseClosed,
+    ContinuationInvalid,
+    Cancelled,
+    NoWatchers,
+    AclChanged,
+    ChannelRestart,
 }
 impl Reason {
     pub fn retryable(self) -> bool {
@@ -86,7 +93,7 @@ pub enum Operation {
         page: OpaqueId,
         lease_id: Identifier,
         lease_deadline: u64,
-        max_pages: u32,
+        continuation: Option<OpaqueId>,
     },
     Cancel {
         request_id: Identifier,
@@ -95,21 +102,29 @@ pub enum Operation {
     Acknowledge {
         request_id: Identifier,
         lease_id: Identifier,
-        frame: u32,
-        continuation: Option<OpaqueId>,
+        page: OpaqueId,
+        lease_deadline: u64,
+        continuation: OpaqueId,
     },
 }
 impl Operation {
     pub fn supported(&self) -> bool {
         matches!(
             self,
-            Self::Resolve { .. } | Self::ReadPage { .. } | Self::ReadField { .. }
+            Self::Resolve { .. }
+                | Self::ReadPage { .. }
+                | Self::ReadField { .. }
+                | Self::SubscribeAppends { .. }
+                | Self::Acknowledge { .. }
+                | Self::Cancel { .. }
         )
     }
     pub fn selector(&self) -> Result<Selector> {
         match self {
             Self::Resolve { selector, .. } => Ok(selector.clone()),
-            Self::ReadPage { page } => Ok(Selector::Page { id: page.clone() }),
+            Self::ReadPage { page }
+            | Self::SubscribeAppends { page, .. }
+            | Self::Acknowledge { page, .. } => Ok(Selector::Page { id: page.clone() }),
             Self::ReadField { field } => Ok(Selector::Field { id: field.clone() }),
             _ => Err(Reason::UnsupportedVerb),
         }
@@ -161,6 +176,15 @@ impl Request {
         crate::body_assertion::decode(&bytes).map_err(|_| Reason::InvalidRequest)?;
         if self.max_bytes == 0 || self.max_bytes as usize > RESPONSE_CAP {
             return Err(Reason::OverBudget);
+        }
+        if matches!(self.operation, Operation::Cancel { lease_id: None, .. }) {
+            return Err(Reason::InvalidRequest);
+        }
+        if let Operation::SubscribeAppends { lease_deadline, .. }
+        | Operation::Acknowledge { lease_deadline, .. } = self.operation
+            && lease_deadline == 0
+        {
+            return Err(Reason::InvalidRequest);
         }
         if let Operation::Resolve {
             authorization_only: Some(c),
@@ -400,6 +424,27 @@ mod tests {
                 serde_json::json!({"kind":"page","id":"p","extra":1})
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn append_identifiers_and_continuations_are_bounded() {
+        // Identifier is exactly 64 hex characters; OpaqueId is 1..=128 bytes.
+        // Serialization metadata counts toward CONTROL_CAP, without body text.
+        let lease = Identifier::from_bytes([1; 32]);
+        let operation = serde_json::json!({"verb":"acknowledge", "request_id":lease, "lease_id":lease, "page":"page", "lease_deadline":70_000, "continuation":"next"});
+        assert!(serde_json::from_value::<Operation>(operation.clone()).is_ok());
+        for (field, value) in [
+            ("lease_id", "a".repeat(65)),
+            ("continuation", "a".repeat(129)),
+            ("page", "".into()),
+        ] {
+            let mut invalid = operation.clone();
+            invalid[field] = value.into();
+            assert!(serde_json::from_value::<Operation>(invalid).is_err());
+        }
+        assert_eq!(
+            control(&"x".repeat(CONTROL_CAP)).err(),
+            Some(Reason::OverBudget)
         );
     }
     #[test]

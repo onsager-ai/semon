@@ -35,6 +35,8 @@ use std::{
 use semon_sessions::{Facts, FactsSource, Input, Options};
 use serde::{Deserialize, Serialize};
 
+#[cfg(unix)]
+pub mod append_source;
 mod archives;
 #[cfg(unix)]
 pub mod body_adapter;
@@ -43,6 +45,8 @@ pub mod body_assertion;
 pub mod body_broker;
 #[cfg(unix)]
 pub mod body_cache;
+#[cfg(unix)]
+pub mod body_lease;
 #[cfg(unix)]
 pub mod body_wire;
 #[cfg(unix)]

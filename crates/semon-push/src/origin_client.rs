@@ -88,6 +88,11 @@ impl Backoff {
         self.next_poll_not_before = 0;
     }
 }
+struct OriginLease {
+    request: Identifier,
+    deadline: u64,
+    binding: origin_read::ResponseBinding,
+}
 pub struct OriginClient<'a, C: Clock, T: PollTransport, E: Entropy> {
     pub origin: OriginRead<'a, C>,
     pub transport: T,
@@ -100,6 +105,8 @@ pub struct OriginClient<'a, C: Clock, T: PollTransport, E: Entropy> {
     scope: Option<origin_read::EnrollmentScope>,
     backoff: Backoff,
     stopped: Option<StopReason>,
+    pub append_source: Option<&'a dyn crate::append_source::AppendPageSource>,
+    leases: std::collections::BTreeMap<Identifier, OriginLease>,
 }
 impl<'a, C: Clock, T: PollTransport, E: Entropy> OriginClient<'a, C, T, E> {
     pub fn new(
@@ -122,6 +129,8 @@ impl<'a, C: Clock, T: PollTransport, E: Entropy> OriginClient<'a, C, T, E> {
             scope: None,
             backoff: Backoff::default(),
             stopped: None,
+            append_source: None,
+            leases: std::collections::BTreeMap::new(),
         }
     }
     pub fn next_poll_not_before(&self) -> u64 {
@@ -130,10 +139,12 @@ impl<'a, C: Clock, T: PollTransport, E: Entropy> OriginClient<'a, C, T, E> {
     fn stop(&mut self, reason: StopReason) -> Step {
         self.stopped = Some(reason);
         self.channel = None;
+        self.leases.clear();
         Step::Stopped(reason)
     }
     fn disconnect(&mut self, error: TransportError) -> Step {
         self.channel = None;
+        self.leases.clear();
         match error {
             TransportError::Revoked => self.stop(StopReason::Revoked),
             TransportError::Cancelled => self.stop(StopReason::Cancelled),
@@ -235,6 +246,68 @@ impl<'a, C: Clock, T: PollTransport, E: Entropy> OriginClient<'a, C, T, E> {
         if self.origin.clock.now_millis() >= request.deadline_millis {
             return self.refuse(id, Reason::Deadline);
         }
+        if request.digest().ok() != Some(claims.request_digest)
+            || claims.machine != scope.machine.as_str()
+            || claims.namespace != scope.namespace.as_str()
+            || scope.publisher_claim_epoch != Some(claims.claim_epoch)
+        {
+            return self.refuse(id, Reason::Forbidden);
+        }
+        let now = self.origin.clock.now_millis();
+        self.leases.retain(|_, lease| now < lease.deadline);
+        if let Operation::Cancel { lease_id, .. } = &request.operation {
+            let Some(lease_id) = lease_id else {
+                return self.refuse(id, Reason::LeaseClosed);
+            };
+            let reason = if self.leases.remove(lease_id).is_some() {
+                Reason::Cancelled
+            } else {
+                Reason::LeaseClosed
+            };
+            return self.refuse(id, reason);
+        }
+        let append = match &request.operation {
+            Operation::SubscribeAppends {
+                lease_id,
+                lease_deadline,
+                continuation,
+                ..
+            } => {
+                if self.leases.contains_key(lease_id) {
+                    return self.refuse(id, Reason::LeaseClosed);
+                }
+                if self.leases.len() >= crate::body_lease::LEASE_CAP {
+                    return self.refuse(id, Reason::LeaseCapacity);
+                }
+                Some((*lease_id, *lease_deadline, continuation.as_ref()))
+            }
+            Operation::Acknowledge {
+                request_id,
+                lease_id,
+                lease_deadline,
+                continuation,
+                ..
+            } => {
+                let Some(lease) = self.leases.get(lease_id) else {
+                    return self.refuse(id, Reason::LeaseClosed);
+                };
+                if lease.request != *request_id
+                    || lease.binding.continuation.as_ref() != Some(continuation)
+                {
+                    self.leases.remove(lease_id);
+                    return self.refuse(id, Reason::ContinuationInvalid);
+                }
+                Some((*lease_id, *lease_deadline, Some(continuation)))
+            }
+            _ => None,
+        };
+        if let Some((lease, deadline, _)) = append
+            && (deadline <= now
+                || deadline > now.saturating_add(crate::body_lease::LEASE_WINDOW_MILLIS))
+        {
+            self.leases.remove(&lease);
+            return self.refuse(id, Reason::Deadline);
+        }
         let target = match request.operation.selector() {
             Ok(wire::Selector::Page { id }) => Target::Page(id),
             Ok(wire::Selector::Field { id }) => Target::Field(id),
@@ -257,31 +330,79 @@ impl<'a, C: Clock, T: PollTransport, E: Entropy> OriginClient<'a, C, T, E> {
             Ok(limits) => limits,
             Err(error) => return self.refuse(id, reason(error)),
         };
-        let authorized = match &request.operation {
-            Operation::Resolve {
-                authorization_only: Some(candidate),
-                ..
-            } => self.origin.authorization_only_with_cache_limits(
-                claims,
-                &read,
-                &CachedCandidate {
-                    key: candidate.key.clone(),
-                    mapping: ExactMapping {
-                        anchor: candidate.anchor.clone(),
-                        assertion: candidate.mapping,
-                    },
-                    continuation: candidate.continuation.clone(),
-                    payload_bytes: candidate.payload_bytes,
+        let authorized = if let Some((lease_id, _, after)) = append {
+            let Some(source) = self.append_source else {
+                return self.refuse(id, Reason::Unavailable);
+            };
+            let Target::Page(page) = &read.target else {
+                return self.refuse(id, Reason::InvalidRequest);
+            };
+            let renderer = crate::append_source::AppendRenderer {
+                source,
+                cursor: crate::append_source::AppendCursor {
+                    lease_id,
+                    page,
+                    after,
                 },
-                self.export_views,
-                limits,
-            ),
-            _ => self.origin.read_with_cache_limits(claims, &read, limits),
+            };
+            self.origin.read_append(claims, &read, &renderer)
+        } else {
+            match &request.operation {
+                Operation::Resolve {
+                    authorization_only: Some(candidate),
+                    ..
+                } => self.origin.authorization_only_with_cache_limits(
+                    claims,
+                    &read,
+                    &CachedCandidate {
+                        key: candidate.key.clone(),
+                        mapping: ExactMapping {
+                            anchor: candidate.anchor.clone(),
+                            assertion: candidate.mapping,
+                        },
+                        continuation: candidate.continuation.clone(),
+                        payload_bytes: candidate.payload_bytes,
+                    },
+                    self.export_views,
+                    limits,
+                ),
+                _ => self.origin.read_with_cache_limits(claims, &read, limits),
+            }
         };
         let authorized = match authorized {
             Ok(authorized) => authorized,
-            Err(error) => return self.refuse(id, reason(error)),
+            Err(error) => {
+                if let Some((lease_id, _, _)) = append {
+                    self.leases.remove(&lease_id);
+                }
+                let refusal = if append.is_some() && error == origin_read::Refused::PolicyChanged {
+                    Reason::ContinuationInvalid
+                } else {
+                    reason(error)
+                };
+                return self.refuse(id, refusal);
+            }
         };
+        if let Some((lease_id, _, _)) = append {
+            let invalid = authorized.response_binding.continuation.is_none()
+                || self.leases.get(&lease_id).is_some_and(|previous| {
+                    !crate::body_lease::same_generation(
+                        &previous.binding,
+                        &authorized.response_binding,
+                    )
+                });
+            if invalid {
+                self.leases.remove(&lease_id);
+                if authorized
+                    .finish(self.origin.audit, Outcome::Failed, 0)
+                    .is_err()
+                {
+                    return self.stop(StopReason::AuditFailure);
+                }
+                return self.refuse(id, Reason::ContinuationInvalid);
+            }
+        }
+        let lease_binding = authorized.response_binding.clone();
         // Build and bound the complete response before sending any frame. All
         // temporary canonical payload and encoded frames are zeroized on drop.
         let frames = response_frames(id, &authorized, request.max_bytes as usize);
@@ -357,6 +478,16 @@ impl<'a, C: Clock, T: PollTransport, E: Entropy> OriginClient<'a, C, T, E> {
                 return self.refuse(id, error);
             }
             return self.disconnect(TransportError::Unavailable);
+        }
+        if let Some((lease_id, deadline, _)) = append {
+            self.leases.insert(
+                lease_id,
+                OriginLease {
+                    request: id,
+                    deadline,
+                    binding: lease_binding,
+                },
+            );
         }
         Step::Delivered
     }
