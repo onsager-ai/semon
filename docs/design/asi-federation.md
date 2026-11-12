@@ -612,8 +612,23 @@ alone does not establish D2 or expose a remote body read.
 `stream-through` prohibits disk persistence and uses bounded request-owned memory
 only, with `no-store` responses and no retry spool. It does not mean zero copies:
 origin, receiver TLS endpoint and browser see plaintext. Restricted sources default
-to local-only; a source owner may opt them into stream-through for named users.
-Public/internal classification does not itself authorize publication.
+to local-only; a source owner's opt-in covers only the owner principal. Named-user
+opt-in remains deferred with multi-user support. Public/internal classification
+does not itself authorize publication.
+
+**Decision — origin-bound stream-through (#595):** every response carries a required
+closed `delivery_mode` (`cached` or `stream_through`) in its authenticated response
+identity and origin authorization's export-view binding. The origin injects this
+source-policy decision into `OriginRead`; consent persistence belongs to #592.
+Receivers may tighten either response to stream-through, never relax it to cached.
+No-store delivery bypasses every cache operation, including lookup, clock metadata,
+staging and abandonment cleanup; existing entries are never served or modified by
+that response. An authorization-only request under origin stream-through policy
+renders fresh bounded bytes instead. Complete encoded responses remain capped at
+256 KiB; buffers and typed text are zeroized on drop. There is no retry spool.
+`PendingDelivery::no_store()` is the typed marker the future route must translate
+to `Cache-Control: no-store`. Release repeats live authority, ACL and deadline
+checks; refusal records zero bytes, completion records actual delivered bytes.
 
 ## Viewer and search
 

@@ -344,8 +344,13 @@ narrowing before approval. Default selection is all current sources; apply an
 `internal` floor only to currently unclassified selected sources. Preserve existing
 classifications, stricter floors, baselines and scans. Unknown classification or
 missing, failed, unsupported, incomplete or stale scans never count as successful
-evidence. Restricted sources remain local unless a separate explicit named-reader
-stream-through policy permits them.
+evidence. Restricted sources remain local unless the source owner explicitly opts
+into stream-through for the owner principal; named-user opt-in is deferred with
+multi-user support. The origin binds the required delivery mode to each response;
+the receiver may tighten it to stream-through but never relax it to cached.
+Stream-through bypasses cache operations and retry spools and requires no-store
+responses, as specified by [the body-channel contract](asi-body-channel.md#authorization-audits-and-cache).
+Renewal preserves this consent and cannot change the delivery mode policy.
 
 P1 is scoped to the named receiver and its authenticated owner principal: typed
 receiver analytics including plain names/paths and permitted coverage, plus

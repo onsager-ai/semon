@@ -102,7 +102,9 @@ Bind responses to request digest/ID, authenticated enrollment/epoch, source hand
 complete cohort generations/consumed boundaries, activity/transcript generations,
 export-view generation, selector/anchor, exact mapping, continuation, payload digest,
 origin authorization audit ID, both sides' policy/redactor versions and narrower
-limits. Verify completeness, bindings and digest before admission; mismatch publishes
+limits and the required closed `delivery_mode` (`cached` or `stream_through`).
+Missing, malformed or unknown modes refuse; no wire default exists. The mode also
+binds the origin audit export-view digest. Verify completeness, bindings and digest before admission; mismatch publishes
 nothing. TLS authenticates the origin; a digest alone is not evidence authority.
 
 ## Authorization, audits and cache
@@ -133,6 +135,19 @@ origin policy/redactor versions and origin authorization audit ID. Cache hits re
 the same binding. Recheck current ACL/policy before release; changes need fresh
 admission. Audit failure refuses release; later receipt failure stops emission and
 leaves an attempted read, not false success.
+
+**Decision — origin controls custody (#595):** origin injects the response mode
+into `OriginRead`; #592 owns source consent persistence. The receiver's
+`ReadInput::stream_through` can only tighten it. Stream-through uses request-owned
+bounded memory, bypasses cache lookup/insertion/discard and all cache metadata or
+staging writes, and has no retry spool. `PendingDelivery::no_store()` requires the
+future HTTP route to send `Cache-Control: no-store`. Buffers and typed text are
+zeroized on drop. Release checks captured enrollment authority, ACL and deadline
+before exposing any body; a failed release completes the receiver audit with zero
+bytes. Origin stream-through renders fresh bytes even for authorization-only
+candidate requests. Restricted-source opt-in remains origin-owned and owner-only;
+named-user opt-in is deferred with multi-user support. Append pages remain
+stream-through and share the same mode binding.
 
 **Decision — cache hits contact origin:** `resolve` with `authorization_only` and
 candidate envelope key/digest authorizes/audits one cached page without payload.
