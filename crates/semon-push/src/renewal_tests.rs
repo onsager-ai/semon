@@ -376,6 +376,52 @@ fn exact_window_idempotent_begin_and_restart_rate_limit() {
     assert!(f.begin(&mut receiver, now + 3600).is_ok());
 }
 #[test]
+fn delivery_failures_preserve_committed_reservations_without_exposing_secrets() {
+    for failure in 1..=3 {
+        let f = Fixture::new();
+        let mut receiver = Receiver::default();
+        let now = 2_000_000;
+        let begun = f.begin(&mut receiver, now).unwrap();
+        let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+        receiver.fail_delivery = failure;
+        let result = receiver.finish(&f.dir, &commit, &[4; 32], None, now);
+        if failure == 1 {
+            assert!(result.is_err());
+            assert!(
+                Registry::read_current(&f.dir)
+                    .unwrap()
+                    .renewal_receipts
+                    .is_empty()
+            );
+            receiver
+                .finish(&f.dir, &commit, &[4; 32], None, now)
+                .unwrap();
+        } else if failure == 2 {
+            assert!(result.is_err());
+            assert_eq!(
+                Registry::read_current(&f.dir).unwrap().renewal_receipts[0].deliveries,
+                1
+            );
+            receiver = Receiver::default();
+        } else {
+            assert!(result.is_ok());
+        }
+        let recover = f.finish(&begun, Action::Recover, [3; 32], [5; 32]);
+        let recovered = receiver.finish(&f.dir, &recover, &[5; 32], None, now + 1);
+        assert_eq!(recovered.is_err(), failure == 3);
+        assert_eq!(
+            Registry::read_current(&f.dir).unwrap().renewal_receipts[0].deliveries,
+            2
+        );
+        receiver = Receiver::default();
+        assert!(
+            receiver
+                .finish(&f.dir, &recover, &[5; 32], None, now + 2)
+                .is_err()
+        );
+    }
+}
+#[test]
 fn lost_ack_recovers_identical_delivery_once_after_restart() {
     let f = Fixture::new();
     let mut receiver = Receiver::default();

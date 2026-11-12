@@ -45,6 +45,8 @@ pub struct Receiver {
     pending: BTreeMap<String, Pending>,
     latest: u64,
     terminal: BTreeMap<String, u64>,
+    #[cfg(test)]
+    fail_delivery: u8,
 }
 
 fn enrollment<'a>(registry: &'a Registry, id: &str) -> Result<&'a crate::enrollment::Enrollment> {
@@ -468,6 +470,11 @@ impl Receiver {
             store
                 .commit(registry.revision(), &registry)
                 .map_err(|_| Refused)?;
+            #[cfg(test)]
+            if self.fail_delivery == 3 {
+                self.fail_delivery = 0;
+                return Err(Refused);
+            }
             return Ok(bytes);
         }
         if self.terminal.contains_key(&message.renewal_id) {
@@ -674,10 +681,20 @@ impl Receiver {
             .check_renewal_admission(self.pending.len().saturating_sub(1))
             .map_err(|_| Refused)?;
         audit(dir, &pending.begun, "commit_delivery_reserved", now)?;
+        #[cfg(test)]
+        if self.fail_delivery == 1 {
+            self.fail_delivery = 0;
+            return Err(Refused);
+        }
         store
             .commit(registry.revision(), &registry)
             .map_err(|_| Refused)?;
         self.pending.remove(&message.enrollment_id);
+        #[cfg(test)]
+        if self.fail_delivery == 2 {
+            self.fail_delivery = 0;
+            return Err(Refused);
+        }
         Ok(bytes)
     }
 }
