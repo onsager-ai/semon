@@ -231,12 +231,6 @@ pub fn install(
         credential_sha256: crate::wire::sha256_hex(delivery.credentials[0].1.as_bytes()),
         client_certificate_sha256: certificate.as_deref().map(crate::wire::sha256_hex),
     };
-    let key = EcdsaKeyPair::from_pkcs8(
-        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-        private,
-        &ring::rand::SystemRandom::new(),
-    )
-    .map_err(|_| ERROR)?;
     let bytes = serde_json::to_vec(&configuration).map_err(|_| ERROR)?;
     let signature = key
         .sign(&ring::rand::SystemRandom::new(), &bytes)

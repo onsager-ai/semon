@@ -109,10 +109,12 @@ fn invalid_client_certificate_never_publishes_origin_custody() {
         client_certificate_pins: vec![crate::client_ca::pin(key.public_key_raw()).unwrap()],
         valid_until: until,
     };
-    let mut missing_eku = rcgen::CertificateParams::default();
-    missing_eku.not_before = time::OffsetDateTime::from_unix_timestamp(now as i64 - 300).unwrap();
-    missing_eku.not_after = time::OffsetDateTime::from_unix_timestamp(until as i64).unwrap();
-    missing_eku.is_ca = rcgen::IsCa::ExplicitNoCa;
+    let missing_eku = rcgen::CertificateParams {
+        not_before: time::OffsetDateTime::from_unix_timestamp(now as i64 - 300).unwrap(),
+        not_after: time::OffsetDateTime::from_unix_timestamp(until as i64).unwrap(),
+        is_ca: rcgen::IsCa::ExplicitNoCa,
+        ..Default::default()
+    };
     let missing_eku = missing_eku.self_signed(&key).unwrap().der().to_vec();
     for certificate in [
         crate::client_ca::issue(&ca, now, other.public_key_raw(), "enrollment", now, until)

@@ -25,8 +25,10 @@ fn timestamp(now: u64) -> Result<OffsetDateTime> {
     OffsetDateTime::from_unix_timestamp(i64::try_from(now).map_err(|_| ())?).map_err(|_| ())
 }
 fn ca_params(created: u64) -> Result<CertificateParams> {
-    let mut p = CertificateParams::default();
-    p.distinguished_name = rcgen::DistinguishedName::new();
+    let mut p = CertificateParams {
+        distinguished_name: rcgen::DistinguishedName::new(),
+        ..Default::default()
+    };
     p.distinguished_name
         .push(DnType::CommonName, "Semon client issuer");
     p.not_before = timestamp(created.saturating_sub(300))?;
@@ -100,8 +102,10 @@ pub(crate) fn issue(
     )
     .map_err(|_| ())?;
     let issuer = rcgen::Issuer::new(ca_params(created)?, key);
-    let mut p = CertificateParams::default();
-    p.distinguished_name = rcgen::DistinguishedName::new();
+    let mut p = CertificateParams {
+        distinguished_name: rcgen::DistinguishedName::new(),
+        ..Default::default()
+    };
     p.distinguished_name.push(DnType::CommonName, enrollment);
     p.not_before = timestamp(now.saturating_sub(300))?;
     p.not_after = timestamp(until)?;
