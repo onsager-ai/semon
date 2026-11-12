@@ -248,6 +248,80 @@ fn validate(claims: &Claims, now: u64, skew: u64) -> Result<()> {
     Ok(())
 }
 
+/// Exact canonical signing bytes followed by the Ed25519 signature.
+pub fn encode(assertion: &Assertion) -> Vec<u8> {
+    let mut bytes = encoding(assertion.version, &assertion.claims);
+    bytes.extend_from_slice(&assertion.signature);
+    bytes
+}
+/// Decode only the canonical bounded representation. Signature and live claim
+/// validation still require verify(); decoding never establishes authority.
+pub fn decode(bytes: &[u8]) -> Result<Assertion> {
+    fn take<'a>(input: &mut &'a [u8]) -> Result<&'a [u8]> {
+        let n = input.get(..4).ok_or(Refused(Reason::Field))?;
+        let n = u32::from_be_bytes(n.try_into().map_err(|_| Refused(Reason::Field))?) as usize;
+        let field = input
+            .get(4..4usize.checked_add(n).ok_or(Refused(Reason::Field))?)
+            .ok_or(Refused(Reason::Field))?;
+        *input = &input[4 + n..];
+        Ok(field)
+    }
+    fn string(input: &mut &[u8]) -> Result<String> {
+        String::from_utf8(take(input)?.to_vec()).map_err(|_| Refused(Reason::Field))
+    }
+    fn integer(input: &mut &[u8]) -> Result<u64> {
+        Ok(u64::from_be_bytes(
+            take(input)?
+                .try_into()
+                .map_err(|_| Refused(Reason::Field))?,
+        ))
+    }
+    if bytes.len() > 4096 || !bytes.starts_with(DOMAIN) {
+        return Err(Refused(Reason::Field));
+    }
+    let mut input = &bytes[DOMAIN.len()..];
+    let version_field = take(&mut input)?;
+    let [version] = version_field else {
+        return Err(Refused(Reason::Field));
+    };
+    let version = *version;
+    let claims = Claims {
+        issuer_key_id: string(&mut input)?,
+        issued_at: integer(&mut input)?,
+        expiry: integer(&mut input)?,
+        audience: Audience {
+            origin_incarnation: string(&mut input)?,
+            namespace: string(&mut input)?,
+        },
+        claim_epoch: integer(&mut input)?,
+        nonce: take(&mut input)?
+            .try_into()
+            .map_err(|_| Refused(Reason::Field))?,
+        subject_principal: string(&mut input)?,
+        machine: string(&mut input)?,
+        namespace: string(&mut input)?,
+        acl_grant_version: string(&mut input)?,
+        receiver_policy_version: string(&mut input)?,
+        request_digest: take(&mut input)?
+            .try_into()
+            .map_err(|_| Refused(Reason::Field))?,
+        deadline: integer(&mut input)?,
+        channel_binding: take(&mut input)?
+            .try_into()
+            .map_err(|_| Refused(Reason::Field))?,
+    };
+    let signature = input.try_into().map_err(|_| Refused(Reason::Field))?;
+    let assertion = Assertion {
+        version,
+        claims,
+        signature,
+    };
+    if version != VERSION || encode(&assertion) != bytes {
+        return Err(Refused(Reason::Field));
+    }
+    Ok(assertion)
+}
+
 // Canonical v1: literal domain, then every field (including version and integers)
 // in this fixed order with a big-endian u32 byte length. Integers are big-endian
 // fixed width; strings are ASCII. No JSON, concatenation ambiguity or native endian.
@@ -324,6 +398,19 @@ mod tests {
     }
     fn reason(result: Result<&Claims>) -> Reason {
         result.err().unwrap().reason()
+    }
+    #[test]
+    fn transport_encoding_roundtrip_and_refusals() {
+        let a = signed(claims());
+        let encoded = encode(&a);
+        let decoded = decode(&encoded).unwrap();
+        assert_eq!(encode(&decoded), encoded);
+        assert!(check(&decoded, &mut ReplayCache::new(1), 100).is_ok());
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(decode(&trailing).is_err());
+        assert!(decode(&encoded[..encoded.len() - 1]).is_err());
+        assert!(decode(&vec![0; 4097]).is_err());
     }
     #[test]
     fn roundtrip_and_replay_capacity_no_sliding() {
