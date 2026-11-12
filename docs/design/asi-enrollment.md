@@ -31,8 +31,13 @@ keep-alive enrollment binding and revision handles for in-flight reauthorization
 `RevisionHandle`. The bounded registry reader and revision handle inspect registry
 custody only; missing pairing-gate custody does not disable existing authentication.
 Private owned mode-0600 `DIR/client-trust.pem` supplies PEM client roots; absence
-disables client-certificate presentation. Reserved analytics/body routes refuse
-closed until their owning integrations land.
+disables client-certificate presentation. Analytics routes remain reserved. #661
+registers the closed body poll/response routes when existing body custody and
+client trust are configured; body enrollment and a reachable end-to-end workflow
+remain blocked on admitted-binding and owning integrations. Its fresh registry
+release checks currently use the conservative revision handle. PR4.1 replaces that
+handle as specified below; PR4.2 renewal routes remain separate from body dispatch
+and pairing-ceremony state. See [receiver route registration](asi-body-channel.md#receiver-route-registration-part-of-594).
 The listener uses kind-scoped enrollment-registry authentication; the former
 flat-file token reader and commands are removed. Legacy `DIR/tokens` custody
 refuses startup/routes without import or deletion. The [mirror protocol](../mirror-protocol.md)
