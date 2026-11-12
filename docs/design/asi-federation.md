@@ -484,6 +484,15 @@ stream-only under the existing audit contract. The receiver broker additionally
 limits retained work to four requests per enrollment, including dispatched results,
 so an abandoned caller cannot grow response memory without bound.
 
+Receiver reads return a non-Clone pending delivery. Each `release()` checks current
+enrollment, ACL and deadline before exposing typed fields; `delivered(bytes)` then
+records actual completion. Drop/abandon records a closed failure and removes that
+delivery's temporary cache entry, even following a successful release. This cannot
+recall plaintext already handed to the caller. A refused release removes its entry
+and exposes no new body. An authorization-only candidate refused as unavailable is
+discarded by exact key before a fresh fetch, including when the candidate's old
+authorization scope differs from the new response.
+
 ## Receiver cache: bounded temporary custody
 
 Only the operator's self-hosted receiver holds this cache. It is separate from

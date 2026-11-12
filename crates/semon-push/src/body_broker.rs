@@ -308,6 +308,8 @@ impl<'a> Broker<'a> {
                 }
                 return Err(Reason::Unavailable);
             }
+            #[cfg(test)]
+            tests::unexpected_wait();
             let (next, _) = self
                 .changed
                 .wait_timeout(state, remaining)
@@ -451,6 +453,8 @@ impl Poll<'_, '_> {
             if remaining.is_zero() {
                 return Ok(None);
             }
+            #[cfg(test)]
+            tests::unexpected_wait();
             let (next, _) = self
                 .broker
                 .changed
@@ -600,6 +604,9 @@ struct Prepared {
 }
 /// One audited delivery. The page is accessible only through a fresh release
 /// check; completion records actual bytes only after the caller reports delivery.
+/// Abandon/drop removes this delivery's cache entry even after release(): without
+/// delivered(bytes), the journal records failure and no reusable entry remains.
+/// Previously released plaintext cannot be recalled from the caller.
 pub struct PendingDelivery<'s, 'a, 'b, C: Clock> {
     service: &'s mut ReadService<'a, 'b, C>,
     prepared: Option<Prepared>,
@@ -725,6 +732,7 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
         }
         let original = input.request.operation.clone();
         if let Some(candidate) = input.candidate.take() {
+            let candidate_key = candidate.key.clone();
             input.request.operation = wire::Operation::Resolve {
                 selector: original.selector()?,
                 authorization_only: Some(Box::new(candidate)),
@@ -733,6 +741,12 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             // on that path; a fresh request/nonce is required after unavailable.
             match self.round_trip(principal, &input, grant.version(), exchange) {
                 Err(Reason::Unavailable) => {
+                    // This exact candidate could not receive fresh origin
+                    // admission. Remove its temporary ciphertext before fetching;
+                    // a different authorization scope must not leave it behind.
+                    self.cache
+                        .discard(&candidate_key)
+                        .map_err(|_| Reason::Unavailable)?;
                     let mut nonce = [0; 32];
                     getrandom::fill(&mut nonce).map_err(|_| Reason::Unavailable)?;
                     input.request.request_id = Identifier::from_bytes(nonce);
@@ -1531,6 +1545,11 @@ mod tests {
         drop(audit);
         std::fs::remove_dir_all(path).unwrap();
     }
+    pub(super) fn unexpected_wait() {
+        panic!(
+            "body broker tests must supply a terminal result before waiting; use the injected clock or nonblocking core"
+        );
+    }
     thread_local! {
         static FAIL_AUTHORIZE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static ADMISSION: std::cell::RefCell<Option<(std::path::PathBuf, usize)>> = const { std::cell::RefCell::new(None) };
@@ -1755,6 +1774,18 @@ mod tests {
                         wire::Operation::ReadField { .. }
                     ));
                     assert_ne!(outgoing.request_id, id(21));
+                    // The prior candidate had the seed assertion's different
+                    // authorization scope. Unavailable must discard that exact
+                    // entry before the fresh response has any admission.
+                    assert_eq!(
+                        std::fs::read_dir(&cache_dir)
+                            .unwrap()
+                            .map(|entry| entry.unwrap().path())
+                            .filter(|path| path.extension().is_some_and(|ext| ext == "entry"))
+                            .count(),
+                        0,
+                        "{mode:?}: candidate survived unavailable"
+                    );
                 }
                 let claims = body_assertion::decode(&hex::decode(&outgoing.assertion).unwrap())
                     .unwrap()
@@ -1887,9 +1918,34 @@ mod tests {
                     assert!(matches!(pending.release(), Err(Reason::Revoked)));
                 }
                 drop(pending);
-                assert_eq!(service.cache.entry_count(), 0);
+                assert_eq!(
+                    service.cache.entry_count(),
+                    0,
+                    "{mode:?}: abandon retained a cache entry"
+                );
+                assert_eq!(
+                    std::fs::read_dir(&cache_dir)
+                        .unwrap()
+                        .map(|entry| entry.unwrap().path())
+                        .filter(|path| path.extension().is_some_and(|ext| ext == "entry"))
+                        .count(),
+                    0,
+                    "{mode:?}: abandon retained ciphertext"
+                );
                 let after = std::fs::read_to_string(&journal_path).unwrap();
                 assert!(!after.contains("\"outcome\":\"completed\""));
+                let completions: Vec<serde_json::Value> = after
+                    .lines()
+                    .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap())
+                    .filter(|event| event["event"] == "completion")
+                    .collect();
+                assert_eq!(completions.len(), 2, "{mode:?}");
+                assert!(
+                    completions
+                        .iter()
+                        .all(|event| event["outcome"] == "failed" && event["bytes"] == 0),
+                    "{mode:?}"
+                );
                 assert_eq!(calls, 2);
                 ADMISSION.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().1, 1));
             } else {
