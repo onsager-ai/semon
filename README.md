@@ -6,7 +6,8 @@ Semon is Agent Session Intelligence (ASI): durable storage, query and analytics
 over harness-native agent sessions collected from your machines. Native source
 logs remain the source of truth; the incremental Session Event Index and Session
 Catalog are the foundation for the ASI store, CLI/MCP query and analytics. Session
-display and two-way harness control are not product goals; see the
+history is browsable through Semon's standalone read-only Viewer. Two-way harness
+control is not a product goal; see the
 [ASI direction](docs/design/asi-direction.md).
 
 The core CLI lives in `semon-cli`; native session discovery, parsing and focused
@@ -23,6 +24,49 @@ remain supported. With the `asi-query` feature, ASI SQL, schema, origin-local
 full-text search and focused body views are available through CLI and MCP after
 analytics materialization. Remote body access remains follow-up work. Retirement
 does not delete user data, credentials, history or installed services. See the [session foundation contract](docs/design/session-foundation-retirement.md#collection-retirement-scope).
+
+## Start with local history
+
+With `semon` installed and on your PATH, run:
+
+```sh
+semon sessions --serve
+```
+
+Open the printed local launch URL to browse your history. Semon works without
+T3 Code; the Viewer is read-only and does not start or control a harness.
+
+For ASI SQL, full-text search and focused views, use a binary built with the
+`asi-query` feature. The current `release-binary.yml` workflow artifact does not
+include that feature; downloading it alone does not enable these commands.
+With a query-enabled binary, prepare the local analytics once, then query it:
+
+```sh
+semon analytics materialize
+semon query sql 'SELECT COUNT(*) AS sessions FROM fact_session'
+semon query search 'timeout'
+```
+
+Use `semon query view FULL_ASI_UID` with a `body_uid` returned by search to inspect
+a hit. `semon query schema` describes the analytics tables. Materialization refreshes
+the full local Catalog; initial preparation can take time. It publishes one
+snapshot and exits. For ongoing publication, run `semon analytics materialize
+--watch` in another process; Viewer and MCP do not start that writer automatically.
+These commands keep data local. Remote ASI enrollment/viewing remains integration
+work; existing `push` copies redacted native logs and is a separate custody choice.
+
+| Goal | Current command family |
+| --- | --- |
+| Browse stored native history | `semon sessions --serve` |
+| Read analytics or local evidence | `semon query sql`, `schema`, `search`, `view` (`asi-query` required) |
+| Produce and inspect analytics snapshots | `semon analytics materialize`, `coverage` |
+| Preserve a published analytics snapshot | `semon analytics export DESTINATION` |
+| Author or back up durable labels/work records | `semon asi add`, `backup` |
+| Explicitly mirror native logs to another machine | `semon push` and `semon receive` |
+
+`analytics reset` is exceptional destructive maintenance, not a first-run or
+routine error-recovery step. Preserve unsupported state and follow the custody
+guidance below rather than deleting the state directory to start over.
 
 ## Seeing your agent sessions
 
@@ -219,6 +263,18 @@ use `--values -` for stdin. The same shape supports all nine durable tables.
 Success prints only `id` and `revision`. With `asi-query`, local stdio MCP offers
 `asi_add` (`table`, `id`, `values`) against its configured store, using the same
 Writer validation and lock. See [durable state](docs/design/asi-store.md#durable-state).
+
+Choose backup operations by what you need to preserve:
+
+| Operation | Preserves | Does not replace |
+| --- | --- | --- |
+| `semon analytics export DESTINATION` | Verified current published analytics snapshot and its namespace | Durable free-text backup, native history/archive custody, private enrollment state or the egress-handle mapping |
+| `semon asi backup PATH` | Author-owned durable SQLite state, including its local body fields | Analytics snapshot export or native history/archive custody |
+
+Neither command is a complete machine backup. Keep destinations private, and
+preserve native evidence and continuity-critical state separately under the
+[operator backup/recovery guidance](docs/design/asi-operator-journey.md#backup-and-recovery-beyond-the-two-shipped-export-commands).
+Do not copy a running SQLite file as a substitute for its supported backup API.
 
 `semon analytics reset` is explicit destructive maintenance for the analytics store
 only. It requires `--confirm` with the exact `analytics-namespace`, plus exactly one of
