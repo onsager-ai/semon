@@ -361,13 +361,13 @@ fn only_post_to_the_two_endpoints() {
     ] {
         assert_eq!(
             post(receiving.address, route, Some(&tokens[0]), b"{}").status,
-            404,
+            401,
             "{route}"
         );
         let get = format!("GET {route} HTTP/1.1\r\n\r\n");
         assert_eq!(
             exchange(receiving.address, get.as_bytes()).status,
-            404,
+            401,
             "{route}"
         );
     }
@@ -648,6 +648,26 @@ fn a_post_without_a_length_is_411() {
     assert_eq!(exchange(receiving.address, request.as_bytes()).status, 411);
 }
 
+#[test]
+fn legacy_keep_alive_authenticates_each_machine_independently() {
+    let (receiving, tokens) = receiving(&["laptop", "desktop"]);
+    let mut stream = TcpStream::connect(receiving.address).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    for (index, token) in tokens.iter().enumerate() {
+        let body = append_body(LOG, b"", 0, b"hello\n");
+        let head = format!(
+            "POST {APPEND} HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).unwrap();
+        stream.write_all(&body).unwrap();
+        let answer = read_one(&mut stream);
+        assert_eq!(answer.status, 200, "machine {index}: {}", answer.body);
+    }
+}
+
 /// Reads one answer off a kept-alive connection: its head, then
 /// Content-Length bytes.
 fn read_one(stream: &mut TcpStream) -> Answer {
@@ -824,7 +844,7 @@ fn status_head_advertises_post_without_body_and_unknown_routes_stay_unsupported(
     assert!(answer.body.is_null());
     assert_eq!(answer.body_bytes, 0, "HEAD must not send an error body");
     let unknown = head.replace("/v1/mirror/status", "/v1/mirror/unknown-status");
-    assert_eq!(exchange(receiving.address, unknown.as_bytes()).status, 404);
+    assert_eq!(exchange(receiving.address, unknown.as_bytes()).status, 401);
     let unauthorized = post(
         receiving.address,
         "/v1/mirror/status",

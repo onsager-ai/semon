@@ -17,11 +17,17 @@ source authority.
 
 ## Existing implementation and delivery boundary
 
-At main `db8acabca`, [`serve.rs`](../../crates/semon-push/src/serve.rs) implements
-a blocking HTTP/1.1 thread-per-connection receiver with socket deadlines, operator
-server TLS and total/unauthenticated-per-IP limits. It uses
-`with_no_client_auth()` and dispatches mirror append, facts and status,
-authenticating requests before reading bodies.
+The blocking HTTP/1.1 receiver in [`serve.rs`](../../crates/semon-push/src/serve.rs)
+retains socket deadlines, operator server TLS and total/unauthenticated-per-IP
+limits. Slice 4a PR2 (#646) adds route classification before body reads, optional
+verified TLS client certificates, current registry authorization per request,
+keep-alive enrollment binding and revision handles for in-flight reauthorization.
+`serve_auth.rs` exposes `RegistryAuthenticator`, `AuthenticatedEnrollment` and
+`RevisionHandle`. The bounded registry reader and revision handle inspect registry
+custody only; missing pairing-gate custody does not disable existing authentication.
+Private owned mode-0600 `DIR/client-trust.pem` supplies PEM client roots; absence
+disables client-certificate presentation. Reserved analytics/body routes refuse
+closed until their owning integrations land.
 [`tokens.rs`](../../crates/semon-push/src/tokens.rs) stores `NAME SHA256(token)`
 lines in `DIR/tokens`; `Tokens::authorize` supplies a machine identity. The
 [mirror protocol](../mirror-protocol.md) and push client implement supported Push,
@@ -29,16 +35,22 @@ not the enrollment, client-certificate identity or remote body read defined here
 #630/#631 and #635 supply libraries, not integrated onboarding or body service.
 
 The receiver registry and kind-aware credential custody are implemented as Unix
-libraries in `semon-push::enrollment` and `semon-push::credentials`, unwired from
-`semon receive`, its listener, CLI and default paths. Explicit library
+libraries in `semon-push::enrollment` and `semon-push::credentials`, consumed by
+the listener's registry authenticator. Enrollment creation and pairing remain
+unwired from CLI and default provisioning paths. Explicit library
 initialization creates `DIR/enrollment/registry.json` (format 1) and
 `DIR/enrollment/registry.lock`, relative to the receiver state directory `DIR`.
 One atomic registry document contains enrollment bindings, generation-scoped
 certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
 serialized. The library also exposes legacy `DIR/tokens` refusal without importing
-or modifying it. Supported Push continues using the existing token path until a
-later end-to-end enrollment/pairing cutover. Renewal protocols and TLS/route
-integration remain unimplemented by these libraries. The `public_tls`
+or modifying it. A transitional authenticator preserves mirror `DIR/tokens` only
+while no enrollment directory exists, rechecking absence on every request. Legacy
+requests may select different token machines on one connection; registry mode
+binds it to one enrollment. Appearance of enrollment custody blocks legacy
+requests; legacy resumes only when that path truly does not exist. Mixed token/
+registry custody refuses startup without changing either file. PR 3.2 removes
+this seam in the end-to-end pairing/token cutover. Renewal and provisioning route
+integration remain unimplemented. The `public_tls`
 pairing core is landed unwired in `crates/semon-push/src/pairing.rs` with deterministic
 coverage in `pairing_tests.rs`; PR 3.2 will wire provisioning routes, CLI, outputs
 and the tokens cutover, including receiver assertion-issuer signing-key custody;
@@ -441,6 +453,10 @@ its namespace. Permanent evidence loss retains frozen facts and reports unavaila
 bodies; recovery cannot reconstruct missing source custody.
 
 ## Shared listener authentication and dispatch
+
+The implementation status above covers PR2's listener hooks and PR 3.1's unwired
+pairing core. PR 3.2 owns provisioning and token cutover; #594 owns body handlers
+and in-flight cancellation; slice 5 owns analytics handlers.
 
 Extend rustls with optional client-certificate presentation/verification: analytics
 and mirror origins without certificates may complete TLS where their kind permits.
