@@ -279,10 +279,12 @@ no provisioning authority.
 
 `open` carries only version; its response carries version, session ID, receiver
 nonce, canonical advertised endpoint, receiver ID, assertion issuer key ID and
-public key. This revises the earlier proposed open-time scope commitment: the
-origin first needs those issuer pins to construct its full ActivationInput.
-The origin commits the full input in `confirm`'s scope commitment; the code-bound
-MACs authenticate the returned issuer metadata through that commitment. The code is delivered once only to the
+public key. The origin copies receiver ID into ActivationInput and commits the
+full input in `confirm`. Receiver ID is required for all kinds and must equal the
+receiver's own identity before approval or activation. Mirror-only enrollment
+uses Binding::Inapplicable and installs no issuer pins. Issuer pins additionally
+belong in Binding::Admitted for analytics/body kinds, which are not enabled yet.
+The code is delivered once only to the
 receiver's trusted local terminal. It has no request or response field.
 `confirm` carries version, session ID, 65-byte origin public key, 32-byte origin
 nonce, 32-byte scope commitment and 32-byte origin MAC. The receiver reconstructs
@@ -680,3 +682,20 @@ cancellation deadlines; 4a resource tests settle non-poll reservations. The revi
 records exact pairing/renewal parameters here before implementation merges. Full
 publication, body-read and four-action journey acceptance belong to the owning
 integration slices; docs-only CI proves none of those runtime guarantees.
+
+Origin PR3.2c status (part of #593): `connect --to URL [--machine NAME]` uses
+public-CA TLS 1.3 and a non-echoing controlling terminal, followed by explicit
+mirror-only trust/source approval. `push [--receiver NAME] [--watch]` consumes
+stored enrollment; the superseded `--to`/`--token-file` push CLI is removed.
+Custody is `$XDG_CONFIG_HOME/semon/origin/<sha256-canonical-endpoint>/` (default
+`~/.config/semon/origin/`): `enrollment.json` signed by `origin-key.pk8`,
+`mirror-push.secret`, and separately bound `source-consent.json`. Directories are
+0700 and regular files 0600, owned by the local user; fd-relative no-follow opens
+refuse links. A private `stage-<random>/` is synced before its atomic publication;
+only the final directory is admitted. Interrupted staging is retained, never
+silently deleted or loaded. No credential is written before receiver confirmation
+and approval delivery. `install.lock` serializes publication. Receiver selection
+uses the full endpoint hash; an omitted name requires one enrolled receiver.
+`connect::producer_admission` is the option-C swap point for option B: it requires
+an existing local namespace binding for analytics/body and currently refuses
+those kinds until producer admission / client-certificate issuance lands.

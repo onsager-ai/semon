@@ -264,6 +264,10 @@ pub struct ConfirmedKey {
     transcript: Transcript,
 }
 impl ConfirmedKey {
+    /// Recovery material is exposed only within the provisioning implementation.
+    pub(crate) fn application_key(&self) -> &[u8; 32] {
+        &self.application
+    }
     #[cfg(test)]
     pub(crate) fn recovery_key_for_test(&self) -> &[u8; 32] {
         &self.application
@@ -650,6 +654,7 @@ pub(crate) fn validate_receipts(registry: &Registry) -> Result<()> {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActivationInput {
+    pub receiver_id: String,
     pub machine: String,
     pub binding: Binding,
     pub kinds: Vec<(Kind, bool)>,

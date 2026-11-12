@@ -5,6 +5,34 @@ use std::{
     process::ExitCode,
 };
 
+mod connect_terminal;
+
+fn parse_connect_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
+    let mut endpoint = None;
+    let mut machine = None;
+    while let Some(argument) = arguments.next() {
+        match argument.as_str() {
+            "--to" => endpoint = Some(arguments.next().ok_or("--to requires URL")?),
+            "--machine" => machine = Some(arguments.next().ok_or("--machine requires NAME")?),
+            "-h" | "--help" => return Err("Usage: semon connect --to URL [--machine NAME]".into()),
+            _ => return Err(format!("unknown connect argument: {argument}")),
+        }
+    }
+    let machine = machine.unwrap_or_else(|| {
+        std::fs::read_to_string("/proc/sys/kernel/hostname")
+            .unwrap_or_default()
+            .trim()
+            .into()
+    });
+    if !semon_sessions::is_machine_name(&machine) {
+        return Err("hostname is not a machine name; use --machine NAME".into());
+    }
+    Ok(Command::Connect {
+        endpoint: endpoint.ok_or("connect requires --to URL")?,
+        machine,
+    })
+}
+
 const ANALYTICS_NAMESPACE_FILE: &str = "analytics-namespace";
 const DURABLE_VALUES_LIMIT: usize = 256 * 1024;
 const DURABLE_VALUES_TOO_LARGE: &str = "durable values exceed the 256 KiB authoring limit";
@@ -39,6 +67,10 @@ enum Command {
     Version,
     Sessions(SessionsArgs),
     Push(PushArgs),
+    Connect {
+        endpoint: String,
+        machine: String,
+    },
     Receive(ReceiveArgs),
     Query(QueryArgs),
     #[cfg(feature = "asi-query")]
@@ -207,6 +239,7 @@ fn parse_args() -> Result<Command, String> {
     match arguments.next().as_deref() {
         Some("--version") if arguments.next().is_none() => Ok(Command::Version),
         Some("sessions") => parse_sessions_args(arguments).map(Command::Sessions),
+        Some("connect") => parse_connect_args(arguments),
         Some("push") => parse_push_args(arguments).map(Command::Push),
         Some("receive") => parse_receive_args(arguments).map(Command::Receive),
         Some("query") => parse_query_command(arguments),
@@ -864,8 +897,7 @@ fn parse_mcp_args(mut arguments: impl Iterator<Item = String>) -> Result<HomeArg
 
 fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushArgs, String> {
     let mut sessions = semon_sessions::Options::default();
-    let mut url = None;
-    let mut token_file = None;
+    let mut receiver = None;
     let mut state = None;
     let mut watch = false;
     while let Some(argument) = arguments.next() {
@@ -875,8 +907,7 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
                 .ok_or_else(|| format!("{argument} requires a value"))
         };
         match argument.as_str() {
-            "--to" => url = Some(value()?),
-            "--token-file" => token_file = Some(PathBuf::from(value()?)),
+            "--receiver" => receiver = Some(value()?),
             "--state" => state = Some(PathBuf::from(value()?)),
             "--claude-home" => sessions.claude_home = value()?.into(),
             "--claude-json" => sessions.claude_json = value()?.into(),
@@ -889,13 +920,20 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
-    let url = url.ok_or("push requires --to URL")?;
-    let token_file = token_file.ok_or("push requires --token-file PATH")?;
+    let base = semon_push::origin_custody::default_directory();
+    let (config, credential) = semon_push::origin_custody::load(&base, receiver.as_deref())?;
+    let name = semon_push::wire::sha256_hex(config.endpoint.as_bytes());
+    let sources = semon_push::origin_custody::consent(&base, &name, &config)?;
+    let semon_push::Credential::Memory(token) = credential else {
+        return Err("invalid enrolled credential".into());
+    };
+    let credential = semon_push::Credential::Enrolled { token, sources };
+    let url = config.endpoint;
     let state = state.unwrap_or_else(|| semon_push::default_state_path(&url));
     Ok(PushArgs {
         options: semon_push::PushOptions {
             url,
-            credential: semon_push::Credential::File(token_file),
+            credential,
             sessions,
             state,
         },
@@ -1130,6 +1168,7 @@ fn run(command: Command) -> Result<(), String> {
         }
         Command::Sessions(args) => run_sessions(args),
         Command::Push(args) => run_push(&args),
+        Command::Connect { endpoint, machine } => connect_terminal::run(&endpoint, &machine),
         Command::Receive(args) => run_receive(args),
         Command::Query(args) => run_query(args),
         #[cfg(feature = "asi-query")]
@@ -2296,7 +2335,8 @@ fn usage() -> String {
          The query tools plus local durable asi_add (with asi-query) over Model Context Protocol on stdin and stdout; no listener. Queries read\n\
          the log files modified within the window, --since (30d by default), or all of them with --all.\n\
          \n\
-         Usage: semon push --to URL --token-file PATH [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
+         Usage: semon connect --to URL [--machine NAME]\n\
+         Usage: semon push [--receiver NAME] [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\
          (docs/mirror-protocol.md), appending as they grow. The token file must be mode 0600. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s.\n\

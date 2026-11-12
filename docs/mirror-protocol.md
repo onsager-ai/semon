@@ -5,7 +5,7 @@
 `semon receive` is the reference receiver (`semon_push::mirror::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<name>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and 507 (the machine's copy would pass its size cap); a client treats either as a failure.
 
 The reference receiver requires the current enrollment registry and a separate
-`mirror_push` bearer credential scoped to one machine. `--token-file` remains the
+`mirror_push` bearer credential scoped to one machine. `connect` installs the
 Push client's protected input for that kind bearer; a bearer is machine transport
 authority, never user identity or source authority. Legacy `DIR/tokens` state and
 `receive token` commands are refused; preserve old tokens/history and explicitly
@@ -83,7 +83,7 @@ The answer is 200 when it is stored. A receiver that hasn't had facts for a whil
 - **409.** When the receiver's copy is the client's redacted file up to a line boundary (same length prefix, same head hash), the client resumes from the receiver's length. Otherwise it sends the file again with `replace`.
 - **Deleted files** are not deleted on the receiver.
 - **Cadence.** One complete pass and one facts post, then exit. With `--watch`, each sweep sends at most four complete redaction batches before waiting 2 s and discovering fresh targets. Recent/live batches and history retain the scheduler's three-to-one preference; a long line remains one indivisible redaction batch. Full facts are posted at most every 10 s, after a complete sweep only; a bounded partial sweep never commits a complete source inventory. Optional status heartbeats continue during backfill.
-- **Token.** It is read from `--token-file`, which must be mode 0600; the client refuses anything else. The token is sent only in the `Authorization` header.
+- **Credential.** `semon connect --to HTTPS_URL [--machine NAME]` installs a mirror-only enrollment after mutually confirmed pairing and explicit terminal approval. `semon push [--receiver NAME] [--watch]` reads its protected origin custody; it sends the bearer only in the `Authorization` header. The superseded push `--to`/`--token-file` CLI is removed.
 
 ## Sealed copies on the receiver
 

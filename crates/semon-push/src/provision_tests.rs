@@ -25,6 +25,50 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
+#[test]
+fn wrong_receiver_identity_refused_before_approval_without_side_effects() {
+    let fixture = Fixture::new();
+    let mut controller = fixture.controller();
+    let (opened, code) = opened(&mut controller, [1; 32], 100);
+    let key = key();
+    let mut input = input(&controller, 100);
+    input.receiver_id = "substituted-receiver".into();
+    let t = transcript(&opened, &key, [1; 32], input.commitment());
+    let keys = pairing::derive_keys(&code, &t).unwrap();
+    controller
+        .handle(
+            confirmation(&t, &keys.origin_confirmation(&t)),
+            [1; 32],
+            100,
+            |_, _| panic!(),
+        )
+        .unwrap();
+    let before = controller.core.registry().unwrap();
+    let proof = key
+        .sign(&SystemRandom::new(), &wire::possession_message(&t))
+        .unwrap();
+    assert!(
+        controller
+            .handle(
+                Request::Approve(wire::Approve {
+                    version: 1,
+                    session_id: t.session_id.clone(),
+                    proof: wire::encode(proof.as_ref()),
+                    input
+                }),
+                [1; 32],
+                100,
+                |_, _| panic!()
+            )
+            .is_err()
+    );
+    assert_eq!(
+        controller.core.state(&t.session_id, 100).unwrap(),
+        pairing::State::Confirmed
+    );
+    assert_eq!(controller.core.registry().unwrap(), before);
+}
+
 fn key() -> EcdsaKeyPair {
     let random = SystemRandom::new();
     let pkcs8 =
@@ -37,8 +81,9 @@ fn key() -> EcdsaKeyPair {
     )
     .unwrap()
 }
-fn input(now: u64) -> pairing::ActivationInput {
+fn input(controller: &Controller, now: u64) -> pairing::ActivationInput {
     pairing::ActivationInput {
+        receiver_id: controller.custody.receiver_id().into(),
         machine: "laptop".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, false)],
@@ -98,7 +143,7 @@ fn confirmation_activation_and_recovery_preserve_one_registry_outcome() {
     let exporter = [1; 32];
     let (opened, code) = opened(&mut controller, exporter, 100);
     let key = key();
-    let input = input(100);
+    let input = input(&controller, 100);
     let t = transcript(&opened, &key, exporter, input.commitment());
     let keys = pairing::derive_keys(&code, &t).unwrap();
     let response = controller
@@ -253,7 +298,12 @@ fn wrong_code_charges_attempt_and_connection_replay_cannot_confirm() {
     let mut controller = fixture.controller();
     let (created, code) = opened(&mut controller, [1; 32], 100);
     let key = key();
-    let t = transcript(&created, &key, [1; 32], input(100).commitment());
+    let t = transcript(
+        &created,
+        &key,
+        [1; 32],
+        input(&controller, 100).commitment(),
+    );
     let keys = pairing::derive_keys(&code, &t).unwrap();
     let correct = keys.origin_confirmation(&t);
     assert!(
@@ -303,7 +353,7 @@ fn exact_expiry_cancellation_and_receiver_policy_refuse_without_activation() {
         controller.core.state(&second.session_id, 700).unwrap(),
         pairing::State::Expired
     );
-    let mut input = input(700);
+    let mut input = input(&controller, 700);
     assert!(controller.validate_input(&input, 700).is_ok());
     input.valid_until += 1;
     assert!(controller.validate_input(&input, 700).is_err());
@@ -330,7 +380,12 @@ fn confirmation_finishing_at_expiry_spends_attempt_but_refuses() {
     let mut controller = fixture.controller();
     let (created, code) = opened(&mut controller, [1; 32], 100);
     let key = key();
-    let t = transcript(&created, &key, [1; 32], input(100).commitment());
+    let t = transcript(
+        &created,
+        &key,
+        [1; 32],
+        input(&controller, 100).commitment(),
+    );
     let keys = pairing::derive_keys(&code, &t).unwrap();
     let clock = std::cell::Cell::new(699);
     let now = || {
@@ -361,7 +416,7 @@ fn analytics_refusal_changes_no_authority_and_never_refunds_attempts() {
     let mut controller = fixture.controller();
     let (created, code) = opened(&mut controller, [1; 32], 100);
     let key = key();
-    let mut input = input(100);
+    let mut input = input(&controller, 100);
     input.kinds = vec![(Kind::AnalyticsPublish, false)];
     let t = transcript(&created, &key, [1; 32], input.commitment());
     let keys = pairing::derive_keys(&code, &t).unwrap();

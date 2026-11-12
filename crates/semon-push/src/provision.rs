@@ -2,7 +2,7 @@
 //! of machine transport credentials. Core alone owns session/gate/guess state.
 use crate::{
     credentials::Kind,
-    enrollment::{Binding, IssuerKind, Store},
+    enrollment::{Binding, Store},
     pairing::{self, Core, Transcript},
     provision_wire::{self as wire, Refused, Request},
     receiver_custody::{self, ReceiverCustody},
@@ -337,7 +337,8 @@ impl Controller {
         }
     }
     fn validate_input(&self, input: &pairing::ActivationInput, now: u64) -> Result<(), Refused> {
-        if input.machine != self.machine
+        if input.receiver_id != self.custody.receiver_id()
+            || input.machine != self.machine
             || input.valid_until <= now
             || input.valid_until > now.saturating_add(wire::INITIAL_CREDENTIAL_VALIDITY_SECONDS)
             || !input.client_certificate_pins.is_empty()
@@ -348,17 +349,6 @@ impl Controller {
                 .any(|(kind, certificate)| *certificate || *kind != Kind::MirrorPush)
             || !matches!(input.binding, Binding::Inapplicable)
             || input.kinds.len() != 1
-        {
-            return Err(Refused);
-        }
-        if let Binding::Admitted {
-            issuer,
-            assertion_issuer_keys,
-            ..
-        } = &input.binding
-            && (issuer.kind != IssuerKind::Receiver
-                || !issuer.origin_trust_acknowledged
-                || assertion_issuer_keys.as_slice() != [self.custody.issuer().clone()])
         {
             return Err(Refused);
         }

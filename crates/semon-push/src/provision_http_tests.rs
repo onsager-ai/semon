@@ -91,6 +91,10 @@ impl Harness {
     }
     fn input(&self) -> pairing::ActivationInput {
         pairing::ActivationInput {
+            receiver_id: crate::receiver_custody::ReceiverCustody::open_or_initialize(&self.dir.0)
+                .unwrap()
+                .receiver_id()
+                .into(),
             machine: "laptop".into(),
             binding: crate::enrollment::Binding::Inapplicable,
             kinds: vec![(Kind::MirrorPush, false)],
@@ -129,6 +133,136 @@ fn open(client: &mut Client) -> wire::Opened {
     assert_eq!(status, 200);
     serde_json::from_slice(&body).unwrap()
 }
+struct OriginTerminal<'a> {
+    harness: &'a Harness,
+    approve: bool,
+    malformed: bool,
+    expired: bool,
+}
+impl crate::connect::Terminal for OriginTerminal<'_> {
+    fn code(&mut self) -> crate::Result<crate::credentials::Secret> {
+        if self.expired {
+            self.harness.clock.store(701, Ordering::Relaxed);
+        }
+        if self.malformed {
+            return Ok(crate::credentials::Secret::new("bad-check-digit".into()));
+        }
+        let codes = self.harness.codes.lock().unwrap();
+        Ok(crate::credentials::Secret::new(
+            codes.values().next().unwrap().expose().into(),
+        ))
+    }
+    fn approve(&mut self, _: &str, _: &str, _: &str) -> crate::Result<bool> {
+        Ok(self.approve)
+    }
+    fn sources(&self) -> Vec<std::path::PathBuf> {
+        vec![]
+    }
+}
+fn origin_transport(
+    h: &Harness,
+    workers: &mut Vec<thread::JoinHandle<()>>,
+) -> crate::Result<crate::connect::Connection> {
+    let (mut stream, worker) = h.connect();
+    while stream.conn.is_handshaking() {
+        stream.conn.complete_io(&mut stream.sock).unwrap();
+    }
+    let exporter = stream
+        .conn
+        .export_keying_material([0; 32], wire::EXPORTER_LABEL, Some(&[]))
+        .unwrap();
+    workers.push(worker);
+    Ok(crate::connect::Connection {
+        stream,
+        host: "localhost".into(),
+        exporter,
+    })
+}
+#[test]
+fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
+    let h = Harness::new();
+    let origin = h.dir.0.join("origin");
+    let mut workers = vec![];
+    let mut terminal = OriginTerminal {
+        harness: &h,
+        approve: true,
+        malformed: false,
+        expired: false,
+    };
+    let name = crate::connect::connect_with(
+        "https://localhost:443",
+        "laptop",
+        &mut terminal,
+        &origin,
+        &|| 100,
+        &mut || origin_transport(&h, &mut workers),
+    )
+    .unwrap();
+    for worker in workers {
+        worker.join().unwrap();
+    }
+    let (config, credential) = crate::origin_custody::load(&origin, Some(&name)).unwrap();
+    assert_eq!(config.scope.receiver_id, config.receiver_id);
+    assert!(matches!(
+        config.scope.binding,
+        crate::enrollment::Binding::Inapplicable
+    ));
+    let crate::Credential::Memory(token) = credential else {
+        panic!()
+    };
+    let (mut client, worker) = h.connect();
+    let bytes = b"{}";
+    write!(client, "PUT /v1/mirror/facts HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n", token.expose(), bytes.len()).unwrap();
+    client.write_all(bytes).unwrap();
+    client.flush().unwrap();
+    assert_ne!(response(&mut client).0, 401);
+    drop(client);
+    worker.join().unwrap();
+}
+#[test]
+fn origin_decline_malformed_and_expired_never_write_custody() {
+    for (approve, malformed, expired) in [
+        (false, false, false),
+        (true, true, false),
+        (true, false, true),
+    ] {
+        let h = Harness::new();
+        let origin = h.dir.0.join("origin");
+        let mut workers = vec![];
+        let mut terminal = OriginTerminal {
+            harness: &h,
+            approve,
+            malformed,
+            expired,
+        };
+        assert!(
+            crate::connect::connect_with(
+                "https://localhost:443",
+                "laptop",
+                &mut terminal,
+                &origin,
+                &|| 100,
+                &mut || origin_transport(&h, &mut workers)
+            )
+            .is_err()
+        );
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(!origin.exists());
+        assert!(
+            crate::enrollment::Registry::read_current(&h.dir.0)
+                .unwrap()
+                .enrollments()
+                .is_empty()
+        );
+        if malformed {
+            let mut controller = h.shared.provisioning.as_ref().unwrap().lock().unwrap();
+            assert_eq!(controller.pending(100)[0].1, pairing::State::Pending);
+        }
+    }
+}
+
 fn wrong_confirmation(id: &str) -> Vec<u8> {
     let mut key = [1; 65];
     key[0] = 4;

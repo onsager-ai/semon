@@ -348,6 +348,7 @@ mod tests {
                     session_id: "a".repeat(64),
                     proof: encode(&[0; 64]),
                     input: pairing::ActivationInput {
+                        receiver_id: "receiver-1".into(),
                         machine: "laptop".into(),
                         binding: crate::enrollment::Binding::Inapplicable,
                         kinds: vec![(crate::credentials::Kind::MirrorPush, false)],
