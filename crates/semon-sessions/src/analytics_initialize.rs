@@ -563,13 +563,7 @@ mod tests {
         assert_eq!(fs::read(&target).unwrap(), before);
         fs::remove_file(&identity).unwrap();
         fs::rename(&target, &identity).unwrap();
-        let db = rusqlite::Connection::open(&index).unwrap();
-        db.execute(
-            "INSERT INTO meta(key,value) VALUES('storage_namespace','foreign')",
-            [],
-        )
-        .unwrap();
-        drop(db);
+        store::bind_foreign_analytics_index(&index).unwrap();
         let before = fs::read(&index).unwrap();
         assert_eq!(failure(&index, None).kind, ErrorKind::BindingMismatch);
         assert_eq!(fs::read(index).unwrap(), before);

@@ -773,6 +773,17 @@ pub(crate) fn analytics_index_incarnation(path: &Path) -> Result<String, crate::
     Ok(incarnation)
 }
 
+/// Install a foreign binding for admission-refusal tests through its owner.
+#[cfg(all(test, unix))]
+pub(crate) fn bind_foreign_analytics_index(path: &Path) -> rusqlite::Result<()> {
+    let db = Connection::open(path)?;
+    db.execute(
+        "INSERT INTO meta(key,value) VALUES('storage_namespace','foreign')",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Qualify an exact selected or recovery path without traversing unrelated
 /// archived markers. An existing database is never initialized or reset here.
 pub(crate) fn open_selected(path: &Path) -> Result<(), String> {
