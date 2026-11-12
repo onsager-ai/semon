@@ -225,10 +225,11 @@ impl<'a> Broker<'a> {
     /// A selected request whose transport failed cannot remain dispatched forever.
     pub fn dispatch_failed(&self, id: Identifier) -> Result<()> {
         let mut state = self.state.lock().map_err(|_| Reason::Unavailable)?;
-        if let Some(work) = state.work.get_mut(&id) {
-            if work.dispatched && work.result.is_none() {
-                fail(work, Reason::Unavailable);
-            }
+        if let Some(work) = state.work.get_mut(&id)
+            && work.dispatched
+            && work.result.is_none()
+        {
+            fail(work, Reason::Unavailable);
         }
         self.changed.notify_all();
         Ok(())
