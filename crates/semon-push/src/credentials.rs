@@ -128,6 +128,42 @@ impl fmt::Debug for Refusal {
     }
 }
 impl Registry {
+    /// Recheck one previously authenticated credential without retaining its secret.
+    pub(crate) fn current_credential(
+        &self,
+        credential_id: &str,
+        verified_pin: Option<&crate::enrollment::Pin>,
+        now: u64,
+    ) -> Option<&Bearer> {
+        let bearer = self
+            .credentials
+            .iter()
+            .find(|c| c.credential_id == credential_id)?;
+        let enrollment = self
+            .enrollments
+            .iter()
+            .find(|e| e.enrollment_id == bearer.enrollment_id)?;
+        let scope = enrollment
+            .credential_kinds
+            .iter()
+            .find(|s| s.kind == bearer.kind)?;
+        let certificate = enrollment.client_certificate_pins.iter().any(|p| {
+            Some(&p.pin) == verified_pin
+                && p.generation == bearer.generation
+                && p.revoked_at.is_none()
+        });
+        credential_authority_refusal(
+            enrollment,
+            scope,
+            bearer,
+            verified_pin.is_some(),
+            certificate,
+            now,
+        )
+        .is_none()
+        .then_some(bearer)
+    }
+
     /// `verified_pin` must come from verified TLS evidence, never a request field.
     /// Time is injected Unix seconds. The scan schedule depends on stored state,
     /// not whether the presented digest matches. This is not a constant-time
@@ -155,23 +191,14 @@ impl Registry {
                         & pin.revoked_at.is_none();
                 }
                 for scope in &enrollment.credential_kinds {
-                    let revoked = enrollment.revoked_at.is_some()
-                        | scope.revoked_at.is_some()
-                        | bearer.revoked_at.is_some();
-                    let in_window = (now >= bearer.valid_from) & (now < bearer.valid_until);
-                    let generation = scope.generations.accepts(bearer.generation, now);
-                    let certificate_required = scope.client_cert_required | verified_pin.is_some();
-                    let reason = if revoked {
-                        Some(Refusal::Revoked)
-                    } else if !in_window {
-                        Some(Refusal::OutsideValidity)
-                    } else if !generation {
-                        Some(Refusal::RetiredGeneration)
-                    } else if certificate_required & !certificate {
-                        Some(Refusal::ClientCertificate)
-                    } else {
-                        None
-                    };
+                    let reason = credential_authority_refusal(
+                        enrollment,
+                        scope,
+                        bearer,
+                        verified_pin.is_some(),
+                        certificate,
+                        now,
+                    );
                     if (enrollment.enrollment_id == bearer.enrollment_id)
                         & (scope.kind == bearer.kind)
                     {
@@ -209,6 +236,27 @@ impl Registry {
         }
     }
 }
+fn credential_authority_refusal(
+    enrollment: &crate::enrollment::Enrollment,
+    scope: &crate::enrollment::KindScope,
+    bearer: &Bearer,
+    pin_presented: bool,
+    certificate: bool,
+    now: u64,
+) -> Option<Refusal> {
+    if enrollment.revoked_at.is_some() | scope.revoked_at.is_some() | bearer.revoked_at.is_some() {
+        Some(Refusal::Revoked)
+    } else if !((now >= bearer.valid_from) & (now < bearer.valid_until)) {
+        Some(Refusal::OutsideValidity)
+    } else if !scope.generations.accepts(bearer.generation, now) {
+        Some(Refusal::RetiredGeneration)
+    } else if (scope.client_cert_required | pin_presented) & !certificate {
+        Some(Refusal::ClientCertificate)
+    } else {
+        None
+    }
+}
+
 fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     let mut difference = 0u8;
     for i in 0..32 {

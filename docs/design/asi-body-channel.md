@@ -49,16 +49,13 @@ owner; the watcher does not own append services or schedule background work.
 request using verified connection evidence and its bearer credential, always
 passing `Kind::BodyChannel`; no request body selects the kind. The existing
 `TryFrom<&AuthenticatedEnrollment>` supplies the complete scope. Pending broker
-work and append leases retain the authentication's `RevisionHandle` independently
-of subsequent requests. Registry read errors fail closed.
-
-The current coarse check (option A) invalidates all captured authority on any
-registry revision change. Enrolling another machine, revoking authority, and every
-credential renewal drop all pending body work and append leases for every origin
-with `Revoked`. Origins must reconnect with a fresh grant. Even unchanged owners
-incur this churn. Option B, a credential-bound authority handle exposed by the
-origin lane in its planned renewal/revocation PR4, is the planned replacement;
-it will allow unaffected owners to retain their work.
+work, prepared deliveries and append leases retain the authentication's
+`CredentialHandle` independently of subsequent requests. Registry read errors fail
+closed. Registry revision notifications recheck each captured credential's current
+authority; unrelated enrollment writes and sibling renewal preserve pending work.
+Revocation of the captured credential, kind, enrollment or authenticated pin,
+expiry and generation cutover end its authority at the next authorization/release
+decision.
 
 Body-route mTLS is settled, not an amendment. Slice 4a builds client-certificate
 support; #594 consumes this authenticated scope and never touches TLS configuration.

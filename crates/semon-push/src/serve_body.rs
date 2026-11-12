@@ -709,6 +709,48 @@ mod tests {
         }
     }
     #[test]
+    fn host_revision_check_preserves_poll_until_its_credential_is_revoked() {
+        use crate::body_broker::EnrollmentSource;
+        let (dir, shared) = shared(true);
+        let mut authority = ConnectionAuthority::default();
+        authority.verified_client_identity = Some(auth_tests::identity());
+        let source = RegistryEnrollmentSource::authenticate(
+            shared.tokens.registry(),
+            &mut authority,
+            Some("Bearer test-bearer"),
+            100,
+        )
+        .unwrap();
+        let scope = source
+            .authenticated_enrollment(crate::origin_read::EnrollmentKind::BodyChannel)
+            .unwrap();
+        let host = shared.body.as_ref().unwrap();
+        let bytes = wire::control(&wire::PollRequest {
+            version: wire::VERSION,
+            channel_binding: [3; 32],
+        })
+        .unwrap();
+        let poll = host
+            .broker
+            .reserve_poll(&source)
+            .unwrap()
+            .begin(&source, &bytes)
+            .unwrap();
+        let mut store = crate::enrollment::Store::open(&dir.0).unwrap();
+        let mut registry = store.snapshot().unwrap();
+        store.commit(registry.revision(), &registry).unwrap();
+        host.check_revision().unwrap();
+        assert_eq!(host.broker.channel(&scope), Ok([3; 32]));
+        assert!(poll.try_take(&source).unwrap().is_none());
+        registry = store.snapshot().unwrap();
+        registry.credentials[0].revoked_at = Some(100);
+        store.commit(registry.revision(), &registry).unwrap();
+        host.check_revision().unwrap();
+        assert!(host.broker.channel(&scope).is_err());
+        assert!(matches!(poll.try_take(&source), Err(Reason::Revoked)));
+    }
+
+    #[test]
     fn wrong_kinds_and_revocation_refuse_without_buffering() {
         for kind in [Kind::MirrorPush, Kind::AnalyticsPublish, Kind::BodyChannel] {
             let (dir, shared) = shared(true);

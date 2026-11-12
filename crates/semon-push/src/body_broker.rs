@@ -33,13 +33,16 @@ pub trait EnrollmentSource {
     fn is_current(&self, scope: &EnrollmentScope) -> bool;
     /// Capture request authority for pending work. Registry-backed sources return
     /// the handle obtained at authentication; in-memory sources have no registry.
-    fn revision_handle(&self, _scope: &EnrollmentScope) -> Option<crate::serve::RevisionHandle> {
+    fn credential_handle(
+        &self,
+        _scope: &EnrollmentScope,
+    ) -> Option<crate::serve::CredentialHandle> {
         None
     }
 }
 
 pub(crate) fn authority_is_current(
-    handle: Option<&crate::serve::RevisionHandle>,
+    handle: Option<&crate::serve::CredentialHandle>,
     source: &dyn EnrollmentSource,
     scope: &EnrollmentScope,
     now: u64,
@@ -64,7 +67,7 @@ impl Default for Config {
 }
 struct Work {
     scope: EnrollmentScope,
-    authority: Option<crate::serve::RevisionHandle>,
+    authority: Option<crate::serve::CredentialHandle>,
     channel: [u8; 32],
     request: Request,
     dispatched: bool,
@@ -90,7 +93,7 @@ pub struct VerifiedResponse {
 struct Channel {
     binding: [u8; 32],
     scope: EnrollmentScope,
-    authority: Option<crate::serve::RevisionHandle>,
+    authority: Option<crate::serve::CredentialHandle>,
 }
 #[derive(Default)]
 struct State {
@@ -147,7 +150,7 @@ impl<'a, 'b> PollReservation<'a, 'b> {
             id.into(),
             Channel {
                 binding: poll.channel_binding,
-                authority: auth.revision_handle(&self.scope),
+                authority: auth.credential_handle(&self.scope),
                 scope: self.scope.clone(),
             },
         );
@@ -299,7 +302,7 @@ impl<'a> Broker<'a> {
         state.work.insert(
             request.request_id,
             Work {
-                authority: auth.revision_handle(&scope),
+                authority: auth.credential_handle(&scope),
                 scope,
                 channel,
                 request,
@@ -531,7 +534,7 @@ impl Poll<'_, '_> {
         self.broker.maintain(state, auth);
         if !auth.is_current(&self.scope)
             || auth
-                .revision_handle(&self.scope)
+                .credential_handle(&self.scope)
                 .is_some_and(|handle| !handle.is_current_at(self.broker.clock.now_millis() / 1000))
         {
             return Err(Reason::Revoked);
@@ -725,7 +728,7 @@ struct Prepared {
     attempt: receiver_audit::AttemptId,
     key: crate::body_cache::CacheKey,
     stream_through: bool,
-    authority: Option<crate::serve::RevisionHandle>,
+    authority: Option<crate::serve::CredentialHandle>,
     deadline: u64,
 }
 /// One audited delivery. The page is accessible only through a fresh release
@@ -1050,7 +1053,7 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
                 attempt,
                 key: verified.binding.cache_key,
                 stream_through: true,
-                authority: self.enrollment.revision_handle(&input.scope),
+                authority: self.enrollment.credential_handle(&input.scope),
                 deadline: verified.binding.deadline_millis,
             });
         }
@@ -1120,7 +1123,7 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             attempt,
             key,
             stream_through: false,
-            authority: self.enrollment.revision_handle(&input.scope),
+            authority: self.enrollment.credential_handle(&input.scope),
             deadline: verified.binding.deadline_millis,
         })
     }
