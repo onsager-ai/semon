@@ -545,7 +545,7 @@ Certificate possession alone grants no kind. Credential and any required verifie
 certificate must match the same current enrollment.
 
 Under the [pre-release policy](../../AGENTS.md#pre-release-compatibility-policy),
-there is no compatibility reader, migration or dual path for `NAME SHA256(token)`.
+there is no compatibility reader, migration or dual path for `M SHA256(token)`.
 Finding old `DIR/tokens` refuses receiver startup with re-issue guidance and leaves
 the file untouched. Re-issue kind credentials, explicitly enroll/configure machines
 and update supported Push clients/token inputs together. 4a updates the owning CLI,
@@ -607,8 +607,7 @@ to an old credential after confirmed cutover, revocation or expiry.
 
 ### Offline machines and missed renewal
 
-If credentials expire while this machine is offline, pair again when it returns.
-An expired credential or missed renewal fails closed. Recovery uses a NEW enrollment ID and the same
+Expired credentials fail closed; failed renewal does not stop access while existing credentials remain valid. Recovery uses a NEW enrollment ID and the same
 four actions: B1 authorize `receive enroll` on the receiver; B2 run `connect --to`
 on the origin; B3 enter the code in its trusted prompt; B4 approve the combined
 trust/source summary. Retained keys, consent and history do not authorize revival.
@@ -659,7 +658,7 @@ replacement but does not prove revocation; generic renewal refusal proves neithe
 | Expired, receiver has no authorizable kind | 4: B1 enroll, B2 connect, B3 enter code, B4 approve replacement |
 | Active replacement, including other receiver kinds still usable | 5: the four actions plus receiver replacement confirmation before code display |
 | Re-enable with a running watch | 2: receive enable command and its confirmation; renewal is automatic |
-| Re-enable without a running watch | 3: enable command, confirmation, then `semon push --receiver NAME` on the origin |
+| Re-enable without a running watch | 3: enable command, confirmation, then `semon push --receiver URL` on the origin |
 
 These counts use the public_tls code profile and existing listener/TLS prerequisites.
 The pinned_invitation profile uses an invitation, never a public_tls code. Standalone
@@ -957,9 +956,17 @@ attempt schedules the next eligible attempt; it does not change that attempt's
 bound authorization set. Apply the same retry limits and certificate/authority
 checks; the header grants no authority and cannot widen scope.
 
+For revoke, enable and disconnect, rerunning the SAME command after an uncertain
+commit safely reconciles its earlier attempt before prompting or retrying. Persist
+nonsecret operation identity/outcome metadata under the owning custody lock so the
+rerun is idempotent, reports the earlier durable outcome first, and neither repeats
+an authorization nor affects a replacement enrollment. If uncertainty remains,
+refuse with the table's same-command guidance; never direct operators to custody
+files. This reconciliation precedes normal confirmation and target-state checks.
+
 ### Origin disconnect and delivery split
 
-PR4.3 adds `semon disconnect --receiver NAME` with confirmation. Under origin
+PR4.3 adds `semon disconnect --receiver URL` with confirmation. Under origin
 custody's install lock, durably disable the selected enrollment/channel and active
 receiver/issuer trust, stop renewal/publication and cancel active delivery. Keep
 history, keys, consent and audits. Repeated disconnect is harmless. It is local
@@ -971,7 +978,7 @@ concurrent renewal cannot publish active custody after disconnect wins the lock.
 | 4.0, this docs-only PR | Accepted renewal/revoke/enable contract, exact operator strings and CI obligations; no runtime implementation |
 | 4.1, separately in flight | Credential-bound authority handle and in-flight checks independent of unrelated registry revisions |
 | 4.2 | Receiver renewal routes, current registry format, revoke/enable, audit-before-compaction, credential_generation_ended audit record, tombstones and live-state admission integration |
-| 4.3 | Origin `push`/`--watch` renewal, staged installation/recovery and local disconnect |
+| 4.3 | Origin push/watch renewal, staged installation/recovery, local disconnect and URL-based --receiver on connect/push/disconnect using one endpoint normalization; replace #651's hash selector in docs/tests together |
 
 PR3b private-root follows PR4; a future `--trust-root FILE` is outside this contract
 and its behavior is not decided.
@@ -979,17 +986,18 @@ and its behavior is not decided.
 ### Exact new operator-visible strings
 
 This is the single wording inventory for PR4 and the UI/UX Manager's wording/step
-review. `M`, `K`, `NAME`, `N` and `D` below are substitutions for validated machine,
-kind, receiver selector, generation and whole days remaining (rounded up). `DIR`
-is the receiver directory and `URL` its configured HTTPS endpoint. `NAME` is the
-lowercase hex SHA-256 of the origin's normalized endpoint bytes: first apply
-`pairing::normalize_endpoint` (HTTPS host plus explicit port), then the same
-`check_url` normalization used to validate stored custody. The receiver MUST compute
-and print this selector from its own advertised endpoint, which connect requires
-to equal the origin's normalized endpoint. The current controller has one advertised
-endpoint; multiple advertised URLs require retaining the exact enrolled endpoint
-per enrollment and computing its selector, never guessing from the listen address
-or another alias. `TARGET`
+review. `M`, `K` and `D` mean validated machine, kind and whole days remaining
+(rounded up). `DIR` is the receiver directory. `URL` is the full validated HTTPS
+endpoint given to connect, normalized with `pairing::normalize_endpoint`; `HOST` is
+its sanitized host[:port], with IPv6 brackets preserved. Notices/status/confirmation
+show HOST; commands use URL. Never display userinfo or query parts. Connect, push
+and disconnect use ONE endpoint normalization, including default ports and IPv6,
+without DNS alias guessing. `--receiver URL` accepts that HTTPS URL; the 64-hex
+custody key stays internal. No hash alias or operator-chosen alias is supported.
+The receiver computes receive enable's push URL from its advertised endpoint;
+multiple endpoints require retaining the exact enrolled endpoint, never guessing
+from a listen address. PR4.3 changes main's existing #651 push selector contract,
+with docs and tests updated together. `TARGET`
 is `machine M` or `kind K for machine M`. Do not substitute secrets. Prompts and
 confirmation feedback use the controlling terminal; no terminal means refuse.
 Only literal `yes` confirms; any other input/EOF cancels without changing state.
@@ -1000,7 +1008,7 @@ exit 1; cancellation exits 0. No additional renewal prompts.
 
 | Surface | Trigger | Exact text | Stream / exit behavior |
 | --- | --- | --- | --- |
-| receive enroll | M has a usable enrollment, before any code display | `This replaces the active enrollment for machine M and revokes it. Type yes to confirm: ` | owner terminal; only literal yes proceeds; no registry change yet |
+| receive enroll | M has a usable enrollment, before any code display | `Replace the active enrollment for machine M? Its access will stop when pairing completes. Type yes to confirm: ` | owner terminal; only literal yes proceeds; no registry change yet |
 | receive enroll | Replacement declined or EOF | `Enrollment replacement cancelled; nothing changed.` | terminal; exit 0 |
 | receive revoke / enable / disconnect | Confirmation input accepted | `Confirmation received.` | terminal; no success claim until durable commit |
 | receive revoke | Confirmation prompt | `Revoke TARGET? This stops access. Type yes to confirm: ` | terminal; wait for input |
@@ -1010,35 +1018,34 @@ exit 1; cancellation exits 0. No additional renewal prompts.
 | receive revoke | Unknown machine | `semon: machine M was not found; check --machine, then retry revocation.` | stderr; exit 1 |
 | receive revoke | Unknown kind | `semon: kind K was not found for machine M; check --kind, then retry revocation.` | stderr; exit 1 |
 | receive revoke | Wrong owner or missing terminal | `semon: revocation requires the receiver owner's terminal; run this command there.` | stderr; exit 1 |
-| receive revoke | Custody failure or uncertain commit | `semon: revocation could not be confirmed; keep DIR unchanged and reopen receiver state to check the outcome before retrying.` | stderr; exit 1 |
+| receive revoke | Custody failure or uncertain commit | `semon: revocation could not be confirmed; rerun the same command to check its earlier outcome before retrying.` | stderr; exit 1 |
 | receive enable | Confirmation prompt | `Allow fresh access for kind K on machine M? Type yes to confirm: ` | terminal; wait for input |
 | receive enable | Cancelled input | `Enable cancelled; nothing changed.` | terminal; exit 0 |
-| receive enable | Durable authorization, including already pending | `Re-enable approved for kind K on machine M; waiting for origin renewal. A running watch will renew automatically; otherwise run semon push --receiver NAME on the origin.` | stdout; exit 0; access is not yet restored |
+| receive enable | Durable authorization, including already pending | `Re-enable approved for kind K on machine M; waiting for origin renewal. A running watch will renew automatically; otherwise run semon push --receiver URL on the origin.` | stdout; exit 0; access is not yet restored |
 | receive enable | Unknown machine or kind | `semon: enable refused; machine M or kind K was not found. Check --machine and --kind, then retry.` | stderr; exit 1 |
 | receive enable | Wrong owner or missing terminal | `semon: enable requires the receiver owner's terminal; run this command there.` | stderr; exit 1 |
-| receive enable | Custody failure or uncertain commit | `semon: enable could not be confirmed; keep DIR unchanged and reopen receiver state to check the outcome before retrying.` | stderr; exit 1 |
+| receive enable | Custody failure or uncertain commit | `semon: enable could not be confirmed; rerun the same command to check its earlier outcome before retrying.` | stderr; exit 1 |
 | receive enable | Kind is not revoked | `semon: kind K is already enabled for machine M; check the kind before retrying.` | stderr; exit 1 |
 | receive enable | Revoked enrollment or no valid remaining kind | `semon: enable refused; no valid access remains.` followed by newline and the common recovery block below | stderr; exit 1; record nothing; origin steps run on origin machine |
-| disconnect | Confirmation prompt | `Disconnect receiver NAME on this machine? Type yes to confirm: ` | terminal; wait for input |
+| disconnect | Confirmation prompt | `Disconnect receiver HOST on this machine? Type yes to confirm: ` | terminal; wait for input |
 | disconnect | Cancelled input | `Disconnect cancelled; nothing changed.` | terminal; exit 0 |
-| disconnect | Durable success, including already disconnected | `Disconnected receiver NAME on this machine. History, keys and audits kept. Receiver access was not revoked.` | stdout; exit 0 |
-| disconnect | Unknown receiver | `semon: receiver NAME was not found; check --receiver against the name printed by connect, then retry.` | stderr; exit 1 |
+| disconnect | Durable success, including already disconnected | `Disconnected receiver HOST on this machine. History, keys and audits kept. Receiver access was not revoked.` | stdout; exit 0 |
+| disconnect | Unknown receiver | `semon: receiver HOST was not found; use the HTTPS URL given to connect as --receiver URL, then retry.` | stderr; exit 1 |
 | disconnect | Wrong owner or missing terminal | `semon: disconnect requires the local owner's terminal; run this command there.` | stderr; exit 1 |
-| disconnect | Custody failure or uncertain commit | `semon: disconnect could not be confirmed; keep local enrollment files unchanged and reopen them to check the outcome before retrying.` | stderr; exit 1 |
-| push / --watch | 30-day boundary, no attempt under way | `Receiver NAME renewal is due soon; D days remain.` | stderr; no exit change |
-| push / --watch | Attempt actually under way, no failure in this cycle | `Receiver NAME credentials are renewing automatically; D days remain.` | stderr; no exit change |
-| --watch | 14-day or 7-day crossing, or daily reminder at that severity | `Automatic renewal has not completed; D days remain. Check receiver NAME is reachable; renewal will retry.` | stderr; no exit change |
-| --watch | First renewal error/refusal, changed failure outcome, or daily failure reminder | `Could not renew receiver NAME credentials; D days remain. Check the receiver is reachable; renewal will retry.` | stderr; valid traffic continues; no exit change |
-| one-shot push | Renewal error/refusal or 14/7-day escalation | `Could not renew receiver NAME credentials; D days remain. Check the receiver is reachable, then run semon push --receiver NAME again.` | stderr; valid traffic continues; renewal alone changes no exit status |
-| push / --watch | Existing credential refused by application traffic | `Receiver NAME refused access.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; refusal does not prove revocation |
-| push / --watch | Credential expired | `Receiver NAME credentials expired.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; NEW enrollment ID |
-| push / --watch | Client certificate expired | `Receiver NAME client certificate expired.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; NEW enrollment ID |
-| Recovery block | Appended to enable-no-authority and the three push recovery first lines | `To restore access, pair again: on the receiver, run semon receive enroll --machine M with its listener/TLS options; on this machine, run semon connect --to URL, enter the code, and approve replacement.` | stderr; public_tls uses code; pinned_invitation substitutes invitation |
-| push / --watch | Durable installation and first-use confirmation, common generation | `semon push: renewed receiver NAME credentials to generation N.` | stderr; no exit change |
-| push / --watch | Durable installation and first-use confirmation, differing kind generations | `semon push: renewed receiver NAME K credentials to generation N.` | stderr; one line per kind; no exit change |
-| connect | Replacement line in combined approval summary | `This replaces the previous enrollment for receiver NAME. Its files and history will be kept.` | terminal; shown before B4 approval; no extra approval step |
-| receiver startup / owner command | Unsupported pre-renewal registry | `Receiver state uses an unsupported format. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See Offline machines and missed renewal in asi-enrollment.md.` | stderr; exit 1; [recovery section](#offline-machines-and-missed-renewal); never used for capacity |
-| Receiver admission | Actual live/tombstone capacity exhausted | `Receiver state is full. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See Offline machines and missed renewal in asi-enrollment.md.` | local stderr; exit 1; wire remains generic |
+| disconnect | Custody failure or uncertain commit | `semon: disconnect could not be confirmed; rerun the same command to check its earlier outcome before retrying.` | stderr; exit 1 |
+| push / --watch | 30-day boundary, no attempt under way | `Receiver HOST renewal is due soon; D days remain.` | stderr; no exit change |
+| push / --watch | Attempt actually under way, no failure in this cycle | `Receiver HOST credentials are renewing automatically; D days remain.` | stderr; no exit change |
+| --watch | 14-day or 7-day crossing, or daily reminder at that severity | `Automatic renewal has not completed; D days remain. Check receiver HOST is reachable; renewal will retry.` | stderr; no exit change |
+| --watch | First renewal error/refusal, changed failure outcome, or daily failure reminder | `Could not renew receiver HOST credentials; D days remain. Check the receiver is reachable; renewal will retry.` | stderr; valid traffic continues; no exit change |
+| one-shot push | Renewal error/refusal or 14/7-day escalation | `Could not renew receiver HOST credentials; D days remain. Check the receiver is reachable, then run semon push --receiver URL again.` | stderr; valid traffic continues; renewal alone changes no exit status |
+| push / --watch | Existing credential refused by application traffic | `Receiver HOST refused access.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; refusal does not prove revocation |
+| push / --watch | Credential expired | `Receiver HOST credentials expired.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; NEW enrollment ID |
+| push / --watch | Client certificate expired | `Receiver HOST client certificate expired.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; NEW enrollment ID |
+| Recovery block | Appended to enable-no-authority and the three push recovery first lines | `To restore access, pair again: on the receiver, run semon receive enroll --machine M with its listener/TLS options and confirm replacement if prompted; on the origin, run semon connect --to URL, enter the code, and approve replacement.` | stderr; public_tls uses code; pinned_invitation substitutes invitation |
+| push / --watch | Durable installation and first-use confirmation | `Receiver HOST credentials renewed.` | stderr; no exit change; generation/kind details diagnostic only |
+| connect | Replacement line in combined approval summary | `This replaces the previous enrollment for receiver HOST. Its files and history will be kept.` | terminal; shown before B4 approval; no extra approval step |
+| receiver startup / owner command | Unsupported pre-renewal registry | `Receiver state uses an unsupported format. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See docs/design/asi-enrollment.md#offline-machines-and-missed-renewal.` | stderr; exit 1; [recovery section](#offline-machines-and-missed-renewal); never used for capacity |
+| Receiver admission | Actual live/tombstone capacity exhausted | `Receiver state is full. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See docs/design/asi-enrollment.md#offline-machines-and-missed-renewal.` | local stderr; exit 1; wire remains generic |
 | Receiver new authority | Audit unavailable | `Receiver audit is unavailable. Keep DIR unchanged; restore access to its audit storage before enrolling or renewing.` | local stderr; exit 1; wire remains generic; revoke/cutover still work |
 
 For watch, evaluate deadlines independently of file events, at least once per
@@ -1049,7 +1056,9 @@ schedule: report the FIRST failure immediately, a changed outcome/severity, each
 starting late, use only the highest reached severity. Suppress redundant due,
 attempt-start and failure lines within one cycle; failure/severity wins. A running
 watch never tells the operator to run push. At 30 days say due soon unless an
-attempt is actually under way. Reset notices after success. One-shot push emits
+attempt is actually under way. Attempt-start never resets suppression and never
+counts as a changed outcome: alternating starts and the same failure cannot flood
+the log. Reset notices only after success. One-shot push emits
 one combined outcome per cycle. Tests advance injected time; no real-time sleeps
 (#623).
 
@@ -1079,7 +1088,7 @@ be recalled; disconnected origins cannot receive instantaneous remote updates.
 
 | Operation | Contract |
 | --- | --- |
-| `semon disconnect --receiver <name>` | Origin command plus confirmation disables local enrollment/channel and receiver/issuer trust in active use; cancel active delivery and stop new publication. Preserve local history, analytics, keys and audits. This alone is not receiver-side revocation. |
+| `semon disconnect --receiver URL` | Origin command plus confirmation disables local enrollment/channel and receiver/issuer trust in active use; cancel active delivery and stop new publication. Preserve local history, analytics, keys and audits. This alone is not receiver-side revocation. |
 | `semon receive revoke --machine <name>` | Authenticated receiver admin command plus confirmation revokes enrollment, all kinds/generations, associated grants and in-flight hooks; invalidate affected cache entries under cache rules. Preserve admitted facts/audits and report retired/disconnected coverage. Requires no origin contact. |
 | Lost origin | Receiver revokes immediately; replacement pairs with a new enrollment ID. No automatic namespace/claim transfer or erasure of the lost disk. |
 | Lost/compromised receiver | Recover through fresh independently trusted pairing with a new enrollment ID. Connect replaces existing origin custody under the single B4 approval and retains its old files; no separate disconnect is required. Receiver replacement confirmation applies if a usable predecessor remains there. Handle offline origins locally; disconnect remains a standalone way to stop local use. |
@@ -1246,6 +1255,9 @@ CI must verify the implementation, not infer safety from this docs PR:
   whole-enrollment revocation. Refuse last-kind per-kind revoke and enable without
   valid remaining authority before writing. Enable after begin stays pending;
   cancellation/revoke of a bound authorization makes finish refuse.
+- Rerun each revoke/enable/disconnect command after uncertain commit; reconcile
+  idempotently and report the prior outcome before prompting or retrying, without
+  repeating authorization or touching a replacement enrollment.
 - Preserve old valid origin custody across failed staging, crash and disconnect;
   admit no partial/mixed generation or late renewal after disconnect. Preserve keys,
   consent, facts, history and audits; old registry format refuses without migration.
@@ -1273,11 +1285,13 @@ CI must verify the implementation, not infer safety from this docs PR:
 - Exercise exact operator strings, confirmation/cancellation, 30/14/7-day escalation,
   watch without source events, first-failure immediacy, changed outcomes/severity,
   threshold crossings, daily reminder ceiling and suppressed duplicate due/failure
-  lines. A running watch never advises another push; every one-shot push instruction
-  names the receiver. The receiver's printed NAME must exactly equal the name
-  connect prints for the same advertised endpoint, including case, trailing slash
-  and explicit/default port normalization; reject ambiguous multi-endpoint selection.
-  Distinguish client-certificate expiry and unsupported-format
+  lines. Attempt-start never resets suppression or counts as a changed outcome;
+  alternating start/same-failure cycles stay quiet. A running watch never advises
+  another push. Test --receiver URL resolution through the SAME pairing endpoint
+  normalization on connect/push/disconnect, including default ports and IPv6,
+  without hash aliases or DNS alias guessing. Notices never show userinfo/query;
+  receive enable prints the correct semon push --receiver URL for the enrolled
+  advertised endpoint. Distinguish client-certificate expiry and unsupported-format
   versus capacity guidance; all recovery strings use code/invitation consistently.
   Inject wall/monotonic clocks and scheduler advancement, clamp backward wall time,
   and use no real-time sleeps (#623), including deadline and race tests.
@@ -1289,9 +1303,11 @@ records exact pairing/renewal parameters here before implementation merges. Full
 publication, body-read and four-action journey acceptance belong to the owning
 integration slices; docs-only CI proves none of those runtime guarantees.
 
-Origin PR3.2c status (part of #593): `connect --to URL [--machine NAME]` uses
+Origin PR3.2c status (part of #593): `connect --to URL [--machine M]` uses
 public-CA TLS 1.3 and a non-echoing controlling terminal, followed by explicit
-mirror-only trust/source approval. `push [--receiver NAME] [--watch]` consumes
+mirror-only trust/source approval. The shipped push selector uses the internal
+endpoint hash; PR4.3 replaces that operator interface with
+`push [--receiver URL] [--watch]` under the contract above. Push consumes
 stored enrollment; the superseded `--to`/`--token-file` push CLI is removed.
 Custody is `$XDG_CONFIG_HOME/semon/origin/<sha256-canonical-endpoint>/` (default
 `~/.config/semon/origin/`): `enrollment.json` signed by `origin-key.pk8`,
