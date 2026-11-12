@@ -55,6 +55,15 @@ struct Work {
     payload: Vec<u8>,
     result: Option<Result<VerifiedResponse>>,
 }
+struct RequestCleanup<'a, 'b> {
+    broker: &'a Broker<'b>,
+    id: Identifier,
+}
+impl Drop for RequestCleanup<'_, '_> {
+    fn drop(&mut self) {
+        let _ = self.broker.cancel(self.id);
+    }
+}
 pub struct VerifiedResponse {
     pub binding: ResponseBinding,
     pub payload: Vec<u8>,
@@ -178,7 +187,9 @@ impl<'a> Broker<'a> {
         if state
             .work
             .values()
-            .filter(|w| w.scope.enrollment_id == scope.enrollment_id)
+            .filter(|w| {
+                w.scope.enrollment_id == scope.enrollment_id && !matches!(w.result, Some(Err(_)))
+            })
             .count()
             >= 4
         {
@@ -222,9 +233,28 @@ impl<'a> Broker<'a> {
                 fail(work, Reason::Deadline);
             }
         }
+        let terminal: Vec<_> = state
+            .work
+            .iter()
+            .filter(|(_, w)| matches!(w.result, Some(Err(_))))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in terminal.into_iter().rev().skip(16) {
+            state.work.remove(&id);
+        }
         for queue in state.queues.values_mut() {
             queue.retain(|id| state.work.get(id).is_some_and(|w| w.result.is_none()));
         }
+    }
+    /// Caller cancellation/drop cleanup; no retained body or queue slot survives.
+    pub fn cancel(&self, id: Identifier) -> Result<()> {
+        let mut state = self.state.lock().map_err(|_| Reason::Unavailable)?;
+        state.work.remove(&id);
+        for queue in state.queues.values_mut() {
+            queue.retain(|queued| *queued != id);
+        }
+        self.changed.notify_all();
+        Ok(())
     }
     /// 4a's in-flight revocation hook calls this and wakes held polls/readers.
     pub fn revocation_changed(&self, auth: &dyn EnrollmentSource) -> Result<()> {
@@ -354,6 +384,13 @@ impl<'a> Broker<'a> {
                 }
                 work.payload.extend_from_slice(&frame.payload);
             }
+        }
+        if work
+            .binding
+            .as_ref()
+            .is_some_and(|binding| work.encoded_bytes > binding.max_bytes)
+        {
+            return Err(Reason::OverBudget);
         }
         if frame.header.final_frame {
             let binding = work.binding.take().ok_or(Reason::FrameOrder)?;
@@ -555,16 +592,125 @@ pub struct ReadService<'a, 'b, C: Clock> {
     pub cache: &'a mut BodyCache<C>,
     pub origin_limits: Limits,
 }
-impl<C: Clock> ReadService<'_, '_, C> {
-    pub fn read(&mut self, principal: &Principal, input: ReadInput) -> Result<TypedPage> {
-        self.read_with(principal, input, &mut |_, _| {})
+struct Prepared {
+    page: TypedPage,
+    attempt: receiver_audit::AttemptId,
+    key: crate::body_cache::CacheKey,
+    deadline: u64,
+}
+/// One audited delivery. The page is accessible only through a fresh release
+/// check; completion records actual bytes only after the caller reports delivery.
+pub struct PendingDelivery<'s, 'a, 'b, C: Clock> {
+    service: &'s mut ReadService<'a, 'b, C>,
+    prepared: Option<Prepared>,
+    released: bool,
+    principal: String,
+    scope: EnrollmentScope,
+    grant: String,
+}
+impl<C: Clock> PendingDelivery<'_, '_, '_, C> {
+    pub fn release(&mut self) -> Result<&TypedPage> {
+        let prepared = self.prepared.as_ref().ok_or(Reason::LateResponse)?;
+        let decision = if !self.service.enrollment.is_current(&self.scope) {
+            Err(Reason::Revoked)
+        } else if self.service.broker.clock.now_millis() >= prepared.deadline {
+            Err(Reason::Deadline)
+        } else {
+            match self.service.acls.decide(
+                &self.principal,
+                self.scope.machine.as_str(),
+                self.scope.namespace.as_str(),
+                Permission::BodyRead,
+            ) {
+                AclDecision::Granted(grant) if grant.version() == self.grant => Ok(()),
+                _ => Err(Reason::Forbidden),
+            }
+        };
+        if let Err(reason) = decision {
+            self.abandon_inner()?;
+            return Err(reason);
+        }
+        self.released = true;
+        Ok(&self.prepared.as_ref().ok_or(Reason::LateResponse)?.page)
+    }
+    pub fn delivered(mut self, bytes: u64) -> Result<()> {
+        if !self.released {
+            return Err(Reason::InvalidRequest);
+        }
+        let prepared = self.prepared.as_ref().ok_or(Reason::LateResponse)?;
+        let expected = prepared
+            .page
+            .canonical_bytes()
+            .map_err(|_| Reason::InvalidRequest)?
+            .len() as u64;
+        if bytes > expected {
+            return Err(Reason::InvalidRequest);
+        }
+        self.service
+            .audit
+            .complete(prepared.attempt, Outcome::Completed, bytes)
+            .map_err(|_| Reason::AuditFailure)?;
+        self.prepared = None;
+        Ok(())
+    }
+    fn abandon_inner(&mut self) -> Result<()> {
+        if let Some(prepared) = self.prepared.take() {
+            let discard = self
+                .service
+                .cache
+                .discard(&prepared.key)
+                .map_err(|_| Reason::Unavailable);
+            let audit = self
+                .service
+                .audit
+                .complete(prepared.attempt, Outcome::Failed, 0)
+                .map_err(|_| Reason::AuditFailure);
+            discard?;
+            audit?;
+        }
+        Ok(())
+    }
+    pub fn abandon(mut self) -> Result<()> {
+        self.abandon_inner()
+    }
+}
+impl<C: Clock> Drop for PendingDelivery<'_, '_, '_, C> {
+    fn drop(&mut self) {
+        let _ = self.abandon_inner();
+    }
+}
+impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
+    pub fn read<'s>(
+        &'s mut self,
+        principal: &Principal,
+        input: ReadInput,
+    ) -> Result<PendingDelivery<'s, 'a, 'b, C>> {
+        let scope = input.scope.clone();
+        let grant = match self.acls.decide(
+            &principal.subject,
+            scope.machine.as_str(),
+            scope.namespace.as_str(),
+            Permission::BodyRead,
+        ) {
+            AclDecision::Granted(grant) => grant.version().to_owned(),
+            _ => return Err(Reason::Forbidden),
+        };
+        let prepared = self.read_with(principal, input, &mut |_, _| {})?;
+        Ok(PendingDelivery {
+            service: self,
+            prepared: Some(prepared),
+            released: false,
+            principal: principal.subject.clone(),
+            scope,
+            grant,
+        })
     }
     fn read_with(
         &mut self,
         principal: &Principal,
         mut input: ReadInput,
         exchange: &mut dyn FnMut(&Broker<'_>, &Request),
-    ) -> Result<TypedPage> {
+    ) -> Result<Prepared> {
         let grant = match self.acls.decide(
             &principal.subject,
             input.scope.machine.as_str(),
@@ -604,7 +750,7 @@ impl<C: Clock> ReadService<'_, '_, C> {
         input: &ReadInput,
         grant_version: &str,
         exchange: &mut dyn FnMut(&Broker<'_>, &Request),
-    ) -> Result<TypedPage> {
+    ) -> Result<Prepared> {
         let request = &input.request;
         if serde_json::to_vec(&request.destination).ok()
             != serde_json::to_vec(&input.destination).ok()
@@ -673,6 +819,10 @@ impl<C: Clock> ReadService<'_, '_, C> {
                 channel,
                 outgoing.clone(),
             )?;
+            let _cleanup = RequestCleanup {
+                broker: self.broker,
+                id: outgoing.request_id,
+            };
             exchange(self.broker, &outgoing);
             let verified = self.broker.await_result(
                 self.enrollment,
@@ -706,7 +856,7 @@ impl<C: Clock> ReadService<'_, '_, C> {
         attempt: receiver_audit::AttemptId,
         verified: VerifiedResponse,
         fetched: u64,
-    ) -> Result<TypedPage> {
+    ) -> Result<Prepared> {
         let page = decode_page(&verified.payload)?;
         if !self.enrollment.is_current(&input.scope) {
             return Err(Reason::Revoked);
@@ -755,14 +905,19 @@ impl<C: Clock> ReadService<'_, '_, C> {
             return Err(Reason::Unavailable);
         }
         let key = verified.binding.cache_key;
-        self.cache
+        let insertion = self
+            .cache
             .insert(
                 key.clone(),
                 &verified.payload,
                 fetched / 1000,
                 Some(self.origin_limits),
             )
-            .map_err(|_| Reason::Unavailable)?;
+            .map_err(|_| Reason::Unavailable);
+        if let Err(reason) = insertion {
+            self.cache.discard(&key).map_err(|_| Reason::Unavailable)?;
+            return Err(reason);
+        }
         let release = (|| {
             if !self.enrollment.is_current(&input.scope) {
                 return Err(Reason::Revoked);
@@ -779,15 +934,18 @@ impl<C: Clock> ReadService<'_, '_, C> {
                 AclDecision::Granted(current) if current.version() == grant_version => {}
                 _ => return Err(Reason::Forbidden),
             }
-            self.audit
-                .complete(attempt, Outcome::Completed, verified.payload.len() as u64)
-                .map_err(|_| Reason::AuditFailure)
+            Ok(())
         })();
         if let Err(reason) = release {
             self.cache.discard(&key).map_err(|_| Reason::Unavailable)?;
             return Err(reason);
         }
-        Ok(page)
+        Ok(Prepared {
+            page,
+            attempt,
+            key,
+            deadline: verified.binding.deadline_millis,
+        })
     }
 }
 /// Strict inverse of origin_read::TypedPage::canonical_bytes. Text remains typed
@@ -1307,7 +1465,20 @@ mod tests {
                             10_000,
                         )
                         .unwrap();
-                    assert_eq!(delivered.fields[0].text.as_str(), "safe typed body");
+                    assert_eq!(delivered.page.fields[0].text.as_str(), "safe typed body");
+                    let mut pending = PendingDelivery {
+                        service: &mut service,
+                        prepared: Some(delivered),
+                        released: false,
+                        principal: principal.subject.clone(),
+                        scope: a.scope.clone(),
+                        grant: grant.version().to_owned(),
+                    };
+                    assert_eq!(
+                        pending.release().unwrap().fields[0].text.as_str(),
+                        "safe typed body"
+                    );
+                    pending.delivered(payload.len() as u64).unwrap();
                     let journal =
                         std::fs::read_to_string(audit_dir.join(receiver_audit::AUDIT_FILE))
                             .unwrap();
@@ -1395,6 +1566,8 @@ mod tests {
         Revoked,
         Oversize,
         Fallback,
+        FallbackDeadline,
+        FallbackDrop,
     }
     #[test]
     fn service_failures_do_not_cache_and_fallback_requires_admission() {
@@ -1408,6 +1581,8 @@ mod tests {
             Failure::Revoked,
             Failure::Oversize,
             Failure::Fallback,
+            Failure::FallbackDeadline,
+            Failure::FallbackDrop,
         ]
         .into_iter()
         .enumerate()
@@ -1476,7 +1651,10 @@ mod tests {
             .read(&seed_claims, &seed_request)
             .unwrap();
             let mut candidate = None;
-            if matches!(mode, Failure::Fallback) {
+            if matches!(
+                mode,
+                Failure::Fallback | Failure::FallbackDeadline | Failure::FallbackDrop
+            ) {
                 let old = TypedPage {
                     fields: vec![TypedField {
                         field: Field::Assistant,
@@ -1532,9 +1710,15 @@ mod tests {
                     return;
                 }
                 if matches!(mode, Failure::Unavailable)
-                    || (matches!(mode, Failure::Fallback) && calls == 1)
+                    || (matches!(
+                        mode,
+                        Failure::Fallback | Failure::FallbackDeadline | Failure::FallbackDrop
+                    ) && calls == 1)
                 {
-                    if matches!(mode, Failure::Fallback) {
+                    if matches!(
+                        mode,
+                        Failure::Fallback | Failure::FallbackDeadline | Failure::FallbackDrop
+                    ) {
                         assert!(matches!(
                             outgoing.operation,
                             wire::Operation::Resolve {
@@ -1562,7 +1746,10 @@ mod tests {
                         .unwrap();
                     return;
                 }
-                if matches!(mode, Failure::Fallback) {
+                if matches!(
+                    mode,
+                    Failure::Fallback | Failure::FallbackDeadline | Failure::FallbackDrop
+                ) {
                     assert!(matches!(
                         outgoing.operation,
                         wire::Operation::ReadField { .. }
@@ -1578,7 +1765,11 @@ mod tests {
                     anchor: outgoing.anchor.clone(),
                     request_digest: outgoing.digest().unwrap(),
                     channel_binding: [3; 32],
-                    max_bytes: outgoing.max_bytes as usize,
+                    max_bytes: if matches!(mode, Failure::Oversize) {
+                        16 * 1024
+                    } else {
+                        outgoing.max_bytes as usize
+                    },
                     destination: outgoing.destination,
                 };
                 let authorized = OriginRead {
@@ -1634,7 +1825,7 @@ mod tests {
                             1,
                             true,
                             FrameContent::Data,
-                            vec![0; wire::RESPONSE_CAP - work + 1],
+                            vec![0; 16 * 1024 - work + 1],
                         );
                         assert_eq!(
                             broker.accept_response(&a, outgoing.request_id, &oversized),
@@ -1663,8 +1854,42 @@ mod tests {
                     .finish(&mut origin, Outcome::Cancelled, 0)
                     .unwrap();
             });
-            if matches!(mode, Failure::Fallback) {
-                assert_eq!(result.unwrap().fields[0].text.as_str(), "safe typed body");
+            if matches!(
+                mode,
+                Failure::Fallback | Failure::FallbackDeadline | Failure::FallbackDrop
+            ) {
+                let prepared = result.unwrap();
+                assert_eq!(prepared.page.fields[0].text.as_str(), "safe typed body");
+                let before = std::fs::read_to_string(&journal_path).unwrap();
+                assert!(!before.contains("\"outcome\":\"completed\""));
+                let grant =
+                    match acls.decide("subject", "machine", "namespace", Permission::BodyRead) {
+                        AclDecision::Granted(g) => g.version().to_owned(),
+                        _ => panic!("grant"),
+                    };
+                let mut pending = PendingDelivery {
+                    service: &mut service,
+                    prepared: Some(prepared),
+                    released: false,
+                    principal: "subject".into(),
+                    scope: a.scope.clone(),
+                    grant,
+                };
+                assert_eq!(
+                    pending.release().unwrap().fields[0].text.as_str(),
+                    "safe typed body"
+                );
+                if matches!(mode, Failure::FallbackDeadline) {
+                    at.0.store(20_000, Ordering::Relaxed);
+                    assert!(matches!(pending.release(), Err(Reason::Deadline)));
+                } else if matches!(mode, Failure::Fallback) {
+                    a.revoked.store(true, Ordering::Relaxed);
+                    assert!(matches!(pending.release(), Err(Reason::Revoked)));
+                }
+                drop(pending);
+                assert_eq!(service.cache.entry_count(), 0);
+                let after = std::fs::read_to_string(&journal_path).unwrap();
+                assert!(!after.contains("\"outcome\":\"completed\""));
                 assert_eq!(calls, 2);
                 ADMISSION.with(|slot| assert_eq!(slot.borrow().as_ref().unwrap().1, 1));
             } else {
@@ -1675,7 +1900,9 @@ mod tests {
                     Failure::Timeout => Reason::Deadline,
                     Failure::Revoked => Reason::Revoked,
                     Failure::Oversize => Reason::OverBudget,
-                    Failure::Fallback => unreachable!(),
+                    Failure::Fallback | Failure::FallbackDeadline | Failure::FallbackDrop => {
+                        unreachable!()
+                    }
                 };
                 assert!(
                     matches!(result, Err(reason) if reason == expected),
@@ -1716,6 +1943,45 @@ mod tests {
             drop(origin);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+    #[test]
+    fn abandoned_expired_requests_release_capacity_and_cancel_cleans_queue() {
+        let at = At(AtomicU64::new(10_000));
+        let a = auth("a");
+        let broker = Broker::new(Config::default(), &at).unwrap();
+        let poll = broker.begin_poll(&a, &poll_bytes()).unwrap();
+        drop(poll);
+        for n in 1..=4 {
+            broker
+                .enqueue(&a, a.scope.clone(), [3; 32], signed(n).0)
+                .unwrap();
+        }
+        at.0.store(20_001, Ordering::Relaxed);
+        let mut next = signed(5).0;
+        next.deadline_millis = 30_000;
+        broker.enqueue(&a, a.scope.clone(), [3; 32], next).unwrap();
+        broker.cancel(id(5)).unwrap();
+        assert!(!broker.state.lock().unwrap().work.contains_key(&id(5)));
+        assert!(
+            broker
+                .state
+                .lock()
+                .unwrap()
+                .queues
+                .values()
+                .all(|q| q.is_empty())
+        );
+        for n in 6..=30 {
+            let mut request = signed(n).0;
+            request.deadline_millis = 30_000;
+            broker
+                .enqueue(&a, a.scope.clone(), [3; 32], request)
+                .unwrap();
+            at.0.store(30_001, Ordering::Relaxed);
+            broker.revocation_changed(&a).unwrap();
+            at.0.store(20_001, Ordering::Relaxed);
+        }
+        assert!(broker.state.lock().unwrap().work.len() <= 16);
     }
     #[test]
     fn typed_payload_refuses_trailing_unknown_tags_and_empty() {
