@@ -122,8 +122,10 @@ is building a high-entropy one-use invitation first. Its protected transfer carr
 the receiver pin; protocol and technical safety review remain required. Retain
 `receive enroll` as receiver administration. A single origin `connect` operation
 would perform reviewed provisioning and explicitly enable the local producer and
-outbound connection. The store's explicit materializer lifecycle and downstream
-integrations remain separate work.
+outbound connection. The [producer-lifecycle amendment](asi-producer-lifecycle.md)
+replaces the interim materialize-first precheck inside `connect`: B uses four
+counted actions instead of five with a separate materialize command; implementation
+and downstream integrations remain separate work.
 
 | Action | Proposed operation | Generated state / understanding |
 | --- | --- | --- |
@@ -455,11 +457,11 @@ work is pending. Stop leaves all durable history intact. If automatic browser
 opening is unavailable, opening the printed local launch address is one additional
 use action, recorded separately. Unattended service setup remains additional.
 
-This needs an explicit producer-lifecycle amendment to the store contract, where
-`analytics materialize` is currently the only enablement surface. Preserve that
-low-level batch command for scripts; no implicit rebuild on a read, no fallback
-reset and no change to the source integrity boundaries. Exact UI work remains in
-Storybook under the existing Viewer owners.
+The [producer-lifecycle amendment](asi-producer-lifecycle.md) specifies the shared
+explicit initializer for `start`, `connect` and the low-level batch `materialize`
+command; A remains one proposed startup command after installation. No implicit
+rebuild on a read, fallback reset or source-integrity change is allowed. Exact UI
+work and outcome wording remain with the UI/UX Manager and existing Viewer owners.
 
 ### Authoring, backup and exceptional recovery
 
