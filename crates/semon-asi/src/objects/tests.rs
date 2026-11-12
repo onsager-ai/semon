@@ -20,6 +20,139 @@ fn empty() -> Envelope {
         payload,
     }
 }
+fn encode(envelope: &mut Envelope) -> Vec<u8> {
+    envelope.manifest.sessions = envelope.payload.sessions.len() as u64;
+    envelope.manifest.rows = counts(&envelope.payload);
+    let size = serde_json::to_vec(&envelope.payload).unwrap().len() as u64;
+    envelope.manifest.payload_bytes = size;
+    envelope.manifest.decoded_bytes = size;
+    serde_json::to_vec(envelope).unwrap()
+}
+
+fn populated() -> Envelope {
+    let fields = schema::FACT_SESSION
+        .columns
+        .iter()
+        .filter(|column| !column.nullable)
+        .map(|column| {
+            let value = if column.name == "session_uid" {
+                Value::from(format!("ses:{}", "a".repeat(64)))
+            } else if !column.values.is_empty() {
+                Value::from(column.values[0])
+            } else {
+                match column.data_type {
+                    schema::Type::Text => Value::from("fixture"),
+                    schema::Type::Boolean => Value::from(false),
+                    _ => Value::from(0),
+                }
+            };
+            (column.name.into(), value)
+        })
+        .collect();
+    let mut envelope = empty();
+    envelope.payload.sessions.push(Session {
+        rows: vec![Row {
+            table: "fact_session".into(),
+            fields,
+        }],
+        policy_versions: vec![PolicyVersion {
+            source_handle: format!("src:{}", "b".repeat(64)),
+            policy_version: format!("sha256:{}", "c".repeat(64)),
+        }],
+    });
+    envelope
+}
+
+#[test]
+fn flat_shape_namespace_and_duplicate_validation() {
+    let mut envelope = populated();
+    let bytes = encode(&mut envelope);
+    validate(&bytes, "origin").unwrap();
+    assert_eq!(validate(&bytes, "foreign"), Err(Failure::Invalid));
+    for invalid in [
+        format!("{}/receiver/{}", hex::encode("origin"), "a".repeat(64)),
+        format!("ses:{}", "A".repeat(64)),
+        format!("ses:{}", "a".repeat(63)),
+        format!("stp:{}", "a".repeat(64)),
+        format!("ses:{}", "a".repeat(65)),
+        "ses:malformed".into(),
+    ] {
+        let mut envelope = populated();
+        envelope.payload.sessions[0].rows[0]
+            .fields
+            .insert("session_uid".into(), Value::from(invalid));
+        assert_eq!(
+            validate(&encode(&mut envelope), "origin"),
+            Err(Failure::Invalid)
+        );
+    }
+    for invalid in [
+        format!("foreign/source/{}", "b".repeat(64)),
+        format!("ses:{}", "b".repeat(64)),
+        format!("src:{}", "B".repeat(64)),
+        format!("src:{}", "b".repeat(63)),
+    ] {
+        let mut envelope = populated();
+        envelope.payload.sessions[0].policy_versions[0].source_handle = invalid;
+        assert_eq!(
+            validate(&encode(&mut envelope), "origin"),
+            Err(Failure::Invalid)
+        );
+    }
+    let mut envelope = populated();
+    envelope.payload.sessions[0].policy_versions[0].source_handle =
+        format!("src:{}", "a".repeat(64));
+    assert_eq!(
+        validate(&encode(&mut envelope), "origin"),
+        Err(Failure::Invalid)
+    );
+    let mut envelope = populated();
+    envelope.payload.sessions[0]
+        .policy_versions
+        .push(PolicyVersion {
+            source_handle: format!("src:{}", "b".repeat(64)),
+            policy_version: format!("sha256:{}", "c".repeat(64)),
+        });
+    assert_eq!(
+        validate(&encode(&mut envelope), "origin"),
+        Err(Failure::Invalid)
+    );
+    let mut envelope = populated();
+    envelope
+        .payload
+        .sessions
+        .push(populated().payload.sessions.remove(0));
+    assert_eq!(
+        validate(&encode(&mut envelope), "origin"),
+        Err(Failure::Invalid)
+    );
+    for (field, tag) in [
+        ("session_uid", "ses"),
+        ("parent_session_uid", "ses"),
+        ("lane_root_uid", "ses"),
+        ("step_uid", "stp"),
+        ("turn_uid", "trn"),
+        ("compaction_uid", "cmp"),
+    ] {
+        let column = schema::TABLES
+            .iter()
+            .find_map(|table| table.column(field))
+            .unwrap();
+        governance::validate_receiver_value(
+            column,
+            &Value::from(format!("{tag}:{}", "d".repeat(64))),
+        )
+        .unwrap();
+        assert!(
+            governance::validate_receiver_value(
+                column,
+                &Value::from(format!("src:{}", "d".repeat(64)))
+            )
+            .is_err()
+        );
+    }
+}
+
 #[test]
 fn closed_format_sizes_profiles_and_sanitized_errors() {
     let bytes = serde_json::to_vec(&empty()).unwrap();
@@ -51,23 +184,11 @@ fn closed_format_sizes_profiles_and_sanitized_errors() {
 #[test]
 fn body_unknown_columns_and_row_budget_refuse() {
     for field in ["body", "_gen", "metadata", "unknown"] {
-        let mut envelope = empty();
-        envelope.payload.sessions.push(Session {
-            rows: vec![Row {
-                table: "fact_session".into(),
-                fields: Map::from_iter([(field.into(), Value::from("PRIVATE_ROW_VALUE"))]),
-            }],
-            policy_versions: vec![PolicyVersion {
-                source_handle: "a".repeat(64),
-                policy_version: "b".repeat(64),
-            }],
-        });
-        envelope.manifest.sessions = 1;
-        envelope.manifest.rows = counts(&envelope.payload);
-        let size = serde_json::to_vec(&envelope.payload).unwrap().len() as u64;
-        envelope.manifest.payload_bytes = size;
-        envelope.manifest.decoded_bytes = size;
-        assert!(validate(&serde_json::to_vec(&envelope).unwrap(), "origin").is_err());
+        let mut envelope = populated();
+        envelope.payload.sessions[0].rows[0]
+            .fields
+            .insert(field.into(), Value::from("PRIVATE_ROW_VALUE"));
+        assert!(validate(&encode(&mut envelope), "origin").is_err());
     }
     let mut envelope = empty();
     envelope.payload.sessions.push(Session {

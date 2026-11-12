@@ -5,10 +5,10 @@ with the [accepted operator journey](asi-operator-journey.md) and owner decision
 Pairing, mirror-only origin connect and client-certificate issuance are implemented
 at base `f167df6dbeaeb32e88cace13f48f0b843b4598bf`. PR4 renewal, revoke/enable
 and disconnect below are normative requirements, not shipped behavior. Their
-implementation and independent technical safety review remain pending. Manager
-review amendments to last-kind revoke/enable, renewal notices/header triggers and
-the fresh-pairing replacement ceremony are **pending PM confirmation** where they
-change the operator journey. This document does not lift PM-owned implementation holds
+implementation and independent technical safety review remain pending. PM accepted
+the guarded replacement ceremony, authenticated renewal-due header and last-kind
+revoke refusal, and the live-state compaction model below. Operator wording remains
+subject to the separate UI/UX Manager review. This document does not lift PM-owned implementation holds
 or establish runtime delivery. It is the authored home for #593 slice 4a;
 [#594](https://github.com/onsager-ai/semon/issues/594) consumes the same enrollment.
 Its [body-channel proposal in PR #632](https://github.com/onsager-ai/semon/pull/632)
@@ -427,7 +427,7 @@ is part of normal enrollment.
 | Origin private secret custody | Origin-generated client private key and separately protected kind bearer credentials; never exported to receiver or ordinary backups |
 | Origin integrity-protected configuration | Endpoint/root/pins, enrollment/scope, certificate and issuer public pins, secret references and revocation/generation state; separate persisted source consent for policy generation |
 | Origin source/policy custody | Existing namespace, handles and admitted source identity; downstream generated policy/registry from consent plus real scan evidence, separate from credentials |
-| Receiver private registry | Enrollment, kind-scoped credential hashes, activation/consumption, generations and revocation history; no persisted raw bearer secret |
+| Receiver private registry | Live enrollment/credential hashes, activation/consumption, generations and compact terminal tombstones; ended-generation evidence moves audit-first to receiver-audit; no persisted raw bearer secret |
 | Receiver separate secret custody | Receiver TLS private key/root custody, assertion signing key and independent random 32-byte cache master key; none stored in cache or ordinary history backups |
 | Receiver authenticated-owner/ACL custody | Stable principal from authenticated local OS owner, with stable opaque audit mapping; generate exact machine/namespace `analytics` and permitted `body_read` self-grant inputs for `receiver_acl`, no wildcard or pairing-participant principal |
 | Receiver temporary cache custody | Dedicated owned cache directory and separate master-key reference for `body_cache`; D3 limits/exclusions validated by receiver integration, no bodies or keys in enrollment records |
@@ -555,10 +555,8 @@ authorizes deleting old state or history.
 ### Rotation and revocation
 
 The following PR4 contract records the accepted renewal/revocation parameters
-before implementation merges. The review amendments below are Manager decisions;
-the operator-journey changes (last-kind revoke/enable refusal, renewal notices and
-header-triggered renewal, and the fresh-pairing replacement ceremony) are **pending
-PM confirmation**. Routine renewal requires no operator action. It
+before implementation merges, including PM's accepted replacement, renewal hint,
+last-kind refusal and compaction decisions. Routine renewal requires no operator action. It
 preserves enrollment identity, binding, source consent, kinds, certificate
 requirements and origin key/pin. It never rotates the assertion issuer, server
 identity or cache key, adds a kind, clears a revocation or transfers a claim.
@@ -609,10 +607,8 @@ to an old credential after confirmed cutover, revocation or expiry.
 
 ### Offline machines and missed renewal
 
-Plan for a machine offline longer than roughly 60 days (90-day validity minus the
-30-day renewal window) to need pairing again if it misses renewal. Actual expiry,
-not time offline alone, decides whether renewal is allowed. An expired credential
-or missed renewal fails closed. Recovery uses a NEW enrollment ID and the same
+If credentials expire while this machine is offline, pair again when it returns.
+An expired credential or missed renewal fails closed. Recovery uses a NEW enrollment ID and the same
 four actions: B1 authorize `receive enroll` on the receiver; B2 run `connect --to`
 on the origin; B3 enter the code in its trusted prompt; B4 approve the combined
 trust/source summary. Retained keys, consent and history do not authorize revival.
@@ -621,19 +617,59 @@ Fresh pairing must complete against retained custody. On the receiver, an enroll
 with no currently authorizable kind (all kinds revoked, or all credentials expired)
 no longer reserves its machine name. Pairing `receive enroll --machine M` creates a
 NEW enrollment ID and terminally revokes the prior enrollment in the SAME activation
-registry commit, keeping its history. A still-usable enrollment continues to refuse
-a duplicate machine name. This changes no namespace/claim transfer rules.
+registry commit, keeping its evidence in audit custody. If M still has a usable
+kind, the receiver MUST ask for replacement confirmation in the same authenticated
+owner terminal BEFORE showing any code. Only literal `yes` authorizes replacement;
+other input/EOF cancels with no state change and exit 0. If M has no usable kind,
+the name is simply freed with no replacement prompt.
 
-On the origin, `connect --to URL` refuses replacement of still-usable endpoint
-custody and directs the operator to `semon disconnect --receiver NAME` first. If
-expired, disconnected or known-revoked, the combined approval summary explicitly
-states replacement. Under the install lock, atomically select the new enrollment
-as active for that endpoint and move the previous files to retained non-active
-`replaced-<enrollment-id>/` under origin custody. Never delete it; push selection
-ignores it. A crash cannot expose mixed custody or two active selections. Known
-revocation means authenticated application traffic refused the stored credential;
-a generic renewal refusal alone cannot establish it. These replacement-ceremony
-decisions are pending PM confirmation.
+Confirmation authorizes only a pending replacement ceremony. During pending,
+confirmed and approved phases, the old enrollment stays usable and unchanged; no
+old authority is revoked merely by generating a code. After origin pairing, key
+confirmation and B4 approval complete, the single durable activation registry
+commit creates the new enrollment's authority and terminally revokes the exact
+prior enrollment. Serialize and recheck that predecessor under the commit lock;
+a changed predecessor refuses activation rather than revoking another enrollment.
+Cancellation, expiry or failure before that commit leaves old authority intact.
+This changes no namespace/claim transfer rules.
+
+On the origin, `connect --to URL` permits replacement of existing endpoint custody,
+including usable custody. The combined B4 approval summary explicitly states
+replacement; that single approval covers it, with no separate disconnect. The old
+origin enrollment stays selected until the complete new enrollment is durably
+staged. Under the install lock, one atomic swap selects the new enrollment for the
+endpoint and retains the previous files as non-active `replaced-<enrollment-id>/`.
+Never delete those files; push selection ignores retained replacements. The atomic
+selection and durable recovery metadata prevent mixed files or two active selections.
+
+Before receiver activation commit, a crash leaves both old enrollments unchanged.
+After receiver commit but before delivery or origin swap, the receiver has revoked
+the old enrollment, while the origin may still select its old files; those files
+cannot authorize receiver access. Resume the existing pairing delivery-recovery
+path to obtain the SAME committed enrollment, then finish the staged atomic swap.
+An uncertain origin swap is resolved under the install lock from durable selection
+and staging metadata, never by pairing another enrollment or deleting old files.
+After swap but before its acknowledgement, reopening finds the new active selection
+and retained old files. Recovery exhausted or expired requires a fresh ceremony;
+no old authority is resurrected. An application refusal qualifies custody for
+replacement but does not prove revocation; generic renewal refusal proves neither.
+
+| Operation / starting state | Human actions |
+| --- | --- |
+| Expired, receiver has no authorizable kind | 4: B1 enroll, B2 connect, B3 enter code, B4 approve replacement |
+| Active replacement, including other receiver kinds still usable | 5: the four actions plus receiver replacement confirmation before code display |
+| Re-enable with a running watch | 2: receive enable command and its confirmation; renewal is automatic |
+| Re-enable without a running watch | 3: enable command, confirmation, then `semon push --receiver NAME` on the origin |
+
+These counts use the public_tls code profile and existing listener/TLS prerequisites.
+The pinned_invitation profile uses an invitation, never a public_tls code. Standalone
+disconnect retains its command plus confirmation; replacement never requires it.
+
+For unsupported receiver format or actual capacity exhaustion, keep the old receiver
+directory unchanged and initialize a new empty one, then pair each origin again
+using this section's ceremony. Old history, keys and audits stay preserved in the
+old directory but are NOT automatically available in the new receiver. There is no
+standalone receiver recovery guide yet; this section is the recovery reference.
 
 ### Renewal wire and authority
 
@@ -741,11 +777,10 @@ owner action, never advice inferred from that generic refusal. Restart
 destroys uncommitted pending nonce state, so its finish cannot activate; a new begin
 may allocate a new attempt for the same next generation. Committed receipts and
 delivery reservations survive restart. Prune nonsecret renewal receipts once their
-recovery authority has ended by expiry, retirement or revocation. Keep only minimal
-terminal credential/pin history: IDs, kind, generation, validity and `revoked_at`
-(and the tagged pin needed to identify pin history). Never automatically prune that
-history. Missing/pruned receipt IDs always refuse; current generations prevent an
-old begin from recreating the committed attempt. Keep cancelled/expired in-memory
+recovery authority has ended by expiry, retirement or revocation. Move ended
+generation evidence to append-only audit custody before compacting registry records,
+as specified below. Missing/pruned receipt IDs always refuse; persisted generation
+high-water marks prevent an old begin from recreating the committed attempt. Keep cancelled/expired in-memory
 attempt IDs only within the ten-minute window; unknown IDs always refuse.
 
 Renewal shares provisioning's eight admitted connections and the listener total
@@ -765,24 +800,78 @@ worst-case terminal delta before admission so revocation still succeeds at that
 boundary. Terminal operations must not depend on allocating new receipt/audit
 payload in this reserve; required audit evidence uses separate custody.
 
-Capacity planning budgets at most 1,024 encoded bytes per kind per renewal round
-for minimal retained credential/pin history, 16 KiB per enrollment for current
-binding/admission state, and 8 KiB per live receipt. At 60–90-day renewal intervals,
-a ten-year CA lifetime needs at most 62 generations including initial issuance.
-The supported planning capacity is 16 enrollments with all three kinds over that
-lifetime: 16 × 3 × 62 × 1,024 = 3,047,424 history bytes, plus 262,144 binding/state
-bytes and 131,072 bytes for at most one recoverable receipt per enrollment, leaving
-491,520 bytes below the admission ceiling for registry/pairing metadata. These are
-encoded-size budgets to verify in CI, not measurements of the unimplemented format.
-Earlier owner-triggered enables may consume the budget sooner; admission always
-uses actual encoded size, never the planning estimate. Only one recoverable renewal
-receipt per enrollment may be live; a new begin waits until it ends.
+### Live-state budget and audit-before-compaction
 
-At capacity, refuse new authority and preserve prior custody. Prune ended receipts
-as above, but never automatically prune terminal history. If history still prevents
-admission, the owner initializes a fresh receiver directory using the existing
-fresh-directory refusal path, preserving the entire old directory and pairing
-origins to the new receiver. No migration, silent reset or deletion is allowed.
+An ended generation (expired, retired at cutover/overlap end, or revoked) cannot
+authenticate. Do not retain its full credential or per-generation pin record in the
+registry. PR4.2 adds the append-only `credential_generation_ended` audit record in
+`DIR/receiver-audit/`, separate from cache and registry. Its exact fields are
+`version` (1), `record_type` (`credential_generation_ended`), `event_id`, `observed_at`,
+`ended_reason` (`expired`, `retired` or `revoked`), `credential_id`, `enrollment_id`,
+`kind`, `generation`, `valid_from`, `valid_until`, `revoked_at` (timestamp or null)
+and `pin` (tagged enrolled pin or null). The deterministic event ID is SHA-256 over
+pairing-style length-prefixed `semon-generation-ended-v1`, enrollment ID, kind wire
+name, decimal generation and credential ID. Never include bearer hashes/secrets.
+Preserve this evidence forever; never automatically delete audit records.
+
+Append the ended-generation record FIRST under audit custody's append lock and
+fsync it, then commit the registry compaction under the exclusive registry lock
+using durable whole-document replacement. Recheck the generation is still ended
+and preserve its high-water mark. Never remove a registry record before durable
+audit evidence exists. A crash between append and compaction leaves evidence in
+both stores; restart repeats compaction safely. Repeated appends with the same
+event ID denote the same evidence, not new events or authority. Crash before audit
+fsync leaves the registry record intact; crash/uncertain registry commit is resolved
+by rereading custody. Terminal updates may mark generations ended first and defer
+compaction; no distributed transaction or audit-derived authorization is implied.
+
+Keep only compact registry tombstones: revoked enrollment IDs and their tagged
+pins, and the highest generation EVER issued per kind per enrollment, including
+revoked enrollments. Keep one pin tombstone per enrollment for repeated same-SPKI
+renewals; per-generation copies move to audit. Tombstones never grant authority
+and are never pruned or lowered. New generations must exceed the persisted high-water
+mark; revoked enrollment IDs and pins cannot be assigned to another enrollment.
+A dropped credential has no hash match and therefore refuses. Authentication never
+loads audit as a fallback or reconstructs credentials from tombstones. Once compacted,
+a wall-clock rollback cannot restore a missing record; clamp the persisted/observed
+clock so rollback cannot extend surviving validity or pending gates either. These
+properties do not solve the separately deferred on-disk stale-backup replacement
+boundary: restoring an old registry is not authorized recovery.
+
+Budget on LIVE current/retiring credentials, pending attempts, recoverable receipts,
+rolling admission state and compact tombstones, never accumulated renewal rounds.
+Each bound below includes its JSON wrapper/separators and must be checked against
+actual encoded size in CI; reject overlong fields before admission.
+
+| Registry allocation | Encoded maximum |
+| --- | --- |
+| Live enrollment identity/binding, key, consent references, kind scopes, enable records and high-water marks | 8 KiB per enrollment; no source text |
+| Live generation record, including credential and generation pin | 1 KiB; at most current + retiring for each of three kinds (6 KiB per enrollment) |
+| Pending renewal nonce/targets/authorization bindings and reserved outcome | 4 KiB; one per enrollment, four receiver-wide |
+| Live delivery receipt (pairing or renewal) | 8 KiB; at most one per enrollment; new attempts wait for recovery authority to end |
+| Live rolling admission records | 1 KiB per enrollment; prune timestamps outside the rolling window using the clamped clock |
+| Terminal enrollment tombstone: enrollment ID, one tagged pin and three kind high-water marks | 512 bytes; same pin appears once |
+| Registry envelope, receiver-wide gates and allocation accounting | 64 KiB receiver-wide |
+
+A fully occupied live enrollment budgets 27 KiB (8 + 6 + 4 + 8 + 1), conservatively
+charging a pending attempt even though only four exist globally. The supported
+capacity is 128 live three-kind enrollments PLUS 512 terminal enrollment tombstones:
+128 × 27 KiB + 512 × 512 bytes + 64 KiB = 3,866,624 bytes, below the 3,932,160-byte
+admission ceiling, leaving 65,536 bytes of additional slack and the untouched
+256 KiB terminal reserve. Repeated renewals do not consume lifetime history space
+in this registry; tombstones grow with distinct retired enrollments, not generations.
+Actual encoded size and the per-record limits control admission, not the estimate.
+
+If audit storage is full, invalid or unavailable, compaction cannot proceed. Keep
+the ended records in the bounded registry; refuse renewals/new enrollments as local
+`audit unavailable` (the wire refusal stays generic). New authority already requires
+working audit custody. Revoke and cutover continue from the terminal reserve without
+waiting for compaction/audit; preserve ended evidence for a later audit-first pass.
+Admission reserves their worst-case deltas, including tombstone transitions, so
+revoke still succeeds at the boundary. Never grow beyond 4 MiB or delete evidence
+to recover space. At actual live/tombstone capacity, the owner starts a fresh receiver
+directory under the existing refusal path, preserving the old directory and audit
+custody. There is no renewal-count/lifetime cliff, migration or silent reset.
 
 Local error classes are malformed/version, invalid bearer/key/certificate,
 revoked/expired/retired authority, scope mismatch, replay/terminal attempt,
@@ -841,8 +930,9 @@ owner-authorized extension to the normal unrevoked-kind result set. No client
 request can choose it, add a never-enrolled kind, alter consent/binding/pin or
 resurrect a revoked generation. A revoked enrollment is never reactivated.
 
-The PR4.2 registry is one strict current format, replacing format 1. Keep immutable
-per-generation bearer revocation timestamps and generation/pin history; replace
+The PR4.2 registry is one strict current format, replacing format 1. Keep live
+credential records and compact tombstones; move ended-generation evidence to
+append-only audit custody using the audit-before-compaction rule above. Replace
 the terminal whole-kind `KindScope.revoked_at` shape with current kind availability
 and explicit one-use owner authorization records. A fresh generation may make the
 kind available only by consuming its matching authorization; previous revoked
@@ -859,7 +949,8 @@ exception; use fresh pairing and the replacement ceremony.
 
 When any owner enable authorization is pending, or the renewal window is reached,
 add the fixed response header `Semon-Renewal: due` to ordinary AUTHENTICATED mirror
-and body responses. It carries no secret and is never sent to an unauthenticated
+and body responses. It means only renew now for that credential, carries no other
+information or secret and is never sent to an unauthenticated
 caller. The origin starts renewal on seeing it in addition to its local 30-day
 check, including during watch without source changes. A signal received during an
 attempt schedules the next eligible attempt; it does not change that attempt's
@@ -879,7 +970,7 @@ concurrent renewal cannot publish active custody after disconnect wins the lock.
 | --- | --- |
 | 4.0, this docs-only PR | Accepted renewal/revoke/enable contract, exact operator strings and CI obligations; no runtime implementation |
 | 4.1, separately in flight | Credential-bound authority handle and in-flight checks independent of unrelated registry revisions |
-| 4.2 | Receiver renewal routes, current registry format, revoke/enable and owner audit/admission integration |
+| 4.2 | Receiver renewal routes, current registry format, revoke/enable, audit-before-compaction, credential_generation_ended audit record, tombstones and live-state admission integration |
 | 4.3 | Origin `push`/`--watch` renewal, staged installation/recovery and local disconnect |
 
 PR3b private-root follows PR4; a future `--trust-root FILE` is outside this contract
@@ -894,48 +985,65 @@ is the receiver directory and `URL` its configured HTTPS endpoint. `TARGET`
 is `machine M` or `kind K for machine M`. Do not substitute secrets. Prompts and
 confirmation feedback use the controlling terminal; no terminal means refuse.
 Only literal `yes` confirms; any other input/EOF cancels without changing state.
-Success uses stdout, notices use stderr; operational errors follow main's existing
-`semon: ` prefix and exit 1. Cancellation exits 0. No additional renewal prompts.
+Success uses stdout and notices/errors use stderr. Errors with a `semon: ` prefix
+below use main's existing error path; the capitalized multiline recovery/status
+messages are emitted exactly as shown, without an extra prefix. Operational errors
+exit 1; cancellation exits 0. No additional renewal prompts.
 
 | Surface | Trigger | Exact text | Stream / exit behavior |
 | --- | --- | --- | --- |
+| receive enroll | M has a usable enrollment, before any code display | `This replaces the active enrollment for machine M and revokes it. Type yes to confirm: ` | owner terminal; only literal yes proceeds; no registry change yet |
+| receive enroll | Replacement declined or EOF | `Enrollment replacement cancelled; nothing changed.` | terminal; exit 0 |
+| receive revoke / enable / disconnect | Confirmation input accepted | `Confirmation received.` | terminal; no success claim until durable commit |
 | receive revoke | Confirmation prompt | `Revoke TARGET? This stops access. Type yes to confirm: ` | terminal; wait for input |
-| receive revoke | Confirmed input | `Revocation confirmed.` | terminal; perform commit |
 | receive revoke | Cancelled input | `Revocation cancelled; nothing changed.` | terminal; exit 0 |
-| receive revoke | Success, including already revoked | `Revoked TARGET. History and audits kept.` | stdout; exit 0 |
+| receive revoke | Durable success, including already revoked | `Revoked TARGET. History and audits kept.` | stdout; exit 0 |
 | receive revoke | K is the only unrevoked kind | `semon: kind K is the last enabled kind; revoke the enrollment with semon receive revoke --dir DIR --machine M instead.` | stderr; exit 1; change nothing |
-| receive revoke | Missing owner/terminal, unknown target or failed commit | `semon: revocation refused; use the receiver owner's terminal, check the machine and kind, then retry.` | stderr; exit 1; uncertain commit must be reread before retry |
+| receive revoke | Unknown machine | `semon: machine M was not found; check --machine, then retry revocation.` | stderr; exit 1 |
+| receive revoke | Unknown kind | `semon: kind K was not found for machine M; check --kind, then retry revocation.` | stderr; exit 1 |
+| receive revoke | Wrong owner or missing terminal | `semon: revocation requires the receiver owner's terminal; run this command there.` | stderr; exit 1 |
+| receive revoke | Custody failure or uncertain commit | `semon: revocation could not be confirmed; keep DIR unchanged and reopen receiver state to check the outcome before retrying.` | stderr; exit 1 |
 | receive enable | Confirmation prompt | `Allow fresh access for kind K on machine M? Type yes to confirm: ` | terminal; wait for input |
-| receive enable | Confirmed input | `Enable confirmed.` | terminal; record authorization |
 | receive enable | Cancelled input | `Enable cancelled; nothing changed.` | terminal; exit 0 |
-| receive enable | Success, including authorization already pending | `Fresh access allowed for kind K on machine M. Run semon push on the origin to renew.` | stdout; exit 0; only where valid renewal authority remains |
-| receive enable | Invalid owner/terminal, unknown/unrevoked kind or revoked enrollment | `semon: enable refused; check the receiver owner, machine and revoked kind. A revoked enrollment must pair again.` | stderr; exit 1 |
-| receive enable | No unrevoked kind has a currently valid credential | `semon: enable refused; no valid access remains. On the receiver, run semon receive enroll --machine M with its usual listener and TLS options. On the origin, run semon connect --to URL, enter the code, and approve replacement.` | stderr; exit 1; record nothing |
+| receive enable | Durable authorization, including already pending | `Re-enable approved for kind K on machine M; waiting for origin renewal. A running watch will renew automatically; otherwise run semon push --receiver NAME on the origin.` | stdout; exit 0; access is not yet restored |
+| receive enable | Unknown machine or kind | `semon: enable refused; machine M or kind K was not found. Check --machine and --kind, then retry.` | stderr; exit 1 |
+| receive enable | Wrong owner or missing terminal | `semon: enable requires the receiver owner's terminal; run this command there.` | stderr; exit 1 |
+| receive enable | Custody failure or uncertain commit | `semon: enable could not be confirmed; keep DIR unchanged and reopen receiver state to check the outcome before retrying.` | stderr; exit 1 |
+| receive enable | Kind is not revoked | `semon: kind K is already enabled for machine M; check the kind before retrying.` | stderr; exit 1 |
+| receive enable | Revoked enrollment or no valid remaining kind | `semon: enable refused; no valid access remains.` followed by newline and the common recovery block below | stderr; exit 1; record nothing; origin steps run on origin machine |
 | disconnect | Confirmation prompt | `Disconnect receiver NAME on this machine? Type yes to confirm: ` | terminal; wait for input |
-| disconnect | Confirmed input | `Disconnect confirmed.` | terminal; disable local use |
 | disconnect | Cancelled input | `Disconnect cancelled; nothing changed.` | terminal; exit 0 |
-| disconnect | Success, including already disconnected | `Disconnected receiver NAME on this machine. History, keys and audits kept. Receiver access was not revoked.` | stdout; exit 0 |
-| disconnect | Missing terminal, unknown receiver or custody failure | `semon: disconnect refused; check the receiver name and local enrollment files, then retry.` | stderr; exit 1 |
-| push / --watch | First due notice, at 30 days remaining | `semon push: receiver NAME credentials expire in D days; renewing automatically.` | stderr; no exit change |
-| push / --watch | At 14 days remaining | `semon push: receiver NAME credentials expire in D days; keep this machine online for renewal.` | stderr; no exit change |
-| push / --watch | At 7 days remaining | `semon push: receiver NAME credentials expire in D days; run semon push while the receiver is reachable.` | stderr; no exit change |
-| push / --watch | Any renewal error/refusal while old credentials remain valid | `semon push: could not renew receiver NAME credentials; D days remain. Will retry while running; check the connection or run semon push again.` | stderr; valid application traffic continues; renewal alone changes no exit status; watch retries within bounds |
-| push / --watch | Existing credential refused by application traffic | `semon: receiver NAME refused access. Run semon disconnect --receiver NAME. Ask the receiver owner to resolve any still-active enrollment, then run semon receive enroll --machine M with its usual listener and TLS options. On the origin, run semon connect --to URL, enter the code, and approve replacement.` | stderr; stop channel; exit 1; if receiver still has usable enrollment, owner must resolve it before duplicate pairing |
+| disconnect | Durable success, including already disconnected | `Disconnected receiver NAME on this machine. History, keys and audits kept. Receiver access was not revoked.` | stdout; exit 0 |
+| disconnect | Unknown receiver | `semon: receiver NAME was not found; check --receiver against the name printed by connect, then retry.` | stderr; exit 1 |
+| disconnect | Wrong owner or missing terminal | `semon: disconnect requires the local owner's terminal; run this command there.` | stderr; exit 1 |
+| disconnect | Custody failure or uncertain commit | `semon: disconnect could not be confirmed; keep local enrollment files unchanged and reopen them to check the outcome before retrying.` | stderr; exit 1 |
+| push / --watch | 30-day boundary, no attempt under way | `Receiver NAME renewal is due soon; D days remain.` | stderr; no exit change |
+| push / --watch | Attempt actually under way, no failure in this cycle | `Receiver NAME credentials are renewing automatically; D days remain.` | stderr; no exit change |
+| --watch | 14-day or 7-day crossing, or daily reminder at that severity | `Automatic renewal has not completed; D days remain. Check receiver NAME is reachable; renewal will retry.` | stderr; no exit change |
+| --watch | First renewal error/refusal, changed failure outcome, or daily failure reminder | `Could not renew receiver NAME credentials; D days remain. Check the receiver is reachable; renewal will retry.` | stderr; valid traffic continues; no exit change |
+| one-shot push | Renewal error/refusal or 14/7-day escalation | `Could not renew receiver NAME credentials; D days remain. Check the receiver is reachable, then run semon push --receiver NAME again.` | stderr; valid traffic continues; renewal alone changes no exit status |
+| push / --watch | Existing credential refused by application traffic | `Receiver NAME refused access.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; refusal does not prove revocation |
+| push / --watch | Credential expired | `Receiver NAME credentials expired.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; NEW enrollment ID |
+| push / --watch | Client certificate expired | `Receiver NAME client certificate expired.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; NEW enrollment ID |
+| Recovery block | Appended to enable-no-authority and the three push recovery first lines | `To restore access, pair again: on the receiver, run semon receive enroll --machine M with its listener/TLS options; on this machine, run semon connect --to URL, enter the code, and approve replacement.` | stderr; public_tls uses code; pinned_invitation substitutes invitation |
 | push / --watch | Durable installation and first-use confirmation, common generation | `semon push: renewed receiver NAME credentials to generation N.` | stderr; no exit change |
 | push / --watch | Durable installation and first-use confirmation, differing kind generations | `semon push: renewed receiver NAME K credentials to generation N.` | stderr; one line per kind; no exit change |
-| push / --watch | Credential or client certificate expired | `semon: receiver NAME credentials expired. On the receiver, run semon receive enroll --machine M with its usual listener and TLS options. On the origin, run semon connect --to URL, enter the code, and approve replacement.` | stderr; stop channel; exit 1; NEW enrollment ID |
-| connect | Existing endpoint enrollment still usable | `semon: already connected; run semon disconnect --receiver NAME first` | stderr; exit 1; nothing installed |
 | connect | Replacement line in combined approval summary | `This replaces the previous enrollment for receiver NAME. Its files and history will be kept.` | terminal; shown before B4 approval; no extra approval step |
-| receiver startup / owner command | Unsupported pre-renewal registry | `semon: receiver custody predates credential renewal; initialize a fresh receiver directory` | stderr; exit 1; no migration/deletion |
+| receiver startup / owner command | Unsupported pre-renewal registry | `Receiver state uses an unsupported format. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See Offline machines and missed renewal in asi-enrollment.md.` | stderr; exit 1; [recovery section](#offline-machines-and-missed-renewal); never used for capacity |
+| Receiver admission | Actual live/tombstone capacity exhausted | `Receiver state is full. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See Offline machines and missed renewal in asi-enrollment.md.` | local stderr; exit 1; wire remains generic |
+| Receiver new authority | Audit unavailable | `Receiver audit is unavailable. Keep DIR unchanged; restore access to its audit storage before enrolling or renewing.` | local stderr; exit 1; wire remains generic; revoke/cutover still work |
 
 For watch, evaluate deadlines independently of file events, at least once per
-minute, using an injected clock/scheduler. Emit each 30/14/7-day level once per
-receiver/generation per process; if starting late, emit only the highest reached
-level. Repeat the current level at most once per 24 hours. Rate-limit identical
-transient-failure notices and automatic retry attempts to once per minute; a
-higher severity or changed outcome emits immediately. Reset notices after successful
-renewal. One-shot push emits at most one due level and one outcome. Tests advance
-injected time; no real-time sleeps (#623).
+minute, using an injected clock/scheduler. Keep automatic retry attempts at most
+once per minute and within receiver admission limits. Notices follow a separate
+schedule: report the FIRST failure immediately, a changed outcome/severity, each
+30/14/7-day crossing, and at most one reminder per 24 hours while unchanged. If
+starting late, use only the highest reached severity. Suppress redundant due,
+attempt-start and failure lines within one cycle; failure/severity wins. A running
+watch never tells the operator to run push. At 30 days say due soon unless an
+attempt is actually under way. Reset notices after success. One-shot push emits
+one combined outcome per cycle. Tests advance injected time; no real-time sleeps
+(#623).
 
 Normal renewal never rotates the assertion issuer, receiver server/root identity
 or cache master key. Exceptional `semon receive rotate --identity` requires a
@@ -1136,20 +1244,30 @@ CI must verify the implementation, not infer safety from this docs PR:
 - Bound renew-route framing, TLS version, deadline, shared connection admission,
   pending count, per-enrollment rate and receipt/storage capacity, including restart
   and hostile/unknown IDs. Admission refusal allocates no unbounded work. Verify
-  encoded per-round/lifetime capacity budgets, ended-receipt pruning, preserved
-  minimal history, 256 KiB headroom and successful revoke at the admission boundary.
+  per-record live-state budgets, ended-receipt pruning, 256 KiB headroom and
+  successful revoke/cutover at the admission boundary even with unavailable audit.
+  Exercise audit append/fsync before compaction, every crash point, repeated event
+  IDs and idempotent restart. Tombstones preserve no-resurrection, pin isolation and
+  generation monotonicity; rollback never revives compacted authority. Audit-full
+  state blocks compaction/new authority while preserving evidence and bounded state.
   Ordinary receive serves renewal without pairing authorization, machine selection,
   controller mutex or terminal, sharing the same admission budget.
-- Complete expired/revoked fresh pairing with the same machine and endpoint: revoke
-  the unusable prior receiver enrollment in the new activation commit; refuse
-  duplicates still usable. Verify origin replacement approval, atomic active
-  selection and preserved `replaced-<enrollment-id>/` custody across crashes.
+- Complete expired/revoked and active replacement with the same machine/endpoint.
+  Usable predecessors require receiver confirmation before code display; rejection,
+  EOF, expiry and precommit crashes leave old authority intact. Activation atomically
+  revokes the exact predecessor. No prompt for unusable predecessor. Verify 4/5-action
+  replacement and 2/3-action enable counts, single B4 approval, receiver-commit versus
+  delivery/origin-swap crash recovery and preserved `replaced-<enrollment-id>/` files.
 - Authenticate the `Semon-Renewal: due` header trigger and withhold it from refused
   callers. Header and local-window triggers obey one retry budget. Every generic
   renewal error preserves valid application traffic; only application refusal or
   expiry gives re-pair guidance and exits. Exercise this with one-shot and watch.
 - Exercise exact operator strings, confirmation/cancellation, 30/14/7-day escalation,
-  watch without source events, retry/notice suppression and failure next steps.
+  watch without source events, first-failure immediacy, changed outcomes/severity,
+  threshold crossings, daily reminder ceiling and suppressed duplicate due/failure
+  lines. A running watch never advises another push; every one-shot push instruction
+  names the receiver. Distinguish client-certificate expiry and unsupported-format
+  versus capacity guidance; all recovery strings use code/invitation consistently.
   Inject wall/monotonic clocks and scheduler advancement, clamp backward wall time,
   and use no real-time sleeps (#623), including deadline and race tests.
 

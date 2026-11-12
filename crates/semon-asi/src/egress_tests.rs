@@ -165,6 +165,187 @@ fn project(snapshot: &Snapshot, registry: &Registry, handles: &Handles) -> Proje
         .unwrap()
 }
 #[test]
+fn flat_handles_cover_every_kind_and_resolve_without_writes() {
+    let (_directory, snapshot, handles) = setup();
+    let mut row = serde_json::from_value(serde_json::json!({
+        "session_uid": UID, "parent_session_uid": UID, "lane_root_uid": UID,
+        "step_uid": "step", "turn_uid": "turn", "compaction_uid": "compaction"
+    }))
+    .unwrap();
+    opaque_keys(&mut row, &handles).unwrap();
+    let output = project(&snapshot, &registry(), &handles);
+    let value: Value = serde_json::from_slice(&output.serialize_receiver().unwrap()).unwrap();
+    let source = value["sessions"][0]["policy_versions"][0]["source_handle"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        value["sessions"][0]["policy_versions"][0]["policy_version"],
+        PolicyBundle {
+            baseline: policy(),
+            local: policy()
+        }
+        .content_version()
+        .unwrap()
+    );
+    let mut emitted = vec![("src", source, "native-a")];
+    for (field, native) in [
+        ("session_uid", UID),
+        ("parent_session_uid", UID),
+        ("lane_root_uid", UID),
+        ("step_uid", "step"),
+        ("turn_uid", "turn"),
+        ("compaction_uid", "compaction"),
+    ] {
+        emitted.push((
+            handle_tag(field).unwrap(),
+            row[field].as_str().unwrap(),
+            native,
+        ));
+    }
+    let count = || {
+        handles
+            .connection
+            .query_row("SELECT count(*) FROM handles", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    let before = count();
+    for (tag, handle, native) in emitted {
+        assert!(handle_hex(tag, handle).is_some());
+        assert!(handle.len() <= 128);
+        assert!(
+            handle
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.:@".contains(&b))
+        );
+        assert_eq!(
+            handles.resolve(tag, handle).unwrap().as_deref(),
+            Some(native)
+        );
+        assert!(handles.resolve("unknown", handle).unwrap().is_none());
+    }
+    let raw = handles.get("source", "native-a").unwrap();
+    for (tag, handle) in [
+        ("ses", format!("ses:{raw}")),
+        ("ses", format!("src:{raw}")),
+        ("src", format!("src:{}", "0".repeat(64))),
+        ("src", format!("src:{}", "A".repeat(64))),
+        ("src", format!("src:{}", "a".repeat(63))),
+        ("src", format!("origin/source/{raw}")),
+        ("src", String::new()),
+    ] {
+        assert!(handles.resolve(tag, &handle).unwrap().is_none());
+    }
+    let foreign = tempfile::tempdir().unwrap();
+    let foreign = Handles::open(foreign.path(), "foreign").unwrap();
+    assert!(foreign.resolve("src", source).unwrap().is_none());
+    assert_eq!(count(), before);
+}
+
+#[test]
+fn admitted_cohorts_equal_projection_and_keep_relation_witnesses_without_writes() {
+    let (_directory, mut snapshot, handles) = setup();
+    let mut registry = registry();
+    let other = "origin/claude/parent";
+    let outside = "origin/claude/outside";
+    let mut parent = snapshot.provenance[UID].clone();
+    parent.source_witness.sources.truncate(1);
+    parent.source_witness.sources[0].native_id = "native-parent".into();
+    snapshot.provenance.insert(other.into(), parent.clone());
+    let mut excluded = parent.clone();
+    excluded.source_witness.sources[0].native_id = "unregistered".into();
+    snapshot.provenance.insert(outside.into(), excluded);
+    let mut registration = registry.sources["native-a"].clone();
+    registration.source.id = "ignored-parent".into();
+    registry
+        .sources
+        .insert("native-parent".into(), registration);
+    let mut fact = snapshot.rows["fact_session"][0].clone();
+    fact.insert("session_uid".into(), Value::from(other));
+    snapshot.rows.get_mut("fact_session").unwrap().push(fact);
+    snapshot.rows.insert(
+        "dim_session".into(),
+        vec![
+            serde_json::from_value(serde_json::json!({
+                "session_uid": UID, "parent_session_uid": other, "parent_method": "native",
+                "role": "worker", "machine_key": "machine", "harness_key": "claude",
+                "repo_key": "unknown", "status": "unknown"
+            }))
+            .unwrap(),
+        ],
+    );
+    // Dimensions referenced by dim_session are required for atomic projection.
+    for (table, field, key) in [
+        ("dim_machine", "machine_key", "machine"),
+        ("dim_harness", "harness_key", "claude"),
+    ] {
+        snapshot.rows.insert(
+            table.into(),
+            vec![
+                serde_json::from_value(serde_json::json!({(field): key, "display_name": key}))
+                    .unwrap(),
+            ],
+        );
+    }
+    snapshot.rows.insert(
+        "dim_repo".into(),
+        vec![
+            serde_json::from_value(
+                serde_json::json!({"repo_key":"unknown", "display_name":"unknown"}),
+            )
+            .unwrap(),
+        ],
+    );
+    let count = || {
+        handles
+            .connection
+            .query_row("SELECT count(*) FROM handles", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+    };
+    let before = count();
+    let cohorts = snapshot
+        .admitted_cohorts(Some(&registry), &principal(), &scope())
+        .unwrap();
+    assert_eq!(count(), before);
+    let output = project(&snapshot, &registry, &handles);
+    assert_eq!(cohorts.len(), 2);
+    assert!(
+        cohorts
+            == output
+                .sessions
+                .iter()
+                .map(|session| session.cohort.clone())
+                .collect::<Vec<_>>()
+    );
+    let cohort = cohorts
+        .iter()
+        .find(|cohort| cohort.session_uid == UID)
+        .unwrap();
+    assert_eq!(
+        cohort.source_ids,
+        BTreeSet::from(["native-a".into(), "native-b".into(), "native-parent".into()])
+    );
+    assert_eq!(cohort.witnesses[other], parent.source_witness);
+    assert!(!cohort.source_ids.contains("unregistered"));
+    registry
+        .sources
+        .get_mut("native-parent")
+        .unwrap()
+        .local
+        .allow_row_existence = false;
+    assert!(
+        snapshot
+            .admitted_cohorts(Some(&registry), &principal(), &scope())
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(project(&snapshot, &registry, &handles).outcomes.exported, 0);
+}
+
+#[test]
 fn reproducible_object_from_governed_projection() {
     let (_directory, snapshot, handles) = setup();
     let projection = project(&snapshot, &registry(), &handles);

@@ -3,7 +3,7 @@ use crate::{egress::Projection, governance, schema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(target_os = "linux")]
 mod storage;
@@ -210,17 +210,16 @@ pub(crate) fn validate(bytes: &[u8], namespace: &str) -> Result<()> {
     if m.rows.values().sum::<u64>() > MAX_ROWS || m.sessions > MAX_ROWS {
         return Err(Failure::Limit);
     }
-    let prefix = format!("{}/receiver/", hex::encode(namespace.as_bytes()));
+    let mut handle_tags = BTreeMap::new();
+    let mut entities = BTreeSet::new();
     for session in &payload.sessions {
         if session.policy_versions.is_empty() || session.policy_versions.len() > 1024 {
             return Err(Failure::Invalid);
         }
+        let mut policies = BTreeSet::new();
         for policy in &session.policy_versions {
-            let source_prefix = format!("{}/source/", hex::encode(namespace.as_bytes()));
-            if !policy
-                .source_handle
-                .strip_prefix(&source_prefix)
-                .is_some_and(hash)
+            check_handle("src", &policy.source_handle, &mut handle_tags)?;
+            if !policies.insert(&policy.source_handle)
                 || !policy
                     .policy_version
                     .strip_prefix("sha256:")
@@ -237,6 +236,23 @@ pub(crate) fn validate(bytes: &[u8], namespace: &str) -> Result<()> {
             if matches!(table.name, "fact_label" | "dim_price") {
                 return Err(Failure::Invalid);
             }
+            let entity_field = match table.name {
+                "fact_session" | "dim_session" => Some("session_uid"),
+                "fact_step" => Some("step_uid"),
+                "fact_turn" => Some("turn_uid"),
+                "fact_compaction" => Some("compaction_uid"),
+                _ => None,
+            };
+            if let Some(field) = entity_field {
+                let handle = row
+                    .fields
+                    .get(field)
+                    .and_then(Value::as_str)
+                    .ok_or(Failure::Invalid)?;
+                if !entities.insert((table.name, handle)) {
+                    return Err(Failure::Invalid);
+                }
+            }
             for column in table.columns {
                 if !column.nullable && !row.fields.contains_key(column.name) {
                     return Err(Failure::Invalid);
@@ -247,25 +263,31 @@ pub(crate) fn validate(bytes: &[u8], namespace: &str) -> Result<()> {
                 if column.class == schema::Class::Body {
                     return Err(Failure::Invalid);
                 }
-                governance::validate_column_value(column, value, governance::Destination::Receiver)
-                    .map_err(|_| Failure::Invalid)?;
-                if matches!(
-                    name.as_str(),
-                    "session_uid"
-                        | "parent_session_uid"
-                        | "lane_root_uid"
-                        | "step_uid"
-                        | "turn_uid"
-                        | "compaction_uid"
-                ) && !value.is_null()
-                {
-                    let text = value.as_str().ok_or(Failure::Invalid)?;
-                    if !text.starts_with(&prefix) || !text.rsplit('/').next().is_some_and(hash) {
-                        return Err(Failure::Invalid);
-                    }
+                governance::validate_receiver_value(column, value).map_err(|_| Failure::Invalid)?;
+                if let Some(tag) = crate::egress::handle_tag(name).filter(|_| !value.is_null()) {
+                    check_handle(
+                        tag,
+                        value.as_str().ok_or(Failure::Invalid)?,
+                        &mut handle_tags,
+                    )?;
                 }
             }
         }
+    }
+    Ok(())
+}
+
+fn check_handle<'a>(
+    tag: &'static str,
+    handle: &'a str,
+    tags: &mut BTreeMap<&'a str, &'static str>,
+) -> Result<()> {
+    let opaque = crate::egress::handle_hex(tag, handle).ok_or(Failure::Invalid)?;
+    if tags
+        .insert(opaque, tag)
+        .is_some_and(|previous| previous != tag)
+    {
+        return Err(Failure::Invalid);
     }
     Ok(())
 }

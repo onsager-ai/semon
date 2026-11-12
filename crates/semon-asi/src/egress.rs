@@ -16,7 +16,7 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
@@ -59,7 +59,7 @@ pub struct Registry {
     namespace: String,
     sources: BTreeMap<String, Registration>,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Registration {
     source: Source,
@@ -132,6 +132,25 @@ impl Handles {
             namespace: namespace.into(),
         })
     }
+    /// Read an existing namespace-local mapping. Malformed handles and unknown
+    /// mappings both return `None`; this never admits or creates an identity.
+    pub fn resolve(&self, tag: &str, handle: &str) -> Result<Option<String>> {
+        let Some(kind) = handle_kind(tag) else {
+            return Ok(None);
+        };
+        let Some(opaque) = handle_hex(tag, handle) else {
+            return Ok(None);
+        };
+        self.connection
+            .query_row(
+                "SELECT native FROM handles WHERE opaque=?1 AND kind=?2",
+                params![opaque, kind],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| Failure::Handles)
+    }
+
     fn get(&self, kind: &str, native: &str) -> Result<String> {
         self.connection
             .execute(
@@ -147,6 +166,49 @@ impl Handles {
             )
             .map_err(|_| Failure::Handles)
     }
+}
+
+fn handle_kind(tag: &str) -> Option<&'static str> {
+    match tag {
+        "src" => Some("source"),
+        "ses" => Some("session_uid"),
+        "stp" => Some("step_uid"),
+        "trn" => Some("turn_uid"),
+        "cmp" => Some("compaction_uid"),
+        _ => None,
+    }
+}
+
+pub(crate) fn handle_tag(field: &str) -> Option<&'static str> {
+    match field {
+        "source" => Some("src"),
+        "session_uid" | "parent_session_uid" | "lane_root_uid" => Some("ses"),
+        "step_uid" => Some("stp"),
+        "turn_uid" => Some("trn"),
+        "compaction_uid" => Some("cmp"),
+        _ => None,
+    }
+}
+
+pub(crate) fn handle_hex<'a>(tag: &str, handle: &'a str) -> Option<&'a str> {
+    handle_kind(tag)?;
+    let (actual, opaque) = handle.split_once(':')?;
+    (actual == tag
+        && opaque.len() == 64
+        && opaque
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+    .then_some(opaque)
+}
+
+/// Native custody for one admitted session and its relation contributors.
+/// Local only: paths and native identities must never enter receiver output.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AdmittedCohort {
+    pub session_uid: String,
+    pub source_ids: BTreeSet<String>,
+    /// Exact pinned witnesses, keyed by contributing native session identity.
+    pub witnesses: BTreeMap<String, crate::input::SourceWitness>,
 }
 
 /// All inputs are decoded during pinning; later publications cannot change them.
@@ -212,13 +274,41 @@ impl Snapshot {
         principal: &Principal,
         scope: &Scope,
     ) -> Result<Projection> {
+        if handles.namespace != self.namespace {
+            return Err(Failure::Registry);
+        }
+        self.admit(registry, Some(handles), principal, scope)
+    }
+
+    /// Return exactly the native cohorts admitted by receiver projection policy
+    /// and session atomicity, without creating handles or consulting body UIDs.
+    pub fn admitted_cohorts(
+        &self,
+        registry: Option<&Registry>,
+        principal: &Principal,
+        scope: &Scope,
+    ) -> Result<Vec<AdmittedCohort>> {
+        Ok(self
+            .admit(registry, None, principal, scope)?
+            .sessions
+            .into_iter()
+            .map(|session| session.cohort)
+            .collect())
+    }
+
+    fn admit(
+        &self,
+        registry: Option<&Registry>,
+        handles: Option<&Handles>,
+        principal: &Principal,
+        scope: &Scope,
+    ) -> Result<Projection> {
         let registry = registry.ok_or(Failure::Registry)?;
         if registry.format != 1
             || registry.sources.is_empty()
             || scope.destination != Destination::Receiver
             || registry.namespace != self.namespace
             || scope.namespace != self.namespace
-            || handles.namespace != self.namespace
         {
             return Err(Failure::Registry);
         }
@@ -276,11 +366,13 @@ impl Snapshot {
         ids: &BTreeSet<String>,
         eligible: &BTreeMap<String, BTreeSet<String>>,
         registry: &Registry,
-        handles: &Handles,
+        handles: Option<&Handles>,
         audience: (&Principal, &Scope),
     ) -> Result<Option<SessionExport>> {
         let (principal, scope) = audience;
         let mut cohort = ids.clone();
+        let mut witnesses =
+            BTreeMap::from([(uid.to_owned(), self.provenance[uid].source_witness.clone())]);
         let mut pending = Vec::new();
         for table in schema::TABLES
             .iter()
@@ -300,6 +392,10 @@ impl Snapshot {
                                 return Ok(None);
                             };
                             cohort.extend(other.iter().cloned());
+                            witnesses.insert(
+                                target.to_owned(),
+                                self.provenance[target].source_witness.clone(),
+                            );
                         }
                     }
                 }
@@ -368,8 +464,17 @@ impl Snapshot {
                     row.remove(column.name);
                 }
             }
-            opaque_keys(&mut row, handles)?;
-            match governance::project_derived_row(&authority, table.name, &row) {
+            let native = match governance::project_derived_row(&authority, table.name, &row) {
+                Ok(native) => native,
+                Err(_) => return Ok(None),
+            };
+            let projected = if let Some(handles) = handles {
+                opaque_keys(&mut row, handles)?;
+                governance::project_receiver_row(&authority, table.name, &row)
+            } else {
+                Ok(native)
+            };
+            match projected {
                 Ok(row) => rows.push(ExportRow {
                     table: table.name,
                     row,
@@ -379,13 +484,10 @@ impl Snapshot {
         }
         let mut policies = Vec::new();
         for id in &cohort {
+            let Some(handles) = handles else { break };
             let registration = &registry.sources[id];
             policies.push(PolicyVersion {
-                source_handle: format!(
-                    "{}/source/{}",
-                    hex::encode(handles.namespace.as_bytes()),
-                    handles.get("source", id)?
-                ),
+                source_handle: format!("src:{}", handles.get("source", id)?),
                 policy_version: PolicyBundle {
                     baseline: registration.baseline.clone(),
                     local: registration.local.clone(),
@@ -394,23 +496,34 @@ impl Snapshot {
                 .map_err(|_| Failure::Registry)?,
             });
         }
-        Ok(Some(SessionExport { rows, policies }))
+        Ok(Some(SessionExport {
+            rows,
+            policies,
+            cohort: AdmittedCohort {
+                session_uid: uid.into(),
+                source_ids: cohort,
+                witnesses,
+            },
+        }))
     }
 }
 
 fn authority(
     ids: &BTreeSet<String>,
     registry: &Registry,
-    handles: &Handles,
+    handles: Option<&Handles>,
     principal: &Principal,
     scope: &Scope,
 ) -> Result<Option<ExportAuthority>> {
     let mut policies = BTreeMap::new();
     let mut sources = Vec::new();
-    for id in ids {
+    for (index, id) in ids.iter().enumerate() {
         let registration = &registry.sources[id];
         let mut source = registration.source.clone();
-        source.id = handles.get("source", id)?;
+        source.id = match handles {
+            Some(handles) => handles.get("source", id)?,
+            None => format!("{index:064x}"),
+        };
         policies.insert(
             source.id.clone(),
             PolicyBundle {
@@ -438,13 +551,8 @@ fn opaque_keys(row: &mut Map<String, Value>, handles: &Handles) -> Result<()> {
                 field => field,
             };
             let opaque = handles.get(kind, native)?;
-            let namespace = hex::encode(handles.namespace.as_bytes());
-            let value = match kind {
-                "step_uid" => format!("{namespace}/receiver/evidence/s/claude/{opaque}"),
-                "turn_uid" => format!("{namespace}/receiver/evidence/t/{opaque}"),
-                "compaction_uid" => format!("{namespace}/receiver/evidence/c/{opaque}"),
-                _ => format!("{namespace}/receiver/{opaque}"),
-            };
+            let tag = handle_tag(kind).expect("declared handle kind");
+            let value = format!("{tag}:{opaque}");
             row.insert(field.into(), Value::String(value));
         }
     }
@@ -464,6 +572,7 @@ pub struct Projection {
     pub outcomes: LocalOutcomes,
 }
 struct SessionExport {
+    cohort: AdmittedCohort,
     rows: Vec<ExportRow>,
     policies: Vec<PolicyVersion>,
 }
