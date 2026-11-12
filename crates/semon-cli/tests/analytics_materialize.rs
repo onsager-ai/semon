@@ -188,6 +188,45 @@ fn materialize_publishes_once_and_reuses_its_namespace() {
         String::from_utf8_lossy(&first.stdout)
     );
 
+    // Initializing an already populated publication preserves every published byte.
+    let published = semon_asi::read_manifest(&store).unwrap().unwrap();
+    assert!(!published.files.is_empty());
+    let identity_path = state.join("analytics-namespace");
+    let identity_bytes = fs::read(&identity_path).unwrap();
+    let manifest_bytes = fs::read(&manifest).unwrap();
+    let files: Vec<_> = published
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(published.live_map.as_deref())
+        .map(|relative| {
+            let path = store.join("analytics").join(relative);
+            let bytes = fs::read(&path).unwrap();
+            (path, bytes)
+        })
+        .collect();
+    let initialized =
+        semon_sessions::analytics::initialize(&state.join("index.sqlite3"), None, || false)
+            .unwrap();
+    let binding = initialized.binding.clone();
+    assert_eq!(fs::read(&identity_path).unwrap(), identity_bytes);
+    assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
+    for (path, bytes) in &files {
+        assert_eq!(&fs::read(path).unwrap(), bytes);
+    }
+    drop(initialized);
+    let repeated =
+        semon_sessions::analytics::initialize(&state.join("index.sqlite3"), Some(&binding), || {
+            false
+        })
+        .unwrap();
+    assert_eq!(repeated.binding, binding);
+    assert_eq!(fs::read(&identity_path).unwrap(), identity_bytes);
+    assert_eq!(fs::read(&manifest).unwrap(), manifest_bytes);
+    for (path, bytes) in &files {
+        assert_eq!(&fs::read(path).unwrap(), bytes);
+    }
+    drop(repeated);
     let second = materialize(&home);
     assert!(
         second.status.success(),

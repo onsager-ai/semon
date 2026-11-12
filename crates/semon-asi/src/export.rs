@@ -72,11 +72,7 @@ pub fn export_snapshot(
         let manifest = validate_snapshot(root)?;
         require_regular_file(namespace_file, "analytics namespace")?;
         let source_namespace = fs::read_to_string(namespace_file)?;
-        if identity_namespace(&source_namespace)? != namespace {
-            return Err(Error::invalid(
-                "analytics namespace changed before export lock was acquired",
-            ));
-        }
+        require_identity(&source_namespace, namespace, &manifest)?;
         require_namespace_ownership(root, &manifest, namespace)?;
         let files = snapshot_files(root, &manifest)?;
         let mut receipt_files = Vec::with_capacity(files.len() + 1);
@@ -184,12 +180,8 @@ pub(crate) fn reset_snapshot_with<F: FnMut(ResetStage) -> Result<()>>(
     let _lock = open_lock(root, true)?;
     require_regular_file(namespace_file, "analytics namespace")?;
     let namespace = fs::read_to_string(namespace_file)?;
-    if identity_namespace(&namespace)? != expected_namespace {
-        return Err(Error::invalid(
-            "analytics namespace changed before reset lock was acquired",
-        ));
-    }
     let manifest = validate_snapshot(root)?;
+    require_identity(&namespace, expected_namespace, &manifest)?;
     require_namespace_ownership(root, &manifest, expected_namespace)?;
     if let Some(bundle) = verified_export {
         reject_overlapping_bundle(root, bundle)?;
@@ -509,17 +501,7 @@ fn verify_receipt(bundle: &Path, receipt: &ExportReceipt) -> Result<()> {
         ));
     }
     let namespace = fs::read_to_string(bundle.join("analytics-namespace"))?;
-    let identity: serde_json::Value = serde_json::from_str(&namespace)?;
-    if identity.get("format").and_then(serde_json::Value::as_str) != Some("semon-producer-1")
-        || identity
-            .get("namespace")
-            .and_then(serde_json::Value::as_str)
-            != Some(receipt.source_namespace.as_str())
-    {
-        return Err(Error::invalid(
-            "export receipt namespace does not match bundle",
-        ));
-    }
+    require_identity(&namespace, &receipt.source_namespace, &manifest)?;
     for file in &receipt.files {
         let path = checked_bundle_path(bundle, &file.path)?;
         let (bytes, sha256) = hash_file(&path)?;
@@ -533,16 +515,39 @@ fn verify_receipt(bundle: &Path, receipt: &ExportReceipt) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn identity_namespace(content: &str) -> Result<String> {
-    let identity: serde_json::Value = serde_json::from_str(content)?;
-    if identity.get("format").and_then(serde_json::Value::as_str) != Some("semon-producer-1") {
-        return Err(Error::invalid("unsupported producer identity format"));
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProducerIdentity {
+    format: String,
+    namespace: String,
+    origin_incarnation: String,
+}
+
+pub(crate) fn require_identity(
+    content: &str,
+    namespace: &str,
+    manifest: &crate::Manifest,
+) -> Result<()> {
+    let identity: ProducerIdentity = serde_json::from_str(content)?;
+    if identity.format != "semon-producer-1"
+        || identity.namespace != namespace
+        || !identity_component(&identity.namespace)
+        || !identity_component(&identity.origin_incarnation)
+        || manifest.origin_incarnations.get(namespace) != Some(&identity.origin_incarnation)
+    {
+        return Err(Error::invalid(
+            "producer identity does not match published custody",
+        ));
     }
-    identity
-        .get("namespace")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| Error::invalid("missing producer namespace"))
+    Ok(())
+}
+
+fn identity_component(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 fn checked_bundle_path(bundle: &Path, relative: &str) -> Result<PathBuf> {
@@ -682,6 +687,7 @@ mod tests {
         fs::write(&namespace, serde_json::json!({"format":"semon-producer-1", "namespace":"origin-test", "origin_incarnation":"producer-test"}).to_string()).unwrap();
         let (_, writer_fds) = inherited_during(|| {
             let mut store = Store::open(&root).unwrap();
+            store.bind_origin("origin-test", "producer-test").unwrap();
             store
                 .publish(&update(&[("origin-test/claude/session", 1)], "a", 0))
                 .unwrap();
@@ -727,6 +733,7 @@ mod tests {
         let namespace_file = temporary.path().join("namespace");
         fs::write(&namespace_file, serde_json::json!({"format":"semon-producer-1", "namespace":"origin-test", "origin_incarnation":"producer-test"}).to_string()).unwrap();
         let mut store = Store::open_with_clock(&root, TestClock::new(0)).unwrap();
+        store.bind_origin("origin-test", "producer-test").unwrap();
         store
             .publish(&update(&[("origin-test/claude/session", 1)], "a", 0))
             .unwrap();
@@ -758,6 +765,7 @@ mod tests {
         fs::write(&namespace_file, serde_json::json!({"format":"semon-producer-1", "namespace":namespace, "origin_incarnation":"producer-test"}).to_string()).unwrap();
         let clock = TestClock::new(0);
         let mut store = Store::open_with_clock(&root, clock).unwrap();
+        store.bind_origin("origin-test", "producer-test").unwrap();
         store
             .publish(&update(&[("origin-test/claude/session", 1)], "test", 0))
             .unwrap();

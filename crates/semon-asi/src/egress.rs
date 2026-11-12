@@ -161,11 +161,12 @@ impl Snapshot {
         let read = || -> crate::Result<Self> {
             let _lock = crate::export::open_lock(root, false)?;
             regular(namespace_file)?;
-            if crate::export::identity_namespace(&fs::read_to_string(namespace_file)?)? != namespace
-            {
-                return Err(crate::Error::invalid("namespace mismatch"));
-            }
             let manifest = crate::export::validate_snapshot(root)?;
+            crate::export::require_identity(
+                &fs::read_to_string(namespace_file)?,
+                namespace,
+                &manifest,
+            )?;
             crate::export::require_namespace_ownership(root, &manifest, namespace)?;
             let live = crate::read_live_map(root, &manifest)?;
             if manifest.generation > 0 && manifest.live_map.is_none() {

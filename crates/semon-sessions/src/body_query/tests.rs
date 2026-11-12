@@ -16,7 +16,65 @@ fn fixture(namespace: char) -> (PathBuf, PathBuf) {
         serde_json::json!({"format":"semon-producer-1", "namespace":format!("origin-{}", namespace.to_string().repeat(64)), "origin_incarnation":format!("producer-{}", "a".repeat(64))}).to_string(),
     )
     .unwrap();
+    let mut store = semon_asi::Store::open(&root.join("analytics-store")).unwrap();
+    store
+        .bind_origin(
+            &format!("origin-{}", namespace.to_string().repeat(64)),
+            &format!("producer-{}", "a".repeat(64)),
+        )
+        .unwrap();
+    store.publish(&semon_asi::Update::default()).unwrap();
+    drop(store);
     (root, cache.with_extension("sqlite3"))
+}
+
+#[test]
+fn initialized_body_queries_remain_pending_until_publication() {
+    for populated in [false, true] {
+        let root = std::env::temp_dir().join(format!(
+            "semon-body-pending-{}-{}",
+            std::process::id(),
+            getrandom::u64().unwrap()
+        ));
+        let index = root.join("index.sqlite3");
+        if populated {
+            std::fs::create_dir_all(&root).unwrap();
+            drop(EventCache::open_scoped(&root.join("index.json")).unwrap());
+            insert(&index, "needle", 1);
+        }
+        let initialized = crate::analytics::initialize(&index, None, || false).unwrap();
+        let before = std::fs::read(root.join("analytics-namespace")).unwrap();
+        let result = request(vec![index.clone()], "search", json!({"query":"needle"})).unwrap_err();
+        assert_eq!(result["error"]["code"], "not_materialized");
+        assert_eq!(
+            std::fs::read(root.join("analytics-namespace")).unwrap(),
+            before
+        );
+        assert!(
+            !root
+                .join("analytics-store/analytics/manifest.json")
+                .exists()
+        );
+        if !populated {
+            let mut config = crate::AnalyticsWriterConfig::new(
+                &initialized.binding.namespace,
+                &index,
+                root.join("analytics-store"),
+            );
+            config.interval = Duration::ZERO;
+            let writer = initialized.owner.start(config).unwrap();
+            assert_eq!(
+                writer.publish_and_wait(),
+                crate::AnalyticsWriterStatus::Idle
+            );
+            writer.stop_and_join();
+            let result = request(vec![index], "search", json!({"query":"needle"})).unwrap();
+            assert_eq!(result["hits"], json!([]));
+        } else {
+            drop(initialized);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 fn insert(index: &Path, text: &str, ordinal: u64) {
@@ -588,6 +646,7 @@ fn namespace_is_required_and_full_uid_must_match() {
     let (root, index) = fixture('a');
     insert(&index, "needle", 0);
     std::fs::remove_file(root.join("analytics-namespace")).unwrap();
+    std::fs::remove_dir_all(root.join("analytics-store")).unwrap();
     assert_eq!(
         request(vec![index.clone()], "search", json!({"query":"needle"})).unwrap_err()["error"]["code"],
         "not_materialized"

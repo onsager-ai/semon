@@ -122,6 +122,16 @@ pub fn initialize(
     let root = state.join("analytics-store");
     check_cancelled(&cancelled, Stage::Preflight)?;
     qualify(index, state, expected)?;
+    let mut directory = fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory.mode(0o700);
+    }
+    directory
+        .create(state)
+        .map_err(|_| Error::new(ErrorKind::Io, Stage::Ownership))?;
     let owner =
         Owner::acquire_qualified(&root).map_err(|error| Error::store(error, Stage::Ownership))?;
     check_cancelled(&cancelled, Stage::Ownership)?;
@@ -287,6 +297,35 @@ mod tests {
         drop(initialized);
         fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(unix)]
+    #[test]
+    fn custom_state_is_private_and_existing_directory_mode_is_preserved() {
+        use std::os::unix::fs::PermissionsExt;
+        let parent = root();
+        fs::create_dir_all(&parent).unwrap();
+        // Explicit parent mode avoids changing the process-wide umask while
+        // other tests create files. A 0700 creation mode cannot gain group/world
+        // permissions under umask 022 (or any stricter ambient mask).
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o755)).unwrap();
+        let state = parent.join("custom-state");
+        let initialized = initialize(&state.join("index.sqlite3"), None, || false).unwrap();
+        assert_eq!(
+            fs::metadata(&state).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        drop(initialized);
+        let existing = parent.join("existing-state");
+        fs::create_dir(&existing).unwrap();
+        fs::set_permissions(&existing, fs::Permissions::from_mode(0o755)).unwrap();
+        let initialized = initialize(&existing.join("index.sqlite3"), None, || false).unwrap();
+        assert_eq!(
+            fs::metadata(&existing).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        drop(initialized);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
     #[test]
     fn publication_bytes_and_identity_survive_repeat_initialization() {
         let root = root();

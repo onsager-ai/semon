@@ -5201,6 +5201,12 @@ fn uuidless_claude_body_turns_match_analytics_after_append_and_received_copy() {
         serde_json::json!({"format":"semon-producer-1", "namespace":namespace, "origin_incarnation":format!("producer-{}", "a".repeat(64))}).to_string(),
     )
     .unwrap();
+    let mut analytics = semon_asi::Store::open(&home.root.join("analytics-store")).unwrap();
+    analytics
+        .bind_origin(&namespace, &format!("producer-{}", "a".repeat(64)))
+        .unwrap();
+    analytics.publish(&semon_asi::Update::default()).unwrap();
+    drop(analytics);
     let check = || {
         let index = EventCache::path(&home.options.cache);
         let mut input = crate::SqliteAnalyticsInput::open(&index, &namespace).unwrap();
