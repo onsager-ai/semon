@@ -111,9 +111,11 @@ fallback), then starts `semon-sessions::analytics_writer` against
 that read-only SQLite index. Nothing starts the writer by default: Viewer, MCP,
 push and receive remain disabled as hosts. The Viewer drives the same native
 Catalog producer, including rules repairs, but does not start the analytics
-writer or a replacement publication. The first materialize writes a random
-`origin-` namespace to `<index parent>/analytics-namespace`, and later runs reuse
-it. Deleting that state directory starts a new namespace with new session IDs;
+writer or a replacement publication. Materialize first calls the explicit
+[producer initializer](asi-producer-lifecycle.md), which persists a random `origin-`
+namespace and independent origin incarnation together in the current versioned JSON
+`<index parent>/analytics-namespace`. Later calls reuse both; the native index owns
+its separate index incarnation. Deleting that state directory starts a new namespace with new session IDs;
 there is no automatic reconciliation. Rename or transfer is a later explicit
 operator workflow. The CLI's `--watch` repeats Catalog refresh and notification
 until stopped; it exits visibly on refresh or publication failure. It acquires

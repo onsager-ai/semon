@@ -613,7 +613,7 @@ fn namespace_loader_refuses_symlinks_and_nonregular_files() {
     #[cfg(unix)]
     {
         let target = root.join("target");
-        std::fs::write(&target, format!("origin-{}\n", "a".repeat(64))).unwrap();
+        std::fs::write(&target, serde_json::json!({"format":"semon-producer-1", "namespace":format!("origin-{}", "a".repeat(64)), "origin_incarnation":format!("producer-{}", "a".repeat(64))}).to_string()).unwrap();
         std::os::unix::fs::symlink(&target, &path).unwrap();
         assert_eq!(
             request(vec![index], "search", json!({"query":"needle"})).unwrap_err()["error"]["code"],
