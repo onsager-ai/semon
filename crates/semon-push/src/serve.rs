@@ -187,6 +187,7 @@ pub fn check_listen(
 #[derive(Default)]
 struct Admission {
     open: usize,
+    provisioning: usize,
     per_ip: HashMap<IpAddr, usize>,
 }
 
@@ -211,6 +212,7 @@ struct Slot {
     shared: Arc<Shared>,
     /// The address it counts against, until it authenticates.
     ip: Option<IpAddr>,
+    provisioning: bool,
 }
 
 fn release_ip(admission: &mut Admission, ip: IpAddr) {
@@ -237,7 +239,21 @@ impl Slot {
         Some(Self {
             shared: Arc::clone(shared),
             ip: Some(ip),
+            provisioning: false,
         })
+    }
+
+    fn admit_provisioning(&mut self) -> bool {
+        if self.provisioning {
+            return true;
+        }
+        let mut admission = self.shared.admission();
+        if admission.provisioning >= crate::provision_wire::MAX_CONNECTIONS {
+            return false;
+        }
+        admission.provisioning += 1;
+        self.provisioning = true;
+        true
     }
 
     /// A request on this connection passed the token check: from now on it
@@ -253,6 +269,9 @@ impl Drop for Slot {
     fn drop(&mut self) {
         let mut admission = self.shared.admission();
         admission.open = admission.open.saturating_sub(1);
+        if self.provisioning {
+            admission.provisioning -= 1;
+        }
         if let Some(ip) = self.ip.take() {
             release_ip(&mut admission, ip);
         }
@@ -554,6 +573,7 @@ struct Head {
     /// An `Expect` other than `100-continue`.
     expect_other: bool,
     authorization: Option<String>,
+    content_type: Option<String>,
 }
 
 /// Why no request head was read.
@@ -838,6 +858,12 @@ fn parse_head(bytes: &[u8]) -> Result<Head, (u16, &'static str)> {
                     head.expect_other = true;
                 }
             }
+            "content-type" => {
+                if head.content_type.is_some() {
+                    return Err(MALFORMED);
+                }
+                head.content_type = Some(value.to_owned());
+            }
             "authorization" => {
                 if head.authorization.is_some() {
                     return Err(MALFORMED);
@@ -939,9 +965,61 @@ fn classify_route(path: &str) -> Option<(Kind, Option<Endpoint>)> {
     }
 }
 
+/// Separate bounded dispatcher. The initial draft deliberately has no owner
+/// authorization source, so valid messages also refuse before allocating state.
+/// No machine credential, cookie or body route can authorize this surface.
+fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
+    use crate::provision_wire::{self, Request, Route};
+    let refused = || Next::Refuse(401, "request refused", &[]);
+    let Some(route) = Route::from_path(&head.target) else {
+        return refused();
+    };
+    let Stream::Tls(stream) = &connection.stream else {
+        return refused();
+    };
+    if stream.conn.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3) {
+        return refused();
+    }
+    let exporter = stream.conn.export_keying_material(
+        [0u8; provision_wire::EXPORTER_LENGTH],
+        provision_wire::EXPORTER_LABEL,
+        Some(&[]),
+    );
+    if exporter.is_err()
+        || head.method != "POST"
+        || head.content_type.as_deref() != Some("application/json")
+        || head.transfer_encoding
+        || head.expect_other
+        || !head
+            .content_length
+            .is_some_and(|n| n <= provision_wire::MAX_MESSAGE_BYTES as u64)
+        || !slot.admit_provisioning()
+    {
+        return refused();
+    }
+    if head.expect_continue && connection.send(b"HTTP/1.1 100 Continue\r\n\r\n").is_err() {
+        return Next::Close;
+    }
+    let saved = connection.limits.body;
+    connection.limits.body = Duration::from_secs(provision_wire::READ_SECONDS);
+    let body = connection.read_body(head.content_length.unwrap_or(0) as usize);
+    connection.limits.body = saved;
+    let Ok(body) = body else {
+        return refused();
+    };
+    let _request = match Request::parse(route, &body) {
+        Ok(request) => request,
+        Err(_) => return refused(),
+    };
+    refused()
+}
+
 /// Checks a request in order (endpoint, method, framing, token, size) and,
 /// only once all pass, reads its body and answers it.
 fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
+    if head.target.starts_with("/v1/provision/") {
+        return answer_provisioning(slot, connection, head);
+    }
     if head.transfer_encoding {
         return Next::Refuse(
             411,

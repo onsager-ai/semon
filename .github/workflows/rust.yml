@@ -158,6 +158,9 @@ jobs:
       - name: Pairing confirmation derivation cost
         run: cargo test --locked -p semon-push pbkdf2_confirmation_derivation_cost -- --nocapture
 
+      - name: Pairing confirmation derivation cost (release)
+        run: cargo test --release --locked -p semon-push pbkdf2_confirmation_derivation_cost -- --nocapture
+
       - name: cargo test
         # PRs replay seeds 0..12; main and dispatch retain all 64. The test's
         # unset/unknown default is full, including local and other callers.

@@ -256,6 +256,51 @@ logs, URLs, assertions or errors. Pairing does not persist P1 source consent;
 the caller supplies verified private-key signature evidence binding B4 to the
 transcript and exact summary digest, and must durably persist consent separately.
 
+### public_tls provisioning wire contract
+
+Contract additions for review (receiver PR3.2b-1): provisioning uses the existing
+listener, with dedicated HTTPS POST routes `/v1/provision/open`, `confirm`,
+`approve` and `cancel`. The dispatcher precedes analytics/body classification.
+TLS 1.3 is mandatory before allocating pairing state. Obtain exactly 32 bytes
+from the live rustls connection's `export_keying_material` with label
+`EXPORTER-semon-asi-pairing-v1` and empty context. Bind the session to that
+connection's exporter; never accept exporter bytes from a request. Resumption is
+permitted, but a resumed connection has its own exporter and cannot inherit a
+pending session's authority.
+
+Messages are strict JSON objects (`Content-Type: application/json`), with explicit
+`version: 1`, no unknown or duplicate fields, and canonical base64url without
+padding for binary fields. Session IDs retain pairing.rs's 64 lowercase hex
+characters. Every request and response has an exact 8,192-byte encoded ceiling;
+check Content-Length before reading and bound the reader. Provisioning has a
+10-second request read deadline and at most eight admitted connections across the
+receiver, separate from body/analytics dispatch. Core retains the four-pending,
+six-creations/hour and ten/ten/twenty-minute session limits. Excess admission
+allocates no session. All external protocol failures are the same generic
+refusal, including unknown session, wrong code, expiry and exhausted budgets.
+No redirects are emitted or followed; cookies and Authorization headers confer
+no provisioning authority.
+
+`open` carries only version; its response carries version, session ID, receiver
+nonce and canonical advertised endpoint. The code is delivered once only to the
+receiver's trusted local terminal. It has no request or response field.
+`confirm` carries version, session ID, 65-byte origin public key, 32-byte origin
+nonce, 32-byte scope commitment and 32-byte origin MAC. The receiver reconstructs
+the existing pairing.rs transcript with its own exporter/nonce/endpoint. Only a
+verified origin MAC permits a `confirmed` response (version and receiver MAC).
+`approve` carries version, session ID and 64-byte proof; `cancel` carries version
+and session ID. Cancellation remains bound to the same TLS connection.
+
+The origin key is an uncompressed P-256 point. Proof of possession uses
+`ring::signature::ECDSA_P256_SHA256_FIXED` over
+`b"semon-asi-pairing-pop-v1\\0" || transcript.digest() || session_id.as_bytes()`.
+The transcript digest is pairing.rs's existing SHA-256 canonical transcript
+commitment, including the exact B4 scope digest. Verify this signature before
+constructing `VerifiedApproval` or activating authority. The wire module does not
+choose enrollment scope, install grants, or certify durable origin consent.
+Activation/delivery response integration remains pending in the initial draft;
+the dispatcher stays closed until the local owner authorizes pairing.
+
 ## Source consent and P1
 
 B4 confirms the journey's accepted first-owner policy profile P1. Show the selected
