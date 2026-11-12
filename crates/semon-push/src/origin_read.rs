@@ -2,9 +2,9 @@
 //!
 //! Integrations supply one authenticated enrollment, admitted source resolution,
 //! complete contributor governance and a bounded typed renderer. No identifier is
-//! a path or authority. The body_query adapter remains an integration task: its
-//! origin-local view currently exposes neither a narrowed timeout nor an exact
-//! export-view witness. Never substitute its local UID lookup for remote authority.
+//! a path or authority. body_adapter supplies the bounded origin-local view;
+//! exact export-view evidence remains an integration dependency. Never substitute
+//! its local UID lookup for remote authority.
 
 use crate::{
     body_assertion::Claims,
@@ -174,7 +174,9 @@ pub struct ExactMapping {
 #[derive(Clone)]
 pub struct RenderPlan {
     /// Length of canonical typed payload, including its untrusted_text wrappers.
-    /// Preparation is metadata-only and must not render/read body content.
+    /// Preparation is metadata-only where supported. The body_query adapter's
+    /// documented bounded fallback discards a render to measure length; without
+    /// exact export evidence the core refuses before authorization or egress.
     pub payload_bytes: u64,
     pub export_view_generation: Option<OpaqueId>,
     pub exact_mapping: Option<ExactMapping>,
@@ -316,6 +318,53 @@ pub struct ReadRequest {
     pub destination: Destination,
 }
 
+/// Optional origin cache ceilings. Zero is invalid; larger values are clamped
+/// against receiver defaults. These values convey custody limits, never authority.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheLimits {
+    pub cache_ttl_seconds: Option<std::num::NonZeroU64>,
+    pub cache_per_source_bytes: Option<std::num::NonZeroU64>,
+    pub cache_total_bytes: Option<std::num::NonZeroU64>,
+}
+impl CacheLimits {
+    pub fn narrowed(self, receiver: crate::body_cache::Limits) -> crate::body_cache::Limits {
+        let ceiling = crate::body_cache::Limits::default();
+        crate::body_cache::Limits {
+            ttl_seconds: receiver.ttl_seconds.min(ceiling.ttl_seconds).min(
+                self.cache_ttl_seconds
+                    .map_or(u64::MAX, std::num::NonZeroU64::get),
+            ),
+            source_bytes: receiver.source_bytes.min(ceiling.source_bytes).min(
+                self.cache_per_source_bytes
+                    .map_or(u64::MAX, std::num::NonZeroU64::get),
+            ),
+            global_bytes: receiver.global_bytes.min(ceiling.global_bytes).min(
+                self.cache_total_bytes
+                    .map_or(u64::MAX, std::num::NonZeroU64::get),
+            ),
+            response_bytes: receiver.response_bytes.min(ceiling.response_bytes),
+        }
+    }
+    fn bind(self, bytes: &mut Vec<u8>) {
+        for value in [
+            self.cache_ttl_seconds,
+            self.cache_per_source_bytes,
+            self.cache_total_bytes,
+        ] {
+            bytes.extend_from_slice(&value.map_or(0, std::num::NonZeroU64::get).to_be_bytes());
+        }
+    }
+}
+pub trait OriginLimits {
+    fn cache_limits(&self) -> Result<CacheLimits>;
+}
+impl OriginLimits for CacheLimits {
+    fn cache_limits(&self) -> Result<CacheLimits> {
+        Ok(*self)
+    }
+}
+
 /// Exact response identity, also carried by the strict body-channel header.
 /// Receiver verifies this binding then passes receiver_binding to authorize().
 #[derive(Clone, Serialize, Deserialize)]
@@ -334,6 +383,7 @@ pub struct ResponseBinding {
     pub max_bytes: usize,
     pub deadline_millis: u64,
     pub receiver_binding: AuthorizationBinding,
+    pub cache_limits: CacheLimits,
 }
 impl ResponseBinding {
     /// Recompute the origin's exact response identity using the signed claims.
@@ -376,20 +426,20 @@ impl ResponseBinding {
             claims,
             self.cache_key.payload_digest,
         );
-        if key != self.cache_key
-            || self.receiver_binding.response_identity
-                != identifier(&binding_bytes_for_response(
-                    &self.enrollment,
-                    &source,
-                    &request,
-                    &key,
-                    &plan,
-                    self.policy,
-                    self.deadline_millis,
-                    self.max_bytes,
-                    self.origin_authorization,
-                    claims,
-                ))
+        let mut identity = binding_bytes_for_response(
+            &self.enrollment,
+            &source,
+            &request,
+            &key,
+            &plan,
+            self.policy,
+            self.deadline_millis,
+            self.max_bytes,
+            self.origin_authorization,
+            claims,
+        );
+        self.cache_limits.bind(&mut identity);
+        if key != self.cache_key || self.receiver_binding.response_identity != identifier(&identity)
         {
             return Err(Refused::InvalidRequest);
         }
@@ -464,7 +514,15 @@ impl<C: Clock> OriginRead<'_, C> {
     /// claims MUST be the successful body_assertion::verify result (signature,
     /// pinned issuer and consumed nonce); this function does not repeat crypto.
     pub fn read(&mut self, claims: &Claims, request: &ReadRequest) -> Result<Authorized> {
-        self.run(claims, request, None)
+        self.read_with_cache_limits(claims, request, CacheLimits::default())
+    }
+    pub fn read_with_cache_limits(
+        &mut self,
+        claims: &Claims,
+        request: &ReadRequest,
+        limits: CacheLimits,
+    ) -> Result<Authorized> {
+        self.run(claims, request, None, limits)
     }
     pub fn authorization_only(
         &mut self,
@@ -473,13 +531,30 @@ impl<C: Clock> OriginRead<'_, C> {
         candidate: &CachedCandidate,
         validator: &dyn ExportViewValidator,
     ) -> Result<Authorized> {
-        self.run(claims, request, Some((candidate, validator)))
+        self.authorization_only_with_cache_limits(
+            claims,
+            request,
+            candidate,
+            validator,
+            CacheLimits::default(),
+        )
+    }
+    pub fn authorization_only_with_cache_limits(
+        &mut self,
+        claims: &Claims,
+        request: &ReadRequest,
+        candidate: &CachedCandidate,
+        validator: &dyn ExportViewValidator,
+        limits: CacheLimits,
+    ) -> Result<Authorized> {
+        self.run(claims, request, Some((candidate, validator)), limits)
     }
     fn run(
         &mut self,
         claims: &Claims,
         request: &ReadRequest,
         cached: Option<(&CachedCandidate, &dyn ExportViewValidator)>,
+        cache_limits: CacheLimits,
     ) -> Result<Authorized> {
         let scope = self
             .enrollment
@@ -586,6 +661,7 @@ impl<C: Clock> OriginRead<'_, C> {
             claims.receiver_policy_version.as_bytes(),
         );
         id_bytes(&mut binding_bytes, Identifier::from_bytes([0; 32]));
+        cache_limits.bind(&mut binding_bytes);
         // Include the response identity digest in addition to all binding fields.
         let metadata_bytes = binding_bytes
             .len()
@@ -687,6 +763,7 @@ impl<C: Clock> OriginRead<'_, C> {
             binding_bytes = binding_bytes_for_response(
                 &scope, &source, request, &key, &plan, policy, deadline, limit, audit_id, claims,
             );
+            cache_limits.bind(&mut binding_bytes);
             let receiver_binding = AuthorizationBinding {
                 request_id: Identifier::from_bytes(claims.nonce),
                 response_identity: identifier(&binding_bytes),
@@ -714,6 +791,7 @@ impl<C: Clock> OriginRead<'_, C> {
                     max_bytes: limit,
                     deadline_millis: deadline,
                     receiver_binding,
+                    cache_limits,
                 },
             })
         })();

@@ -451,8 +451,23 @@ rendering and export-view validation. It defines no transport or enrollment stor
 A renderer first prepares metadata without reading/rendering bodies: exact canonical
 payload length, export-view generation, mapping and continuation. This lets the
 origin fsync an exact authorization range before rendering. Missing preparation or
-mapping evidence is unavailable. The `body_query::view` adapter remains follow-up:
-its current public API lacks a narrowed deadline and exact export-view witness.
+mapping evidence is unavailable. `body_adapter::BodyQueryRenderer` reuses
+`body_query::view` through its public narrowed-timeout entry. That API cannot
+prepare an exact canonical length without reading bodies, so this adapter performs
+one bounded render during preparation and immediately discards it. It returns no
+export-view generation or exact mapping; the core therefore refuses remote egress.
+Truncated views and unknown field kinds are unavailable. Cancellation is checked
+before and after SQLite; its progress handler enforces the narrowed deadline.
+
+The analytics registry already produces namespace-qualified source/evidence handles
+(`semon-asi::egress::Handles`), but exposes no reverse lookup or admitted native
+cohort fence. Its slash-qualified identifiers also do not fit `origin_read::OpaqueId`.
+A production resolver needs a reconciled current handle contract plus origin-owned
+source admission; local body UIDs are not a substitute. `HandleResolver`, the
+`LocalView` exact local target lookup, and the complete governance/scan-backed
+`PolicyVector` remain integration dependencies. No new remote handle format or
+policy bypass is introduced. Exact export-view witness production and validation
+remain required before remote reads or authorization-only cache hits can succeed.
 
 Audit ranges are half-open `[0, canonical_payload_bytes)` for each exported typed
 page/field. Continuations identify another typed payload; they never accumulate byte
@@ -466,6 +481,22 @@ the caller completes it with the actual payload byte count after delivery, failu
 or cancellation. Dropping/crashing leaves an attempted authorization. Page/field
 completion uses the existing audit completion event; streaming receipts remain in
 the lease/append integration.
+
+The `origin_client` library runs serial poll/response steps over an injected
+transport, clock and entropy source. Reconnect rotates the channel binding and
+never resumes body bytes. Backoff is a bounded next-poll timestamp; the host owns
+scheduling. Posting succeeds for a complete accepted frame or fails the response;
+a transport cannot report partial-frame progress, so completion counts accepted
+payload frames only. No socket, HTTP client or enrollment custody is wired here.
+Frame-zero bindings now carry optional positive origin cache TTL, per-source and
+total-byte limits from an `OriginLimits` provider. They bind the audited response
+identity. Receiver admission and insertion take the minimum of these values,
+receiver limits and the default hard ceilings; absent values do not narrow, larger
+values clamp, and malformed/zero values refuse during strict parsing. Origin byte
+budgets count and evict only entries in the request's namespace and enrolled origin
+incarnation; the cache key has no separate enrollment identifier. Receiver ceilings
+retain global LRU enforcement. Lookup applies origin limits as admission checks
+without origin-driven eviction, including a miss for a narrowed TTL.
 
 ### Body wire library framing (#594 slice 2)
 

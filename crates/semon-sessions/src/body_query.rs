@@ -369,13 +369,15 @@ pub fn execute(request: Request, access: Access) -> Result<Value, Value> {
     execute_with_timeout(request, access, Duration::from_millis(TIMEOUT_MS))
 }
 
-pub(crate) fn execute_with_timeout(
+/// Origin-local entry with a caller-narrowed deadline. The default execute path
+/// retains its two-second budget; callers cannot widen that focused ceiling.
+pub fn execute_with_timeout(
     request: Request,
     access: Access,
     timeout_budget: Duration,
 ) -> Result<Value, Value> {
     admit(access)?;
-    let deadline = Instant::now() + timeout_budget;
+    let deadline = Instant::now() + timeout_budget.min(Duration::from_millis(TIMEOUT_MS));
     // Parse inputs before opening any store. Unknown properties fail closed.
     enum Parsed {
         Search(Search),
