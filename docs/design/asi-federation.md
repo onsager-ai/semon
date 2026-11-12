@@ -461,6 +461,10 @@ historical enrollment/capability lookup is retained. A persistent audit write
 failure cannot promise a durable failure completion: emission stops and the
 existing attempted/authorized record remains incomplete. A transient followup
 failure permits a failed completion with the actual delivered byte count.
+Delivery reports validate and preserve actual bytes before lifecycle closure;
+expiry or revocation during delivery yields a non-success completion without
+renewing release authority. Maintenance is scoped to the authenticated enrollment;
+revocation sweeps additionally name the known owner scope, never foreign leases.
 
 ### Origin read library integration
 

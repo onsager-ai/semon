@@ -2706,7 +2706,7 @@ mod tests {
         // Every independent case starts at 10_000 ms: page expires at 12_000,
         // lease at 70_000. Partial delivery reports exactly 1 byte. Injected
         // receipt/complete failures occur once, permitting failed completion.
-        for case in 0..9 {
+        for case in 0..11 {
             let at = At(AtomicU64::new(10_000));
             let a = auth("append-failures");
             let foreign = auth("foreign");
@@ -2825,6 +2825,11 @@ mod tests {
                 })
                 .unwrap();
             assert!(service.collect(lease).unwrap());
+            // Cases 9/10 release at 11_999, then report seven delivered bytes
+            // after deadline/revocation. Accounting must precede closure.
+            if case >= 9 {
+                at.0.store(11_999, Ordering::Relaxed);
+            }
             let bytes = service
                 .release(lease)
                 .unwrap()
@@ -2833,10 +2838,47 @@ mod tests {
                 .len() as u64;
             let expected = match case {
                 0 => {
+                    let journal_path = root.join("receiver").join(receiver_audit::AUDIT_FILE);
+                    let journal_before = std::fs::read(&journal_path).unwrap();
+                    let renders_before = appends.renders.load(Ordering::Relaxed);
+                    let request_before = service.active_request_for_test(lease).request_id;
                     service.enrollment = &foreign;
+                    service.maintain().unwrap();
+                    let mut foreign_template = signed(90).0;
+                    foreign_template.operation = wire::Operation::ReadPage {
+                        page: opaque("append"),
+                    };
+                    // B has no established broker channel: subscribe refuses,
+                    // but its preliminary maintenance must leave A untouched.
+                    assert_eq!(
+                        service
+                            .subscribe(
+                                Principal {
+                                    subject: "subject".into(),
+                                    audit_id: id(9)
+                                },
+                                foreign.scope.clone(),
+                                foreign_template,
+                                id(4)
+                            )
+                            .err(),
+                        Some(Reason::Unavailable)
+                    );
+                    assert_eq!(service.delivered(lease, 7), Err(Reason::LeaseClosed));
+                    assert_eq!(std::fs::read(&journal_path).unwrap(), journal_before);
+                    assert_eq!(appends.renders.load(Ordering::Relaxed), renders_before);
+                    assert_eq!(
+                        service.active_request_for_test(lease).request_id,
+                        request_before
+                    );
                     assert_eq!(service.release(lease).err(), Some(Reason::LeaseClosed));
                     assert_eq!(service.release(id(99)).err(), Some(Reason::LeaseClosed));
                     service.enrollment = &a;
+                    service.delivered(lease, bytes).unwrap();
+                    service.acknowledge(lease, &opaque("next-1")).unwrap();
+                    assert_eq!(client.step(), Step::Delivered);
+                    assert!(service.collect(lease).unwrap());
+                    assert_eq!(appends.renders.load(Ordering::Relaxed), renders_before + 1);
                     // Two 262_144-byte reservations exactly fill 524_288.
                     // A second-page excess is rejected before aggregate growth;
                     // a third page cannot exist because lease capacity is two.
@@ -2894,6 +2936,9 @@ mod tests {
                 1 => {
                     service.delivered(lease, bytes).unwrap();
                     at.0.store(70_000, Ordering::Relaxed);
+                    service.enrollment = &foreign;
+                    service.sweep_owner(&a.scope, &a).unwrap();
+                    service.enrollment = &a;
                     Reason::Deadline
                 }
                 2 => {
@@ -2922,12 +2967,23 @@ mod tests {
                     assert_eq!(service.delivered(lease, bytes), Err(Reason::AuditFailure));
                     Reason::AuditFailure
                 }
+                9 | 10 => {
+                    let reason = if case == 9 {
+                        at.0.store(12_000, Ordering::Relaxed);
+                        Reason::Deadline
+                    } else {
+                        a.revoked.store(true, Ordering::Relaxed);
+                        Reason::Revoked
+                    };
+                    assert_eq!(service.delivered(lease, 7), Err(reason));
+                    reason
+                }
                 _ => unreachable!(),
             };
             if case == 0 {
                 service.cancel(lease).unwrap();
             }
-            if (1..=4).contains(&case) {
+            if (2..=4).contains(&case) {
                 assert_eq!(service.release(lease).err(), Some(expected));
             }
             assert_eq!(service.release(lease).err(), Some(Reason::LeaseClosed));
@@ -2960,6 +3016,11 @@ mod tests {
             }
             if case == 5 {
                 assert!(journal.contains("\"outcome\":\"cancelled\",\"bytes\":1"));
+            }
+            if case >= 9 {
+                assert!(journal.contains("\"outcome\":\"failed\",\"bytes\":7"));
+                assert!(journal.contains("\"event\":\"receipt\""));
+                assert!(!journal.contains("\"outcome\":\"completed\""));
             }
             drop(receiver);
             drop(origin_audit);

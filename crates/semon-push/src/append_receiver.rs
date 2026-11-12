@@ -122,15 +122,17 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
         Ok((id, watcher))
     }
     fn check(&self, id: Identifier) -> Result<()> {
+        self.check_owner(id, self.enrollment)
+    }
+    fn check_owner(&self, id: Identifier, owner: &dyn EnrollmentSource) -> Result<()> {
         let active = self.active.get(&id).ok_or(Reason::LeaseClosed)?;
-        if self
-            .enrollment
+        if owner
             .authenticated_enrollment(crate::origin_read::EnrollmentKind::BodyChannel)
             .is_ok_and(|scope| scope != active.scope)
         {
             return Err(Reason::LeaseClosed);
         }
-        if !self.enrollment.is_current(&active.scope) {
+        if !owner.is_current(&active.scope) {
             return Err(Reason::Revoked);
         }
         if active.payload.is_some() && self.broker.clock.now_millis() >= active.page_deadline {
@@ -144,7 +146,7 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
             id,
             &active.scope,
             channel,
-            self.enrollment,
+            owner,
             self.acls,
             self.broker.clock,
         )
@@ -160,8 +162,9 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
     }
     /// Recheck at each poll/control exchange and before every release. Closed IDs
     /// remain unavailable; cancellation is sent only through the bounded queue.
-    pub fn revocation_changed(&mut self) -> Result<()> {
-        self.maintain()
+    pub fn revocation_changed(&mut self, scope: &EnrollmentScope) -> Result<()> {
+        let owner = self.enrollment;
+        self.sweep_owner(scope, owner)
     }
     /// The transport calls this when the enrollment connection is lost. A new
     /// connection starts fresh subscriptions, even if the credential is current.
@@ -178,10 +181,28 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
         Ok(())
     }
     pub fn maintain(&mut self) -> Result<()> {
+        let owner = self.enrollment;
+        let scope =
+            owner.authenticated_enrollment(crate::origin_read::EnrollmentKind::BodyChannel)?;
+        self.sweep_owner(&scope, owner)
+    }
+    /// Lifecycle cleanup uses the lease owner's enrollment source. A different
+    /// authenticated connection cannot close or account for that owner's leases.
+    pub fn sweep_owner(
+        &mut self,
+        scope: &EnrollmentScope,
+        owner: &dyn EnrollmentSource,
+    ) -> Result<()> {
         let closed: Vec<_> = self
             .active
-            .keys()
-            .filter_map(|id| self.check(*id).err().map(|reason| (*id, reason)))
+            .iter()
+            .filter(|(_, active)| active.scope == *scope)
+            .filter_map(|(id, _)| {
+                self.check_owner(*id, owner)
+                    .err()
+                    .filter(|reason| *reason != Reason::LeaseClosed)
+                    .map(|reason| (*id, reason))
+            })
             .collect();
         for (id, reason) in closed {
             self.close(id, reason)?;
@@ -347,15 +368,20 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
     /// Report the whole admitted page after delivery. A page is one bounded range
     /// receipt and one completed attempt; partial delivery closes the lease.
     pub fn delivered(&mut self, id: Identifier, bytes: u64) -> Result<()> {
-        self.check_or_close(id)?;
+        let lifecycle = self.check(id);
+        if lifecycle == Err(Reason::LeaseClosed) {
+            return lifecycle;
+        }
         let active = self.active.get_mut(&id).ok_or(Reason::LeaseClosed)?;
         let expected = active.payload.as_ref().ok_or(Reason::InvalidRequest)?.len() as u64;
         if !active.released || bytes > expected {
             return Err(Reason::InvalidRequest);
         }
-        if bytes < expected {
+        // Accounting describes bytes already released, never new authority.
+        // Save it before expiry/revocation can close the delivery attempt.
+        active.delivered_bytes = bytes;
+        if lifecycle.is_err() || bytes < expected {
             let attempt = active.attempt.ok_or(Reason::AuditFailure)?;
-            active.delivered_bytes = bytes;
             if bytes > 0 {
                 let result = self.audit.receipt(
                     attempt,
@@ -367,11 +393,11 @@ impl<'a, 'b, C: Clock> AppendService<'a, 'b, C> {
                     return Err(Reason::AuditFailure);
                 }
             }
-            self.close(id, Reason::Cancelled)?;
-            return Err(Reason::Cancelled);
+            let reason = lifecycle.err().unwrap_or(Reason::Cancelled);
+            self.close(id, reason)?;
+            return Err(reason);
         }
         let attempt = active.attempt.ok_or(Reason::AuditFailure)?;
-        active.delivered_bytes = bytes;
         let range = PermittedRange::new(0, bytes).ok_or(Reason::InvalidRequest)?;
         let result = self
             .audit
