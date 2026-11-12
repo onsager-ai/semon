@@ -741,14 +741,22 @@ pub(crate) fn analytics_index_incarnation(path: &Path) -> Result<String, crate::
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )
     .map_err(|_| Error::new(ErrorKind::InconsistentState, Stage::Index))?;
-    match qualify_producer(&db) {
+    qualified_analytics_incarnation(&db)
+}
+
+/// Qualify an already-open snapshot without reopening or initializing the store.
+pub(crate) fn qualified_analytics_incarnation(
+    db: &Connection,
+) -> Result<String, crate::analytics::Error> {
+    use crate::analytics::{Error, ErrorKind, Stage};
+    match qualify_producer(db) {
         Ok(Init::Ready) => {}
         Ok(Init::Unsupported(_)) => {
             return Err(Error::new(ErrorKind::UnsupportedState, Stage::Index));
         }
         _ => return Err(Error::new(ErrorKind::InconsistentState, Stage::Index)),
     }
-    let (stamp, bound) = crate::storage::sqlite::binding(&db)
+    let (stamp, bound) = crate::storage::sqlite::binding(db)
         .map_err(|_| Error::new(ErrorKind::InconsistentState, Stage::Index))?;
     if stamp.as_deref() != Some(crate::storage::sqlite::stamp().as_str()) {
         return Err(Error::new(ErrorKind::UnsupportedState, Stage::Index));
@@ -5122,6 +5130,55 @@ fn archived_index(connection: &Connection, path: &str) -> rusqlite::Result<Optio
         .transpose()
 }
 
+/// Read only the archive identity already bound to this exact indexed prefix.
+/// No archive file or manifest is opened by this evidence lookup.
+pub(crate) fn cohort_chain(
+    connection: &Connection,
+    source: &semon_asi::input::Source,
+) -> Result<String, crate::origin_projection::CohortReadError> {
+    use crate::origin_projection::CohortReadError::{NotIndexed, Stale, Unavailable};
+    let marker = archived_index(connection, &source.local_path)
+        .map_err(|error| match error {
+            rusqlite::Error::SqliteFailure(_, _) => Unavailable,
+            _ => Stale,
+        })?
+        .ok_or(NotIndexed)?;
+    let chain = marker.chain_id.ok_or(NotIndexed)?;
+    let relative = Path::new(&marker.source.path);
+    // The trusted writer binds root/path to the absolute marker key through
+    // Options. This reader has no Options: additionally check the embedded
+    // relative path without inferring a native home from the filesystem.
+    if marker.source.path.is_empty()
+        || !crate::is_input_path(&marker.source.root, &marker.source.path)
+        || !relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+        || !Path::new(&source.local_path).ends_with(relative)
+        || relative.file_name() != Path::new(&source.local_path).file_name()
+    {
+        return Err(Stale);
+    }
+    if chain.len() != 32
+        || !chain
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || marker.source.native_id != source.native_id
+        || marker.stat.size < source.consumed_offset
+        || marker.source.offset != source.consumed_offset
+        || source.prefix_sha256.len() != 64
+        || marker
+            .source
+            .prefix_sha256
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+            != source.prefix_sha256
+    {
+        return Err(Stale);
+    }
+    Ok(chain)
+}
+
 fn proof_ledger(proof: &crate::SessionSourceProof) -> Ledger {
     Ledger {
         stat: Stat {
@@ -6767,6 +6824,7 @@ fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite
 #[cfg(test)]
 mod tests {
     mod bounded_input;
+    mod cohort_generations;
 
     use std::collections::BTreeSet;
 

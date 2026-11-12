@@ -21,6 +21,273 @@ use crate::{
     model::summary::{CatalogLifecycle, CatalogRow},
 };
 
+/// Generations of the exact contributing session set, independent of cohort IDs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CohortGenerations {
+    pub activity_generation: String,
+    pub transcript_generation: String,
+    pub chains: BTreeMap<String, ChainEvidence>,
+}
+
+/// Stable archive identity; prefix and byte verification remain caller-owned.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChainEvidence {
+    pub chain_id: String,
+}
+
+/// Closed, path-free refusals from a cohort evidence read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CohortReadError {
+    Unavailable,
+    Unsupported,
+    Malformed,
+    NotIndexed,
+    Stale,
+}
+
+impl std::fmt::Display for CohortReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Unavailable => "cohort index unavailable",
+            Self::Unsupported => "unsupported cohort index binding",
+            Self::Malformed => "malformed cohort evidence",
+            Self::NotIndexed => "cohort member not indexed",
+            Self::Stale => "stale cohort index evidence",
+        })
+    }
+}
+impl std::error::Error for CohortReadError {}
+
+/// Pin index evidence only. The caller retains authorization and before/after
+/// source checks around body reads. This never initializes or repairs an index,
+/// writes database content or WAL frames, or modifies index rows. SQLite may
+/// create or refresh WAL shared-memory sidecars when opening a closed WAL index.
+pub fn read_cohort_generations(
+    index: &Path,
+    expected: &crate::analytics::Binding,
+    cohorts: &[semon_asi::egress::AdmittedCohort],
+) -> Result<CohortGenerations, CohortReadError> {
+    use CohortReadError::{Malformed, NotIndexed, Stale, Unavailable, Unsupported};
+    let mut members = BTreeMap::new();
+    if cohorts.is_empty() {
+        return Err(Malformed);
+    }
+    for cohort in cohorts {
+        if cohort.session_uid.is_empty() || cohort.witnesses.is_empty() {
+            return Err(Malformed);
+        }
+        let mut sources = std::collections::BTreeSet::new();
+        for (uid, witness) in &cohort.witnesses {
+            if uid.is_empty() || witness.generation.is_empty() || witness.sources.is_empty() {
+                return Err(Malformed);
+            }
+            for source in &witness.sources {
+                if source.native_id.is_empty()
+                    || source.local_path.is_empty()
+                    || source.prefix_sha256.len() != 64
+                    || !source
+                        .prefix_sha256
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(Malformed);
+                }
+                sources.insert(source.native_id.clone());
+            }
+            if let Some(previous) = members.insert(uid, witness)
+                && canonical_witness(previous.clone()) != canonical_witness(witness.clone())
+            {
+                return Err(Malformed);
+            }
+        }
+        if sources != cohort.source_ids || !cohort.witnesses.contains_key(&cohort.session_uid) {
+            return Err(Malformed);
+        }
+    }
+    let mut connection = Connection::open_with_flags(
+        index,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(|_| Unavailable)?;
+    let tx = connection.transaction().map_err(|_| Unavailable)?;
+    let incarnation = crate::events::store::qualified_analytics_incarnation(&tx).map_err(
+        |error| match error.kind {
+            crate::analytics::ErrorKind::UnsupportedState
+            | crate::analytics::ErrorKind::BindingMismatch => Unsupported,
+            _ => Unavailable,
+        },
+    )?;
+    let identity = crate::analytics_namespace::read_identity(index.parent().ok_or(Unsupported)?)
+        .map_err(|_| Unsupported)?
+        .ok_or(Unavailable)?;
+    if identity.binding(incarnation) != *expected {
+        return Err(Unsupported);
+    }
+    let coherent: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta a JOIN meta b ON a.value=b.value WHERE a.key='catalog_generation' AND b.key='slot_projection_catalog_generation')",
+        [], |row| row.get(0),
+    ).map_err(cohort_sql_error)?;
+    if !coherent {
+        return Err(Stale);
+    }
+    let price = crate::pricing::snapshot();
+    let mut activity = Vec::new();
+    let mut transcript = Vec::new();
+    let mut chains = BTreeMap::new();
+    for (uid, pinned) in members {
+        let mut candidates = std::collections::BTreeSet::new();
+        for source in &pinned.sources {
+            let mut statement = tx
+                .prepare(
+                    "SELECT DISTINCT session_key FROM session_catalog_sources WHERE native_id=?1",
+                )
+                .map_err(cohort_sql_error)?;
+            for key in statement
+                .query_map([&source.native_id], |row| row.get::<_, String>(0))
+                .map_err(cohort_sql_error)?
+            {
+                let key = key.map_err(cohort_sql_error)?;
+                let identity = session_identity(&tx, &key).map_err(cohort_sql_error)?;
+                if session_uid(&expected.namespace, &identity) == *uid {
+                    candidates.insert(key);
+                }
+            }
+        }
+        if candidates.len() > 1 {
+            return Err(Malformed);
+        }
+        let key = candidates.into_iter().next().ok_or(NotIndexed)?;
+        let row = catalog_row(&tx, &key)
+            .map_err(cohort_sql_error)?
+            .ok_or(NotIndexed)?;
+        if row.key != key {
+            return Err(Malformed);
+        }
+        if row.lifecycle != CatalogLifecycle::Current {
+            return Err(NotIndexed);
+        }
+        let pending: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_catalog_sources s JOIN session_catalog_invalidations i ON i.source_path=s.source_path WHERE s.session_key=?1)",
+            [&key], |row| row.get(0),
+        ).map_err(cohort_sql_error)?;
+        if pending {
+            return Err(Stale);
+        }
+        match crate::events::store::session_activity::source_missing(&tx, &key)
+            .map_err(cohort_sql_error)?
+        {
+            Some(true) => return Err(NotIndexed),
+            None => return Err(Stale),
+            Some(false) => {}
+        }
+        let header =
+            crate::events::store::session_activity::page(&tx, &row, None, &price.fingerprint, 0, 0)
+                .map_err(cohort_sql_error)?
+                .ok_or(Stale)?;
+        let witness = source_witness(&tx, &key).map_err(cohort_sql_error)?;
+        if witness.key != key
+            || native_session_identity(&witness).map_err(cohort_sql_error)?
+                != native_session_identity(&row).map_err(cohort_sql_error)?
+            || canonical_witness(indexed_source_witness(&witness).map_err(cohort_sql_error)?)
+                != canonical_witness(pinned.clone())
+        {
+            return Err(Stale);
+        }
+        let sources = crate::retention::source_generation(&row.sources).map_err(|_| Stale)?;
+        if sources != pinned.generation {
+            return Err(Stale);
+        }
+        let slot: Option<String> = tx.query_row(
+            "SELECT generation FROM session_slot_projections WHERE session_key=?1 AND source_generation=?2 AND version=?3",
+            params![key, sources, crate::slot_projection::VERSION], |row| row.get(0),
+        ).optional().map_err(cohort_sql_error)?;
+        let slot = slot.filter(|value| !value.is_empty()).ok_or(Stale)?;
+        if header.generation.is_empty() {
+            return Err(Stale);
+        }
+        for source in &pinned.sources {
+            let evidence = ChainEvidence {
+                chain_id: crate::events::store::cohort_chain(&tx, source)?,
+            };
+            if let Some(previous) = chains.insert(source.native_id.clone(), evidence.clone())
+                && previous != evidence
+            {
+                return Err(Stale);
+            }
+        }
+        activity.push((uid.as_str(), header.generation));
+        transcript.push((
+            uid.as_str(),
+            crate::transcript_range::entry_generation(&slot),
+        ));
+    }
+    let generations = CohortGenerations {
+        activity_generation: cohort_digest("cohort-activity-v1", expected, &activity)?,
+        transcript_generation: cohort_digest("cohort-transcript-v1", expected, &transcript)?,
+        chains,
+    };
+    tx.commit().map_err(cohort_sql_error)?;
+    Ok(generations)
+}
+
+fn cohort_sql_error(error: rusqlite::Error) -> CohortReadError {
+    match error {
+        rusqlite::Error::SqliteFailure(_, _) => CohortReadError::Unavailable,
+        _ => CohortReadError::Stale,
+    }
+}
+
+fn cohort_digest(
+    domain: &str,
+    binding: &crate::analytics::Binding,
+    records: &[(&str, String)],
+) -> Result<String, CohortReadError> {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(&(
+        domain,
+        &binding.namespace,
+        &binding.index_incarnation,
+        records,
+    ))
+    .map_err(|_| CohortReadError::Malformed)?;
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
+fn canonical_witness(mut witness: SourceWitness) -> SourceWitness {
+    witness.sources.sort_by(|a, b| {
+        (
+            &a.native_id,
+            &a.local_path,
+            a.consumed_offset,
+            &a.prefix_sha256,
+        )
+            .cmp(&(
+                &b.native_id,
+                &b.local_path,
+                b.consumed_offset,
+                &b.prefix_sha256,
+            ))
+    });
+    witness
+}
+
+fn indexed_source_witness(row: &CatalogRow) -> rusqlite::Result<SourceWitness> {
+    Ok(SourceWitness {
+        generation: crate::retention::source_generation(&row.sources)
+            .map_err(|_| rusqlite::Error::InvalidQuery)?,
+        sources: row
+            .sources
+            .iter()
+            .map(|source| Source {
+                native_id: source.native_id.clone(),
+                local_path: source.path.to_string_lossy().into_owned(),
+                consumed_offset: source.offset,
+                prefix_sha256: hex_bytes(&source.prefix_sha256),
+            })
+            .collect(),
+    })
+}
+
 /// A read-only input over one native SQLite index and one machine namespace.
 ///
 /// The namespace is supplied by the owner that configured the index.  It is
@@ -676,8 +943,6 @@ fn admitted(
         .iter()
         .filter(|step| step.activity.is_none())
         .count() as u64;
-    let source_generation = crate::retention::source_generation(&witness.sources)
-        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     let Some(compactions) = read_compactions(tx, &session_uid, &row, generation, &price_version)?
     else {
         return Ok(None);
@@ -687,19 +952,7 @@ fn admitted(
         .all(|step| !step.billing.split_unknown);
     Ok(Some(AdmittedSession {
         session_uid: session_uid.clone(),
-        source_witness: SourceWitness {
-            generation: source_generation,
-            sources: witness
-                .sources
-                .iter()
-                .map(|source| Source {
-                    native_id: source.native_id.clone(),
-                    local_path: source.path.to_string_lossy().into_owned(),
-                    consumed_offset: source.offset,
-                    prefix_sha256: hex_bytes(&source.prefix_sha256),
-                })
-                .collect(),
-        },
+        source_witness: indexed_source_witness(&witness)?,
         derivation: semon_asi::input::Derivation {
             activity_generation: generation.to_owned(),
             producer_version: env!("CARGO_PKG_VERSION").to_owned(),
