@@ -13,14 +13,15 @@ use std::{
     io::{Read, Write},
     os::{
         fd::{AsRawFd, FromRawFd},
-        unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
+        unix::fs::{DirBuilderExt, OpenOptionsExt},
     },
     path::{Path, PathBuf},
 };
 use zeroize::Zeroizing;
 
 pub const IDENTITY: &str = "receiver.json";
-pub const SECRETS: &str = "secrets";
+pub const SECRETS: &str = "issuer-secrets";
+pub const CACHE_SECRETS: &str = "cache-secrets";
 pub const CACHE: &str = "body-cache";
 pub const AUDIT: &str = "receiver-audit";
 pub const ACL: &str = "acl";
@@ -182,6 +183,13 @@ impl ReceiverCustody {
         Self::open_with_fault(dir, || Ok(()))
     }
     fn open_with_fault(dir: &Path, before_identity: impl FnOnce() -> Result<()>) -> Result<Self> {
+        Self::open_with_hooks(dir, before_identity, |_| {})
+    }
+    fn open_with_hooks(
+        dir: &Path,
+        before_identity: impl FnOnce() -> Result<()>,
+        locked: impl FnOnce(&File),
+    ) -> Result<Self> {
         if !dir.try_exists().map_err(|_| Error::Custody)? {
             fs::DirBuilder::new()
                 .mode(0o700)
@@ -193,6 +201,7 @@ impl ReceiverCustody {
         }
         let root = Directory::open(dir)?;
         let _lock = root.lock("custody.lock")?;
+        locked(&_lock.0);
         let has_identity = root.exists(IDENTITY)?;
         if !has_identity {
             // A lock alone is safe to reuse after a crash before the first mutation.
@@ -206,6 +215,7 @@ impl ReceiverCustody {
                 return Err(Error::Incomplete);
             }
             let secrets = root.create_child(SECRETS)?;
+            let cache_secrets = root.create_child(CACHE_SECRETS)?;
             root.create_child(CACHE)?;
             root.create_child(AUDIT)?;
             let acl = root.create_child(ACL)?;
@@ -217,7 +227,7 @@ impl ReceiverCustody {
             let public_key = key.public_key().map_err(|_| Error::Invalid)?;
             let key_id = issuer_key_id(&public_key);
             secrets.create(&issuer_filename(&key_id), seed.as_ref())?;
-            secrets.create(CACHE_KEY, random_secret()?.as_ref())?;
+            cache_secrets.create(CACHE_KEY, random_secret()?.as_ref())?;
             acl.create(
                 "owners.json",
                 &encode(&GrantLedger {
@@ -261,7 +271,7 @@ impl ReceiverCustody {
             .names()
             .map_err(|_| Error::Custody)?
             .iter()
-            .any(|name| name != Path::new(CACHE_KEY) && name != Path::new(&issuer_name))
+            .any(|name| name != Path::new(&issuer_name))
         {
             return Err(Error::Invalid);
         }
@@ -272,7 +282,17 @@ impl ReceiverCustody {
         if issuer_key_id(&public_key) != identity.issuer_key_id {
             return Err(Error::Invalid);
         }
-        read_secret(&secrets, CACHE_KEY)?;
+        let cache_secrets = root.child(CACHE_SECRETS)?;
+        if cache_secrets
+            .cache
+            .names()
+            .map_err(|_| Error::Custody)?
+            .iter()
+            .any(|name| name != Path::new(CACHE_KEY))
+        {
+            return Err(Error::Invalid);
+        }
+        read_secret(&cache_secrets, CACHE_KEY)?;
         root.child(CACHE)?;
         root.child(AUDIT)?;
         let acl = root.child(ACL)?;
@@ -303,7 +323,7 @@ impl ReceiverCustody {
         self.dir.join(CACHE)
     }
     pub fn cache_key_path(&self) -> PathBuf {
-        self.dir.join(SECRETS).join(CACHE_KEY)
+        self.dir.join(CACHE_SECRETS).join(CACHE_KEY)
     }
     pub fn audit_dir(&self) -> PathBuf {
         self.dir.join(AUDIT)
@@ -320,6 +340,9 @@ impl ReceiverCustody {
         }
         Ok(key)
     }
+    /// Caller must hold a fresh authorized activation decision: enrollment approved,
+    /// grants within its approved scope, and enrollment not revoked. This method
+    /// validates custody and exact grants; it cannot consult registry authority.
     pub fn install_owner_grants(&self, enrollment_id: &str, grants: &[OwnerGrant]) -> Result<()> {
         validate_grants(grants)?;
         if grants
@@ -399,7 +422,7 @@ impl ReceiverCustody {
                                         {
                                             return Err(Error::Invalid);
                                         }
-                                        read_secret(&child, CACHE_KEY)?;
+                                        read_secret(&root.child(CACHE_SECRETS)?, CACHE_KEY)?;
                                     }
                                     ACL => {
                                         load_ledger(&child)?;
@@ -531,30 +554,24 @@ fn decode<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T> {
 struct Directory {
     fd: File,
     cache: CacheDirectory,
-    path: PathBuf,
 }
 impl Directory {
     fn open(path: &Path) -> Result<Self> {
+        Self::open_after_fd(path, || {})
+    }
+    fn open_after_fd(path: &Path, after_fd: impl FnOnce()) -> Result<Self> {
         let fd = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
             .open(path)
             .map_err(|_| Error::Custody)?;
-        let meta = fd.metadata().map_err(|_| Error::Custody)?;
-        // SAFETY: geteuid has no memory preconditions.
-        if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o7777 != 0o700 {
-            return Err(Error::Custody);
-        }
-        let cache = CacheDirectory::open(path).map_err(|_| Error::Custody)?;
-        let current = fs::symlink_metadata(path).map_err(|_| Error::Custody)?;
-        if current.dev() != meta.dev() || current.ino() != meta.ino() {
-            return Err(Error::Custody);
-        }
-        Ok(Self {
-            fd,
-            cache,
-            path: path.into(),
-        })
+        after_fd();
+        Self::from_file(fd)
+    }
+    fn from_file(fd: File) -> Result<Self> {
+        let cache = CacheDirectory::from_file(fd.try_clone().map_err(|_| Error::Custody)?)
+            .map_err(|_| Error::Custody)?;
+        Ok(Self { fd, cache })
     }
     fn child(&self, name: &str) -> Result<Self> {
         let name_c = CString::new(name).map_err(|_| Error::Invalid)?;
@@ -571,14 +588,7 @@ impl Directory {
         }
         // SAFETY: fresh owned descriptor from openat.
         let fd = unsafe { File::from_raw_fd(fd) };
-        let path = self.path.join(name);
-        let result = Self::open(&path)?;
-        let a = fd.metadata().map_err(|_| Error::Custody)?;
-        let b = result.fd.metadata().map_err(|_| Error::Custody)?;
-        if a.dev() != b.dev() || a.ino() != b.ino() {
-            return Err(Error::Custody);
-        }
-        Ok(result)
+        Self::from_file(fd)
     }
     fn create_child(&self, name: &str) -> Result<Self> {
         let c = CString::new(name).map_err(|_| Error::Invalid)?;

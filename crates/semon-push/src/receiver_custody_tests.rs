@@ -53,7 +53,14 @@ fn first_run_reuses_identity_secrets_and_storage_outputs() {
     assert_eq!(seed.len(), 32);
     assert_eq!(cache_key.len(), 32);
     assert_ne!(seed, cache_key);
-    for directory in [SECRETS, CACHE, AUDIT, ACL, enrollment::DIRECTORY] {
+    for directory in [
+        SECRETS,
+        CACHE_SECRETS,
+        CACHE,
+        AUDIT,
+        ACL,
+        enrollment::DIRECTORY,
+    ] {
         assert_eq!(mode(&f.0.join(directory)), 0o700);
     }
     for file in [
@@ -68,6 +75,12 @@ fn first_run_reuses_identity_secrets_and_storage_outputs() {
     assert_ne!(
         custody.cache_dir().parent(),
         custody.cache_key_path().parent()
+    );
+    assert_ne!(issuer_path.parent(), custody.cache_key_path().parent());
+    assert_ne!(issuer_path.parent(), Some(custody.cache_dir().as_path()));
+    assert_ne!(
+        custody.cache_key_path().parent(),
+        Some(custody.cache_dir().as_path())
     );
     let second = f.open();
     assert_eq!(custody.receiver_id(), second.receiver_id());
@@ -137,7 +150,7 @@ fn generated_key_signs_and_verifies_pinned_assertion() {
 fn corrupted_or_missing_pieces_never_regenerate_secrets() {
     for target in [
         IDENTITY,
-        "secrets/cache-master.key",
+        "cache-secrets/cache-master.key",
         "acl/owners.json",
         "acl/grants.json",
         "enrollment/registry.json",
@@ -179,7 +192,7 @@ fn modes_links_and_short_keys_refuse() {
         CACHE,
         ACL,
         AUDIT,
-        "secrets/cache-master.key",
+        "cache-secrets/cache-master.key",
         "acl/grants.json",
     ] {
         let f = Fixture::new();
@@ -197,7 +210,7 @@ fn modes_links_and_short_keys_refuse() {
         CACHE,
         ACL,
         AUDIT,
-        "secrets/cache-master.key",
+        "cache-secrets/cache-master.key",
     ] {
         let f = Fixture::new();
         f.open();
@@ -230,12 +243,15 @@ fn crash_before_identity_refuses_without_replacing_keys() {
         Err(Error::Write)
     ));
     assert!(!f.0.join(IDENTITY).exists());
-    let key = fs::read(f.0.join(SECRETS).join(CACHE_KEY)).unwrap();
+    let key = fs::read(f.0.join(CACHE_SECRETS).join(CACHE_KEY)).unwrap();
     assert!(matches!(
         ReceiverCustody::open_or_initialize(&f.0),
         Err(Error::Incomplete)
     ));
-    assert_eq!(fs::read(f.0.join(SECRETS).join(CACHE_KEY)).unwrap(), key);
+    assert_eq!(
+        fs::read(f.0.join(CACHE_SECRETS).join(CACHE_KEY)).unwrap(),
+        key
+    );
 }
 
 #[test]
@@ -393,6 +409,98 @@ fn ownership_hardlinks_and_unknown_secret_files_refuse() {
         assert!(ReceiverCustody::open_or_initialize(&f.0).is_err());
         // SAFETY: restore our fixture ownership before cleanup.
         assert_eq!(unsafe { libc::chown(path.as_ptr(), 0, 0) }, 0);
+    }
+}
+
+#[test]
+fn directory_swap_cannot_split_file_and_directory_operations() {
+    let f = Fixture::new();
+    let original = f.0.join("original");
+    let selected = f.0.join("selected");
+    fs::DirBuilder::new().mode(0o700).create(&selected).unwrap();
+    let dir = Directory::open_after_fd(&selected, || {
+        fs::rename(&selected, &original).unwrap();
+        fs::DirBuilder::new().mode(0o700).create(&selected).unwrap();
+    })
+    .unwrap();
+    dir.create("marker", b"private").unwrap();
+    dir.create_child("child")
+        .unwrap()
+        .create("nested", b"private")
+        .unwrap();
+    assert_eq!(fs::read(original.join("marker")).unwrap(), b"private");
+    assert_eq!(fs::read(original.join("child/nested")).unwrap(), b"private");
+    assert!(fs::read_dir(&selected).unwrap().next().is_none());
+}
+
+#[test]
+fn initialization_explicitly_unlocks_with_inherited_descriptor() {
+    let f = Fixture::new();
+    let mut inherited = None;
+    ReceiverCustody::open_with_hooks(
+        &f.0,
+        || Ok(()),
+        |file| {
+            inherited = Some(file.try_clone().unwrap());
+        },
+    )
+    .unwrap();
+    // A duplicated descriptor shares flock ownership, just like fork inheritance.
+    // Keep it alive while the real initialization path acquires the lock again.
+    f.open();
+    drop(inherited);
+}
+
+#[test]
+fn pending_retirement_recovers_before_and_after_acl_publication() {
+    for already_published in [false, true] {
+        let f = Fixture::new();
+        let custody = f.open();
+        let removed = owner_grants(custody.owner(), "laptop", "work", true).unwrap();
+        let retained = owner_grants(custody.owner(), "desktop", "personal", false).unwrap();
+        custody.install_owner_grants(&id(1), &removed).unwrap();
+        custody.install_owner_grants(&id(2), &retained).unwrap();
+        let acl = Directory::open(&custody.acl_dir()).unwrap();
+        let mut ledger = load_ledger(&acl).unwrap();
+        ledger.enrollments.remove(&id(1));
+        ledger.pending = Some(PolicyDocument {
+            format: 1,
+            grants: retained,
+        });
+        acl.publish("owners.json", &encode(&ledger).unwrap(), true)
+            .unwrap();
+        if already_published {
+            acl.publish(
+                receiver_acl::ACL_FILE,
+                &encode(ledger.pending.as_ref().unwrap()).unwrap(),
+                true,
+            )
+            .unwrap();
+        }
+        f.open();
+        let acls = Acls::new(custody.acl_dir());
+        assert_eq!(
+            acls.decide(
+                &custody.owner.principal,
+                "laptop",
+                "work",
+                Permission::Analytics
+            ),
+            Decision::Denied
+        );
+        assert!(matches!(
+            acls.decide(
+                &custody.owner.principal,
+                "desktop",
+                "personal",
+                Permission::Analytics
+            ),
+            Decision::Granted(_)
+        ));
+        let ledger = load_ledger(&acl).unwrap();
+        assert!(ledger.pending.is_none());
+        assert!(!ledger.enrollments.contains_key(&id(1)));
+        custody.retire_owner_grants(&id(1)).unwrap();
     }
 }
 
