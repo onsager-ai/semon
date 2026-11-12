@@ -216,6 +216,31 @@ impl ExportViewValidator for Valid {
 }
 
 #[test]
+fn canonical_serialization_reserves_complete_bounded_capacity() {
+    let page = TypedPage {
+        fields: (0..32)
+            .map(|_| TypedField {
+                field: Field::Assistant,
+                text: UntrustedText::new(SECRET.repeat(16)),
+            })
+            .collect(),
+    };
+    let bytes = page.canonical_bytes().unwrap();
+    let expected = b"semon/typed-body/v1\0".len()
+        + 8
+        + 32 * (1 + 8 + b"untrusted_text".len() + 8 + SECRET.len() * 16);
+    assert_eq!(bytes.len(), expected);
+    assert_eq!(bytes.capacity(), expected);
+    let oversized = TypedPage {
+        fields: vec![TypedField {
+            field: Field::Assistant,
+            text: UntrustedText::new("x".repeat(MAX_BYTES)),
+        }],
+    };
+    assert_eq!(oversized.canonical_bytes().err(), Some(Refused::OverBudget));
+}
+
+#[test]
 fn happy_path_digest_binding_and_explicit_completion() {
     let f = Fixture::new();
     let at = At(Cell::new(10_000));
@@ -235,6 +260,7 @@ fn happy_path_digest_binding_and_explicit_completion() {
         enrollment: &enrollment,
         resolver: &Resolver { missing: false },
         policies: &policies,
+        delivery_mode: DeliveryMode::Cached,
         renderer: &renderer,
         clock: &at,
         cancelled: &|| false,
@@ -266,6 +292,82 @@ fn happy_path_digest_binding_and_explicit_completion() {
 }
 
 #[test]
+fn delivery_mode_is_required_and_binds_identity_and_origin_audit() {
+    let mut audit_bindings = Vec::new();
+    for mode in [DeliveryMode::Cached, DeliveryMode::StreamThrough] {
+        let f = Fixture::new();
+        let at = At(Cell::new(10_000));
+        let mut audit = AuditStore::open(&f.0, &at, crate::origin_audit::MAX_BYTES).unwrap();
+        let renderer = Renderer {
+            fixture: &f,
+            calls: Cell::new(0),
+            action: &|| {},
+            failure: None,
+            oversized: false,
+        };
+        let authorized = OriginRead {
+            enrollment: &Enrollment {
+                revoked: Cell::new(false),
+            },
+            resolver: &Resolver { missing: false },
+            policies: &Policies(Cell::new(false)),
+            delivery_mode: mode,
+            renderer: &renderer,
+            clock: &at,
+            cancelled: &|| false,
+            audit: &mut audit,
+        }
+        .read(&claims(), &request())
+        .unwrap();
+        let binding = &authorized.response_binding;
+        binding
+            .verify_identity(&claims(), Destination::Viewer)
+            .unwrap();
+        let mut changed = binding.clone();
+        changed.delivery_mode = if mode == DeliveryMode::Cached {
+            DeliveryMode::StreamThrough
+        } else {
+            DeliveryMode::Cached
+        };
+        assert_eq!(
+            changed.verify_identity(&claims(), Destination::Viewer),
+            Err(Refused::InvalidRequest)
+        );
+        let value = serde_json::to_value(binding).unwrap();
+        for bad in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!("unknown")),
+            Some(serde_json::json!(1)),
+        ] {
+            let mut invalid = value.clone();
+            invalid.as_object_mut().unwrap().remove("delivery_mode");
+            if let Some(bad) = bad {
+                invalid["delivery_mode"] = bad;
+            }
+            assert!(serde_json::from_value::<ResponseBinding>(invalid.clone()).is_err());
+            let header = serde_json::to_vec(&serde_json::json!({
+                "version": 1, "request_id": id(1), "frame": 0,
+                "final_frame": false, "payload_bytes": 0,
+                "content": { "kind": "header", "binding": invalid }
+            }))
+            .unwrap();
+            let mut frame = (header.len() as u32).to_be_bytes().to_vec();
+            frame.extend(header);
+            assert!(crate::body_wire::parse_frame(&frame).is_err());
+        }
+        let event: serde_json::Value =
+            serde_json::from_str(f.journal().lines().next().unwrap()).unwrap();
+        audit_bindings.push(event["record"]["export_view_binding"].clone());
+        authorized
+            .finish(&mut audit, Outcome::Completed, 7)
+            .unwrap();
+        assert!(f.journal().contains("\"bytes\":7"));
+    }
+    assert_ne!(audit_bindings[0], audit_bindings[1]);
+}
+
+#[test]
 fn policy_revocation_deadline_cancellation_and_renderer_failure_close_audits() {
     for mode in 0..5 {
         let f = Fixture::new();
@@ -294,6 +396,7 @@ fn policy_revocation_deadline_cancellation_and_renderer_failure_close_audits() {
             enrollment: &enrollment,
             resolver: &Resolver { missing: false },
             policies: &policies,
+            delivery_mode: DeliveryMode::Cached,
             renderer: &renderer,
             clock: &at,
             cancelled: &|| cancelled.get(),
@@ -356,6 +459,7 @@ fn scope_and_unknown_handle_refuse_uniformly_before_render() {
             enrollment: &ScopeStub(s),
             resolver: &Resolver { missing: mode == 9 },
             policies: &Policies(Cell::new(false)),
+            delivery_mode: DeliveryMode::Cached,
             renderer: &renderer,
             clock: &at,
             cancelled: &|| false,
@@ -400,6 +504,7 @@ fn budget_deadline_and_audit_failure_refuse_before_render() {
             },
             resolver: &Resolver { missing: false },
             policies: &Policies(Cell::new(false)),
+            delivery_mode: DeliveryMode::Cached,
             renderer: &renderer,
             clock: &at,
             cancelled: &|| false,
@@ -438,6 +543,7 @@ fn dropping_authorized_leaves_attempted_history() {
             },
             resolver: &Resolver { missing: false },
             policies: &Policies(Cell::new(false)),
+            delivery_mode: DeliveryMode::Cached,
             renderer: &renderer,
             clock: &at,
             cancelled: &|| false,
@@ -491,6 +597,7 @@ fn authorization_only_requires_exact_origin_witness_and_never_renders() {
         enrollment: &enrollment,
         resolver: &Resolver { missing: false },
         policies: &policies,
+        delivery_mode: DeliveryMode::Cached,
         renderer: &renderer,
         clock: &at,
         cancelled: &|| false,
@@ -520,6 +627,7 @@ fn authorization_only_requires_exact_origin_witness_and_never_renders() {
         enrollment: &enrollment,
         resolver: &Resolver { missing: false },
         policies: &policies,
+        delivery_mode: DeliveryMode::Cached,
         renderer: &renderer,
         clock: &at,
         cancelled: &|| false,
@@ -593,6 +701,7 @@ fn cancellation_or_deadline_during_prepare_leaves_journal_empty() {
             },
             resolver: &Resolver { missing: false },
             policies: &Policies(Cell::new(false)),
+            delivery_mode: DeliveryMode::Cached,
             renderer: &renderer,
             clock: &at,
             cancelled: &|| cancelled.get(),
@@ -662,6 +771,7 @@ fn cancellation_or_deadline_during_final_policy_recheck_closes_audit() {
             },
             resolver: &Resolver { missing: false },
             policies: &policies,
+            delivery_mode: DeliveryMode::Cached,
             renderer: &renderer,
             clock: &at,
             cancelled: &|| cancelled.get(),
