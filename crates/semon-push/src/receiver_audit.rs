@@ -220,11 +220,13 @@ impl<C: Clock> AuditStore<C> {
                 .map_err(|_| AuditError::Custody)?;
         }
         let directory = CacheDirectory::open(dir)?;
-        if directory
-            .names()?
-            .iter()
-            .any(|name| name != Path::new(AUDIT_FILE) && name != Path::new("audit.lock"))
-        {
+        if directory.names()?.iter().any(|name| {
+            name != Path::new(AUDIT_FILE)
+                && name != Path::new("audit.lock")
+                && name != Path::new(crate::generation_audit::FILE)
+                && name != Path::new("generations.lock")
+                && name != Path::new("owners.jsonl")
+        }) {
             return Err(AuditError::Custody);
         }
         let lock = directory.open_file(Path::new("audit.lock"), libc::O_RDWR | libc::O_CREAT)?;

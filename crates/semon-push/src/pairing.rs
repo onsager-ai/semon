@@ -294,6 +294,7 @@ pub enum State {
     Revoked,
 }
 struct Session {
+    predecessor: Option<String>,
     binding: String,
     created: u64,
     confirmed: Option<u64>,
@@ -400,6 +401,7 @@ pub struct Core {
     gate: Gate,
     sessions: BTreeMap<String, Session>,
     gate_unavailable: bool,
+    predecessor: Option<String>,
 }
 impl Core {
     /// Fresh registry fields populate origin_read::EnrollmentScope; no extra
@@ -420,7 +422,11 @@ impl Core {
             gate,
             sessions: BTreeMap::new(),
             gate_unavailable: false,
+            predecessor: None,
         })
+    }
+    pub(crate) fn bind_predecessor(&mut self, predecessor: Option<String>) {
+        self.predecessor = predecessor;
     }
     fn observe(&mut self, now: u64) -> Result<u64> {
         if self.gate_unavailable {
@@ -503,6 +509,7 @@ impl Core {
         self.sessions.insert(
             session_id.clone(),
             Session {
+                predecessor: self.predecessor.clone(),
                 binding: connection_binding,
                 created: now,
                 confirmed: None,
@@ -631,7 +638,7 @@ pub(crate) struct Receipt {
     transcript_digest: [u8; 32],
     application_hash: [u8; 32],
     created: u64,
-    valid_until: u64,
+    pub(crate) valid_until: u64,
     pub(crate) deliveries: u8,
     client_certificate: Option<Vec<u8>>,
 }
@@ -641,6 +648,7 @@ pub(crate) fn validate_receipts(registry: &Registry) -> Result<()> {
         if r.session_id.len() != 64
             || !ids.insert(&r.session_id)
             || r.deliveries > 2
+            || serde_json::to_vec(r).map_err(|_| Error::Invalid)?.len() >= 8192
             || r.created >= r.valid_until
             || !registry
                 .enrollments
@@ -796,6 +804,10 @@ impl Core {
             enrollment_id: enrollment_id.clone(),
             receiver_id: self.receiver_id.clone(),
             machine: input.machine,
+            sequence: snapshot.next_sequence,
+            origin_key: t.origin_key.clone(),
+            endpoint: t.endpoint.clone(),
+            enrolled_pin: input.client_certificate_pins.first().map(|p| p.pin.clone()),
             binding: input.binding,
             client_certificate_pins: input.client_certificate_pins,
             credential_kinds: kinds,
@@ -841,6 +853,25 @@ impl Core {
                 if fresh.pairing_receipts.iter().any(|r| r.session_id == id) {
                     return Err(Error::Terminal);
                 }
+                if fresh
+                    .endpoint
+                    .as_ref()
+                    .is_some_and(|endpoint| endpoint != &enrollment.endpoint)
+                {
+                    return Err(Error::Terminal);
+                }
+                fresh.endpoint = Some(enrollment.endpoint.clone());
+                if fresh.usable_machine(&enrollment.machine, now) != session.predecessor.as_deref()
+                {
+                    return Err(Error::Terminal);
+                }
+                if let Some(id) = &session.predecessor {
+                    fresh.revoke_enrollment(id, None, now);
+                }
+                let mut enrollment = enrollment;
+                enrollment.sequence = fresh.next_sequence;
+                fresh.next_sequence = fresh.next_sequence.checked_add(1).ok_or(Error::Invalid)?;
+                fresh.latest = now.max(fresh.latest);
                 fresh.enrollments.push(enrollment);
                 fresh.credentials.extend(added_bearers);
                 fresh.pairing_receipts.push(receipt);
@@ -889,11 +920,12 @@ impl Core {
                 .iter()
                 .find(|e| e.enrollment_id == receipt.enrollment_id)
                 .ok_or(Error::Invalid)?;
-            if enrollment.revoked_at.is_some()
+            if snapshot.endpoint.as_deref() != Some(enrollment.endpoint.as_str())
+                || enrollment.revoked_at.is_some()
                 || enrollment
                     .credential_kinds
                     .iter()
-                    .any(|k| k.revoked_at.is_some() || k.generations.current != 1)
+                    .any(|k| !k.available || k.generations.current != 1)
                 || snapshot
                     .credentials
                     .iter()

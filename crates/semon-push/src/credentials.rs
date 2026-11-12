@@ -13,6 +13,30 @@ pub enum Kind {
     MirrorPush,
 }
 
+impl Kind {
+    pub fn wire_name(self) -> &'static str {
+        match self {
+            Self::AnalyticsPublish => "analytics_publish",
+            Self::BodyChannel => "body_channel",
+            Self::MirrorPush => "mirror_push",
+        }
+    }
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "analytics_publish" => Some(Self::AnalyticsPublish),
+            "body_channel" => Some(Self::BodyChannel),
+            "mirror_push" => Some(Self::MirrorPush),
+            _ => None,
+        }
+    }
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::AnalyticsPublish => 0,
+            Self::BodyChannel => 1,
+            Self::MirrorPush => 2,
+        }
+    }
+}
 /// No serializer; exposure is explicit for future protected provisioning only.
 pub struct Secret(Zeroizing<String>);
 impl Secret {
@@ -135,6 +159,7 @@ impl Registry {
         verified_pin: Option<&crate::enrollment::Pin>,
         now: u64,
     ) -> Option<&Bearer> {
+        let now = now.max(self.latest);
         let bearer = self
             .credentials
             .iter()
@@ -153,6 +178,7 @@ impl Registry {
                 && p.revoked_at.is_none()
         });
         credential_authority_refusal(
+            self.endpoint.as_deref(),
             enrollment,
             scope,
             bearer,
@@ -176,6 +202,7 @@ impl Registry {
         verified_pin: Option<&crate::enrollment::Pin>,
         now: u64,
     ) -> Authorization {
+        let now = now.max(self.latest);
         let hash = secret.hash();
         let valid = self.validate().is_ok();
         let mut selected = None;
@@ -192,6 +219,7 @@ impl Registry {
                 }
                 for scope in &enrollment.credential_kinds {
                     let reason = credential_authority_refusal(
+                        self.endpoint.as_deref(),
                         enrollment,
                         scope,
                         bearer,
@@ -237,6 +265,7 @@ impl Registry {
     }
 }
 fn credential_authority_refusal(
+    endpoint: Option<&str>,
     enrollment: &crate::enrollment::Enrollment,
     scope: &crate::enrollment::KindScope,
     bearer: &Bearer,
@@ -244,7 +273,9 @@ fn credential_authority_refusal(
     certificate: bool,
     now: u64,
 ) -> Option<Refusal> {
-    if enrollment.revoked_at.is_some() | scope.revoked_at.is_some() | bearer.revoked_at.is_some() {
+    if endpoint != Some(enrollment.endpoint.as_str()) {
+        Some(Refusal::InvalidCredential)
+    } else if enrollment.revoked_at.is_some() | !scope.available | bearer.revoked_at.is_some() {
         Some(Refusal::Revoked)
     } else if !((now >= bearer.valid_from) & (now < bearer.valid_until)) {
         Some(Refusal::OutsideValidity)

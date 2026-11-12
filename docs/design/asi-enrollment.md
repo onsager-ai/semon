@@ -35,8 +35,8 @@ disables client-certificate presentation. Analytics routes remain reserved. #661
 registers the closed body poll/response routes when existing body custody and
 client trust are configured; body enrollment and a reachable end-to-end workflow
 remain blocked on admitted-binding and owning integrations. Its fresh registry
-release checks currently use the conservative revision handle. PR4.1 replaces that
-handle as specified below; PR4.2 renewal routes remain separate from body dispatch
+release checks use the shipped credential-bound `CredentialHandle` from PR4.1.
+PR4.2 renewal routes remain separate from body dispatch
 and pairing-ceremony state. See [receiver route registration](asi-body-channel.md#receiver-route-registration-part-of-594).
 The listener uses kind-scoped enrollment-registry authentication; the former
 flat-file token reader and commands are removed. Legacy `DIR/tokens` custody
@@ -49,7 +49,7 @@ controller and `receive enroll` terminal. Receiver-side public_tls provisioning
 creates mirror-only enrollments; origin connect/client and optional client certificates
 are integrated. Independently validated analytics/body admission, renewal and
 revocation CLI remain follow-up integrations. Shipped custody creates
-`DIR/enrollment/registry.json` (format 1; PR4.2 replaces it as specified below)
+`DIR/enrollment/registry.json` (strict current format 2)
 and `DIR/enrollment/registry.lock`, relative to receiver state directory `DIR`.
 One atomic registry document contains enrollment bindings, generation-scoped
 certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
@@ -65,7 +65,7 @@ receiver identity/assertion-issuer custody comes from ReceiverCustody.
 all fields for the later `origin_read::EnrollmentScope` adapter. Revocation comes
 from a separate CLI process editing the registry and is observed through its
 revision; pairing holds `pairing.lock`, acquiring `registry.lock` only for short
-transactions so that external updates remain possible. Registry format 1 now includes immutable nonsecret pairing
+transactions so that external updates remain possible. Registry format 2 includes live nonsecret pairing
 activation receipts in the same commit as enrollment and credential hashes. The
 activation input's commitment binds the exact machine, namespace/incarnation or
 mirror-only binding, kind settings, certificate pins and validity to B4. Secrets
@@ -444,8 +444,8 @@ Later enrollments reuse receiver identity, owner, keys and directories.
 
 Implementation status (slice 4a PR3.2a, part of #593): `receiver_custody`
 is a Unix library consumed by receiver-side provisioning. Under `DIR`, mode-0700 directories are `enrollment/`
-(existing registry format 1), `issuer-secrets/`, `cache-secrets/`, `body-cache/`, `acl/` and
-`receiver-audit/`. Mode-0600 files are `receiver.json` (strict JSON format 1:
+(current registry format 2), `issuer-secrets/`, `cache-secrets/`, `body-cache/`, `acl/` and
+`receiver-audit/`. Mode-0600 files are `receiver.json` (strict JSON format 2:
 random receiver ID and current issuer key ID), `custody.lock`,
 `issuer-secrets/issuer-<key-id>.seed` (raw 32-byte Ed25519 seed),
 `cache-secrets/cache-master.key` (independent raw 32-byte key), `acl/grants.json`
@@ -627,8 +627,10 @@ confirmed and approved phases, the old enrollment stays usable and unchanged; no
 old authority is revoked merely by generating a code. After origin pairing, key
 confirmation and B4 approval complete, the single durable activation registry
 commit creates the new enrollment's authority and terminally revokes the exact
-prior enrollment. Serialize and recheck that predecessor under the commit lock;
-a changed predecessor refuses activation rather than revoking another enrollment.
+prior enrollment. Carry the predecessor ID observed before the terminal prompt,
+or explicit absence when no usable enrollment existed, into the pairing session.
+Serialize and recheck that observation under the commit lock; a changed predecessor
+refuses activation rather than revoking another enrollment.
 Cancellation, expiry or failure before that commit leaves old authority intact.
 This changes no namespace/claim transfer rules.
 
@@ -849,7 +851,7 @@ actual encoded size in CI; reject overlong fields before admission.
 | Pending renewal nonce/targets/authorization bindings and reserved outcome | 4 KiB; one per enrollment, four receiver-wide |
 | Live delivery receipt (pairing or renewal) | 8 KiB; at most one per enrollment; new attempts wait for recovery authority to end |
 | Live rolling admission records | 1 KiB per enrollment; prune timestamps outside the rolling window using the clamped clock |
-| Terminal enrollment tombstone: enrollment ID, one tagged pin and three kind high-water marks | 512 bytes; same pin appears once |
+| Terminal enrollment tombstone: enrollment ID, validated machine name (at most 63 bytes), insertion sequence, one tagged pin and three kind high-water marks | 512 bytes; same pin appears once; machine/sequence support state-idempotent lookup only |
 | Registry envelope, receiver-wide gates and allocation accounting | 64 KiB receiver-wide |
 
 A fully occupied live enrollment budgets 27 KiB (8 + 6 + 4 + 8 + 1), conservatively
@@ -908,12 +910,12 @@ either commits first and is included in revoke, or sees revoke and refuses.
 Grants/cache invalidation follow their owning custody rules; access stops at the
 registry commit even if cleanup is interrupted. Preserve facts, keys and audits.
 
-PR4.1 supplies a credential-bound authority handle: it is current only while that
+The shipped PR4.1 `CredentialHandle` is current only while that
 EXACT credential, its kind scope, enrollment and any presented pin remain
 authorized and in validity. Re-read current custody before dispatch/release and
 signal revoked in-flight work on kept-alive connections. Unrelated registry
-revisions NEVER invalidate it. Missing/unreadable custody fails closed. This
-replaces the shipped conservative `RevisionHandle` that invalidates on any revision.
+revisions NEVER invalidate it. Missing/unreadable custody fails closed. It replaced
+the former `RevisionHandle` that invalidated on any revision.
 
 `semon receive enable --dir DIR --machine M --kind K` requires that same owner and
 confirmation. BEFORE recording anything, require another unrevoked kind with a
@@ -956,13 +958,20 @@ attempt schedules the next eligible attempt; it does not change that attempt's
 bound authorization set. Apply the same retry limits and certificate/authority
 checks; the header grants no authority and cannot widen scope.
 
-For revoke, enable and disconnect, rerunning the SAME command after an uncertain
-commit safely reconciles its earlier attempt before prompting or retrying. Persist
-nonsecret operation identity/outcome metadata under the owning custody lock so the
-rerun is idempotent, reports the earlier durable outcome first, and neither repeats
-an authorization nor affects a replacement enrollment. If uncertainty remains,
-refuse with the table's same-command guidance; never direct operators to custody
-files. This reconciliation precedes normal confirmation and target-state checks.
+Revoke, enable and disconnect are state-idempotent. Reread durable custody before
+prompting; that read reconciles an uncertain whole-document commit. Do not persist
+operation IDs, outcome receipts, acknowledgements or expiry state. Revoke resolves
+M to its most recent non-tombstoned enrollment, or its most recent revoked enrollment
+if all are revoked. Already-revoked targets report the existing success without a
+prompt or write. Enable with an already-pending authorization reports its existing
+success without a prompt or new record; an already-enabled kind reports the table's
+error. Otherwise use the normal confirmation. A replacement enrollment can only be
+changed after the owner types literal `yes` at a new prompt; declining changes
+nothing. Compact tombstones retain the validated machine name and insertion
+sequence solely for this lookup, never as authority. Origin-side disconnect in
+PR4.3 follows the same state-idempotent rule. If custody remains unreadable or the
+outcome remains uncertain, refuse with the table's same-command guidance; never
+direct operators to custody files.
 
 ### Origin disconnect and delivery split
 
@@ -994,9 +1003,28 @@ show HOST; commands use URL. Never display userinfo or query parts. Connect, pus
 and disconnect use ONE endpoint normalization, including default ports and IPv6,
 without DNS alias guessing. `--receiver URL` accepts that HTTPS URL; the 64-hex
 custody key stays internal. No hash alias or operator-chosen alias is supported.
-The receiver computes receive enable's push URL from its advertised endpoint;
-multiple endpoints require retaining the exact enrolled endpoint, never guessing
-from a listen address. PR4.3 changes main's existing #651 push selector contract,
+The registry is authoritative for one current normalized advertised endpoint,
+initialized by `receive enroll --advertise URL`. Immutable `receiver.json` identity
+custody contains no endpoint. Every live enrollment retains its own normalized
+enrolled endpoint within its 8 KiB budget. Plain `receive --dir` keeps its invocation
+and loads the registry endpoint. Enable's push command uses the target enrollment's
+own endpoint; the common fresh-pairing recovery block uses the receiver's CURRENT
+endpoint, including after compaction. Neither guesses from a listen address. The
+origin custody name is SHA-256 of its enrolled endpoint.
+
+An address change is exceptional and is not a four-action enrollment claim. On an
+existing directory, `receive enroll --advertise NEW` requires the authenticated
+owner's literal `yes` at the address-change prompt BEFORE any code is displayed.
+Decline/EOF changes nothing. Confirmation replaces only the current endpoint in ONE
+registry commit, with requested/committed owner audit metadata; unavailable audit
+must not preserve old authority, following revoke's rule. Prior enrollments remain
+unchanged and are not revoked or deleted. The shared credential authority predicate
+refuses an enrollment whose enrolled endpoint differs from the current endpoint;
+this applies to every route, first-use cutover and in-flight `CredentialHandle`
+checks. Such an enrollment has no usable kind, freeing its machine name without a
+replacement prompt; enable refuses with current-endpoint fresh-pairing guidance.
+Old endpoint enrollments remain budgeted live state until credentials end and
+audit-first compaction applies. PR4.3 changes main's existing #651 push selector contract,
 with docs and tests updated together. `TARGET`
 is `machine M` or `kind K for machine M`. Do not substitute secrets. Prompts and
 confirmation feedback use the controlling terminal; no terminal means refuse.
@@ -1046,6 +1074,9 @@ exit 1; cancellation exits 0. No additional renewal prompts.
 | connect | Replacement line in combined approval summary | `This replaces the previous enrollment for receiver HOST. Its files and history will be kept.` | terminal; shown before B4 approval; no extra approval step |
 | receiver startup / owner command | Unsupported pre-renewal registry | `Receiver state uses an unsupported format. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See docs/design/asi-enrollment.md#offline-machines-and-missed-renewal.` | stderr; exit 1; [recovery section](#offline-machines-and-missed-renewal); never used for capacity |
 | Receiver admission | Actual live/tombstone capacity exhausted | `Receiver state is full. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See docs/design/asi-enrollment.md#offline-machines-and-missed-renewal.` | local stderr; exit 1; wire remains generic |
+| receive enroll | Address change confirmation | `Change this receiver's address from OLD to NEW? Existing origins must pair again. Type yes to confirm: ` | owner terminal; literal yes; before any code |
+| receive enroll | Address change declined or EOF | `Address change cancelled; nothing changed.` | terminal; exit 0; preserve custody |
+| receive enroll | Endpoint mismatch without confirmed change | `Receiver directory records endpoint URL. To change address, run semon receive enroll --advertise NEW with its listener/TLS options and confirm the address change.` | stderr; exit 1; preserve custody |
 | Receiver new authority | Audit unavailable | `Receiver audit is unavailable. Keep DIR unchanged; restore access to its audit storage before enrolling or renewing.` | local stderr; exit 1; wire remains generic; revoke/cutover still work |
 
 For watch, evaluate deadlines independently of file events, at least once per
@@ -1259,9 +1290,19 @@ CI must verify the implementation, not infer safety from this docs PR:
   whole-enrollment revocation. Refuse last-kind per-kind revoke and enable without
   valid remaining authority before writing. Enable after begin stays pending;
   cancellation/revoke of a bound authorization makes finish refuse.
-- Rerun each revoke/enable/disconnect command after uncertain commit; reconcile
-  idempotently and report the prior outcome before prompting or retrying, without
-  repeating authorization or touching a replacement enrollment.
+- Check normalized endpoint mismatch refusal on every route, in-flight handles and
+  first-use cutover. Address change uses one registry commit; crashes before/after
+  commit preserve a coherent endpoint and leave old enrollments unchanged. Decline
+  changes nothing; old-endpoint machine names are freed. Enable's push line uses
+  the enrolled endpoint; fresh-pairing recovery uses the current endpoint after
+  change/compaction. Test default-port/IPv6 normalization and origin custody names
+  equaling SHA-256 of the enrolled endpoint. Plain receive loads the registry
+  endpoint without a new --advertise argument.
+- Rerun each revoke/enable/disconnect command after durable commit and report the
+  existing end state without a prompt or repeated authorization. After replacement,
+  rerun prompts for the replacement and declining changes nothing. Exercise crashes
+  and uncertain commits at every step, including the fresh custody read before
+  prompting. Check tombstone lookup at the maximum validated machine-name length.
 - Preserve old valid origin custody across failed staging, crash and disconnect;
   admit no partial/mixed generation or late renewal after disconnect. Preserve keys,
   consent, facts, history and audits; old registry format refuses without migration.
