@@ -622,7 +622,7 @@ impl Core {
 #[serde(deny_unknown_fields)]
 pub(crate) struct Receipt {
     pub(crate) session_id: String,
-    enrollment_id: String,
+    pub(crate) enrollment_id: String,
     origin_key_hash: [u8; 32],
     transcript_digest: [u8; 32],
     application_hash: [u8; 32],
