@@ -39,6 +39,7 @@ impl PageRenderer for BodyQueryRenderer<'_> {
             export_view_generation: None,
             exact_mapping: None,
             continuation: None,
+            append_continuity: Vec::new(),
         })
     }
     fn render(
@@ -73,6 +74,7 @@ impl PageRenderer for BodyQueryRenderer<'_> {
             export_view_generation: None,
             exact_mapping: None,
             continuation: None,
+            append_continuity: Vec::new(),
         })
     }
 }
