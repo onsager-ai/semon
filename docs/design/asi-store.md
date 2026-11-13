@@ -192,7 +192,7 @@ transfer. It runs per namespace and supplies:
   `analytics-namespace` at read time and accept full UIDs. Namespace creation uses
   only the explicit [producer initializer](asi-producer-lifecycle.md); read paths
   never initialize. `body_source` records source ownership
-  for transactional append/rewrite cleanup. Event Index schema 48 refuses older
+  for transactional append/rewrite cleanup. Event Index schema 49 refuses older
   indexes without mutation; explicit recovery must establish source availability
   and custody before rebuilding. See [ASI query](asi-query.md#search).
 

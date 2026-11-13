@@ -30,18 +30,26 @@ or refresh shared-memory (`-shm`) sidecars on a closed WAL index; sidecar absenc
 is not a read-only guarantee. Missing indexes are never created.
 
 The same snapshot returns a deterministic native-ID map of stable archive chain
-IDs. Each exact-path retention marker must name a chain and agree with the pinned
-native ID, consumed boundary and prefix digest; its recorded physical length must
-cover that boundary. The trusted writer derives the exact absolute marker key
-from configured root/path. The reader additionally requires an allowlisted relative
-embedded path, with no parent components, matching the pinned path's component
-suffix and file name. Without caller `Options`, it cannot independently map the
-embedded root to a native home: the index proves key-exact, suffix-consistent
-binding plus native ID, offset, prefix digest and recorded size. Missing markers (including sources never archived), absent
-chain identities and contradictory chain evidence refuse. These markers record
-index evidence, not the archive chain's current length or independently verified
-bytes. No archive file is read; the caller must verify archive custody, actual
-chain bytes and any later extension. Chain IDs do not enter the generation hashes.
+IDs. Schema 49 stores dedicated `native_chain_evidence` rows keyed by the exact
+absolute source path used by the pinned witness. Archive admission returns the
+chain identity, consumed offset, verified SHA-256 of `[0,offset)` and stored chain
+length under its archive lock. Catalog publication writes, replaces or removes
+that evidence in the same SQLite transaction as Catalog/activity source witnesses.
+The row must agree with the pinned native ID, consumed boundary and prefix digest;
+its recorded length must cover the boundary. The exact path key replaces the
+former embedded-root suffix check. An append publishes the new prefix on the same
+chain; old pinned witnesses refuse as stale. Rewrites and truncations likewise
+refuse witness disagreement.
+
+Missing rows return `NotIndexed`; contradictory evidence returns `Stale`. Failed
+or skipped admission removes prior evidence at publication. Facts mode, non-native
+sources and zero consumed offsets produce no row and body reads remain unavailable.
+Bounded checkpoints and incomplete trailing records bind only the consumed prefix,
+including when an already longer archive chain verifies that prefix. Retention
+markers keep their separate retention meaning: this path neither writes nor reads
+nor clears them. These rows record index evidence, not the archive chain's current
+length or independently verified bytes. No archive file is read; the caller must
+verify archive custody, actual chain bytes and any later extension. Chain IDs do not enter the generation hashes.
 The accessor pins index evidence, not live filesystem state: callers keep their
 before/after authorization and source checks around body reads.
 
