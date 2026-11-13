@@ -95,10 +95,17 @@ impl Fixture {
         application: [u8; 32],
         exporter: [u8; 32],
     ) -> wire::Finish {
-        let authentication = vec![Generation {
-            kind: Kind::MirrorPush,
-            generation: 1,
-        }];
+        self.finish_using(begun, action, application, exporter, self.credentials())
+    }
+    fn finish_using(
+        &self,
+        begun: &Begun,
+        action: Action,
+        application: [u8; 32],
+        exporter: [u8; 32],
+        credentials: Vec<Credential>,
+    ) -> wire::Finish {
+        let authentication = wire::identities(&credentials).unwrap();
         let signed = wire::possession_message(
             "receiver",
             "https://receiver.example:443",
@@ -115,7 +122,7 @@ impl Fixture {
             enrollment_id: begun.enrollment_id.clone(),
             renewal_id: begun.renewal_id.clone(),
             action,
-            credentials: self.credentials(),
+            credentials,
             application_key: provision_wire::encode(&application),
             proof: provision_wire::encode(proof.as_ref()),
         }
@@ -496,6 +503,200 @@ fn registry_replace_failures_preserve_initial_and_recovery_reservations() {
             assert!(
                 receiver
                     .finish(&f.dir, &recover, &[5; 32], None, now + 2)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn terminal_cancel_cutover_and_revoke_work_near_admission_with_audit_unavailable() {
+    for committed in [false, true] {
+        let f = Fixture::new();
+        let mut receiver = Receiver::default();
+        let now = 2_000_000;
+        let begun = f.begin(&mut receiver, now).unwrap();
+        if committed {
+            let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+            receiver
+                .finish(&f.dir, &commit, &[4; 32], None, now)
+                .unwrap();
+        }
+        {
+            let mut store = Store::open(&f.dir).unwrap();
+            let mut registry = store.snapshot().unwrap();
+            let sample = crate::enrollment::Tombstone {
+                enrollment_id: format!("{:064x}", 1),
+                machine: "m".repeat(63),
+                sequence: 1,
+                pin: None,
+                high_water: [u64::MAX; 3],
+            };
+            let available = crate::enrollment::ADMISSION_CAP as usize
+                - 4 * 8192
+                - serde_json::to_vec(&registry).unwrap().len();
+            let count = available / (serde_json::to_vec(&sample).unwrap().len() + 1);
+            for n in 1..=count {
+                let mut tombstone = sample.clone();
+                tombstone.enrollment_id = format!("{n:064x}");
+                registry.tombstones.push(tombstone);
+            }
+            assert!(registry.check_admission().is_ok());
+            assert!(
+                serde_json::to_vec(&registry).unwrap().len() + 4 * 8192
+                    > crate::enrollment::ADMISSION_CAP as usize - 512
+            );
+            store.commit(registry.revision(), &registry).unwrap();
+        }
+        fs::rename(f.dir.join("receiver-audit"), f.dir.join("saved-audit")).unwrap();
+        if committed {
+            let secret = wire::bearer(
+                &[3; 32],
+                &begun.enrollment_id,
+                &begun.renewal_id,
+                &begun.generations[0],
+            );
+            Store::authorize_cutover(&f.dir, Kind::MirrorPush, &secret, None, now).unwrap();
+            assert!(
+                Registry::read_current(&f.dir).unwrap().enrollments[0].credential_kinds[0]
+                    .generations
+                    .retiring
+                    .is_none()
+            );
+        } else {
+            let cancel = f.finish(&begun, Action::Cancel, [3; 32], [4; 32]);
+            receiver
+                .finish(&f.dir, &cancel, &[4; 32], None, now)
+                .unwrap();
+            let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+            assert!(
+                receiver
+                    .finish(&f.dir, &commit, &[4; 32], None, now)
+                    .is_err()
+            );
+        }
+        Store::open(&f.dir)
+            .unwrap()
+            .owner_update(
+                &f.dir,
+                None,
+                crate::enrollment::OwnerAction::Revoke,
+                "owner",
+                &begun.enrollment_id,
+                now,
+            )
+            .unwrap();
+        let registry = Registry::read_current(&f.dir).unwrap();
+        assert!(registry.enrollments[0].revoked_at.is_some());
+        assert!(serde_json::to_vec(&registry).unwrap().len() <= crate::enrollment::CAP as usize);
+    }
+}
+
+#[test]
+fn renewal_first_use_cuts_over_each_kind_independently() {
+    let f = Fixture::new();
+    let mut registry = Registry::read_current(&f.dir).unwrap();
+    let e = &mut registry.enrollments[0];
+    e.binding = Binding::Admitted {
+        namespace: "namespace".into(),
+        origin_incarnation: "origin".into(),
+        index_incarnation: "index".into(),
+        publisher_claim_epoch: crate::enrollment::ClaimEpoch::Unassigned,
+        issuer: crate::enrollment::Issuer {
+            kind: crate::enrollment::IssuerKind::Receiver,
+            origin_trust_acknowledged: true,
+        },
+        assertion_issuer_keys: vec![crate::enrollment::IssuerKey {
+            key_id: "issuer".into(),
+            public_key: [1; 32],
+        }],
+    };
+    e.credential_kinds
+        .push(KindScope::new(Kind::AnalyticsPublish, 1));
+    let mut second = registry.credentials[0].clone();
+    second.credential_id = "c".repeat(64);
+    second.kind = Kind::AnalyticsPublish;
+    second.sha256 = Secret::new("analytics-secret".into()).hash();
+    registry.credentials.push(second);
+    let initial = Registry::from_records(registry.enrollments, registry.credentials).unwrap();
+    fs::write(
+        f.dir.join("enrollment/registry.json"),
+        serde_json::to_vec(&initial).unwrap(),
+    )
+    .unwrap();
+    let credentials = || {
+        vec![
+            Credential {
+                kind: Kind::MirrorPush,
+                generation: 1,
+                bearer: f.secret.clone(),
+            },
+            Credential {
+                kind: Kind::AnalyticsPublish,
+                generation: 1,
+                bearer: "analytics-secret".into(),
+            },
+        ]
+    };
+    let mut receiver = Receiver::default();
+    let now = 2_000_000;
+    let begun = receiver
+        .begin(
+            &f.dir,
+            &wire::Begin {
+                version: 1,
+                enrollment_id: "a".repeat(64),
+                credentials: credentials(),
+            },
+            None,
+            now,
+        )
+        .unwrap();
+    let commit = f.finish_using(&begun, Action::Commit, [3; 32], [4; 32], credentials());
+    receiver
+        .finish(&f.dir, &commit, &[4; 32], None, now)
+        .unwrap();
+    for kind in [Kind::MirrorPush, Kind::AnalyticsPublish] {
+        let target = begun.generations.iter().find(|g| g.kind == kind).unwrap();
+        let secret = wire::bearer(&[3; 32], &begun.enrollment_id, &begun.renewal_id, target);
+        Store::authorize_cutover(&f.dir, kind, &secret, None, now + 1).unwrap();
+        let registry = Registry::read_current(&f.dir).unwrap();
+        assert!(
+            registry.enrollments[0]
+                .credential_kinds
+                .iter()
+                .find(|s| s.kind == kind)
+                .unwrap()
+                .generations
+                .retiring
+                .is_none()
+        );
+        if kind == Kind::MirrorPush {
+            let analytics = registry.enrollments[0]
+                .credential_kinds
+                .iter()
+                .find(|s| s.kind == Kind::AnalyticsPublish)
+                .unwrap();
+            assert_eq!(
+                analytics.generations.retiring.as_ref().unwrap().cutover_at,
+                now + wire::OVERLAP
+            );
+            assert!(matches!(
+                registry
+                    .authorize(
+                        Kind::AnalyticsPublish,
+                        Kind::AnalyticsPublish,
+                        &Secret::new("analytics-secret".into()),
+                        None,
+                        now + 1
+                    )
+                    .decision,
+                Decision::Allowed { generation: 1, .. }
+            ));
+            let recover = f.finish_using(&begun, Action::Recover, [3; 32], [5; 32], credentials());
+            assert!(
+                receiver
+                    .finish(&f.dir, &recover, &[5; 32], None, now + 1)
                     .is_err()
             );
         }

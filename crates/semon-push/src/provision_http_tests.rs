@@ -143,6 +143,51 @@ impl Harness {
     }
 }
 #[test]
+fn renewal_hostile_transport_refuses_without_pairing_or_registry_changes() {
+    let mut h = Harness::new();
+    let shared = Arc::get_mut(&mut h.shared).unwrap();
+    shared.provisioning = None;
+    shared.provisioning_terminal = None;
+    let before = fs::read(h.dir.0.join("enrollment/registry.json")).unwrap();
+    let requests = [
+        "POST /v1/renew/begin HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n{}",
+        "POST /v1/renew/begin HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 8193\r\n\r\n",
+        "POST /v1/renew/begin HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        "POST /v1/renew/begin HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        "POST /v1/renew/finish HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 25\r\n\r\n{\"version\":1,\"version\":1}",
+    ];
+    for request in requests {
+        let (mut client, worker) = h.connect();
+        client.write_all(request.as_bytes()).unwrap();
+        client.flush().unwrap();
+        let (status, body) = response(&mut client);
+        assert_eq!(status, 401);
+        assert!(!String::from_utf8_lossy(&body).contains("Semon-Renewal"));
+        drop(client);
+        worker.join().unwrap();
+        assert_eq!(
+            fs::read(h.dir.0.join("enrollment/registry.json")).unwrap(),
+            before
+        );
+        assert_eq!(h.shared.admission.lock().unwrap().provisioning, 0);
+    }
+    h.shared
+        .provisioning_timeout
+        .as_ref()
+        .unwrap()
+        .store(true, Ordering::Relaxed);
+    let (mut client, worker) = h.connect();
+    assert_eq!(post(&mut client, "/v1/renew/begin", b"{}").0, 401);
+    drop(client);
+    worker.join().unwrap();
+    assert_eq!(
+        fs::read(h.dir.0.join("enrollment/registry.json")).unwrap(),
+        before
+    );
+    assert_eq!(h.shared.admission.lock().unwrap().provisioning, 0);
+}
+
+#[test]
 fn ordinary_receive_renews_without_pairing_controller_or_terminal() {
     ordinary_renewal(false);
     ordinary_renewal(true);
@@ -237,6 +282,31 @@ fn ordinary_renewal(required_certificate: bool) {
         drop(missing);
         missing_worker.join().unwrap();
     }
+    let foreign_key = rcgen::KeyPair::generate().unwrap();
+    let foreign = crate::ClientIdentity {
+        private: zeroize::Zeroizing::new(foreign_key.serialize_der()),
+        certificate: crate::receiver_custody::ReceiverCustody::open_existing(&h.dir.0)
+            .unwrap()
+            .issue_client_certificate(
+                foreign_key.public_key_raw(),
+                &"c".repeat(64),
+                100,
+                4_000_000,
+            )
+            .unwrap(),
+    };
+    let (mut foreign_client, foreign_worker) = h.connect_identity(Some(&foreign));
+    assert_eq!(
+        post(
+            &mut foreign_client,
+            "/v1/renew/begin",
+            &wire::encode_message(&begin).unwrap()
+        )
+        .0,
+        401
+    );
+    drop(foreign_client);
+    foreign_worker.join().unwrap();
     let (status, body) = post(
         &mut client,
         "/v1/renew/begin",
