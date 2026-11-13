@@ -703,25 +703,78 @@ pub struct Principal {
     pub subject: String,
     pub audit_id: Identifier,
 }
+/// Receiver authorization and cache ceilings captured for one body read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BodyReadPolicy {
+    pub acl_grant_version: String,
+    pub receiver_policy_version: Identifier,
+    pub limits: Limits,
+    pub stream_through: bool,
+}
+
+pub trait ReceiverPolicy {
+    fn decide(&self, subject: &str, scope: &EnrollmentScope) -> Option<BodyReadPolicy>;
+}
+
+/// Static receiver configuration with an ACL read on every decision.
+pub struct AclReceiverPolicy<'a> {
+    pub acls: &'a Acls,
+    pub receiver_policy_version: Identifier,
+    pub limits: Limits,
+    pub stream_through: bool,
+}
+impl ReceiverPolicy for AclReceiverPolicy<'_> {
+    fn decide(&self, subject: &str, scope: &EnrollmentScope) -> Option<BodyReadPolicy> {
+        match self.acls.decide(
+            subject,
+            scope.machine.as_str(),
+            scope.namespace.as_str(),
+            Permission::BodyRead,
+        ) {
+            AclDecision::Granted(grant) => Some(BodyReadPolicy {
+                acl_grant_version: grant.version().to_owned(),
+                receiver_policy_version: self.receiver_policy_version,
+                limits: self.limits,
+                stream_through: self.stream_through,
+            }),
+            AclDecision::Denied => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EffectiveBodyReadPolicy {
+    pub limits: Limits,
+    pub stream_through: bool,
+}
+
+/// Combine receiver ceilings with the authenticated origin's restrictions.
+pub fn effective_body_read_policy(
+    receiver: &BodyReadPolicy,
+    binding: &ResponseBinding,
+) -> EffectiveBodyReadPolicy {
+    EffectiveBodyReadPolicy {
+        limits: binding.cache_limits.narrowed(receiver.limits),
+        stream_through: receiver.stream_through
+            || binding.delivery_mode == crate::origin_read::DeliveryMode::StreamThrough,
+    }
+}
+
 pub struct ReadInput {
     pub scope: EnrollmentScope,
     pub request: Request,
     pub generation: Identifier,
     pub destination: Destination,
     pub candidate: Option<wire::Candidate>,
-    /// Receiver may prohibit caching regardless of the origin's delivery mode.
-    pub stream_through: bool,
 }
 pub struct ReadService<'a, 'b, C: Clock> {
     pub broker: &'a Broker<'b>,
     pub enrollment: &'a dyn EnrollmentSource,
-    pub acls: &'a Acls,
+    pub policy: &'a dyn ReceiverPolicy,
     pub signing_key: &'a dyn SigningKey,
     pub issuer_key_id: &'a str,
-    pub receiver_policy_version: Identifier,
     pub audit: &'a mut AuditStore<C>,
     pub cache: &'a mut BodyCache<C>,
-    pub origin_limits: Limits,
 }
 struct Prepared {
     page: TypedPage,
@@ -742,7 +795,7 @@ pub struct PendingDelivery<'s, 'a, 'b, C: Clock> {
     released: bool,
     principal: String,
     scope: EnrollmentScope,
-    grant: String,
+    policy: BodyReadPolicy,
 }
 impl<C: Clock> PendingDelivery<'_, '_, '_, C> {
     /// The future HTTP route MUST apply `Cache-Control: no-store` when true.
@@ -760,16 +813,16 @@ impl<C: Clock> PendingDelivery<'_, '_, '_, C> {
             Err(Reason::Revoked)
         } else if self.service.broker.clock.now_millis() >= prepared.deadline {
             Err(Reason::Deadline)
+        } else if self
+            .service
+            .policy
+            .decide(&self.principal, &self.scope)
+            .as_ref()
+            == Some(&self.policy)
+        {
+            Ok(())
         } else {
-            match self.service.acls.decide(
-                &self.principal,
-                self.scope.machine.as_str(),
-                self.scope.namespace.as_str(),
-                Permission::BodyRead,
-            ) {
-                AclDecision::Granted(grant) if grant.version() == self.grant => Ok(()),
-                _ => Err(Reason::Forbidden),
-            }
+            Err(Reason::Forbidden)
         };
         if let Err(reason) = decision {
             self.abandon_inner()?;
@@ -834,40 +887,48 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
         input: ReadInput,
     ) -> Result<PendingDelivery<'s, 'a, 'b, C>> {
         let scope = input.scope.clone();
-        let grant = match self.acls.decide(
-            &principal.subject,
-            scope.machine.as_str(),
-            scope.namespace.as_str(),
-            Permission::BodyRead,
-        ) {
-            AclDecision::Granted(grant) => grant.version().to_owned(),
-            _ => return Err(Reason::Forbidden),
-        };
-        let prepared = self.read_with(principal, input, &mut |_, _| {})?;
+        let policy = self
+            .policy
+            .decide(&principal.subject, &scope)
+            .ok_or(Reason::Forbidden)?;
+        let prepared = self.read_with_policy(principal, input, &policy, &mut |_, _| {})?;
         Ok(PendingDelivery {
             service: self,
             prepared: Some(prepared),
             released: false,
             principal: principal.subject.clone(),
             scope,
-            grant,
+            policy,
         })
     }
+    #[cfg(test)]
     fn read_with(
         &mut self,
         principal: &Principal,
-        mut input: ReadInput,
+        input: ReadInput,
         exchange: &mut dyn FnMut(&Broker<'_>, &Request),
     ) -> Result<Prepared> {
-        let grant = match self.acls.decide(
-            &principal.subject,
-            input.scope.machine.as_str(),
-            input.scope.namespace.as_str(),
-            Permission::BodyRead,
-        ) {
-            AclDecision::Granted(grant) => grant,
-            AclDecision::Denied => return Err(Reason::Forbidden),
-        };
+        let policy = self
+            .policy
+            .decide(&principal.subject, &input.scope)
+            .ok_or(Reason::Forbidden)?;
+        self.read_with_policy(principal, input, &policy, exchange)
+    }
+    fn read_with_policy(
+        &mut self,
+        principal: &Principal,
+        mut input: ReadInput,
+        policy: &BodyReadPolicy,
+        exchange: &mut dyn FnMut(&Broker<'_>, &Request),
+    ) -> Result<Prepared> {
+        if self
+            .policy
+            .decide(&principal.subject, &input.scope)
+            .as_ref()
+            != Some(policy)
+        {
+            return Err(Reason::Forbidden);
+        }
         if !matches!(
             input.request.operation,
             wire::Operation::Resolve { .. }
@@ -877,7 +938,7 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             return Err(Reason::UnsupportedVerb);
         }
         let original = input.request.operation.clone();
-        if input.stream_through {
+        if policy.stream_through {
             input.candidate = None;
         }
         if let Some(candidate) = input.candidate.take() {
@@ -888,7 +949,7 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             };
             // The current origin validator refuses this. Never read cache bytes
             // on that path; a fresh request/nonce is required after unavailable.
-            match self.round_trip(principal, &input, grant.version(), exchange) {
+            match self.round_trip(principal, &input, policy, exchange) {
                 Err(Reason::Unavailable) => {
                     // This exact candidate could not receive fresh origin
                     // admission. Remove its temporary ciphertext before fetching;
@@ -906,13 +967,13 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
                 Ok(_) => return Err(Reason::Unavailable),
             }
         }
-        self.round_trip(principal, &input, grant.version(), exchange)
+        self.round_trip(principal, &input, policy, exchange)
     }
     fn round_trip(
         &mut self,
         principal: &Principal,
         input: &ReadInput,
-        grant_version: &str,
+        policy: &BodyReadPolicy,
         exchange: &mut dyn FnMut(&Broker<'_>, &Request),
     ) -> Result<Prepared> {
         let request = &input.request;
@@ -937,7 +998,7 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
                 generation: input.generation,
                 permitted_range: range,
                 purpose,
-                receiver_policy_version: self.receiver_policy_version,
+                receiver_policy_version: policy.receiver_policy_version,
                 origin_policy_version: None,
                 origin_redactor_version: None,
                 decision: receiver_audit::Decision::Granted,
@@ -967,8 +1028,8 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
                 subject_principal: principal.subject.clone(),
                 machine: input.scope.machine.as_str().into(),
                 namespace: input.scope.namespace.as_str().into(),
-                acl_grant_version: grant_version.into(),
-                receiver_policy_version: String::from(self.receiver_policy_version),
+                acl_grant_version: policy.acl_grant_version.clone(),
+                receiver_policy_version: String::from(policy.receiver_policy_version),
                 request_digest: request.digest()?,
                 deadline,
                 channel_binding: channel,
@@ -1003,7 +1064,7 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
                 .binding
                 .verify_identity(&claims, input.destination)
                 .map_err(|_| Reason::BindingMismatch)?;
-            self.admit(principal, input, grant_version, attempt, verified, now)
+            self.admit(principal, input, policy, attempt, verified, now)
         })();
         if result.is_err() {
             self.audit
@@ -1016,7 +1077,7 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
         &mut self,
         principal: &Principal,
         input: &ReadInput,
-        grant_version: &str,
+        policy: &BodyReadPolicy,
         attempt: receiver_audit::AttemptId,
         verified: VerifiedResponse,
         fetched: u64,
@@ -1025,14 +1086,13 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
         if !self.enrollment.is_current(&input.scope) {
             return Err(Reason::Revoked);
         }
-        match self.acls.decide(
-            &principal.subject,
-            input.scope.machine.as_str(),
-            input.scope.namespace.as_str(),
-            Permission::BodyRead,
-        ) {
-            AclDecision::Granted(current) if current.version() == grant_version => {}
-            _ => return Err(Reason::Forbidden),
+        if self
+            .policy
+            .decide(&principal.subject, &input.scope)
+            .as_ref()
+            != Some(policy)
+        {
+            return Err(Reason::Forbidden);
         }
         let binding = verified.binding.receiver_binding.clone();
         #[cfg(test)]
@@ -1042,9 +1102,8 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             .map_err(|_| Reason::AuditFailure)?;
         #[cfg(test)]
         tests::observe_admission(&verified.binding.receiver_binding);
-        let stream_through = input.stream_through
-            || verified.binding.delivery_mode == crate::origin_read::DeliveryMode::StreamThrough;
-        if stream_through {
+        let effective = effective_body_read_policy(policy, &verified.binding);
+        if effective.stream_through {
             if self.broker.clock.now_millis() >= verified.binding.deadline_millis {
                 return Err(Reason::Deadline);
             }
@@ -1057,7 +1116,7 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
                 deadline: verified.binding.deadline_millis,
             });
         }
-        let origin_limits = verified.binding.cache_limits.narrowed(self.origin_limits);
+        let origin_limits = effective.limits;
         // Admission is constructed only after authorize() has fsynced.
         let admission = ReadAdmission::after_online_authorization_and_audit(
             verified.binding.cache_key.clone(),
@@ -1072,14 +1131,13 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
         if !self.enrollment.is_current(&input.scope) {
             return Err(Reason::Revoked);
         }
-        match self.acls.decide(
-            &principal.subject,
-            input.scope.machine.as_str(),
-            input.scope.namespace.as_str(),
-            Permission::BodyRead,
-        ) {
-            AclDecision::Granted(current) if current.version() == grant_version => {}
-            _ => return Err(Reason::Forbidden),
+        if self
+            .policy
+            .decide(&principal.subject, &input.scope)
+            .as_ref()
+            != Some(policy)
+        {
+            return Err(Reason::Forbidden);
         }
         if self.broker.clock.now_millis() >= verified.binding.deadline_millis {
             return Err(Reason::Unavailable);
@@ -1103,14 +1161,13 @@ impl<'a, 'b, C: Clock> ReadService<'a, 'b, C> {
             if self.broker.clock.now_millis() >= verified.binding.deadline_millis {
                 return Err(Reason::Unavailable);
             }
-            match self.acls.decide(
-                &principal.subject,
-                input.scope.machine.as_str(),
-                input.scope.namespace.as_str(),
-                Permission::BodyRead,
-            ) {
-                AclDecision::Granted(current) if current.version() == grant_version => {}
-                _ => return Err(Reason::Forbidden),
+            if self
+                .policy
+                .decide(&principal.subject, &input.scope)
+                .as_ref()
+                != Some(policy)
+            {
+                return Err(Reason::Forbidden);
             }
             Ok(())
         })();
@@ -1633,16 +1690,6 @@ mod tests {
                         generation: id(4),
                         destination: Destination::Viewer,
                         candidate: None,
-                        stream_through: false,
-                    };
-                    let grant = match acls.decide(
-                        "subject",
-                        "machine",
-                        "namespace",
-                        Permission::BodyRead,
-                    ) {
-                        AclDecision::Granted(g) => g,
-                        _ => panic!("grant"),
                     };
                     let attempt = receiver_audit
                         .begin_attempt(AttemptRecord {
@@ -1660,22 +1707,27 @@ mod tests {
                             destination: Destination::Viewer,
                         })
                         .unwrap();
+                    let policy = AclReceiverPolicy {
+                        acls: &acls,
+                        receiver_policy_version: id(11),
+                        limits: Limits::default(),
+                        stream_through: false,
+                    };
                     let mut service = ReadService {
                         broker: &broker,
                         enrollment: &a,
-                        acls: &acls,
+                        policy: &policy,
                         signing_key: &signing,
                         issuer_key_id: "issuer",
-                        receiver_policy_version: id(11),
                         audit: &mut receiver_audit,
                         cache: &mut cache,
-                        origin_limits: Limits::default(),
                     };
+                    effective_policy_table(&verified.binding);
                     let delivered = service
                         .admit(
                             &principal,
                             &input,
-                            grant.version(),
+                            &policy.decide("subject", &a.scope).unwrap(),
                             attempt,
                             verified,
                             10_000,
@@ -1688,7 +1740,7 @@ mod tests {
                         released: false,
                         principal: principal.subject.clone(),
                         scope: a.scope.clone(),
-                        grant: grant.version().to_owned(),
+                        policy: policy.decide("subject", &a.scope).unwrap(),
                     };
                     assert_eq!(
                         pending.release().unwrap().fields[0].text.as_str(),
@@ -1713,7 +1765,7 @@ mod tests {
                         service.admit(
                             &principal,
                             &input,
-                            grant.version(),
+                            &policy.decide("subject", &a.scope).unwrap(),
                             attempt,
                             invalid,
                             10_000
@@ -1726,7 +1778,6 @@ mod tests {
                         generation: id(4),
                         destination: Destination::Viewer,
                         candidate: None,
-                        stream_through: false,
                     };
                     denied.request.source_handle = opaque("unknown");
                     assert!(matches!(
@@ -1910,19 +1961,22 @@ mod tests {
                 generation: id(4),
                 destination: Destination::Viewer,
                 candidate,
-                stream_through: false,
             };
             let mut calls = 0;
+            let policy = AclReceiverPolicy {
+                acls: &acls,
+                receiver_policy_version: id(11),
+                limits: Limits::default(),
+                stream_through: false,
+            };
             let mut service = ReadService {
                 broker: &broker,
                 enrollment: &a,
-                acls: &acls,
+                policy: &policy,
                 signing_key: &signing,
                 issuer_key_id: "issuer",
-                receiver_policy_version: id(11),
                 audit: &mut receiver,
                 cache: &mut cache,
-                origin_limits: Limits::default(),
             };
             FAIL_AUTHORIZE.with(|fail| fail.set(matches!(mode, Failure::Audit)));
             let result = service.read_with(&principal, input, &mut |broker, outgoing| {
@@ -2180,18 +2234,13 @@ mod tests {
                 assert_eq!(prepared.page.fields[0].text.as_str(), "safe typed body");
                 let before = std::fs::read_to_string(&journal_path).unwrap();
                 assert!(!before.contains("\"outcome\":\"completed\""));
-                let grant =
-                    match acls.decide("subject", "machine", "namespace", Permission::BodyRead) {
-                        AclDecision::Granted(g) => g.version().to_owned(),
-                        _ => panic!("grant"),
-                    };
                 let mut pending = PendingDelivery {
                     service: &mut service,
                     prepared: Some(prepared),
                     released: false,
                     principal: "subject".into(),
                     scope: a.scope.clone(),
-                    grant,
+                    policy: policy.decide("subject", &a.scope).unwrap(),
                 };
                 assert_eq!(
                     pending.release().unwrap().fields[0].text.as_str(),
@@ -2503,6 +2552,89 @@ mod tests {
             }
         }
     }
+    fn effective_policy_table(binding: &ResponseBinding) {
+        use crate::origin_read::{CacheLimits, DeliveryMode};
+        let mut binding = binding.clone();
+        let mut receiver = BodyReadPolicy {
+            acl_grant_version: "grant".into(),
+            receiver_policy_version: id(11),
+            limits: Limits {
+                global_bytes: 200,
+                source_bytes: 80,
+                ttl_seconds: 30,
+                response_bytes: 50,
+            },
+            stream_through: false,
+        };
+        binding.cache_limits = CacheLimits {
+            cache_total_bytes: std::num::NonZeroU64::new(100),
+            cache_per_source_bytes: std::num::NonZeroU64::new(90),
+            cache_ttl_seconds: std::num::NonZeroU64::new(20),
+        };
+        for (receiver_stream, origin_mode, expected) in [
+            (false, DeliveryMode::Cached, false),
+            (true, DeliveryMode::Cached, true),
+            (false, DeliveryMode::StreamThrough, true),
+            (true, DeliveryMode::StreamThrough, true),
+        ] {
+            receiver.stream_through = receiver_stream;
+            binding.delivery_mode = origin_mode;
+            assert_eq!(
+                effective_body_read_policy(&receiver, &binding),
+                EffectiveBodyReadPolicy {
+                    limits: Limits {
+                        global_bytes: 100,
+                        source_bytes: 80,
+                        ttl_seconds: 20,
+                        response_bytes: 50
+                    },
+                    stream_through: expected,
+                }
+            );
+        }
+        binding.cache_limits = CacheLimits::default();
+        assert_eq!(
+            effective_body_read_policy(&receiver, &binding).limits,
+            receiver.limits
+        );
+        receiver.limits = Limits {
+            global_bytes: u64::MAX,
+            source_bytes: u64::MAX,
+            ttl_seconds: u64::MAX,
+            response_bytes: usize::MAX,
+        };
+        assert_eq!(
+            effective_body_read_policy(&receiver, &binding).limits,
+            Limits::default()
+        );
+    }
+    impl ReceiverPolicy for std::cell::RefCell<AclReceiverPolicy<'_>> {
+        fn decide(&self, subject: &str, scope: &EnrollmentScope) -> Option<BodyReadPolicy> {
+            self.borrow().decide(subject, scope)
+        }
+    }
+    fn change_receiver_policy(
+        policy: &std::cell::RefCell<AclReceiverPolicy<'_>>,
+        grants: &std::path::Path,
+        change: u8,
+    ) {
+        match change {
+            4 => std::fs::write(grants, br#"{"format":1,"grants":[]}"#).unwrap(),
+            5 => policy.borrow_mut().receiver_policy_version = id(12),
+            6 => policy.borrow_mut().limits.ttl_seconds -= 1,
+            7 => policy.borrow_mut().stream_through = true,
+            8 => {
+                std::fs::write(grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"machine","namespace":"namespace","permissions":["body_read","analytics"]}]}"#).unwrap();
+            }
+            _ => panic!("unknown policy change"),
+        }
+    }
+    #[test]
+    fn receiver_policy_changes_refuse_admission_and_release() {
+        for failure in 4..21 {
+            loopback_delivery(false, false, failure);
+        }
+    }
     fn loopback_delivery(stream_through: bool, receiver_stricter: bool, failure: u8) {
         use crate::origin_client::{OriginClient, Step};
         use std::os::unix::fs::PermissionsExt;
@@ -2577,17 +2709,51 @@ mod tests {
             subject: "subject".into(),
             audit_id: id(9),
         };
+        let policy = std::cell::RefCell::new(AclReceiverPolicy {
+            acls: &acls,
+            receiver_policy_version: id(11),
+            limits: Limits::default(),
+            stream_through: false,
+        });
         let mut service = ReadService {
             broker: &broker,
             enrollment: &a,
-            acls: &acls,
+            policy: &policy,
             signing_key: &signing,
             issuer_key_id: "issuer",
-            receiver_policy_version: id(11),
             audit: &mut receiver,
             cache: &mut cache,
-            origin_limits: Limits::default(),
         };
+        if failure >= 14 {
+            match failure {
+                14 => std::fs::remove_file(&grants).unwrap(),
+                15 => std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"machine","namespace":"namespace","permissions":["analytics"]}]}"#).unwrap(),
+                16 => std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"other","machine":"machine","namespace":"namespace","permissions":["body_read"]}]}"#).unwrap(),
+                17 => std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"machine","namespace":"other","permissions":["body_read"]}]}"#).unwrap(),
+                18 => std::fs::write(&grants, b"malformed").unwrap(),
+                19 => std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o644)).unwrap(),
+                20 => std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"other","namespace":"namespace","permissions":["body_read"]}]}"#).unwrap(),
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                service.read(
+                    &principal,
+                    ReadInput {
+                        scope: a.scope.clone(),
+                        request: signed(77).0,
+                        generation: id(4),
+                        destination: Destination::Viewer,
+                        candidate: None,
+                    }
+                ),
+                Err(Reason::Forbidden)
+            ));
+            assert_eq!(service.cache.entry_count(), 0);
+            drop(client);
+            drop(origin_audit);
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
         let journal = root.join("receiver").join(receiver_audit::AUDIT_FILE);
         ADMISSION.with(|slot| *slot.borrow_mut() = Some((journal.clone(), 0)));
         if stream_through {
@@ -2602,7 +2768,6 @@ mod tests {
                         generation: id(4),
                         destination: Destination::Viewer,
                         candidate: None,
-                        stream_through: false,
                     },
                     &mut |_, _| assert_eq!(client.step(), Step::Delivered),
                 )
@@ -2640,37 +2805,66 @@ mod tests {
             files.sort();
             files
         };
+        policy.borrow_mut().stream_through = receiver_stricter;
         let before = cache_snapshot();
-        let prepared = service
-            .read_with(
-                &principal,
-                ReadInput {
-                    scope: a.scope.clone(),
-                    request: signed(77).0,
-                    generation: id(4),
-                    destination: Destination::Viewer,
-                    candidate: None,
-                    stream_through: receiver_stricter,
-                },
-                &mut |_, _| {
-                    assert_eq!(client.step(), Step::Delivered);
-                },
-            )
-            .unwrap();
+        let prepared = service.read_with(
+            &principal,
+            ReadInput {
+                scope: a.scope.clone(),
+                request: signed(77).0,
+                generation: id(4),
+                destination: Destination::Viewer,
+                candidate: None,
+            },
+            &mut |_, outgoing| {
+                let claims = body_assertion::decode(&hex::decode(&outgoing.assertion).unwrap())
+                    .unwrap()
+                    .claims;
+                assert_eq!(
+                    claims.acl_grant_version,
+                    policy
+                        .decide("subject", &a.scope)
+                        .unwrap()
+                        .acl_grant_version
+                );
+                assert_eq!(claims.receiver_policy_version, String::from(id(11)));
+                assert_eq!(client.step(), Step::Delivered);
+                if failure >= 9 {
+                    change_receiver_policy(&policy, &grants, failure - 5);
+                }
+            },
+        );
+        if failure >= 9 {
+            assert!(matches!(prepared, Err(Reason::Forbidden)));
+            assert_eq!(service.cache.entry_count(), 0);
+            ADMISSION.with(|slot| *slot.borrow_mut() = None);
+            drop(client);
+            drop(origin_audit);
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
+        let prepared = prepared.unwrap();
         let cache_key = prepared.key.clone();
         let bytes = prepared.page.canonical_bytes().unwrap().len() as u64;
-        let grant = match acls.decide("subject", "machine", "namespace", Permission::BodyRead) {
-            AclDecision::Granted(g) => g.version().to_owned(),
-            _ => panic!("grant"),
-        };
         let mut pending = PendingDelivery {
             service: &mut service,
             prepared: Some(prepared),
             released: false,
             principal: "subject".into(),
             scope: a.scope.clone(),
-            grant,
+            policy: policy.decide("subject", &a.scope).unwrap(),
         };
+        if (4..9).contains(&failure) {
+            change_receiver_policy(&policy, &grants, failure);
+            assert!(matches!(pending.release(), Err(Reason::Forbidden)));
+            drop(pending);
+            assert_eq!(service.cache.entry_count(), 0);
+            ADMISSION.with(|slot| *slot.borrow_mut() = None);
+            drop(client);
+            drop(origin_audit);
+            std::fs::remove_dir_all(root).unwrap();
+            return;
+        }
         if failure == 0 {
             assert_eq!(
                 pending.release().unwrap().fields[0].text.as_str(),
@@ -2743,7 +2937,6 @@ mod tests {
                 generation: id(4),
                 destination: Destination::Viewer,
                 candidate: None,
-                stream_through: false,
             },
             &mut |_, _| assert_eq!(client.step(), Step::Delivered),
         );
