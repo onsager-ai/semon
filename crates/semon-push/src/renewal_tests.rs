@@ -77,10 +77,13 @@ impl Fixture {
             revoked_at: None,
         };
         let registry = Registry::from_records(vec![enrollment], vec![bearer]).unwrap();
-        let mut store = Store::initialize(&dir).unwrap();
-        store
-            .commit(store.snapshot().unwrap().revision(), &registry)
-            .unwrap();
+        let mut store = if certificate {
+            Store::open(&dir).unwrap()
+        } else {
+            Store::initialize(&dir).unwrap()
+        };
+        let revision = store.snapshot().unwrap().revision();
+        store.commit(revision, &registry).unwrap();
         Self { dir, key, secret }
     }
     fn credentials(&self) -> Vec<Credential> {
