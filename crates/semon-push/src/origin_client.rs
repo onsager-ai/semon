@@ -343,6 +343,10 @@ impl<'a, C: Clock, T: PollTransport, E: Entropy> OriginClient<'a, C, T, E> {
             let renderer = crate::append_source::AppendRenderer {
                 source,
                 cursor: crate::append_source::AppendCursor {
+                    previous_cohort: self
+                        .leases
+                        .get(&lease_id)
+                        .map(|lease| lease.binding.cache_key.cohort.as_slice()),
                     lease_id,
                     page,
                     after,
@@ -388,12 +392,15 @@ impl<'a, C: Clock, T: PollTransport, E: Entropy> OriginClient<'a, C, T, E> {
         };
         if let Some((lease_id, _, _)) = append {
             let invalid = authorized.response_binding.continuation.is_none()
-                || self.leases.get(&lease_id).is_some_and(|previous| {
-                    !crate::body_lease::same_generation(
-                        &previous.binding,
-                        &authorized.response_binding,
-                    )
-                });
+                || self.leases.get(&lease_id).map_or_else(
+                    || !authorized.response_binding.append_continuity.is_empty(),
+                    |previous| {
+                        !crate::body_lease::append_extension(
+                            &previous.binding,
+                            &authorized.response_binding,
+                        )
+                    },
+                );
             if invalid {
                 self.leases.remove(&lease_id);
                 if authorized

@@ -181,6 +181,7 @@ pub struct RenderPlan {
     pub export_view_generation: Option<OpaqueId>,
     pub exact_mapping: Option<ExactMapping>,
     pub continuation: Option<OpaqueId>,
+    pub append_continuity: Vec<AppendContinuity>,
 }
 
 /// The only body-bearing value. Formatting never prints its content.
@@ -264,6 +265,7 @@ pub struct RenderedPage {
     pub export_view_generation: Option<OpaqueId>,
     pub exact_mapping: Option<ExactMapping>,
     pub continuation: Option<OpaqueId>,
+    pub append_continuity: Vec<AppendContinuity>,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct RenderBudget {
@@ -388,6 +390,16 @@ impl DeliveryMode {
     }
 }
 
+/// Prefix evidence recomputed from the current pinned source for a grown member.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppendContinuity {
+    pub source_id: OpaqueId,
+    pub chain: OpaqueId,
+    pub previous_boundary: u64,
+    pub prefix_sha256: Identifier,
+}
+
 /// Exact response identity, also carried by the strict body-channel header.
 /// Receiver verifies this binding then passes receiver_binding to authorize().
 #[derive(Clone, Serialize, Deserialize)]
@@ -408,6 +420,41 @@ pub struct ResponseBinding {
     pub receiver_binding: AuthorizationBinding,
     pub cache_limits: CacheLimits,
     pub delivery_mode: DeliveryMode,
+    /// Required, possibly empty. At most one entry per admitted source (128).
+    #[serde(deserialize_with = "deserialize_append_continuity")]
+    pub append_continuity: Vec<AppendContinuity>,
+}
+fn deserialize_append_continuity<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Vec<AppendContinuity>, D::Error> {
+    struct BoundedContinuity;
+    impl<'de> serde::de::Visitor<'de> for BoundedContinuity {
+        type Value = Vec<AppendContinuity>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("at most 128 append continuity entries")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut entries = Vec::with_capacity(sequence.size_hint().unwrap_or(0).min(128));
+            while entries.len() < 128 {
+                let Some(entry) = sequence.next_element::<AppendContinuity>()? else {
+                    return Ok(entries);
+                };
+                entries.push(entry);
+            }
+            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
+                return Err(serde::de::Error::custom(
+                    "append continuity exceeds cohort cap",
+                ));
+            }
+            Ok(entries)
+        }
+    }
+    deserializer.deserialize_seq(BoundedContinuity)
 }
 impl ResponseBinding {
     /// Recompute the origin's exact response identity using the signed claims.
@@ -438,6 +485,7 @@ impl ResponseBinding {
             export_view_generation: Some(OpaqueId::new(&self.cache_key.export_view_generation)?),
             exact_mapping: Some(self.mapping.clone()),
             continuation: self.continuation.clone(),
+            append_continuity: self.append_continuity.clone(),
         };
         let key = cache_key(
             &self.enrollment,
@@ -666,6 +714,7 @@ impl<C: Clock> OriginRead<'_, C> {
                 export_view_generation: Some(OpaqueId::new(&candidate.key.export_view_generation)?),
                 exact_mapping: Some(candidate.mapping.clone()),
                 continuation: candidate.continuation.clone(),
+                append_continuity: Vec::new(),
             }
         } else {
             renderer.prepare(
@@ -682,6 +731,10 @@ impl<C: Clock> OriginRead<'_, C> {
         check_deadline(self.clock, deadline)?;
         if (self.cancelled)() {
             return Err(Refused::Unavailable);
+        }
+        if plan.append_continuity.len() > 128 || (!streaming && !plan.append_continuity.is_empty())
+        {
+            return Err(Refused::InvalidRequest);
         }
         let export = plan
             .export_view_generation
@@ -780,6 +833,7 @@ impl<C: Clock> OriginRead<'_, C> {
                 if rendered.export_view_generation != plan.export_view_generation
                     || rendered.exact_mapping != plan.exact_mapping
                     || rendered.continuation != plan.continuation
+                    || rendered.append_continuity != plan.append_continuity
                 {
                     return Err(Refused::PolicyChanged);
                 }
@@ -860,6 +914,7 @@ impl<C: Clock> OriginRead<'_, C> {
                     receiver_binding,
                     cache_limits,
                     delivery_mode,
+                    append_continuity: plan.append_continuity.clone(),
                 },
             })
         })();
@@ -1064,6 +1119,13 @@ fn binding_bytes(
         id_bytes(&mut out, mapping.assertion);
     }
     optional(&mut out, plan.continuation.as_ref());
+    out.extend_from_slice(&(plan.append_continuity.len() as u64).to_be_bytes());
+    for entry in &plan.append_continuity {
+        append(&mut out, entry.source_id.as_str().as_bytes());
+        append(&mut out, entry.chain.as_str().as_bytes());
+        out.extend_from_slice(&entry.previous_boundary.to_be_bytes());
+        id_bytes(&mut out, entry.prefix_sha256);
+    }
     out.extend_from_slice(&plan.payload_bytes.to_be_bytes());
     append(&mut out, &key.payload_digest);
     for id in [

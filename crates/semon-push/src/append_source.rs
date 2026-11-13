@@ -13,6 +13,10 @@ type Result<T> = std::result::Result<T, crate::origin_read::Refused>;
 /// Continuations are opaque export identities, never native byte offsets. Prepare
 /// and render must describe the same complete admitted records; OriginRead checks
 /// their exact mapping, length, continuation and live policy/source witnesses.
+/// `prepare` returns `RenderPlan::append_continuity` for every grown member;
+/// `render` must return identical `RenderedPage::append_continuity`. Hash each
+/// [0, previous_boundary) from the CURRENT pinned source, honoring budget and
+/// cancellation. This injected seam has no production hashing implementation.
 pub trait AppendPageSource {
     fn prepare(
         &self,
@@ -32,6 +36,9 @@ pub trait AppendPageSource {
     ) -> Result<RenderedPage>;
 }
 pub struct AppendCursor<'a> {
+    /// Last acknowledged cohort. Evidence must be recomputed from the current
+    /// pinned source, never copied from these previous witnesses.
+    pub previous_cohort: Option<&'a [crate::body_cache::SourceWitness]>,
     pub lease_id: Identifier,
     pub page: &'a OpaqueId,
     pub after: Option<&'a OpaqueId>,
