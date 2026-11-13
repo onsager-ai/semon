@@ -20,16 +20,28 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::with_custody(false)
+    }
+    fn with_custody(certificate: bool) -> Self {
         let dir = std::env::temp_dir().join(format!(
             "semon-renewal-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(dir.join("receiver-audit"))
+        if certificate {
+            crate::receiver_custody::ReceiverCustody::open_at_endpoint(
+                &dir,
+                100,
+                "https://receiver.example:443",
+            )
             .unwrap();
+        } else {
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(dir.join("receiver-audit"))
+                .unwrap();
+        }
         let rng = SystemRandom::new();
         let private =
             EcdsaKeyPair::generate_pkcs8(&ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
@@ -66,7 +78,9 @@ impl Fixture {
         };
         let registry = Registry::from_records(vec![enrollment], vec![bearer]).unwrap();
         let mut store = Store::initialize(&dir).unwrap();
-        store.commit(0, &registry).unwrap();
+        store
+            .commit(store.snapshot().unwrap().revision(), &registry)
+            .unwrap();
         Self { dir, key, secret }
     }
     fn credentials(&self) -> Vec<Credential> {
@@ -507,6 +521,237 @@ fn registry_replace_failures_preserve_initial_and_recovery_reservations() {
             );
         }
     }
+}
+
+#[test]
+fn optional_only_renewal_preserves_certificate_for_later_required_enable() {
+    let f = Fixture::with_custody(true);
+    let custody = crate::receiver_custody::ReceiverCustody::open_at_endpoint(
+        &f.dir,
+        100,
+        "https://receiver.example:443",
+    )
+    .unwrap();
+    let mut registry = Registry::read_current(&f.dir).unwrap();
+    let e = &mut registry.enrollments[0];
+    e.receiver_id = custody.receiver_id().into();
+    let pin = crate::client_ca::pin(f.key.public_key().as_ref()).unwrap();
+    e.enrolled_pin = Some(pin.pin.clone());
+    e.client_certificate_pins = vec![pin];
+    let mut required = KindScope::new(Kind::AnalyticsPublish, 1);
+    required.client_cert_required = true;
+    e.credential_kinds.push(required);
+    e.binding = Binding::Admitted {
+        namespace: "namespace".into(),
+        origin_incarnation: "origin".into(),
+        index_incarnation: "index".into(),
+        publisher_claim_epoch: crate::enrollment::ClaimEpoch::Unassigned,
+        issuer: crate::enrollment::Issuer {
+            kind: crate::enrollment::IssuerKind::Receiver,
+            origin_trust_acknowledged: true,
+        },
+        assertion_issuer_keys: vec![crate::enrollment::IssuerKey {
+            key_id: "issuer".into(),
+            public_key: [1; 32],
+        }],
+    };
+    let mut revoked = registry.credentials[0].clone();
+    revoked.kind = Kind::AnalyticsPublish;
+    revoked.credential_id = "c".repeat(64);
+    revoked.sha256 = Secret::new("revoked-analytics".into()).hash();
+    registry.credentials.push(revoked);
+    let initial = Registry::from_records(registry.enrollments, registry.credentials).unwrap();
+    fs::write(
+        f.dir.join("enrollment/registry.json"),
+        serde_json::to_vec(&initial).unwrap(),
+    )
+    .unwrap();
+    Store::open(&f.dir)
+        .unwrap()
+        .owner_update(
+            &f.dir,
+            Some(Kind::AnalyticsPublish),
+            crate::enrollment::OwnerAction::Revoke,
+            "owner",
+            &"a".repeat(64),
+            100,
+        )
+        .unwrap();
+    let mut receiver = Receiver::default();
+    let now = 2_000_000;
+    let request = wire::Begin {
+        version: 1,
+        enrollment_id: "a".repeat(64),
+        credentials: f.credentials(),
+    };
+    let begun = receiver.begin(&f.dir, &request, None, now).unwrap();
+    // This fixture uses receiver custody's actual identity in proof construction.
+    let sign = |begun: &Begun,
+                action,
+                application: [u8; 32],
+                exporter: [u8; 32],
+                credentials: Vec<Credential>| {
+        let signed = wire::possession_message(
+            custody.receiver_id(),
+            "https://receiver.example:443",
+            begun,
+            &wire::identities(&credentials).unwrap(),
+            &exporter,
+            action,
+            &application,
+        )
+        .unwrap();
+        wire::Finish {
+            version: 1,
+            enrollment_id: begun.enrollment_id.clone(),
+            renewal_id: begun.renewal_id.clone(),
+            action,
+            credentials,
+            application_key: provision_wire::encode(&application),
+            proof: provision_wire::encode(
+                f.key.sign(&SystemRandom::new(), &signed).unwrap().as_ref(),
+            ),
+        }
+    };
+    let commit = sign(&begun, Action::Commit, [3; 32], [4; 32], f.credentials());
+    let delivered: wire::Delivered = serde_json::from_slice(
+        &receiver
+            .finish(&f.dir, &commit, &[4; 32], None, now)
+            .unwrap(),
+    )
+    .unwrap();
+    use base64::Engine;
+    let certificate = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(delivered.client_certificate.as_ref().unwrap())
+        .unwrap();
+    let identity = VerifiedClientIdentity::from_verified_der(
+        &rustls::pki_types::CertificateDer::from(certificate),
+    )
+    .unwrap();
+    let mirror = &delivered.credentials[0];
+    let secret = Secret::new(mirror.bearer.clone());
+    Store::authorize_cutover(
+        &f.dir,
+        Kind::MirrorPush,
+        &secret,
+        Some(identity.spki()),
+        now + 1,
+    )
+    .unwrap();
+    Store::open(&f.dir)
+        .unwrap()
+        .compact(&f.dir, now + 1)
+        .unwrap();
+    let compacted = Registry::read_current(&f.dir).unwrap();
+    assert!(
+        compacted.enrollments[0]
+            .client_certificate_pins
+            .iter()
+            .all(|p| p.generation == 2)
+    );
+    Store::open(&f.dir)
+        .unwrap()
+        .owner_update(
+            &f.dir,
+            Some(Kind::AnalyticsPublish),
+            crate::enrollment::OwnerAction::Enable,
+            "owner",
+            &begun.enrollment_id,
+            now + 2,
+        )
+        .unwrap();
+    let credentials = || {
+        vec![Credential {
+            kind: Kind::MirrorPush,
+            generation: 2,
+            bearer: mirror.bearer.clone(),
+        }]
+    };
+    let request = wire::Begin {
+        version: 1,
+        enrollment_id: begun.enrollment_id.clone(),
+        credentials: credentials(),
+    };
+    assert!(receiver.begin(&f.dir, &request, None, now + 2).is_err());
+    let enabled = receiver
+        .begin(&f.dir, &request, Some(&identity), now + 2)
+        .unwrap();
+    let commit = sign(&enabled, Action::Commit, [6; 32], [7; 32], credentials());
+    let initial = receiver
+        .finish(&f.dir, &commit, &[7; 32], Some(&identity), now + 2)
+        .unwrap();
+    let recover = sign(&enabled, Action::Recover, [6; 32], [8; 32], credentials());
+    assert_eq!(
+        receiver
+            .finish(&f.dir, &recover, &[8; 32], Some(&identity), now + 3)
+            .unwrap(),
+        initial
+    );
+}
+
+#[test]
+fn unrelated_expiry_audit_failure_does_not_block_live_signed_cancel() {
+    let f = Fixture::new();
+    let mut receiver = Receiver::default();
+    let now = 2_000_000;
+    let expired = f.begin(&mut receiver, now).unwrap();
+    // Add a second enrollment with independent bearer and a later deadline.
+    let mut registry = Registry::read_current(&f.dir).unwrap();
+    let mut e = registry.enrollments[0].clone();
+    e.enrollment_id = "c".repeat(64);
+    e.machine = "second".into();
+    e.sequence = 2;
+    let mut b = registry.credentials[0].clone();
+    b.enrollment_id = e.enrollment_id.clone();
+    b.credential_id = "d".repeat(64);
+    b.sha256 = Secret::new("second-bearer".into()).hash();
+    registry.enrollments.push(e);
+    registry.credentials.push(b);
+    registry.next_sequence = 3;
+    Store::open(&f.dir)
+        .unwrap()
+        .commit(registry.revision(), &registry)
+        .unwrap();
+    let credentials = || {
+        vec![Credential {
+            kind: Kind::MirrorPush,
+            generation: 1,
+            bearer: "second-bearer".into(),
+        }]
+    };
+    let live = receiver
+        .begin(
+            &f.dir,
+            &wire::Begin {
+                version: 1,
+                enrollment_id: "c".repeat(64),
+                credentials: credentials(),
+            },
+            None,
+            now + 100,
+        )
+        .unwrap();
+    let cancel = f.finish_using(&live, Action::Cancel, [3; 32], [4; 32], credentials());
+    fs::rename(f.dir.join("receiver-audit"), f.dir.join("saved-audit")).unwrap();
+    receiver
+        .finish(&f.dir, &cancel, &[4; 32], None, expired.expires_at)
+        .unwrap();
+    assert!(receiver.pending.contains_key(&expired.enrollment_id));
+    assert!(!receiver.pending.contains_key(&live.enrollment_id));
+    let cancel_expired = f.finish(&expired, Action::Cancel, [3; 32], [4; 32]);
+    assert!(
+        receiver
+            .finish(&f.dir, &cancel_expired, &[4; 32], None, expired.expires_at)
+            .is_err()
+    );
+    fs::rename(f.dir.join("saved-audit"), f.dir.join("receiver-audit")).unwrap();
+    receiver.expire(&f.dir, expired.expires_at).unwrap();
+    assert!(receiver.pending.is_empty());
+    assert!(
+        fs::read_to_string(f.dir.join("receiver-audit/renewals.jsonl"))
+            .unwrap()
+            .contains("expired")
+    );
 }
 
 #[test]

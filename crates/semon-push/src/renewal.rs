@@ -422,7 +422,10 @@ impl Receiver {
                 .map_err(|_| Refused)?;
             registry = store.snapshot().map_err(|_| Refused)?;
         }
-        self.expire(dir, now)?;
+        let expiry = self.expire(dir, now);
+        if message.action != Action::Cancel {
+            expiry?;
+        }
         let application = Zeroizing::new(provision_wire::decode_fixed::<32>(
             &message.application_key,
         )?);
@@ -486,7 +489,7 @@ impl Receiver {
             .filter(|p| p.begun.renewal_id == message.renewal_id)
             .cloned()
             .ok_or(Refused)?;
-        if message.action == Action::Recover {
+        if message.action == Action::Recover || now >= pending.begun.expires_at {
             return Err(Refused);
         }
         authenticate(
@@ -547,11 +550,12 @@ impl Receiver {
         let until = now
             .checked_add(provision_wire::INITIAL_CREDENTIAL_VALIDITY_SECONDS)
             .ok_or(Refused)?;
-        let certificate = if pending.begun.generations.iter().any(|g| {
-            e.credential_kinds
-                .iter()
-                .any(|s| s.kind == g.kind && s.client_cert_required)
-        }) {
+        let certificate = if e.enrolled_pin.is_some()
+            || pending.begun.generations.iter().any(|g| {
+                e.credential_kinds
+                    .iter()
+                    .any(|s| s.kind == g.kind && s.client_cert_required)
+            }) {
             let pin = crate::client_ca::pin(&e.origin_key)
                 .map_err(|_| Refused)?
                 .pin;
@@ -886,11 +890,12 @@ impl Registry {
             }) {
                 return Err(Error::Invalid);
             }
-            let certificate_required = r.begun.generations.iter().any(|g| {
-                e.credential_kinds
-                    .iter()
-                    .any(|s| s.kind == g.kind && s.client_cert_required)
-            });
+            let certificate_required = e.enrolled_pin.is_some()
+                || r.begun.generations.iter().any(|g| {
+                    e.credential_kinds
+                        .iter()
+                        .any(|s| s.kind == g.kind && s.client_cert_required)
+                });
             if certificate_required != r.client_certificate.is_some()
                 || r.client_certificate
                     .as_ref()

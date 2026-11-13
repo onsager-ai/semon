@@ -589,11 +589,13 @@ slot; its revoked generation never regains authority.
 An ordinary new begin outside the renewal window refuses; an outstanding owner
 enable authorization permits an early begin under otherwise-valid current authority.
 
-When a certificate is required, reissue a clientAuth leaf through `client_ca.rs`
-for the SAME origin P-256 key and SAME tagged SPKI pin, with the renewed validity.
-Record the same pin under the new generation; never replace it with a new key or
-leaf fingerprint. CA validity still bounds issuance; renewal cannot repair expired
-CA custody or change its trust. The private origin key never leaves the origin.
+When the enrollment holds an enrolled certificate pin, reissue and deliver a
+clientAuth leaf through `client_ca.rs` for the SAME origin P-256 key and SAME tagged
+SPKI pin, with the renewed validity, even when all renewed kinds make presenting
+the certificate optional. Record the same pin under EVERY renewed generation;
+this preserves certificate authority for a later enable of a required kind after
+old generations are compacted. Never replace it with a new key or leaf fingerprint.
+CA validity still bounds issuance; renewal cannot repair expired CA custody or change its trust. The private origin key never leaves the origin.
 
 PR4.3 stages the complete renewed credential set, certificate, signed configuration
 and unchanged consent binding using connect's owned 0700 directories, 0600 files,
@@ -775,6 +777,8 @@ conservative refusal rule below; do not infer revocation or mint another generat
 Cancel is a signed finish action with the same credential checks and a staged
 application-key commitment. Before commit it terminally cancels the pending ID and
 issues nothing; after commit it refuses without changing committed authority.
+Unrelated expired attempts whose audit append fails remain retained for a later
+audit attempt and must not block cancellation of a still-live attempt.
 Stopping committed local use requires disconnect; receiver revocation is a separate
 owner action, never advice inferred from that generic refusal. Restart
 destroys uncommitted pending nonce state, so its finish cannot activate; a new begin
