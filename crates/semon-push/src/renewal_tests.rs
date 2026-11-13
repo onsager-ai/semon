@@ -623,14 +623,15 @@ fn optional_only_renewal_preserves_certificate_for_later_required_enable() {
             .unwrap(),
     )
     .unwrap();
-    use base64::Engine;
-    let certificate = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(delivered.client_certificate.as_ref().unwrap())
+    let certificate = Registry::read_current(&f.dir).unwrap().renewal_receipts[0]
+        .client_certificate
+        .clone()
         .unwrap();
-    let identity = VerifiedClientIdentity::from_verified_der(
-        &rustls::pki_types::CertificateDer::from(certificate),
-    )
-    .unwrap();
+    assert_eq!(
+        delivered.client_certificate.as_deref(),
+        Some(provision_wire::encode(&certificate).as_str())
+    );
+    let identity = crate::serve::renewal_test_identity(&certificate);
     let mirror = &delivered.credentials[0];
     let secret = Secret::new(mirror.bearer.clone());
     Store::authorize_cutover(

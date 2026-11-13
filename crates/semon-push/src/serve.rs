@@ -40,6 +40,12 @@ pub use auth::{
     VerifiedClientIdentity,
 };
 
+#[cfg(test)]
+pub(crate) fn renewal_test_identity(certificate: &[u8]) -> VerifiedClientIdentity {
+    VerifiedClientIdentity::from_verified_der(&rustls::pki_types::CertificateDer::from(certificate))
+        .unwrap()
+}
+
 use crate::{
     mirror::{DEFAULT_MAX_BYTES, Endpoint, MAX_BODY_BYTES, Receiver},
     tokens::prepare_private_dir,
