@@ -108,6 +108,15 @@ struct Manifest {
     references: BTreeMap<String, String>,
 }
 
+/// The exact consumed prefix verified under the archive admission lock.
+#[derive(Clone, Debug)]
+pub(crate) struct Admitted {
+    pub(crate) chain_id: String,
+    pub(crate) consumed_offset: u64,
+    pub(crate) prefix_sha256: [u8; 32],
+    pub(crate) recorded_size: u64,
+}
+
 /// Admission binds bytes to the configured native identity and original ledger.
 /// It is custody metadata, not a new filesystem observation or runtime grant.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -421,17 +430,18 @@ impl Archive {
         prefix: &[u8; 32],
     ) -> io::Result<bool> {
         self.admit_inner(source, log, offset, prefix, None)
+            .map(|admitted| offset == 0 || admitted.is_some())
     }
 
     pub(crate) fn admit_native(
         &self,
         log: &mut crate::sealed::LogFile,
         native: &NativeSource,
-    ) -> io::Result<bool> {
+    ) -> io::Result<Option<Admitted>> {
         let path = native.full_path();
         let before = crate::events::Stat::from_metadata(&log.metadata()?)?;
         if !same_generation(&native.ledger, before) {
-            return Ok(false);
+            return Ok(None);
         }
         self.admit_inner(
             &path.to_string_lossy(),
@@ -449,10 +459,16 @@ impl Archive {
         offset: u64,
         prefix: &[u8; 32],
         native: Option<&NativeSource>,
-    ) -> io::Result<bool> {
+    ) -> io::Result<Option<Admitted>> {
         if offset == 0 {
-            return Ok(true);
+            return Ok(None);
         }
+        let evidence = |chain: &Chain| Admitted {
+            chain_id: chain.chain_id.clone(),
+            consumed_offset: offset,
+            prefix_sha256: *prefix,
+            recorded_size: chain.length,
+        };
         let _guard = self.lock(true)?;
         self.admission_time()?;
         let (dir, mut manifest) = self.open_source(source)?;
@@ -476,10 +492,10 @@ impl Archive {
                 if manifest.native != previous {
                     publish(&dir, MANIFEST, &manifest)?;
                 }
-                return Ok(bound);
+                return Ok(bound.then(|| evidence(&held)));
             }
             if held.length > offset && self.matches_prefix(&dir, &held, offset, prefix)? {
-                return Ok(true);
+                return Ok(Some(evidence(&held)));
             } else if held.length < offset
                 && !manifest.references.values().any(|id| id == &held.chain_id)
                 && let Some(resume) = &held.resume
@@ -503,7 +519,7 @@ impl Archive {
                         if extended && let Some(chain) = manifest.chains.last().cloned() {
                             self.remember(&dir, &chain)?;
                         }
-                        return Ok(extended);
+                        return Ok(extended.then(|| evidence(manifest.chains.last().unwrap())));
                     }
                     Ok(_) => {}
                     Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => {}
@@ -518,7 +534,7 @@ impl Archive {
         if begun && let Some(chain) = manifest.chains.last().cloned() {
             self.remember(&dir, &chain)?;
         }
-        Ok(begun)
+        Ok(begun.then(|| evidence(manifest.chains.last().unwrap())))
     }
 
     /// Discover only sources admitted under these exact configured native roots.

@@ -1110,6 +1110,14 @@ pub(crate) struct CatalogPendingBatch {
 /// ledger row it was based on, so two processes sharing one store never
 /// apply the same lines twice.
 pub(crate) trait IndexStore: Send {
+    /// Archive results from this scan, held until source publication.
+    fn record_chain_admission(
+        &mut self,
+        path: &str,
+        native_id: &str,
+        admitted: Option<crate::archive::Admitted>,
+    );
+
     /// Where the store is, for messages.
     fn describe(&self) -> String;
 
@@ -2210,6 +2218,14 @@ impl EventCache {
         self.busy = false;
     }
 
+    pub(crate) fn clear_chain_admissions(&mut self, seen: &BTreeSet<String>) {
+        if let Some(store) = self.store.as_mut() {
+            for path in seen {
+                store.record_chain_admission(path, "", None);
+            }
+        }
+    }
+
     /// Admits every scanned native prefix, including unchanged ones so lost
     /// custody is repaired. Intact chains use the verification cache. A failure is
     /// reported and retried by the next full scan; it does not stop the read.
@@ -2276,10 +2292,16 @@ impl EventCache {
             };
             let admitted =
                 LogFile::open(path).and_then(|mut log| archive.admit_native(&mut log, &native));
-            match admitted {
-                Ok(_) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => eprintln!("semon: native log archive: {key}: {error}"),
+            let admitted = match admitted {
+                Ok(admitted) => admitted,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    eprintln!("semon: native log archive: {key}: {error}");
+                    None
+                }
+            };
+            if let Some(store) = self.store.as_mut() {
+                store.record_chain_admission(key, &native.native_id, admitted);
             }
         }
     }
