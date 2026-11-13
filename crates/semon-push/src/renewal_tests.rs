@@ -422,6 +422,295 @@ fn delivery_failures_preserve_committed_reservations_without_exposing_secrets() 
     }
 }
 #[test]
+fn registry_replace_failures_preserve_initial_and_recovery_reservations() {
+    use crate::enrollment::Stage;
+    for stage in [
+        Stage::Written,
+        Stage::Synced,
+        Stage::Renamed,
+        Stage::DirectorySynced,
+    ] {
+        for recovering in [false, true] {
+            let f = Fixture::new();
+            let mut receiver = Receiver::default();
+            let now = 2_000_000;
+            let begun = f.begin(&mut receiver, now).unwrap();
+            let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+            let expected = if recovering {
+                Some(
+                    receiver
+                        .finish(&f.dir, &commit, &[4; 32], None, now)
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
+            let recover = f.finish(&begun, Action::Recover, [3; 32], [5; 32]);
+            receiver.fail_registry = Some(stage);
+            assert!(
+                receiver
+                    .finish(
+                        &f.dir,
+                        if recovering { &recover } else { &commit },
+                        if recovering { &[5; 32] } else { &[4; 32] },
+                        None,
+                        now,
+                    )
+                    .is_err()
+            );
+            let replaced = matches!(stage, Stage::Renamed | Stage::DirectorySynced);
+            let registry = Registry::read_current(&f.dir).unwrap();
+            if !recovering && !replaced {
+                assert!(registry.renewal_receipts.is_empty());
+                assert_eq!(registry.credentials.len(), 1);
+                receiver
+                    .finish(&f.dir, &commit, &[4; 32], None, now)
+                    .unwrap();
+            } else {
+                assert_eq!(registry.renewal_receipts.len(), 1);
+                assert_eq!(
+                    registry.renewal_receipts[0].deliveries,
+                    if recovering && replaced { 2 } else { 1 }
+                );
+                assert_eq!(
+                    registry.enrollments[0].credential_kinds[0]
+                        .generations
+                        .current,
+                    2
+                );
+            }
+            receiver = Receiver::default();
+            let result = receiver.finish(&f.dir, &recover, &[5; 32], None, now + 1);
+            if recovering && replaced {
+                assert!(result.is_err());
+            } else {
+                let recovered = result.unwrap();
+                if let Some(expected) = expected {
+                    assert_eq!(expected, recovered);
+                }
+            }
+            assert_eq!(
+                Registry::read_current(&f.dir).unwrap().renewal_receipts[0].deliveries,
+                2
+            );
+            assert!(
+                receiver
+                    .finish(&f.dir, &recover, &[5; 32], None, now + 2)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn authority_mutations_refuse_without_consuming_pending_or_delivery() {
+    let f = Fixture::new();
+    let mut receiver = Receiver::default();
+    let now = 2_000_000;
+    let begun = f.begin(&mut receiver, now).unwrap();
+    for mutation in 0..7 {
+        let mut finish = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+        match mutation {
+            0 => finish.credentials.clear(),
+            1 => finish.credentials.push(Credential {
+                kind: Kind::MirrorPush,
+                generation: 1,
+                bearer: f.secret.clone(),
+            }),
+            2 => finish.credentials.push(Credential {
+                kind: Kind::AnalyticsPublish,
+                generation: 1,
+                bearer: f.secret.clone(),
+            }),
+            3 => finish.credentials[0].kind = Kind::BodyChannel,
+            4 => finish.credentials[0].generation = 2,
+            5 => finish.enrollment_id = "c".repeat(64),
+            6 => finish.credentials[0].bearer = "foreign-bearer".into(),
+            _ => unreachable!(),
+        }
+        assert!(
+            receiver
+                .finish(&f.dir, &finish, &[4; 32], None, now)
+                .is_err()
+        );
+        let registry = Registry::read_current(&f.dir).unwrap();
+        assert!(registry.renewal_receipts.is_empty());
+        assert_eq!(registry.credentials.len(), 1);
+        assert_eq!(f.begin(&mut receiver, now).unwrap(), begun);
+    }
+    let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    receiver
+        .finish(&f.dir, &commit, &[4; 32], None, now)
+        .unwrap();
+}
+
+#[test]
+fn unavailable_audit_blocks_release_and_compaction_but_keeps_committed_authority() {
+    let f = Fixture::new();
+    let mut receiver = Receiver::default();
+    let now = 2_000_000;
+    let begun = f.begin(&mut receiver, now).unwrap();
+    let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    let audit = f.dir.join("receiver-audit");
+    let saved = f.dir.join("saved-audit");
+    fs::rename(&audit, &saved).unwrap();
+    assert!(
+        receiver
+            .finish(&f.dir, &commit, &[4; 32], None, now)
+            .is_err()
+    );
+    assert!(
+        Registry::read_current(&f.dir)
+            .unwrap()
+            .renewal_receipts
+            .is_empty()
+    );
+    fs::rename(&saved, &audit).unwrap();
+    receiver
+        .finish(&f.dir, &commit, &[4; 32], None, now)
+        .unwrap();
+    fs::rename(&audit, &saved).unwrap();
+    let recover = f.finish(&begun, Action::Recover, [3; 32], [5; 32]);
+    assert!(
+        receiver
+            .finish(&f.dir, &recover, &[5; 32], None, now)
+            .is_err()
+    );
+    assert_eq!(
+        Registry::read_current(&f.dir).unwrap().renewal_receipts[0].deliveries,
+        1
+    );
+    assert!(
+        Store::open(&f.dir)
+            .unwrap()
+            .compact(&f.dir, now + wire::OVERLAP)
+            .is_err()
+    );
+    let registry = Registry::read_current(&f.dir).unwrap();
+    assert_eq!(registry.credentials.len(), 2);
+    assert_eq!(registry.renewal_receipts.len(), 1);
+    fs::rename(&saved, &audit).unwrap();
+    Store::open(&f.dir)
+        .unwrap()
+        .compact(&f.dir, now + wire::OVERLAP)
+        .unwrap();
+    assert_eq!(Registry::read_current(&f.dir).unwrap().credentials.len(), 1);
+}
+
+#[test]
+fn ended_renewal_compaction_audits_before_every_replace_failure() {
+    use crate::enrollment::{Error, Stage};
+    for stage in [
+        Stage::Written,
+        Stage::Synced,
+        Stage::Renamed,
+        Stage::DirectorySynced,
+    ] {
+        let f = Fixture::new();
+        let mut receiver = Receiver::default();
+        let now = 2_000_000;
+        let begun = f.begin(&mut receiver, now).unwrap();
+        let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+        receiver
+            .finish(&f.dir, &commit, &[4; 32], None, now)
+            .unwrap();
+        let ended = now + wire::OVERLAP;
+        {
+            let mut store = Store::open(&f.dir).unwrap();
+            assert!(
+                store
+                    .compact_with_fault(&f.dir, ended, |at| {
+                        if at == stage {
+                            Err(Error::Write)
+                        } else {
+                            Ok(())
+                        }
+                    })
+                    .is_err()
+            );
+        }
+        let audit = fs::read_to_string(
+            f.dir
+                .join("receiver-audit")
+                .join(crate::generation_audit::FILE),
+        )
+        .unwrap();
+        assert!(audit.contains(&"b".repeat(64)));
+        let registry = Registry::read_current(&f.dir).unwrap();
+        if matches!(stage, Stage::Renamed | Stage::DirectorySynced) {
+            assert_eq!(registry.credentials.len(), 1);
+            assert!(registry.renewal_receipts.is_empty());
+        } else {
+            assert_eq!(registry.credentials.len(), 2);
+            assert_eq!(registry.renewal_receipts.len(), 1);
+        }
+        Store::open(&f.dir).unwrap().compact(&f.dir, ended).unwrap();
+        let registry = Registry::read_current(&f.dir).unwrap();
+        assert_eq!(registry.credentials.len(), 1);
+        assert!(registry.renewal_receipts.is_empty());
+        assert_eq!(
+            registry.enrollments[0].credential_kinds[0]
+                .generations
+                .current,
+            2
+        );
+    }
+}
+
+#[test]
+fn competing_finishes_commit_only_first_application_key_and_replay_requires_recover() {
+    for reverse in [false, true] {
+        let f = Fixture::new();
+        let mut receiver = Receiver::default();
+        let now = 2_000_000;
+        let begun = f.begin(&mut receiver, now).unwrap();
+        let applications = if reverse {
+            [[7; 32], [3; 32]]
+        } else {
+            [[3; 32], [7; 32]]
+        };
+        let winner = f.finish(&begun, Action::Commit, applications[0], [4; 32]);
+        let loser = f.finish(&begun, Action::Commit, applications[1], [5; 32]);
+        let delivered = receiver
+            .finish(&f.dir, &winner, &[4; 32], None, now)
+            .unwrap();
+        assert!(
+            receiver
+                .finish(&f.dir, &loser, &[5; 32], None, now)
+                .is_err()
+        );
+        assert_eq!(f.begin(&mut receiver, now).unwrap(), begun);
+        assert!(
+            receiver
+                .finish(&f.dir, &winner, &[4; 32], None, now)
+                .is_err()
+        );
+        let wrong = f.finish(&begun, Action::Recover, applications[1], [6; 32]);
+        assert!(
+            receiver
+                .finish(&f.dir, &wrong, &[6; 32], None, now)
+                .is_err()
+        );
+        let right = f.finish(&begun, Action::Recover, applications[0], [6; 32]);
+        assert_eq!(
+            receiver
+                .finish(&f.dir, &right, &[6; 32], None, now)
+                .unwrap(),
+            delivered
+        );
+        let registry = Registry::read_current(&f.dir).unwrap();
+        assert_eq!(registry.credentials.len(), 2);
+        assert_eq!(registry.renewal_receipts.len(), 1);
+        assert_eq!(
+            registry.enrollments[0].credential_kinds[0]
+                .generations
+                .current,
+            2
+        );
+    }
+}
+
+#[test]
 fn lost_ack_recovers_identical_delivery_once_after_restart() {
     let f = Fixture::new();
     let mut receiver = Receiver::default();

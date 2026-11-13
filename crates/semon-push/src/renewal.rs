@@ -47,6 +47,8 @@ pub struct Receiver {
     terminal: BTreeMap<String, u64>,
     #[cfg(test)]
     fail_delivery: u8,
+    #[cfg(test)]
+    fail_registry: Option<crate::enrollment::Stage>,
 }
 
 fn enrollment<'a>(registry: &'a Registry, id: &str) -> Result<&'a crate::enrollment::Enrollment> {
@@ -467,9 +469,7 @@ impl Receiver {
                 .ok_or(Refused)?
                 .deliveries = 2;
             registry.latest = now;
-            store
-                .commit(registry.revision(), &registry)
-                .map_err(|_| Refused)?;
+            self.commit_delivery(&mut store, &registry)?;
             #[cfg(test)]
             if self.fail_delivery == 3 {
                 self.fail_delivery = 0;
@@ -686,9 +686,7 @@ impl Receiver {
             self.fail_delivery = 0;
             return Err(Refused);
         }
-        store
-            .commit(registry.revision(), &registry)
-            .map_err(|_| Refused)?;
+        self.commit_delivery(&mut store, &registry)?;
         self.pending.remove(&message.enrollment_id);
         #[cfg(test)]
         if self.fail_delivery == 2 {
@@ -696,6 +694,23 @@ impl Receiver {
             return Err(Refused);
         }
         Ok(bytes)
+    }
+    fn commit_delivery(&mut self, store: &mut Store, registry: &Registry) -> Result<()> {
+        #[cfg(test)]
+        if let Some(failure) = self.fail_registry.take() {
+            return store
+                .commit_with_fault(registry.revision(), registry, |stage| {
+                    if stage == failure {
+                        Err(Error::Write)
+                    } else {
+                        Ok(())
+                    }
+                })
+                .map_err(|_| Refused);
+        }
+        store
+            .commit(registry.revision(), registry)
+            .map_err(|_| Refused)
     }
 }
 fn random_nonce() -> Result<[u8; 32]> {

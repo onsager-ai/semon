@@ -326,7 +326,7 @@ impl Store {
     pub fn compact(&mut self, receiver: &Path, now: u64) -> Result<()> {
         self.compact_with_fault(receiver, now, |_| Ok(()))
     }
-    pub(super) fn compact_with_fault(
+    pub(crate) fn compact_with_fault(
         &mut self,
         receiver: &Path,
         now: u64,

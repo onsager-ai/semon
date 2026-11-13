@@ -934,6 +934,14 @@ impl Store {
     /// Compare-and-swap a snapshot revision under the exclusive lock. Callers
     /// must supply the revision they read, including for newly built records.
     pub fn commit(&mut self, expected_revision: u64, next: &Registry) -> Result<()> {
+        self.commit_with_fault(expected_revision, next, |_| Ok(()))
+    }
+    pub(crate) fn commit_with_fault(
+        &mut self,
+        expected_revision: u64,
+        next: &Registry,
+        fault: impl FnMut(Stage) -> Result<()>,
+    ) -> Result<()> {
         let _transaction = self.registry_transaction()?;
         if self.failed {
             return Err(Error::CommitUncertain);
@@ -950,7 +958,7 @@ impl Store {
         }
         let mut next = next.clone();
         next.revision = current.revision.checked_add(1).ok_or(Error::Invalid)?;
-        self.write(&next, |_| Ok(()))
+        self.write(&next, fault)
     }
     fn write(&mut self, next: &Registry, mut fault: impl FnMut(Stage) -> Result<()>) -> Result<()> {
         next.validate()?;
@@ -985,7 +993,7 @@ impl Store {
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Stage {
+pub(crate) enum Stage {
     Written,
     Synced,
     Renamed,
