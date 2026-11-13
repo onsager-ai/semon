@@ -219,9 +219,34 @@ in one qualified read; missing evidence refuses uniformly.
 An append lease may survive newer generations only on a strict append extension:
 the chain ID is unchanged and the prefix digest at the acknowledged offset is
 unchanged. Rewrite, truncation or membership change closes the lease with
-`continuation_invalid`, as #653 specifies. The storage lane owns that lease
-continuity integration. Cache keys include the prefix digest and consumed boundary
+`continuation_invalid`. Cache keys include the prefix digest and consumed boundary
 and invalidate conservatively on append.
+
+`ResponseBinding.append_continuity` is a required, possibly empty list, capped at
+128 entries. Each closed-shape entry contains `source_id`, `chain`,
+`previous_boundary` and `prefix_sha256` (64 lowercase hex). Missing fields, unknown
+fields and oversized lists refuse. The list is authenticated by the response
+identity and origin audit binding digest; it is not part of the cached payload
+key/AAD because append pages are stream-through and never admitted to cache.
+The initial page has an empty list. For each grown member, exactly one entry must
+name its unchanged chain and acknowledged old boundary, and its digest must equal
+the old binding's prefix digest. The digest is recomputed from the CURRENT pinned
+source over `[0, previous_boundary)`. Missing, duplicate, extra or mismatched
+entries close the lease with `continuation_invalid`. An unchanged boundary needs
+the same prefix digest and no entry. Boundaries may never shrink.
+
+Both endpoints use `body_lease::append_extension`: enrollment, source handle,
+cohort ID, member set/count/chains, selector, mapping anchor, export-view generation
+and policy stay equal. Source, activity and transcript generations may change.
+Closure discards the page before delivery and releases lease/byte capacity.
+
+The injected origin seam is `AppendPageSource::prepare` returning
+`RenderPlan::append_continuity`; `AppendPageSource::render` must return identical
+`RenderedPage::append_continuity`. `AppendCursor::previous_cohort` supplies the
+retained acknowledged witnesses. The origin adapter owns production computation;
+the library supplies no hashing implementation. Cost is one extra hash pass over
+`[0, previous_boundary)` per grown member per page, under the operation's existing
+deadline, cancellation and byte/metadata caps. An over-budget computation refuses.
 
 ## Leases, failures and implementation
 

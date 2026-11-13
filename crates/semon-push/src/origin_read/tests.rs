@@ -155,6 +155,7 @@ fn plan() -> RenderPlan {
             assertion: id(8),
         }),
         continuation: Some(opaque("next")),
+        append_continuity: Vec::new(),
     }
 }
 struct Renderer<'a> {
@@ -206,6 +207,7 @@ impl PageRenderer for Renderer<'_> {
             export_view_generation: p.export_view_generation,
             exact_mapping: p.exact_mapping,
             continuation: p.continuation,
+            append_continuity: p.append_continuity,
         })
     }
 }
@@ -366,6 +368,157 @@ fn delivery_mode_is_required_and_binds_identity_and_origin_audit() {
         assert!(f.journal().contains("\"bytes\":7"));
     }
     assert_ne!(audit_bindings[0], audit_bindings[1]);
+}
+
+#[test]
+fn append_continuity_deserialization_stops_at_the_cap() {
+    let entry = serde_json::to_value(AppendContinuity {
+        source_id: opaque("source"),
+        chain: opaque("chain"),
+        previous_boundary: 99,
+        prefix_sha256: id(10),
+    })
+    .unwrap();
+    for length in [128, 129, 10_000] {
+        let consumed = Cell::new(0);
+        let elements = (0..length).map(|index| {
+            consumed.set(consumed.get() + 1);
+            if index < 128 {
+                entry.clone()
+            } else {
+                // This cannot deserialize as AppendContinuity. The visitor must
+                // detect overflow through IgnoredAny, without constructing it.
+                serde_json::Value::Null
+            }
+        });
+        let deserializer = serde::de::value::SeqDeserializer::<_, serde_json::Error>::new(elements);
+        let result = deserialize_append_continuity(deserializer);
+        if length == 128 {
+            assert_eq!(result.unwrap().len(), 128);
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("exceeds cohort cap")
+            );
+        }
+        assert_eq!(consumed.get(), length.min(129));
+    }
+}
+
+#[test]
+fn append_continuity_is_required_strict_and_bound_to_identity_and_audit() {
+    struct WithEvidence<'a> {
+        renderer: Renderer<'a>,
+        evidence: Vec<AppendContinuity>,
+    }
+    impl PageRenderer for WithEvidence<'_> {
+        fn prepare(
+            &self,
+            source: &ResolvedSource,
+            target: &Target,
+            policy: PinnedPolicy,
+            budget: RenderBudget,
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<RenderPlan> {
+            let mut plan = self
+                .renderer
+                .prepare(source, target, policy, budget, cancelled)?;
+            plan.append_continuity = self.evidence.clone();
+            Ok(plan)
+        }
+        fn render(
+            &self,
+            source: &ResolvedSource,
+            target: &Target,
+            policy: PinnedPolicy,
+            budget: RenderBudget,
+            cancelled: &dyn Fn() -> bool,
+        ) -> Result<RenderedPage> {
+            let mut rendered = self
+                .renderer
+                .render(source, target, policy, budget, cancelled)?;
+            rendered.append_continuity = self.evidence.clone();
+            Ok(rendered)
+        }
+    }
+    let mut digests = Vec::new();
+    for digest in [id(10), id(11)] {
+        let f = Fixture::new();
+        let at = At(Cell::new(10_000));
+        let mut audit = AuditStore::open(&f.0, &at, crate::origin_audit::MAX_BYTES).unwrap();
+        let renderer = WithEvidence {
+            renderer: Renderer {
+                fixture: &f,
+                calls: Cell::new(0),
+                action: &|| {},
+                failure: None,
+                oversized: false,
+            },
+            evidence: vec![AppendContinuity {
+                source_id: opaque("source"),
+                chain: opaque("chain"),
+                previous_boundary: 800,
+                prefix_sha256: digest,
+            }],
+        };
+        let authorized = OriginRead {
+            enrollment: &Enrollment {
+                revoked: Cell::new(false),
+            },
+            resolver: &Resolver { missing: false },
+            policies: &Policies(Cell::new(false)),
+            delivery_mode: DeliveryMode::StreamThrough,
+            renderer: &renderer,
+            clock: &at,
+            cancelled: &|| false,
+            audit: &mut audit,
+        }
+        .read_append(&claims(), &request(), &renderer)
+        .unwrap();
+        let binding = &authorized.response_binding;
+        binding
+            .verify_identity(&claims(), Destination::Viewer)
+            .unwrap();
+        let mut changed = binding.clone();
+        changed.append_continuity[0].prefix_sha256 = id(12);
+        assert_eq!(
+            changed.verify_identity(&claims(), Destination::Viewer),
+            Err(Refused::InvalidRequest)
+        );
+        let value = serde_json::to_value(binding).unwrap();
+        for case in 0..5 {
+            let mut invalid = value.clone();
+            match case {
+                0 => {
+                    invalid.as_object_mut().unwrap().remove("append_continuity");
+                }
+                1 => invalid["append_continuity"][0]["extra"] = true.into(),
+                2 => {
+                    invalid["append_continuity"] =
+                        serde_json::json!(vec![&value["append_continuity"][0]; 129])
+                }
+                3 => invalid["append_continuity"][0]["prefix_sha256"] = "bad".into(),
+                _ => invalid["append_continuity"] = serde_json::Value::Null,
+            }
+            assert!(
+                serde_json::from_value::<ResponseBinding>(invalid.clone()).is_err(),
+                "case {case}"
+            );
+            let header = serde_json::to_vec(&serde_json::json!({"version":1,"request_id":id(1),"frame":0,"final_frame":false,"payload_bytes":0,"content":{"kind":"header","binding":invalid}})).unwrap();
+            let mut frame = (header.len() as u32).to_be_bytes().to_vec();
+            frame.extend(header);
+            assert!(crate::body_wire::parse_frame(&frame).is_err());
+        }
+        let event: serde_json::Value =
+            serde_json::from_str(f.journal().lines().next().unwrap()).unwrap();
+        digests.push(event["record"]["export_view_binding"].clone());
+        authorized
+            .finish(&mut audit, Outcome::Completed, 0)
+            .unwrap();
+    }
+    assert_ne!(digests[0], digests[1]);
 }
 
 #[test]
