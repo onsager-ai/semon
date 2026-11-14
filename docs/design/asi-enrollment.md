@@ -1416,7 +1416,10 @@ Interrupted staging is retained, never silently deleted or loaded. PR4.3b-2 adds
 one shared push/watch renewal schedule, also used by the status heartbeat. It
 checks deadlines during idle watch passes at least once per minute, limits attempts
 to once per minute, and accepts the fixed due hint only on authenticated application
-responses from the enrolled HTTPS peer. Every delivery selects current custody;
+responses from the enrolled HTTPS peer. One background worker owns each in-flight
+renewal; request checkpoints never wait for renewal network IO, and the schedule
+mutex is released before application HTTP so foreground and heartbeat traffic can
+proceed independently. Every delivery selects current custody;
 first successful application use durably confirms that generation before emitting
 the renewed notice. Temporary renewal errors retain valid application traffic and
 use the separate failure/severity reminder schedule above. No credential is written

@@ -113,6 +113,9 @@ impl Schedule {
     }
 }
 
+#[cfg(test)]
+type TestRenew = std::sync::Arc<dyn Fn(&mut Renewal, u64) -> Result<()> + Send + Sync>;
+
 pub(crate) struct Delivery {
     base: PathBuf,
     options: PushOptions,
@@ -120,7 +123,7 @@ pub(crate) struct Delivery {
     schedule: Schedule,
     in_flight: Option<std::sync::mpsc::Receiver<Result<()>>>,
     #[cfg(test)]
-    renew: Option<std::sync::Arc<dyn Fn(&mut Renewal, u64) -> Result<()> + Send + Sync>>,
+    renew: Option<TestRenew>,
     #[cfg(test)]
     notices: Vec<String>,
     #[cfg(test)]
@@ -325,8 +328,11 @@ impl Delivery {
         Ok(())
     }
     pub(crate) fn refused(&self) -> Result<String> {
-        let renewal = Renewal::open(&self.base, &self.options.url)?;
-        self.recovery("refused access", &renewal.configuration().machine)
+        let now = Self::clock()?;
+        #[cfg(test)]
+        let now = self.clock.unwrap_or(now);
+        let (config, _) = origin_custody::load_at(&self.base, Some(&self.options.url), now)?;
+        self.recovery("refused access", &config.machine)
     }
     pub(crate) fn recovery(&self, reason: &str, machine: &str) -> Result<String> {
         let host = origin_custody::receiver_host(&self.options.url)?;
