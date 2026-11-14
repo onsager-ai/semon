@@ -11,7 +11,8 @@ enum Response {
     Delivered(Delivered),
 }
 #[cfg(test)]
-type TestExchange = dyn FnMut(&mut Renewal, bool, &dyn Fn() -> Result<u64>) -> Result<Response>;
+type TestExchange =
+    dyn FnMut(&mut Renewal, bool, &dyn Fn() -> Result<u64>) -> Result<Response> + Send;
 
 const PENDING: &str = "renewal.json";
 const BLOCKED: &str = "receiver renewal cannot publish against changed or disabled custody";
@@ -264,6 +265,11 @@ impl Renewal {
             Ok(Response::Begun(_)) => Err(ERROR.into()),
             Err(error) => Err(error),
         }
+    }
+    pub(crate) fn awaiting_confirmation(&self) -> bool {
+        self.attempt
+            .as_ref()
+            .is_some_and(|a| a.state == State::Installed)
     }
     pub fn pending(&self) -> bool {
         self.attempt
@@ -603,12 +609,18 @@ impl Renewal {
     /// Call only after authenticated application success with the selected generation.
     /// Retained old files are evidence, never an automatic fallback.
     pub fn confirm(&mut self, generation: u64) -> Result<()> {
+        let _lock = self.root.install_lock()?;
+        self.recheck()?;
         let a = self.attempt.as_mut().ok_or(ERROR)?;
         if a.state != State::Installed || generation != a.begun.generations[0].generation {
             return Err(ERROR.into());
         }
         a.state = State::Confirmed;
-        save(&self.dir, a)
+        let result = save(&self.dir, a);
+        if result.is_err() {
+            a.state = State::Installed;
+        }
+        result
     }
 }
 

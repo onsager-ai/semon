@@ -215,7 +215,7 @@ fn status_advertised(client: &Client) -> bool {
                 .map(|authority| authority.admit())
                 .transpose()?;
             #[cfg(unix)]
-            let (_delivery, selected) = admitted.map_or((None, None), |(guard, credential)| {
+            let (_delivery, selected) = admitted.map_or((None, None), |(guard, credential, _)| {
                 (Some(guard), Some(credential))
             });
             #[cfg(not(unix))]

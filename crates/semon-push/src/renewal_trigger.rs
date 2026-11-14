@@ -79,7 +79,12 @@ impl Trigger {
                     }
                     cycle.tick(&base, &origin_custody::now, &mut |line| eprintln!("{line}"));
                     if !watch {
-                        let _ = ended.recv();
+                        while !stop.is_stopped() {
+                            match ended.recv_timeout(Duration::from_millis(20)) {
+                                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                                _ => break,
+                            }
+                        }
                         break;
                     }
                     match ended.recv_timeout(Duration::from_secs(1)) {
@@ -119,16 +124,21 @@ impl Drop for Trigger {
     }
 }
 
-struct Cycle {
+#[cfg(test)]
+type Configure = Box<dyn FnMut(&mut Renewal) + Send>;
+
+pub(crate) struct Cycle {
     authority: Authority,
     endpoint: String,
     host: String,
     watch: bool,
     schedule: Schedule,
     installed: Option<Renewal>,
+    #[cfg(test)]
+    pub(crate) configure: Option<Configure>,
 }
 impl Cycle {
-    fn new(authority: Authority, endpoint: String, watch: bool) -> Self {
+    pub(crate) fn new(authority: Authority, endpoint: String, watch: bool) -> Self {
         let host = origin_custody::receiver_host(&endpoint).expect("validated receiver endpoint");
         Self {
             authority,
@@ -137,6 +147,8 @@ impl Cycle {
             watch,
             schedule: Schedule::default(),
             installed: None,
+            #[cfg(test)]
+            configure: None,
         }
     }
     fn confirm(&mut self, emit: &mut impl FnMut(String)) {
@@ -156,7 +168,7 @@ impl Cycle {
             self.installed = None;
         }
     }
-    fn tick(
+    pub(crate) fn tick(
         &mut self,
         base: &std::path::Path,
         clock: &dyn Fn() -> Result<u64>,
@@ -172,10 +184,22 @@ impl Cycle {
         let Ok((config, _)) = origin_custody::load_at(base, Some(&self.endpoint), now) else {
             return;
         };
+        let opened = Renewal::open(base, &self.endpoint);
+        if let Ok(renewal) = opened.as_ref()
+            && renewal.awaiting_confirmation()
+        {
+            self.installed = opened.ok();
+            self.confirm(emit);
+            return;
+        }
         if !self.schedule.due(now, config.scope.valid_until) {
             return;
         }
-        let result = Renewal::open(base, &self.endpoint).and_then(|mut renewal| {
+        let result = opened.and_then(|mut renewal| {
+            #[cfg(test)]
+            if let Some(configure) = self.configure.as_mut() {
+                configure(&mut renewal);
+            }
             renewal.renew_with_clock(clock)?;
             Ok(renewal)
         });
