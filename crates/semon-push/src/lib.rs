@@ -568,7 +568,12 @@ impl Client {
                 let stop = Stop::new();
                 #[cfg(unix)]
                 if let Credential::Enrolled { authority, .. } = &options.credential {
-                    stop.with_authority(authority.clone()).following_selection()
+                    let stop = stop.with_authority(authority.clone());
+                    if options.url.starts_with("https://") {
+                        stop.following_selection()
+                    } else {
+                        stop
+                    }
                 } else {
                     stop
                 }
@@ -1797,10 +1802,12 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
     let enrolled_stop;
     #[cfg(unix)]
     let stop = if let Credential::Enrolled { authority, .. } = &options.credential {
-        enrolled_stop = stop
-            .clone()
-            .with_authority(authority.clone())
-            .following_selection();
+        let stop = stop.clone().with_authority(authority.clone());
+        enrolled_stop = if options.url.starts_with("https://") {
+            stop.following_selection()
+        } else {
+            stop
+        };
         &enrolled_stop
     } else {
         stop

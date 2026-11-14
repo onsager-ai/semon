@@ -130,6 +130,11 @@ impl Delivery {
         let Credential::Enrolled { authority, .. } = &options.credential else {
             return None;
         };
+        // Existing loopback mirror custody is also represented as Enrolled.
+        // Only HTTPS enrollment participates in the renewal wire contract.
+        if !options.url.starts_with("https://") {
+            return None;
+        }
         Some(Self {
             base: authority.base().into(),
             options: options.clone(),
@@ -348,6 +353,20 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn loopback_mirror_custody_does_not_create_a_renewal_checkpoint() {
+        let endpoint = "http://127.0.0.1:8735";
+        let f = Fixture::endpoint(NOW + WINDOW - 1, endpoint);
+        let (_, credential) = origin_custody::load_at(&f.0, None, NOW).unwrap();
+        let options = PushOptions {
+            url: endpoint.into(),
+            credential,
+            sessions: Default::default(),
+            state: f.0.join("push-state"),
+        };
+        assert!(Delivery::new(&options).is_none());
+        assert!(crate::Client::new(&options).unwrap().renewal.is_none());
     }
     #[test]
     fn unauthenticated_proxy_cannot_inject_a_renewal_hint() {
