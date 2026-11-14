@@ -50,10 +50,16 @@ Received facts describe the origin; receiver hostname, paths and live processes
 must not replace origin observations. Redacted received bytes are not original
 unredacted source proofs. Keep mirror archive custody and source validation. [M, I]
 
-The received machine needs a stable namespace binding independent of hostname or
-directory. Its exact binding and duplicate-session accounting are **open owner
-decisions** below; neither may be inferred from today's display/cache keys.
-Identity work precedes receiver materialization. [C1, I; open A/B]
+Each received machine has a **generated stable ID**, independent of hostname,
+directory and enrollment name. It is shown as its hostname plus an optional name
+the owner chooses. Two IDs' histories, for example before and after an origin
+reinstall, are joined only by an explicit owner link on demand; Semon never infers
+a link. A session that appears on more than one machine counts **once** in
+analytics only when native identity and provenance prove it is the same session;
+both source records are retained, and divergent same-ID copies are reported, not
+merged. Identity work precedes receiver materialization. PR1 brings the exact ID
+origin, persisted form and link/unlink behavior back for owner review before it
+encodes them. [C6]
 
 ## Reads and audit
 
@@ -61,8 +67,9 @@ The receiver authorizes and audits reads locally, using its retained custody and
 authenticated loopback Viewer boundary. The origin does not approve or audit each
 receiver read. No online origin assertion, pull-body cache, or dual audit is part
 of this default. Local read/audit integration remains implementation work; this
-amendment chooses no new journal format or authentication protocol. Whether this
-release needs users beyond the loopback owner remains open below. [C1, C2, I; open D]
+amendment chooses no new journal format or authentication protocol. In this
+release only the receiver's OS owner reads, through the authenticated loopback
+Viewer, CLI and MCP; no login or multi-user ACL is added. [C1, C2, C6, I]
 
 ## Four-action journey
 
@@ -97,13 +104,13 @@ normal renewal neither widens consent nor revives revoked authority. [C5, M]
 ## Implementation plan
 
 Keep each PR at roughly **1,000 changed lines or fewer**; split a step as needed.
-These are implementation slices, not authorization to settle the open choices.
+These are implementation slices; PR1 returns its persisted identity/link design for owner review.
 
 | PR | Scope and verified starting point | Trace |
 | --- | --- | --- |
-| 1 | Received-machine stable identity and durable custody; settle open A/B before encoding accounting or persisted bindings. Preserve mirror source/archive integrity. | C1, M, I |
+| 1 | Received-machine stable identity and durable custody; generated machine ID, hostname/optional-name display, explicit owner link, proven-duplicate accounting and a receiver-wide refusal cap beside the per-machine cap (C6). Preserve mirror source/archive integrity. | C1, M, I |
 | 2 | Received-machine indexing/materialization. Reuse [`ReceivedMachines`](../../crates/semon-sessions/src/received.rs) discovery and `SqliteAnalyticsInput` via [`analytics_writer.rs`](../../crates/semon-sessions/src/analytics_writer.rs). [`parse_materialize_args`](../../crates/semon-cli/src/main.rs) currently refuses `--machine`; this is a real integration gap. | C1, I |
-| 3 | Receiver SQL/search/evidence and local authorization/audit. [`body_query.rs`](../../crates/semon-sessions/src/body_query.rs) currently refuses `Access::Receiver` in `admit`; its search/view worker already accepts multiple indexes. Viewer machine aggregation exists in [`union.rs`](../../crates/semon-sessions/src/union.rs) and [`overview.rs`](../../crates/semon-sessions/src/overview.rs); it is not proof of receiver ASI SQL delivery. Resolve open D before expanding reader identity. | C1, I |
+| 3 | Receiver SQL/search/evidence and local authorization/audit. [`body_query.rs`](../../crates/semon-sessions/src/body_query.rs) currently refuses `Access::Receiver` in `admit`; its search/view worker already accepts multiple indexes. Viewer machine aggregation exists in [`union.rs`](../../crates/semon-sessions/src/union.rs) and [`overview.rs`](../../crates/semon-sessions/src/overview.rs); it is not proof of receiver ASI SQL delivery. Readers are the loopback owner only (C6). | C1, I |
 | 4 | Four-action lifecycle and consent wording: combined trust/custody/source interaction, automatic push, integrated receiver/index/materializer/Viewer lifecycle. Keep enrollment, TLS and renewal. | C4, C5, M |
 | 5 | After the switch and a dependency pass, remove federation runtime: #594 body channel, #593 publication objects/heads/egress handles, #595 receiver body cache/dual audit, and `analytics_publish`/`body_channel` credential kinds. Candidates include `origin_read`, `body_*`, `handle_resolver`, `egress`, `objects` and publication paths. Preserve enrollment, mTLS, renewal, mirror, archive custody, ASI projection/store/query and local read audit. No dormant federation mode or compatibility layer. | C2, M, I |
 
@@ -113,16 +120,14 @@ each slice. Preserve the [federation](asi-federation.md) and
 [body-channel](asi-body-channel.md) rationale as superseded history, so a future
 multi-user or third-party receiver can revisit it without dormant runtime. [C2, I]
 
-## Open owner decisions
+## Owner decisions on the open choices (2026-11-15)
 
-These choices are intentionally unsettled. Recommendations are not decisions.
-
-| Open owner decision | Options | Recommendation |
-| --- | --- | --- |
-| A. Duplicate-session accounting when self-push or a copied home presents the same session on two machines | Count each machine's occurrence; deduplicate across machines using proven native identity/provenance; require an explicit canonical source choice | Deduplicate only where native identity/provenance proves duplication, retaining both source records. Decide the rule before aggregate accounting changes. |
-| B. Stable received-machine namespace/identity binding | Bind to enrollment machine identity/enrollment ID; bind to an origin-generated namespace carried in facts | Prefer origin-generated namespace in facts for continuity, subject to an explicit binding decision. Hostname and directory are not candidates. |
-| C. Receiver retention/storage beyond today's 20 GiB per-machine cap | Keep the current configurable refusal cap; add receiver-wide refusal limits; add operator-selected archival tiers | Keep the current cap first. No option automatically deletes history; any deletion remains explicit. |
-| D. Reader authentication beyond the loopback owner in this release | Authenticated loopback owner only; add authenticated remote/multiple users | Recommend no additional users in this release: keep the single-owner loopback boundary. |
+| Choice | Decision |
+| --- | --- |
+| A. Duplicate sessions across machines | Count once only when native identity/provenance proves duplication; keep both source records; report divergent same-ID copies. |
+| B. Received-machine identity | Generated stable ID, displayed as hostname plus an optional owner-chosen name; histories join only through an explicit owner link on demand. PR1 returns the exact ID origin, persisted form and link/unlink behavior for review. |
+| C. Receiver storage | Keep the configurable per-machine cap and add a receiver-wide cap. Both refuse uploads with a clear message; nothing is deleted automatically. Default values are proposed in the implementing PR. |
+| D. Readers in this release | Receiver OS owner only, through the authenticated loopback Viewer, CLI and MCP. |
 
 ## Decision trace
 
@@ -134,6 +139,7 @@ All new mechanisms above use these sources; no historical document overrides the
 | C2 | Owner, **2026-11-14**: remove federation runtime after the switch; retain its rationale as superseded history; no dormant code. |
 | C3 | Owner, **2026-11-14**: recommend full-disk encryption plus encrypted backups; no app encryption or blocking setup check; keep 0600/0700. |
 | C4 | Owner, **2026-11-14**: UX/DX primary; four setup actions, combined narrowing/approval, automatic push, two processes; service install separately counted. |
+| C6 | Owner, **2026-11-15**: decisions A–D above (proven-duplicate accounting, generated machine ID with hostname/optional name and explicit link, receiver-wide refusal cap, loopback-owner readers only). |
 | C5 | Owner, **2026-11-14**: private-root/LAN pairing deferred, pinned invitation removed (#680), no zero-findings scan gate for own-machine reads. |
 | M | Shipped [mirror](../mirror-protocol.md), [enrollment and renewal](asi-enrollment.md): source allowlist/redaction, export consent, transport authentication, credential custody and current trust lifecycle. |
 | I | [Repository invariants](../../AGENTS.md): native identity/lineage/provenance, source integrity and custody, body-free analytics/Hub, parser behavior, one current format, preserved frozen/user data and Viewer ownership/security. |

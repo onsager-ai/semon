@@ -6,8 +6,8 @@ materializations and durably received redacted text with receiver-local
 authorization/audit. The former per-read origin approval, remote body channel,
 cache and federation search sequencing below are superseded history. Current
 receiver body-query refusal remains shipped behavior until that integration; Hub
-body access still refuses. Additional users beyond the loopback owner remain an
-open owner decision. Existing query bounds/sandbox and local API contracts stay.
+body access still refuses. Readers are the loopback owner only in this release
+(owner, 2026-11-15). Existing query bounds/sandbox and local API contracts stay.
 [C1/C2/I]
 
 Status: accepted architecture/spec for #545 (revised 2026-11-09 for federation

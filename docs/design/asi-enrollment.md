@@ -144,7 +144,7 @@ The mirror command path is shipped; integrated receiver ASI and owner Viewer
 startup remain pending under the centralized plan. [C1/C4] After installation,
 the local-owner target is exactly four actions B1–B4. Reachability, host custody,
 service installation and any additional reader login are separately counted
-actions when applicable; additional readers remain an open owner decision, and a conditional four-action target is not a clean-host claim.
+actions when applicable; this release has no additional readers (owner, 2026-11-15), and a conditional four-action target is not a clean-host claim.
 
 | Action | Operation | Provisioning effect |
 | --- | --- | --- |

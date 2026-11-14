@@ -69,8 +69,8 @@ future multi-user or third-party receiver discussion, not a dormant runtime mode
   Origin availability gates new uploads, not reads. Hub remains body-free. [C1/I].
 - **Preservation.** Keep native identity/lineage/provenance, recorded costs without
   silent repricing, one current format and frozen data. No automatic deletion or
-  compatibility layers. Duplicate accounting and stable received-machine namespace
-  binding remain open owner decisions in the central contract. [C1/M/I].
+  compatibility layers. Duplicates count once only when proven; received machines
+  have generated IDs joined only by explicit owner link (central contract C6). [C1/C6/M/I]
 - **At rest and UX.** Recommend full-disk encryption and encrypted backups without
   a blocking setup check or app encryption. Target four setup actions and two
   long-running processes; service install is a counted opt-in. [C3/C4].
