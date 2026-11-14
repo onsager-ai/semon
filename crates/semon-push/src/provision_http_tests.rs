@@ -561,7 +561,8 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     // Explicit initialization owns the index and namespace; mirror connect reuses
     // neither for enrollment and must not publish an analytics snapshot.
     assert!(analytics_state.join("sessions-index.sqlite3").exists());
-    let (config, credential) = crate::origin_custody::load_at(&origin, None, 100).unwrap();
+    let (config, credential) =
+        crate::origin_custody::load_at(&origin, Some("https://LOCALHOST/"), 100).unwrap();
     assert_eq!(config.scope.receiver_id, config.receiver_id);
     assert!(matches!(
         config.scope.binding,

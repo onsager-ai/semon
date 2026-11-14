@@ -157,6 +157,7 @@ pub enum Credential {
     Enrolled {
         token: Token,
         sources: Vec<PathBuf>,
+        authority: origin_custody::Authority,
         identity: Option<ClientIdentity>,
     },
 }
@@ -510,11 +511,29 @@ impl Client {
                 url: url.clone(),
                 files: BTreeMap::new(),
             });
+        #[cfg(unix)]
+        if let Credential::Enrolled { authority, .. } = &options.credential
+            && !authority.is_active()
+        {
+            return Err("receiver is disconnected or its custody is unavailable".into());
+        }
         Ok(Self {
             url,
             token,
             http,
-            stop: Stop::new(),
+            stop: {
+                let stop = Stop::new();
+                #[cfg(unix)]
+                if let Credential::Enrolled { authority, .. } = &options.credential {
+                    stop.with_authority(authority.clone())
+                } else {
+                    stop
+                }
+                #[cfg(not(unix))]
+                {
+                    stop
+                }
+            },
             lock: None,
             state_path: options.state.clone(),
             state,
@@ -544,6 +563,12 @@ impl Client {
 
     /// Ends passes and requests early once `stop` is stopped.
     pub fn with_stop(mut self, stop: Stop) -> Self {
+        #[cfg(unix)]
+        let stop = if let Some(authority) = self.stop.authority.clone() {
+            stop.with_authority(authority)
+        } else {
+            stop
+        };
         self.stop = stop;
         self
     }
@@ -1641,6 +1666,15 @@ pub fn push(options: &PushOptions, watch: bool) -> Result<()> {
 /// `reqwest::blocking`, which panics inside a tokio runtime (in an async
 /// Tauri command, say; use `spawn_blocking` or `std::thread::spawn`).
 pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()> {
+    #[cfg(unix)]
+    let enrolled_stop;
+    #[cfg(unix)]
+    let stop = if let Credential::Enrolled { authority, .. } = &options.credential {
+        enrolled_stop = stop.clone().with_authority(authority.clone());
+        &enrolled_stop
+    } else {
+        stop
+    };
     // Declared first, so it is dropped last, after the client and the
     // facts worker have let go of their shares.
     let hold = Hold::new(StateLock::acquire(&options.state)?);

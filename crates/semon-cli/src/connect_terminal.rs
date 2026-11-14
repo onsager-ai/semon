@@ -79,6 +79,7 @@ impl Terminal for Prompt {
     }
 
     fn approve(&mut self, receiver: &str, receiver_id: &str, machine: &str) -> Result<bool> {
+        let receiver = semon_push::origin_custody::receiver_host(receiver)?;
         writeln!(
             self.tty,
             "Mirror client certificate required: {}",

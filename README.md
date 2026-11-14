@@ -147,6 +147,10 @@ Origin custody lives under `$XDG_CONFIG_HOME/semon/origin/` (default
 `~/.config/semon/origin/`), with mode-0700 directories and separate mode-0600 key,
 credential, signed configuration and source-consent files. `connect` prints its
 normalized HTTPS receiver URL; use `push --receiver URL` when more than one is enrolled.
+Use `semon disconnect --receiver https://receiver.example:8735` on the origin to
+stop local use after typing literal `yes` at its controlling terminal. This keeps
+history, keys, source consent and audits; it sends no receiver request and does
+not revoke receiver-side access. Repeating it reports the same disconnected state.
 Only explicitly approved current files are eligible for later pushes; future
 sources require a new consent update (that update command is not shipped yet).
 Analytics/body enrollment, client certificates and issuer trust are not enabled.

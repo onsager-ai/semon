@@ -182,7 +182,7 @@ fn certificate_clock_refuses_future_install_and_expired_load() {
         .contains("not yet valid")
     );
     assert!(!f.0.exists());
-    let name = install_at(
+    install_at(
         &f.0,
         "https://receiver.example:443",
         "laptop",
@@ -218,7 +218,7 @@ fn staged_credentials_are_never_a_half_installed_enrollment() {
         .write("mirror-push.secret", b"interrupted-secret")
         .unwrap();
     assert!(load(&f.0, None).is_err());
-    let name = f.install();
+    f.install();
     load(&f.0, Some("https://receiver.example:443")).unwrap();
     assert!(f.0.join("stage-interrupted/mirror-push.secret").exists());
 }
@@ -298,4 +298,148 @@ fn config_roots_require_absolute_paths() {
         .is_err()
     );
     assert!(configuration_directory(None, None).is_err());
+}
+
+#[test]
+fn url_selector_uses_pairing_normalization_and_never_accepts_hashes() {
+    let f = Fixture::new();
+    let name = f.install();
+    assert_eq!(
+        name,
+        crate::wire::sha256_hex(b"https://receiver.example:443")
+    );
+    for url in [
+        "https://receiver.example",
+        "https://RECEIVER.EXAMPLE/",
+        "https://receiver.example:443/",
+    ] {
+        let (config, _) = load(&f.0, Some(url)).unwrap();
+        assert_eq!(receiver_endpoint(url).unwrap(), config.endpoint);
+        assert!(!Disconnect::open(&f.0, url).unwrap().is_disconnected());
+    }
+    for (url, canonical) in [
+        ("https://[::1]/", "https://[::1]:443"),
+        ("https://[2001:DB8::1]:443", "https://[2001:db8::1]:443"),
+        (
+            "https://Receiver.Example:8735/",
+            "https://receiver.example:8735",
+        ),
+    ] {
+        assert_eq!(receiver_endpoint(url).unwrap(), canonical);
+        assert_eq!(receiver_host(url).unwrap(), &canonical[8..]);
+    }
+    for invalid in [
+        name.as_str(),
+        "https://user:secret@receiver.example",
+        "https://receiver.example?secret=value",
+        "https://receiver.example/#secret",
+        "http://receiver.example",
+        "https://receiver.example/path",
+    ] {
+        assert!(receiver_endpoint(invalid).is_err());
+        assert!(load(&f.0, Some(invalid)).is_err());
+        assert!(Disconnect::open(&f.0, invalid).is_err());
+    }
+}
+
+#[test]
+fn disconnect_preserves_custody_cancels_delivery_and_is_state_idempotent() {
+    let f = Fixture::new();
+    let name = f.install();
+    let (config, _) = load(&f.0, None).unwrap();
+    let authority = Authority::new(&f.0, &config).unwrap();
+    let stop = crate::Stop::new().with_authority(authority.clone());
+    let files = [
+        "enrollment.json",
+        "origin-key.pk8",
+        "mirror-push.secret",
+        "source-consent.json",
+    ];
+    let before: Vec<_> = files
+        .iter()
+        .map(|p| fs::read(f.0.join(&name).join(p)).unwrap())
+        .collect();
+    assert!(!stop.is_stopped());
+    // Dropping the unconfirmed operation changes nothing.
+    drop(Disconnect::open(&f.0, "https://receiver.example").unwrap());
+    assert!(authority.is_active());
+    let operation = Disconnect::open(&f.0, "https://RECEIVER.example:443/").unwrap();
+    assert!(!operation.is_disconnected());
+    operation.commit().unwrap();
+    assert!(stop.is_stopped());
+    assert!(!authority.is_active());
+    assert!(load(&f.0, None).is_err());
+    let operation = Disconnect::open(&f.0, "https://receiver.example").unwrap();
+    assert!(operation.is_disconnected());
+    operation.commit().unwrap();
+    for (file, bytes) in files.iter().zip(before) {
+        assert_eq!(fs::read(f.0.join(&name).join(file)).unwrap(), bytes);
+    }
+    assert_eq!(
+        consent(&f.0, &name, &config).unwrap(),
+        [PathBuf::from("/native/approved.jsonl")]
+    );
+}
+
+#[test]
+fn disconnect_wins_install_lock_against_concurrent_publication() {
+    let f = Fixture::new();
+    f.install();
+    let operation = Disconnect::open(&f.0, "https://receiver.example").unwrap();
+    let base = f.0.clone();
+    let worker = std::thread::spawn(move || {
+        // A delivery already prepared before disconnect cannot obtain the install lock.
+        let other = Fixture(base);
+        let result = other.install_sources(&[]);
+        // The parent retains ownership of fixture cleanup.
+        std::mem::forget(other);
+        result
+    });
+    assert_eq!(
+        worker.join().unwrap().unwrap_err(),
+        "origin custody is in use"
+    );
+    operation.commit().unwrap();
+    // A delayed installation cannot overwrite the disabled selection, either.
+    assert!(f.install_sources(&[]).is_err());
+    assert!(
+        Disconnect::open(&f.0, "https://receiver.example")
+            .unwrap()
+            .is_disconnected()
+    );
+    assert!(load(&f.0, None).is_err());
+}
+
+#[test]
+fn disconnect_unknown_and_insecure_state_fail_closed() {
+    let f = Fixture::new();
+    assert_eq!(
+        Disconnect::open(&f.0, "https://UNKNOWN.example/")
+            .err()
+            .unwrap(),
+        "receiver unknown.example:443 was not found; use the HTTPS URL given to connect as --receiver URL, then retry."
+    );
+    let name = f.install();
+    assert!(
+        Disconnect::open(&f.0, "https://other.example")
+            .err()
+            .unwrap()
+            .contains("was not found")
+    );
+    let (config, _) = load(&f.0, None).unwrap();
+    let authority = Authority::new(&f.0, &config).unwrap();
+    // Interrupted disabled staging is inactive; it neither enables nor disables a channel.
+    let dir = Directory::open(&f.0).unwrap().child(&name).unwrap();
+    dir.write("disabled-stage-interrupted", b"disabled\n")
+        .unwrap();
+    assert!(authority.is_active());
+    dir.write("disabled", b"corrupt").unwrap();
+    assert!(!authority.is_active());
+    assert_eq!(
+        Disconnect::open(&f.0, "https://receiver.example")
+            .err()
+            .unwrap(),
+        DISCONNECT_UNCERTAIN
+    );
+    assert!(load(&f.0, None).is_err());
 }

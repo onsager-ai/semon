@@ -1387,7 +1387,12 @@ Custody is `$XDG_CONFIG_HOME/semon/origin/<sha256-canonical-endpoint>/` (default
 `mirror-push.secret`, and separately bound `source-consent.json`. Directories are
 0700 and regular files 0600, owned by the local user; fd-relative no-follow opens
 refuse links. A private `stage-<random>/` is synced before its atomic publication;
-only the final directory is admitted. Interrupted staging is retained, never
+only the final directory is admitted. A durable `disabled` marker stops active
+local channel/trust use without removing any of those files. Disconnect publishes
+that marker under `install.lock`; fresh loads and running Push stop checks refuse
+disabled or unreadable state. Existing blocking HTTP work can finish after its
+waiter stops under the existing Push cancellation contract; no subsequent request
+is scheduled. Renewal installation/recovery is PR4.3b. Interrupted staging is retained, never
 silently deleted or loaded. No credential is written before receiver confirmation
 and approval delivery. `install.lock` serializes publication. Receiver selection
 accepts the enrolled HTTPS URL; the endpoint hash stays internal. An omitted URL

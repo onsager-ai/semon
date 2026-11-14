@@ -116,6 +116,29 @@ impl Directory {
         }
         self.child(name)
     }
+    fn install_lock(&self) -> Result<InstallLock> {
+        let lock = self
+            .checked
+            .open_file(Path::new("install.lock"), libc::O_RDWR | libc::O_CREAT)
+            .map_err(|_| ERROR)?;
+        lock.try_lock().map_err(|_| "origin custody is in use")?;
+        Ok(InstallLock(lock))
+    }
+    fn disabled(&self) -> Result<bool> {
+        if !self
+            .checked
+            .names()
+            .map_err(|_| ERROR)?
+            .iter()
+            .any(|p| p == Path::new("disabled"))
+        {
+            return Ok(false);
+        }
+        if self.read("disabled")?.as_slice() != b"disabled\n" {
+            return Err(ERROR.into());
+        }
+        Ok(true)
+    }
     fn read(&self, name: &str) -> Result<Zeroizing<Vec<u8>>> {
         let file = self
             .checked
@@ -209,12 +232,7 @@ pub(crate) fn install_at(
         .create(base)
         .map_err(|_| ERROR)?;
     let root = Directory::open(base)?;
-    let lock = root
-        .checked
-        .open_file(Path::new("install.lock"), libc::O_RDWR | libc::O_CREAT)
-        .map_err(|_| ERROR)?;
-    lock.try_lock().map_err(|_| "origin custody is in use")?;
-    let _lock = InstallLock(lock);
+    let _lock = root.install_lock()?;
     #[cfg(test)]
     LOCK_DUPLICATE.with(|slot| *slot.borrow_mut() = Some(_lock.0.try_clone().unwrap()));
     let name =
@@ -353,6 +371,47 @@ pub(crate) fn load_at(
         }
     };
     let dir = root.child(&name)?;
+    if dir.disabled()? {
+        return Err("receiver is disconnected on this machine; run semon connect --to URL".into());
+    }
+    let (config, key) = read_configuration(&dir, &name)?;
+    let private = dir.read("origin-key.pk8")?;
+    let secret = dir.read("mirror-push.secret")?;
+    if crate::wire::sha256_hex(&secret) != config.credential_sha256 {
+        return Err(ERROR.into());
+    }
+    let token = crate::Token::new(std::str::from_utf8(&secret).map_err(|_| ERROR)?)?;
+    let certificate = config
+        .client_certificate_sha256
+        .as_ref()
+        .map(|hash| {
+            let bytes = dir.read("client-certificate.der")?;
+            if crate::wire::sha256_hex(&bytes) != *hash {
+                return Err(ERROR.to_owned());
+            }
+            Ok(bytes.to_vec())
+        })
+        .transpose()?;
+    validate_certificate(
+        &config.scope,
+        certificate.as_deref(),
+        key.public_key().as_ref(),
+        now,
+    )?;
+    let credential = match certificate {
+        Some(certificate) => crate::Credential::MutualTls {
+            token,
+            identity: crate::ClientIdentity {
+                certificate,
+                private: Zeroizing::new(private.to_vec()),
+            },
+        },
+        None => crate::Credential::Memory(token),
+    };
+    Ok((config, credential))
+}
+
+fn read_configuration(dir: &Directory, name: &str) -> Result<(Configuration, EcdsaKeyPair)> {
     let signed: Signed =
         serde_json::from_slice(&dir.read("enrollment.json")?).map_err(|_| ERROR)?;
     let config = signed.configuration;
@@ -395,39 +454,126 @@ pub(crate) fn load_at(
         &crate::provision_wire::decode_fixed::<64>(&signed.signature).map_err(|_| ERROR)?,
     )
     .map_err(|_| ERROR)?;
-    let secret = dir.read("mirror-push.secret")?;
-    if crate::wire::sha256_hex(&secret) != config.credential_sha256 {
-        return Err(ERROR.into());
+    Ok((config, key))
+}
+
+/// Nonsecret local authority for a selected channel. Missing or insecure custody
+/// stops existing delivery through the same Stop hook used by embedded callers.
+#[derive(Clone, Debug)]
+pub struct Authority {
+    base: PathBuf,
+    name: String,
+}
+impl Authority {
+    pub fn new(base: &Path, config: &Configuration) -> Result<Self> {
+        let endpoint = &config.endpoint;
+        let authority = Self {
+            base: base.into(),
+            name: custody_name(endpoint),
+        };
+        if !authority.is_active() {
+            return Err("receiver is disconnected or its custody is unavailable".into());
+        }
+        Ok(authority)
     }
-    let token = crate::Token::new(std::str::from_utf8(&secret).map_err(|_| ERROR)?)?;
-    let certificate = config
-        .client_certificate_sha256
-        .as_ref()
-        .map(|hash| {
-            let bytes = dir.read("client-certificate.der")?;
-            if crate::wire::sha256_hex(&bytes) != *hash {
-                return Err(ERROR.to_owned());
-            }
-            Ok(bytes.to_vec())
+    pub(crate) fn is_active(&self) -> bool {
+        Directory::open(&self.base)
+            .and_then(|root| root.child(&self.name))
+            .and_then(|dir| dir.disabled())
+            .is_ok_and(|disabled| !disabled)
+    }
+}
+
+pub const DISCONNECT_OWNER: &str =
+    "disconnect requires the local owner's terminal; run this command there.";
+pub const DISCONNECT_UNCERTAIN: &str = "disconnect could not be confirmed; rerun the same command to check its earlier outcome before retrying.";
+
+/// Holds install.lock from the fresh state read through confirmation and commit.
+/// No network operation or receiver revocation is involved.
+pub struct Disconnect {
+    _lock: InstallLock,
+    dir: Directory,
+    disabled: bool,
+}
+impl Disconnect {
+    pub fn open(base: &Path, receiver: &str) -> Result<Self> {
+        let endpoint = receiver_endpoint(receiver)?;
+        let host = receiver_host(&endpoint)?;
+        let unknown = || {
+            format!(
+                "receiver {host} was not found; use the HTTPS URL given to connect as --receiver URL, then retry."
+            )
+        };
+        let metadata = match fs::symlink_metadata(base) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Err(unknown()),
+            Err(_) => return Err(DISCONNECT_UNCERTAIN.into()),
+        };
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: geteuid has no preconditions.
+        if metadata.uid() != unsafe { libc::geteuid() } {
+            return Err(DISCONNECT_OWNER.into());
+        }
+        let root = Directory::open(base).map_err(|_| DISCONNECT_UNCERTAIN)?;
+        let lock = root.install_lock().map_err(|_| DISCONNECT_UNCERTAIN)?;
+        let name = custody_name(&endpoint);
+        if !root
+            .checked
+            .names()
+            .map_err(|_| DISCONNECT_UNCERTAIN)?
+            .iter()
+            .any(|p| p == Path::new(&name))
+        {
+            return Err(unknown());
+        }
+        let dir = root.child(&name).map_err(|_| DISCONNECT_UNCERTAIN)?;
+        read_configuration(&dir, &name).map_err(|_| DISCONNECT_UNCERTAIN)?;
+        let disabled = dir.disabled().map_err(|_| DISCONNECT_UNCERTAIN)?;
+        Ok(Self {
+            _lock: lock,
+            dir,
+            disabled,
         })
-        .transpose()?;
-    validate_certificate(
-        &config.scope,
-        certificate.as_deref(),
-        key.public_key().as_ref(),
-        now,
-    )?;
-    let credential = match certificate {
-        Some(certificate) => crate::Credential::MutualTls {
-            token,
-            identity: crate::ClientIdentity {
-                certificate,
-                private: Zeroizing::new(private.to_vec()),
-            },
-        },
-        None => crate::Credential::Memory(token),
-    };
-    Ok((config, credential))
+    }
+    pub fn is_disconnected(&self) -> bool {
+        self.disabled
+    }
+    pub fn commit(mut self) -> Result<()> {
+        if self.disabled {
+            // Reconcile a previous uncertain directory fsync before success.
+            return self
+                .dir
+                .checked
+                .sync()
+                .map_err(|_| DISCONNECT_UNCERTAIN.into());
+        }
+        let stage = format!(
+            "disabled-stage-{}",
+            crate::enrollment::random_id().map_err(|_| DISCONNECT_UNCERTAIN)?
+        );
+        self.dir
+            .write(&stage, b"disabled\n")
+            .map_err(|_| DISCONNECT_UNCERTAIN)?;
+        let from = std::ffi::CString::new(stage).map_err(|_| DISCONNECT_UNCERTAIN)?;
+        let to = c"disabled";
+        // SAFETY: both single-component names are relative to this owned directory.
+        if unsafe {
+            libc::renameat(
+                self.dir.fd.as_raw_fd(),
+                from.as_ptr(),
+                self.dir.fd.as_raw_fd(),
+                to.as_ptr(),
+            )
+        } != 0
+        {
+            return Err(DISCONNECT_UNCERTAIN.into());
+        }
+        self.disabled = true;
+        self.dir
+            .checked
+            .sync()
+            .map_err(|_| DISCONNECT_UNCERTAIN.into())
+    }
 }
 
 #[derive(Serialize, Deserialize)]
