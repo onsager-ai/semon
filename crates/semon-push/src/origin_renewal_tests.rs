@@ -507,6 +507,7 @@ fn application_admission_keeps_request_valid_during_publication() {
         panic!()
     };
     let mut r = f.prepare();
+    let receiver_dir = f.receiver(&r);
     let delivered = f.delivery(&r);
     let (admission, selected) = authority.admit().unwrap();
     let overlapping = authority.delivery().unwrap();
@@ -523,6 +524,16 @@ fn application_admission_keeps_request_valid_during_publication() {
         selected.token().unwrap().expose(),
         delivered.credentials[0].bearer
     );
+    // The admitted old request remains valid remotely until first use of the
+    // successor cuts it over. Local publication itself does not revoke it.
+    let registry = crate::enrollment::Registry::read_current(&receiver_dir).unwrap();
+    let old = crate::credentials::Secret::new("old-bearer".into());
+    assert!(matches!(
+        registry
+            .authorize(Kind::MirrorPush, Kind::MirrorPush, &old, None, NOW)
+            .decision,
+        crate::credentials::Decision::Allowed { .. }
+    ));
     let disconnect = Disconnect::open(&f.0, ENDPOINT).unwrap();
     drop(admission);
     drop(overlapping);

@@ -850,8 +850,6 @@ impl Store {
             .file(&stage, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
         let result = (|| {
             file.write_all(bytes).map_err(|_| Error::Write)?;
-            #[cfg(test)]
-            crate::renewal::observe_durable_io(false, true);
             file.sync_all().map_err(|_| Error::Write)?;
             self.dir.rename(&stage, crate::pairing::GATE_FILE)
         })();

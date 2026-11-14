@@ -433,10 +433,12 @@ struct Source {
     prepared: bool,
 }
 
+type HttpFactory =
+    dyn Fn(Option<Credential>) -> Result<(reqwest::blocking::Client, Token)> + Send + Sync;
+
 pub struct Client {
     url: String,
-    http:
-        Arc<dyn Fn(Option<Credential>) -> Result<(reqwest::blocking::Client, Token)> + Send + Sync>,
+    http: Arc<HttpFactory>,
     stop: Stop,
     lock: Option<Arc<StateLock>>,
     state_path: PathBuf,
@@ -484,9 +486,7 @@ impl Client {
         let url = check_url(&options.url)?;
         options.credential.token()?;
         let credential = options.credential.clone();
-        let http: Arc<
-            dyn Fn(Option<Credential>) -> Result<(reqwest::blocking::Client, Token)> + Send + Sync,
-        > = Arc::new(move |selected| {
+        let http: Arc<HttpFactory> = Arc::new(move |selected| {
             let credential = selected.as_ref().unwrap_or(&credential);
             let token = credential.token()?;
             let http = builder();
