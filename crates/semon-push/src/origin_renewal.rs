@@ -209,7 +209,7 @@ impl Renewal {
     pub fn renew(&mut self) -> Result<()> {
         self.renew_with_clock(&now)
     }
-    fn renew_with_clock(&mut self, clock: &dyn Fn() -> Result<u64>) -> Result<()> {
+    pub(crate) fn renew_with_clock(&mut self, clock: &dyn Fn() -> Result<u64>) -> Result<()> {
         #[cfg(test)]
         if let Some(mut exchange) = self.exchange.take() {
             let result = self.renew_using(clock, &mut exchange);

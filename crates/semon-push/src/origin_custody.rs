@@ -509,6 +509,7 @@ pub struct Authority {
     base: PathBuf,
     name: String,
     enrollment_id: String,
+    confirmed: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 impl Authority {
     pub fn new(base: &Path, config: &Configuration) -> Result<Self> {
@@ -517,6 +518,7 @@ impl Authority {
             base: base.into(),
             name: custody_name(endpoint),
             enrollment_id: config.enrollment_id.clone(),
+            confirmed: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         if !authority.is_active() {
             return Err("receiver is disconnected or its custody is unavailable".into());
@@ -533,7 +535,7 @@ impl Authority {
         }
         Ok(guard)
     }
-    pub(crate) fn admit(&self) -> Result<(Delivery, crate::Credential)> {
+    pub(crate) fn admit(&self) -> Result<(Delivery, crate::Credential, u64)> {
         let root = Directory::open(&self.base)?;
         let (before, credential) = load_selected(&self.base, &root, &self.name, now()?)?;
         if before.enrollment_id != self.enrollment_id {
@@ -548,7 +550,7 @@ impl Authority {
             return Err(ERROR.into());
         }
         if before.generation == after.generation {
-            return Ok((guard, credential));
+            return Ok((guard, credential, before.generation));
         }
         drop(guard);
         #[cfg(test)]
@@ -560,7 +562,23 @@ impl Authority {
         if selected.enrollment_id != self.enrollment_id {
             return Err(ERROR.into());
         }
-        Ok((guard, credential))
+        Ok((guard, credential, selected.generation))
+    }
+    pub(crate) fn application_success(&self, generation: u64) {
+        self.confirmed
+            .fetch_max(generation, std::sync::atomic::Ordering::Release);
+    }
+    pub(crate) fn confirmed_generation(&self) -> u64 {
+        self.confirmed.load(std::sync::atomic::Ordering::Acquire)
+    }
+    pub(crate) fn renewal_location(&self) -> Result<(PathBuf, String)> {
+        let root = Directory::open(&self.base)?;
+        let dir = root.child(&self.name)?;
+        let (config, _) = read_configuration(&selected_directory(&dir)?, &self.name)?;
+        if dir.disabled()? || config.enrollment_id != self.enrollment_id {
+            return Err(ERROR.into());
+        }
+        Ok((self.base.clone(), config.endpoint))
     }
     pub(crate) fn is_active(&self) -> bool {
         Directory::open(&self.base)
@@ -786,7 +804,7 @@ fn validate_certificate(
     }
     Ok(())
 }
-fn now() -> Result<u64> {
+pub(crate) fn now() -> Result<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
