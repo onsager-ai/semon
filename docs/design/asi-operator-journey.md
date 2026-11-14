@@ -51,10 +51,9 @@ invitation removed by #680. Private-root/LAN pairing was deferred by the owner o
 2026-11-14. Preserve automatic renewal under enrolled trust and explicit recovery
 for loss/compromise. [C3/C5/M]
 
-Duplicate accounting, stable received namespace binding, storage/retention beyond
-today's cap and readers beyond the loopback owner remain
-[open owner decisions](asi-centralized.md#open-owner-decisions). No journey wording
-settles them. The central contract supplies the [implementation order](asi-centralized.md#implementation-plan).
+Duplicate accounting, received-machine identity, storage caps and readers are
+settled in the central contract's
+[owner decisions](asi-centralized.md#owner-decisions-on-the-open-choices-2026-11-15). The central contract supplies the [implementation order](asi-centralized.md#implementation-plan).
 
 ## Superseded journey record (2026-11-11/12)
 

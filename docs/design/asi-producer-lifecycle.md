@@ -6,8 +6,8 @@ export and starts push after combined approval; receiver startup owns
 received-machine indexing/materialization and its authenticated loopback Viewer.
 The origin-analytics enablement proposal below is superseded for that journey;
 its local initializer discussion remains historical design input, not an added
-onboarding action. Stable received namespace binding is still an open owner
-decision. Preserve shipped local materialization and its integrity checks. [C1/C4/M/I]
+onboarding action. Received machines use a generated stable ID with explicit owner
+linking ([owner decisions](asi-centralized.md#owner-decisions-on-the-open-choices-2026-11-15)). Preserve shipped local materialization and its integrity checks. [C1/C4/M/I]
 
 Proposal for #652, part of #593. This amends the local producer contract; it does
 not implement `connect`, `start`, enrollment activation or their UX.

@@ -38,11 +38,10 @@ client-certificate requirement and renewal. Issuer assertions, publication
 claims/heads, egress handles, receiver body cache and dual audit belong to the
 superseded federation design, not this default. Read audit is receiver-local. [C2/M]
 
-Receiver stable namespace binding and duplicate accounting remain open; this
-amendment does not choose the enrollment ID, machine name or facts namespace.
-Enrollment's existing transport binding is not itself that decision. Additional
-reader identities and storage/retention beyond the current cap are also
-[open owner decisions](asi-centralized.md#open-owner-decisions). [C1/I]
+Received machines use a generated stable ID, not the enrollment ID or machine
+name; enrollment's transport binding stays separate. Duplicate accounting, storage
+caps and readers are settled in the central contract's
+[owner decisions](asi-centralized.md#owner-decisions-on-the-open-choices-2026-11-15). [C1/C6/I]
 
 The implementation inventory and protocol details below record delivered libraries
 and former integration plans. Federation-only passages (issuer/cache custody,
