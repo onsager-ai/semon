@@ -382,6 +382,114 @@ fn receiver_restart_refuses_old_nonce_then_new_begin_can_commit() {
 }
 
 #[test]
+fn same_object_public_retry_reconciles_published_recovery_before_expiry() {
+    let f = Fixture::new();
+    let mut r = f.prepare();
+    r.finish(&[1; 32], NOW).unwrap();
+    r.finish(&[2; 32], NOW).unwrap();
+    let delivery = f.delivery(&r);
+    FAULT.with(|fault| *fault.borrow_mut() = Some(("generation-directory-fsync", 0)));
+    assert!(r.delivered(&delivery, NOW).is_err());
+    FAULT.with(|fault| *fault.borrow_mut() = None);
+    assert!(r.attempt.as_ref().unwrap().state == State::RecoverReserved);
+    // The production public entry point must select the complete generation,
+    // even though RecoverReserved would otherwise be abandoned on this call.
+    r.renew().unwrap();
+    assert_eq!(r.config.generation, 2);
+    assert!(r.attempt.as_ref().unwrap().state == State::Installed);
+    assert_eq!(load_at(&f.0, None, NOW).unwrap().0.generation, 2);
+}
+
+#[test]
+fn renewal_flow_reads_fresh_clock_at_each_boundary() {
+    use std::{cell::RefCell, rc::Rc};
+    let f = Fixture::new();
+    let mut r = f.open();
+    let begun = Begun {
+        version: 1,
+        enrollment_id: "b".repeat(64),
+        renewal_id: "c".repeat(64),
+        receiver_nonce: crate::provision_wire::encode(&[7; 32]),
+        expires_at: NOW + 600,
+        generations: vec![Generation {
+            kind: Kind::MirrorPush,
+            generation: 2,
+        }],
+        enable_authorization_ids: vec![],
+    };
+    let readings = Rc::new(RefCell::new(Vec::new()));
+    let next = std::cell::Cell::new(NOW);
+    let clock = || {
+        let value = next.get();
+        next.set(value + 1);
+        readings.borrow_mut().push(value);
+        Ok(value)
+    };
+    r.exchange = Some(Box::new(move |r, begin, clock| {
+        if begin {
+            r.credentials(clock()?)?;
+            Ok(Response::Begun(begun.clone()))
+        } else {
+            let finish = r.finish(&[9; 32], clock()?)?;
+            let application =
+                crate::provision_wire::decode_fixed::<32>(&finish.application_key).unwrap();
+            let target = Generation {
+                kind: Kind::MirrorPush,
+                generation: 2,
+            };
+            Ok(Response::Delivered(Delivered {
+                version: 1,
+                enrollment_id: finish.enrollment_id.clone(),
+                renewal_id: finish.renewal_id.clone(),
+                credentials: vec![wire::DeliveredCredential {
+                    kind: Kind::MirrorPush,
+                    credential_id: "d".repeat(64),
+                    generation: 2,
+                    bearer: wire::bearer(
+                        &application,
+                        &finish.enrollment_id,
+                        &finish.renewal_id,
+                        &target,
+                    )
+                    .expose()
+                    .into(),
+                    valid_from: NOW + 4,
+                    valid_until: NOW + 4 + 7_776_000,
+                }],
+                client_certificate: None,
+            }))
+        }
+    }));
+    r.renew_with_clock(&clock).unwrap();
+    assert_eq!(
+        *readings.borrow(),
+        vec![NOW, NOW + 1, NOW + 2, NOW + 3, NOW + 4]
+    );
+    assert_eq!(r.config.generation, 2);
+}
+
+#[test]
+fn renewal_error_automatically_abandons_exhausted_recovery() {
+    let f = Fixture::new();
+    let mut r = f.prepare();
+    r.finish(&[1; 32], NOW).unwrap();
+    r.exchange = Some(Box::new(|r, begin, clock| {
+        assert!(!begin);
+        assert_eq!(r.finish(&[2; 32], clock()?)?.action, Action::Recover);
+        Err("receiver refused renewal".into())
+    }));
+    assert!(r.renew_with_clock(&|| Ok(NOW + 1)).is_err());
+    assert!(!r.pending());
+    assert!(r.attempt.as_ref().unwrap().state == State::Abandoned);
+    assert!(
+        r.dir
+            .read(&format!("renewal-ended-{}.json", "c".repeat(64)))
+            .is_ok()
+    );
+    assert!(load_at(&f.0, None, NOW).is_ok());
+}
+
+#[test]
 fn strict_thirty_day_boundary_and_expiry() {
     assert_eq!(window(NOW + wire::WINDOW + 1, NOW), (false, false));
     assert_eq!(window(NOW + wire::WINDOW, NOW), (true, false));

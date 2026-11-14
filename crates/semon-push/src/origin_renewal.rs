@@ -7,6 +7,13 @@ use crate::renewal_wire::{self as wire, Action, Begun, Delivered, Generation};
 #[path = "origin_renewal_tests.rs"]
 mod tests;
 
+enum Response {
+    Begun(Begun),
+    Delivered(Delivered),
+}
+#[cfg(test)]
+type TestExchange = dyn FnMut(&mut Renewal, bool, &dyn Fn() -> Result<u64>) -> Result<Response>;
+
 const PENDING: &str = "renewal.json";
 const BLOCKED: &str = "receiver renewal recovery must complete before application traffic";
 
@@ -136,6 +143,8 @@ pub struct Renewal {
     config: Configuration,
     key: EcdsaKeyPair,
     attempt: Option<Attempt>,
+    #[cfg(test)]
+    exchange: Option<Box<TestExchange>>,
 }
 impl Renewal {
     pub fn open(base: &Path, endpoint: &str) -> Result<Self> {
@@ -156,6 +165,8 @@ impl Renewal {
             config,
             key,
             attempt,
+            #[cfg(test)]
+            exchange: None,
         };
         if renewal.attempt.is_some() {
             // Complete any durable local delivery before opening network traffic.
@@ -218,7 +229,38 @@ impl Renewal {
     pub fn renew(&mut self) -> Result<()> {
         self.renew_with_clock(&now)
     }
-    pub fn renew_with_clock(&mut self, clock: &dyn Fn() -> Result<u64>) -> Result<()> {
+    fn renew_with_clock(&mut self, clock: &dyn Fn() -> Result<u64>) -> Result<()> {
+        #[cfg(test)]
+        if let Some(mut exchange) = self.exchange.take() {
+            let result = self.renew_using(clock, &mut exchange);
+            self.exchange = Some(exchange);
+            return result;
+        }
+        self.renew_using(clock, &mut Self::exchange)
+    }
+    fn exchange(&mut self, begin: bool, clock: &dyn Fn() -> Result<u64>) -> Result<Response> {
+        let (_guard, mut connection) = self.connection(clock)?;
+        if begin {
+            let message = wire::Begin {
+                version: 1,
+                enrollment_id: self.config.enrollment_id.clone(),
+                credentials: self.credentials(clock()?)?,
+            };
+            connection
+                .post("/v1/renew/begin", &message)
+                .map(Response::Begun)
+        } else {
+            let finish = self.finish(&connection.exporter, clock()?)?;
+            connection
+                .post("/v1/renew/finish", &finish)
+                .map(Response::Delivered)
+        }
+    }
+    fn renew_using(
+        &mut self,
+        clock: &dyn Fn() -> Result<u64>,
+        exchange: &mut impl FnMut(&mut Self, bool, &dyn Fn() -> Result<u64>) -> Result<Response>,
+    ) -> Result<()> {
         if self.attempt.is_some() {
             self.reconcile_local()?;
         }
@@ -231,25 +273,14 @@ impl Renewal {
             return Ok(());
         }
         if !self.pending() {
-            let credentials = self.credentials(clock()?)?;
-            let message = wire::Begin {
-                version: 1,
-                enrollment_id: self.config.enrollment_id.clone(),
-                credentials,
-            };
-            let begun = {
-                let (_guard, mut connection) = self.connection(clock)?;
-                connection.post("/v1/renew/begin", &message)?
+            let Response::Begun(begun) = exchange(self, true, clock)? else {
+                return Err(ERROR.into());
             };
             self.prepare(begun, clock()?)?;
         }
-        let result = {
-            let (_guard, mut connection) = self.connection(clock)?;
-            let finish = self.finish(&connection.exporter, clock()?)?;
-            connection.post::<Delivered>("/v1/renew/finish", &finish)
-        };
-        match result {
-            Ok(delivery) => self.delivered_with_clock(&delivery, clock),
+        match exchange(self, false, clock) {
+            Ok(Response::Delivered(delivery)) => self.delivered_with_clock(&delivery, clock),
+            Ok(Response::Begun(_)) => Err(ERROR.into()),
             Err(error) => {
                 // A refused commit is indistinguishable from lost delivery.
                 // Reserve the one recovery on the next call; never resend commit.
@@ -327,7 +358,7 @@ impl Renewal {
         }])
     }
     /// Stage the random application key before any finish can be sent.
-    pub fn prepare(&mut self, begun: Begun, now: u64) -> Result<()> {
+    fn prepare(&mut self, begun: Begun, now: u64) -> Result<()> {
         self.expire(now)?;
         if self
             .attempt
@@ -369,7 +400,7 @@ impl Renewal {
     }
     /// A request's action is durable before dispatch. After uncertain recovery,
     /// refuse further delivery; the receiver permits only one recovery reservation.
-    pub fn finish(&mut self, exporter: &[u8; 32], now: u64) -> Result<wire::Finish> {
+    fn finish(&mut self, exporter: &[u8; 32], now: u64) -> Result<wire::Finish> {
         self.expire(now)?;
         let credentials = self.credentials(now)?;
         let a = self.attempt.as_mut().ok_or(ERROR)?;
@@ -430,7 +461,7 @@ impl Renewal {
         self.delivered(delivery, clock()?)
     }
     /// Verify the complete delivery, stage all files, then atomically select it.
-    pub fn delivered(&mut self, delivered: &Delivered, now: u64) -> Result<()> {
+    fn delivered(&mut self, delivered: &Delivered, now: u64) -> Result<()> {
         let a = self.attempt.as_ref().ok_or(ERROR)?;
         if !matches!(a.state, State::CommitReserved | State::RecoverReserved)
             || delivered.version != 1
@@ -605,7 +636,7 @@ impl Renewal {
         Ok(())
     }
     /// Reopening a verified, durable delivery never consumes another wire delivery.
-    pub fn reconcile(&mut self) -> Result<()> {
+    fn reconcile(&mut self) -> Result<()> {
         let a = self.attempt.as_mut().ok_or(ERROR)?;
         if self.dir.disabled()? {
             return Err(BLOCKED.into());
