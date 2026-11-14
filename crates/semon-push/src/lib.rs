@@ -665,15 +665,13 @@ impl Client {
             let answer = self.stop.run(route, move || {
                 let _lock = lock;
                 #[cfg(unix)]
-                let mut renewal = renewal
-                    .as_ref()
-                    .map(|r| r.lock().unwrap_or_else(|e| e.into_inner()));
-                #[cfg(unix)]
-                let (factory, token, dispatch_stop, generation) = if let Some(renewal) =
-                    renewal.as_mut()
-                {
-                    renewal.checkpoint()?;
-                    let selected = Client::with_http_builder(renewal.options(), move || builder())?;
+                let (factory, token, dispatch_stop, generation) = if let Some(renewal) = &renewal {
+                    let options = {
+                        let mut delivery = renewal.lock().unwrap_or_else(|e| e.into_inner());
+                        delivery.checkpoint()?;
+                        delivery.options().clone()
+                    };
+                    let selected = Client::with_http_builder(&options, move || builder())?;
                     let authority = selected.stop.authority.expect("enrolled authority");
                     let generation = authority.generation();
                     (
@@ -738,7 +736,8 @@ impl Client {
                 #[cfg(unix)]
                 drop(_delivery);
                 #[cfg(unix)]
-                if let (Some(renewal), Ok((status, _, _, hint))) = (renewal.as_mut(), &result) {
+                if let (Some(renewal), Ok((status, _, _, hint))) = (renewal.as_ref(), &result) {
+                    let mut renewal = renewal.lock().unwrap_or_else(|e| e.into_inner());
                     // Confirmation failure retains Installed for the next success;
                     // it must not discard an application acknowledgement.
                     let _ = renewal.response(generation, *status, *hint);

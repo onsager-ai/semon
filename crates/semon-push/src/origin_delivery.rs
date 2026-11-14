@@ -118,8 +118,9 @@ pub(crate) struct Delivery {
     options: PushOptions,
     watch: bool,
     schedule: Schedule,
+    in_flight: Option<std::sync::mpsc::Receiver<Result<()>>>,
     #[cfg(test)]
-    renew: Option<fn(&mut Renewal, u64) -> Result<()>>,
+    renew: Option<std::sync::Arc<dyn Fn(&mut Renewal, u64) -> Result<()> + Send + Sync>>,
     #[cfg(test)]
     notices: Vec<String>,
     #[cfg(test)]
@@ -140,6 +141,7 @@ impl Delivery {
             options: options.clone(),
             watch: false,
             schedule: Schedule::default(),
+            in_flight: None,
             #[cfg(test)]
             renew: None,
             #[cfg(test)]
@@ -161,12 +163,83 @@ impl Delivery {
             .map_err(|_| "system clock is before epoch".into())
     }
     pub(crate) fn checkpoint(&mut self) -> Result<()> {
+        let now = Self::clock()?;
         #[cfg(test)]
-        if let Some(now) = self.clock {
-            return self.checkpoint_at(now);
+        let now = self.clock.unwrap_or(now);
+        let completed = self
+            .in_flight
+            .as_ref()
+            .and_then(|worker| match worker.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("renewal worker stopped".into()))
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            });
+        if completed.is_some() {
+            self.in_flight = None;
         }
-        self.checkpoint_at(Self::clock()?)
+        let (config, credential) =
+            origin_custody::load_at(&self.base, Some(&self.options.url), now)?;
+        self.options.credential = credential;
+        let until = config.scope.valid_until;
+        // A running worker owns install.lock. Never wait for that lock or its
+        // network work; the selected valid credential remains usable.
+        let mut renewal = if self.in_flight.is_none() {
+            Renewal::open(&self.base, &self.options.url).ok()
+        } else {
+            None
+        };
+        let installed = renewal.as_ref().is_some_and(Renewal::awaiting_confirmation);
+        let attempt = self.in_flight.is_none()
+            && !installed
+            && self
+                .schedule
+                .attempt(until, now, renewal.as_ref().is_some_and(Renewal::pending));
+        let outcome = if completed.is_some() {
+            completed
+        } else if attempt && renewal.is_some() {
+            drop(renewal.take());
+            let base = self.base.clone();
+            let endpoint = self.options.url.clone();
+            let (answer, answers) = std::sync::mpsc::sync_channel(1);
+            #[cfg(test)]
+            let renew = self.renew.clone();
+            let worker = std::thread::Builder::new()
+                .name("semon-origin-renewal".into())
+                .spawn(move || {
+                    let result = Renewal::open(&base, &endpoint).and_then(|mut renewal| {
+                        #[cfg(test)]
+                        {
+                            match renew {
+                                Some(renew) => renew(&mut renewal, now),
+                                None => renewal.renew(),
+                            }
+                        }
+                        #[cfg(not(test))]
+                        {
+                            renewal.renew()
+                        }
+                    });
+                    // Release custody before advertising completion.
+                    let _ = answer.send(result);
+                });
+            match worker {
+                Ok(_) => {
+                    self.in_flight = Some(answers);
+                    Some(Ok(()))
+                }
+                Err(error) => Some(Err(error.to_string())),
+            }
+        } else {
+            completed
+        };
+        if let Some(notice) = self.schedule.outcome(until, now, outcome) {
+            self.emit(notice, until, now)?;
+        }
+        Ok(())
     }
+    #[cfg(test)]
     fn checkpoint_at(&mut self, now: u64) -> Result<()> {
         // Open reconciles durable delivery before constructing any application client.
         let mut renewal = match Renewal::open(&self.base, &self.options.url) {
@@ -194,7 +267,7 @@ impl Delivery {
             && self.schedule.attempt(until, now, renewal.pending());
         let result = if attempt {
             #[cfg(test)]
-            let result = match self.renew {
+            let result = match &self.renew {
                 Some(renew) => renew(&mut renewal, now),
                 None => renewal.renew(),
             };
@@ -379,7 +452,7 @@ mod tests {
         let f = Fixture::new(NOW + WINDOW - 1);
         let mut d = f.delivery();
         d.clock = Some(NOW);
-        d.renew = Some(|_, _| Err("offline".into()));
+        d.renew = Some(std::sync::Arc::new(|_, _| Err("offline".into())));
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -431,77 +504,88 @@ mod tests {
         assert_eq!(d.notices.len(), 1);
     }
     #[test]
-    fn real_https_application_traffic_survives_renewal_error() {
+    fn stalled_renewal_does_not_block_foreground_or_heartbeat_acknowledgements() {
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
         use std::{
             io::{BufRead, BufReader, Read, Write},
-            net::{TcpListener, TcpStream},
-            sync::{Arc, Mutex},
+            net::TcpListener,
+            sync::{Arc, Mutex, mpsc},
             time::{Duration, Instant},
         };
+        let timeout = Duration::from_secs(5);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let endpoint = format!("https://127.0.0.1:{}", address.port());
         let f = Fixture::endpoint(NOW + WINDOW - 1, &endpoint);
         let mut d = f.delivery_endpoint(&endpoint);
         d.clock = Some(NOW);
-        d.renew = Some(|_, _| Err("offline".into()));
-        listener.set_nonblocking(true).unwrap();
+        let (entered, started) = mpsc::sync_channel(1);
+        let (release, released) = mpsc::sync_channel(1);
+        let released = Mutex::new(released);
+        d.renew = Some(Arc::new(move |renewal, now| {
+            entered.send(()).unwrap();
+            released.lock().unwrap().recv_timeout(timeout).unwrap();
+            renewal.install_test_generation(now)
+        }));
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
         let pem = std::fs::read(fixture.join("test-cert.pem")).unwrap();
         let trust = reqwest::Certificate::from_pem(&pem).unwrap();
         let certificate = CertificateDer::from_pem_file(fixture.join("test-cert.pem")).unwrap();
         let key = PrivateKeyDer::from_pem_file(fixture.join("test-key.pem")).unwrap();
-        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .unwrap()
-        .with_no_client_auth()
-        .with_single_cert(vec![certificate], key)
-        .unwrap();
+        let config = Arc::new(
+            rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![certificate], key)
+            .unwrap(),
+        );
+        listener.set_nonblocking(true).unwrap();
+        let (foreground, foreground_started) = mpsc::sync_channel(1);
+        let (ack, ack_allowed) = mpsc::sync_channel(1);
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let socket: TcpStream = loop {
-                match listener.accept() {
-                    Ok((socket, _)) => break socket,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline);
-                        std::thread::yield_now();
+            let mut workers = Vec::new();
+            let ack_allowed = Arc::new(Mutex::new(ack_allowed));
+            for index in 0..3 {
+                let deadline = Instant::now() + timeout;
+                let socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline);
+                            std::thread::yield_now();
+                        }
+                        Err(error) => panic!("{error}"),
                     }
-                    Err(error) => panic!("{error}"),
-                }
-            };
-            socket
-                .set_read_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            socket
-                .set_write_timeout(Some(Duration::from_secs(5)))
-                .unwrap();
-            let connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
-            let mut stream = rustls::StreamOwned::new(connection, socket);
-            let mut reader = BufReader::new(&mut stream);
-            let mut head = String::new();
-            loop {
-                let mut line = String::new();
-                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
-                if line == "\r\n" {
-                    break;
-                }
-                head.push_str(&line);
+                };
+                let config = Arc::clone(&config);
+                let foreground = foreground.clone();
+                let ack = ack.clone();
+                let ack_allowed = Arc::clone(&ack_allowed);
+                workers.push(std::thread::spawn(move || {
+                    socket.set_read_timeout(Some(timeout)).unwrap();
+                    socket.set_write_timeout(Some(timeout)).unwrap();
+                    let connection = rustls::ServerConnection::new(config).unwrap();
+                    let mut stream = rustls::StreamOwned::new(connection, socket);
+                    let mut reader = BufReader::new(&mut stream);
+                    let mut head = String::new();
+                    loop { let mut line = String::new(); assert_ne!(reader.read_line(&mut line).unwrap(), 0); if line == "\r\n" { break; } head.push_str(&line); }
+                    assert_eq!(head.to_ascii_lowercase().contains("authorization: bearer old-bearer"), index < 2);
+                    let mut body = [0; 2]; reader.read_exact(&mut body).unwrap();
+                    drop(reader);
+                    if index == 0 {
+                        foreground.send(()).unwrap();
+                        ack_allowed.lock().unwrap().recv_timeout(timeout).unwrap();
+                    } else if index == 1 { ack.send(()).unwrap(); }
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nSemon-Renewal: due\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").unwrap();
+                    stream.flush().unwrap();
+                }));
             }
-            assert!(
-                head.to_ascii_lowercase()
-                    .contains("authorization: bearer old-bearer")
-            );
-            let mut body = [0; 2];
-            reader.read_exact(&mut body).unwrap();
-            assert_eq!(&body, b"{}");
-            drop(reader);
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
-                .unwrap();
-            stream.flush().unwrap();
+            for worker in workers {
+                worker.join().unwrap();
+            }
         });
         let mut client = crate::Client::with_http_builder(d.options(), move || {
             reqwest::blocking::Client::builder()
@@ -509,22 +593,75 @@ mod tests {
                 .add_root_certificate(trust.clone())
         })
         .unwrap();
-        // Explicit test trust accepts the synthetic certificate with normal
-        // hostname verification. Production retains public WebPKI roots.
         let delivery = Arc::new(Mutex::new(d));
         client.renewal = Some(Arc::clone(&delivery));
+        let client = Arc::new(client);
+        delivery.lock().unwrap().checkpoint().unwrap();
+        started.recv_timeout(timeout).unwrap();
+        let (answers, answered) = mpsc::channel();
+        let foreground_client = Arc::clone(&client);
+        let foreground_answer = answers.clone();
+        let upload = std::thread::spawn(move || {
+            foreground_answer
+                .send(foreground_client.post("facts", "{}".into()))
+                .unwrap();
+        });
+        foreground_started.recv_timeout(timeout).unwrap();
+        let heartbeat_client = Arc::clone(&client);
+        let heartbeat = std::thread::spawn(move || {
+            answers
+                .send(heartbeat_client.post("status", "{}".into()))
+                .unwrap();
+        });
+        for _ in 0..2 {
+            assert_eq!(
+                answered.recv_timeout(timeout).unwrap().unwrap(),
+                (200, "{}".into())
+            );
+        }
+        // Both acknowledgements returned while renewal still owns install.lock.
+        assert!(delivery.lock().unwrap().in_flight.is_some());
+        upload.join().unwrap();
+        heartbeat.join().unwrap();
+        release.send(()).unwrap();
+        let deadline = Instant::now() + timeout;
+        loop {
+            let mut d = delivery.lock().unwrap();
+            d.checkpoint().unwrap();
+            if d.in_flight.is_none() {
+                break;
+            }
+            drop(d);
+            assert!(Instant::now() < deadline);
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            origin_custody::load_at(&f.0, None, NOW)
+                .unwrap()
+                .0
+                .generation,
+            2
+        );
         assert_eq!(
             client.post("facts", "{}".into()).unwrap(),
             (200, "{}".into())
         );
+        assert!(
+            !Renewal::open(&f.0, &endpoint)
+                .unwrap()
+                .awaiting_confirmation()
+        );
+        assert_eq!(
+            delivery.lock().unwrap().notices.last().unwrap(),
+            &format!("Receiver 127.0.0.1:{} credentials renewed.", address.port())
+        );
         server.join().unwrap();
-        assert_eq!(delivery.lock().unwrap().notices.len(), 1);
     }
     #[test]
     fn failed_renewal_keeps_valid_application_authority_and_exact_notice() {
         let f = Fixture::new(NOW + WINDOW - 1);
         let mut d = f.delivery();
-        d.renew = Some(|_, _| Err("offline".into()));
+        d.renew = Some(std::sync::Arc::new(|_, _| Err("offline".into())));
         d.checkpoint_at(NOW).unwrap();
         assert_eq!(d.options.credential.token().unwrap().expose(), "old-bearer");
         let Credential::Enrolled { authority, .. } = &d.options.credential else {
@@ -554,7 +691,7 @@ mod tests {
         let f = Fixture::new(NOW + WINDOW);
         let mut d = f.delivery();
         d.watch(true);
-        d.renew = Some(Renewal::install_test_generation);
+        d.renew = Some(std::sync::Arc::new(Renewal::install_test_generation));
         let Credential::Enrolled { authority, .. } = &d.options.credential else {
             panic!("enrolled");
         };
@@ -602,7 +739,7 @@ mod tests {
     fn authenticated_hint_renews_outside_local_window_and_forged_hint_does_not() {
         let f = Fixture::new(NOW + WINDOW * 2);
         let mut d = f.delivery();
-        d.renew = Some(Renewal::install_test_generation);
+        d.renew = Some(std::sync::Arc::new(Renewal::install_test_generation));
         d.response(1, 401, true).unwrap();
         d.checkpoint_at(NOW).unwrap();
         assert_eq!(
@@ -651,7 +788,7 @@ mod tests {
             .unwrap()
             .commit()
             .unwrap();
-        d.renew = Some(Renewal::install_test_generation);
+        d.renew = Some(std::sync::Arc::new(Renewal::install_test_generation));
         assert!(d.checkpoint_at(NOW).is_err());
         assert!(origin_custody::load_at(&base, None, NOW).is_err());
     }
