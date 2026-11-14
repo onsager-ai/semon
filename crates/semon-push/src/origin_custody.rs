@@ -16,6 +16,8 @@ use zeroize::Zeroizing;
 type Result<T> = std::result::Result<T, String>;
 const FILE_CAP: usize = 4 * 1024 * 1024;
 const ERROR: &str = "invalid or unreadable origin enrollment custody";
+#[path = "origin_renewal.rs"]
+pub mod renewal;
 #[cfg(test)]
 #[path = "origin_custody_tests.rs"]
 mod tests;
@@ -24,6 +26,7 @@ mod tests;
 #[serde(deny_unknown_fields)]
 pub struct Configuration {
     pub version: u32,
+    pub generation: u64,
     pub endpoint: String,
     pub receiver_id: String,
     pub enrollment_id: String,
@@ -250,7 +253,8 @@ pub(crate) fn install_at(
         "stage-{}",
         crate::enrollment::random_id().map_err(|_| ERROR)?
     );
-    let dir = root.create_child(&stage)?;
+    let endpoint_dir = root.create_child(&stage)?;
+    let dir = endpoint_dir.create_child("generation-1")?;
     let scope: ActivationInput =
         serde_json::from_slice(&serde_json::to_vec(scope).map_err(|_| ERROR)?)
             .map_err(|_| ERROR)?;
@@ -262,7 +266,8 @@ pub(crate) fn install_at(
     };
     let consent_bytes = serde_json::to_vec(&consent).map_err(|_| ERROR)?;
     let configuration = Configuration {
-        version: 1,
+        version: 2,
+        generation: 1,
         endpoint: endpoint.into(),
         receiver_id: scope.receiver_id.clone(),
         enrollment_id: delivery.enrollment_id.clone(),
@@ -302,6 +307,8 @@ pub(crate) fn install_at(
     }
     dir.write("enrollment.json", &signed_bytes)?;
     dir.checked.sync().map_err(|_| ERROR)?;
+    endpoint_dir.write("selected", b"generation-1")?;
+    endpoint_dir.checked.sync().map_err(|_| ERROR)?;
     let from = std::ffi::CString::new(stage).map_err(|_| ERROR)?;
     let to = std::ffi::CString::new(name.clone()).map_err(|_| ERROR)?;
     // SAFETY: both names are single components under the locked private fd.
@@ -374,7 +381,12 @@ pub(crate) fn load_at(
     if dir.disabled()? {
         return Err("receiver is disconnected on this machine; run semon connect --to URL".into());
     }
+    renewal::ready(&dir)?;
+    let dir = selected_directory(&dir)?;
     let (config, key) = read_configuration(&dir, &name)?;
+    if now >= config.scope.valid_until {
+        return Err("receiver credentials expired; run semon connect --to URL".into());
+    }
     let private = dir.read("origin-key.pk8")?;
     let secret = dir.read("mirror-push.secret")?;
     if crate::wire::sha256_hex(&secret) != config.credential_sha256 {
@@ -410,11 +422,24 @@ pub(crate) fn load_at(
     Ok((config, credential))
 }
 
+fn selected_directory(dir: &Directory) -> Result<Directory> {
+    let selected = dir.read("selected")?;
+    let selected = std::str::from_utf8(&selected).map_err(|_| ERROR)?;
+    if !selected.starts_with("generation-")
+        || selected[11..].is_empty()
+        || !selected[11..].bytes().all(|b| b.is_ascii_digit())
+    {
+        return Err(ERROR.into());
+    }
+    dir.child(selected)
+}
+
 fn read_configuration(dir: &Directory, name: &str) -> Result<(Configuration, EcdsaKeyPair)> {
     let signed: Signed =
         serde_json::from_slice(&dir.read("enrollment.json")?).map_err(|_| ERROR)?;
     let config = signed.configuration;
-    if config.version != 1
+    if config.version != 2
+        || config.generation == 0
         || config.server_roots != "public_webpki"
         || config.credential_file != "mirror-push.secret"
         || config.private_key_file != "origin-key.pk8"
@@ -573,7 +598,11 @@ impl Disconnect {
             return Err(unknown());
         }
         let dir = root.child(&name).map_err(|_| DISCONNECT_UNCERTAIN)?;
-        read_configuration(&dir, &name).map_err(|_| DISCONNECT_UNCERTAIN)?;
+        read_configuration(
+            &selected_directory(&dir).map_err(|_| DISCONNECT_UNCERTAIN)?,
+            &name,
+        )
+        .map_err(|_| DISCONNECT_UNCERTAIN)?;
         let disabled = dir.disabled().map_err(|_| DISCONNECT_UNCERTAIN)?;
         Ok(Self {
             _lock: lock,
@@ -637,6 +666,7 @@ pub fn consent(base: &Path, receiver: &str, config: &Configuration) -> Result<Ve
         return Err(ERROR.into());
     }
     let dir = Directory::open(base)?.child(receiver)?;
+    let dir = selected_directory(&dir)?;
     let bytes = dir.read("source-consent.json")?;
     if crate::wire::sha256_hex(&bytes) != config.consent_sha256 {
         return Err(ERROR.into());

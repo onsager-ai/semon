@@ -37,7 +37,7 @@ impl Fixture {
                 binding: Binding::Inapplicable,
                 kinds: vec![(Kind::MirrorPush, false)],
                 client_certificate_pins: vec![],
-                valid_until: 1000,
+                valid_until: 4_000_000_000,
             },
             &Activated {
                 version: 1,
@@ -76,7 +76,7 @@ fn atomic_custody_integrity_permissions_and_secret_debug() {
         "source-consent.json",
     ] {
         assert_eq!(
-            fs::metadata(f.0.join(&name).join(file))
+            fs::metadata(f.0.join(&name).join("generation-1").join(file))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -84,14 +84,17 @@ fn atomic_custody_integrity_permissions_and_secret_debug() {
             0o600
         );
     }
-    let path = f.0.join(&name).join("source-consent.json");
+    let path =
+        f.0.join(&name)
+            .join("generation-1")
+            .join("source-consent.json");
     let bytes = fs::read(&path).unwrap();
     let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     value["sources"] = serde_json::json!(["/native/unapproved.jsonl"]);
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
     assert!(consent(&f.0, &name, &config).is_err());
     fs::write(&path, bytes).unwrap();
-    let path = f.0.join(&name).join("enrollment.json");
+    let path = f.0.join(&name).join("generation-1").join("enrollment.json");
     let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     value["configuration"]["endpoint"] = "https://attacker.example:443".into();
     fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
@@ -229,11 +232,14 @@ fn staged_credentials_are_never_a_half_installed_enrollment() {
 fn symlink_and_world_readable_custody_refuse() {
     let f = Fixture::new();
     let name = f.install();
-    let secret = f.0.join(&name).join("mirror-push.secret");
+    let secret =
+        f.0.join(&name)
+            .join("generation-1")
+            .join("mirror-push.secret");
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(load(&f.0, None).is_err());
     fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
-    let moved = f.0.join(&name).join("moved.secret");
+    let moved = f.0.join(&name).join("generation-1").join("moved.secret");
     fs::rename(&secret, &moved).unwrap();
     symlink(&moved, &secret).unwrap();
     assert!(load(&f.0, None).is_err());
@@ -379,7 +385,7 @@ fn disconnect_preserves_custody_cancels_delivery_and_is_state_idempotent() {
     ];
     let before: Vec<_> = files
         .iter()
-        .map(|p| fs::read(f.0.join(&name).join(p)).unwrap())
+        .map(|p| fs::read(f.0.join(&name).join("generation-1").join(p)).unwrap())
         .collect();
     assert!(!stop.is_stopped());
     // Dropping the unconfirmed operation changes nothing.
@@ -395,7 +401,10 @@ fn disconnect_preserves_custody_cancels_delivery_and_is_state_idempotent() {
     assert!(operation.is_disconnected());
     operation.commit().unwrap();
     for (file, bytes) in files.iter().zip(before) {
-        assert_eq!(fs::read(f.0.join(&name).join(file)).unwrap(), bytes);
+        assert_eq!(
+            fs::read(f.0.join(&name).join("generation-1").join(file)).unwrap(),
+            bytes
+        );
     }
     assert_eq!(
         consent(&f.0, &name, &config).unwrap(),
