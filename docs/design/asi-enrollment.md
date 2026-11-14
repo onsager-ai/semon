@@ -1378,8 +1378,8 @@ integration slices; docs-only CI proves none of those runtime guarantees.
 
 Origin PR3.2c status (part of #593): `connect --to URL [--machine M]` uses
 public-CA TLS 1.3 and a non-echoing controlling terminal, followed by explicit
-mirror-only trust/source approval. The URL receiver selector uses the same pairing normalization for
-connect, push and disconnect, with
+mirror-only trust/source approval. The URL receiver selector uses the same pairing
+normalization for connect, push and disconnect, with
 `push [--receiver URL] [--watch]` under the contract above. Push consumes
 stored enrollment; the superseded `--to`/`--token-file` push CLI is removed.
 Custody is `$XDG_CONFIG_HOME/semon/origin/<sha256-canonical-endpoint>/` (default
@@ -1392,9 +1392,9 @@ local channel/trust use without removing any of those files. Disconnect publishe
 that marker under `install.lock`; fresh loads and running Push stop checks refuse
 disabled or unreadable state. Existing blocking HTTP work can finish after its
 waiter stops under the existing Push cancellation contract; no subsequent request
-is scheduled. Renewal installation/recovery is PR4.3b. Interrupted staging is retained, never
-silently deleted or loaded. No credential is written before receiver confirmation
-and approval delivery. `install.lock` serializes publication. Receiver selection
+is scheduled. Renewal installation/recovery is PR4.3b. Interrupted staging is
+retained, never silently deleted or loaded. No credential is written before
+receiver confirmation and approval delivery. `install.lock` serializes publication. Receiver selection
 accepts the enrolled HTTPS URL; the endpoint hash stays internal. An omitted URL
 requires one enrolled receiver.
 `connect::producer_admission` calls the explicit library initializer for requested

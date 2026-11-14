@@ -14,12 +14,18 @@ fn parse_connect_args(mut arguments: impl Iterator<Item = String>) -> Result<Com
     let mut require_client_certificate = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--to" | "--receiver" => endpoint = Some(arguments.next().ok_or("--to requires URL")?),
+            "--to" | "--receiver" => {
+                endpoint = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| format!("{argument} requires URL"))?,
+                );
+            }
             "--require-client-certificate" => require_client_certificate = true,
             "--machine" => machine = Some(arguments.next().ok_or("--machine requires NAME")?),
             "-h" | "--help" => {
                 return Err(
-                    "Usage: semon connect --to URL [--machine NAME] [--require-client-certificate]"
+                    "Usage: semon connect (--to URL | --receiver URL) [--machine NAME] [--require-client-certificate]"
                         .into(),
                 );
             }
@@ -2454,7 +2460,7 @@ fn usage() -> String {
          The query tools plus local durable asi_add (with asi-query) over Model Context Protocol on stdin and stdout; no listener. Queries read\n\
          the log files modified within the window, --since (30d by default), or all of them with --all.\n\
          \n\
-         Usage: semon connect --to URL [--machine NAME] [--require-client-certificate]\n\
+         Usage: semon connect (--to URL | --receiver URL) [--machine NAME] [--require-client-certificate]\n\
          Usage: semon disconnect --receiver URL\n\
          Disables this machine's local receiver access after terminal confirmation; receiver access is not revoked.\n\
          \n\

@@ -168,6 +168,27 @@ fn disconnect_cancel_confirm_repeat_unknown_and_no_terminal() {
     assert!(tty.is_empty(), "repeat must not prompt: {tty}");
     assert!(output.stderr.is_empty());
     assert!(semon_push::origin_custody::load(&base, Some(URL)).is_err());
+    for url in ["https://RECEIVER.example/", URL] {
+        let output = Command::new(env!("CARGO_BIN_EXE_semon"))
+            .args(["push", "--receiver", url])
+            .env("XDG_CONFIG_HOME", temp.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        assert!(text(&output.stderr).contains("receiver is disconnected"));
+    }
+    let marker = base
+        .join(semon_push::wire::sha256_hex(URL.as_bytes()))
+        .join("disabled");
+    std::fs::write(marker, b"corrupt").unwrap();
+    let (output, tty) = terminal(command(temp.path(), URL), Some(b"yes\n"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(tty.is_empty(), "unreadable state must not prompt");
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        text(&output.stderr),
+        "semon: disconnect could not be confirmed; rerun the same command to check its earlier outcome before retrying.\n"
+    );
 }
 
 #[test]

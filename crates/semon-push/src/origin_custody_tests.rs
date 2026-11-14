@@ -19,6 +19,9 @@ impl Fixture {
             .unwrap()
     }
     fn install_sources(&self, sources: &[PathBuf]) -> Result<String> {
+        self.install_endpoint("https://receiver.example:443", sources)
+    }
+    fn install_endpoint(&self, endpoint: &str, sources: &[PathBuf]) -> Result<String> {
         let private = EcdsaKeyPair::generate_pkcs8(
             &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
             &ring::rand::SystemRandom::new(),
@@ -26,7 +29,7 @@ impl Fixture {
         .unwrap();
         install(
             &self.0,
-            "https://receiver.example:443",
+            endpoint,
             "laptop",
             &ActivationInput {
                 receiver_id: "receiver".into(),
@@ -343,6 +346,25 @@ fn url_selector_uses_pairing_normalization_and_never_accepts_hashes() {
 }
 
 #[test]
+fn ipv6_url_selects_the_same_enrolled_custody_for_push_and_disconnect() {
+    let f = Fixture::new();
+    let endpoint = receiver_endpoint("https://[2001:DB8::1]/").unwrap();
+    let name = f.install_endpoint(&endpoint, &[]).unwrap();
+    assert_eq!(name, crate::wire::sha256_hex(b"https://[2001:db8::1]:443"));
+    for url in ["https://[2001:DB8::1]", "https://[2001:db8::1]:443/"] {
+        let (config, _) = load(&f.0, Some(url)).unwrap();
+        assert_eq!(config.endpoint, endpoint);
+        assert!(!Disconnect::open(&f.0, url).unwrap().is_disconnected());
+    }
+    assert!(load(&f.0, Some("https://[2001:db8::1]:8735")).is_err());
+    Disconnect::open(&f.0, "https://[2001:DB8::1]/")
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert!(load(&f.0, Some(&endpoint)).is_err());
+}
+
+#[test]
 fn disconnect_preserves_custody_cancels_delivery_and_is_state_idempotent() {
     let f = Fixture::new();
     let name = f.install();
@@ -442,4 +464,37 @@ fn disconnect_unknown_and_insecure_state_fail_closed() {
         DISCONNECT_UNCERTAIN
     );
     assert!(load(&f.0, None).is_err());
+}
+
+#[test]
+fn disconnect_stops_waiting_for_active_delivery_without_new_work() {
+    let f = Fixture::new();
+    f.install();
+    let (config, _) = load(&f.0, None).unwrap();
+    let stop = crate::Stop::new().with_authority(Authority::new(&f.0, &config).unwrap());
+    let waiting = stop.clone();
+    let (ready, started) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        waiting.run("delivery", move || {
+            ready.send(()).unwrap();
+            released.recv().unwrap();
+            7
+        })
+    });
+    started.recv().unwrap();
+    Disconnect::open(&f.0, "https://receiver.example")
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert_eq!(worker.join().unwrap().unwrap(), None);
+    assert!(stop.is_stopped());
+    assert_eq!(
+        stop.run("later-delivery", || panic!(
+            "disabled delivery must not start"
+        ))
+        .unwrap(),
+        None::<()>
+    );
+    release.send(()).unwrap();
 }

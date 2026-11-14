@@ -125,16 +125,16 @@ impl Directory {
         Ok(InstallLock(lock))
     }
     fn disabled(&self) -> Result<bool> {
-        if !self
+        let Some(file) = self
             .checked
-            .names()
+            .open_optional_file(Path::new("disabled"), libc::O_RDONLY)
             .map_err(|_| ERROR)?
-            .iter()
-            .any(|p| p == Path::new("disabled"))
-        {
+        else {
             return Ok(false);
-        }
-        if self.read("disabled")?.as_slice() != b"disabled\n" {
+        };
+        let mut bytes = Vec::new();
+        file.take(10).read_to_end(&mut bytes).map_err(|_| ERROR)?;
+        if bytes != b"disabled\n" {
             return Err(ERROR.into());
         }
         Ok(true)
