@@ -230,6 +230,16 @@ impl Cycle {
 mod tests {
     use super::*;
     #[test]
+    fn one_shot_notice_uses_its_exact_retry_guidance() {
+        let mut schedule = Schedule::default();
+        assert_eq!(
+            schedule
+                .failure(0, DAY, false, "host:443", "https://host:443")
+                .unwrap(),
+            "Could not renew receiver host:443 credentials; 1 days remain. Check the receiver is reachable, then run semon push --receiver https://host:443 again."
+        );
+    }
+    #[test]
     fn timer_boundary_retry_and_notice_cadence() {
         let mut schedule = Schedule::default();
         let expiry = 40 * DAY;

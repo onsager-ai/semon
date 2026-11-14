@@ -5,8 +5,9 @@ with the [accepted operator journey](asi-operator-journey.md) and owner decision
 Pairing, mirror-only origin connect and client-certificate issuance are implemented
 at base `f167df6dbeaeb32e88cace13f48f0b843b4598bf`. #669/#671/#673 shipped
 receiver renewal, disconnect and origin staging libraries. The idempotent renewal
-amendment below supersedes their delivery-budget model; simplification, push/watch
-integration and independent technical safety review remain pending. PM accepted
+amendment below supersedes their delivery-budget model; #677 shipped its
+simplification. Push/watch timer integration is implemented in the current draft;
+independent technical safety review remains pending. PM accepted
 the guarded replacement ceremony, last-kind revoke refusal and live-state
 compaction model below. Operator wording remains
 subject to the separate UI/UX Manager review. This document does not lift PM-owned implementation holds
@@ -1356,8 +1357,11 @@ application key and old selected generation for identical retries. Restart may
 publish a complete verified staged generation after the identity/generation/disabled
 recheck; otherwise valid selected custody stays usable. Keep incomplete staging
 inactive and retained generations out of fallback selection. Dispatch/delivery use
-fresh clock values. Push/watch timer scheduling and notices remain follow-up;
-automatic renewal is not yet wired to the CLI.
+fresh clock values. Enrolled push/watch now own a background renewal timer,
+independent of application requests and file events, with injected-clock scheduling,
+minute-bounded retries and the notices specified above. Application workers report
+successful selected-generation use; the renewal worker durably confirms it before
+printing the renewed notice. Plain-HTTP mirror pushes do not enter this path.
 `connect::producer_admission` calls the explicit library initializer for requested
 analytics_publish/body_channel kinds before pairing or network activity. It passes
 no expected binding until enrollment supplies one. Initialization creates or reuses

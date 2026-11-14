@@ -682,8 +682,53 @@ fn idle_scheduler_recovers_install_and_notices_only_confirmed_first_use() {
     authority.application_success(1);
     cycle.tick(&f.0, &|| Ok(NOW + 60), &mut |line| lines.push(line));
     assert!(lines.is_empty());
-    authority.application_success(2);
+    // An actual successful application request selects generation 2 and reports
+    // its authenticated use to the same Authority shared with the scheduler.
+    let (_, credential) = load_at(&f.0, None, NOW).unwrap();
+    let crate::Credential::Enrolled {
+        token,
+        sources,
+        identity,
+        ..
+    } = credential
+    else {
+        panic!()
+    };
+    let credential = crate::Credential::Enrolled {
+        token,
+        sources,
+        identity,
+        authority: authority.clone(),
+    };
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let options = crate::PushOptions {
+        url: format!("http://{}", server.server_addr()),
+        credential,
+        sessions: crate::Options::default(),
+        state: f.0.join("push.json"),
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let application = std::thread::spawn(move || {
+        let client = crate::Client::new(&options).unwrap();
+        tx.send(client.post("facts", "{}".into()).is_ok()).unwrap();
+    });
+    let request = server
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    request
+        .respond(tiny_http::Response::from_string("{}"))
+        .unwrap();
+    assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap());
+    application.join().unwrap();
+    FAULT.with(|fault| *fault.borrow_mut() = Some(("before-rename", 0)));
     cycle.tick(&f.0, &|| Ok(NOW + 120), &mut |line| lines.push(line));
+    assert!(
+        lines.is_empty(),
+        "uncertain durable confirmation cannot announce success"
+    );
+    FAULT.with(|fault| *fault.borrow_mut() = None);
+    cycle.tick(&f.0, &|| Ok(NOW + 121), &mut |line| lines.push(line));
     assert_eq!(
         lines,
         ["Receiver receiver.example:443 credentials renewed."]
