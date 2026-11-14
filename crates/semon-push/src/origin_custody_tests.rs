@@ -409,18 +409,23 @@ fn disconnect_wins_install_lock_against_concurrent_publication() {
     f.install();
     let operation = Disconnect::open(&f.0, "https://receiver.example").unwrap();
     let base = f.0.clone();
+    let (finished, completed) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         // A delivery already prepared before disconnect cannot obtain the install lock.
         let other = Fixture(base);
         let result = other.install_sources(&[]);
         // The parent retains ownership of fixture cleanup.
         std::mem::forget(other);
-        result
+        finished.send(result).unwrap();
     });
     assert_eq!(
-        worker.join().unwrap().unwrap_err(),
+        completed
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .unwrap_err(),
         "origin custody is in use"
     );
+    worker.join().unwrap();
     operation.commit().unwrap();
     // A delayed installation cannot overwrite the disabled selection, either.
     assert!(f.install_sources(&[]).is_err());
@@ -475,14 +480,16 @@ fn disconnect_stops_waiting_for_active_delivery_without_new_work() {
     let waiting = stop.clone();
     let (ready, started) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel();
+    let (finished, completed) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
-        waiting.run("delivery", move || {
+        let result = waiting.run("delivery", move || {
             ready.send(()).unwrap();
             released
                 .recv_timeout(std::time::Duration::from_secs(15))
                 .unwrap();
             7
-        })
+        });
+        finished.send(result).unwrap();
     });
     started
         .recv_timeout(std::time::Duration::from_secs(10))
@@ -491,7 +498,14 @@ fn disconnect_stops_waiting_for_active_delivery_without_new_work() {
         .unwrap()
         .commit()
         .unwrap();
-    assert_eq!(worker.join().unwrap().unwrap(), None);
+    assert_eq!(
+        completed
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap(),
+        None
+    );
+    worker.join().unwrap();
     assert!(stop.is_stopped());
     assert_eq!(
         stop.run("later-delivery", || panic!(
@@ -620,4 +634,43 @@ fn disconnect_aborts_slow_upload_and_drains_transport_before_success() {
     upload.join().unwrap();
     disconnect.join().unwrap();
     server.join().unwrap();
+}
+
+#[test]
+fn disconnect_success_waits_for_existing_delivery_guard() {
+    use std::time::{Duration, Instant};
+    let f = Fixture::new();
+    f.install();
+    let (_, credential) = load(&f.0, None).unwrap();
+    let crate::Credential::Enrolled { authority, .. } = credential else {
+        panic!("enrolled authority required")
+    };
+    let delivery = authority.delivery().unwrap();
+    let base = f.0.clone();
+    let (finished, completed) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        finished
+            .send(
+                Disconnect::open(&base, "https://receiver.example")
+                    .unwrap()
+                    .commit(),
+            )
+            .unwrap()
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while authority.is_active() {
+        assert!(Instant::now() < deadline, "disabled publication timed out");
+        std::thread::yield_now();
+    }
+    assert!(matches!(
+        completed.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    drop(delivery);
+    completed
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    worker.join().unwrap();
+    assert!(authority.delivery().is_err());
 }

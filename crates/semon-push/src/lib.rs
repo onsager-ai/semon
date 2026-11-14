@@ -462,7 +462,7 @@ impl Read for UploadBody {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         if self.stop.is_stopped() {
             return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
+                io::ErrorKind::ConnectionAborted,
                 "delivery stopped",
             ));
         }
@@ -598,10 +598,9 @@ impl Client {
         self
     }
 
-    /// One request to the receiver, made on a thread of its own so that a
-    /// stop doesn't wait for it (up to the 120 s timeout). A request a stop
-    /// leaves behind finishes there, holding the state lock (see
-    /// [`StateLock`]), and its answer is dropped.
+    /// Each request rechecks enrolled authority at dispatch and between upload
+    /// chunks. Its worker retains state and delivery locks until HTTP ends;
+    /// disconnect drains delivery locks before reporting success.
     fn post(&self, route: &str, body: String) -> std::result::Result<(u16, String), Failure> {
         self.post_wait(route, body, |delay| self.stop.sleep(delay))
     }
