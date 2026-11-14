@@ -626,7 +626,7 @@ impl Client {
         let mut retries = 0;
         loop {
             let factory = Arc::clone(&self.http);
-            let url = self.url.clone();
+            let request_url = format!("{}/v1/mirror/{route}", self.url);
             let token = self.token.clone();
             let body = body.clone();
             let lock = self.lock.clone();
@@ -649,7 +649,7 @@ impl Client {
                 // private reqwest runtime before the guard can be released.
                 let http = factory()?;
                 let request = http
-                    .post(format!("{}/v1/mirror/{route}", url))
+                    .post(request_url)
                     .bearer_auth(token.expose())
                     .header("content-type", "application/json")
                     .body(reqwest::blocking::Body::sized(
