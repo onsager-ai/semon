@@ -1,29 +1,69 @@
 # ASI operator journey
 
-Status: **accepted operator UX decisions; implementation and protocol review
-pending** (owner decisions relayed by the PM on 2026-11-11/12).
-Part of #549. The four-action, single-owner-first target remains approved. PAKE
-remains the target, but no maintained PAKE library passed review; slice 4a is
-building the high-entropy one-use invitation first. Its protected transfer carries
-the receiver pin. No separate receiver identity check is added. Confirmed-at-pairing
-P1 and automatic renewal under valid trust remain settled; protocol and technical
-safety reviews remain required. #634 and #635 are merged; slice 4a has started.
-This status does not claim the remaining PM-owned holds are lifted.
+Status: **current journey amended by the owner 2026-11-14**.
+[Centralized ASI](asi-centralized.md) owns the architecture, custody and current
+four-action target. [Enrollment](asi-enrollment.md) owns shipped public_tls
+pairing and idempotent renewal. Low friction, easy setup and easy daily use are
+primary factors. The centralized target is planned, not a shipped end-to-end flow.
 
-[ASI direction](asi-direction.md) owns product scope; [federation](asi-federation.md)
-owns accepted D1–D8. [Store](asi-store.md), [query](asi-query.md) and
-[governance](asi-governance-api.md) describe delivered foundations and remaining
-integration. Semon works without T3. No composer, control, SSH, Hub deployment or
-transcript redesign is proposed here.
+## Current single-owner journey (2026-11-14)
 
-Current baseline: main `194e600a6`, including journey #639 (`e701269`), enrollment
-#634 (`2fd6aa1`) and assertion/audit library #635. The current enrollment contract
-is [asi-enrollment.md](asi-enrollment.md); implementation and protocol review remain
-pending. These merges do not provide a functioning receiver onboarding flow.
-The [body-channel proposal #632](https://github.com/onsager-ai/semon/pull/632)
-consumes the same enrollment as publication; it adds no second enrollment.
-The historical inventory below records the pre-reconciliation #634 proposal at
-`0757b085d` and main `649a8f130`, not the updated enrollment contract.
+The receiver is the durable custodian of selected redacted native logs. It indexes
+and materializes received sessions and runs analytics/SQL/search/transcripts
+locally. Origins authorize export once through pairing plus source consent;
+receiver reads use local authorization/audit and do not need an online origin.
+Hub remains body-free with tokenized paths. [Central C1/M/I](asi-centralized.md#decision-trace).
+
+After installation and endpoint reachability, count four setup actions:
+
+| Action | Target behavior | Trace |
+| --- | --- | --- |
+| 1 | One receiver command starts receive, received-machine indexing/ASI materialization and the authenticated loopback Viewer. Exact spelling remains unspecified. | C4 |
+| 2 | Origin runs `semon connect`. | C4/M |
+| 3 | Enter the receiver code in the trusted origin prompt. | C4/C5/M |
+| 4 | One combined approval of receiver trust, durable custody and selected sources; allow narrowing within that interaction. Push then starts automatically. | C1/C4/M |
+
+Two long-running processes remain: origin push and receiver. Unattended service
+install is an explicit, counted opt-in. Installation, DNS/firewall/TLS setup when
+needed, browser use and indexing waits must be reported separately. A prompt is
+an action even inside a command. [C4]
+
+Today there are seven setup actions: receiver enrollment command, connect command,
+code entry, source-selection response, approval, separate push command and separate
+Viewer command. The [README](../../README.md#receive-pushes-from-your-other-machines)
+and [`connect_terminal.rs`](../../crates/semon-cli/src/connect_terminal.rs) show
+that baseline; they do not deliver the target. [C4/M]
+
+### Current P1 custody summary
+
+Replace the former P1 “no raw replica”/online-cache wording with explicit approval
+that this receiver stores the selected redacted native session text, including
+private/work material and disclosed names/paths, and reads it locally while the
+origin is offline. Preserve separately persisted consent, source narrowing and
+explicit approval for future sources. Declining keeps sources local. Redaction is
+best effort. Own-machine reads have no zero-findings scan gate; consent grants no
+Hub body or hosted-model egress. [C1/C5/M/I]
+
+Recommend receiver full-disk encryption plus encrypted backups. No app-level
+encryption or blocking setup check; keep mode-0600 files and mode-0700 directories.
+The code uses shipped public-CA TLS pairing, not the rejected 71-character pinned
+invitation removed by #680. Private-root/LAN pairing was deferred by the owner on
+2026-11-14. Preserve automatic renewal under enrolled trust and explicit recovery
+for loss/compromise. [C3/C5/M]
+
+Duplicate accounting, stable received namespace binding, storage/retention beyond
+today's cap and readers beyond the loopback owner remain
+[open owner decisions](asi-centralized.md#open-owner-decisions). No journey wording
+settles them. The central contract supplies the [implementation order](asi-centralized.md#implementation-plan).
+
+## Superseded journey record (2026-11-11/12)
+
+Everything below records the earlier federation proposal and its review evidence,
+including obsolete invitation, P1 scan/cache, issuer, per-read origin approval,
+backup and lifecycle requirements. Those are historical, not additional setup
+gates or current decisions. The local-only runnable examples remain baseline
+evidence; the centralized amendment above governs the target. Retain this record
+for rationale, not as a parallel supported journey. [C2]
 
 ## Counting steps and the proposed budget
 

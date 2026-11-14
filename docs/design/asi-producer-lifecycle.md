@@ -1,5 +1,14 @@
 # Explicit local producer initialization
 
+**Architecture amendment — owner, 2026-11-14:** [Centralized ASI](asi-centralized.md)
+now owns the default lifecycle. Origin `connect` authorizes selected redacted-log
+export and starts push after combined approval; receiver startup owns
+received-machine indexing/materialization and its authenticated loopback Viewer.
+The origin-analytics enablement proposal below is superseded for that journey;
+its local initializer discussion remains historical design input, not an added
+onboarding action. Stable received namespace binding is still an open owner
+decision. Preserve shipped local materialization and its integrity checks. [C1/C4/M/I]
+
 Proposal for #652, part of #593. This amends the local producer contract; it does
 not implement `connect`, `start`, enrollment activation or their UX.
 

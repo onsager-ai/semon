@@ -14,13 +14,42 @@ subject to the separate UI/UX Manager review. This document does not lift PM-own
 or establish runtime delivery. It is the authored home for #593 slice 4a;
 [#594](https://github.com/onsager-ai/semon/issues/594) consumes the same enrollment.
 Its [body-channel proposal in PR #632](https://github.com/onsager-ai/semon/pull/632)
-owns the separate read transport contract.
+records the superseded read transport contract.
 
-[ASI federation](asi-federation.md) owns D1–D8 and custody/security boundaries.
-Body-route mTLS and receiver-as-assertion-issuer are accepted, with explicit origin
-trust approval. Hub never participates in enrollment, body transport, issuer
-custody or body authorization. Machine credentials are never user identity or
-source authority.
+## Centralized amendment (owner, 2026-11-14)
+
+[Centralized ASI](asi-centralized.md) now owns custody and architecture. Origins
+approve export through pairing plus separate source consent; receivers durably
+hold redacted native text and authorize/audit reads locally. The Hub boundary
+stays body-free with tokenized paths. No zero-findings scan gate applies to
+own-machine reads. Existing enrollment, TLS/mTLS, mirror and automatic idempotent
+renewal remain; renewal never widens consent or revives revoked authority. [C1/C5/M/I]
+
+The four-action target is one receiver command starting receive plus received
+indexing/ASI and authenticated loopback Viewer, origin `connect`, code entry, and
+one combined trust/custody/source approval with narrowing in that interaction.
+Push starts automatically. There are two long-running processes; service install
+is an explicit counted opt-in. This integration is not shipped. [C4]
+
+`analytics_publish` and `body_channel` are retired design kinds, scheduled for
+runtime removal after the switch and a dependency pass. Do not add activation or
+mirror-to-analytics enablement integrations. Preserve `mirror_push`, its optional
+client-certificate requirement and renewal. Issuer assertions, publication
+claims/heads, egress handles, receiver body cache and dual audit belong to the
+superseded federation design, not this default. Read audit is receiver-local. [C2/M]
+
+Receiver stable namespace binding and duplicate accounting remain open; this
+amendment does not choose the enrollment ID, machine name or facts namespace.
+Enrollment's existing transport binding is not itself that decision. Additional
+reader identities and storage/retention beyond the current cap are also
+[open owner decisions](asi-centralized.md#open-owner-decisions). [C1/I]
+
+The implementation inventory and protocol details below record delivered libraries
+and former integration plans. Federation-only passages (issuer/cache custody,
+analytics/body admission, claims and #594 interfaces) are **superseded history**,
+not pending centralized features or read gates. Shipped pairing/renewal details
+continue to apply. Trace labels are defined in the central contract's
+[decision table](asi-centralized.md#decision-trace).
 
 ## Existing implementation and delivery boundary
 
@@ -111,18 +140,18 @@ does not require replacing HTTP/1.1 in this slice.
 
 ## Accepted four-action ceremony
 
-The mirror-only command path is shipped; the full analytics/body journey and owner
-Viewer integration remain pending. After installation,
+The mirror command path is shipped; integrated receiver ASI and owner Viewer
+startup remain pending under the centralized plan. [C1/C4] After installation,
 the local-owner target is exactly four actions B1–B4. Reachability, host custody,
-service installation and remote-owner login are separate prerequisites/actions as
-counted by the journey; a conditional four-action target is not a clean-host claim.
+service installation and any additional reader login are separately counted
+actions when applicable; additional readers remain an open owner decision, and a conditional four-action target is not a clean-host claim.
 
 | Action | Operation | Provisioning effect |
 | --- | --- | --- |
-| B1 | Receiver admin: `semon receive enroll --machine <name> --listen <addr> --advertise <https url>` | The authenticated local OS owner authorizes one enrollment for that machine. First run generates receiver identity/TLS custody, assertion issuer key, separate cache master key, stable owner principal, exact self-grant inputs and receiver audit directory. It starts foreground receiver transport and a loopback-only authenticated owner Viewer through receiver integration. Show a code only on the authenticated local pairing surface. Later enrollments reuse the owned service through its local administrative interface. |
-| B2 | Origin: `semon connect --to <https url>` | The nonsecret address selects the destination, not trust. Begin bounded provisioning and show a non-echoing Semon code prompt. |
-| B3 | Enter the receiver code directly into that trusted origin prompt | Complete the reviewed pairing/bootstrap and mutual key confirmation. No transfer through chat, files, URLs, command arguments, logs or other untrusted channels. |
-| B4 | Approve one combined trust/source summary in `connect` | Confirm receiver-as-issuer trust, authenticated receiver owner, selected current sources, typed name/path disclosure and P1 restrictions. Bind the origin-generated public key, issue separate kind credentials and certificate, and atomically activate the enrollment. Persist source consent separately; downstream policy/producer/publication integrations consume the outputs. |
+| B1 | One receiver startup command (final spelling unspecified) | Start receive, received-machine indexing/ASI materialization and the authenticated loopback Viewer; show the pairing code on the trusted local surface. [C4/M] |
+| B2 | Origin: `semon connect --to <https url>` | Select the destination and prompt for its code; address alone is not trust. [C4/M] |
+| B3 | Enter the code in the trusted origin prompt | Use shipped public_tls mutual confirmation. Private-root/LAN pairing remains deferred; no pinned invitation. [C5/M] |
+| B4 | One combined trust/custody/source approval | Approve durable receiver custody, names/paths and selected sources, with narrowing in this interaction; persist source consent separately and start push automatically. No per-read origin approval or issuer delegation. [C1/C4/M] |
 
 D4 selects `public_tls` short-code confirmation for receivers whose advertised
 HTTPS endpoint already has normal trusted certificate-chain and hostname validation.
@@ -342,39 +371,19 @@ recovery revalidates committed authority before repairing interrupted grants. Gr
 
 ## Source consent and P1
 
-B4 confirms the journey's accepted first-owner policy profile P1. Show the selected
-currently discovered local sources, including private/work material, and allow
-narrowing before approval. Default selection is all current sources; apply an
-`internal` floor only to currently unclassified selected sources. Preserve existing
-classifications, stricter floors, baselines and scans. Unknown classification or
-missing, failed, unsupported, incomplete or stale scans never count as successful
-evidence. Restricted sources remain local unless the source owner explicitly opts
-into stream-through for the owner principal; named-user opt-in is deferred with
-multi-user support. The origin binds the required delivery mode to each response;
-the receiver may tighten it to stream-through but never relax it to cached.
-Stream-through bypasses cache operations and retry spools and requires no-store
-responses, as specified by [the body-channel contract](asi-body-channel.md#authorization-audits-and-cache).
-Renewal preserves this consent and cannot change the delivery mode policy.
+B4 approves export to the named receiver as durable custodian of the selected
+redacted native text. Show current sources, including private/work material, and
+allow narrowing within the single approval interaction. State that receiver-local
+reads continue while the origin is offline. This supersedes P1's raw-replica
+exclusion, per-read issuer/origin approval, encrypted-cache limits and scan gate
+for own-machine reads. Redaction remains best effort. No Hub body or hosted-model
+egress consent follows from enrollment. [C1/C4/C5/M/I]
 
-P1 is scoped to the named receiver and its authenticated owner principal: typed
-receiver analytics including plain names/paths and permitted coverage, plus
-approved bounded redacted evidence with encrypted cache under D3 (at most
-15 minutes, 64 MiB/source, 256 MiB global, narrowed by every contributor). No Hub,
-other user, raw replica or hosted-model evidence egress is included. Explicitly
-state that receiver-as-issuer trusts that operator to impersonate users; choose
-independently pinned external issuer administration or local-only use when that
-trust is unacceptable. Declining B4 keeps sources local and cancels activation.
-
-Persist selected-source consent and its receiver/owner/scope binding independently
-from enrollment and transport credentials. Renewal cannot widen it, future
-roots/sources require a new explicit local selection update, and machine
-credentials cannot substitute for it. The policy generator must resolve complete
-admitted contributor identities and actual detector/redactor results under
-[the governance API](asi-governance-api.md#pinned-receiver-projection-593-slice-2).
-It cannot omit a denied contributor, invent a successful scan or fall back on an
-absent registry. Scan-backed P1 registry generation is a downstream dependency,
-not implementation assigned to 4a. Body availability remains refused until actual
-policy, custody, user authentication and both audits pass, including cache hits.
+Persist selected-source consent and its receiver/scope binding independently from
+transport credentials. Renewal cannot widen it; future sources need explicit
+approval. Machine credentials never substitute for source consent. Declining B4
+keeps sources local and cancels activation. Preserve the shipped mirror allowlist,
+redactor, source integrity and private custody. [M/I]
 
 ## Receiver enrollment record
 
@@ -405,7 +414,9 @@ there is no admitted namespace/index binding yet, activation of these kinds wait
 for the owning producer lifecycle; 4a cannot invent a namespace/claim to bypass it.
 Mirror-only enrollment binds receiver, enrollment and machine; incarnation, claim
 and issuer fields are explicitly inapplicable until relevant kinds are enabled.
-Mirror custody grants no publisher claim or replica authority. Native UID,
+Mirror custody grants selected redacted-log custody through separate source consent,
+not a federation publisher claim. Stable receiver ASI namespace binding remains
+open under the central contract. Native UID,
 lineage and provenance rules remain unchanged.
 
 <a id="origin-configuration-and-out-of-band-enrollment"></a>
@@ -533,8 +544,8 @@ prints them for separate delivery.
 
 | Kind | Permitted routes | `client_cert_required` |
 | --- | --- | --- |
-| `analytics_publish` | `/v1/analytics/` once slice 5 implements it | Explicit per-kind setting, default `false` for now; revisited when #594 lands, operator may require it |
-| `body_channel` | `/v1/body/` origin poll/response once #594 implements it | Always `true`, cannot be disabled while enabled |
+| `analytics_publish` — retired design | Historical `/v1/analytics/`; remove runtime after centralized switch [C2] | Historical setting only; no new activation |
+| `body_channel` — retired design | Historical `/v1/body/`; remove runtime after centralized switch [C2] | Historical mandatory mTLS; preserve supported mirror mTLS |
 | `mirror_push` | Existing `/v1/mirror/append`, `/facts`, `/status` | Explicit per-kind setting, default `false` for supported mirror Push |
 
 A body credential permits machine transport only, with no `body_read`, metadata

@@ -1,5 +1,14 @@
 # ASI store
 
+**Architecture amendment — owner, 2026-11-14:** [Centralized ASI](asi-centralized.md)
+is current for one owner's machines. Selected redacted native logs are mirrored
+to durable receiver custody; the receiver indexes/materializes them. The former
+origin-only derivation, replica authority transfer and encrypted pull-cache
+requirements below are superseded history, not the default. Origins approve
+export; receiver reads use local authorization/audit. Preserve native identity,
+recorded costs, frozen data and one current format. Stable received namespace and
+duplicate accounting remain open in the central contract. [C1/C2/M/I]
+
 Status: accepted architecture/spec for #544 (revised 2026-11-09 for the user's
 federation decisions D1–D8 and DuckDB analytics). Implementation and validation
 remain delivery work. Direction: [ASI direction](asi-direction.md#architecture).
