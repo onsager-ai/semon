@@ -150,9 +150,7 @@ impl Heartbeat {
                             match client.post("status", body) {
                                 Ok((404 | 405, _)) => break,
                                 Ok((200..=299, _)) => {}
-                                Err(Failure::Remote(error))
-                                    if error.contains("refused the token") =>
-                                {
+                                Err(Failure::Remote(error)) if crate::access_ended(&error) => {
                                     *shared_fatal.lock().unwrap_or_else(|e| e.into_inner()) =
                                         Some(error);
                                     caller_stop.stop();

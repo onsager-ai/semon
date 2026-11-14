@@ -560,7 +560,7 @@ impl Client {
                 let stop = Stop::new();
                 #[cfg(unix)]
                 if let Credential::Enrolled { authority, .. } = &options.credential {
-                    stop.with_authority(authority.clone())
+                    stop.with_authority(authority.clone()).following_selection()
                 } else {
                     stop
                 }
@@ -602,7 +602,12 @@ impl Client {
     pub fn with_stop(mut self, stop: Stop) -> Self {
         #[cfg(unix)]
         let stop = if let Some(authority) = self.stop.authority.clone() {
-            stop.with_authority(authority)
+            let stop = stop.with_authority(authority);
+            if self.renewal.is_some() {
+                stop.following_selection()
+            } else {
+                stop
+            }
         } else {
             stop
         };
@@ -649,18 +654,21 @@ impl Client {
                     .as_ref()
                     .map(|r| r.lock().unwrap_or_else(|e| e.into_inner()));
                 #[cfg(unix)]
-                let (factory, token, dispatch_stop) = if let Some(renewal) = renewal.as_mut() {
-                    renewal.checkpoint()?;
-                    let selected = Client::new(renewal.options())?;
-                    (
-                        selected.http,
-                        selected.token,
-                        dispatch_stop
-                            .with_authority(selected.stop.authority.expect("enrolled authority")),
-                    )
-                } else {
-                    (factory, token, dispatch_stop)
-                };
+                let (factory, token, dispatch_stop, generation) =
+                    if let Some(renewal) = renewal.as_mut() {
+                        renewal.checkpoint()?;
+                        let selected = Client::new(renewal.options())?;
+                        let authority = selected.stop.authority.expect("enrolled authority");
+                        let generation = authority.generation();
+                        (
+                            selected.http,
+                            selected.token,
+                            dispatch_stop.with_authority(authority),
+                            generation,
+                        )
+                    } else {
+                        (factory, token, dispatch_stop, 0)
+                    };
                 #[cfg(unix)]
                 let _delivery = dispatch_stop
                     .authority
@@ -717,7 +725,15 @@ impl Client {
                 if let (Some(renewal), Ok((status, _, _, hint))) = (renewal.as_mut(), &result) {
                     // Confirmation failure retains Installed for the next success;
                     // it must not discard an application acknowledgement.
-                    let _ = renewal.response(*status, *hint);
+                    let _ = renewal.response(generation, *status, *hint);
+                    if matches!(status, 401 | 403) {
+                        return Err(renewal.refused()?);
+                    }
+                    // A hint on the final one-shot request still schedules an
+                    // attempt in this push, rather than waiting for another run.
+                    if *hint {
+                        let _ = renewal.checkpoint();
+                    }
                 }
                 #[cfg(test)]
                 completed_transports.fetch_add(1, Ordering::SeqCst);
@@ -1770,7 +1786,10 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
     let enrolled_stop;
     #[cfg(unix)]
     let stop = if let Credential::Enrolled { authority, .. } = &options.credential {
-        enrolled_stop = stop.clone().with_authority(authority.clone());
+        enrolled_stop = stop
+            .clone()
+            .with_authority(authority.clone())
+            .following_selection();
         &enrolled_stop
     } else {
         stop
@@ -1838,7 +1857,7 @@ fn push_running(
         client.pass(&options.sessions)
     };
     if let Err(error) = &initial_pass
-        && error.contains("refused the token")
+        && access_ended(error)
     {
         return Err(error.clone());
     }
@@ -1887,7 +1906,7 @@ fn push_running(
     let mut last_facts = Instant::now() - FACTS_EVERY;
     loop {
         if let Err(error) = &pass
-            && error.contains("refused the token")
+            && access_ended(error)
         {
             return Err(error.clone());
         }
@@ -1947,7 +1966,7 @@ fn push_running(
                         Err(Failure::Stopped) => return Ok(()),
                         Err(failure) => {
                             let error = failure.message();
-                            if error.contains("refused the token") {
+                            if access_ended(&error) {
                                 return Err(error);
                             }
                             if !(backoff.state == Some("storage full")
@@ -1970,7 +1989,9 @@ fn push_running(
         let delay = if catchup_pending && backoff.state.is_none() {
             Duration::ZERO
         } else {
-            backoff.delay()
+            // Renewal deadlines must be evaluated even during a long storage
+            // or pause backoff, independently of source events.
+            backoff.delay().min(Duration::from_secs(60))
         };
         let deadline = Instant::now() + delay;
         loop {
@@ -2000,6 +2021,13 @@ fn push_running(
         }
         pass = client.watch_pass(&options.sessions);
     }
+}
+
+fn access_ended(error: &str) -> bool {
+    error.contains("refused the token")
+        || error.contains("refused access.")
+        || error.contains("credentials expired.")
+        || error.contains("client certificate expired.")
 }
 
 fn error_kind(text: &str) -> Option<String> {
@@ -2063,7 +2091,7 @@ impl WatchBackoff {
 /// and tried again next pass.
 fn after_pass(result: Result<Report>, stop: &Stop) -> Option<Result<()>> {
     match result {
-        Err(error) if error.contains("refused the token") => Some(Err(error)),
+        Err(error) if access_ended(&error) => Some(Err(error)),
         _ if stop.is_stopped() => Some(Ok(())),
         Ok(report) => {
             if report.files > 0 {
@@ -2686,8 +2714,15 @@ mod tests {
         let sessions = fixture.options.clone();
         let sender = thread::spawn(move || client.pass(&sessions));
         first_pending.recv_timeout(Duration::from_secs(10)).unwrap();
-        let heartbeat =
-            status::Heartbeat::start(&options, &stop, Arc::clone(&lock), progress).unwrap();
+        let heartbeat = status::Heartbeat::start(
+            &options,
+            &stop,
+            Arc::clone(&lock),
+            progress,
+            #[cfg(unix)]
+            None,
+        )
+        .unwrap();
         let observation = proven.recv_timeout(Duration::from_secs(25)).unwrap();
         assert_eq!(observation.targets.len(), wire::MAX_STATUS_TARGETS);
         assert!(!observation.inventory_complete);
@@ -3216,6 +3251,8 @@ mod sync_status_tests {
             &stop,
             Arc::clone(&lock),
             Arc::new(Mutex::new(status::Progress::default())),
+            #[cfg(unix)]
+            None,
         )
         .unwrap();
         let deadline = Instant::now() + Duration::from_secs(25);
@@ -3291,6 +3328,8 @@ mod sync_status_tests {
             &stop,
             Arc::clone(&lock),
             Arc::new(Mutex::new(status::Progress::default())),
+            #[cfg(unix)]
+            None,
         )
         .unwrap();
         received.recv_timeout(Duration::from_secs(3)).unwrap();
@@ -3357,6 +3396,8 @@ mod sync_status_tests {
             &stop,
             Arc::clone(&lock),
             Arc::new(Mutex::new(status::Progress::default())),
+            #[cfg(unix)]
+            None,
         )
         .unwrap();
         let first = received.recv_timeout(Duration::from_secs(3)).unwrap();

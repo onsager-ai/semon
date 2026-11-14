@@ -1412,10 +1412,15 @@ fresh clock values, including after a network exchange crosses a second boundary
 The atomic `selected` replacement publishes all credential/configuration files
 at once. Retained old generations are never selected as a fallback. Existing
 application authority also binds its generation, so selection ends stale clients.
-Interrupted staging is retained, never silently deleted or loaded. Push/watch
-scheduling, authenticated due-header triggers and exact operator notices remain
-a follow-up integration slice; automatic renewal is not yet wired to the CLI. No credential is written before
-receiver confirmation and approval delivery. `install.lock` serializes publication. Receiver selection
+Interrupted staging is retained, never silently deleted or loaded. PR4.3b-2 adds
+one shared push/watch renewal schedule, also used by the status heartbeat. It
+checks deadlines during idle watch passes at least once per minute, limits attempts
+to once per minute, and accepts the fixed due hint only on authenticated application
+responses from the enrolled HTTPS peer. Every delivery selects current custody;
+first successful application use durably confirms that generation before emitting
+the renewed notice. Temporary renewal errors retain valid application traffic and
+use the separate failure/severity reminder schedule above. No credential is written
+before receiver confirmation and approval delivery. `install.lock` serializes publication. Receiver selection
 accepts the enrolled HTTPS URL; the endpoint hash stays internal. An omitted URL
 requires one enrolled receiver.
 `connect::producer_admission` calls the explicit library initializer for requested

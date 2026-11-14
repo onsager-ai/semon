@@ -613,13 +613,16 @@ fn disconnect_aborts_slow_upload_and_drains_transport_before_success() {
         }
         observed.send(total).unwrap();
     });
-    let client = crate::Client::new(&crate::PushOptions {
+    let mut client = crate::Client::new(&crate::PushOptions {
         url: format!("http://{address}"),
         credential,
         sessions: Default::default(),
         state: f.0.join("push-state"),
     })
     .unwrap();
+    // This test substitutes plaintext loopback for the enrolled TLS peer to
+    // exercise upload cancellation alone. Renewal requires the real endpoint.
+    client.renewal = None;
     let client = std::sync::Arc::new(client);
     let kept_alive = std::sync::Arc::clone(&client);
     let completed_transports = std::sync::Arc::clone(&client.completed_transports);

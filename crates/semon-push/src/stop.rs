@@ -33,6 +33,8 @@ pub struct Stop {
     parent: Option<Arc<Stop>>,
     #[cfg(unix)]
     pub(crate) authority: Option<crate::origin_custody::Authority>,
+    #[cfg(unix)]
+    follow_selection: bool,
 }
 
 #[derive(Default)]
@@ -72,6 +74,8 @@ impl Stop {
             parent: Some(Arc::new(self.clone())),
             #[cfg(unix)]
             authority: None,
+            #[cfg(unix)]
+            follow_selection: self.follow_selection,
         }
     }
 
@@ -81,13 +85,21 @@ impl Stop {
         self
     }
 
+    #[cfg(unix)]
+    pub(crate) fn following_selection(mut self) -> Self {
+        self.follow_selection = true;
+        self
+    }
+
     pub fn is_stopped(&self) -> bool {
         #[cfg(unix)]
-        if self
-            .authority
-            .as_ref()
-            .is_some_and(|authority| !authority.is_enabled())
-        {
+        if self.authority.as_ref().is_some_and(|authority| {
+            if self.follow_selection {
+                !authority.is_enabled()
+            } else {
+                !authority.is_active()
+            }
+        }) {
             self.stop();
         }
         *self

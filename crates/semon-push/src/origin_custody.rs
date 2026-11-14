@@ -516,6 +516,9 @@ impl Authority {
         }
         Ok(guard)
     }
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
     pub(crate) fn base(&self) -> &Path {
         &self.base
     }

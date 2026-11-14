@@ -177,6 +177,54 @@ impl Renewal {
     pub fn configuration(&self) -> &Configuration {
         &self.config
     }
+    #[cfg(test)]
+    pub(crate) fn install_test_generation(&mut self, now: u64) -> Result<()> {
+        let target = Generation {
+            kind: crate::credentials::Kind::MirrorPush,
+            generation: self.config.generation + 1,
+        };
+        self.prepare(
+            Begun {
+                version: 1,
+                enrollment_id: self.config.enrollment_id.clone(),
+                renewal_id: "c".repeat(64),
+                receiver_nonce: crate::provision_wire::encode(&[7; 32]),
+                expires_at: now + 600,
+                generations: vec![target.clone()],
+                enable_authorization_ids: vec![],
+            },
+            now,
+        )?;
+        let finish = self.finish(&[9; 32], now)?;
+        let application = Zeroizing::new(
+            crate::provision_wire::decode_fixed::<32>(&finish.application_key)
+                .map_err(|_| ERROR)?,
+        );
+        self.delivered_with_clock(
+            &Delivered {
+                version: 1,
+                enrollment_id: finish.enrollment_id.clone(),
+                renewal_id: finish.renewal_id.clone(),
+                credentials: vec![wire::DeliveredCredential {
+                    kind: target.kind,
+                    credential_id: "d".repeat(64),
+                    generation: target.generation,
+                    bearer: wire::bearer(
+                        &application,
+                        &finish.enrollment_id,
+                        &finish.renewal_id,
+                        &target,
+                    )
+                    .expose()
+                    .into(),
+                    valid_from: now,
+                    valid_until: now + 7_776_000,
+                }],
+                client_certificate: None,
+            },
+            &|| Ok(now),
+        )
+    }
     pub(crate) fn awaiting_confirmation(&self) -> bool {
         self.attempt
             .as_ref()
