@@ -369,7 +369,7 @@ fn pending_capacity_expires_before_admission_and_never_evicts_live_attempts() {
     }
     assert_eq!(
         receiver
-            .handle(
+            .handle_audited(
                 &f.dir,
                 wire::Request::Begin(request(5)),
                 [4; 32],
@@ -1395,9 +1395,9 @@ fn bogus_requests_have_fixed_audit_budget_and_leave_legitimate_renewal_capacity(
         });
         assert_eq!(
             receiver
-                .handle(&f.dir, request, [4; 32], None, 2_000_000)
+                .handle_audited(&f.dir, request, [4; 32], None, 2_000_000)
                 .unwrap_err(),
-            Failure::Authority
+            Failure::InvalidCredential
         );
     }
     assert_eq!(
@@ -1414,7 +1414,7 @@ fn bogus_requests_have_fixed_audit_budget_and_leave_legitimate_renewal_capacity(
     assert!(summary.len() as u64 <= crate::generation_audit::REFUSAL_CAP);
     let summary: serde_json::Value = serde_json::from_slice(&summary).unwrap();
     assert_eq!(summary["classes"][0]["count"], 256);
-    assert_eq!(summary["classes"][0]["last"]["class"], "authority");
+    assert_eq!(summary["classes"][0]["last"]["class"], "invalid_credential");
     // Refusal custody cannot take the successful-event append lock either.
     let lock = crate::body_cache::CacheDirectory::open(&f.dir.join("receiver-audit"))
         .unwrap()
@@ -1470,7 +1470,7 @@ fn local_failure_classes_survive_until_uniform_wire_dispatch() {
     });
     assert_eq!(
         receiver
-            .handle(&f.dir, rate, [4; 32], None, now)
+            .handle_audited(&f.dir, rate, [4; 32], None, now)
             .unwrap_err(),
         Failure::Rate
     );
@@ -1484,7 +1484,7 @@ fn local_failure_classes_survive_until_uniform_wire_dispatch() {
     let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
     assert_eq!(
         receiver
-            .handle(&f.dir, wire::Request::Finish(commit), [4; 32], None, now)
+            .handle_audited(&f.dir, wire::Request::Finish(commit), [4; 32], None, now)
             .unwrap_err(),
         Failure::CommitUncertain
     );
@@ -1500,7 +1500,7 @@ fn local_failure_classes_survive_until_uniform_wire_dispatch() {
     });
     assert_eq!(
         receiver
-            .handle(&f.dir, request, [4; 32], None, now)
+            .handle_audited(&f.dir, request, [4; 32], None, now)
             .unwrap_err(),
         Failure::Custody
     );
@@ -1634,38 +1634,82 @@ fn registry_lock_child() {
         _ => {}
     }
 }
-fn hold_registry_in_child(dir: &Path) -> std::process::Child {
-    use std::io::BufRead;
-    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "renewal::tests::registry_lock_child",
-            "--nocapture",
-        ])
-        .env("SEMON_RENEWAL_LOCK_CHILD", dir)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .unwrap();
-    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+struct RegistryChild(std::process::Child);
+impl Drop for RegistryChild {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        // Never wait without a deadline, including while unwinding a failed test.
+    }
+}
+const CHILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+fn child_ready(fd: std::os::fd::RawFd, events: libc::c_short, deadline: std::time::Instant) {
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .expect("registry child IO timed out");
+    let mut descriptor = libc::pollfd {
+        fd,
+        events,
+        revents: 0,
+    };
+    // SAFETY: descriptor points to one live pollfd; timeout is bounded to ten seconds.
+    let ready = unsafe { libc::poll(&mut descriptor, 1, remaining.as_millis().max(1) as i32) };
+    assert!(ready > 0, "registry child IO timed out or poll failed");
+}
+fn hold_registry_in_child(dir: &Path) -> RegistryChild {
+    use std::{io::Read, os::fd::AsRawFd};
+    let mut child = RegistryChild(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "renewal::tests::registry_lock_child",
+                "--nocapture",
+            ])
+            .env("SEMON_RENEWAL_LOCK_CHILD", dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    let output = child.0.stdout.as_mut().unwrap();
+    let deadline = std::time::Instant::now() + CHILD_TIMEOUT;
+    let mut line = Vec::new();
     loop {
-        let mut line = String::new();
-        assert_ne!(
-            output.read_line(&mut line).unwrap(),
-            0,
+        child_ready(output.as_raw_fd(), libc::POLLIN, deadline);
+        let mut byte = [0];
+        assert_eq!(
+            output.read(&mut byte).unwrap(),
+            1,
             "child exited before acquiring registry lock"
         );
-        if line.contains("REGISTRY_LOCKED") {
-            break;
+        line.push(byte[0]);
+        assert!(line.len() <= 4096, "unexpected registry child output");
+        if byte[0] == b'\n' {
+            if String::from_utf8_lossy(&line).contains("REGISTRY_LOCKED") {
+                break;
+            }
+            line.clear();
         }
     }
-    child.stdout = Some(output.into_inner());
     child
 }
-fn release_registry_child(mut child: std::process::Child, action: u8) {
-    use std::io::Write;
-    child.stdin.take().unwrap().write_all(&[action]).unwrap();
-    assert!(child.wait_with_output().unwrap().status.success());
+fn release_registry_child(mut child: RegistryChild, action: u8) {
+    use std::{io::Write, os::fd::AsRawFd};
+    let deadline = std::time::Instant::now() + CHILD_TIMEOUT;
+    let mut input = child.0.stdin.take().unwrap();
+    child_ready(input.as_raw_fd(), libc::POLLOUT, deadline);
+    input.write_all(&[action]).unwrap();
+    drop(input);
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert!(status.success(), "registry child failed: {status}");
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "registry child exit timed out"
+        );
+        std::thread::park_timeout(std::time::Duration::from_millis(10));
+    }
 }
 #[test]
 fn cross_process_registry_contention_refuses_and_retry_reads_owner_commit() {
@@ -1699,7 +1743,7 @@ fn cross_process_registry_contention_refuses_and_retry_reads_owner_commit() {
                 receiver
                     .finish(&f.dir, &commit, &[4; 32], None, now)
                     .unwrap_err(),
-                Failure::Authority
+                Failure::EndedAuthority
             );
             assert!(
                 Registry::read_current(&f.dir)
@@ -2069,5 +2113,273 @@ fn retry_after_cross_process_enable_reads_new_authorization_scope() {
             .credential_kinds
             .iter()
             .all(|scope| scope.available && scope.generations.current == 2)
+    );
+}
+
+#[test]
+fn refused_request_io_does_not_hold_registry_authenticator_renewal_mutex() {
+    use crate::generation_audit::{RefusalIo, set_refusal_io};
+    use std::sync::mpsc;
+    let f = Fixture::new();
+    let auth = crate::serve::RegistryAuthenticator::open(&f.dir).unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (legitimate_tx, legitimate_rx) = mpsc::channel();
+    std::thread::scope(|scope| {
+        let auth = &auth;
+        let bogus = scope.spawn(move || {
+            set_refusal_io(RefusalIo::Block {
+                entered: entered_tx,
+                release: release_rx,
+            });
+            auth.renew(
+                wire::Request::Begin(wire::Begin {
+                    version: 1,
+                    enrollment_id: "a".repeat(64),
+                    credentials: vec![Credential {
+                        kind: Kind::MirrorPush,
+                        generation: 1,
+                        bearer: "bogus".into(),
+                    }],
+                }),
+                [4; 32],
+                None,
+                2_000_000,
+            )
+        });
+        entered_rx
+            .recv_timeout(CHILD_TIMEOUT)
+            .expect("bogus request never reached refusal IO");
+        let credentials = f.credentials();
+        scope.spawn(move || {
+            legitimate_tx
+                .send(auth.renew(
+                    wire::Request::Begin(wire::Begin {
+                        version: 1,
+                        enrollment_id: "a".repeat(64),
+                        credentials,
+                    }),
+                    [4; 32],
+                    None,
+                    2_000_000,
+                ))
+                .unwrap();
+        });
+        let legitimate = legitimate_rx.recv_timeout(std::time::Duration::from_secs(5));
+        release_tx.send(()).unwrap();
+        assert_eq!(
+            bogus.join().unwrap().unwrap_err(),
+            Failure::InvalidCredential
+        );
+        let bytes = legitimate
+            .expect("legitimate renewal blocked behind refusal IO")
+            .unwrap();
+        let begun: Begun = serde_json::from_slice(&bytes).unwrap();
+        let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+        auth.renew(wire::Request::Finish(commit), [4; 32], None, 2_000_000)
+            .unwrap();
+    });
+}
+
+#[test]
+fn interrupted_first_refusal_publication_leaves_no_empty_final_and_retries() {
+    use crate::generation_audit::{REFUSAL_FILE, RefusalIo, set_refusal_io};
+    let f = Fixture::new();
+    let record = || crate::generation_audit::RefusalRecord {
+        class: Failure::InvalidCredential,
+        observed_at: 2_000_000,
+        enrollment_id: "a".repeat(64),
+        renewal_id: String::new(),
+        generations: vec![],
+        outcome: "refused".into(),
+    };
+    set_refusal_io(RefusalIo::Interrupt);
+    assert!(matches!(
+        crate::generation_audit::refusal(&f.dir, record()),
+        Err(Error::AuditUnavailable)
+    ));
+    assert!(!f.dir.join("receiver-audit").join(REFUSAL_FILE).exists());
+    assert!(f.dir.join("receiver-audit/renewal-refusals.stage").exists());
+    crate::generation_audit::refusal(&f.dir, record()).unwrap();
+    let path = f.dir.join("receiver-audit").join(REFUSAL_FILE);
+    let summary: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(summary["classes"][0]["count"], 1);
+    // Existing corrupt custody is preserved and returns an explicit local error;
+    // write_refusal reports this failure on stderr, outside the renewal mutex.
+    for bytes in [b"".as_slice(), b"corrupt"] {
+        fs::write(&path, bytes).unwrap();
+        assert!(matches!(
+            crate::generation_audit::refusal(&f.dir, record()),
+            Err(Error::AuditUnavailable)
+        ));
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn authority_classes_and_all_eleven_aggregate_slots_fit_the_encoded_budget() {
+    let f = Fixture::new();
+    let auth = crate::serve::RegistryAuthenticator::open(&f.dir).unwrap();
+    let request = |credentials| {
+        wire::Request::Begin(wire::Begin {
+            version: 1,
+            enrollment_id: "a".repeat(64),
+            credentials,
+        })
+    };
+    let bogus = vec![Credential {
+        kind: Kind::MirrorPush,
+        generation: 1,
+        bearer: "bogus".into(),
+    }];
+    assert_eq!(
+        auth.renew(request(bogus), [4; 32], None, 2_000_000)
+            .unwrap_err(),
+        Failure::InvalidCredential
+    );
+    let mut mismatch = f.credentials();
+    mismatch[0].generation = 2;
+    assert_eq!(
+        auth.renew(request(mismatch), [4; 32], None, 2_000_000)
+            .unwrap_err(),
+        Failure::ScopeMismatch
+    );
+    let begun: Begun = serde_json::from_slice(
+        &auth
+            .renew(request(f.credentials()), [4; 32], None, 2_000_000)
+            .unwrap(),
+    )
+    .unwrap();
+    let mut bad_key = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    bad_key.proof = provision_wire::encode(&[0; 64]);
+    assert_eq!(
+        auth.renew(wire::Request::Finish(bad_key), [4; 32], None, 2_000_000)
+            .unwrap_err(),
+        Failure::InvalidCredential
+    );
+    let cancel = f.finish(&begun, Action::Cancel, [3; 32], [4; 32]);
+    auth.renew(wire::Request::Finish(cancel), [4; 32], None, 2_000_000)
+        .unwrap();
+    let replay = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    assert_eq!(
+        auth.renew(wire::Request::Finish(replay), [4; 32], None, 2_000_000)
+            .unwrap_err(),
+        Failure::ReplayTerminal
+    );
+    assert_eq!(
+        auth.renew(request(f.credentials()), [4; 32], None, 4_000_000)
+            .unwrap_err(),
+        Failure::EndedAuthority
+    );
+    let path = f.dir.join("receiver-audit/renewal-refusals.json");
+    let summary = fs::read_to_string(&path).unwrap();
+    for class in [
+        "invalid_credential",
+        "scope_mismatch",
+        "replay_terminal",
+        "ended_authority",
+    ] {
+        assert!(summary.contains(class));
+    }
+    for class in [
+        Failure::Malformed,
+        Failure::InvalidCredential,
+        Failure::EndedAuthority,
+        Failure::ScopeMismatch,
+        Failure::ReplayTerminal,
+        Failure::Rate,
+        Failure::Capacity,
+        Failure::Custody,
+        Failure::AuditUnavailable,
+        Failure::CommitUncertain,
+        Failure::Contention,
+    ] {
+        crate::generation_audit::refusal(
+            &f.dir,
+            crate::generation_audit::RefusalRecord {
+                class,
+                observed_at: u64::MAX,
+                enrollment_id: "f".repeat(64),
+                renewal_id: "f".repeat(64),
+                generations: [Kind::AnalyticsPublish, Kind::BodyChannel, Kind::MirrorPush]
+                    .into_iter()
+                    .map(|kind| Generation {
+                        kind,
+                        generation: u64::MAX,
+                    })
+                    .collect(),
+                outcome: "refused".into(),
+            },
+        )
+        .unwrap();
+    }
+    let bytes = fs::read(&path).unwrap();
+    assert!(bytes.len() as u64 <= crate::generation_audit::REFUSAL_CAP);
+    let summary: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(summary["classes"].as_array().unwrap().len(), 11);
+}
+
+#[test]
+fn revoked_retired_and_wrong_certificate_keep_distinct_local_authority_class() {
+    for ended in [false, true] {
+        let f = Fixture::new();
+        let mut registry = Registry::read_current(&f.dir).unwrap();
+        if ended {
+            registry.credentials[0].revoked_at = Some(100);
+        } else {
+            registry.enrollments[0].credential_kinds[0]
+                .generations
+                .current = 2;
+            // No retiring slot accepts the old bearer. Keep a current record so
+            // validation does not obscure the retired-generation diagnostic.
+            let mut current = registry.credentials[0].clone();
+            current.credential_id = "c".repeat(64);
+            current.generation = 2;
+            current.sha256 = Secret::new("current".into()).hash();
+            registry.credentials.push(current);
+        }
+        let initial = Registry::from_records(registry.enrollments, registry.credentials).unwrap();
+        fs::write(
+            f.dir.join("enrollment/registry.json"),
+            serde_json::to_vec(&initial).unwrap(),
+        )
+        .unwrap();
+        let auth = crate::serve::RegistryAuthenticator::open(&f.dir).unwrap();
+        assert_eq!(
+            auth.renew(
+                wire::Request::Begin(wire::Begin {
+                    version: 1,
+                    enrollment_id: "a".repeat(64),
+                    credentials: f.credentials(),
+                }),
+                [4; 32],
+                None,
+                2_000_000
+            )
+            .unwrap_err(),
+            Failure::EndedAuthority
+        );
+    }
+    let f = Fixture::with_custody(true);
+    let custody = crate::receiver_custody::ReceiverCustody::open_existing(&f.dir).unwrap();
+    let certificate = custody
+        .issue_client_certificate(f.key.public_key().as_ref(), &"a".repeat(64), 100, 4_000_000)
+        .unwrap();
+    let identity = crate::serve::renewal_test_identity(&certificate);
+    // The registry has no pin for this presented certificate.
+    let auth = crate::serve::RegistryAuthenticator::open(&f.dir).unwrap();
+    assert_eq!(
+        auth.renew(
+            wire::Request::Begin(wire::Begin {
+                version: 1,
+                enrollment_id: "a".repeat(64),
+                credentials: f.credentials(),
+            }),
+            [4; 32],
+            Some(&identity),
+            2_000_000
+        )
+        .unwrap_err(),
+        Failure::InvalidCredential
     );
 }

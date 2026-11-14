@@ -160,7 +160,7 @@ pub(crate) fn renewal(receiver: &Path, record: &RenewalRecord) -> Result<(), Err
         },
     )
 }
-/// Refusals never append to the authority journal or take its lock. Eight
+/// Refusals never append to the authority journal or take its lock. Eleven
 /// saturating counters and one last nonsecret scope per class have a fixed budget.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -197,36 +197,27 @@ pub(crate) fn refusal(receiver: &Path, record: RefusalRecord) -> Result<(), Erro
         .map_err(|_| Error::AuditUnavailable)?;
     lock.try_lock().map_err(|_| Error::AuditUnavailable)?;
     let file = directory
-        .open_file(Path::new(REFUSAL_FILE), libc::O_RDONLY)
-        .map_err(|_| Error::AuditUnavailable);
-    // A missing summary is the only empty initial state. Other custody failures
-    // must not silently reset counters or overwrite evidence.
+        .open_optional_file(Path::new(REFUSAL_FILE), libc::O_RDONLY)
+        .map_err(|_| Error::AuditUnavailable)?;
+    // Absence initializes only in memory. The final path first appears as a
+    // complete fsynced summary after atomic rename. Existing corruption fails
+    // visibly at the caller and is never silently reset.
     let mut summary = match file {
-        Ok(file) => {
+        Some(file) => {
             if file.metadata().map_err(|_| Error::AuditUnavailable)?.len() > REFUSAL_CAP {
                 return Err(Error::AuditUnavailable);
             }
             let summary: Refusals = serde_json::from_reader(file.take(REFUSAL_CAP + 1))
                 .map_err(|_| Error::AuditUnavailable)?;
-            if summary.version != 1 || summary.classes.len() > 8 {
+            if summary.version != 1 || summary.classes.len() > 11 {
                 return Err(Error::AuditUnavailable);
             }
             summary
         }
-        Err(_) => {
-            // O_EXCL distinguishes first creation from an existing file with
-            // unavailable or invalid custody without enumerating the directory.
-            directory
-                .open_file(
-                    Path::new(REFUSAL_FILE),
-                    libc::O_RDWR | libc::O_CREAT | libc::O_EXCL,
-                )
-                .map_err(|_| Error::AuditUnavailable)?;
-            Refusals {
-                version: 1,
-                classes: Vec::new(),
-            }
-        }
+        None => Refusals {
+            version: 1,
+            classes: Vec::new(),
+        },
     };
     if let Some(entry) = summary
         .classes
@@ -236,7 +227,7 @@ pub(crate) fn refusal(receiver: &Path, record: RefusalRecord) -> Result<(), Erro
         entry.count = entry.count.saturating_add(1);
         entry.last = record;
     } else {
-        if summary.classes.len() >= 8 {
+        if summary.classes.len() >= 11 {
             return Err(Error::AuditUnavailable);
         }
         summary.classes.push(RefusalCount {
@@ -255,11 +246,42 @@ pub(crate) fn refusal(receiver: &Path, record: RefusalRecord) -> Result<(), Erro
     file.set_len(0).map_err(|_| Error::AuditUnavailable)?;
     file.write_all(&bytes)
         .map_err(|_| Error::AuditUnavailable)?;
+    #[cfg(test)]
+    refusal_test_io()?;
     file.sync_all().map_err(|_| Error::AuditUnavailable)?;
     directory
         .rename(stage, Path::new(REFUSAL_FILE))
         .map_err(|_| Error::AuditUnavailable)?;
     directory.sync().map_err(|_| Error::AuditUnavailable)
+}
+#[cfg(test)]
+pub(crate) enum RefusalIo {
+    Interrupt,
+    Block {
+        entered: std::sync::mpsc::Sender<()>,
+        release: std::sync::mpsc::Receiver<()>,
+    },
+}
+#[cfg(test)]
+thread_local! {
+    static REFUSAL_IO: std::cell::RefCell<Option<RefusalIo>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+pub(crate) fn set_refusal_io(hook: RefusalIo) {
+    REFUSAL_IO.with(|slot| *slot.borrow_mut() = Some(hook));
+}
+#[cfg(test)]
+fn refusal_test_io() -> Result<(), Error> {
+    match REFUSAL_IO.with(|slot| slot.borrow_mut().take()) {
+        Some(RefusalIo::Interrupt) => Err(Error::AuditUnavailable),
+        Some(RefusalIo::Block { entered, release }) => {
+            entered.send(()).map_err(|_| Error::AuditUnavailable)?;
+            release
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|_| Error::AuditUnavailable)
+        }
+        None => Ok(()),
+    }
 }
 // Cache only fully validated snapshots, never authorization. Metadata changes
 // (including another process's append/replacement) require full validation again.

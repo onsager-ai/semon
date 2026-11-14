@@ -891,12 +891,19 @@ also record authenticated owner and target. Never audit bearer/application keys,
 private keys, proofs, exporter bytes or source text. Audit storage stays separate
 from registry/cache. Refusals use a separate, fixed 8 KiB summary
 (`renewal-refusals.json`), with saturating counts and the most recent nonsecret
-scope/time/outcome for each local failure class (malformed/version, authority,
-rate, capacity, custody, audit unavailable, commit uncertain and contention).
+scope/time/outcome for each of eleven local failure classes: malformed/version,
+invalid bearer/key/certificate, revoked/expired/retired authority, scope mismatch,
+replay/terminal attempt, rate, capacity, custody, audit unavailable, commit uncertain
+and contention. All eleven worst-case records fit the fixed 8 KiB encoded budget.
 This aggregate intentionally retains counts rather than individual refusal
 history. Its own lock and one bounded replacement staging file are independent
 of the append-only successful-event journal; corrupt, full or unavailable refusal
 custody never consumes that journal's capacity or blocks a legitimate renewal.
+Release the receiver-wide renewal mutex before refusal storage IO, including file
+and directory fsync. Publish even the first summary by fsynced staging and atomic
+rename; an interrupted first publication leaves no empty final file. An existing
+empty/corrupt summary is preserved and reports local refusal-audit unavailability
+on stderr, rather than silently resetting evidence or disabling renewal.
 Authenticate before compaction, expiry auditing or persisted clock writes. Reuse
 journal validation only while its inode/size/change timestamps match the last
 fully validated snapshot; a changed journal is validated again before append.

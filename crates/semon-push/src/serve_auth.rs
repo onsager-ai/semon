@@ -194,7 +194,15 @@ impl RegistryAuthenticator {
                     .map_err(|_| crate::renewal::Failure::Contention)
             });
         match result {
-            Ok(mut receiver) => receiver.handle(&self.dir, request, exporter, identity, now),
+            Ok(mut receiver) => {
+                let result = receiver.handle(&self.dir, request, exporter, identity, now);
+                drop(receiver);
+                result.map_err(|record| {
+                    let class = record.class;
+                    crate::renewal::write_refusal(&self.dir, record);
+                    class
+                })
+            }
             Err(class) => {
                 let (id, renewal_id, credentials) = match &request {
                     crate::renewal_wire::Request::Begin(m) => {
