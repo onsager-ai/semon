@@ -227,7 +227,7 @@ fn status_advertised(client: &Client) -> bool {
             if dispatch_stop.is_stopped() {
                 return Err("delivery stopped".to_owned());
             }
-            request
+            let result = request
                 .send()
                 .map_err(|error| error.to_string())
                 .map(|response| {
@@ -242,7 +242,9 @@ fn status_advertised(client: &Client) -> bool {
                                     .split(',')
                                     .any(|method| method.trim().eq_ignore_ascii_case("POST"))
                             })
-                })
+                });
+            drop(http);
+            result
         }),
         Ok(Some(Ok(true)))
     )

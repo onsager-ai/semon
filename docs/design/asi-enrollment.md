@@ -1392,7 +1392,10 @@ local channel/trust use without removing any of those files. Disconnect publishe
 that marker under `install.lock`; fresh loads and running Push stop checks refuse
 disabled or unreadable state. Each HTTP dispatch holds a shared delivery lock and
 checks authority immediately before sending; body readers check it on each chunk.
-Disconnect drains active delivery locks before reporting success.
+Each delivery drops its private HTTP client and joins its transport runtime
+before releasing its lock. Disconnect drains active delivery locks before
+reporting success. Lock acquisition has a five-second deadline; failure leaves
+the disabled marker in place and reports the uncertain-outcome guidance.
 Renewal installation/recovery is PR4.3b. Interrupted staging is
 retained, never silently deleted or loaded. No credential is written before
 receiver confirmation and approval delivery. `install.lock` serializes publication. Receiver selection

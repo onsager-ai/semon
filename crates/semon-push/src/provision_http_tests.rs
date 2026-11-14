@@ -622,9 +622,11 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
         state: h.dir.0.join("production-push-state"),
     };
     let server_pem = fs::read(auth_tests::fixture("test-cert.pem")).unwrap();
-    let builder = reqwest::blocking::Client::builder()
-        .add_root_certificate(reqwest::Certificate::from_pem(&server_pem).unwrap())
-        .no_proxy();
+    let builder = move || {
+        reqwest::blocking::Client::builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(&server_pem).unwrap())
+            .no_proxy()
+    };
     let production = crate::Client::with_http_builder(&options, builder).unwrap();
     production
         .send_facts(&semon_sessions::Facts {

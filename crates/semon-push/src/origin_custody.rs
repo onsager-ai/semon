@@ -501,13 +501,31 @@ impl Drop for Delivery {
     }
 }
 fn delivery_lock(dir: &Directory, operation: libc::c_int) -> Result<Delivery> {
+    delivery_lock_until(
+        dir,
+        operation,
+        std::time::Instant::now() + std::time::Duration::from_secs(5),
+    )
+}
+fn delivery_lock_until(
+    dir: &Directory,
+    operation: libc::c_int,
+    deadline: std::time::Instant,
+) -> Result<Delivery> {
     let file = dir
         .checked
         .open_file(Path::new("delivery.lock"), libc::O_RDWR | libc::O_CREAT)
         .map_err(|_| ERROR)?;
-    // SAFETY: this owned descriptor remains live until the guard drops.
-    if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
-        return Err(ERROR.into());
+    loop {
+        // SAFETY: this owned descriptor remains live until the guard drops.
+        if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
+            break;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::WouldBlock || std::time::Instant::now() >= deadline {
+            return Err(ERROR.into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
     }
     Ok(Delivery(file))
 }
@@ -566,12 +584,15 @@ impl Disconnect {
     pub fn is_disconnected(&self) -> bool {
         self.disabled
     }
-    pub fn commit(mut self) -> Result<()> {
+    pub fn commit(self) -> Result<()> {
+        self.commit_until(std::time::Instant::now() + std::time::Duration::from_secs(5))
+    }
+    fn commit_until(mut self, deadline: std::time::Instant) -> Result<()> {
         if self.disabled {
             // Reconcile a previous uncertain directory fsync before success.
             self.dir.checked.sync().map_err(|_| DISCONNECT_UNCERTAIN)?;
-            let _drained =
-                delivery_lock(&self.dir, libc::LOCK_EX).map_err(|_| DISCONNECT_UNCERTAIN)?;
+            let _drained = delivery_lock_until(&self.dir, libc::LOCK_EX, deadline)
+                .map_err(|_| DISCONNECT_UNCERTAIN)?;
             return Ok(());
         }
         let stage = format!(
@@ -597,7 +618,8 @@ impl Disconnect {
         }
         self.disabled = true;
         self.dir.checked.sync().map_err(|_| DISCONNECT_UNCERTAIN)?;
-        let _drained = delivery_lock(&self.dir, libc::LOCK_EX).map_err(|_| DISCONNECT_UNCERTAIN)?;
+        let _drained = delivery_lock_until(&self.dir, libc::LOCK_EX, deadline)
+            .map_err(|_| DISCONNECT_UNCERTAIN)?;
         Ok(())
     }
 }

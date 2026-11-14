@@ -558,7 +558,21 @@ fn disconnect_aborts_slow_upload_and_drains_transport_before_success() {
     let (drain, draining) = std::sync::mpsc::channel();
     let (observed, received) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
-        let (socket, _) = listener.accept().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "upload accept timed out"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("upload accept failed: {error}"),
+            }
+        };
         socket
             .set_read_timeout(Some(Duration::from_secs(10)))
             .unwrap();
@@ -566,7 +580,11 @@ fn disconnect_aborts_slow_upload_and_drains_transport_before_success() {
         let mut line = String::new();
         loop {
             line.clear();
-            reader.read_line(&mut line).unwrap();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "EOF in upload headers"
+            );
             if line == "\r\n" {
                 break;
             }
@@ -593,10 +611,16 @@ fn disconnect_aborts_slow_upload_and_drains_transport_before_success() {
         state: f.0.join("push-state"),
     })
     .unwrap();
+    let client = std::sync::Arc::new(client);
+    let kept_alive = std::sync::Arc::clone(&client);
+    let completed_transports = std::sync::Arc::clone(&client.completed_transports);
     let (finished, uploaded) = std::sync::mpsc::channel();
     let upload = std::thread::spawn(move || {
         finished
-            .send(client.post("append", "x".repeat(32 * 1024 * 1024)).is_err())
+            .send(matches!(
+                client.post("append", "x".repeat(32 * 1024 * 1024)),
+                Err(crate::Failure::Stopped)
+            ))
             .unwrap()
     });
     started.recv_timeout(Duration::from_secs(10)).unwrap();
@@ -629,6 +653,10 @@ fn disconnect_aborts_slow_upload_and_drains_transport_before_success() {
         .recv_timeout(Duration::from_secs(15))
         .unwrap()
         .unwrap();
+    // The long-lived Client remains alive, but its delivery runtime was joined
+    // before disconnect acquired the exclusive lock and returned success.
+    assert_eq!(completed_transports.load(Ordering::SeqCst), 1);
+    assert!(kept_alive.stop.is_stopped());
     assert!(uploaded.recv_timeout(Duration::from_secs(5)).unwrap());
     assert!(received.recv_timeout(Duration::from_secs(5)).unwrap() < 32 * 1024 * 1024);
     upload.join().unwrap();
@@ -673,4 +701,52 @@ fn disconnect_success_waits_for_existing_delivery_guard() {
         .unwrap();
     worker.join().unwrap();
     assert!(authority.delivery().is_err());
+}
+
+#[test]
+fn disconnect_deadline_preserves_disabled_state_with_a_separate_lock_holder() {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    let f = Fixture::new();
+    let name = f.install();
+    let path = f.0.join(&name).join("delivery.lock");
+    Directory::open(&f.0)
+        .unwrap()
+        .child(&name)
+        .unwrap()
+        .write("delivery.lock", b"")
+        .unwrap();
+    let mut child = Command::new("flock")
+        .arg(&path)
+        .args(["sh", "-c", "printf 'locked\\n'; read release"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (ready, started) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut line = String::new();
+        BufReader::new(stdout).read_line(&mut line).unwrap();
+        ready.send(line).unwrap();
+    });
+    assert_eq!(
+        started.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "locked\n"
+    );
+    let result = Disconnect::open(&f.0, "https://receiver.example")
+        .unwrap()
+        .commit_until(Instant::now() + Duration::from_millis(50));
+    // Release and reap before assertions so a failed assertion cannot orphan it.
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    reader.join().unwrap();
+    assert_eq!(result.unwrap_err(), DISCONNECT_UNCERTAIN);
+    assert!(load(&f.0, None).is_err());
+    let operation = Disconnect::open(&f.0, "https://receiver.example").unwrap();
+    assert!(operation.is_disconnected());
+    operation.commit().unwrap();
 }
