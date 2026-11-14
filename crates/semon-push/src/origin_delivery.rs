@@ -83,7 +83,13 @@ impl Schedule {
         };
         // Attempt start is not a changed outcome. Keep the previous reminder
         // timestamp so alternating starts and failures cannot flood stderr.
-        if outcome == Notice::Renewing && self.notice.is_some() {
+        if (outcome == Notice::Renewing && self.notice.is_some())
+            || (outcome == Notice::Due
+                && self
+                    .notice
+                    .as_ref()
+                    .is_some_and(|(notice, _)| *notice == Notice::Renewing))
+        {
             return None;
         }
         if self
@@ -116,6 +122,8 @@ pub(crate) struct Delivery {
     renew: Option<fn(&mut Renewal, u64) -> Result<()>>,
     #[cfg(test)]
     notices: Vec<String>,
+    #[cfg(test)]
+    clock: Option<u64>,
 }
 impl Delivery {
     pub(crate) fn new(options: &PushOptions) -> Option<Self> {
@@ -131,6 +139,8 @@ impl Delivery {
             renew: None,
             #[cfg(test)]
             notices: Vec::new(),
+            #[cfg(test)]
+            clock: None,
         })
     }
     pub(crate) fn watch(&mut self, watch: bool) {
@@ -146,6 +156,10 @@ impl Delivery {
             .map_err(|_| "system clock is before epoch".into())
     }
     pub(crate) fn checkpoint(&mut self) -> Result<()> {
+        #[cfg(test)]
+        if let Some(now) = self.clock {
+            return self.checkpoint_at(now);
+        }
         self.checkpoint_at(Self::clock()?)
     }
     fn checkpoint_at(&mut self, now: u64) -> Result<()> {
@@ -188,11 +202,22 @@ impl Delivery {
         if let Some(notice) = self.schedule.outcome(until, now, result) {
             self.emit(notice, until, now)?;
         }
+        let machine = renewal.configuration().machine.clone();
+        let until = renewal.configuration().scope.valid_until;
         drop(renewal);
         #[cfg(not(test))]
         let now = Self::clock()?;
+        if now >= until {
+            return Err(self.recovery("credentials expired", &machine)?);
+        }
         self.options.credential =
-            origin_custody::load_at(&self.base, Some(&self.options.url), now)?.1;
+            match origin_custody::load_at(&self.base, Some(&self.options.url), now) {
+                Ok((_, credential)) => credential,
+                Err(error) if error.starts_with("origin client certificate expired") => {
+                    return Err(self.recovery("client certificate expired", &machine)?);
+                }
+                Err(error) => return Err(error),
+            };
         Ok(())
     }
     fn emit(&mut self, notice: Notice, until: u64, now: u64) -> Result<()> {
@@ -260,6 +285,9 @@ mod tests {
     struct Fixture(PathBuf);
     impl Fixture {
         fn new(until: u64) -> Self {
+            Self::endpoint(until, ENDPOINT)
+        }
+        fn endpoint(until: u64, endpoint: &str) -> Self {
             use crate::{
                 credentials::Kind, enrollment::Binding, pairing::ActivationInput,
                 provision_wire::Activated,
@@ -279,7 +307,7 @@ mod tests {
             .unwrap();
             origin_custody::install_at(
                 &f.0,
-                ENDPOINT,
+                endpoint,
                 "laptop",
                 &ActivationInput {
                     receiver_id: "a".repeat(64),
@@ -303,9 +331,12 @@ mod tests {
             f
         }
         fn delivery(&self) -> Delivery {
-            let (_, credential) = origin_custody::load_at(&self.0, Some(ENDPOINT), NOW).unwrap();
+            self.delivery_endpoint(ENDPOINT)
+        }
+        fn delivery_endpoint(&self, endpoint: &str) -> Delivery {
+            let (_, credential) = origin_custody::load_at(&self.0, Some(endpoint), NOW).unwrap();
             Delivery::new(&PushOptions {
-                url: ENDPOINT.into(),
+                url: endpoint.into(),
                 credential,
                 sessions: Default::default(),
                 state: self.0.join("push-state"),
@@ -317,6 +348,158 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+    #[test]
+    fn unauthenticated_proxy_cannot_inject_a_renewal_hint() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            sync::{Arc, Mutex},
+            time::{Duration, Instant},
+        };
+        let f = Fixture::new(NOW + WINDOW - 1);
+        let mut d = f.delivery();
+        d.clock = Some(NOW);
+        d.renew = Some(|_, _| Err("offline".into()));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline);
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("CONNECT receiver.example:443"));
+            assert!(!request.contains("old-bearer"));
+            stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nSemon-Renewal: due\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        // Keep the logical enrolled HTTPS endpoint. This test-only builder
+        // routes its bytes to bounded plaintext loopback to inject a response.
+        let proxy = reqwest::Proxy::https(format!("http://{address}")).unwrap();
+        let mut client = crate::Client::with_http_builder(d.options(), move || {
+            reqwest::blocking::Client::builder().proxy(proxy.clone())
+        })
+        .unwrap();
+        let delivery = Arc::new(Mutex::new(d));
+        client.renewal = Some(Arc::clone(&delivery));
+        // A proxy CONNECT refusal is a TLS transport error, so its forged hint
+        // must never reach the authenticated application response path.
+        assert!(client.post("facts", "{}".into()).is_err());
+        server.join().unwrap();
+        let d = delivery.lock().unwrap();
+        assert!(!d.schedule.hint);
+        assert_eq!(d.options.credential.token().unwrap().expose(), "old-bearer");
+        assert_eq!(d.notices.len(), 1);
+    }
+    #[test]
+    fn real_https_application_traffic_survives_renewal_error() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+        use std::{
+            io::{BufRead, BufReader, Read, Write},
+            net::{TcpListener, TcpStream},
+            sync::{Arc, Mutex},
+            time::{Duration, Instant},
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let endpoint = format!("https://127.0.0.1:{}", address.port());
+        let f = Fixture::endpoint(NOW + WINDOW - 1, &endpoint);
+        let mut d = f.delivery_endpoint(&endpoint);
+        d.clock = Some(NOW);
+        d.renew = Some(|_, _| Err("offline".into()));
+        listener.set_nonblocking(true).unwrap();
+        let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let pem = std::fs::read(fixture.join("test-cert.pem")).unwrap();
+        let trust = reqwest::Certificate::from_pem(&pem).unwrap();
+        let certificate = CertificateDer::from_pem_file(fixture.join("test-cert.pem")).unwrap();
+        let key = PrivateKeyDer::from_pem_file(fixture.join("test-key.pem")).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate], key)
+        .unwrap();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let socket: TcpStream = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline);
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let connection = rustls::ServerConnection::new(Arc::new(config)).unwrap();
+            let mut stream = rustls::StreamOwned::new(connection, socket);
+            let mut reader = BufReader::new(&mut stream);
+            let mut head = String::new();
+            loop {
+                let mut line = String::new();
+                assert_ne!(reader.read_line(&mut line).unwrap(), 0);
+                if line == "\r\n" {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            assert!(
+                head.to_ascii_lowercase()
+                    .contains("authorization: bearer old-bearer")
+            );
+            let mut body = [0; 2];
+            reader.read_exact(&mut body).unwrap();
+            assert_eq!(&body, b"{}");
+            drop(reader);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+                .unwrap();
+            stream.flush().unwrap();
+        });
+        let mut client = crate::Client::with_http_builder(d.options(), move || {
+            reqwest::blocking::Client::builder()
+                .no_proxy()
+                .add_root_certificate(trust.clone())
+        })
+        .unwrap();
+        // Explicit test trust accepts the synthetic certificate with normal
+        // hostname verification. Production retains public WebPKI roots.
+        let delivery = Arc::new(Mutex::new(d));
+        client.renewal = Some(Arc::clone(&delivery));
+        assert_eq!(
+            client.post("facts", "{}".into()).unwrap(),
+            (200, "{}".into())
+        );
+        server.join().unwrap();
+        assert_eq!(delivery.lock().unwrap().notices.len(), 1);
     }
     #[test]
     fn failed_renewal_keeps_valid_application_authority_and_exact_notice() {
@@ -491,6 +674,13 @@ mod tests {
             s.outcome(until, 100 + DAY, Some(Err("temporary".into())))
                 .is_some()
         );
+    }
+    #[test]
+    fn attempt_start_is_not_followed_by_a_redundant_due_line() {
+        let mut s = Schedule::default();
+        assert_eq!(s.outcome(30 * DAY, 1, Some(Ok(()))), Some(Notice::Renewing));
+        assert_eq!(s.outcome(30 * DAY, 2, None), None);
+        assert_eq!(s.outcome(30 * DAY, 61, Some(Ok(()))), None);
     }
     #[test]
     fn severity_crossings_and_daily_reminders_are_independent_of_attempts() {

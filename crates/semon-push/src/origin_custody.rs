@@ -389,7 +389,7 @@ pub(crate) fn load_at(
     let dir = selected_directory(&dir)?;
     let (config, key) = read_configuration(&dir, &name)?;
     if now >= config.scope.valid_until {
-        return Err("receiver credentials expired; run semon connect --to URL".into());
+        return Err(recovery_message(&config, "credentials expired")?);
     }
     let private = dir.read("origin-key.pk8")?;
     let secret = dir.read("mirror-push.secret")?;
@@ -408,12 +408,18 @@ pub(crate) fn load_at(
             Ok(bytes.to_vec())
         })
         .transpose()?;
-    validate_certificate(
+    if let Err(error) = validate_certificate(
         &config.scope,
         certificate.as_deref(),
         key.public_key().as_ref(),
         now,
-    )?;
+    ) {
+        return Err(if error.starts_with("origin client certificate expired") {
+            recovery_message(&config, "client certificate expired")?
+        } else {
+            error
+        });
+    }
     let credential = crate::Credential::Enrolled {
         token,
         identity: certificate.map(|certificate| crate::ClientIdentity {
@@ -424,6 +430,14 @@ pub(crate) fn load_at(
         authority: Authority::new(base, &config)?,
     };
     Ok((config, credential))
+}
+
+pub(crate) fn recovery_message(config: &Configuration, reason: &str) -> Result<String> {
+    let host = receiver_host(&config.endpoint)?;
+    Ok(format!(
+        "Receiver {host} {reason}.\nTo restore access, pair again: on the receiver, run semon receive enroll --machine {} with its listener/TLS options and confirm replacement if prompted; on the origin, run semon connect --to {}, enter the code, and approve replacement.",
+        config.machine, config.endpoint
+    ))
 }
 
 fn selected_directory(dir: &Directory) -> Result<Directory> {

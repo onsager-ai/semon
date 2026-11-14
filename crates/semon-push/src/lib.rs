@@ -441,6 +441,8 @@ pub struct Client {
     #[cfg(unix)]
     renewal: Option<Arc<Mutex<origin_delivery::Delivery>>>,
     http: Arc<dyn Fn() -> Result<reqwest::blocking::Client> + Send + Sync>,
+    #[cfg(unix)]
+    http_builder: Arc<dyn Fn() -> reqwest::blocking::ClientBuilder + Send + Sync>,
     stop: Stop,
     lock: Option<Arc<StateLock>>,
     state_path: PathBuf,
@@ -488,6 +490,10 @@ impl Client {
         let url = check_url(&options.url)?;
         let token = options.credential.token()?;
         let credential = options.credential.clone();
+        let builder: Arc<dyn Fn() -> reqwest::blocking::ClientBuilder + Send + Sync> =
+            Arc::new(builder);
+        #[cfg(unix)]
+        let http_builder = Arc::clone(&builder);
         let http: Arc<dyn Fn() -> Result<reqwest::blocking::Client> + Send + Sync> =
             Arc::new(move || {
                 let http = builder();
@@ -556,6 +562,8 @@ impl Client {
             renewal: origin_delivery::Delivery::new(options)
                 .map(|delivery| Arc::new(Mutex::new(delivery))),
             http,
+            #[cfg(unix)]
+            http_builder,
             stop: {
                 let stop = Stop::new();
                 #[cfg(unix)]
@@ -645,6 +653,8 @@ impl Client {
             let dispatch_stop = self.stop.clone();
             #[cfg(unix)]
             let renewal = self.renewal.clone();
+            #[cfg(unix)]
+            let builder = Arc::clone(&self.http_builder);
             #[cfg(test)]
             let completed_transports = Arc::clone(&self.completed_transports);
             let answer = self.stop.run(route, move || {
@@ -654,21 +664,22 @@ impl Client {
                     .as_ref()
                     .map(|r| r.lock().unwrap_or_else(|e| e.into_inner()));
                 #[cfg(unix)]
-                let (factory, token, dispatch_stop, generation) =
-                    if let Some(renewal) = renewal.as_mut() {
-                        renewal.checkpoint()?;
-                        let selected = Client::new(renewal.options())?;
-                        let authority = selected.stop.authority.expect("enrolled authority");
-                        let generation = authority.generation();
-                        (
-                            selected.http,
-                            selected.token,
-                            dispatch_stop.with_authority(authority),
-                            generation,
-                        )
-                    } else {
-                        (factory, token, dispatch_stop, 0)
-                    };
+                let (factory, token, dispatch_stop, generation) = if let Some(renewal) =
+                    renewal.as_mut()
+                {
+                    renewal.checkpoint()?;
+                    let selected = Client::with_http_builder(renewal.options(), move || builder())?;
+                    let authority = selected.stop.authority.expect("enrolled authority");
+                    let generation = authority.generation();
+                    (
+                        selected.http,
+                        selected.token,
+                        dispatch_stop.with_authority(authority),
+                        generation,
+                    )
+                } else {
+                    (factory, token, dispatch_stop, 0)
+                };
                 #[cfg(unix)]
                 let _delivery = dispatch_stop
                     .authority
@@ -1989,9 +2000,7 @@ fn push_running(
         let delay = if catchup_pending && backoff.state.is_none() {
             Duration::ZERO
         } else {
-            // Renewal deadlines must be evaluated even during a long storage
-            // or pause backoff, independently of source events.
-            backoff.delay().min(Duration::from_secs(60))
+            backoff.delay()
         };
         let deadline = Instant::now() + delay;
         loop {
@@ -2002,22 +2011,24 @@ fn push_running(
             if stop.sleep(remaining.min(FACTS_EVERY)) {
                 return Ok(());
             }
-        }
-        #[cfg(unix)]
-        if let Some(renewal) = &client.renewal {
-            let renewal = Arc::clone(renewal);
-            let lock = hold.share();
-            let Some(result) = stop.run("renewal", move || {
-                let _lock = lock;
-                renewal
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .checkpoint()
-            })?
-            else {
-                return Ok(());
-            };
-            result?;
+            // Evaluate renewal independently of file events and application
+            // backoff, without increasing the rate of paused/storage retries.
+            #[cfg(unix)]
+            if let Some(renewal) = &client.renewal {
+                let renewal = Arc::clone(renewal);
+                let lock = hold.share();
+                let Some(result) = stop.run("renewal", move || {
+                    let _lock = lock;
+                    renewal
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .checkpoint()
+                })?
+                else {
+                    return Ok(());
+                };
+                result?;
+            }
         }
         pass = client.watch_pass(&options.sessions);
     }
