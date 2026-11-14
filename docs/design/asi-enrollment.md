@@ -126,7 +126,11 @@ counted by the journey; a conditional four-action target is not a clean-host cla
 
 D4 selects `public_tls` short-code confirmation for receivers whose advertised
 HTTPS endpoint already has normal trusted certificate-chain and hostname validation.
-Private-root/LAN receivers keep the long `pinned_invitation` (71 characters).
+Private-root/LAN receivers have no pairing profile yet. The owner rejected the
+71-character pinned invitation (2026-11-12: any typed or pasted code is at most
+10 characters), and private-root pairing is deferred until there is a concrete
+LAN-only need (owner, 2026-11-14). Until then receivers use a publicly valid
+certificate, such as a domain or a Tailscale `ts.net` name.
 PAKE (password-authenticated key exchange) is a separate later track, only after a
 maintained implementation clears independent review and owner approval. No
 bootstrap TLS profile skips chain trust. Tailscale `ts.net` names appear in public
@@ -141,18 +145,16 @@ the receiver owner's session or arbitrary administration authority.
 
 ## Pairing bootstrap and provisioning state
 
-Normal TLS chain and endpoint validation precedes pairing for both profiles.
-A private-root/LAN receiver uses `pinned_invitation`: its protected transfer adds
-the receiver pin, while explicit trusted-root provisioning remains necessary.
-A matching pin never substitutes for chain trust. No system trust-store mutation,
+Normal TLS chain and endpoint validation precedes pairing. A future private-root
+profile must provision the trusted root explicitly; a matching pin never
+substitutes for chain trust. No system trust-store mutation,
 general verification bypass, TOFU or peer-installed unverified root is permitted.
 Before confirmation the channel carries only bounded protocol material, never
 application bodies, issued credentials, source policy or grants.
 
-The transcript binds receiver identity and exact advertised endpoint; the
-pinned_invitation profile additionally binds its TLS pin. public_tls validates
-public CA roots and hostname and records no receiver certificate fingerprint.
-Both profiles bind the
+The transcript binds receiver identity and exact advertised endpoint. public_tls
+validates public CA roots and hostname and records no receiver certificate
+fingerprint. The transcript also binds the
 origin-generated public key, both roles, fresh session identity, protocol version
 and intended enrollment/kind/scope. Require mutual key confirmation and proof of
 origin key possession before approval can activate authority. The origin client
@@ -192,7 +194,7 @@ checks locally before sending or spending an attempt. Every single-character
 substitution is detected; transpositions are not all detected (adjacent unequal
 data pairs are detected in 30/31 cases; pairs differing by 16 can collide).
 
-Both profiles have ten minutes from creation to confirmation, ten minutes from
+Pairing sessions have ten minutes from creation to confirmation, ten minutes from
 confirmation to B4 approval, and an absolute twenty-minute session lifetime.
 Exact deadline instants are expired. The injected Unix-seconds wall clock is
 clamped to the latest persisted/observed value: backward jumps never reopen gates
@@ -256,15 +258,10 @@ speed assertion. A mistyped hostname hands that host the code; endpoint/exporter
 binding and PBKDF2 cost bound what that host can do. PAKE is the real fix and
 remains a separate later reviewed track.
 
-`pinned_invitation` parameters, **implemented in PR 3b**: 128-bit secret, 64-bit
-session ID, 128-bit truncated receiver pin, 71-character protected invitation,
-three attempts, the same ten/ten/twenty-minute windows, pending cap two,
-six issuances/hour and three burns/hour causing the same persisted thirty-minute
-pause. Its admission limits are four concurrent provisioning connections,
-8 KiB maximum request, ten-second read deadline and thirty unknown-ID requests
-per minute. PR 3.1 does not implement this profile.
+There is no private-root pairing profile. A future one must keep the typed or
+pasted code at 10 characters or fewer and needs its own owner-reviewed contract.
 
-Codes, invitations, keys and bearer secrets never enter Debug/Display output,
+Codes, keys and bearer secrets never enter Debug/Display output,
 logs, URLs, assertions or errors. Pairing does not persist P1 source consent;
 the caller supplies verified private-key signature evidence binding B4 to the
 transcript and exact summary digest, and must durably persist consent separately.
@@ -665,7 +662,7 @@ replacement but does not prove revocation; generic renewal refusal proves neithe
 | Active replacement, including other receiver kinds still usable | 5: the four actions plus receiver replacement confirmation before code display |
 
 These counts use the public_tls code profile and existing listener/TLS prerequisites.
-The pinned_invitation profile uses an invitation, never a public_tls code. Standalone
+Standalone
 disconnect retains its command plus confirmation; replacement never requires it.
 
 For unsupported receiver format or actual capacity exhaustion, keep the old receiver
@@ -987,8 +984,8 @@ concurrent renewal cannot publish active custody after disconnect wins the lock.
 | Renewal simplification (2), next PR | Receiver and origin together: scope-preserving idempotent finish, identical-result retries; remove enable, due header, precommit cancel, delivery budget and Abandoned/archive; short install locks, separate attempt serialization, overall network deadline and coordinated application selection/admission |
 | Push/watch trigger (3), following PR | Run renewal off the application path; 30-day timer and idle-watch checks only, idle-watch scheduling, bounded retries and exact notices; valid traffic survives temporary renewal errors |
 
-PR3b private-root follows PR4; a future `--trust-root FILE` is outside this contract
-and its behavior is not decided.
+Private-root pairing (formerly PR3b) is deferred by owner decision (2026-11-14) until
+there is a concrete LAN-only need; how an origin obtains a private root is undecided.
 
 ### Exact new operator-visible strings
 
@@ -1056,7 +1053,7 @@ exit 1; cancellation exits 0. No additional renewal prompts.
 | push / --watch | Existing credential refused by application traffic | `Receiver HOST refused access.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; refusal does not prove revocation |
 | push / --watch | Credential expired | `Receiver HOST credentials expired.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; NEW enrollment ID |
 | push / --watch | Client certificate expired | `Receiver HOST client certificate expired.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; NEW enrollment ID |
-| Recovery block | Appended to the three push recovery first lines | `To restore access, pair again: on the receiver, run semon receive enroll --machine M with its listener/TLS options and confirm replacement if prompted; on the origin, run semon connect --to URL, enter the code, and approve replacement.` | stderr; public_tls uses code; pinned_invitation substitutes invitation |
+| Recovery block | Appended to the three push recovery first lines | `To restore access, pair again: on the receiver, run semon receive enroll --machine M with its listener/TLS options and confirm replacement if prompted; on the origin, run semon connect --to URL, enter the code, and approve replacement.` | stderr |
 | push / --watch | Durable installation and first-use confirmation | `Receiver HOST credentials renewed.` | stderr; no exit change; generation/kind details diagnostic only |
 | connect | Replacement line in combined approval summary | `This replaces the previous enrollment for receiver HOST. Its files and history will be kept.` | terminal; shown before B4 approval; no extra approval step |
 | receiver startup / owner command | Unsupported receiver registry/renewal receipt | `Receiver state uses an unsupported format. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. See docs/design/asi-enrollment.md#offline-machines-and-missed-renewal.` | stderr; exit 1; [recovery section](#offline-machines-and-missed-renewal); never used for capacity |
@@ -1228,7 +1225,7 @@ CI must verify the implementation, not infer safety from this docs PR:
 
 - Successful accepted public_tls code pairing and refused wrong-code/key/endpoint/
   pin/version/role/scope or failed confirmation; no TOFU, general TLS bypass,
-  redirects or secret leaks. Private-root belongs to PR3b; PAKE remains a separate
+  redirects or secret leaks. Private-root pairing is deferred; PAKE remains a separate
   reviewed track, not a gate claiming it ships in PR4.
 - Tight per-session and receiver-wide guessing, issuance/pending-state and recovery
   bounds across addresses/connections/retries; reissue cannot reset aggregate bounds.
@@ -1317,7 +1314,7 @@ CI must verify the implementation, not infer safety from this docs PR:
   resolution through the SAME pairing endpoint
   normalization on connect/push/disconnect, including default ports and IPv6,
   without hash aliases or DNS alias guessing. Notices never show userinfo/query.
-  Distinguish certificate expiry and unsupported-format versus capacity guidance; all recovery strings use code/invitation consistently.
+  Distinguish certificate expiry and unsupported-format versus capacity guidance; all recovery strings use the code consistently.
   Inject wall/monotonic clocks and scheduler advancement, clamp backward wall time,
   and use no real-time sleeps (#623), including deadline and race tests.
 
