@@ -443,7 +443,7 @@ fn ended_renewal_compaction_audits_before_every_replace_failure() {
 }
 
 #[test]
-fn competing_finishes_commit_only_first_application_key_and_replay_requires_recover() {
+fn competing_finishes_commit_only_first_application_key() {
     for reverse in [false, true] {
         let f = Fixture::new();
         let mut receiver = Receiver::default();
@@ -465,10 +465,11 @@ fn competing_finishes_commit_only_first_application_key_and_replay_requires_reco
                 .is_err()
         );
         assert_eq!(f.begin(&mut receiver, now).unwrap(), begun);
-        assert!(
+        assert_eq!(
             receiver
                 .finish(&f.dir, &winner, &[4; 32], None, now)
-                .is_err()
+                .unwrap(),
+            delivered
         );
         let wrong = f.finish(&begun, applications[1], [6; 32]);
         assert!(
@@ -496,7 +497,7 @@ fn competing_finishes_commit_only_first_application_key_and_replay_requires_reco
 }
 
 #[test]
-fn lost_ack_recovers_identical_delivery_once_after_restart() {
+fn lost_response_retries_identically_after_restart_and_ten_minutes() {
     let f = Fixture::new();
     let mut receiver = Receiver::default();
     let now = 2_000_000;
@@ -505,10 +506,11 @@ fn lost_ack_recovers_identical_delivery_once_after_restart() {
     let initial = receiver
         .finish(&f.dir, &commit, &[4; 32], None, now + 1)
         .unwrap();
-    assert!(
+    assert_eq!(
         receiver
             .finish(&f.dir, &commit, &[4; 32], None, now + 1)
-            .is_err()
+            .unwrap(),
+        initial
     );
     receiver = Receiver::default();
     assert_eq!(begun, f.begin(&mut receiver, now + 2).unwrap());
@@ -530,10 +532,12 @@ fn lost_ack_recovers_identical_delivery_once_after_restart() {
             .finish(&f.dir, &recover, &[6; 32], None, now + 2)
             .unwrap()
     );
-    assert!(
+    let retry = f.finish(&begun, [3; 32], [8; 32]);
+    assert_eq!(
         receiver
-            .finish(&f.dir, &recover, &[6; 32], None, now + 2)
-            .is_err()
+            .finish(&f.dir, &retry, &[8; 32], None, now + 601)
+            .unwrap(),
+        initial
     );
     let registry = Registry::read_current(&f.dir).unwrap();
     assert_eq!(
@@ -755,7 +759,7 @@ fn refused_request_io_does_not_hold_registry_authenticator_renewal_mutex() {
             )
         });
         entered_rx
-            .recv_timeout(CHILD_TIMEOUT)
+            .recv_timeout(std::time::Duration::from_secs(10))
             .expect("bogus request never reached refusal IO");
         let credentials = f.credentials();
         scope.spawn(move || {
@@ -944,4 +948,57 @@ fn refusal_warning_latch_bounds_repeated_failures_and_concurrent_contention() {
     assert_eq!(warnings.load(Ordering::Relaxed), 1);
     assert!(!refusal_warning(&latch, &Ok(())));
     assert!(!refusal_warning(&latch, &Err(Error::AuditUnavailable)));
+}
+
+#[test]
+fn hostile_identical_retries_do_not_write_registry_or_audit() {
+    let f = Fixture::new();
+    let mut receiver = Receiver::default();
+    let now = 2_000_000;
+    let begun = f.begin(&mut receiver, now).unwrap();
+    let pending_registry = fs::read(f.dir.join("enrollment/registry.json")).unwrap();
+    let pending_audit = fs::read(f.dir.join("receiver-audit/renewals.jsonl")).unwrap();
+    for offset in 1..100 {
+        assert_eq!(f.begin(&mut receiver, now + offset).unwrap(), begun);
+    }
+    assert_eq!(
+        fs::read(f.dir.join("enrollment/registry.json")).unwrap(),
+        pending_registry
+    );
+    assert_eq!(
+        fs::read(f.dir.join("receiver-audit/renewals.jsonl")).unwrap(),
+        pending_audit
+    );
+    let finish = f.finish(&begun, [3; 32], [4; 32]);
+    let initial = receiver
+        .finish(&f.dir, &finish, &[4; 32], None, now + 100)
+        .unwrap();
+    let committed_registry = fs::read(f.dir.join("enrollment/registry.json")).unwrap();
+    let committed_audit = fs::read(f.dir.join("receiver-audit/renewals.jsonl")).unwrap();
+    for offset in 601..701 {
+        assert_eq!(f.begin(&mut receiver, now + offset).unwrap(), begun);
+        let finish = f.finish(&begun, [3; 32], [5; 32]);
+        assert_eq!(
+            receiver
+                .finish(&f.dir, &finish, &[5; 32], None, now + offset)
+                .unwrap(),
+            initial
+        );
+    }
+    assert_eq!(
+        fs::read(f.dir.join("enrollment/registry.json")).unwrap(),
+        committed_registry
+    );
+    assert_eq!(
+        fs::read(f.dir.join("receiver-audit/renewals.jsonl")).unwrap(),
+        committed_audit
+    );
+    let registry = Registry::read_current(&f.dir).unwrap();
+    assert_eq!(registry.credentials.len(), 2);
+    assert_eq!(
+        registry.enrollments[0].credential_kinds[0]
+            .generations
+            .current,
+        2
+    );
 }

@@ -51,6 +51,7 @@ pub(crate) struct Connection {
     pub(crate) stream: rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
     pub(crate) host: String,
     pub(crate) exporter: [u8; 32],
+    pub(crate) started: Instant,
     #[cfg(test)]
     pub(crate) fault: Option<&'static str>,
 }
@@ -68,10 +69,22 @@ impl Connection {
         let port = url
             .port_or_known_default()
             .ok_or("receiver URL has no port")?;
-        let addresses = (host.as_str(), port)
-            .to_socket_addrs()
-            .map_err(|_| "receiver DNS lookup failed")?;
         let started = Instant::now();
+        let (resolved_tx, resolved_rx) = std::sync::mpsc::sync_channel(1);
+        let dns_host = host.clone();
+        std::thread::Builder::new()
+            .name("receiver-dns".into())
+            .spawn(move || {
+                let addresses = (dns_host.as_str(), port)
+                    .to_socket_addrs()
+                    .map(|addresses| addresses.collect::<Vec<_>>());
+                let _ = resolved_tx.send(addresses);
+            })
+            .map_err(|_| "receiver DNS lookup unavailable")?;
+        let addresses = resolved_rx
+            .recv_timeout(remaining_response(&|| started.elapsed())?)
+            .map_err(|_| "receiver DNS lookup timed out")?
+            .map_err(|_| "receiver DNS lookup failed")?;
         let mut connected = None;
         for address in addresses {
             let remaining = remaining_response(&|| started.elapsed())?;
@@ -106,7 +119,11 @@ impl Connection {
             .map_err(|_| "TLS configuration failed")?;
         let mut socket = socket;
         while conn.is_handshaking() {
-            conn.complete_io(&mut socket).map_err(io_error)?;
+            let mut bounded = DeadlineSocket {
+                socket: &mut socket,
+                elapsed: &|| started.elapsed(),
+            };
+            conn.complete_io(&mut bounded).map_err(io_error)?;
         }
         let exporter = conn
             .export_keying_material([0; 32], wire::EXPORTER_LABEL, Some(&[]))
@@ -115,6 +132,7 @@ impl Connection {
             stream: rustls::StreamOwned::new(conn, socket),
             host: format!("{host}:{port}"),
             exporter,
+            started,
             #[cfg(test)]
             fault: None,
         })
@@ -124,8 +142,8 @@ impl Connection {
         path: &str,
         message: &impl Serialize,
     ) -> Result<T> {
-        let start = Instant::now();
-        self.post_with_clock(path, message, &|| start.elapsed())
+        let started = self.started;
+        self.post_with_clock(path, message, &|| started.elapsed())
     }
     fn post_with_clock<T: DeserializeOwned>(
         &mut self,

@@ -14,7 +14,7 @@ enum Response {
 type TestExchange = dyn FnMut(&mut Renewal, bool, &dyn Fn() -> Result<u64>) -> Result<Response>;
 
 const PENDING: &str = "renewal.json";
-const BLOCKED: &str = "receiver renewal recovery must complete before application traffic";
+const BLOCKED: &str = "receiver renewal cannot publish against changed or disabled custody";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -162,8 +162,7 @@ impl Renewal {
     pub fn configuration(&self) -> &Configuration {
         &self.config
     }
-    /// One private TLS connection per request, guarded through socket destruction.
-    /// The guard is declared first so disconnect drains the complete request.
+    /// Renewal network work owns neither the install lock nor application admission.
     fn connection(&self, clock: &dyn Fn() -> Result<u64>) -> Result<crate::connect::Connection> {
         if self.dir.disabled()? {
             return Err(BLOCKED.into());
@@ -252,10 +251,12 @@ impl Renewal {
         {
             return Ok(());
         }
-        if !self.pending() {
-            let Response::Begun(begun) = exchange(self, true, clock)? else {
-                return Err(ERROR.into());
-            };
+        // Begin also reconciles a receiver restart/expired uncommitted nonce.
+        // A committed result returns the same ID even after ten minutes.
+        let Response::Begun(begun) = exchange(self, true, clock)? else {
+            return Err(ERROR.into());
+        };
+        if self.attempt.as_ref().is_none_or(|a| a.begun != begun) {
             self.prepare(begun, clock()?)?;
         }
         match exchange(self, false, clock) {
@@ -301,7 +302,10 @@ impl Renewal {
     fn prepare(&mut self, begun: Begun, now: u64) -> Result<()> {
         let _lock = self.root.install_lock()?;
         self.recheck()?;
-        if self.pending()
+        if self
+            .attempt
+            .as_ref()
+            .is_some_and(|a| a.state != State::Prepared && a.state != State::Confirmed)
             || now >= self.config.scope.valid_until
             || now >= begun.expires_at
             || begun.version != 1
@@ -494,10 +498,11 @@ impl Renewal {
         self.reconcile()
     }
     fn recheck(&self) -> Result<()> {
-        if self.dir.disabled()? {
+        let active = self.root.child(&self.name)?;
+        if active.disabled()? {
             return Err(BLOCKED.into());
         }
-        let (selected, _) = read_configuration(&selected_directory(&self.dir)?, &self.name)?;
+        let (selected, _) = read_configuration(&selected_directory(&active)?, &self.name)?;
         if selected.enrollment_id != self.config.enrollment_id
             || selected.generation != self.config.generation
         {
@@ -575,6 +580,11 @@ impl Renewal {
                 {
                     return Err(ERROR.into());
                 }
+                // Existing requests keep their selected generation through completion.
+                // A busy application causes a temporary renewal error, never an
+                // install-lock wait across network traffic.
+                let _admission =
+                    delivery_lock_until(&self.dir, libc::LOCK_EX, std::time::Instant::now())?;
                 replace(&self.dir, "selected", name.as_bytes())?;
                 a.state = State::Installed;
                 save(&self.dir, a)?;

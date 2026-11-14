@@ -58,7 +58,6 @@ impl Fixture {
                     kind: Kind::MirrorPush,
                     generation: 2,
                 }],
-                enable_authorization_ids: vec![],
             },
             NOW,
         )
@@ -171,7 +170,6 @@ fn origin_proof_and_recovery_match_receiver_commit_contract() {
     drop(origin);
     let mut origin = f.open();
     let request = origin.finish(&[3; 32], NOW).unwrap();
-    assert_eq!(request.action, Action::Recover);
     let bytes = receiver
         .handle(
             &receiver_dir,
@@ -246,18 +244,6 @@ fn revoked_receiver_refuses_recovery_without_origin_fallback() {
 }
 
 #[test]
-fn recovery_stops_at_conservative_cutover_without_using_old_application_authority() {
-    let f = Fixture::new();
-    let mut origin = f.prepare();
-    origin.finish(&[1; 32], NOW).unwrap();
-    drop(origin);
-    let mut origin = f.open();
-    assert!(origin.finish(&[2; 32], NOW + wire::OVERLAP).is_err());
-    assert!(!origin.pending());
-    assert!(load_at(&f.0, None, NOW + wire::OVERLAP).is_ok());
-}
-
-#[test]
 fn pending_attempt_preserves_selected_application_authority() {
     let f = Fixture::new();
     let (_, credential) = load_at(&f.0, None, NOW).unwrap();
@@ -276,112 +262,6 @@ fn pending_attempt_preserves_selected_application_authority() {
 }
 
 #[test]
-fn expired_prepared_attempt_is_archived_and_replaced() {
-    let f = Fixture::new();
-    drop(f.prepare());
-    let mut r = f.open();
-    let mut next = r.attempt.as_ref().unwrap().begun.clone();
-    next.renewal_id = "f".repeat(64);
-    next.expires_at = NOW + 1200;
-    r.prepare(next, NOW + 601).unwrap();
-    assert_eq!(r.attempt.as_ref().unwrap().begun.renewal_id, "f".repeat(64));
-    let archived: Attempt = serde_json::from_slice(
-        &r.dir
-            .read(&format!("renewal-ended-{}.json", "c".repeat(64)))
-            .unwrap(),
-    )
-    .unwrap();
-    assert!(archived.state == State::Abandoned);
-    assert_eq!(
-        r.finish(&[3; 32], NOW + 601).unwrap().action,
-        Action::Commit
-    );
-}
-
-#[test]
-fn receiver_restart_refuses_old_nonce_then_new_begin_can_commit() {
-    let f = Fixture::new();
-    let mut origin = f.open();
-    let receiver_dir = f.receiver(&origin);
-    let mut receiver = crate::renewal::Receiver::default();
-    let begin = || wire::Begin {
-        version: 1,
-        enrollment_id: "b".repeat(64),
-        credentials: vec![wire::Credential {
-            kind: Kind::MirrorPush,
-            generation: 1,
-            bearer: "old-bearer".into(),
-        }],
-    };
-    let bytes = receiver
-        .handle(
-            &receiver_dir,
-            wire::Request::Begin(begin()),
-            [1; 32],
-            None,
-            NOW,
-        )
-        .unwrap_or_else(|_| panic!("begin refused"));
-    origin
-        .prepare(serde_json::from_slice(&bytes).unwrap(), NOW)
-        .unwrap();
-    receiver = crate::renewal::Receiver::default();
-    let commit = origin.finish(&[2; 32], NOW).unwrap();
-    assert!(
-        receiver
-            .handle(
-                &receiver_dir,
-                wire::Request::Finish(commit),
-                [2; 32],
-                None,
-                NOW
-            )
-            .is_err()
-    );
-    let recover = origin.finish(&[3; 32], NOW).unwrap();
-    assert!(
-        receiver
-            .handle(
-                &receiver_dir,
-                wire::Request::Finish(recover),
-                [3; 32],
-                None,
-                NOW
-            )
-            .is_err()
-    );
-    origin.abandon().unwrap();
-    assert!(!origin.pending());
-    let bytes = receiver
-        .handle(
-            &receiver_dir,
-            wire::Request::Begin(begin()),
-            [4; 32],
-            None,
-            NOW + 60,
-        )
-        .unwrap_or_else(|_| panic!("new begin refused"));
-    origin
-        .prepare(serde_json::from_slice(&bytes).unwrap(), NOW + 60)
-        .unwrap();
-    let commit = origin.finish(&[5; 32], NOW + 61).unwrap();
-    let bytes = receiver
-        .handle(
-            &receiver_dir,
-            wire::Request::Finish(commit),
-            [5; 32],
-            None,
-            NOW + 62,
-        )
-        .unwrap_or_else(|_| panic!("new commit refused"));
-    let delivery = serde_json::from_slice(&bytes).unwrap();
-    origin
-        .delivered_with_clock(&delivery, &|| Ok(NOW + 63))
-        .unwrap();
-    assert_eq!(origin.config.generation, 2);
-}
-
-#[test]
 fn same_object_public_retry_reconciles_published_recovery_before_expiry() {
     let f = Fixture::new();
     let mut r = f.prepare();
@@ -391,9 +271,8 @@ fn same_object_public_retry_reconciles_published_recovery_before_expiry() {
     FAULT.with(|fault| *fault.borrow_mut() = Some(("generation-directory-fsync", 0)));
     assert!(r.delivered(&delivery, NOW).is_err());
     FAULT.with(|fault| *fault.borrow_mut() = None);
-    assert!(r.attempt.as_ref().unwrap().state == State::RecoverReserved);
-    // The production public entry point must select the complete generation,
-    // even though RecoverReserved would otherwise be abandoned on this call.
+    assert!(r.attempt.as_ref().unwrap().state == State::Prepared);
+    // The public entry point reconciles a complete staged generation locally.
     r.renew().unwrap();
     assert_eq!(r.config.generation, 2);
     assert!(r.attempt.as_ref().unwrap().state == State::Installed);
@@ -415,7 +294,6 @@ fn renewal_flow_reads_fresh_clock_at_each_boundary() {
             kind: Kind::MirrorPush,
             generation: 2,
         }],
-        enable_authorization_ids: vec![],
     };
     let readings = Rc::new(RefCell::new(Vec::new()));
     let next = std::cell::Cell::new(NOW);
@@ -469,27 +347,6 @@ fn renewal_flow_reads_fresh_clock_at_each_boundary() {
 }
 
 #[test]
-fn renewal_error_automatically_abandons_exhausted_recovery() {
-    let f = Fixture::new();
-    let mut r = f.prepare();
-    r.finish(&[1; 32], NOW).unwrap();
-    r.exchange = Some(Box::new(|r, begin, clock| {
-        assert!(!begin);
-        assert_eq!(r.finish(&[2; 32], clock()?)?.action, Action::Recover);
-        Err("receiver refused renewal".into())
-    }));
-    assert!(r.renew_with_clock(&|| Ok(NOW + 1)).is_err());
-    assert!(!r.pending());
-    assert!(r.attempt.as_ref().unwrap().state == State::Abandoned);
-    assert!(
-        r.dir
-            .read(&format!("renewal-ended-{}.json", "c".repeat(64)))
-            .is_ok()
-    );
-    assert!(load_at(&f.0, None, NOW).is_ok());
-}
-
-#[test]
 fn strict_thirty_day_boundary_and_expiry() {
     assert_eq!(window(NOW + wire::WINDOW + 1, NOW), (false, false));
     assert_eq!(window(NOW + wire::WINDOW, NOW), (true, false));
@@ -501,16 +358,14 @@ fn prepared_commit_recovery_and_exhaustion_survive_restart() {
     let f = Fixture::new();
     let mut r = f.prepare();
     let first = r.finish(&[1; 32], NOW).unwrap();
-    assert_eq!(first.action, Action::Commit);
     drop(r);
     assert!(load_at(&f.0, None, NOW).is_ok());
     let mut r = f.open();
     let second = r.finish(&[2; 32], NOW).unwrap();
-    assert_eq!(second.action, Action::Recover);
     assert_eq!(first.application_key, second.application_key);
     assert_ne!(first.proof, second.proof);
     drop(r);
-    assert!(f.open().finish(&[3; 32], NOW).is_err());
+    assert!(f.open().finish(&[3; 32], NOW + 601).is_ok());
 }
 #[test]
 fn delivered_generation_is_atomic_retained_and_never_falls_back() {
@@ -523,7 +378,7 @@ fn delivered_generation_is_atomic_retained_and_never_falls_back() {
     r.finish(&[1; 32], NOW).unwrap();
     let delivered = f.delivery(&r);
     r.delivered(&delivered, NOW).unwrap();
-    assert!(!authority.is_active());
+    assert!(authority.is_active());
     assert!(r.credentials(NOW).is_err());
     drop(r);
     let (config, _) = load_at(&f.0, None, NOW).unwrap();
@@ -578,10 +433,10 @@ fn crash_points_never_mix_files_and_restart_reconciles_complete_generation() {
         FAULT.with(|fault| *fault.borrow_mut() = None);
         drop(r);
         let mut r = f.open();
-        if matches!(r.attempt.as_ref().unwrap().state, State::CommitReserved) {
+        if matches!(r.attempt.as_ref().unwrap().state, State::Prepared) {
             // Incomplete retained stage never selects; only a verified recovery may.
             assert_eq!(load_at(&f.0, None, NOW).unwrap().0.generation, 1);
-            assert_eq!(r.finish(&[2; 32], NOW).unwrap().action, Action::Recover);
+            r.finish(&[2; 32], NOW).unwrap();
             r.delivered(&delivered, NOW).unwrap();
         }
         drop(r);
@@ -618,4 +473,59 @@ fn invalid_delivery_and_expired_authentication_never_publish() {
         std::str::from_utf8(&r.dir.read("selected").unwrap()).unwrap(),
         "generation-1"
     );
+}
+
+#[test]
+fn disconnect_during_stalled_renewal_does_not_wait_for_install_lock() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let f = Fixture::new();
+    let base = f.0.clone();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let mut r = Renewal::open(&base, ENDPOINT).unwrap();
+        r.exchange = Some(Box::new(move |_, _, _| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            Err("stalled exchange released".into())
+        }));
+        assert!(r.renew_with_clock(&|| Ok(NOW)).is_err());
+        finished_tx.send(()).unwrap();
+    });
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    Disconnect::open(&f.0, ENDPOINT).unwrap().commit().unwrap();
+    assert!(load_at(&f.0, None, NOW).is_err());
+    release_tx.send(()).unwrap();
+    finished_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    worker.join().unwrap();
+}
+
+#[test]
+fn application_admission_keeps_request_valid_during_publication() {
+    let f = Fixture::new();
+    let (_, credential) = load_at(&f.0, None, NOW).unwrap();
+    let crate::Credential::Enrolled { authority, .. } = credential else {
+        panic!()
+    };
+    let mut r = f.prepare();
+    let delivered = f.delivery(&r);
+    let admission = authority.delivery().unwrap();
+    let selected = authority.selected_credential().unwrap();
+    assert_eq!(selected.token().unwrap().expose(), "old-bearer");
+    // Publication cannot invalidate an admitted application request. It retries
+    // the local publication after the request releases its delivery guard.
+    assert!(r.delivered(&delivered, NOW).is_err());
+    assert!(authority.is_active());
+    assert_eq!(load_at(&f.0, None, NOW).unwrap().0.generation, 1);
+    drop(admission);
+    r.reconcile_local().unwrap();
+    let _admission = authority.delivery().unwrap();
+    let selected = authority.selected_credential().unwrap();
+    assert_eq!(
+        selected.token().unwrap().expose(),
+        delivered.credentials[0].bearer
+    );
+    assert_eq!(load_at(&f.0, None, NOW).unwrap().0.generation, 2);
 }

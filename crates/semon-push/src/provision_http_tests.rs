@@ -501,6 +501,7 @@ fn origin_transport(
         stream,
         host: "localhost".into(),
         exporter,
+        started: Instant::now(),
         fault: None,
     })
 }

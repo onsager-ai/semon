@@ -435,8 +435,7 @@ struct Source {
 
 pub struct Client {
     url: String,
-    token: Token,
-    http: Arc<dyn Fn() -> Result<reqwest::blocking::Client> + Send + Sync>,
+    http: Arc<dyn Fn() -> Result<(reqwest::blocking::Client, Token)> + Send + Sync>,
     stop: Stop,
     lock: Option<Arc<StateLock>>,
     state_path: PathBuf,
@@ -482,10 +481,21 @@ impl Client {
         builder: impl Fn() -> reqwest::blocking::ClientBuilder + Send + Sync + 'static,
     ) -> Result<Self> {
         let url = check_url(&options.url)?;
-        let token = options.credential.token()?;
+        options.credential.token()?;
         let credential = options.credential.clone();
-        let http: Arc<dyn Fn() -> Result<reqwest::blocking::Client> + Send + Sync> =
+        let http: Arc<dyn Fn() -> Result<(reqwest::blocking::Client, Token)> + Send + Sync> =
             Arc::new(move || {
+                #[cfg(unix)]
+                let selected;
+                #[cfg(unix)]
+                let credential = match &credential {
+                    Credential::Enrolled { authority, .. } => {
+                        selected = authority.selected_credential()?;
+                        &selected
+                    }
+                    credential => credential,
+                };
+                let token = credential.token()?;
                 let http = builder();
                 #[cfg(unix)]
                 let http = match &credential {
@@ -528,6 +538,7 @@ impl Client {
                     .timeout(Duration::from_secs(120))
                     .user_agent(concat!("semon-push/", env!("CARGO_PKG_VERSION")))
                     .build()
+                    .map(|http| (http, token))
                     .map_err(|error| error.to_string())
             });
         let state = fs::read(&options.state)
@@ -547,7 +558,6 @@ impl Client {
         }
         Ok(Self {
             url,
-            token,
             http,
             stop: {
                 let stop = Stop::new();
@@ -627,7 +637,6 @@ impl Client {
         loop {
             let factory = Arc::clone(&self.http);
             let request_url = format!("{}/v1/mirror/{route}", self.url);
-            let token = self.token.clone();
             let body = body.clone();
             let lock = self.lock.clone();
             let dispatch_stop = self.stop.clone();
@@ -647,7 +656,7 @@ impl Client {
                 }
                 // Declared after the delivery guard: the last handle joins its
                 // private reqwest runtime before the guard can be released.
-                let http = factory()?;
+                let (http, token) = factory()?;
                 let request = http
                     .post(request_url)
                     .bearer_auth(token.expose())

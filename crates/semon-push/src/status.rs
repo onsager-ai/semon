@@ -201,17 +201,8 @@ fn bounded_body(status: &mut Status) -> Option<String> {
 // answer 401 to a valid push-only token. Discover the POST-only route before
 // treating optional status POST refusal as authoritative token rejection.
 fn status_advertised(client: &Client) -> bool {
-    let Ok(http) = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    else {
-        return false;
-    };
-    let request = http
-        .head(format!("{}/v1/mirror/status", client.url))
-        .bearer_auth(client.token.expose())
-        .header("connection", "close");
+    let factory = Arc::clone(&client.http);
+    let url = format!("{}/v1/mirror/status", client.url);
     let lock = client.lock.clone();
     let dispatch_stop = client.stop.clone();
     matches!(
@@ -227,6 +218,11 @@ fn status_advertised(client: &Client) -> bool {
             if dispatch_stop.is_stopped() {
                 return Err("delivery stopped".to_owned());
             }
+            let (http, token) = factory()?;
+            let request = http
+                .head(url)
+                .bearer_auth(token.expose())
+                .header("connection", "close");
             let result = request
                 .send()
                 .map_err(|error| error.to_string())

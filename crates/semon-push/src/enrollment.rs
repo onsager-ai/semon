@@ -498,9 +498,7 @@ impl Registry {
                 .iter()
                 .find(|r| r.begun.renewal_id == receipt.begun.renewal_id)
                 .ok_or(Error::Terminal)?;
-            let mut expected = receipt.clone();
-            expected.deliveries = next.deliveries;
-            if &expected != next || next.deliveries < receipt.deliveries {
+            if receipt != next {
                 return Err(Error::Terminal);
             }
         }

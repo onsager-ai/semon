@@ -381,7 +381,6 @@ pub(crate) fn load_at(
     if dir.disabled()? {
         return Err("receiver is disconnected on this machine; run semon connect --to URL".into());
     }
-    renewal::ready(&dir)?;
     let dir = selected_directory(&dir)?;
     let (config, key) = read_configuration(&dir, &name)?;
     if now >= config.scope.valid_until {
@@ -487,7 +486,7 @@ fn read_configuration(dir: &Directory, name: &str) -> Result<(Configuration, Ecd
 pub struct Authority {
     base: PathBuf,
     name: String,
-    generation: u64,
+    enrollment_id: String,
 }
 impl Authority {
     pub fn new(base: &Path, config: &Configuration) -> Result<Self> {
@@ -495,7 +494,7 @@ impl Authority {
         let authority = Self {
             base: base.into(),
             name: custody_name(endpoint),
-            generation: config.generation,
+            enrollment_id: config.enrollment_id.clone(),
         };
         if !authority.is_active() {
             return Err("receiver is disconnected or its custody is unavailable".into());
@@ -512,6 +511,15 @@ impl Authority {
         }
         Ok(guard)
     }
+    pub(crate) fn selected_credential(&self) -> Result<crate::Credential> {
+        let dir = Directory::open(&self.base)?.child(&self.name)?;
+        let (config, _) = read_configuration(&selected_directory(&dir)?, &self.name)?;
+        let (configuration, credential) = load(&self.base, Some(&config.endpoint))?;
+        if configuration.enrollment_id != self.enrollment_id {
+            return Err(ERROR.into());
+        }
+        Ok(credential)
+    }
     pub(crate) fn is_active(&self) -> bool {
         Directory::open(&self.base)
             .and_then(|root| root.child(&self.name))
@@ -519,9 +527,8 @@ impl Authority {
                 if dir.disabled()? {
                     return Ok(false);
                 }
-                renewal::ready(&dir)?;
                 let (config, _) = read_configuration(&selected_directory(&dir)?, &self.name)?;
-                Ok(config.generation == self.generation)
+                Ok(config.enrollment_id == self.enrollment_id)
             })
             .unwrap_or(false)
     }
