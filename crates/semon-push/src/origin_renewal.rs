@@ -18,6 +18,7 @@ struct Attempt {
     application_key: String,
     old_generation: u64,
     old_valid_until: u64,
+    recovery_until: Option<u64>,
     state: State,
 }
 impl Drop for Attempt {
@@ -242,6 +243,12 @@ impl Renewal {
         {
             return Err("renewed generation awaits application confirmation".into());
         }
+        if self.attempt.as_ref().is_some_and(|a| {
+            a.recovery_until.is_some_and(|until| now >= until)
+                && !matches!(a.state, State::Confirmed)
+        }) {
+            return Err(BLOCKED.into());
+        }
         let generation = self
             .attempt
             .as_ref()
@@ -288,6 +295,7 @@ impl Renewal {
             application_key: crate::provision_wire::encode(application.as_ref()),
             old_generation: self.config.generation,
             old_valid_until: self.config.scope.valid_until,
+            recovery_until: None,
             state: State::Prepared,
         };
         save(&self.dir, &attempt)?;
@@ -304,8 +312,16 @@ impl Renewal {
             State::CommitReserved => Action::Recover,
             _ => return Err(BLOCKED.into()),
         };
-        if now >= a.old_valid_until {
+        if now >= a.old_valid_until
+            || (action == Action::Commit && now >= a.begun.expires_at)
+            || (action == Action::Recover && now >= a.recovery_until.ok_or(ERROR)?)
+        {
             return Err(BLOCKED.into());
+        }
+        if action == Action::Commit {
+            // Receiver commit cannot precede this reservation. This lower bound
+            // is deliberately conservative when the delivery response is lost.
+            a.recovery_until = Some(now.saturating_add(wire::OVERLAP).min(a.old_valid_until));
         }
         let application = Zeroizing::new(
             crate::provision_wire::decode_fixed::<32>(&a.application_key).map_err(|_| ERROR)?,
@@ -563,13 +579,13 @@ fn checkpoint(_point: &'static str) -> Result<()> {
     #[cfg(test)]
     FAULT.with(|fault| -> Result<()> {
         let mut fault = fault.borrow_mut();
-        if let Some((point, remaining)) = fault.as_mut() {
-            if *point == _point {
-                if *remaining == 0 {
-                    return Err("injected renewal interruption".into());
-                }
-                *remaining -= 1;
+        if let Some((point, remaining)) = fault.as_mut()
+            && *point == _point
+        {
+            if *remaining == 0 {
+                return Err("injected renewal interruption".into());
             }
+            *remaining -= 1;
         }
         Ok(())
     })?;

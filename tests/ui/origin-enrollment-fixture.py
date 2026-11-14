@@ -13,7 +13,12 @@ base, receiver, token_path, sample = map(Path, (base, receiver, token_path, samp
 base.mkdir(mode=0o700, parents=True, exist_ok=False)
 record = json.loads((receiver / 'enrollment/registry.json').read_text())['enrollments'][0]
 name = hashlib.sha256(endpoint.encode()).hexdigest()
-directory = base / name
+endpoint_directory = base / name
+endpoint_directory.mkdir(mode=0o700)
+fd = os.open(endpoint_directory / 'selected', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(fd, 'wb') as output:
+    output.write(b'generation-1')
+directory = endpoint_directory / 'generation-1'
 directory.mkdir(mode=0o700)
 def write(name, data):
     fd = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -28,7 +33,7 @@ sources = sorted(str(path) for root in ('claude', 'codex', 'copilot') for path i
 consent = packed(dict(receiver_id=record['receiver_id'], enrollment_id=record['enrollment_id'], machine='laptop', sources=sources))
 secret = token_path.read_bytes()
 scope = dict(receiver_id=record['receiver_id'], machine='laptop', binding={'state': 'inapplicable'}, kinds=[['mirror_push', False]], client_certificate_pins=[], valid_until=18446744073709551615)
-config = dict(version=1, endpoint=endpoint, receiver_id=record['receiver_id'], enrollment_id=record['enrollment_id'], machine='laptop', server_roots='public_webpki', scope=scope, credential_file='mirror-push.secret', private_key_file='origin-key.pk8', consent_file='source-consent.json', consent_sha256=hashlib.sha256(consent).hexdigest(), credential_sha256=hashlib.sha256(secret).hexdigest(), client_certificate_sha256=None)
+config = dict(version=2, generation=1, endpoint=endpoint, receiver_id=record['receiver_id'], enrollment_id=record['enrollment_id'], machine='laptop', server_roots='public_webpki', scope=scope, credential_file='mirror-push.secret', private_key_file='origin-key.pk8', consent_file='source-consent.json', consent_sha256=hashlib.sha256(consent).hexdigest(), credential_sha256=hashlib.sha256(secret).hexdigest(), client_certificate_sha256=None)
 key = subprocess.check_output(['openssl', 'genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256', '-outform', 'DER'], stderr=subprocess.DEVNULL)
 # genpkey's DER EC output is SEC1; explicitly convert to PKCS#8 for ring.
 key = subprocess.check_output(['openssl', 'pkcs8', '-topk8', '-nocrypt', '-inform', 'DER', '-outform', 'DER'], input=key)

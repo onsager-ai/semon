@@ -65,6 +65,43 @@ impl Fixture {
         .unwrap();
         r
     }
+    fn receiver(&self, r: &Renewal) -> PathBuf {
+        use crate::enrollment::{Enrollment, KindScope, Registry, Store};
+        let path = self.0.join("test-receiver");
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        fs::DirBuilder::new()
+            .mode(0o700)
+            .create(path.join("receiver-audit"))
+            .unwrap();
+        let enrollment = Enrollment {
+            enrollment_id: r.config.enrollment_id.clone(),
+            receiver_id: r.config.receiver_id.clone(),
+            machine: r.config.machine.clone(),
+            sequence: 1,
+            origin_key: r.key.public_key().as_ref().to_vec(),
+            endpoint: ENDPOINT.into(),
+            enrolled_pin: None,
+            binding: Binding::Inapplicable,
+            client_certificate_pins: vec![],
+            credential_kinds: vec![KindScope::new(Kind::MirrorPush, 1)],
+            revoked_at: None,
+        };
+        let bearer = crate::credentials::Bearer {
+            credential_id: "e".repeat(64),
+            enrollment_id: enrollment.enrollment_id.clone(),
+            kind: Kind::MirrorPush,
+            sha256: crate::credentials::Secret::new("old-bearer".into()).hash(),
+            generation: 1,
+            valid_from: NOW - 1,
+            valid_until: r.config.scope.valid_until,
+            revoked_at: None,
+        };
+        let registry = Registry::from_records(vec![enrollment], vec![bearer]).unwrap();
+        let mut store = Store::initialize(&path).unwrap();
+        let revision = store.snapshot().unwrap().revision();
+        store.commit(revision, &registry).unwrap();
+        path
+    }
     fn delivery(&self, r: &Renewal) -> Delivered {
         let a = r.attempt.as_ref().unwrap();
         let application = crate::provision_wire::decode_fixed::<32>(&a.application_key).unwrap();
@@ -95,6 +132,127 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn origin_proof_and_recovery_match_receiver_commit_contract() {
+    let f = Fixture::new();
+    let mut origin = f.open();
+    let receiver_dir = f.receiver(&origin);
+    let mut receiver = crate::renewal::Receiver::default();
+    let begin = wire::Begin {
+        version: 1,
+        enrollment_id: origin.config.enrollment_id.clone(),
+        credentials: origin.credentials(NOW).unwrap(),
+    };
+    let begun = receiver
+        .handle(
+            &receiver_dir,
+            wire::Request::Begin(begin),
+            [1; 32],
+            None,
+            NOW,
+        )
+        .unwrap_or_else(|_| panic!("begin refused"));
+    origin
+        .prepare(serde_json::from_slice(&begun).unwrap(), NOW)
+        .unwrap();
+    let request = origin.finish(&[2; 32], NOW).unwrap();
+    // Receiver commits, but the initial delivery is deliberately lost.
+    receiver
+        .handle(
+            &receiver_dir,
+            wire::Request::Finish(request),
+            [2; 32],
+            None,
+            NOW,
+        )
+        .unwrap_or_else(|_| panic!("commit refused"));
+    drop(origin);
+    let mut origin = f.open();
+    let request = origin.finish(&[3; 32], NOW).unwrap();
+    assert_eq!(request.action, Action::Recover);
+    let bytes = receiver
+        .handle(
+            &receiver_dir,
+            wire::Request::Finish(request),
+            [3; 32],
+            None,
+            NOW,
+        )
+        .unwrap_or_else(|_| panic!("recover refused"));
+    let delivered: Delivered = serde_json::from_slice(&bytes).unwrap();
+    origin.delivered(&delivered, NOW).unwrap();
+    drop(origin);
+    assert_eq!(load_at(&f.0, None, NOW).unwrap().0.generation, 2);
+}
+
+#[test]
+fn revoked_receiver_refuses_recovery_without_origin_fallback() {
+    let f = Fixture::new();
+    let mut origin = f.open();
+    let receiver_dir = f.receiver(&origin);
+    let mut receiver = crate::renewal::Receiver::default();
+    let begin = wire::Begin {
+        version: 1,
+        enrollment_id: origin.config.enrollment_id.clone(),
+        credentials: origin.credentials(NOW).unwrap(),
+    };
+    let begun = receiver
+        .handle(
+            &receiver_dir,
+            wire::Request::Begin(begin),
+            [1; 32],
+            None,
+            NOW,
+        )
+        .unwrap_or_else(|_| panic!("begin refused"));
+    origin
+        .prepare(serde_json::from_slice(&begun).unwrap(), NOW)
+        .unwrap();
+    let request = origin.finish(&[2; 32], NOW).unwrap();
+    receiver
+        .handle(
+            &receiver_dir,
+            wire::Request::Finish(request),
+            [2; 32],
+            None,
+            NOW,
+        )
+        .unwrap_or_else(|_| panic!("commit refused"));
+    let mut store = crate::enrollment::Store::open(&receiver_dir).unwrap();
+    let mut registry = store.snapshot().unwrap();
+    let revision = registry.revision();
+    registry.revoke_enrollment(&origin.config.enrollment_id, None, NOW);
+    store.commit(revision, &registry).unwrap();
+    drop(store);
+    drop(origin);
+    let mut origin = f.open();
+    let request = origin.finish(&[3; 32], NOW).unwrap();
+    assert!(
+        receiver
+            .handle(
+                &receiver_dir,
+                wire::Request::Finish(request),
+                [3; 32],
+                None,
+                NOW
+            )
+            .is_err()
+    );
+    drop(origin);
+    assert!(load_at(&f.0, None, NOW).is_err());
+}
+
+#[test]
+fn recovery_stops_at_conservative_cutover_without_using_old_application_authority() {
+    let f = Fixture::new();
+    let mut origin = f.prepare();
+    origin.finish(&[1; 32], NOW).unwrap();
+    drop(origin);
+    let mut origin = f.open();
+    assert!(origin.finish(&[2; 32], NOW + wire::OVERLAP).is_err());
+    assert!(load_at(&f.0, None, NOW + wire::OVERLAP).is_err());
 }
 
 #[test]
