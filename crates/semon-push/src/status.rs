@@ -95,12 +95,17 @@ impl Heartbeat {
         stop: &Stop,
         lock: Arc<StateLock>,
         progress: Arc<Mutex<Progress>>,
+        #[cfg(unix)] renewal: Option<Arc<Mutex<crate::origin_delivery::Delivery>>>,
     ) -> Result<Self> {
         let owned_stop = stop.child();
         let mut client = Client::new(options)?
             .with_stop(owned_stop.clone())
             .with_lock(lock.clone());
         client.progress = Arc::clone(&progress);
+        #[cfg(unix)]
+        {
+            client.renewal = renewal;
+        }
         {
             let mut context = progress.lock().unwrap_or_else(|e| e.into_inner());
             if context.observation_id.is_empty() {

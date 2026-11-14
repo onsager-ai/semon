@@ -177,6 +177,11 @@ impl Renewal {
     pub fn configuration(&self) -> &Configuration {
         &self.config
     }
+    pub(crate) fn awaiting_confirmation(&self) -> bool {
+        self.attempt
+            .as_ref()
+            .is_some_and(|a| a.state == State::Installed)
+    }
     /// One private TLS connection per request, guarded through socket destruction.
     /// The guard is declared first so disconnect drains the complete request.
     fn connection(

@@ -76,6 +76,8 @@ pub mod origin_client;
 #[cfg(unix)]
 pub mod origin_custody;
 #[cfg(unix)]
+mod origin_delivery;
+#[cfg(unix)]
 pub mod origin_read;
 #[cfg(unix)]
 pub mod pairing;
@@ -436,6 +438,8 @@ struct Source {
 pub struct Client {
     url: String,
     token: Token,
+    #[cfg(unix)]
+    renewal: Option<Arc<Mutex<origin_delivery::Delivery>>>,
     http: Arc<dyn Fn() -> Result<reqwest::blocking::Client> + Send + Sync>,
     stop: Stop,
     lock: Option<Arc<StateLock>>,
@@ -548,6 +552,9 @@ impl Client {
         Ok(Self {
             url,
             token,
+            #[cfg(unix)]
+            renewal: origin_delivery::Delivery::new(options)
+                .map(|delivery| Arc::new(Mutex::new(delivery))),
             http,
             stop: {
                 let stop = Stop::new();
@@ -631,10 +638,29 @@ impl Client {
             let body = body.clone();
             let lock = self.lock.clone();
             let dispatch_stop = self.stop.clone();
+            #[cfg(unix)]
+            let renewal = self.renewal.clone();
             #[cfg(test)]
             let completed_transports = Arc::clone(&self.completed_transports);
             let answer = self.stop.run(route, move || {
                 let _lock = lock;
+                #[cfg(unix)]
+                let mut renewal = renewal
+                    .as_ref()
+                    .map(|r| r.lock().unwrap_or_else(|e| e.into_inner()));
+                #[cfg(unix)]
+                let (factory, token, dispatch_stop) = if let Some(renewal) = renewal.as_mut() {
+                    renewal.checkpoint()?;
+                    let selected = Client::new(renewal.options())?;
+                    (
+                        selected.http,
+                        selected.token,
+                        dispatch_stop
+                            .with_authority(selected.stop.authority.expect("enrolled authority")),
+                    )
+                } else {
+                    (factory, token, dispatch_stop)
+                };
                 #[cfg(unix)]
                 let _delivery = dispatch_stop
                     .authority
@@ -678,14 +704,26 @@ impl Client {
                                 })
                             })
                             .unwrap_or(2);
-                        (status, response.text().unwrap_or_default(), retry)
+                        let hint = response
+                            .headers()
+                            .get("semon-renewal")
+                            .is_some_and(|value| value == "due");
+                        (status, response.text().unwrap_or_default(), retry, hint)
                     });
                 drop(http);
+                #[cfg(unix)]
+                drop(_delivery);
+                #[cfg(unix)]
+                if let (Some(renewal), Ok((status, _, _, hint))) = (renewal.as_mut(), &result) {
+                    // Confirmation failure retains Installed for the next success;
+                    // it must not discard an application acknowledgement.
+                    let _ = renewal.response(*status, *hint);
+                }
                 #[cfg(test)]
                 completed_transports.fetch_add(1, Ordering::SeqCst);
                 result
             });
-            let (status, text, retry) = match answer {
+            let (status, text, retry, _hint) = match answer {
                 Ok(Some(Ok(answer))) => answer,
                 Ok(Some(Err(_))) if self.stop.is_stopped() => return Err(Failure::Stopped),
                 Ok(Some(Err(error))) => return Err(Failure::Remote(format!("{route}: {error}"))),
@@ -1740,11 +1778,46 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
     // Declared first, so it is dropped last, after the client and the
     // facts worker have let go of their shares.
     let hold = Hold::new(StateLock::acquire(&options.state)?);
+    #[cfg(unix)]
+    let renewal = origin_delivery::Delivery::new(options).map(|mut delivery| {
+        delivery.watch(watch);
+        Arc::new(Mutex::new(delivery))
+    });
+    #[cfg(unix)]
+    let selected;
+    #[cfg(unix)]
+    let options = if let Some(renewal) = &renewal {
+        let worker = Arc::clone(renewal);
+        let lock = hold.share();
+        let Some(result) = stop.run("renewal", move || {
+            let _lock = lock;
+            let mut delivery = worker.lock().unwrap_or_else(|e| e.into_inner());
+            delivery.checkpoint()?;
+            Ok::<_, String>(delivery.options().clone())
+        })?
+        else {
+            return Ok(());
+        };
+        selected = result?;
+        &selected
+    } else {
+        options
+    };
     let mut client = Client::new(options)?
         .with_stop(stop.clone())
         .with_lock(hold.share());
-    let heartbeat =
-        status::Heartbeat::start(options, stop, hold.share(), Arc::clone(&client.progress))?;
+    #[cfg(unix)]
+    {
+        client.renewal = renewal;
+    }
+    let heartbeat = status::Heartbeat::start(
+        options,
+        stop,
+        hold.share(),
+        Arc::clone(&client.progress),
+        #[cfg(unix)]
+        client.renewal.clone(),
+    )?;
     let result = push_running(options, watch, stop, &hold, &mut client);
     if let Some(error) = heartbeat.fatal() {
         return Err(error);
@@ -1908,6 +1981,22 @@ fn push_running(
             if stop.sleep(remaining.min(FACTS_EVERY)) {
                 return Ok(());
             }
+        }
+        #[cfg(unix)]
+        if let Some(renewal) = &client.renewal {
+            let renewal = Arc::clone(renewal);
+            let lock = hold.share();
+            let Some(result) = stop.run("renewal", move || {
+                let _lock = lock;
+                renewal
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .checkpoint()
+            })?
+            else {
+                return Ok(());
+            };
+            result?;
         }
         pass = client.watch_pass(&options.sessions);
     }

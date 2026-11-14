@@ -381,7 +381,11 @@ pub(crate) fn load_at(
     if dir.disabled()? {
         return Err("receiver is disconnected on this machine; run semon connect --to URL".into());
     }
-    renewal::ready(&dir)?;
+    if renewal::ready(&dir).is_err() {
+        let (config, _) = read_configuration(&selected_directory(&dir)?, &name)?;
+        drop(renewal::Renewal::open(base, &config.endpoint)?);
+        renewal::ready(&dir)?;
+    }
     let dir = selected_directory(&dir)?;
     let (config, key) = read_configuration(&dir, &name)?;
     if now >= config.scope.valid_until {
@@ -511,6 +515,15 @@ impl Authority {
             return Err("receiver is disconnected or its custody is unavailable".into());
         }
         Ok(guard)
+    }
+    pub(crate) fn base(&self) -> &Path {
+        &self.base
+    }
+    pub(crate) fn is_enabled(&self) -> bool {
+        Directory::open(&self.base)
+            .and_then(|root| root.child(&self.name))
+            .and_then(|dir| dir.disabled().map(|disabled| !disabled))
+            .unwrap_or(false)
     }
     pub(crate) fn is_active(&self) -> bool {
         Directory::open(&self.base)

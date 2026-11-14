@@ -86,7 +86,7 @@ impl Stop {
         if self
             .authority
             .as_ref()
-            .is_some_and(|authority| !authority.is_active())
+            .is_some_and(|authority| !authority.is_enabled())
         {
             self.stop();
         }
