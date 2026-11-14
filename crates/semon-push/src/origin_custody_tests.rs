@@ -194,18 +194,18 @@ fn certificate_clock_refuses_future_install_and_expired_load() {
     )
     .unwrap();
     assert!(
-        load_at(&f.0, Some(&name), until)
+        load_at(&f.0, Some("https://receiver.example:443"), until)
             .err()
             .unwrap()
             .contains("expired")
     );
     assert!(
-        load_at(&f.0, Some(&name), now - 601)
+        load_at(&f.0, Some("https://receiver.example:443"), now - 601)
             .err()
             .unwrap()
             .contains("not yet valid")
     );
-    assert!(load_at(&f.0, Some(&name), now).is_ok());
+    assert!(load_at(&f.0, Some("https://receiver.example:443"), now).is_ok());
 }
 
 #[test]
@@ -219,7 +219,7 @@ fn staged_credentials_are_never_a_half_installed_enrollment() {
         .unwrap();
     assert!(load(&f.0, None).is_err());
     let name = f.install();
-    load(&f.0, Some(&name)).unwrap();
+    load(&f.0, Some("https://receiver.example:443")).unwrap();
     assert!(f.0.join("stage-interrupted/mirror-push.secret").exists());
 }
 #[test]
@@ -247,7 +247,7 @@ fn realistic_source_list_roundtrips_and_oversize_never_publishes() {
         })
         .collect();
     let name = f.install_sources(&sources).unwrap();
-    let (config, _) = load(&f.0, Some(&name)).unwrap();
+    let (config, _) = load(&f.0, Some("https://receiver.example:443")).unwrap();
     assert_eq!(consent(&f.0, &name, &config).unwrap(), sources);
     let oversized = Fixture::new();
     assert!(

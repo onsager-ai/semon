@@ -13,7 +13,7 @@ fn parse_connect_args(mut arguments: impl Iterator<Item = String>) -> Result<Com
     let mut require_client_certificate = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--to" => endpoint = Some(arguments.next().ok_or("--to requires URL")?),
+            "--to" | "--receiver" => endpoint = Some(arguments.next().ok_or("--to requires URL")?),
             "--require-client-certificate" => require_client_certificate = true,
             "--machine" => machine = Some(arguments.next().ok_or("--machine requires NAME")?),
             "-h" | "--help" => {
@@ -2436,7 +2436,7 @@ fn usage() -> String {
          the log files modified within the window, --since (30d by default), or all of them with --all.\n\
          \n\
          Usage: semon connect --to URL [--machine NAME] [--require-client-certificate]\n\
-         Usage: semon push [--receiver NAME] [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
+         Usage: semon push [--receiver URL] [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\
          (docs/mirror-protocol.md), appending as they grow. Run connect first to install private enrollment custody. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s.\n\

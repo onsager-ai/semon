@@ -150,8 +150,9 @@ pub(super) fn run(endpoint: &str, machine: &str, require_client_certificate: boo
     };
     let index_path = semon_sessions::analytics_index_path(&options.cache);
     let analytics_state = index_path.parent().ok_or("analytics index has no parent")?;
-    let name = semon_push::connect::connect(
-        endpoint,
+    let endpoint = semon_push::origin_custody::receiver_endpoint(endpoint)?;
+    semon_push::connect::connect(
+        &endpoint,
         machine,
         &mut prompt,
         &semon_push::origin_custody::default_directory()?,
@@ -163,7 +164,8 @@ pub(super) fn run(endpoint: &str, machine: &str, require_client_certificate: boo
                 .as_secs()
         },
     )?;
-    println!("Connected. Receiver name: {name}\nRun semon push --receiver {name} [--watch]");
+    let host = semon_push::origin_custody::receiver_host(&endpoint)?;
+    println!("Connected to receiver {host}.\nRun semon push --receiver {endpoint} [--watch]");
     Ok(())
 }
 

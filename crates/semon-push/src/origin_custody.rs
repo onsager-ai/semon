@@ -304,8 +304,22 @@ pub(crate) fn install_at(
     Ok(name)
 }
 
-/// Select by the stable name printed by connect; an omitted name requires exactly
-/// one enrollment. No partially staged enrollment or absent/corrupt secret is used.
+/// Resolve an operator URL through the pairing endpoint contract. Custody keys
+/// remain internal, including when exactly one enrolled receiver is selected.
+pub fn receiver_endpoint(receiver: &str) -> Result<String> {
+    crate::pairing::normalize_endpoint(receiver)
+        .map_err(|_| "receiver requires an HTTPS URL without path, credentials or query".into())
+}
+
+pub fn receiver_host(endpoint: &str) -> Result<String> {
+    Ok(receiver_endpoint(endpoint)?["https://".len()..].to_owned())
+}
+
+fn custody_name(endpoint: &str) -> String {
+    crate::wire::sha256_hex(endpoint.as_bytes())
+}
+
+/// An omitted URL requires exactly one enrollment. Staging is never selected.
 pub fn load(base: &Path, receiver: Option<&str>) -> Result<(Configuration, crate::Credential)> {
     load_at(base, receiver, now()?)
 }
@@ -314,18 +328,11 @@ pub(crate) fn load_at(
     receiver: Option<&str>,
     now: u64,
 ) -> Result<(Configuration, crate::Credential)> {
+    let selected = receiver.map(receiver_endpoint).transpose()?;
     let root =
         Directory::open(base).map_err(|_| "no readable enrollment; run semon connect --to URL")?;
-    let name = match receiver {
-        Some(name)
-            if name.len() == 64
-                && name
-                    .bytes()
-                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) =>
-        {
-            name.to_owned()
-        }
-        Some(_) => return Err("invalid receiver name; use the name printed by connect".into()),
+    let name = match selected {
+        Some(endpoint) => custody_name(&endpoint),
         None => {
             let names: Vec<_> = root
                 .checked
@@ -340,7 +347,7 @@ pub(crate) fn load_at(
                 })
                 .collect();
             if names.len() != 1 {
-                return Err("push requires exactly one enrollment or --receiver NAME; run semon connect --to URL".into());
+                return Err("push requires exactly one enrollment or --receiver URL; run semon connect --to URL".into());
             }
             names[0].clone()
         }
