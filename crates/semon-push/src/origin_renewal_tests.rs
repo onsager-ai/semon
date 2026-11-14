@@ -241,7 +241,8 @@ fn revoked_receiver_refuses_recovery_without_origin_fallback() {
             .is_err()
     );
     drop(origin);
-    assert!(load_at(&f.0, None, NOW).is_err());
+    // A generic renewal refusal alone does not prove application revocation.
+    assert!(load_at(&f.0, None, NOW).is_ok());
 }
 
 #[test]
@@ -252,7 +253,132 @@ fn recovery_stops_at_conservative_cutover_without_using_old_application_authorit
     drop(origin);
     let mut origin = f.open();
     assert!(origin.finish(&[2; 32], NOW + wire::OVERLAP).is_err());
-    assert!(load_at(&f.0, None, NOW + wire::OVERLAP).is_err());
+    assert!(!origin.pending());
+    assert!(load_at(&f.0, None, NOW + wire::OVERLAP).is_ok());
+}
+
+#[test]
+fn pending_attempt_preserves_selected_application_authority() {
+    let f = Fixture::new();
+    let (_, credential) = load_at(&f.0, None, NOW).unwrap();
+    let crate::Credential::Enrolled { authority, .. } = credential else {
+        panic!()
+    };
+    let mut r = f.prepare();
+    assert!(authority.is_active());
+    assert_eq!(load_at(&f.0, None, NOW).unwrap().0.generation, 1);
+    r.finish(&[1; 32], NOW).unwrap();
+    assert!(authority.is_active());
+    assert_eq!(load_at(&f.0, None, NOW).unwrap().0.generation, 1);
+    r.finish(&[2; 32], NOW).unwrap();
+    assert!(authority.is_active());
+    assert!(load_at(&f.0, None, r.config.scope.valid_until).is_err());
+}
+
+#[test]
+fn expired_prepared_attempt_is_archived_and_replaced() {
+    let f = Fixture::new();
+    drop(f.prepare());
+    let mut r = f.open();
+    let mut next = r.attempt.as_ref().unwrap().begun.clone();
+    next.renewal_id = "f".repeat(64);
+    next.expires_at = NOW + 1200;
+    r.prepare(next, NOW + 601).unwrap();
+    assert_eq!(r.attempt.as_ref().unwrap().begun.renewal_id, "f".repeat(64));
+    let archived: Attempt = serde_json::from_slice(
+        &r.dir
+            .read(&format!("renewal-ended-{}.json", "c".repeat(64)))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(archived.state == State::Abandoned);
+    assert_eq!(
+        r.finish(&[3; 32], NOW + 601).unwrap().action,
+        Action::Commit
+    );
+}
+
+#[test]
+fn receiver_restart_refuses_old_nonce_then_new_begin_can_commit() {
+    let f = Fixture::new();
+    let mut origin = f.open();
+    let receiver_dir = f.receiver(&origin);
+    let mut receiver = crate::renewal::Receiver::default();
+    let begin = || wire::Begin {
+        version: 1,
+        enrollment_id: "b".repeat(64),
+        credentials: vec![wire::Credential {
+            kind: Kind::MirrorPush,
+            generation: 1,
+            bearer: "old-bearer".into(),
+        }],
+    };
+    let bytes = receiver
+        .handle(
+            &receiver_dir,
+            wire::Request::Begin(begin()),
+            [1; 32],
+            None,
+            NOW,
+        )
+        .unwrap_or_else(|_| panic!("begin refused"));
+    origin
+        .prepare(serde_json::from_slice(&bytes).unwrap(), NOW)
+        .unwrap();
+    receiver = crate::renewal::Receiver::default();
+    let commit = origin.finish(&[2; 32], NOW).unwrap();
+    assert!(
+        receiver
+            .handle(
+                &receiver_dir,
+                wire::Request::Finish(commit),
+                [2; 32],
+                None,
+                NOW
+            )
+            .is_err()
+    );
+    let recover = origin.finish(&[3; 32], NOW).unwrap();
+    assert!(
+        receiver
+            .handle(
+                &receiver_dir,
+                wire::Request::Finish(recover),
+                [3; 32],
+                None,
+                NOW
+            )
+            .is_err()
+    );
+    origin.abandon().unwrap();
+    assert!(!origin.pending());
+    let bytes = receiver
+        .handle(
+            &receiver_dir,
+            wire::Request::Begin(begin()),
+            [4; 32],
+            None,
+            NOW + 60,
+        )
+        .unwrap_or_else(|_| panic!("new begin refused"));
+    origin
+        .prepare(serde_json::from_slice(&bytes).unwrap(), NOW + 60)
+        .unwrap();
+    let commit = origin.finish(&[5; 32], NOW + 61).unwrap();
+    let bytes = receiver
+        .handle(
+            &receiver_dir,
+            wire::Request::Finish(commit),
+            [5; 32],
+            None,
+            NOW + 62,
+        )
+        .unwrap_or_else(|_| panic!("new commit refused"));
+    let delivery = serde_json::from_slice(&bytes).unwrap();
+    origin
+        .delivered_with_clock(&delivery, &|| Ok(NOW + 63))
+        .unwrap();
+    assert_eq!(origin.config.generation, 2);
 }
 
 #[test]
@@ -269,7 +395,7 @@ fn prepared_commit_recovery_and_exhaustion_survive_restart() {
     let first = r.finish(&[1; 32], NOW).unwrap();
     assert_eq!(first.action, Action::Commit);
     drop(r);
-    assert!(load_at(&f.0, None, NOW).is_err());
+    assert!(load_at(&f.0, None, NOW).is_ok());
     let mut r = f.open();
     let second = r.finish(&[2; 32], NOW).unwrap();
     assert_eq!(second.action, Action::Recover);
@@ -346,7 +472,7 @@ fn crash_points_never_mix_files_and_restart_reconciles_complete_generation() {
         let mut r = f.open();
         if matches!(r.attempt.as_ref().unwrap().state, State::CommitReserved) {
             // Incomplete retained stage never selects; only a verified recovery may.
-            assert!(load_at(&f.0, None, NOW).is_err());
+            assert_eq!(load_at(&f.0, None, NOW).unwrap().0.generation, 1);
             assert_eq!(r.finish(&[2; 32], NOW).unwrap().action, Action::Recover);
             r.delivered(&delivered, NOW).unwrap();
         }

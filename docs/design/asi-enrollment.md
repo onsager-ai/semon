@@ -1403,6 +1403,12 @@ PR4.3b provides the mirror-only renewal library and private TLS begin/finish
 client. `renewal.json` durably binds the begin response, protected application key,
 old generation and delivery reservation. Restart reconciles a complete signed
 staged generation before network use; uncertain commit uses at most one recovery.
+Without a verified local new generation, pending or refused renewal leaves the
+selected valid application credential usable. Expired unsent attempts and exhausted
+uncertain attempts become durable abandoned records, archived before a new begin;
+generic refusal never establishes revocation or cutover. New begin remains subject
+to receiver admission and receipt authority. Dispatch and delivery validation read
+fresh clock values, including after a network exchange crosses a second boundary.
 The atomic `selected` replacement publishes all credential/configuration files
 at once. Retained old generations are never selected as a fallback. Existing
 application authority also binds its generation, so selection ends stale clients.
