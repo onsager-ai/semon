@@ -7,7 +7,6 @@ use crate::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerAction {
     Revoke,
-    Enable,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnerState {
@@ -21,10 +20,6 @@ pub enum OwnerState {
     UnknownMachine,
     UnknownKind,
     LastKind,
-    AlreadyEnabled,
-    NoAuthority {
-        endpoint: String,
-    },
 }
 impl Registry {
     pub(crate) fn check_admission(&self) -> Result<()> {
@@ -34,7 +29,7 @@ impl Registry {
             self.credentials.len() as u64 * 20 + self.enrollments.len() as u64 * (20 + 512);
         // Four process-local pending attempts can each commit a receipt. Reserve
         // their maximum encoded outcomes for every authority-producing writer,
-        // including pairing and owner enables in other processes.
+        // including pairing in other processes.
         let pending_outcomes = 4 * 8192;
         if size.saturating_add(pending_outcomes) > ADMISSION_CAP
             || size.saturating_add(terminal_delta) > CAP
@@ -104,14 +99,8 @@ impl Registry {
                 if kind.is_some_and(|k| t.high_water[k.index()] == 0) {
                     return OwnerState::UnknownKind;
                 }
-                if action == OwnerAction::Revoke {
-                    OwnerState::Complete {
-                        endpoint: String::new(),
-                    }
-                } else {
-                    OwnerState::NoAuthority {
-                        endpoint: String::new(),
-                    }
+                OwnerState::Complete {
+                    endpoint: String::new(),
                 }
             } else {
                 OwnerState::UnknownMachine
@@ -123,9 +112,7 @@ impl Registry {
         }
         match action {
             OwnerAction::Revoke => {
-                if e.revoked_at.is_some()
-                    || scope.is_some_and(|s| !s.available && s.enable_authorization.is_none())
-                {
+                if e.revoked_at.is_some() || scope.is_some_and(|s| !s.available) {
                     return OwnerState::Complete {
                         endpoint: e.endpoint.clone(),
                     };
@@ -134,28 +121,6 @@ impl Registry {
                     && e.credential_kinds.iter().filter(|s| s.available).count() == 1
                 {
                     return OwnerState::LastKind;
-                }
-            }
-            OwnerAction::Enable => {
-                let Some(scope) = scope else {
-                    return OwnerState::UnknownKind;
-                };
-                if e.revoked_at.is_some() || !self.usable(e, now) {
-                    return OwnerState::NoAuthority {
-                        endpoint: e.endpoint.clone(),
-                    };
-                }
-                if scope.available {
-                    return OwnerState::AlreadyEnabled;
-                }
-                if scope
-                    .enable_authorization
-                    .as_ref()
-                    .is_some_and(|a| a.consumed_renewal_id.is_none())
-                {
-                    return OwnerState::Complete {
-                        endpoint: e.endpoint.clone(),
-                    };
                 }
             }
         }
@@ -172,7 +137,6 @@ impl Registry {
             for scope in &mut e.credential_kinds {
                 if kind.is_none_or(|k| k == scope.kind) {
                     scope.available = false;
-                    scope.enable_authorization = None;
                 }
             }
         }
@@ -272,48 +236,16 @@ impl Store {
             kind,
             action: match action {
                 OwnerAction::Revoke => "revoke",
-                OwnerAction::Enable => "enable",
             }
             .into(),
             outcome: generation_audit::OwnerOutcome::Requested,
         };
-        let audited = generation_audit::owner(receiver, &audit);
-        if action == OwnerAction::Enable {
-            audited?;
-        }
-        match action {
-            OwnerAction::Revoke => next.revoke_enrollment(confirmed_id, kind, now),
-            OwnerAction::Enable => {
-                generation_audit::append(receiver, &[])?;
-                let scope = next
-                    .enrollments
-                    .iter_mut()
-                    .find(|e| e.enrollment_id == confirmed_id)
-                    .ok_or(Error::Invalid)?
-                    .credential_kinds
-                    .iter_mut()
-                    .find(|s| Some(s.kind) == kind)
-                    .ok_or(Error::Invalid)?;
-                scope.enable_authorization = Some(EnableAuthorization {
-                    enrollment_id: confirmed_id.into(),
-                    kind: scope.kind,
-                    owner: owner.into(),
-                    authorization_id: random_id()?,
-                    created_at: now,
-                    consumed_renewal_id: None,
-                });
-            }
-        }
+        let _ = generation_audit::owner(receiver, &audit);
+        next.revoke_enrollment(confirmed_id, kind, now);
         next.latest = now;
-        if action == OwnerAction::Enable {
-            next.check_admission()?;
-        }
         self.commit(next.revision(), &next)?;
         audit.outcome = generation_audit::OwnerOutcome::Committed;
-        let committed_audit = generation_audit::owner(receiver, &audit);
-        if action == OwnerAction::Enable {
-            committed_audit?;
-        }
+        let _ = generation_audit::owner(receiver, &audit);
         Ok(OwnerState::Complete {
             endpoint: match state {
                 OwnerState::Confirm { endpoint, .. } => endpoint,

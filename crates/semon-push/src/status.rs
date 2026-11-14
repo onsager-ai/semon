@@ -201,32 +201,33 @@ fn bounded_body(status: &mut Status) -> Option<String> {
 // answer 401 to a valid push-only token. Discover the POST-only route before
 // treating optional status POST refusal as authoritative token rejection.
 fn status_advertised(client: &Client) -> bool {
-    let Ok(http) = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    else {
-        return false;
-    };
-    let request = http
-        .head(format!("{}/v1/mirror/status", client.url))
-        .bearer_auth(client.token.expose())
-        .header("connection", "close");
+    let factory = Arc::clone(&client.http);
+    let url = format!("{}/v1/mirror/status", client.url);
     let lock = client.lock.clone();
     let dispatch_stop = client.stop.clone();
     matches!(
         client.stop.run("status-capability", move || {
             let _lock = lock;
             #[cfg(unix)]
-            let _delivery = dispatch_stop
+            let admitted = dispatch_stop
                 .authority
                 .as_ref()
-                .map(|authority| authority.delivery())
-                .transpose()
-                .map_err(|error| error.to_string())?;
+                .map(|authority| authority.admit())
+                .transpose()?;
+            #[cfg(unix)]
+            let (_delivery, selected) = admitted.map_or((None, None), |(guard, credential)| {
+                (Some(guard), Some(credential))
+            });
+            #[cfg(not(unix))]
+            let selected = None;
             if dispatch_stop.is_stopped() {
                 return Err("delivery stopped".to_owned());
             }
+            let (http, token) = factory(selected)?;
+            let request = http
+                .head(url)
+                .bearer_auth(token.expose())
+                .header("connection", "close");
             let result = request
                 .send()
                 .map_err(|error| error.to_string())

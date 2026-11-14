@@ -1,7 +1,6 @@
-//! Durable origin renewal attempts. Network delivery is reserved locally before
-//! dispatch; uncertain attempts recover once, and never silently retry commit.
+//! Durable origin renewal attempts with idempotent delivery retries.
 use super::*;
-use crate::renewal_wire::{self as wire, Action, Begun, Delivered, Generation};
+use crate::renewal_wire::{self as wire, Begun, Delivered, Generation};
 
 #[cfg(test)]
 #[path = "origin_renewal_tests.rs"]
@@ -15,7 +14,7 @@ enum Response {
 type TestExchange = dyn FnMut(&mut Renewal, bool, &dyn Fn() -> Result<u64>) -> Result<Response>;
 
 const PENDING: &str = "renewal.json";
-const BLOCKED: &str = "receiver renewal recovery must complete before application traffic";
+const BLOCKED: &str = "receiver renewal cannot publish against changed or disabled custody";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,7 +24,6 @@ struct Attempt {
     application_key: String,
     old_generation: u64,
     old_valid_until: u64,
-    recovery_until: Option<u64>,
     state: State,
 }
 impl Drop for Attempt {
@@ -37,12 +35,9 @@ impl Drop for Attempt {
 #[serde(rename_all = "snake_case")]
 enum State {
     Prepared,
-    CommitReserved,
-    RecoverReserved,
     Delivered,
     Installed,
     Confirmed,
-    Abandoned,
 }
 
 fn optional_attempt(dir: &Directory) -> Result<Option<Attempt>> {
@@ -56,7 +51,7 @@ fn optional_attempt(dir: &Directory) -> Result<Option<Attempt>> {
         return Ok(None);
     }
     let attempt: Attempt = serde_json::from_slice(&dir.read(PENDING)?).map_err(|_| ERROR)?;
-    if attempt.version != 1
+    if attempt.version != 2
         || attempt.old_generation == 0
         || attempt.begun.version != 1
         || attempt.begun.generations
@@ -64,7 +59,6 @@ fn optional_attempt(dir: &Directory) -> Result<Option<Attempt>> {
                 kind: crate::credentials::Kind::MirrorPush,
                 generation: attempt.old_generation.checked_add(1).ok_or(ERROR)?,
             }]
-        || !attempt.begun.enable_authorization_ids.is_empty()
     {
         return Err(ERROR.into());
     }
@@ -107,24 +101,6 @@ fn save(dir: &Directory, attempt: &Attempt) -> Result<()> {
         &serde_json::to_vec(attempt).map_err(|_| ERROR)?,
     )
 }
-pub(super) fn ready(dir: &Directory) -> Result<()> {
-    if let Some(a) = optional_attempt(dir)? {
-        let target = format!("generation-{}", a.begun.generations[0].generation);
-        if a.state == State::Delivered
-            || (matches!(a.state, State::CommitReserved | State::RecoverReserved)
-                && dir
-                    .checked
-                    .names()
-                    .map_err(|_| ERROR)?
-                    .iter()
-                    .any(|n| n == Path::new(&target)))
-        {
-            return Err(BLOCKED.into());
-        }
-    }
-    Ok(())
-}
-
 /// The notice boundary is inclusive; attempts begin strictly inside the window.
 pub fn window(valid_until: u64, now: u64) -> (bool, bool) {
     let remaining = valid_until.saturating_sub(now);
@@ -134,10 +110,10 @@ pub fn window(valid_until: u64, now: u64) -> (bool, bool) {
     )
 }
 
-/// Owns the install lock throughout receipt reconciliation and publication.
-/// This prevents both competing renewals and publication after disconnect wins.
+/// Serializes renewal attempts independently from local installation.
 pub struct Renewal {
-    _lock: InstallLock,
+    _attempt_lock: InstallLock,
+    root: Directory,
     dir: Directory,
     name: String,
     config: Configuration,
@@ -157,9 +133,18 @@ impl Renewal {
             return Err("receiver is disconnected on this machine".into());
         }
         let (config, key) = read_configuration(&selected_directory(&dir)?, &name)?;
+        let attempt_lock = dir
+            .checked
+            .open_file(Path::new("renewal.lock"), libc::O_RDWR | libc::O_CREAT)
+            .map_err(|_| ERROR)?;
+        attempt_lock
+            .try_lock()
+            .map_err(|_| "renewal is in progress")?;
         let attempt = optional_attempt(&dir)?;
+        drop(lock);
         let mut renewal = Self {
-            _lock: lock,
+            _attempt_lock: InstallLock(attempt_lock),
+            root,
             dir,
             name,
             config,
@@ -177,13 +162,8 @@ impl Renewal {
     pub fn configuration(&self) -> &Configuration {
         &self.config
     }
-    /// One private TLS connection per request, guarded through socket destruction.
-    /// The guard is declared first so disconnect drains the complete request.
-    fn connection(
-        &self,
-        clock: &dyn Fn() -> Result<u64>,
-    ) -> Result<(Delivery, crate::connect::Connection)> {
-        let guard = delivery_lock(&self.dir, libc::LOCK_SH)?;
+    /// Renewal network work owns neither the install lock nor application admission.
+    fn connection(&self, clock: &dyn Fn() -> Result<u64>) -> Result<crate::connect::Connection> {
         if self.dir.disabled()? {
             return Err(BLOCKED.into());
         }
@@ -222,7 +202,7 @@ impl Renewal {
         };
         let connection =
             crate::connect::Connection::open_identity(&config.endpoint, roots, identity)?;
-        Ok((guard, connection))
+        Ok(connection)
     }
     /// Reconcile an existing attempt before allocating a new begin. Wire errors
     /// are temporary; callers retain valid old application authority and notices.
@@ -239,7 +219,7 @@ impl Renewal {
         self.renew_using(clock, &mut Self::exchange)
     }
     fn exchange(&mut self, begin: bool, clock: &dyn Fn() -> Result<u64>) -> Result<Response> {
-        let (_guard, mut connection) = self.connection(clock)?;
+        let mut connection = self.connection(clock)?;
         if begin {
             let message = wire::Begin {
                 version: 1,
@@ -247,12 +227,12 @@ impl Renewal {
                 credentials: self.credentials(clock()?)?,
             };
             connection
-                .post("/v1/renew/begin", &message)
+                .post_with_deadline("/v1/renew/begin", &message)
                 .map(Response::Begun)
         } else {
             let finish = self.finish(&connection.exporter, clock()?)?;
             connection
-                .post("/v1/renew/finish", &finish)
+                .post_with_deadline("/v1/renew/finish", &finish)
                 .map(Response::Delivered)
         }
     }
@@ -264,7 +244,6 @@ impl Renewal {
         if self.attempt.is_some() {
             self.reconcile_local()?;
         }
-        self.expire(clock()?)?;
         if self
             .attempt
             .as_ref()
@@ -272,56 +251,24 @@ impl Renewal {
         {
             return Ok(());
         }
-        if !self.pending() {
-            let Response::Begun(begun) = exchange(self, true, clock)? else {
-                return Err(ERROR.into());
-            };
+        // Begin also reconciles a receiver restart/expired uncommitted nonce.
+        // A committed result returns the same ID even after ten minutes.
+        let Response::Begun(begun) = exchange(self, true, clock)? else {
+            return Err(ERROR.into());
+        };
+        if self.attempt.as_ref().is_none_or(|a| a.begun != begun) {
             self.prepare(begun, clock()?)?;
         }
         match exchange(self, false, clock) {
             Ok(Response::Delivered(delivery)) => self.delivered_with_clock(&delivery, clock),
             Ok(Response::Begun(_)) => Err(ERROR.into()),
-            Err(error) => {
-                // A refused commit is indistinguishable from lost delivery.
-                // Reserve the one recovery on the next call; never resend commit.
-                if self
-                    .attempt
-                    .as_ref()
-                    .is_some_and(|a| a.state == State::RecoverReserved)
-                {
-                    self.abandon()?;
-                }
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
-    }
-    /// Retain terminal evidence before another begin can replace the active record.
-    fn abandon(&mut self) -> Result<()> {
-        let a = self.attempt.as_mut().ok_or(ERROR)?;
-        a.state = State::Abandoned;
-        save(&self.dir, a)?;
-        let archive = format!("renewal-ended-{}.json", a.begun.renewal_id);
-        replace(
-            &self.dir,
-            &archive,
-            &serde_json::to_vec(a).map_err(|_| ERROR)?,
-        )
-    }
-    fn expire(&mut self, now: u64) -> Result<()> {
-        if self.attempt.as_ref().is_some_and(|a| match a.state {
-            State::Prepared => now >= a.begun.expires_at,
-            State::CommitReserved => now >= a.recovery_until.unwrap_or(a.old_valid_until),
-            State::RecoverReserved => true,
-            _ => false,
-        }) {
-            self.abandon()?;
-        }
-        Ok(())
     }
     pub fn pending(&self) -> bool {
         self.attempt
             .as_ref()
-            .is_some_and(|a| !matches!(a.state, State::Confirmed | State::Abandoned))
+            .is_some_and(|a| a.state != State::Confirmed)
     }
     pub fn credentials(&self, now: u64) -> Result<Vec<wire::Credential>> {
         if self
@@ -330,12 +277,6 @@ impl Renewal {
             .is_some_and(|a| matches!(a.state, State::Installed))
         {
             return Err("renewed generation awaits application confirmation".into());
-        }
-        if self.attempt.as_ref().is_some_and(|a| {
-            a.recovery_until.is_some_and(|until| now >= until)
-                && !matches!(a.state, State::Confirmed | State::Abandoned)
-        }) {
-            return Err(BLOCKED.into());
         }
         let generation = self
             .attempt
@@ -359,15 +300,12 @@ impl Renewal {
     }
     /// Stage the random application key before any finish can be sent.
     fn prepare(&mut self, begun: Begun, now: u64) -> Result<()> {
-        self.expire(now)?;
+        let _lock = self.root.install_lock()?;
+        self.recheck()?;
         if self
             .attempt
             .as_ref()
-            .is_some_and(|a| a.state == State::Abandoned)
-        {
-            self.abandon()?;
-        }
-        if self.pending()
+            .is_some_and(|a| a.state != State::Prepared && a.state != State::Confirmed)
             || now >= self.config.scope.valid_until
             || now >= begun.expires_at
             || begun.version != 1
@@ -377,7 +315,6 @@ impl Renewal {
                     kind: crate::credentials::Kind::MirrorPush,
                     generation: self.config.generation.checked_add(1).ok_or(ERROR)?,
                 }]
-            || !begun.enable_authorization_ids.is_empty()
         {
             return Err(ERROR.into());
         }
@@ -386,39 +323,23 @@ impl Renewal {
         let mut application = Zeroizing::new([0; 32]);
         getrandom::fill(application.as_mut()).map_err(|_| ERROR)?;
         let attempt = Attempt {
-            version: 1,
+            version: 2,
             begun,
             application_key: crate::provision_wire::encode(application.as_ref()),
             old_generation: self.config.generation,
             old_valid_until: self.config.scope.valid_until,
-            recovery_until: None,
             state: State::Prepared,
         };
         save(&self.dir, &attempt)?;
         self.attempt = Some(attempt);
         Ok(())
     }
-    /// A request's action is durable before dispatch. After uncertain recovery,
-    /// refuse further delivery; the receiver permits only one recovery reservation.
+    /// Re-sign the same staged application key for this live connection.
     fn finish(&mut self, exporter: &[u8; 32], now: u64) -> Result<wire::Finish> {
-        self.expire(now)?;
         let credentials = self.credentials(now)?;
         let a = self.attempt.as_mut().ok_or(ERROR)?;
-        let action = match a.state {
-            State::Prepared => Action::Commit,
-            State::CommitReserved => Action::Recover,
-            _ => return Err(BLOCKED.into()),
-        };
-        if now >= a.old_valid_until
-            || (action == Action::Commit && now >= a.begun.expires_at)
-            || (action == Action::Recover && now >= a.recovery_until.ok_or(ERROR)?)
-        {
+        if a.state != State::Prepared || now >= a.old_valid_until {
             return Err(BLOCKED.into());
-        }
-        if action == Action::Commit {
-            // Receiver commit cannot precede this reservation. This lower bound
-            // is deliberately conservative when the delivery response is lost.
-            a.recovery_until = Some(now.saturating_add(wire::OVERLAP).min(a.old_valid_until));
         }
         let application = Zeroizing::new(
             crate::provision_wire::decode_fixed::<32>(&a.application_key).map_err(|_| ERROR)?,
@@ -429,7 +350,6 @@ impl Renewal {
             &a.begun,
             &wire::identities(&credentials).map_err(|_| ERROR)?,
             exporter,
-            action,
             &application,
         )
         .map_err(|_| ERROR)?;
@@ -437,17 +357,10 @@ impl Renewal {
             .key
             .sign(&ring::rand::SystemRandom::new(), &message)
             .map_err(|_| ERROR)?;
-        a.state = if action == Action::Commit {
-            State::CommitReserved
-        } else {
-            State::RecoverReserved
-        };
-        save(&self.dir, a)?;
         Ok(wire::Finish {
             version: 1,
             enrollment_id: self.config.enrollment_id.clone(),
             renewal_id: a.begun.renewal_id.clone(),
-            action,
             credentials,
             application_key: a.application_key.clone(),
             proof: crate::provision_wire::encode(signature.as_ref()),
@@ -462,8 +375,10 @@ impl Renewal {
     }
     /// Verify the complete delivery, stage all files, then atomically select it.
     fn delivered(&mut self, delivered: &Delivered, now: u64) -> Result<()> {
+        let _lock = self.root.install_lock()?;
+        self.recheck()?;
         let a = self.attempt.as_ref().ok_or(ERROR)?;
-        if !matches!(a.state, State::CommitReserved | State::RecoverReserved)
+        if a.state != State::Prepared
             || delivered.version != 1
             || delivered.enrollment_id != a.begun.enrollment_id
             || delivered.renewal_id != a.begun.renewal_id
@@ -582,7 +497,27 @@ impl Renewal {
         save(&self.dir, self.attempt.as_ref().ok_or(ERROR)?)?;
         self.reconcile()
     }
+    fn recheck(&self) -> Result<()> {
+        let active = self.root.child(&self.name)?;
+        if active.disabled()? {
+            return Err(BLOCKED.into());
+        }
+        let (selected, _) = read_configuration(&selected_directory(&active)?, &self.name)?;
+        let published_target = self.attempt.as_ref().is_some_and(|a| {
+            a.state == State::Delivered
+                && a.begun.enrollment_id == selected.enrollment_id
+                && a.begun.generations[0].generation == selected.generation
+        });
+        if selected.enrollment_id != self.config.enrollment_id
+            || (selected.generation != self.config.generation && !published_target)
+        {
+            return Err(ERROR.into());
+        }
+        Ok(())
+    }
     fn reconcile_local(&mut self) -> Result<()> {
+        let _lock = self.root.install_lock()?;
+        self.recheck()?;
         let a = self.attempt.as_ref().ok_or(ERROR)?;
         let target = a.begun.generations.first().ok_or(ERROR)?;
         let generation_name = format!("generation-{}", target.generation);
@@ -593,7 +528,7 @@ impl Renewal {
             .map_err(|_| ERROR)?
             .iter()
             .any(|n| n == Path::new(&generation_name));
-        if exists && matches!(a.state, State::CommitReserved | State::RecoverReserved) {
+        if exists && a.state == State::Prepared {
             let dir = self.dir.child(&generation_name)?;
             let (config, _) = read_configuration(&dir, &self.name)?;
             let old = self
@@ -652,8 +587,8 @@ impl Renewal {
                 }
                 replace(&self.dir, "selected", name.as_bytes())?;
                 a.state = State::Installed;
-                save(&self.dir, a)?;
                 self.config = config;
+                save(&self.dir, a)?;
                 Ok(())
             }
             State::Installed | State::Confirmed => {

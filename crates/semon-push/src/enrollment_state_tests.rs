@@ -84,10 +84,6 @@ fn revoke_is_terminal_and_rerun_reports_state() {
         ended.owner_state("laptop", None, OwnerAction::Revoke, 20),
         OwnerState::Complete { .. }
     ));
-    assert!(matches!(
-        ended.owner_state("laptop", Some(Kind::MirrorPush), OwnerAction::Enable, 20),
-        OwnerState::NoAuthority { .. }
-    ));
     assert_eq!(store.snapshot().unwrap().revision(), ended.revision());
 }
 #[test]
@@ -176,72 +172,6 @@ fn first_use_cutover_is_atomic_and_contended_request_refuses() {
     );
     let again = Store::authorize_cutover(&f.0, Kind::MirrorPush, &secret, None, 20).unwrap();
     assert_eq!(again.revision(), committed.revision());
-}
-
-#[test]
-fn enable_is_one_use_pending_and_revoke_cancels_it() {
-    let f = Fixture::new();
-    audit(&f);
-    let mut store = Store::initialize(&f.0).unwrap();
-    let (mut r, _) = registry(Kind::AnalyticsPublish);
-    let mut second = r.credentials[0].clone();
-    second.kind = Kind::MirrorPush;
-    second.credential_id = id('c');
-    second.sha256 = Secret::new("mirror".into()).hash();
-    r.credentials.push(second);
-    r.enrollments[0]
-        .credential_kinds
-        .push(KindScope::new(Kind::MirrorPush, 2));
-    store.commit(0, &r).unwrap();
-    store
-        .owner_update(
-            &f.0,
-            Some(Kind::MirrorPush),
-            OwnerAction::Revoke,
-            "owner",
-            &id('a'),
-            20,
-        )
-        .unwrap();
-    store
-        .owner_update(
-            &f.0,
-            Some(Kind::MirrorPush),
-            OwnerAction::Enable,
-            "owner",
-            &id('a'),
-            20,
-        )
-        .unwrap();
-    let pending = store.snapshot().unwrap();
-    let auth = pending.enrollments[0].credential_kinds[1]
-        .enable_authorization
-        .clone()
-        .unwrap();
-    assert_eq!(auth.enrollment_id, id('a'));
-    assert_eq!(auth.owner, "owner");
-    assert_eq!(auth.consumed_renewal_id, None);
-    assert!(matches!(
-        pending.owner_state("laptop", Some(Kind::MirrorPush), OwnerAction::Enable, 20),
-        OwnerState::Complete { .. }
-    ));
-    assert_eq!(store.snapshot().unwrap().revision(), pending.revision());
-    store
-        .owner_update(
-            &f.0,
-            Some(Kind::MirrorPush),
-            OwnerAction::Revoke,
-            "owner",
-            &id('a'),
-            21,
-        )
-        .unwrap();
-    assert!(
-        store.snapshot().unwrap().enrollments[0]
-            .credential_kinds
-            .iter()
-            .all(|s| s.enable_authorization.is_none())
-    );
 }
 
 #[test]
@@ -480,10 +410,6 @@ fn address_change_atomically_ends_authority_without_mutating_enrollments() {
         Decision::Refused
     );
     assert!(after.usable_machine("laptop", 20).is_none());
-    assert!(matches!(
-        after.owner_state("laptop", Some(Kind::MirrorPush), OwnerAction::Enable, 20),
-        OwnerState::NoAuthority { .. }
-    ));
     drop(store);
     assert!(Store::authorize_cutover(&f.0, Kind::MirrorPush, &secret, None, 20).is_err());
     let current = Store::open(&f.0).unwrap().snapshot().unwrap();

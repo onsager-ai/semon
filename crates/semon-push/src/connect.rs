@@ -47,10 +47,30 @@ pub trait Terminal {
     }
 }
 
+// Timed-out resolver threads are detached; renewal's once-per-minute retry
+// rate bounds accumulation until the system resolver returns.
+fn resolve_using(
+    timeout: Duration,
+    resolve: impl FnOnce() -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
+) -> Result<Vec<std::net::SocketAddr>> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("receiver-dns".into())
+        .spawn(move || {
+            let result = resolve();
+            let _ = tx.send(result);
+        })
+        .map_err(|_| "receiver DNS lookup unavailable")?;
+    rx.recv_timeout(timeout)
+        .map_err(|_| "receiver DNS lookup timed out")?
+        .map_err(|_| "receiver DNS lookup failed".into())
+}
+
 pub(crate) struct Connection {
     pub(crate) stream: rustls::StreamOwned<rustls::ClientConnection, TcpStream>,
     pub(crate) host: String,
     pub(crate) exporter: [u8; 32],
+    pub(crate) started: Instant,
     #[cfg(test)]
     pub(crate) fault: Option<&'static str>,
 }
@@ -68,10 +88,21 @@ impl Connection {
         let port = url
             .port_or_known_default()
             .ok_or("receiver URL has no port")?;
-        let addresses = (host.as_str(), port)
-            .to_socket_addrs()
-            .map_err(|_| "receiver DNS lookup failed")?;
         let started = Instant::now();
+        let addresses = if let Ok(ip) = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+        {
+            vec![std::net::SocketAddr::new(ip, port)]
+        } else {
+            let dns_host = host.clone();
+            resolve_using(remaining_response(&|| started.elapsed())?, move || {
+                (dns_host.as_str(), port)
+                    .to_socket_addrs()
+                    .map(|addresses| addresses.collect())
+            })?
+        };
         let mut connected = None;
         for address in addresses {
             let remaining = remaining_response(&|| started.elapsed())?;
@@ -106,7 +137,11 @@ impl Connection {
             .map_err(|_| "TLS configuration failed")?;
         let mut socket = socket;
         while conn.is_handshaking() {
-            conn.complete_io(&mut socket).map_err(io_error)?;
+            let mut bounded = DeadlineSocket {
+                socket: &mut socket,
+                elapsed: &|| started.elapsed(),
+            };
+            conn.complete_io(&mut bounded).map_err(io_error)?;
         }
         let exporter = conn
             .export_keying_material([0; 32], wire::EXPORTER_LABEL, Some(&[]))
@@ -115,6 +150,7 @@ impl Connection {
             stream: rustls::StreamOwned::new(conn, socket),
             host: format!("{host}:{port}"),
             exporter,
+            started,
             #[cfg(test)]
             fault: None,
         })
@@ -124,8 +160,16 @@ impl Connection {
         path: &str,
         message: &impl Serialize,
     ) -> Result<T> {
-        let start = Instant::now();
-        self.post_with_clock(path, message, &|| start.elapsed())
+        let started = Instant::now();
+        self.post_with_clock(path, message, &|| started.elapsed())
+    }
+    pub(crate) fn post_with_deadline<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        message: &impl Serialize,
+    ) -> Result<T> {
+        let started = self.started;
+        self.post_with_clock(path, message, &|| started.elapsed())
     }
     fn post_with_clock<T: DeserializeOwned>(
         &mut self,

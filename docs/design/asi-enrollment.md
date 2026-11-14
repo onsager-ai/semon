@@ -726,7 +726,7 @@ its own eight-byte big-endian length prefix. Sign with
 `ECDSA_P256_SHA256_FIXED` and verify against the enrolled origin key. The receiver
 must retain that verified key from pairing in integrity-protected registry custody;
 a pin alone is not a proof-verification key. Bind every finish, including retries,
-to its nonce and live exporter. No old-connection proof is reusable.
+to its nonce and live exporter. No old-connection proof is reusable. Repeating an identical signed finish on the same TLS connection is an idempotent retry; replay refusal applies to cross-connection proof reuse, which the exporter binding rejects.
 
 Durably stage a fresh origin application key before finish. Derive kind bearers
 with HMAC-SHA256 over pairing-style length-prefixed fields:

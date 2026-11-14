@@ -214,7 +214,7 @@ pub(super) fn answer_body(
             Err(_) => return error(connection, Reason::Unavailable),
         }
     };
-    let Some(authenticated) = shared.tokens.registry().authenticated_enrollment(
+    let Some(_authenticated) = shared.tokens.registry().authenticated_enrollment(
         &mut connection.authority,
         head.authorization.as_deref(),
         Kind::BodyChannel,
@@ -222,20 +222,14 @@ pub(super) fn answer_body(
     ) else {
         return error(connection, Reason::Forbidden);
     };
-    let renewal_due = authenticated.renewal_due;
     if result.status == 204 {
-        let renewal = if renewal_due {
-            "Semon-Renewal: due\r\n"
-        } else {
-            ""
-        };
         let close = if head.close {
             "Connection: close\r\n"
         } else {
             ""
         };
         let response = format!(
-            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nCache-Control: no-store\r\n{renewal}{close}\r\n"
+            "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nCache-Control: no-store\r\n{close}\r\n"
         );
         return if connection.send(response.as_bytes()).is_ok() {
             Next::Continue
@@ -243,12 +237,7 @@ pub(super) fn answer_body(
             Next::Close
         };
     }
-    let headers = if renewal_due {
-        &[("Semon-Renewal", "due")][..]
-    } else {
-        &[]
-    };
-    match connection.respond(result.status, &body, head.close, headers) {
+    match connection.respond(result.status, &body, head.close, &[]) {
         Ok(()) => {
             dispatch.selected = None;
             Next::Continue

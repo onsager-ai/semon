@@ -77,6 +77,20 @@ impl Drop for InstallLock {
 }
 #[cfg(test)]
 thread_local! { static LOCK_DUPLICATE: std::cell::RefCell<Option<fs::File>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(test)]
+type AdmissionBarrier = Box<dyn FnMut(&str)>;
+#[cfg(test)]
+thread_local! {
+    static ADMISSION_BARRIER: std::cell::RefCell<Option<AdmissionBarrier>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn admission_barrier(point: &str) {
+    ADMISSION_BARRIER.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(point);
+        }
+    });
+}
 struct Directory {
     fd: fs::File,
     checked: CacheDirectory,
@@ -377,13 +391,20 @@ pub(crate) fn load_at(
             names[0].clone()
         }
     };
-    let dir = root.child(&name)?;
+    load_selected(base, &root, &name, now)
+}
+fn load_selected(
+    base: &Path,
+    root: &Directory,
+    name: &str,
+    now: u64,
+) -> Result<(Configuration, crate::Credential)> {
+    let dir = root.child(name)?;
     if dir.disabled()? {
         return Err("receiver is disconnected on this machine; run semon connect --to URL".into());
     }
-    renewal::ready(&dir)?;
     let dir = selected_directory(&dir)?;
-    let (config, key) = read_configuration(&dir, &name)?;
+    let (config, key) = read_configuration(&dir, name)?;
     if now >= config.scope.valid_until {
         return Err("receiver credentials expired; run semon connect --to URL".into());
     }
@@ -416,7 +437,7 @@ pub(crate) fn load_at(
             certificate,
             private: Zeroizing::new(private.to_vec()),
         }),
-        sources: consent(base, &name, &config)?,
+        sources: consent(base, name, &config)?,
         authority: Authority::new(base, &config)?,
     };
     Ok((config, credential))
@@ -487,7 +508,7 @@ fn read_configuration(dir: &Directory, name: &str) -> Result<(Configuration, Ecd
 pub struct Authority {
     base: PathBuf,
     name: String,
-    generation: u64,
+    enrollment_id: String,
 }
 impl Authority {
     pub fn new(base: &Path, config: &Configuration) -> Result<Self> {
@@ -495,7 +516,7 @@ impl Authority {
         let authority = Self {
             base: base.into(),
             name: custody_name(endpoint),
-            generation: config.generation,
+            enrollment_id: config.enrollment_id.clone(),
         };
         if !authority.is_active() {
             return Err("receiver is disconnected or its custody is unavailable".into());
@@ -512,6 +533,35 @@ impl Authority {
         }
         Ok(guard)
     }
+    pub(crate) fn admit(&self) -> Result<(Delivery, crate::Credential)> {
+        let root = Directory::open(&self.base)?;
+        let (before, credential) = load_selected(&self.base, &root, &self.name, now()?)?;
+        if before.enrollment_id != self.enrollment_id {
+            return Err(ERROR.into());
+        }
+        #[cfg(test)]
+        admission_barrier("selected");
+        let guard = self.delivery()?;
+        let dir = root.child(&self.name)?;
+        let (after, _) = read_configuration(&selected_directory(&dir)?, &self.name)?;
+        if after.enrollment_id != self.enrollment_id {
+            return Err(ERROR.into());
+        }
+        if before.generation == after.generation {
+            return Ok((guard, credential));
+        }
+        drop(guard);
+        #[cfg(test)]
+        admission_barrier("reload");
+        // Publication won admission. Reload once from the selected generation;
+        // retained generations are never a fallback.
+        let guard = self.delivery()?;
+        let (selected, credential) = load_selected(&self.base, &root, &self.name, now()?)?;
+        if selected.enrollment_id != self.enrollment_id {
+            return Err(ERROR.into());
+        }
+        Ok((guard, credential))
+    }
     pub(crate) fn is_active(&self) -> bool {
         Directory::open(&self.base)
             .and_then(|root| root.child(&self.name))
@@ -519,9 +569,8 @@ impl Authority {
                 if dir.disabled()? {
                     return Ok(false);
                 }
-                renewal::ready(&dir)?;
                 let (config, _) = read_configuration(&selected_directory(&dir)?, &self.name)?;
-                Ok(config.generation == self.generation)
+                Ok(config.enrollment_id == self.enrollment_id)
             })
             .unwrap_or(false)
     }

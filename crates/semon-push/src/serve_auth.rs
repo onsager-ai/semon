@@ -58,7 +58,6 @@ pub struct AuthenticatedEnrollment {
     pub publisher_claim_epoch: Option<ClaimEpoch>,
     pub kinds: Vec<Kind>,
     pub verified_client_identity: Option<VerifiedClientIdentity>,
-    pub renewal_due: bool,
     pub authority: CredentialHandle,
 }
 impl TryFrom<&AuthenticatedEnrollment> for crate::origin_read::EnrollmentScope {
@@ -322,15 +321,6 @@ impl RegistryAuthenticator {
                 .map(|k| k.kind)
                 .collect(),
             verified_client_identity: identity.cloned(),
-            renewal_due: credential
-                .valid_until
-                .saturating_sub(now.max(registry.latest))
-                <= crate::renewal_wire::WINDOW
-                || enrollment.credential_kinds.iter().any(|s| {
-                    s.enable_authorization
-                        .as_ref()
-                        .is_some_and(|a| a.consumed_renewal_id.is_none())
-                }),
             authority: CredentialHandle {
                 dir: self.dir.clone(),
                 credential_id: credential.credential_id.clone(),

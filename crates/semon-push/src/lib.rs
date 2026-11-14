@@ -433,10 +433,12 @@ struct Source {
     prepared: bool,
 }
 
+type HttpFactory =
+    dyn Fn(Option<Credential>) -> Result<(reqwest::blocking::Client, Token)> + Send + Sync;
+
 pub struct Client {
     url: String,
-    token: Token,
-    http: Arc<dyn Fn() -> Result<reqwest::blocking::Client> + Send + Sync>,
+    http: Arc<HttpFactory>,
     stop: Stop,
     lock: Option<Arc<StateLock>>,
     state_path: PathBuf,
@@ -482,54 +484,54 @@ impl Client {
         builder: impl Fn() -> reqwest::blocking::ClientBuilder + Send + Sync + 'static,
     ) -> Result<Self> {
         let url = check_url(&options.url)?;
-        let token = options.credential.token()?;
+        options.credential.token()?;
         let credential = options.credential.clone();
-        let http: Arc<dyn Fn() -> Result<reqwest::blocking::Client> + Send + Sync> =
-            Arc::new(move || {
-                let http = builder();
-                #[cfg(unix)]
-                let http = match &credential {
-                    Credential::MutualTls { identity, .. }
-                    | Credential::Enrolled {
-                        identity: Some(identity),
-                        ..
-                    } => {
-                        let mut pem =
-                            zeroize::Zeroizing::new(client_ca::pem(&identity.certificate));
-                        let mut private = zeroize::Zeroizing::new(crate::provision_wire::encode(
-                            &identity.private,
-                        ));
-                        // Both substitutions preserve ASCII and byte length.
-                        let mut bytes =
-                            zeroize::Zeroizing::new(std::mem::take(&mut *private).into_bytes());
-                        for byte in bytes.iter_mut() {
-                            match *byte {
-                                b'-' => *byte = b'+',
-                                b'_' => *byte = b'/',
-                                _ => {}
-                            }
+        let http: Arc<HttpFactory> = Arc::new(move |selected| {
+            let credential = selected.as_ref().unwrap_or(&credential);
+            let token = credential.token()?;
+            let http = builder();
+            #[cfg(unix)]
+            let http = match &credential {
+                Credential::MutualTls { identity, .. }
+                | Credential::Enrolled {
+                    identity: Some(identity),
+                    ..
+                } => {
+                    let mut pem = zeroize::Zeroizing::new(client_ca::pem(&identity.certificate));
+                    let mut private =
+                        zeroize::Zeroizing::new(crate::provision_wire::encode(&identity.private));
+                    // Both substitutions preserve ASCII and byte length.
+                    let mut bytes =
+                        zeroize::Zeroizing::new(std::mem::take(&mut *private).into_bytes());
+                    for byte in bytes.iter_mut() {
+                        match *byte {
+                            b'-' => *byte = b'+',
+                            b'_' => *byte = b'/',
+                            _ => {}
                         }
-                        *private =
-                            String::from_utf8(std::mem::take(&mut *bytes)).expect("base64 ASCII");
-                        while !private.len().is_multiple_of(4) {
-                            private.push('=');
-                        }
-                        pem.extend_from_slice(b"-----BEGIN PRIVATE KEY-----\n");
-                        pem.extend_from_slice(private.as_bytes());
-                        pem.extend_from_slice(b"\n-----END PRIVATE KEY-----\n");
-                        let identity = reqwest::Identity::from_pem(&pem)
-                            .map_err(|_| "invalid enrolled TLS identity")?;
-                        drop(private);
-                        http.identity(identity)
                     }
-                    _ => http,
-                };
-                http.redirect(reqwest::redirect::Policy::none())
-                    .timeout(Duration::from_secs(120))
-                    .user_agent(concat!("semon-push/", env!("CARGO_PKG_VERSION")))
-                    .build()
-                    .map_err(|error| error.to_string())
-            });
+                    *private =
+                        String::from_utf8(std::mem::take(&mut *bytes)).expect("base64 ASCII");
+                    while !private.len().is_multiple_of(4) {
+                        private.push('=');
+                    }
+                    pem.extend_from_slice(b"-----BEGIN PRIVATE KEY-----\n");
+                    pem.extend_from_slice(private.as_bytes());
+                    pem.extend_from_slice(b"\n-----END PRIVATE KEY-----\n");
+                    let identity = reqwest::Identity::from_pem(&pem)
+                        .map_err(|_| "invalid enrolled TLS identity")?;
+                    drop(private);
+                    http.identity(identity)
+                }
+                _ => http,
+            };
+            http.redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(120))
+                .user_agent(concat!("semon-push/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .map(|http| (http, token))
+                .map_err(|error| error.to_string())
+        });
         let state = fs::read(&options.state)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<State>(&bytes).ok())
@@ -547,7 +549,6 @@ impl Client {
         }
         Ok(Self {
             url,
-            token,
             http,
             stop: {
                 let stop = Stop::new();
@@ -627,7 +628,6 @@ impl Client {
         loop {
             let factory = Arc::clone(&self.http);
             let request_url = format!("{}/v1/mirror/{route}", self.url);
-            let token = self.token.clone();
             let body = body.clone();
             let lock = self.lock.clone();
             let dispatch_stop = self.stop.clone();
@@ -636,18 +636,23 @@ impl Client {
             let answer = self.stop.run(route, move || {
                 let _lock = lock;
                 #[cfg(unix)]
-                let _delivery = dispatch_stop
+                let admitted = dispatch_stop
                     .authority
                     .as_ref()
-                    .map(|authority| authority.delivery())
-                    .transpose()
-                    .map_err(|error| error.to_string())?;
+                    .map(|authority| authority.admit())
+                    .transpose()?;
+                #[cfg(unix)]
+                let (_delivery, selected) = admitted.map_or((None, None), |(guard, credential)| {
+                    (Some(guard), Some(credential))
+                });
+                #[cfg(not(unix))]
+                let selected = None;
                 if dispatch_stop.is_stopped() {
                     return Err("delivery stopped".to_owned());
                 }
                 // Declared after the delivery guard: the last handle joins its
                 // private reqwest runtime before the guard can be released.
-                let http = factory()?;
+                let (http, token) = factory(selected)?;
                 let request = http
                     .post(request_url)
                     .bearer_auth(token.expose())

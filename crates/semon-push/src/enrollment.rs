@@ -18,7 +18,7 @@ use std::{
 pub const DIRECTORY: &str = "enrollment";
 pub const REGISTRY_FILE: &str = "registry.json";
 pub const LOCK_FILE: &str = "registry.lock";
-pub const FORMAT: u32 = 3;
+pub const FORMAT: u32 = 4;
 pub const CAP: u64 = 4 * 1024 * 1024;
 pub const TERMINAL_RESERVE: u64 = 256 * 1024;
 pub const ADMISSION_CAP: u64 = CAP - TERMINAL_RESERVE;
@@ -147,7 +147,6 @@ pub struct KindScope {
     pub client_cert_required: bool,
     pub generations: Generations,
     pub available: bool,
-    pub enable_authorization: Option<EnableAuthorization>,
 }
 impl KindScope {
     pub fn new(kind: Kind, generation: u64) -> Self {
@@ -159,19 +158,8 @@ impl KindScope {
                 retiring: None,
             },
             available: true,
-            enable_authorization: None,
         }
     }
-}
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EnableAuthorization {
-    pub enrollment_id: String,
-    pub kind: Kind,
-    pub owner: String,
-    pub authorization_id: String,
-    pub created_at: u64,
-    pub consumed_renewal_id: Option<String>,
 }
 /// Compact terminal lookup and no-resurrection evidence; never grants authority.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,16 +390,6 @@ impl Registry {
                 {
                     return Err(Error::Invalid);
                 }
-                if k.enable_authorization.as_ref().is_some_and(|a| {
-                    a.enrollment_id != e.enrollment_id
-                        || a.kind != k.kind
-                        || !opaque(&a.authorization_id)
-                        || !identifier(&a.owner)
-                        || a.consumed_renewal_id.as_ref().is_some_and(|id| !opaque(id))
-                        || (k.available && a.consumed_renewal_id.is_none())
-                }) {
-                    return Err(Error::Invalid);
-                }
                 if k.available
                     && e.revoked_at.is_none()
                     && self.credentials.iter().any(|b| {
@@ -520,9 +498,7 @@ impl Registry {
                 .iter()
                 .find(|r| r.begun.renewal_id == receipt.begun.renewal_id)
                 .ok_or(Error::Terminal)?;
-            let mut expected = receipt.clone();
-            expected.deliveries = next.deliveries;
-            if &expected != next || next.deliveries < receipt.deliveries {
+            if receipt != next {
                 return Err(Error::Terminal);
             }
         }
@@ -571,15 +547,7 @@ impl Registry {
                     .iter()
                     .find(|n| n.kind == scope.kind)
                     .ok_or(Error::Terminal)?;
-                if (!scope.available
-                    && n.available
-                    && !scope.enable_authorization.as_ref().is_some_and(|a| {
-                        a.consumed_renewal_id.is_none()
-                            && n.enable_authorization.as_ref().is_some_and(|b| {
-                                b.authorization_id == a.authorization_id
-                                    && b.consumed_renewal_id.is_some()
-                            })
-                    }))
+                if (!scope.available && n.available)
                     || n.generations.current < scope.generations.current
                     || (scope.client_cert_required && !n.client_cert_required)
                     || (n.generations.current == scope.generations.current
@@ -971,8 +939,12 @@ impl Store {
             .dir
             .file(&stage, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
         let before = (|| {
+            #[cfg(test)]
+            crate::renewal::observe_durable_io(false, false);
             file.write_all(&bytes).map_err(|_| Error::Write)?;
             fault(Stage::Written)?;
+            #[cfg(test)]
+            crate::renewal::observe_durable_io(false, true);
             file.sync_all().map_err(|_| Error::Write)?;
             fault(Stage::Synced)?;
             self.dir.rename(&stage, REGISTRY_FILE)
@@ -983,7 +955,11 @@ impl Store {
         }
         // Never continue with a cached pre-commit view after rename uncertainty.
         if fault(Stage::Renamed).is_err()
-            || self.dir.0.sync_all().is_err()
+            || {
+                #[cfg(test)]
+                crate::renewal::observe_durable_io(false, true);
+                self.dir.0.sync_all().is_err()
+            }
             || fault(Stage::DirectorySynced).is_err()
         {
             self.failed = true;

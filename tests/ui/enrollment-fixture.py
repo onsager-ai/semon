@@ -14,7 +14,7 @@ enrollment_dir.mkdir(mode=0o700)
 token = secrets.token_hex(32)
 enrollment_id = secrets.token_hex(32)
 registry = {
-    "format": 3,
+    "format": 4,
     "latest": 0,
     "next_sequence": 2,
     "tombstones": [],
@@ -33,7 +33,7 @@ registry = {
         "credential_kinds": [{
             "kind": "mirror_push", "client_cert_required": False,
             "generations": {"current": 1, "retiring": None},
-            "available": True, "enable_authorization": None,
+            "available": True,
         }],
         "revoked_at": None,
     }],
