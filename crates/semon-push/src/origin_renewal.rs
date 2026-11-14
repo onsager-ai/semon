@@ -503,8 +503,13 @@ impl Renewal {
             return Err(BLOCKED.into());
         }
         let (selected, _) = read_configuration(&selected_directory(&active)?, &self.name)?;
+        let published_target = self.attempt.as_ref().is_some_and(|a| {
+            a.state == State::Delivered
+                && a.begun.enrollment_id == selected.enrollment_id
+                && a.begun.generations[0].generation == selected.generation
+        });
         if selected.enrollment_id != self.config.enrollment_id
-            || selected.generation != self.config.generation
+            || (selected.generation != self.config.generation && !published_target)
         {
             return Err(ERROR.into());
         }

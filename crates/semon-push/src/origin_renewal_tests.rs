@@ -134,7 +134,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn origin_proof_and_recovery_match_receiver_commit_contract() {
+fn origin_proof_and_retry_match_receiver_commit_contract() {
     let f = Fixture::new();
     let mut origin = f.open();
     let receiver_dir = f.receiver(&origin);
@@ -351,7 +351,7 @@ fn strict_thirty_day_boundary_and_expiry() {
     assert_eq!(window(NOW, NOW), (true, false));
 }
 #[test]
-fn prepared_commit_recovery_and_exhaustion_survive_restart() {
+fn prepared_identical_retries_survive_restart_and_ten_minutes() {
     let f = Fixture::new();
     let mut r = f.prepare();
     let first = r.finish(&[1; 32], NOW).unwrap();

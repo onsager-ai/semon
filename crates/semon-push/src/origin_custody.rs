@@ -385,12 +385,12 @@ fn load_selected(
     name: &str,
     now: u64,
 ) -> Result<(Configuration, crate::Credential)> {
-    let dir = root.child(&name)?;
+    let dir = root.child(name)?;
     if dir.disabled()? {
         return Err("receiver is disconnected on this machine; run semon connect --to URL".into());
     }
     let dir = selected_directory(&dir)?;
-    let (config, key) = read_configuration(&dir, &name)?;
+    let (config, key) = read_configuration(&dir, name)?;
     if now >= config.scope.valid_until {
         return Err("receiver credentials expired; run semon connect --to URL".into());
     }
@@ -423,7 +423,7 @@ fn load_selected(
             certificate,
             private: Zeroizing::new(private.to_vec()),
         }),
-        sources: consent(base, &name, &config)?,
+        sources: consent(base, name, &config)?,
         authority: Authority::new(base, &config)?,
     };
     Ok((config, credential))

@@ -1029,3 +1029,45 @@ fn audit_append_failures_keep_new_authority_uncommitted() {
         );
     }
 }
+
+#[test]
+fn committed_successor_cannot_begin_n_plus_two_and_revoke_ends_retry() {
+    let f = Fixture::new();
+    let mut receiver = Receiver::default();
+    let now = 2_000_000;
+    let begun = f.begin(&mut receiver, now).unwrap();
+    let finish = f.finish(&begun, [3; 32], [4; 32]);
+    let bytes = receiver
+        .finish(&f.dir, &finish, &[4; 32], None, now)
+        .unwrap();
+    let delivered: wire::Delivered = serde_json::from_slice(&bytes).unwrap();
+    let credential = &delivered.credentials[0];
+    let next = wire::Begin {
+        version: 1,
+        enrollment_id: begun.enrollment_id.clone(),
+        credentials: vec![Credential {
+            kind: credential.kind,
+            generation: credential.generation,
+            bearer: credential.bearer.clone(),
+        }],
+    };
+    assert!(receiver.begin(&f.dir, &next, None, now + 1).is_err());
+    assert_eq!(Registry::read_current(&f.dir).unwrap().credentials.len(), 2);
+    Store::open(&f.dir)
+        .unwrap()
+        .owner_update(
+            &f.dir,
+            None,
+            crate::enrollment::OwnerAction::Revoke,
+            "owner",
+            &begun.enrollment_id,
+            now + 1,
+        )
+        .unwrap();
+    let retry = f.finish(&begun, [3; 32], [5; 32]);
+    assert!(
+        receiver
+            .finish(&f.dir, &retry, &[5; 32], None, now + 1)
+            .is_err()
+    );
+}
