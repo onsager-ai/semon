@@ -2383,3 +2383,61 @@ fn revoked_retired_and_wrong_certificate_keep_distinct_local_authority_class() {
         Failure::InvalidCredential
     );
 }
+
+#[test]
+fn refusal_warning_latch_bounds_repeated_failures_and_concurrent_contention() {
+    let f = Fixture::new();
+    let directory = crate::body_cache::CacheDirectory::open(&f.dir.join("receiver-audit")).unwrap();
+    let lock = directory
+        .open_file(
+            Path::new("renewal-refusals.lock"),
+            libc::O_RDWR | libc::O_CREAT,
+        )
+        .unwrap();
+    lock.try_lock().unwrap();
+    let latch = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            let latch = &latch;
+            let dir = &f.dir;
+            scope.spawn(move || {
+                for _ in 0..32 {
+                    let result = crate::generation_audit::refusal(
+                        dir,
+                        crate::generation_audit::RefusalRecord {
+                            class: Failure::InvalidCredential,
+                            observed_at: 2_000_000,
+                            enrollment_id: String::new(),
+                            renewal_id: String::new(),
+                            generations: vec![],
+                            outcome: "refused".into(),
+                        },
+                    );
+                    assert!(matches!(result, Err(Error::InUse)));
+                    assert!(!refusal_warning(latch, &result));
+                }
+            });
+        }
+    });
+    assert!(
+        !latch.load(Ordering::Relaxed),
+        "contention consumed the storage warning"
+    );
+    let warnings = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            let latch = &latch;
+            let warnings = &warnings;
+            scope.spawn(move || {
+                for _ in 0..32 {
+                    if refusal_warning(latch, &Err(Error::AuditUnavailable)) {
+                        warnings.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+    });
+    assert_eq!(warnings.load(Ordering::Relaxed), 1);
+    assert!(!refusal_warning(&latch, &Ok(())));
+    assert!(!refusal_warning(&latch, &Err(Error::AuditUnavailable)));
+}

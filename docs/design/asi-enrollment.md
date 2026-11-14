@@ -903,7 +903,10 @@ Release the receiver-wide renewal mutex before refusal storage IO, including fil
 and directory fsync. Publish even the first summary by fsynced staging and atomic
 rename; an interrupted first publication leaves no empty final file. An existing
 empty/corrupt summary is preserved and reports local refusal-audit unavailability
-on stderr, rather than silently resetting evidence or disabling renewal.
+on stderr, rather than silently resetting evidence or disabling renewal. Expected
+refusal-summary lock contention drops that aggregate update silently. Storage
+failures emit at most one warning per process lifetime across all receivers;
+subsequent failures remain quiet, so hostile refusals cannot flood stderr.
 Authenticate before compaction, expiry auditing or persisted clock writes. Reuse
 journal validation only while its inode/size/change timestamps match the last
 fully validated snapshot; a changed journal is validated again before append.

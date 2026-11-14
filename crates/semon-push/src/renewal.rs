@@ -907,9 +907,22 @@ pub(crate) fn record_refusal(
         },
     );
 }
+// Refusals are attacker-controlled. Permit at most one storage warning for the
+// process lifetime, across receivers; expected aggregate-lock contention is quiet.
+static REFUSAL_WARNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn refusal_warning(
+    latch: &std::sync::atomic::AtomicBool,
+    result: &std::result::Result<(), Error>,
+) -> bool {
+    matches!(result, Err(error) if !matches!(error, Error::InUse))
+        && !latch.swap(true, std::sync::atomic::Ordering::Relaxed)
+}
 pub(crate) fn write_refusal(dir: &Path, record: crate::generation_audit::RefusalRecord) {
-    if crate::generation_audit::refusal(dir, record).is_err() {
-        eprintln!("Receiver refusal audit is unavailable; restore access to its audit storage.");
+    let result = crate::generation_audit::refusal(dir, record);
+    if refusal_warning(&REFUSAL_WARNING, &result) {
+        eprintln!(
+            "Receiver refusal audit is unavailable; restore access to its audit storage (further warnings suppressed)."
+        );
     }
 }
 fn audit(dir: &Path, begun: &Begun, action: &str, now: u64) -> Result<()> {

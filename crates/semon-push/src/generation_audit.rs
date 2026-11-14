@@ -195,7 +195,10 @@ pub(crate) fn refusal(receiver: &Path, record: RefusalRecord) -> Result<(), Erro
             libc::O_RDWR | libc::O_CREAT,
         )
         .map_err(|_| Error::AuditUnavailable)?;
-    lock.try_lock().map_err(|_| Error::AuditUnavailable)?;
+    lock.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => Error::InUse,
+        std::fs::TryLockError::Error(_) => Error::AuditUnavailable,
+    })?;
     let file = directory
         .open_optional_file(Path::new(REFUSAL_FILE), libc::O_RDONLY)
         .map_err(|_| Error::AuditUnavailable)?;
