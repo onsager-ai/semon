@@ -328,7 +328,6 @@ fn ordinary_renewal(required_certificate: bool) {
         &begun,
         &authentication,
         &exporter,
-        renewal::Action::Commit,
         &[3; 32],
     )
     .unwrap();
@@ -337,7 +336,6 @@ fn ordinary_renewal(required_certificate: bool) {
         version: 1,
         enrollment_id: id,
         renewal_id: begun.renewal_id.clone(),
-        action: renewal::Action::Commit,
         credentials: vec![renewal::Credential {
             kind: Kind::MirrorPush,
             generation: 1,
