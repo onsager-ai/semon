@@ -80,12 +80,21 @@ fn terminal(mut command: Command, answer: Option<&'static [u8]>) -> (Output, Str
             Ok(())
         });
     }
-    let child = command.spawn().unwrap();
+    let mut child = command.spawn().unwrap();
     drop(slave);
     let reader = thread::spawn(move || {
         let mut transcript = Vec::new();
         let mut answered = false;
         loop {
+            let mut poll = libc::pollfd {
+                fd: master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            assert!(
+                unsafe { libc::poll(&mut poll, 1, 10_000) } > 0,
+                "terminal timed out"
+            );
             let mut byte = [0];
             match master.read(&mut byte) {
                 Ok(0) | Err(_) => break,
@@ -99,6 +108,15 @@ fn terminal(mut command: Command, answer: Option<&'static [u8]>) -> (Output, Str
         }
         String::from_utf8(transcript).unwrap().replace("\r\n", "\n")
     });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            panic!("disconnect child timed out");
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
     let output = child.wait_with_output().unwrap();
     (output, reader.join().unwrap())
 }

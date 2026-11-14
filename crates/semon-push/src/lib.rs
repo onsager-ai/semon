@@ -453,6 +453,24 @@ pub struct Client {
     allowed_sources: Option<BTreeSet<PathBuf>>,
 }
 
+/// Bound each upload read and recheck local authority before releasing bytes.
+struct UploadBody {
+    bytes: std::io::Cursor<Vec<u8>>,
+    stop: Stop,
+}
+impl Read for UploadBody {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if self.stop.is_stopped() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "delivery stopped",
+            ));
+        }
+        let length = output.len().min(16 * 1024);
+        self.bytes.read(&mut output[..length])
+    }
+}
+
 impl Client {
     pub fn new(options: &PushOptions) -> Result<Self> {
         Self::with_http_builder(options, reqwest::blocking::Client::builder())
@@ -601,28 +619,48 @@ impl Client {
                 .post(format!("{}/v1/mirror/{route}", self.url))
                 .bearer_auth(self.token.expose())
                 .header("content-type", "application/json")
-                .body(body.clone());
+                .body(reqwest::blocking::Body::sized(
+                    UploadBody {
+                        bytes: std::io::Cursor::new(body.clone().into_bytes()),
+                        stop: self.stop.clone(),
+                    },
+                    body.len() as u64,
+                ));
             let lock = self.lock.clone();
+            let dispatch_stop = self.stop.clone();
             let answer = self.stop.run(route, move || {
                 let _lock = lock;
-                request.send().map(|response| {
-                    let status = response.status().as_u16();
-                    let retry = response
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|value| value.to_str().ok())
-                        .and_then(|value| {
-                            value.parse::<u64>().ok().or_else(|| {
-                                httpdate::parse_http_date(value).ok().map(|date| {
-                                    date.duration_since(std::time::SystemTime::now())
-                                        .unwrap_or_default()
-                                        .as_secs()
+                #[cfg(unix)]
+                let _delivery = dispatch_stop
+                    .authority
+                    .as_ref()
+                    .map(|authority| authority.delivery())
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
+                if dispatch_stop.is_stopped() {
+                    return Err("delivery stopped".to_owned());
+                }
+                request
+                    .send()
+                    .map_err(|error| error.to_string())
+                    .map(|response| {
+                        let status = response.status().as_u16();
+                        let retry = response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(|value| {
+                                value.parse::<u64>().ok().or_else(|| {
+                                    httpdate::parse_http_date(value).ok().map(|date| {
+                                        date.duration_since(std::time::SystemTime::now())
+                                            .unwrap_or_default()
+                                            .as_secs()
+                                    })
                                 })
                             })
-                        })
-                        .unwrap_or(2);
-                    (status, response.text().unwrap_or_default(), retry)
-                })
+                            .unwrap_or(2);
+                        (status, response.text().unwrap_or_default(), retry)
+                    })
             });
             let (status, text, retry) = match answer {
                 Ok(Some(Ok(answer))) => answer,

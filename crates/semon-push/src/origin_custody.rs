@@ -398,15 +398,14 @@ pub(crate) fn load_at(
         key.public_key().as_ref(),
         now,
     )?;
-    let credential = match certificate {
-        Some(certificate) => crate::Credential::MutualTls {
-            token,
-            identity: crate::ClientIdentity {
-                certificate,
-                private: Zeroizing::new(private.to_vec()),
-            },
-        },
-        None => crate::Credential::Memory(token),
+    let credential = crate::Credential::Enrolled {
+        token,
+        identity: certificate.map(|certificate| crate::ClientIdentity {
+            certificate,
+            private: Zeroizing::new(private.to_vec()),
+        }),
+        sources: consent(base, &name, &config)?,
+        authority: Authority::new(base, &config)?,
     };
     Ok((config, credential))
 }
@@ -476,12 +475,41 @@ impl Authority {
         }
         Ok(authority)
     }
+    /// Keep a shared delivery lock until the HTTP operation has ended. Disconnect
+    /// publishes disabled first, then drains these locks before reporting success.
+    pub(crate) fn delivery(&self) -> Result<Delivery> {
+        let dir = Directory::open(&self.base)?.child(&self.name)?;
+        let guard = delivery_lock(&dir, libc::LOCK_SH)?;
+        if !self.is_active() {
+            return Err("receiver is disconnected or its custody is unavailable".into());
+        }
+        Ok(guard)
+    }
     pub(crate) fn is_active(&self) -> bool {
         Directory::open(&self.base)
             .and_then(|root| root.child(&self.name))
             .and_then(|dir| dir.disabled())
             .is_ok_and(|disabled| !disabled)
     }
+}
+
+pub(crate) struct Delivery(fs::File);
+impl Drop for Delivery {
+    fn drop(&mut self) {
+        // Explicit unlock also covers descriptors inherited by unrelated forks.
+        let _ = self.0.unlock();
+    }
+}
+fn delivery_lock(dir: &Directory, operation: libc::c_int) -> Result<Delivery> {
+    let file = dir
+        .checked
+        .open_file(Path::new("delivery.lock"), libc::O_RDWR | libc::O_CREAT)
+        .map_err(|_| ERROR)?;
+    // SAFETY: this owned descriptor remains live until the guard drops.
+    if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+        return Err(ERROR.into());
+    }
+    Ok(Delivery(file))
 }
 
 pub const DISCONNECT_OWNER: &str =
@@ -541,11 +569,10 @@ impl Disconnect {
     pub fn commit(mut self) -> Result<()> {
         if self.disabled {
             // Reconcile a previous uncertain directory fsync before success.
-            return self
-                .dir
-                .checked
-                .sync()
-                .map_err(|_| DISCONNECT_UNCERTAIN.into());
+            self.dir.checked.sync().map_err(|_| DISCONNECT_UNCERTAIN)?;
+            let _drained =
+                delivery_lock(&self.dir, libc::LOCK_EX).map_err(|_| DISCONNECT_UNCERTAIN)?;
+            return Ok(());
         }
         let stage = format!(
             "disabled-stage-{}",
@@ -569,10 +596,9 @@ impl Disconnect {
             return Err(DISCONNECT_UNCERTAIN.into());
         }
         self.disabled = true;
-        self.dir
-            .checked
-            .sync()
-            .map_err(|_| DISCONNECT_UNCERTAIN.into())
+        self.dir.checked.sync().map_err(|_| DISCONNECT_UNCERTAIN)?;
+        let _drained = delivery_lock(&self.dir, libc::LOCK_EX).map_err(|_| DISCONNECT_UNCERTAIN)?;
+        Ok(())
     }
 }
 

@@ -568,7 +568,12 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
         config.scope.binding,
         crate::enrollment::Binding::Inapplicable
     ));
-    let crate::Credential::MutualTls { token, identity } = credential else {
+    let crate::Credential::Enrolled {
+        token,
+        identity: Some(identity),
+        ..
+    } = credential
+    else {
         panic!("required certificate was not installed")
     };
     let certificate_path = origin.join(&name).join("client-certificate.der");

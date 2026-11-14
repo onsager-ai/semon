@@ -213,22 +213,36 @@ fn status_advertised(client: &Client) -> bool {
         .bearer_auth(client.token.expose())
         .header("connection", "close");
     let lock = client.lock.clone();
+    let dispatch_stop = client.stop.clone();
     matches!(
         client.stop.run("status-capability", move || {
             let _lock = lock;
-            request.send().map(|response| {
-                response.status().as_u16() == 405
-                    && response
-                        .headers()
-                        .get_all(reqwest::header::ALLOW)
-                        .iter()
-                        .filter_map(|value| value.to_str().ok())
-                        .any(|allow| {
-                            allow
-                                .split(',')
-                                .any(|method| method.trim().eq_ignore_ascii_case("POST"))
-                        })
-            })
+            #[cfg(unix)]
+            let _delivery = dispatch_stop
+                .authority
+                .as_ref()
+                .map(|authority| authority.delivery())
+                .transpose()
+                .map_err(|error| error.to_string())?;
+            if dispatch_stop.is_stopped() {
+                return Err("delivery stopped".to_owned());
+            }
+            request
+                .send()
+                .map_err(|error| error.to_string())
+                .map(|response| {
+                    response.status().as_u16() == 405
+                        && response
+                            .headers()
+                            .get_all(reqwest::header::ALLOW)
+                            .iter()
+                            .filter_map(|value| value.to_str().ok())
+                            .any(|allow| {
+                                allow
+                                    .split(',')
+                                    .any(|method| method.trim().eq_ignore_ascii_case("POST"))
+                            })
+                })
         }),
         Ok(Some(Ok(true)))
     )

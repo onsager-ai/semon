@@ -967,19 +967,6 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
     }
     let base = semon_push::origin_custody::default_directory()?;
     let (config, credential) = semon_push::origin_custody::load(&base, receiver.as_deref())?;
-    let name = semon_push::wire::sha256_hex(config.endpoint.as_bytes());
-    let sources = semon_push::origin_custody::consent(&base, &name, &config)?;
-    let (token, identity) = match credential {
-        semon_push::Credential::Memory(token) => (token, None),
-        semon_push::Credential::MutualTls { token, identity } => (token, Some(identity)),
-        _ => return Err("invalid enrolled credential".into()),
-    };
-    let credential = semon_push::Credential::Enrolled {
-        token,
-        sources,
-        authority: semon_push::origin_custody::Authority::new(&base, &config)?,
-        identity,
-    };
     let url = config.endpoint;
     let state = state.unwrap_or_else(|| semon_push::default_state_path(&url));
     Ok(PushArgs {

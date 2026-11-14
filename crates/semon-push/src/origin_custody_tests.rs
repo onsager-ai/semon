@@ -478,11 +478,15 @@ fn disconnect_stops_waiting_for_active_delivery_without_new_work() {
     let worker = std::thread::spawn(move || {
         waiting.run("delivery", move || {
             ready.send(()).unwrap();
-            released.recv().unwrap();
+            released
+                .recv_timeout(std::time::Duration::from_secs(15))
+                .unwrap();
             7
         })
     });
-    started.recv().unwrap();
+    started
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
     Disconnect::open(&f.0, "https://receiver.example")
         .unwrap()
         .commit()
@@ -497,4 +501,123 @@ fn disconnect_stops_waiting_for_active_delivery_without_new_work() {
         None::<()>
     );
     release.send(()).unwrap();
+}
+
+#[test]
+fn public_loader_client_refuses_delivery_after_disconnect() {
+    let f = Fixture::new();
+    f.install();
+    let (config, credential) = load(&f.0, None).unwrap();
+    assert!(
+        matches!(&credential, crate::Credential::Enrolled { sources, .. } if sources == &[PathBuf::from("/native/approved.jsonl")])
+    );
+    let client = crate::Client::new(&crate::PushOptions {
+        url: config.endpoint,
+        credential,
+        sessions: Default::default(),
+        state: f.0.join("push-state"),
+    })
+    .unwrap();
+    Disconnect::open(&f.0, "https://receiver.example")
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert!(matches!(
+        client.post("facts", "{}".into()),
+        Err(crate::Failure::Stopped)
+    ));
+}
+
+#[test]
+fn disconnect_aborts_slow_upload_and_drains_transport_before_success() {
+    use std::{
+        io::{BufRead, BufReader},
+        net::TcpListener,
+        time::Duration,
+    };
+    let f = Fixture::new();
+    f.install();
+    let (_, credential) = load(&f.0, None).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready, started) = std::sync::mpsc::channel();
+    let (drain, draining) = std::sync::mpsc::channel();
+    let (observed, received) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let (socket, _) = listener.accept().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut chunk = [0; 1024];
+        let first = reader.read(&mut chunk).unwrap();
+        ready.send(()).unwrap();
+        draining.recv_timeout(Duration::from_secs(10)).unwrap();
+        let mut total = first;
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => total += count,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(error) => panic!("upload did not abort: {error}"),
+            }
+        }
+        observed.send(total).unwrap();
+    });
+    let client = crate::Client::new(&crate::PushOptions {
+        url: format!("http://{address}"),
+        credential,
+        sessions: Default::default(),
+        state: f.0.join("push-state"),
+    })
+    .unwrap();
+    let (finished, uploaded) = std::sync::mpsc::channel();
+    let upload = std::thread::spawn(move || {
+        finished
+            .send(client.post("append", "x".repeat(32 * 1024 * 1024)).is_err())
+            .unwrap()
+    });
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
+    let base = f.0.clone();
+    let (committed, disconnected) = std::sync::mpsc::channel();
+    let disconnect = std::thread::spawn(move || {
+        committed
+            .send(
+                Disconnect::open(&base, "https://receiver.example")
+                    .unwrap()
+                    .commit(),
+            )
+            .unwrap()
+    });
+    // Let the transport consume already-buffered bytes. Success must drain the
+    // request's shared lock, and the body reader must abort before its full size.
+    let marker =
+        f.0.join(custody_name("https://receiver.example:443"))
+            .join("disabled");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "disabled publication timed out"
+        );
+        std::thread::yield_now();
+    }
+    drain.send(()).unwrap();
+    disconnected
+        .recv_timeout(Duration::from_secs(15))
+        .unwrap()
+        .unwrap();
+    assert!(uploaded.recv_timeout(Duration::from_secs(5)).unwrap());
+    assert!(received.recv_timeout(Duration::from_secs(5)).unwrap() < 32 * 1024 * 1024);
+    upload.join().unwrap();
+    disconnect.join().unwrap();
+    server.join().unwrap();
 }

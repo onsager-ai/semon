@@ -147,9 +147,13 @@ impl Stop {
             return Ok(None);
         }
         let (answer, answers) = mpsc::sync_channel(1);
+        let dispatch_stop = self.clone();
         thread::Builder::new()
             .name(format!("semon-push-{name}"))
             .spawn(move || {
+                if dispatch_stop.is_stopped() {
+                    return;
+                }
                 // The waiter may be gone after a stop; the answer is dropped.
                 let _ = answer.send(work());
             })

@@ -1390,9 +1390,10 @@ refuse links. A private `stage-<random>/` is synced before its atomic publicatio
 only the final directory is admitted. A durable `disabled` marker stops active
 local channel/trust use without removing any of those files. Disconnect publishes
 that marker under `install.lock`; fresh loads and running Push stop checks refuse
-disabled or unreadable state. Existing blocking HTTP work can finish after its
-waiter stops under the existing Push cancellation contract; no subsequent request
-is scheduled. Renewal installation/recovery is PR4.3b. Interrupted staging is
+disabled or unreadable state. Each HTTP dispatch holds a shared delivery lock and
+checks authority immediately before sending; body readers check it on each chunk.
+Disconnect drains active delivery locks before reporting success.
+Renewal installation/recovery is PR4.3b. Interrupted staging is
 retained, never silently deleted or loaded. No credential is written before
 receiver confirmation and approval delivery. `install.lock` serializes publication. Receiver selection
 accepts the enrolled HTTPS URL; the endpoint hash stays internal. An omitted URL
