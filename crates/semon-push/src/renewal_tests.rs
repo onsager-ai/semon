@@ -1439,7 +1439,7 @@ fn bogus_requests_have_fixed_audit_budget_and_leave_legitimate_renewal_capacity(
 #[test]
 fn local_failure_classes_survive_until_uniform_wire_dispatch() {
     let f = Fixture::new();
-    let auth = crate::serve_auth::RegistryAuthenticator::open(&f.dir).unwrap();
+    let auth = crate::serve::RegistryAuthenticator::open(&f.dir).unwrap();
     for body in [br#"{"version":2}"#.as_slice(), b"{"] {
         assert_eq!(
             auth.renew_encoded(wire::Route::Begin, body, [4; 32], None, 2_000_000)
