@@ -487,6 +487,7 @@ fn read_configuration(dir: &Directory, name: &str) -> Result<(Configuration, Ecd
 pub struct Authority {
     base: PathBuf,
     name: String,
+    generation: u64,
 }
 impl Authority {
     pub fn new(base: &Path, config: &Configuration) -> Result<Self> {
@@ -494,6 +495,7 @@ impl Authority {
         let authority = Self {
             base: base.into(),
             name: custody_name(endpoint),
+            generation: config.generation,
         };
         if !authority.is_active() {
             return Err("receiver is disconnected or its custody is unavailable".into());
@@ -513,8 +515,15 @@ impl Authority {
     pub(crate) fn is_active(&self) -> bool {
         Directory::open(&self.base)
             .and_then(|root| root.child(&self.name))
-            .and_then(|dir| dir.disabled())
-            .is_ok_and(|disabled| !disabled)
+            .and_then(|dir| {
+                if dir.disabled()? {
+                    return Ok(false);
+                }
+                renewal::ready(&dir)?;
+                let (config, _) = read_configuration(&selected_directory(&dir)?, &self.name)?;
+                Ok(config.generation == self.generation)
+            })
+            .unwrap_or(false)
     }
 }
 

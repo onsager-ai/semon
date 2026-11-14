@@ -56,6 +56,13 @@ pub(crate) struct Connection {
 }
 impl Connection {
     pub(crate) fn open(endpoint: &str, roots: rustls::RootCertStore) -> Result<Self> {
+        Self::open_identity(endpoint, roots, None)
+    }
+    pub(crate) fn open_identity(
+        endpoint: &str,
+        roots: rustls::RootCertStore,
+        identity: Option<(Vec<u8>, Zeroizing<Vec<u8>>)>,
+    ) -> Result<Self> {
         let url = reqwest::Url::parse(endpoint).map_err(|_| "invalid receiver URL")?;
         let host = url.host_str().ok_or("receiver URL has no host")?.to_owned();
         let port = url
@@ -77,13 +84,21 @@ impl Connection {
         let timeout = Some(Duration::from_secs(wire::READ_SECONDS));
         socket.set_read_timeout(timeout).map_err(io_error)?;
         socket.set_write_timeout(timeout).map_err(io_error)?;
-        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        let builder = rustls::ClientConfig::builder_with_provider(Arc::new(
             rustls::crypto::ring::default_provider(),
         ))
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|_| "TLS 1.3 unavailable")?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+        .with_root_certificates(roots);
+        let mut config = match identity {
+            Some((certificate, private)) => builder
+                .with_client_auth_cert(
+                    vec![rustls::pki_types::CertificateDer::from(certificate)],
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(private.to_vec()).into(),
+                )
+                .map_err(|_| "invalid enrolled TLS identity")?,
+            None => builder.with_no_client_auth(),
+        };
         config.resumption = rustls::client::Resumption::disabled();
         let name = rustls::pki_types::ServerName::try_from(host.clone())
             .map_err(|_| "invalid receiver hostname")?;

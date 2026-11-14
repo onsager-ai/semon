@@ -3,6 +3,10 @@
 use super::*;
 use crate::renewal_wire::{self as wire, Action, Begun, Delivered, Generation};
 
+#[cfg(test)]
+#[path = "origin_renewal_tests.rs"]
+mod tests;
+
 const PENDING: &str = "renewal.json";
 const BLOCKED: &str = "receiver renewal recovery must complete before application traffic";
 
@@ -43,9 +47,21 @@ fn optional_attempt(dir: &Directory) -> Result<Option<Attempt>> {
         return Ok(None);
     }
     let attempt: Attempt = serde_json::from_slice(&dir.read(PENDING)?).map_err(|_| ERROR)?;
-    if attempt.version != 1 || attempt.old_generation == 0 {
+    if attempt.version != 1
+        || attempt.old_generation == 0
+        || attempt.begun.version != 1
+        || attempt.begun.generations
+            != vec![Generation {
+                kind: crate::credentials::Kind::MirrorPush,
+                generation: attempt.old_generation.checked_add(1).ok_or(ERROR)?,
+            }]
+        || !attempt.begun.enable_authorization_ids.is_empty()
+    {
         return Err(ERROR.into());
     }
+    wire::identifier(&attempt.begun.enrollment_id).map_err(|_| ERROR)?;
+    wire::identifier(&attempt.begun.renewal_id).map_err(|_| ERROR)?;
+    crate::provision_wire::decode_fixed::<32>(&attempt.begun.receiver_nonce).map_err(|_| ERROR)?;
     crate::provision_wire::decode_fixed::<32>(&attempt.application_key).map_err(|_| ERROR)?;
     Ok(Some(attempt))
 }
@@ -122,17 +138,96 @@ impl Renewal {
         }
         let (config, key) = read_configuration(&selected_directory(&dir)?, &name)?;
         let attempt = optional_attempt(&dir)?;
-        Ok(Self {
+        let mut renewal = Self {
             _lock: lock,
             dir,
             name,
             config,
             key,
             attempt,
-        })
+        };
+        if renewal.attempt.is_some() {
+            // Complete any durable local delivery before opening network traffic.
+            renewal.reconcile_local()?;
+        }
+        Ok(renewal)
     }
     pub fn configuration(&self) -> &Configuration {
         &self.config
+    }
+    /// One private TLS connection per request, guarded through socket destruction.
+    /// The guard is declared first so disconnect drains the complete request.
+    fn connection(&self) -> Result<(Delivery, crate::connect::Connection)> {
+        let guard = delivery_lock(&self.dir, libc::LOCK_SH)?;
+        if self.dir.disabled()? {
+            return Err(BLOCKED.into());
+        }
+        let generation = self
+            .attempt
+            .as_ref()
+            .filter(|a| !matches!(a.state, State::Confirmed))
+            .map_or(self.config.generation, |a| a.old_generation);
+        let dir = self.dir.child(&format!("generation-{generation}"))?;
+        let (config, key) = read_configuration(&dir, &self.name)?;
+        let certificate = config
+            .client_certificate_sha256
+            .as_ref()
+            .map(|hash| {
+                let bytes = dir.read("client-certificate.der")?;
+                if crate::wire::sha256_hex(&bytes) != *hash {
+                    return Err(ERROR.to_owned());
+                }
+                validate_certificate(
+                    &config.scope,
+                    Some(&bytes),
+                    key.public_key().as_ref(),
+                    now()?,
+                )?;
+                Ok(bytes.to_vec())
+            })
+            .transpose()?;
+        let identity = certificate
+            .map(|certificate| {
+                dir.read("origin-key.pk8")
+                    .map(|private| (certificate, private))
+            })
+            .transpose()?;
+        let roots = rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        let connection =
+            crate::connect::Connection::open_identity(&config.endpoint, roots, identity)?;
+        Ok((guard, connection))
+    }
+    /// Reconcile an existing attempt before allocating a new begin. Wire errors
+    /// are temporary; callers retain valid old application authority and notices.
+    pub fn renew(&mut self, now: u64) -> Result<()> {
+        if self
+            .attempt
+            .as_ref()
+            .is_some_and(|a| a.state == State::Installed)
+        {
+            return Ok(());
+        }
+        if !self.pending() {
+            let credentials = self.credentials(now)?;
+            let message = wire::Begin {
+                version: 1,
+                enrollment_id: self.config.enrollment_id.clone(),
+                credentials,
+            };
+            let begun = {
+                let (_guard, mut connection) = self.connection()?;
+                connection.post("/v1/renew/begin", &message)?
+            };
+            self.prepare(begun, now)?;
+        }
+        let delivery: Delivered = {
+            let (_guard, mut connection) = self.connection()?;
+            let finish = self.finish(&connection.exporter, now)?;
+            connection.post("/v1/renew/finish", &finish)?
+        };
+        self.delivered(&delivery, now)
     }
     pub fn pending(&self) -> bool {
         self.attempt
@@ -140,6 +235,13 @@ impl Renewal {
             .is_some_and(|a| !matches!(a.state, State::Confirmed))
     }
     pub fn credentials(&self, now: u64) -> Result<Vec<wire::Credential>> {
+        if self
+            .attempt
+            .as_ref()
+            .is_some_and(|a| matches!(a.state, State::Installed))
+        {
+            return Err("renewed generation awaits application confirmation".into());
+        }
         let generation = self
             .attempt
             .as_ref()
@@ -360,6 +462,59 @@ impl Renewal {
         save(&self.dir, self.attempt.as_ref().ok_or(ERROR)?)?;
         self.reconcile()
     }
+    fn reconcile_local(&mut self) -> Result<()> {
+        let a = self.attempt.as_ref().ok_or(ERROR)?;
+        let target = a.begun.generations.first().ok_or(ERROR)?;
+        let generation_name = format!("generation-{}", target.generation);
+        let exists = self
+            .dir
+            .checked
+            .names()
+            .map_err(|_| ERROR)?
+            .iter()
+            .any(|n| n == Path::new(&generation_name));
+        if exists && matches!(a.state, State::CommitReserved | State::RecoverReserved) {
+            let dir = self.dir.child(&generation_name)?;
+            let (config, _) = read_configuration(&dir, &self.name)?;
+            let old = self
+                .dir
+                .child(&format!("generation-{}", a.old_generation))?;
+            let (previous, _) = read_configuration(&old, &self.name)?;
+            let application = Zeroizing::new(
+                crate::provision_wire::decode_fixed::<32>(&a.application_key).map_err(|_| ERROR)?,
+            );
+            let expected = wire::bearer(
+                &application,
+                &a.begun.enrollment_id,
+                &a.begun.renewal_id,
+                target,
+            );
+            if config.generation != target.generation
+                || config.enrollment_id != previous.enrollment_id
+                || config.consent_sha256 != previous.consent_sha256
+                || config.credential_sha256 != crate::wire::sha256_hex(expected.expose().as_bytes())
+                || dir.read("mirror-push.secret")?.as_slice() != expected.expose().as_bytes()
+                || dir.read("source-consent.json")?.as_slice()
+                    != old.read("source-consent.json")?.as_slice()
+                || dir.read("origin-key.pk8")?.as_slice() != old.read("origin-key.pk8")?.as_slice()
+            {
+                return Err(ERROR.into());
+            }
+            dir.checked.sync().map_err(|_| ERROR)?;
+            self.dir.checked.sync().map_err(|_| ERROR)?;
+            self.attempt.as_mut().ok_or(ERROR)?.state = State::Delivered;
+            save(&self.dir, self.attempt.as_ref().ok_or(ERROR)?)?;
+        }
+        if self.attempt.as_ref().is_some_and(|a| {
+            matches!(
+                a.state,
+                State::Delivered | State::Installed | State::Confirmed
+            )
+        }) {
+            self.reconcile()?;
+        }
+        Ok(())
+    }
     /// Reopening a verified, durable delivery never consumes another wire delivery.
     pub fn reconcile(&mut self) -> Result<()> {
         let a = self.attempt.as_mut().ok_or(ERROR)?;
@@ -381,7 +536,12 @@ impl Renewal {
                 self.config = config;
                 Ok(())
             }
-            State::Installed | State::Confirmed => Ok(()),
+            State::Installed | State::Confirmed => {
+                if self.config.generation != a.begun.generations[0].generation {
+                    return Err(ERROR.into());
+                }
+                Ok(())
+            }
             _ => Err(BLOCKED.into()),
         }
     }
@@ -401,7 +561,7 @@ impl Renewal {
 thread_local! { static FAULT: std::cell::RefCell<Option<(&'static str, usize)>> = const { std::cell::RefCell::new(None) }; }
 fn checkpoint(_point: &'static str) -> Result<()> {
     #[cfg(test)]
-    FAULT.with(|fault| {
+    FAULT.with(|fault| -> Result<()> {
         let mut fault = fault.borrow_mut();
         if let Some((point, remaining)) = fault.as_mut() {
             if *point == _point {
