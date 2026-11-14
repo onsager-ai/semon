@@ -100,7 +100,7 @@ pub(super) fn run(
     };
     let prompt = format!("Revoke {target}? This stops access. Type yes to confirm: ");
     if !confirm(&mut terminal, &prompt)? {
-        writeln!(terminal, "{}", "Revocation cancelled; nothing changed.")
+        writeln!(terminal, "Revocation cancelled; nothing changed.")
             .map_err(|_| uncertain.to_owned())?;
         return Ok(());
     }

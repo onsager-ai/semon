@@ -331,18 +331,15 @@ fn renewal_flow_reads_fresh_clock_at_each_boundary() {
                     )
                     .expose()
                     .into(),
-                    valid_from: NOW + 4,
-                    valid_until: NOW + 4 + 7_776_000,
+                    valid_from: NOW + 3,
+                    valid_until: NOW + 3 + 7_776_000,
                 }],
                 client_certificate: None,
             }))
         }
     }));
     r.renew_with_clock(&clock).unwrap();
-    assert_eq!(
-        *readings.borrow(),
-        vec![NOW, NOW + 1, NOW + 2, NOW + 3, NOW + 4]
-    );
+    assert_eq!(*readings.borrow(), vec![NOW, NOW + 1, NOW + 2, NOW + 3]);
     assert_eq!(r.config.generation, 2);
 }
 

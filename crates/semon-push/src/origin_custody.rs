@@ -377,6 +377,14 @@ pub(crate) fn load_at(
             names[0].clone()
         }
     };
+    load_selected(base, &root, &name, now)
+}
+fn load_selected(
+    base: &Path,
+    root: &Directory,
+    name: &str,
+    now: u64,
+) -> Result<(Configuration, crate::Credential)> {
     let dir = root.child(&name)?;
     if dir.disabled()? {
         return Err("receiver is disconnected on this machine; run semon connect --to URL".into());
@@ -512,9 +520,8 @@ impl Authority {
         Ok(guard)
     }
     pub(crate) fn selected_credential(&self) -> Result<crate::Credential> {
-        let dir = Directory::open(&self.base)?.child(&self.name)?;
-        let (config, _) = read_configuration(&selected_directory(&dir)?, &self.name)?;
-        let (configuration, credential) = load(&self.base, Some(&config.endpoint))?;
+        let root = Directory::open(&self.base)?;
+        let (configuration, credential) = load_selected(&self.base, &root, &self.name, now()?)?;
         if configuration.enrollment_id != self.enrollment_id {
             return Err(ERROR.into());
         }

@@ -227,12 +227,12 @@ impl Renewal {
                 credentials: self.credentials(clock()?)?,
             };
             connection
-                .post("/v1/renew/begin", &message)
+                .post_with_deadline("/v1/renew/begin", &message)
                 .map(Response::Begun)
         } else {
             let finish = self.finish(&connection.exporter, clock()?)?;
             connection
-                .post("/v1/renew/finish", &finish)
+                .post_with_deadline("/v1/renew/finish", &finish)
                 .map(Response::Delivered)
         }
     }
@@ -587,8 +587,8 @@ impl Renewal {
                     delivery_lock_until(&self.dir, libc::LOCK_EX, std::time::Instant::now())?;
                 replace(&self.dir, "selected", name.as_bytes())?;
                 a.state = State::Installed;
-                save(&self.dir, a)?;
                 self.config = config;
+                save(&self.dir, a)?;
                 Ok(())
             }
             State::Installed | State::Confirmed => {

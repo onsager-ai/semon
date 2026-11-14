@@ -308,20 +308,11 @@ impl Receiver {
             identity,
             now,
         )?;
-        self.expire(dir, now)?;
-        self.pending.retain(|id, pending| {
-            registry.enrollments.iter().any(|e| {
-                e.enrollment_id == *id
-                    && e.revoked_at.is_none()
-                    && registry.endpoint() == Some(e.endpoint.as_str())
-                    && pending.authentication.iter().all(|g| {
-                        e.credential_kinds.iter().any(|s| {
-                            s.kind == g.kind && s.available && s.generations.current == g.generation
-                        })
-                    })
-            })
-        });
-        if let Some(pending) = self.pending.get(&message.enrollment_id) {
+        if let Some(pending) = self
+            .pending
+            .get(&message.enrollment_id)
+            .filter(|p| now < p.begun.expires_at)
+        {
             if pending.authentication != expected {
                 return Err(Failure::ScopeMismatch);
             }
@@ -336,6 +327,19 @@ impl Receiver {
             )?;
             return Ok(pending.begun.clone());
         }
+        self.expire(dir, now)?;
+        self.pending.retain(|id, pending| {
+            registry.enrollments.iter().any(|e| {
+                e.enrollment_id == *id
+                    && e.revoked_at.is_none()
+                    && registry.endpoint() == Some(e.endpoint.as_str())
+                    && pending.authentication.iter().all(|g| {
+                        e.credential_kinds.iter().any(|s| {
+                            s.kind == g.kind && s.available && s.generations.current == g.generation
+                        })
+                    })
+            })
+        });
         if registry
             .renewal_receipts
             .iter()
@@ -885,6 +889,7 @@ impl Registry {
                 || r.authentication.len() > 3
                 || r.begun.generations.is_empty()
                 || r.begun.generations.len() > 3
+                || r.authentication.len() != r.begun.generations.len()
                 || r.credentials.len() != r.begun.generations.len()
                 || serde_json::to_vec(r).map_err(|_| Error::Invalid)?.len() > 8192
             {

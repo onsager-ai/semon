@@ -142,6 +142,14 @@ impl Connection {
         path: &str,
         message: &impl Serialize,
     ) -> Result<T> {
+        let started = Instant::now();
+        self.post_with_clock(path, message, &|| started.elapsed())
+    }
+    pub(crate) fn post_with_deadline<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        message: &impl Serialize,
+    ) -> Result<T> {
         let started = self.started;
         self.post_with_clock(path, message, &|| started.elapsed())
     }

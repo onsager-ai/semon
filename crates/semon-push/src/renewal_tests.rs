@@ -1002,3 +1002,30 @@ fn hostile_identical_retries_do_not_write_registry_or_audit() {
         2
     );
 }
+
+#[test]
+fn audit_append_failures_keep_new_authority_uncommitted() {
+    use crate::generation_audit::{AppendFault, fail_next_append};
+    for fault in [AppendFault::Partial, AppendFault::Sync] {
+        let f = Fixture::new();
+        let mut receiver = Receiver::default();
+        let now = 2_000_000;
+        let begun = f.begin(&mut receiver, now).unwrap();
+        let finish = f.finish(&begun, [3; 32], [4; 32]);
+        fail_next_append(fault);
+        assert!(
+            receiver
+                .finish(&f.dir, &finish, &[4; 32], None, now)
+                .is_err()
+        );
+        let registry = Registry::read_current(&f.dir).unwrap();
+        assert!(registry.renewal_receipts.is_empty());
+        assert_eq!(registry.credentials.len(), 1);
+        assert_eq!(
+            registry.enrollments[0].credential_kinds[0]
+                .generations
+                .current,
+            1
+        );
+    }
+}
