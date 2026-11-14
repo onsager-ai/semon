@@ -247,14 +247,20 @@ pub(crate) fn refusal(receiver: &Path, record: RefusalRecord) -> Result<(), Erro
         .open_file(stage, libc::O_RDWR | libc::O_CREAT)
         .map_err(|_| Error::AuditUnavailable)?;
     file.set_len(0).map_err(|_| Error::AuditUnavailable)?;
+    #[cfg(test)]
+    crate::renewal::observe_durable_io(true, false);
     file.write_all(&bytes)
         .map_err(|_| Error::AuditUnavailable)?;
     #[cfg(test)]
     refusal_test_io()?;
+    #[cfg(test)]
+    crate::renewal::observe_durable_io(true, true);
     file.sync_all().map_err(|_| Error::AuditUnavailable)?;
     directory
         .rename(stage, Path::new(REFUSAL_FILE))
         .map_err(|_| Error::AuditUnavailable)?;
+    #[cfg(test)]
+    crate::renewal::observe_durable_io(true, true);
     directory.sync().map_err(|_| Error::AuditUnavailable)
 }
 #[cfg(test)]
@@ -392,17 +398,24 @@ fn append_records<T: Serialize>(
     let fault = APPEND_FAULT.take();
     #[cfg(test)]
     if matches!(fault, Some(AppendFault::Partial)) {
+        crate::renewal::observe_durable_io(true, false);
         file.write_all(&bytes[..bytes.len() / 2])
             .map_err(|_| Error::AuditUnavailable)?;
         return Err(Error::AuditUnavailable);
     }
+    #[cfg(test)]
+    crate::renewal::observe_durable_io(true, false);
     file.write_all(&bytes)
         .map_err(|_| Error::AuditUnavailable)?;
     #[cfg(test)]
     if matches!(fault, Some(AppendFault::Sync)) {
         return Err(Error::AuditUnavailable);
     }
+    #[cfg(test)]
+    crate::renewal::observe_durable_io(true, true);
     file.sync_all().map_err(|_| Error::AuditUnavailable)?;
+    #[cfg(test)]
+    crate::renewal::observe_durable_io(true, true);
     directory.sync().map_err(|_| Error::AuditUnavailable)?;
     validated[slot] = Some(JournalStamp::read(&file)?);
     Ok(())

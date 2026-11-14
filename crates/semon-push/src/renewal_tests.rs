@@ -958,8 +958,10 @@ fn hostile_identical_retries_do_not_write_registry_or_audit() {
     let begun = f.begin(&mut receiver, now).unwrap();
     let pending_registry = fs::read(f.dir.join("enrollment/registry.json")).unwrap();
     let pending_audit = fs::read(f.dir.join("receiver-audit/renewals.jsonl")).unwrap();
+    assert!(take_durable_io().iter().any(|count| *count > 0));
     for offset in 1..100 {
         assert_eq!(f.begin(&mut receiver, now + offset).unwrap(), begun);
+        assert_eq!(take_durable_io(), [0; 4]);
     }
     assert_eq!(
         fs::read(f.dir.join("enrollment/registry.json")).unwrap(),
@@ -975,8 +977,10 @@ fn hostile_identical_retries_do_not_write_registry_or_audit() {
         .unwrap();
     let committed_registry = fs::read(f.dir.join("enrollment/registry.json")).unwrap();
     let committed_audit = fs::read(f.dir.join("receiver-audit/renewals.jsonl")).unwrap();
+    assert!(take_durable_io().iter().any(|count| *count > 0));
     for offset in 601..701 {
         assert_eq!(f.begin(&mut receiver, now + offset).unwrap(), begun);
+        assert_eq!(take_durable_io(), [0; 4]);
         let finish = f.finish(&begun, [3; 32], [5; 32]);
         assert_eq!(
             receiver
@@ -984,6 +988,7 @@ fn hostile_identical_retries_do_not_write_registry_or_audit() {
                 .unwrap(),
             initial
         );
+        assert_eq!(take_durable_io(), [0; 4]);
     }
     assert_eq!(
         fs::read(f.dir.join("enrollment/registry.json")).unwrap(),

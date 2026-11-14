@@ -585,11 +585,6 @@ impl Renewal {
                 {
                     return Err(ERROR.into());
                 }
-                // Existing requests keep their selected generation through completion.
-                // A busy application causes a temporary renewal error, never an
-                // install-lock wait across network traffic.
-                let _admission =
-                    delivery_lock_until(&self.dir, libc::LOCK_EX, std::time::Instant::now())?;
                 replace(&self.dir, "selected", name.as_bytes())?;
                 a.state = State::Installed;
                 self.config = config;

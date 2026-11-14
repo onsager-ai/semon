@@ -508,21 +508,25 @@ fn application_admission_keeps_request_valid_during_publication() {
     };
     let mut r = f.prepare();
     let delivered = f.delivery(&r);
-    let admission = authority.delivery().unwrap();
-    let selected = authority.selected_credential().unwrap();
+    let (admission, selected) = authority.admit().unwrap();
+    let overlapping = authority.delivery().unwrap();
     assert_eq!(selected.token().unwrap().expose(), "old-bearer");
-    // Publication cannot invalidate an admitted application request. It retries
-    // the local publication after the request releases its delivery guard.
-    assert!(r.delivered(&delivered, NOW).is_err());
+    let started = std::time::Instant::now();
+    r.delivered(&delivered, NOW).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
     assert!(authority.is_active());
-    assert_eq!(load_at(&f.0, None, NOW).unwrap().0.generation, 1);
-    drop(admission);
-    r.reconcile_local().unwrap();
-    let _admission = authority.delivery().unwrap();
-    let selected = authority.selected_credential().unwrap();
+    // Existing admitted work retains its credential and can finish while a new
+    // request immediately selects the published successor.
+    assert_eq!(selected.token().unwrap().expose(), "old-bearer");
+    let (next_admission, selected) = authority.admit().unwrap();
     assert_eq!(
         selected.token().unwrap().expose(),
         delivered.credentials[0].bearer
     );
-    assert_eq!(load_at(&f.0, None, NOW).unwrap().0.generation, 2);
+    let disconnect = Disconnect::open(&f.0, ENDPOINT).unwrap();
+    drop(admission);
+    drop(overlapping);
+    drop(next_admission);
+    disconnect.commit().unwrap();
+    assert!(!authority.is_active());
 }

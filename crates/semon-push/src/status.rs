@@ -209,16 +209,21 @@ fn status_advertised(client: &Client) -> bool {
         client.stop.run("status-capability", move || {
             let _lock = lock;
             #[cfg(unix)]
-            let _delivery = dispatch_stop
+            let admitted = dispatch_stop
                 .authority
                 .as_ref()
-                .map(|authority| authority.delivery())
-                .transpose()
-                .map_err(|error| error.to_string())?;
+                .map(|authority| authority.admit())
+                .transpose()?;
+            #[cfg(unix)]
+            let (_delivery, selected) = admitted.map_or((None, None), |(guard, credential)| {
+                (Some(guard), Some(credential))
+            });
+            #[cfg(not(unix))]
+            let selected = None;
             if dispatch_stop.is_stopped() {
                 return Err("delivery stopped".to_owned());
             }
-            let (http, token) = factory()?;
+            let (http, token) = factory(selected)?;
             let request = http
                 .head(url)
                 .bearer_auth(token.expose())

@@ -519,13 +519,30 @@ impl Authority {
         }
         Ok(guard)
     }
-    pub(crate) fn selected_credential(&self) -> Result<crate::Credential> {
+    pub(crate) fn admit(&self) -> Result<(Delivery, crate::Credential)> {
         let root = Directory::open(&self.base)?;
-        let (configuration, credential) = load_selected(&self.base, &root, &self.name, now()?)?;
-        if configuration.enrollment_id != self.enrollment_id {
+        let (before, credential) = load_selected(&self.base, &root, &self.name, now()?)?;
+        if before.enrollment_id != self.enrollment_id {
             return Err(ERROR.into());
         }
-        Ok(credential)
+        let guard = self.delivery()?;
+        let dir = root.child(&self.name)?;
+        let (after, _) = read_configuration(&selected_directory(&dir)?, &self.name)?;
+        if after.enrollment_id != self.enrollment_id {
+            return Err(ERROR.into());
+        }
+        if before.generation == after.generation {
+            return Ok((guard, credential));
+        }
+        drop(guard);
+        // Publication won admission. Reload once from the selected generation;
+        // retained generations are never a fallback.
+        let guard = self.delivery()?;
+        let (selected, credential) = load_selected(&self.base, &root, &self.name, now()?)?;
+        if selected.enrollment_id != self.enrollment_id {
+            return Err(ERROR.into());
+        }
+        Ok((guard, credential))
     }
     pub(crate) fn is_active(&self) -> bool {
         Directory::open(&self.base)

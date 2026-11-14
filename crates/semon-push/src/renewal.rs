@@ -12,6 +12,23 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
 use zeroize::Zeroizing;
 
+#[cfg(test)]
+thread_local! {
+    static DURABLE_IO: std::cell::Cell<[u64; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+#[cfg(test)]
+pub(crate) fn observe_durable_io(audit: bool, fsync: bool) {
+    DURABLE_IO.with(|counts| {
+        let mut value = counts.get();
+        value[usize::from(audit) * 2 + usize::from(fsync)] += 1;
+        counts.set(value);
+    });
+}
+#[cfg(test)]
+fn take_durable_io() -> [u64; 4] {
+    DURABLE_IO.with(|counts| counts.replace([0; 4]))
+}
+
 type Result<T> = std::result::Result<T, Failure>;
 /// Local diagnostics only. Dispatch always returns the same wire refusal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

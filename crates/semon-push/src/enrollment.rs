@@ -850,6 +850,8 @@ impl Store {
             .file(&stage, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
         let result = (|| {
             file.write_all(bytes).map_err(|_| Error::Write)?;
+            #[cfg(test)]
+            crate::renewal::observe_durable_io(false, true);
             file.sync_all().map_err(|_| Error::Write)?;
             self.dir.rename(&stage, crate::pairing::GATE_FILE)
         })();
@@ -939,8 +941,12 @@ impl Store {
             .dir
             .file(&stage, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)?;
         let before = (|| {
+            #[cfg(test)]
+            crate::renewal::observe_durable_io(false, false);
             file.write_all(&bytes).map_err(|_| Error::Write)?;
             fault(Stage::Written)?;
+            #[cfg(test)]
+            crate::renewal::observe_durable_io(false, true);
             file.sync_all().map_err(|_| Error::Write)?;
             fault(Stage::Synced)?;
             self.dir.rename(&stage, REGISTRY_FILE)
@@ -951,7 +957,11 @@ impl Store {
         }
         // Never continue with a cached pre-commit view after rename uncertainty.
         if fault(Stage::Renamed).is_err()
-            || self.dir.0.sync_all().is_err()
+            || {
+                #[cfg(test)]
+                crate::renewal::observe_durable_io(false, true);
+                self.dir.0.sync_all().is_err()
+            }
             || fault(Stage::DirectorySynced).is_err()
         {
             self.failed = true;
