@@ -524,6 +524,222 @@ fn disconnect_during_stalled_renewal_does_not_wait_for_install_lock() {
 }
 
 #[test]
+fn scheduler_stall_keeps_application_ack_and_disconnect_live() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    let f = Fixture::new();
+    let (_, credential) = load_at(&f.0, None, NOW).unwrap();
+    let crate::Credential::Enrolled { authority, .. } = &credential else {
+        panic!()
+    };
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let authority = authority.clone();
+    let options = crate::PushOptions {
+        url: format!("http://{}", server.server_addr()),
+        credential,
+        sessions: crate::Options::default(),
+        state: f.0.join("push.json"),
+    };
+    let mut cycle = crate::renewal_trigger::Cycle::new(authority.clone(), ENDPOINT.into(), true);
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let mut release_rx = Some(release_rx);
+    cycle.configure = Some(Box::new(move |renewal| {
+        let entered_tx = entered_tx.clone();
+        let release_rx = release_rx.take().unwrap();
+        renewal.exchange = Some(Box::new(move |_, _, _| {
+            entered_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            Err("injected stalled renewal".into())
+        }));
+    }));
+    let base = f.0.clone();
+    let (done_tx, done_rx) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        cycle.tick(&base, &|| Ok(NOW), &mut |_| {});
+        done_tx.send(()).unwrap();
+    });
+    entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let (ack_tx, ack_rx) = mpsc::channel();
+    let application = std::thread::spawn(move || {
+        let client = crate::Client::new(&options).unwrap();
+        ack_tx
+            .send(client.post("facts", "{}".into()).is_ok())
+            .unwrap();
+    });
+    let request = server
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    request
+        .respond(tiny_http::Response::from_string("{}"))
+        .unwrap();
+    assert!(ack_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+    application.join().unwrap();
+    assert_eq!(authority.confirmed_generation(), 1);
+    Disconnect::open(&f.0, ENDPOINT).unwrap().commit().unwrap();
+    assert!(!authority.is_active());
+    release_tx.send(()).unwrap();
+    done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    worker.join().unwrap();
+    assert!(load_at(&f.0, None, NOW).is_err());
+}
+
+#[test]
+fn idle_watch_clock_drives_boundary_retries_and_exact_notices() {
+    use std::sync::atomic::AtomicUsize;
+    let f = Fixture::new();
+    let (config, credential) = load_at(&f.0, None, NOW).unwrap();
+    let crate::Credential::Enrolled { authority, .. } = credential else {
+        panic!()
+    };
+    let mut cycle = crate::renewal_trigger::Cycle::new(authority, ENDPOINT.into(), true);
+    let calls = std::sync::Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    cycle.configure = Some(Box::new(move |renewal| {
+        let observed = observed.clone();
+        renewal.exchange = Some(Box::new(move |_, _, _| {
+            observed.fetch_add(1, Ordering::Relaxed);
+            Err("temporary refusal".into())
+        }));
+    }));
+    let clock = AtomicU64::new(config.scope.valid_until - wire::WINDOW);
+    let mut lines = Vec::new();
+    cycle.tick(&f.0, &|| Ok(clock.load(Ordering::Relaxed)), &mut |line| {
+        lines.push(line)
+    });
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    clock.fetch_add(1, Ordering::Relaxed);
+    cycle.tick(&f.0, &|| Ok(clock.load(Ordering::Relaxed)), &mut |line| {
+        lines.push(line)
+    });
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        lines,
+        [
+            "Could not renew receiver receiver.example:443 credentials; 30 days remain. Check the receiver is reachable; renewal will retry."
+        ]
+    );
+    clock.fetch_add(59, Ordering::Relaxed);
+    cycle.tick(&f.0, &|| Ok(clock.load(Ordering::Relaxed)), &mut |line| {
+        lines.push(line)
+    });
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    clock.fetch_add(1, Ordering::Relaxed);
+    cycle.tick(&f.0, &|| Ok(clock.load(Ordering::Relaxed)), &mut |line| {
+        lines.push(line)
+    });
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(lines.len(), 1);
+    clock.store(
+        config.scope.valid_until - 7 * 86_400 - 60,
+        Ordering::Relaxed,
+    );
+    cycle.tick(&f.0, &|| Ok(clock.load(Ordering::Relaxed)), &mut |line| {
+        lines.push(line)
+    });
+    assert_eq!(lines.len(), 2);
+    clock.fetch_add(60, Ordering::Relaxed);
+    cycle.tick(&f.0, &|| Ok(clock.load(Ordering::Relaxed)), &mut |line| {
+        lines.push(line)
+    });
+    assert_eq!(
+        lines.len(),
+        3,
+        "severity change overrides the daily reminder interval"
+    );
+    assert_eq!(
+        lines[2],
+        "Could not renew receiver receiver.example:443 credentials; 7 days remain. Check the receiver is reachable; renewal will retry."
+    );
+    clock.fetch_add(60, Ordering::Relaxed);
+    cycle.tick(&f.0, &|| Ok(clock.load(Ordering::Relaxed)), &mut |line| {
+        lines.push(line)
+    });
+    assert_eq!(lines.len(), 3);
+    clock.fetch_add(86_400, Ordering::Relaxed);
+    cycle.tick(&f.0, &|| Ok(clock.load(Ordering::Relaxed)), &mut |line| {
+        lines.push(line)
+    });
+    assert_eq!(lines.len(), 4);
+}
+
+#[test]
+fn idle_scheduler_recovers_install_and_notices_only_confirmed_first_use() {
+    let f = Fixture::new();
+    let (_, credential) = load_at(&f.0, None, NOW).unwrap();
+    let crate::Credential::Enrolled { authority, .. } = credential else {
+        panic!()
+    };
+    let mut renewal = f.prepare();
+    let delivered = f.delivery(&renewal);
+    renewal.delivered(&delivered, NOW).unwrap();
+    drop(renewal);
+    let mut cycle = crate::renewal_trigger::Cycle::new(authority.clone(), ENDPOINT.into(), true);
+    let mut lines = Vec::new();
+    cycle.tick(&f.0, &|| Ok(NOW), &mut |line| lines.push(line));
+    assert!(lines.is_empty());
+    authority.application_success(1);
+    cycle.tick(&f.0, &|| Ok(NOW + 60), &mut |line| lines.push(line));
+    assert!(lines.is_empty());
+    // An actual successful application request selects generation 2 and reports
+    // its authenticated use to the same Authority shared with the scheduler.
+    let (_, credential) = load_at(&f.0, None, NOW).unwrap();
+    let crate::Credential::Enrolled {
+        token,
+        sources,
+        identity,
+        ..
+    } = credential
+    else {
+        panic!()
+    };
+    let credential = crate::Credential::Enrolled {
+        token,
+        sources,
+        identity,
+        authority: authority.clone(),
+    };
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let options = crate::PushOptions {
+        url: format!("http://{}", server.server_addr()),
+        credential,
+        sessions: crate::Options::default(),
+        state: f.0.join("push.json"),
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let application = std::thread::spawn(move || {
+        let client = crate::Client::new(&options).unwrap();
+        tx.send(client.post("facts", "{}".into()).is_ok()).unwrap();
+    });
+    let request = server
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    request
+        .respond(tiny_http::Response::from_string("{}"))
+        .unwrap();
+    assert!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap());
+    application.join().unwrap();
+    FAULT.with(|fault| *fault.borrow_mut() = Some(("before-rename", 0)));
+    cycle.tick(&f.0, &|| Ok(NOW + 120), &mut |line| lines.push(line));
+    assert!(
+        lines.is_empty(),
+        "uncertain durable confirmation cannot announce success"
+    );
+    FAULT.with(|fault| *fault.borrow_mut() = None);
+    cycle.tick(&f.0, &|| Ok(NOW + 121), &mut |line| lines.push(line));
+    assert_eq!(
+        lines,
+        ["Receiver receiver.example:443 credentials renewed."]
+    );
+    cycle.tick(&f.0, &|| Ok(NOW + 180), &mut |line| lines.push(line));
+    assert_eq!(lines.len(), 1);
+    drop(cycle);
+    assert!(!f.open().pending());
+}
+
+#[test]
 fn application_admission_keeps_request_valid_during_publication() {
     let f = Fixture::new();
     let (_, credential) = load_at(&f.0, None, NOW).unwrap();
@@ -532,7 +748,7 @@ fn application_admission_keeps_request_valid_during_publication() {
     };
     let mut r = f.open();
     let (receiver_dir, delivered) = f.receiver_delivery(&mut r);
-    let (admission, selected) = authority.admit().unwrap();
+    let (admission, selected, _) = authority.admit().unwrap();
     let overlapping = authority.delivery().unwrap();
     assert_eq!(selected.token().unwrap().expose(), "old-bearer");
     let started = std::time::Instant::now();
@@ -542,7 +758,7 @@ fn application_admission_keeps_request_valid_during_publication() {
     // Existing admitted work retains its credential and can finish while a new
     // request immediately selects the published successor.
     assert_eq!(selected.token().unwrap().expose(), "old-bearer");
-    let (next_admission, selected) = authority.admit().unwrap();
+    let (next_admission, selected, _) = authority.admit().unwrap();
     assert_eq!(
         selected.token().unwrap().expose(),
         delivered.credentials[0].bearer
@@ -589,7 +805,7 @@ fn admission_reloads_publication_and_disconnect_during_reload_refuses() {
             });
             let result = authority
                 .admit()
-                .map(|(_guard, credential)| credential.token().unwrap().expose().to_owned());
+                .map(|(_guard, credential, _)| credential.token().unwrap().expose().to_owned());
             ADMISSION_BARRIER.with(|hook| *hook.borrow_mut() = None);
             result_tx.send(result).unwrap();
         });
