@@ -101,6 +101,30 @@ impl Fixture {
         store.commit(revision, &registry).unwrap();
         path
     }
+    fn receiver_delivery(&self, r: &mut Renewal) -> (PathBuf, Delivered) {
+        let dir = self.receiver(r);
+        let mut receiver = crate::renewal::Receiver::default();
+        let begun = receiver
+            .handle(
+                &dir,
+                wire::Request::Begin(wire::Begin {
+                    version: 1,
+                    enrollment_id: r.config.enrollment_id.clone(),
+                    credentials: r.credentials(NOW).unwrap(),
+                }),
+                [1; 32],
+                None,
+                NOW,
+            )
+            .unwrap_or_else(|_| panic!("begin refused"));
+        r.prepare(serde_json::from_slice(&begun).unwrap(), NOW)
+            .unwrap();
+        let finish = r.finish(&[2; 32], NOW).unwrap();
+        let bytes = receiver
+            .handle(&dir, wire::Request::Finish(finish), [2; 32], None, NOW)
+            .unwrap_or_else(|_| panic!("finish refused"));
+        (dir, serde_json::from_slice(&bytes).unwrap())
+    }
     fn delivery(&self, r: &Renewal) -> Delivered {
         let a = r.attempt.as_ref().unwrap();
         let application = crate::provision_wire::decode_fixed::<32>(&a.application_key).unwrap();
@@ -506,9 +530,8 @@ fn application_admission_keeps_request_valid_during_publication() {
     let crate::Credential::Enrolled { authority, .. } = credential else {
         panic!()
     };
-    let mut r = f.prepare();
-    let receiver_dir = f.receiver(&r);
-    let delivered = f.delivery(&r);
+    let mut r = f.open();
+    let (receiver_dir, delivered) = f.receiver_delivery(&mut r);
     let (admission, selected) = authority.admit().unwrap();
     let overlapping = authority.delivery().unwrap();
     assert_eq!(selected.token().unwrap().expose(), "old-bearer");
@@ -540,4 +563,56 @@ fn application_admission_keeps_request_valid_during_publication() {
     drop(next_admission);
     disconnect.commit().unwrap();
     assert!(!authority.is_active());
+}
+
+#[test]
+fn admission_reloads_publication_and_disconnect_during_reload_refuses() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    for disconnect in [false, true] {
+        let f = Fixture::new();
+        let (_, credential) = load_at(&f.0, None, NOW).unwrap();
+        let crate::Credential::Enrolled { authority, .. } = credential else {
+            panic!()
+        };
+        let mut r = f.open();
+        let (_, delivered) = f.receiver_delivery(&mut r);
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let (result_tx, result_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            ADMISSION_BARRIER.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |point| {
+                    entered_tx.send(point.to_owned()).unwrap();
+                    resume_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                }))
+            });
+            let result = authority
+                .admit()
+                .map(|(_guard, credential)| credential.token().unwrap().expose().to_owned());
+            ADMISSION_BARRIER.with(|hook| *hook.borrow_mut() = None);
+            result_tx.send(result).unwrap();
+        });
+        assert_eq!(
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "selected"
+        );
+        r.delivered(&delivered, NOW).unwrap();
+        resume_tx.send(()).unwrap();
+        assert_eq!(
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            "reload"
+        );
+        if disconnect {
+            Disconnect::open(&f.0, ENDPOINT).unwrap().commit().unwrap();
+        }
+        resume_tx.send(()).unwrap();
+        let result = result_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        if disconnect {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap(), delivered.credentials[0].bearer);
+        }
+        worker.join().unwrap();
+    }
 }

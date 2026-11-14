@@ -47,34 +47,17 @@ pub trait Terminal {
     }
 }
 
-// A timed-out libc resolver may still be running. Keep its one process-wide
-// permit until that worker exits so retries cannot accumulate resolver threads.
-static RESOLVING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-struct ResolverPermit;
-impl Drop for ResolverPermit {
-    fn drop(&mut self) {
-        RESOLVING.store(false, std::sync::atomic::Ordering::Release);
-    }
-}
+// Timed-out resolver threads are detached; renewal's once-per-minute retry
+// rate bounds accumulation until the system resolver returns.
 fn resolve_using(
     timeout: Duration,
     resolve: impl FnOnce() -> std::io::Result<Vec<std::net::SocketAddr>> + Send + 'static,
 ) -> Result<Vec<std::net::SocketAddr>> {
-    RESOLVING
-        .compare_exchange(
-            false,
-            true,
-            std::sync::atomic::Ordering::Acquire,
-            std::sync::atomic::Ordering::Relaxed,
-        )
-        .map_err(|_| "receiver DNS lookup is busy")?;
-    let permit = ResolverPermit;
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
         .name("receiver-dns".into())
         .spawn(move || {
             let result = resolve();
-            drop(permit);
             let _ = tx.send(result);
         })
         .map_err(|_| "receiver DNS lookup unavailable")?;
@@ -106,12 +89,20 @@ impl Connection {
             .port_or_known_default()
             .ok_or("receiver URL has no port")?;
         let started = Instant::now();
-        let dns_host = host.clone();
-        let addresses = resolve_using(remaining_response(&|| started.elapsed())?, move || {
-            (dns_host.as_str(), port)
-                .to_socket_addrs()
-                .map(|addresses| addresses.collect())
-        })?;
+        let addresses = if let Ok(ip) = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .parse::<std::net::IpAddr>()
+        {
+            vec![std::net::SocketAddr::new(ip, port)]
+        } else {
+            let dns_host = host.clone();
+            resolve_using(remaining_response(&|| started.elapsed())?, move || {
+                (dns_host.as_str(), port)
+                    .to_socket_addrs()
+                    .map(|addresses| addresses.collect())
+            })?
+        };
         let mut connected = None;
         for address in addresses {
             let remaining = remaining_response(&|| started.elapsed())?;
@@ -567,35 +558,5 @@ mod deadline_tests {
         assert!(remaining_response(&|| elapsed.get()).is_ok());
         elapsed.set(Duration::from_secs(wire::READ_SECONDS));
         assert!(remaining_response(&|| elapsed.get()).is_err());
-    }
-}
-
-#[cfg(test)]
-mod resolver_tests {
-    use super::*;
-    #[test]
-    fn timed_out_resolver_keeps_the_single_permit_until_it_exits() {
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (ended_tx, ended_rx) = std::sync::mpsc::channel();
-        let result = resolve_using(Duration::from_millis(20), move || {
-            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-            ended_tx.send(()).unwrap();
-            Ok(Vec::new())
-        });
-        assert_eq!(result.unwrap_err(), "receiver DNS lookup timed out");
-        let started = Instant::now();
-        assert_eq!(
-            resolve_using(Duration::from_secs(5), || panic!("must not spawn")).unwrap_err(),
-            "receiver DNS lookup is busy"
-        );
-        assert!(started.elapsed() < Duration::from_secs(1));
-        release_tx.send(()).unwrap();
-        ended_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while RESOLVING.load(std::sync::atomic::Ordering::Acquire) {
-            assert!(Instant::now() < deadline);
-            std::thread::yield_now();
-        }
-        assert!(resolve_using(Duration::from_secs(1), || Ok(Vec::new())).is_ok());
     }
 }

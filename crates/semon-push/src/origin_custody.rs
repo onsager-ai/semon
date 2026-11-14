@@ -77,6 +77,20 @@ impl Drop for InstallLock {
 }
 #[cfg(test)]
 thread_local! { static LOCK_DUPLICATE: std::cell::RefCell<Option<fs::File>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(test)]
+type AdmissionBarrier = Box<dyn FnMut(&str)>;
+#[cfg(test)]
+thread_local! {
+    static ADMISSION_BARRIER: std::cell::RefCell<Option<AdmissionBarrier>> = const { std::cell::RefCell::new(None) };
+}
+#[cfg(test)]
+fn admission_barrier(point: &str) {
+    ADMISSION_BARRIER.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(point);
+        }
+    });
+}
 struct Directory {
     fd: fs::File,
     checked: CacheDirectory,
@@ -525,6 +539,8 @@ impl Authority {
         if before.enrollment_id != self.enrollment_id {
             return Err(ERROR.into());
         }
+        #[cfg(test)]
+        admission_barrier("selected");
         let guard = self.delivery()?;
         let dir = root.child(&self.name)?;
         let (after, _) = read_configuration(&selected_directory(&dir)?, &self.name)?;
@@ -535,6 +551,8 @@ impl Authority {
             return Ok((guard, credential));
         }
         drop(guard);
+        #[cfg(test)]
+        admission_barrier("reload");
         // Publication won admission. Reload once from the selected generation;
         // retained generations are never a fallback.
         let guard = self.delivery()?;

@@ -389,7 +389,19 @@ fn production_origin_connection_validates_roots_and_hostname() {
         let port = listener.local_addr().unwrap().port();
         let shared = Arc::clone(&h.shared);
         let worker = thread::spawn(move || {
-            let (server, _) = listener.accept().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let server = loop {
+                match listener.accept() {
+                    Ok((server, _)) => break server,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "origin never connected");
+                        thread::park_timeout(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            };
+            server.set_nonblocking(false).unwrap();
             let mut slot = Slot::admit(&shared, "127.0.0.1".parse().unwrap()).unwrap();
             serve_connection(&mut slot, server, Instant::now());
         });
