@@ -6,6 +6,7 @@ use std::{
 };
 
 mod connect_terminal;
+mod disconnect_terminal;
 
 fn parse_connect_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut endpoint = None;
@@ -13,12 +14,18 @@ fn parse_connect_args(mut arguments: impl Iterator<Item = String>) -> Result<Com
     let mut require_client_certificate = false;
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
-            "--to" => endpoint = Some(arguments.next().ok_or("--to requires URL")?),
+            "--to" | "--receiver" => {
+                endpoint = Some(
+                    arguments
+                        .next()
+                        .ok_or_else(|| format!("{argument} requires URL"))?,
+                );
+            }
             "--require-client-certificate" => require_client_certificate = true,
             "--machine" => machine = Some(arguments.next().ok_or("--machine requires NAME")?),
             "-h" | "--help" => {
                 return Err(
-                    "Usage: semon connect --to URL [--machine NAME] [--require-client-certificate]"
+                    "Usage: semon connect (--to URL | --receiver URL) [--machine NAME] [--require-client-certificate]"
                         .into(),
                 );
             }
@@ -35,7 +42,9 @@ fn parse_connect_args(mut arguments: impl Iterator<Item = String>) -> Result<Com
         return Err("hostname is not a machine name; use --machine NAME".into());
     }
     Ok(Command::Connect {
-        endpoint: endpoint.ok_or("connect requires --to URL")?,
+        endpoint: semon_push::origin_custody::receiver_endpoint(
+            &endpoint.ok_or("connect requires --to URL or --receiver URL")?,
+        )?,
         machine,
         require_client_certificate,
     })
@@ -86,6 +95,9 @@ enum Command {
         endpoint: String,
         machine: String,
         require_client_certificate: bool,
+    },
+    Disconnect {
+        receiver: String,
     },
     Receive(ReceiveArgs),
     Query(QueryArgs),
@@ -262,6 +274,17 @@ fn parse_args() -> Result<Command, String> {
         Some("--version") if arguments.next().is_none() => Ok(Command::Version),
         Some("sessions") => parse_sessions_args(arguments).map(Command::Sessions),
         Some("connect") => parse_connect_args(arguments),
+        Some("disconnect") => {
+            if arguments.next().as_deref() != Some("--receiver") {
+                return Err("disconnect requires --receiver URL".into());
+            }
+            let receiver = arguments.next().ok_or("--receiver requires URL")?;
+            if arguments.next().is_some() {
+                return Err("Usage: semon disconnect --receiver URL".into());
+            }
+            let receiver = semon_push::origin_custody::receiver_endpoint(&receiver)?;
+            Ok(Command::Disconnect { receiver })
+        }
         Some("push") => parse_push_args(arguments).map(Command::Push),
         Some("receive") => parse_receive_args(arguments).map(Command::Receive),
         Some("query") => parse_query_command(arguments),
@@ -944,18 +967,6 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
     }
     let base = semon_push::origin_custody::default_directory()?;
     let (config, credential) = semon_push::origin_custody::load(&base, receiver.as_deref())?;
-    let name = semon_push::wire::sha256_hex(config.endpoint.as_bytes());
-    let sources = semon_push::origin_custody::consent(&base, &name, &config)?;
-    let (token, identity) = match credential {
-        semon_push::Credential::Memory(token) => (token, None),
-        semon_push::Credential::MutualTls { token, identity } => (token, Some(identity)),
-        _ => return Err("invalid enrolled credential".into()),
-    };
-    let credential = semon_push::Credential::Enrolled {
-        token,
-        sources,
-        identity,
-    };
     let url = config.endpoint;
     let state = state.unwrap_or_else(|| semon_push::default_state_path(&url));
     Ok(PushArgs {
@@ -1302,6 +1313,7 @@ fn run(command: Command) -> Result<(), String> {
             machine,
             require_client_certificate,
         } => connect_terminal::run(&endpoint, &machine, require_client_certificate),
+        Command::Disconnect { receiver } => disconnect_terminal::run(&receiver),
         Command::Receive(args) => run_receive(args),
         Command::Query(args) => run_query(args),
         #[cfg(feature = "asi-query")]
@@ -2435,8 +2447,11 @@ fn usage() -> String {
          The query tools plus local durable asi_add (with asi-query) over Model Context Protocol on stdin and stdout; no listener. Queries read\n\
          the log files modified within the window, --since (30d by default), or all of them with --all.\n\
          \n\
-         Usage: semon connect --to URL [--machine NAME] [--require-client-certificate]\n\
-         Usage: semon push [--receiver NAME] [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
+         Usage: semon connect (--to URL | --receiver URL) [--machine NAME] [--require-client-certificate]\n\
+         Usage: semon disconnect --receiver URL\n\
+         Disables this machine's local receiver access after terminal confirmation; receiver access is not revoked.\n\
+         \n\
+         Usage: semon push [--receiver URL] [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\
          (docs/mirror-protocol.md), appending as they grow. Run connect first to install private enrollment custody. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s.\n\
@@ -2618,6 +2633,45 @@ mod tests {
         assert_eq!(parse_size("1T").unwrap(), 1u64 << 40);
         for bad in ["", "G", "-1", "1.5G", "10GB", "99999999999T"] {
             assert!(parse_size(bad).is_err(), "{bad}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod receiver_selector_tests {
+    use super::*;
+    #[test]
+    fn connect_receiver_and_to_use_the_pairing_url_contract() {
+        for flag in ["--receiver", "--to"] {
+            for (url, normalized) in [
+                ("https://RECEIVER.example/", "https://receiver.example:443"),
+                ("https://[::1]/", "https://[::1]:443"),
+            ] {
+                let command = parse_connect_args(
+                    [flag, url, "--machine", "laptop"]
+                        .map(str::to_owned)
+                        .into_iter(),
+                )
+                .unwrap();
+                let Command::Connect { endpoint, .. } = command else {
+                    panic!("connect expected")
+                };
+                assert_eq!(endpoint, normalized);
+            }
+            for invalid in [
+                "a".repeat(64),
+                "https://user:secret@receiver.example".into(),
+                "https://receiver.example?secret".into(),
+            ] {
+                assert!(
+                    parse_connect_args(
+                        [flag, &invalid, "--machine", "laptop"]
+                            .map(str::to_owned)
+                            .into_iter()
+                    )
+                    .is_err()
+                );
+            }
         }
     }
 }

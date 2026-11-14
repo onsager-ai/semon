@@ -31,6 +31,8 @@ const POLL: Duration = Duration::from_millis(20);
 pub struct Stop {
     inner: Arc<Inner>,
     parent: Option<Arc<Stop>>,
+    #[cfg(unix)]
+    pub(crate) authority: Option<crate::origin_custody::Authority>,
 }
 
 #[derive(Default)]
@@ -68,10 +70,26 @@ impl Stop {
         Self {
             inner: Arc::new(Inner::default()),
             parent: Some(Arc::new(self.clone())),
+            #[cfg(unix)]
+            authority: None,
         }
     }
 
+    #[cfg(unix)]
+    pub(crate) fn with_authority(mut self, authority: crate::origin_custody::Authority) -> Self {
+        self.authority = Some(authority);
+        self
+    }
+
     pub fn is_stopped(&self) -> bool {
+        #[cfg(unix)]
+        if self
+            .authority
+            .as_ref()
+            .is_some_and(|authority| !authority.is_active())
+        {
+            self.stop();
+        }
         *self
             .inner
             .stopped
@@ -85,7 +103,11 @@ impl Stop {
 
     /// Sleeps for `duration`, or until stopped. True when stopped.
     pub fn sleep(&self, duration: Duration) -> bool {
-        if self.parent.is_some() {
+        #[cfg(unix)]
+        let has_authority = self.authority.is_some();
+        #[cfg(not(unix))]
+        let has_authority = false;
+        if self.parent.is_some() || has_authority {
             let deadline = std::time::Instant::now() + duration;
             while !self.is_stopped() {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -125,9 +147,13 @@ impl Stop {
             return Ok(None);
         }
         let (answer, answers) = mpsc::sync_channel(1);
+        let dispatch_stop = self.clone();
         thread::Builder::new()
             .name(format!("semon-push-{name}"))
             .spawn(move || {
+                if dispatch_stop.is_stopped() {
+                    return;
+                }
                 // The waiter may be gone after a stop; the answer is dropped.
                 let _ = answer.send(work());
             })

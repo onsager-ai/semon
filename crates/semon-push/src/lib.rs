@@ -157,6 +157,7 @@ pub enum Credential {
     Enrolled {
         token: Token,
         sources: Vec<PathBuf>,
+        authority: origin_custody::Authority,
         identity: Option<ClientIdentity>,
     },
 }
@@ -435,7 +436,7 @@ struct Source {
 pub struct Client {
     url: String,
     token: Token,
-    http: reqwest::blocking::Client,
+    http: Arc<dyn Fn() -> Result<reqwest::blocking::Client> + Send + Sync>,
     stop: Stop,
     lock: Option<Arc<StateLock>>,
     state_path: PathBuf,
@@ -450,57 +451,85 @@ pub struct Client {
     sources: BTreeMap<String, Source>,
     catchup_pending: bool,
     allowed_sources: Option<BTreeSet<PathBuf>>,
+    #[cfg(test)]
+    completed_transports: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Bound each upload read and recheck local authority before releasing bytes.
+struct UploadBody {
+    bytes: std::io::Cursor<Vec<u8>>,
+    stop: Stop,
+}
+impl Read for UploadBody {
+    fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+        if self.stop.is_stopped() {
+            return Err(io::Error::new(
+                io::ErrorKind::ConnectionAborted,
+                "delivery stopped",
+            ));
+        }
+        let length = output.len().min(16 * 1024);
+        self.bytes.read(&mut output[..length])
+    }
 }
 
 impl Client {
     pub fn new(options: &PushOptions) -> Result<Self> {
-        Self::with_http_builder(options, reqwest::blocking::Client::builder())
+        Self::with_http_builder(options, reqwest::blocking::Client::builder)
     }
     fn with_http_builder(
         options: &PushOptions,
-        http: reqwest::blocking::ClientBuilder,
+        builder: impl Fn() -> reqwest::blocking::ClientBuilder + Send + Sync + 'static,
     ) -> Result<Self> {
         let url = check_url(&options.url)?;
         let token = options.credential.token()?;
-        #[cfg(unix)]
-        let http = match &options.credential {
-            Credential::MutualTls { identity, .. }
-            | Credential::Enrolled {
-                identity: Some(identity),
-                ..
-            } => {
-                let mut pem = zeroize::Zeroizing::new(client_ca::pem(&identity.certificate));
-                let mut private =
-                    zeroize::Zeroizing::new(crate::provision_wire::encode(&identity.private));
-                // Both substitutions preserve ASCII and byte length.
-                let mut bytes = zeroize::Zeroizing::new(std::mem::take(&mut *private).into_bytes());
-                for byte in bytes.iter_mut() {
-                    match *byte {
-                        b'-' => *byte = b'+',
-                        b'_' => *byte = b'/',
-                        _ => {}
+        let credential = options.credential.clone();
+        let http: Arc<dyn Fn() -> Result<reqwest::blocking::Client> + Send + Sync> =
+            Arc::new(move || {
+                let http = builder();
+                #[cfg(unix)]
+                let http = match &credential {
+                    Credential::MutualTls { identity, .. }
+                    | Credential::Enrolled {
+                        identity: Some(identity),
+                        ..
+                    } => {
+                        let mut pem =
+                            zeroize::Zeroizing::new(client_ca::pem(&identity.certificate));
+                        let mut private = zeroize::Zeroizing::new(crate::provision_wire::encode(
+                            &identity.private,
+                        ));
+                        // Both substitutions preserve ASCII and byte length.
+                        let mut bytes =
+                            zeroize::Zeroizing::new(std::mem::take(&mut *private).into_bytes());
+                        for byte in bytes.iter_mut() {
+                            match *byte {
+                                b'-' => *byte = b'+',
+                                b'_' => *byte = b'/',
+                                _ => {}
+                            }
+                        }
+                        *private =
+                            String::from_utf8(std::mem::take(&mut *bytes)).expect("base64 ASCII");
+                        while !private.len().is_multiple_of(4) {
+                            private.push('=');
+                        }
+                        pem.extend_from_slice(b"-----BEGIN PRIVATE KEY-----\n");
+                        pem.extend_from_slice(private.as_bytes());
+                        pem.extend_from_slice(b"\n-----END PRIVATE KEY-----\n");
+                        let identity = reqwest::Identity::from_pem(&pem)
+                            .map_err(|_| "invalid enrolled TLS identity")?;
+                        drop(private);
+                        http.identity(identity)
                     }
-                }
-                *private = String::from_utf8(std::mem::take(&mut *bytes)).expect("base64 ASCII");
-                while !private.len().is_multiple_of(4) {
-                    private.push('=');
-                }
-                pem.extend_from_slice(b"-----BEGIN PRIVATE KEY-----\n");
-                pem.extend_from_slice(private.as_bytes());
-                pem.extend_from_slice(b"\n-----END PRIVATE KEY-----\n");
-                let identity = reqwest::Identity::from_pem(&pem)
-                    .map_err(|_| "invalid enrolled TLS identity")?;
-                drop(private);
-                http.identity(identity)
-            }
-            _ => http,
-        };
-        let http = http
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(120))
-            .user_agent(concat!("semon-push/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|error| error.to_string())?;
+                    _ => http,
+                };
+                http.redirect(reqwest::redirect::Policy::none())
+                    .timeout(Duration::from_secs(120))
+                    .user_agent(concat!("semon-push/", env!("CARGO_PKG_VERSION")))
+                    .build()
+                    .map_err(|error| error.to_string())
+            });
         let state = fs::read(&options.state)
             .ok()
             .and_then(|bytes| serde_json::from_slice::<State>(&bytes).ok())
@@ -510,11 +539,29 @@ impl Client {
                 url: url.clone(),
                 files: BTreeMap::new(),
             });
+        #[cfg(unix)]
+        if let Credential::Enrolled { authority, .. } = &options.credential
+            && !authority.is_active()
+        {
+            return Err("receiver is disconnected or its custody is unavailable".into());
+        }
         Ok(Self {
             url,
             token,
             http,
-            stop: Stop::new(),
+            stop: {
+                let stop = Stop::new();
+                #[cfg(unix)]
+                if let Credential::Enrolled { authority, .. } = &options.credential {
+                    stop.with_authority(authority.clone())
+                } else {
+                    stop
+                }
+                #[cfg(not(unix))]
+                {
+                    stop
+                }
+            },
             lock: None,
             state_path: options.state.clone(),
             state,
@@ -527,6 +574,8 @@ impl Client {
             archives: archives::Cache::new(&options.state),
             sources: BTreeMap::new(),
             catchup_pending: false,
+            #[cfg(test)]
+            completed_transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             allowed_sources: match &options.credential {
                 #[cfg(unix)]
                 Credential::Enrolled { sources, .. } => Some(sources.iter().cloned().collect()),
@@ -544,6 +593,12 @@ impl Client {
 
     /// Ends passes and requests early once `stop` is stopped.
     pub fn with_stop(mut self, stop: Stop) -> Self {
+        #[cfg(unix)]
+        let stop = if let Some(authority) = self.stop.authority.clone() {
+            stop.with_authority(authority)
+        } else {
+            stop
+        };
         self.stop = stop;
         self
     }
@@ -555,10 +610,9 @@ impl Client {
         self
     }
 
-    /// One request to the receiver, made on a thread of its own so that a
-    /// stop doesn't wait for it (up to the 120 s timeout). A request a stop
-    /// leaves behind finishes there, holding the state lock (see
-    /// [`StateLock`]), and its answer is dropped.
+    /// Each request rechecks enrolled authority at dispatch and between upload
+    /// chunks. Its worker retains state and delivery locks until HTTP ends;
+    /// disconnect drains delivery locks before reporting success.
     fn post(&self, route: &str, body: String) -> std::result::Result<(u16, String), Failure> {
         self.post_wait(route, body, |delay| self.stop.sleep(delay))
     }
@@ -571,36 +625,69 @@ impl Client {
     ) -> std::result::Result<(u16, String), Failure> {
         let mut retries = 0;
         loop {
-            let request = self
-                .http
-                .post(format!("{}/v1/mirror/{route}", self.url))
-                .bearer_auth(self.token.expose())
-                .header("content-type", "application/json")
-                .body(body.clone());
+            let factory = Arc::clone(&self.http);
+            let request_url = format!("{}/v1/mirror/{route}", self.url);
+            let token = self.token.clone();
+            let body = body.clone();
             let lock = self.lock.clone();
+            let dispatch_stop = self.stop.clone();
+            #[cfg(test)]
+            let completed_transports = Arc::clone(&self.completed_transports);
             let answer = self.stop.run(route, move || {
                 let _lock = lock;
-                request.send().map(|response| {
-                    let status = response.status().as_u16();
-                    let retry = response
-                        .headers()
-                        .get("retry-after")
-                        .and_then(|value| value.to_str().ok())
-                        .and_then(|value| {
-                            value.parse::<u64>().ok().or_else(|| {
-                                httpdate::parse_http_date(value).ok().map(|date| {
-                                    date.duration_since(std::time::SystemTime::now())
-                                        .unwrap_or_default()
-                                        .as_secs()
+                #[cfg(unix)]
+                let _delivery = dispatch_stop
+                    .authority
+                    .as_ref()
+                    .map(|authority| authority.delivery())
+                    .transpose()
+                    .map_err(|error| error.to_string())?;
+                if dispatch_stop.is_stopped() {
+                    return Err("delivery stopped".to_owned());
+                }
+                // Declared after the delivery guard: the last handle joins its
+                // private reqwest runtime before the guard can be released.
+                let http = factory()?;
+                let request = http
+                    .post(request_url)
+                    .bearer_auth(token.expose())
+                    .header("content-type", "application/json")
+                    .body(reqwest::blocking::Body::sized(
+                        UploadBody {
+                            bytes: std::io::Cursor::new(body.clone().into_bytes()),
+                            stop: dispatch_stop.clone(),
+                        },
+                        body.len() as u64,
+                    ));
+                let result = request
+                    .send()
+                    .map_err(|error| error.to_string())
+                    .map(|response| {
+                        let status = response.status().as_u16();
+                        let retry = response
+                            .headers()
+                            .get("retry-after")
+                            .and_then(|value| value.to_str().ok())
+                            .and_then(|value| {
+                                value.parse::<u64>().ok().or_else(|| {
+                                    httpdate::parse_http_date(value).ok().map(|date| {
+                                        date.duration_since(std::time::SystemTime::now())
+                                            .unwrap_or_default()
+                                            .as_secs()
+                                    })
                                 })
                             })
-                        })
-                        .unwrap_or(2);
-                    (status, response.text().unwrap_or_default(), retry)
-                })
+                            .unwrap_or(2);
+                        (status, response.text().unwrap_or_default(), retry)
+                    });
+                drop(http);
+                #[cfg(test)]
+                completed_transports.fetch_add(1, Ordering::SeqCst);
+                result
             });
             let (status, text, retry) = match answer {
                 Ok(Some(Ok(answer))) => answer,
+                Ok(Some(Err(_))) if self.stop.is_stopped() => return Err(Failure::Stopped),
                 Ok(Some(Err(error))) => return Err(Failure::Remote(format!("{route}: {error}"))),
                 Ok(None) => return Err(Failure::Stopped),
                 Err(error) => return Err(Failure::Remote(error)),
@@ -1641,6 +1728,15 @@ pub fn push(options: &PushOptions, watch: bool) -> Result<()> {
 /// `reqwest::blocking`, which panics inside a tokio runtime (in an async
 /// Tauri command, say; use `spawn_blocking` or `std::thread::spawn`).
 pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()> {
+    #[cfg(unix)]
+    let enrolled_stop;
+    #[cfg(unix)]
+    let stop = if let Credential::Enrolled { authority, .. } = &options.credential {
+        enrolled_stop = stop.clone().with_authority(authority.clone());
+        &enrolled_stop
+    } else {
+        stop
+    };
     // Declared first, so it is dropped last, after the client and the
     // facts worker have let go of their shares.
     let hold = Hold::new(StateLock::acquire(&options.state)?);

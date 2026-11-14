@@ -561,21 +561,27 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     // Explicit initialization owns the index and namespace; mirror connect reuses
     // neither for enrollment and must not publish an analytics snapshot.
     assert!(analytics_state.join("sessions-index.sqlite3").exists());
-    let (config, credential) = crate::origin_custody::load_at(&origin, Some(&name), 100).unwrap();
+    let (config, credential) =
+        crate::origin_custody::load_at(&origin, Some("https://LOCALHOST/"), 100).unwrap();
     assert_eq!(config.scope.receiver_id, config.receiver_id);
     assert!(matches!(
         config.scope.binding,
         crate::enrollment::Binding::Inapplicable
     ));
-    let crate::Credential::MutualTls { token, identity } = credential else {
+    let crate::Credential::Enrolled {
+        token,
+        identity: Some(identity),
+        ..
+    } = credential
+    else {
         panic!("required certificate was not installed")
     };
     let certificate_path = origin.join(&name).join("client-certificate.der");
     let certificate_bytes = fs::read(&certificate_path).unwrap();
     fs::write(&certificate_path, [0]).unwrap();
-    assert!(crate::origin_custody::load_at(&origin, Some(&name), 100).is_err());
+    assert!(crate::origin_custody::load_at(&origin, Some(&config.endpoint), 100).is_err());
     fs::remove_file(&certificate_path).unwrap();
-    assert!(crate::origin_custody::load_at(&origin, Some(&name), 100).is_err());
+    assert!(crate::origin_custody::load_at(&origin, Some(&config.endpoint), 100).is_err());
     // Recreating a removed file uses the process umask, not custody's 0600 mode.
     // Restore the full custody contract before checking certificate validity.
     {
@@ -588,10 +594,11 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
             .unwrap();
         restored.write_all(&certificate_bytes).unwrap();
     }
-    crate::origin_custody::load_at(&origin, Some(&name), 100).unwrap();
-    let error = crate::origin_custody::load_at(&origin, Some(&name), config.scope.valid_until)
-        .err()
-        .unwrap();
+    crate::origin_custody::load_at(&origin, Some(&config.endpoint), 100).unwrap();
+    let error =
+        crate::origin_custody::load_at(&origin, Some(&config.endpoint), config.scope.valid_until)
+            .err()
+            .unwrap();
     assert!(
         error.contains("expired"),
         "unexpected expiry refusal: {error}"
@@ -615,9 +622,11 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
         state: h.dir.0.join("production-push-state"),
     };
     let server_pem = fs::read(auth_tests::fixture("test-cert.pem")).unwrap();
-    let builder = reqwest::blocking::Client::builder()
-        .add_root_certificate(reqwest::Certificate::from_pem(&server_pem).unwrap())
-        .no_proxy();
+    let builder = move || {
+        reqwest::blocking::Client::builder()
+            .add_root_certificate(reqwest::Certificate::from_pem(&server_pem).unwrap())
+            .no_proxy()
+    };
     let production = crate::Client::with_http_builder(&options, builder).unwrap();
     production
         .send_facts(&semon_sessions::Facts {
@@ -813,8 +822,8 @@ fn origin_substitution_mac_mismatch_and_delivery_recovery() {
         }
         let registry = crate::enrollment::Registry::read_current(&h.dir.0).unwrap();
         if fault == "delivery" {
-            let name = result.unwrap();
-            crate::origin_custody::load_at(&origin, Some(&name), 100).unwrap();
+            result.unwrap();
+            crate::origin_custody::load_at(&origin, None, 100).unwrap();
             assert_eq!(connections, 2);
             assert_eq!(registry.enrollments().len(), 1);
         } else {

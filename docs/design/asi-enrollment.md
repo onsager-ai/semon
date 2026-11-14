@@ -1378,8 +1378,8 @@ integration slices; docs-only CI proves none of those runtime guarantees.
 
 Origin PR3.2c status (part of #593): `connect --to URL [--machine M]` uses
 public-CA TLS 1.3 and a non-echoing controlling terminal, followed by explicit
-mirror-only trust/source approval. The shipped push selector uses the internal
-endpoint hash; PR4.3 replaces that operator interface with
+mirror-only trust/source approval. The URL receiver selector uses the same pairing
+normalization for connect, push and disconnect, with
 `push [--receiver URL] [--watch]` under the contract above. Push consumes
 stored enrollment; the superseded `--to`/`--token-file` push CLI is removed.
 Custody is `$XDG_CONFIG_HOME/semon/origin/<sha256-canonical-endpoint>/` (default
@@ -1387,10 +1387,20 @@ Custody is `$XDG_CONFIG_HOME/semon/origin/<sha256-canonical-endpoint>/` (default
 `mirror-push.secret`, and separately bound `source-consent.json`. Directories are
 0700 and regular files 0600, owned by the local user; fd-relative no-follow opens
 refuse links. A private `stage-<random>/` is synced before its atomic publication;
-only the final directory is admitted. Interrupted staging is retained, never
-silently deleted or loaded. No credential is written before receiver confirmation
-and approval delivery. `install.lock` serializes publication. Receiver selection
-uses the full endpoint hash; an omitted name requires one enrolled receiver.
+only the final directory is admitted. A durable `disabled` marker stops active
+local channel/trust use without removing any of those files. Disconnect publishes
+that marker under `install.lock`; fresh loads and running Push stop checks refuse
+disabled or unreadable state. Each HTTP dispatch holds a shared delivery lock and
+checks authority immediately before sending; body readers check it on each chunk.
+Each delivery drops its private HTTP client and joins its transport runtime
+before releasing its lock. Disconnect drains active delivery locks before
+reporting success. Lock acquisition has a five-second deadline; failure leaves
+the disabled marker in place and reports the uncertain-outcome guidance.
+Renewal installation/recovery is PR4.3b. Interrupted staging is
+retained, never silently deleted or loaded. No credential is written before
+receiver confirmation and approval delivery. `install.lock` serializes publication. Receiver selection
+accepts the enrolled HTTPS URL; the endpoint hash stays internal. An omitted URL
+requires one enrolled receiver.
 `connect::producer_admission` calls the explicit library initializer for requested
 analytics_publish/body_channel kinds before pairing or network activity. It passes
 no expected binding until enrollment supplies one. Initialization creates or reuses

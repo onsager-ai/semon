@@ -19,6 +19,9 @@ impl Fixture {
             .unwrap()
     }
     fn install_sources(&self, sources: &[PathBuf]) -> Result<String> {
+        self.install_endpoint("https://receiver.example:443", sources)
+    }
+    fn install_endpoint(&self, endpoint: &str, sources: &[PathBuf]) -> Result<String> {
         let private = EcdsaKeyPair::generate_pkcs8(
             &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
             &ring::rand::SystemRandom::new(),
@@ -26,7 +29,7 @@ impl Fixture {
         .unwrap();
         install(
             &self.0,
-            "https://receiver.example:443",
+            endpoint,
             "laptop",
             &ActivationInput {
                 receiver_id: "receiver".into(),
@@ -182,7 +185,7 @@ fn certificate_clock_refuses_future_install_and_expired_load() {
         .contains("not yet valid")
     );
     assert!(!f.0.exists());
-    let name = install_at(
+    install_at(
         &f.0,
         "https://receiver.example:443",
         "laptop",
@@ -194,18 +197,18 @@ fn certificate_clock_refuses_future_install_and_expired_load() {
     )
     .unwrap();
     assert!(
-        load_at(&f.0, Some(&name), until)
+        load_at(&f.0, Some("https://receiver.example:443"), until)
             .err()
             .unwrap()
             .contains("expired")
     );
     assert!(
-        load_at(&f.0, Some(&name), now - 601)
+        load_at(&f.0, Some("https://receiver.example:443"), now - 601)
             .err()
             .unwrap()
             .contains("not yet valid")
     );
-    assert!(load_at(&f.0, Some(&name), now).is_ok());
+    assert!(load_at(&f.0, Some("https://receiver.example:443"), now).is_ok());
 }
 
 #[test]
@@ -218,8 +221,8 @@ fn staged_credentials_are_never_a_half_installed_enrollment() {
         .write("mirror-push.secret", b"interrupted-secret")
         .unwrap();
     assert!(load(&f.0, None).is_err());
-    let name = f.install();
-    load(&f.0, Some(&name)).unwrap();
+    f.install();
+    load(&f.0, Some("https://receiver.example:443")).unwrap();
     assert!(f.0.join("stage-interrupted/mirror-push.secret").exists());
 }
 #[test]
@@ -247,7 +250,7 @@ fn realistic_source_list_roundtrips_and_oversize_never_publishes() {
         })
         .collect();
     let name = f.install_sources(&sources).unwrap();
-    let (config, _) = load(&f.0, Some(&name)).unwrap();
+    let (config, _) = load(&f.0, Some("https://receiver.example:443")).unwrap();
     assert_eq!(consent(&f.0, &name, &config).unwrap(), sources);
     let oversized = Fixture::new();
     assert!(
@@ -298,4 +301,452 @@ fn config_roots_require_absolute_paths() {
         .is_err()
     );
     assert!(configuration_directory(None, None).is_err());
+}
+
+#[test]
+fn url_selector_uses_pairing_normalization_and_never_accepts_hashes() {
+    let f = Fixture::new();
+    let name = f.install();
+    assert_eq!(
+        name,
+        crate::wire::sha256_hex(b"https://receiver.example:443")
+    );
+    for url in [
+        "https://receiver.example",
+        "https://RECEIVER.EXAMPLE/",
+        "https://receiver.example:443/",
+    ] {
+        let (config, _) = load(&f.0, Some(url)).unwrap();
+        assert_eq!(receiver_endpoint(url).unwrap(), config.endpoint);
+        assert!(!Disconnect::open(&f.0, url).unwrap().is_disconnected());
+    }
+    for (url, canonical) in [
+        ("https://[::1]/", "https://[::1]:443"),
+        ("https://[2001:DB8::1]:443", "https://[2001:db8::1]:443"),
+        (
+            "https://Receiver.Example:8735/",
+            "https://receiver.example:8735",
+        ),
+    ] {
+        assert_eq!(receiver_endpoint(url).unwrap(), canonical);
+        assert_eq!(receiver_host(url).unwrap(), &canonical[8..]);
+    }
+    for invalid in [
+        name.as_str(),
+        "https://user:secret@receiver.example",
+        "https://receiver.example?secret=value",
+        "https://receiver.example/#secret",
+        "http://receiver.example",
+        "https://receiver.example/path",
+    ] {
+        assert!(receiver_endpoint(invalid).is_err());
+        assert!(load(&f.0, Some(invalid)).is_err());
+        assert!(Disconnect::open(&f.0, invalid).is_err());
+    }
+}
+
+#[test]
+fn ipv6_url_selects_the_same_enrolled_custody_for_push_and_disconnect() {
+    let f = Fixture::new();
+    let endpoint = receiver_endpoint("https://[2001:DB8::1]/").unwrap();
+    let name = f.install_endpoint(&endpoint, &[]).unwrap();
+    assert_eq!(name, crate::wire::sha256_hex(b"https://[2001:db8::1]:443"));
+    for url in ["https://[2001:DB8::1]", "https://[2001:db8::1]:443/"] {
+        let (config, _) = load(&f.0, Some(url)).unwrap();
+        assert_eq!(config.endpoint, endpoint);
+        assert!(!Disconnect::open(&f.0, url).unwrap().is_disconnected());
+    }
+    assert!(load(&f.0, Some("https://[2001:db8::1]:8735")).is_err());
+    Disconnect::open(&f.0, "https://[2001:DB8::1]/")
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert!(load(&f.0, Some(&endpoint)).is_err());
+}
+
+#[test]
+fn disconnect_preserves_custody_cancels_delivery_and_is_state_idempotent() {
+    let f = Fixture::new();
+    let name = f.install();
+    let (config, _) = load(&f.0, None).unwrap();
+    let authority = Authority::new(&f.0, &config).unwrap();
+    let stop = crate::Stop::new().with_authority(authority.clone());
+    let files = [
+        "enrollment.json",
+        "origin-key.pk8",
+        "mirror-push.secret",
+        "source-consent.json",
+    ];
+    let before: Vec<_> = files
+        .iter()
+        .map(|p| fs::read(f.0.join(&name).join(p)).unwrap())
+        .collect();
+    assert!(!stop.is_stopped());
+    // Dropping the unconfirmed operation changes nothing.
+    drop(Disconnect::open(&f.0, "https://receiver.example").unwrap());
+    assert!(authority.is_active());
+    let operation = Disconnect::open(&f.0, "https://RECEIVER.example:443/").unwrap();
+    assert!(!operation.is_disconnected());
+    operation.commit().unwrap();
+    assert!(stop.is_stopped());
+    assert!(!authority.is_active());
+    assert!(load(&f.0, None).is_err());
+    let operation = Disconnect::open(&f.0, "https://receiver.example").unwrap();
+    assert!(operation.is_disconnected());
+    operation.commit().unwrap();
+    for (file, bytes) in files.iter().zip(before) {
+        assert_eq!(fs::read(f.0.join(&name).join(file)).unwrap(), bytes);
+    }
+    assert_eq!(
+        consent(&f.0, &name, &config).unwrap(),
+        [PathBuf::from("/native/approved.jsonl")]
+    );
+}
+
+#[test]
+fn disconnect_wins_install_lock_against_concurrent_publication() {
+    let f = Fixture::new();
+    f.install();
+    let operation = Disconnect::open(&f.0, "https://receiver.example").unwrap();
+    let base = f.0.clone();
+    let (finished, completed) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        // A delivery already prepared before disconnect cannot obtain the install lock.
+        let other = Fixture(base);
+        let result = other.install_sources(&[]);
+        // The parent retains ownership of fixture cleanup.
+        std::mem::forget(other);
+        finished.send(result).unwrap();
+    });
+    assert_eq!(
+        completed
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap()
+            .unwrap_err(),
+        "origin custody is in use"
+    );
+    worker.join().unwrap();
+    operation.commit().unwrap();
+    // A delayed installation cannot overwrite the disabled selection, either.
+    assert!(f.install_sources(&[]).is_err());
+    assert!(
+        Disconnect::open(&f.0, "https://receiver.example")
+            .unwrap()
+            .is_disconnected()
+    );
+    assert!(load(&f.0, None).is_err());
+}
+
+#[test]
+fn disconnect_unknown_and_insecure_state_fail_closed() {
+    let f = Fixture::new();
+    assert_eq!(
+        Disconnect::open(&f.0, "https://UNKNOWN.example/")
+            .err()
+            .unwrap(),
+        "receiver unknown.example:443 was not found; use the HTTPS URL given to connect as --receiver URL, then retry."
+    );
+    let name = f.install();
+    assert!(
+        Disconnect::open(&f.0, "https://other.example")
+            .err()
+            .unwrap()
+            .contains("was not found")
+    );
+    let (config, _) = load(&f.0, None).unwrap();
+    let authority = Authority::new(&f.0, &config).unwrap();
+    // Interrupted disabled staging is inactive; it neither enables nor disables a channel.
+    let dir = Directory::open(&f.0).unwrap().child(&name).unwrap();
+    dir.write("disabled-stage-interrupted", b"disabled\n")
+        .unwrap();
+    assert!(authority.is_active());
+    dir.write("disabled", b"corrupt").unwrap();
+    assert!(!authority.is_active());
+    assert_eq!(
+        Disconnect::open(&f.0, "https://receiver.example")
+            .err()
+            .unwrap(),
+        DISCONNECT_UNCERTAIN
+    );
+    assert!(load(&f.0, None).is_err());
+}
+
+#[test]
+fn disconnect_stops_waiting_for_active_delivery_without_new_work() {
+    let f = Fixture::new();
+    f.install();
+    let (config, _) = load(&f.0, None).unwrap();
+    let stop = crate::Stop::new().with_authority(Authority::new(&f.0, &config).unwrap());
+    let waiting = stop.clone();
+    let (ready, started) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let (finished, completed) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result = waiting.run("delivery", move || {
+            ready.send(()).unwrap();
+            released
+                .recv_timeout(std::time::Duration::from_secs(15))
+                .unwrap();
+            7
+        });
+        finished.send(result).unwrap();
+    });
+    started
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    Disconnect::open(&f.0, "https://receiver.example")
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert_eq!(
+        completed
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap()
+            .unwrap(),
+        None
+    );
+    worker.join().unwrap();
+    assert!(stop.is_stopped());
+    assert_eq!(
+        stop.run("later-delivery", || panic!(
+            "disabled delivery must not start"
+        ))
+        .unwrap(),
+        None::<()>
+    );
+    release.send(()).unwrap();
+}
+
+#[test]
+fn public_loader_client_refuses_delivery_after_disconnect() {
+    let f = Fixture::new();
+    f.install();
+    let (config, credential) = load(&f.0, None).unwrap();
+    assert!(
+        matches!(&credential, crate::Credential::Enrolled { sources, .. } if sources == &[PathBuf::from("/native/approved.jsonl")])
+    );
+    let client = crate::Client::new(&crate::PushOptions {
+        url: config.endpoint,
+        credential,
+        sessions: Default::default(),
+        state: f.0.join("push-state"),
+    })
+    .unwrap();
+    Disconnect::open(&f.0, "https://receiver.example")
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert!(matches!(
+        client.post("facts", "{}".into()),
+        Err(crate::Failure::Stopped)
+    ));
+}
+
+#[test]
+fn disconnect_aborts_slow_upload_and_drains_transport_before_success() {
+    use std::{
+        io::{BufRead, BufReader},
+        net::TcpListener,
+        time::Duration,
+    };
+    let f = Fixture::new();
+    f.install();
+    let (_, credential) = load(&f.0, None).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (ready, started) = std::sync::mpsc::channel();
+    let (drain, draining) = std::sync::mpsc::channel();
+    let (observed, received) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        listener.set_nonblocking(true).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "upload accept timed out"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("upload accept failed: {error}"),
+            }
+        };
+        socket
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut reader = BufReader::new(socket);
+        let mut line = String::new();
+        loop {
+            line.clear();
+            assert_ne!(
+                reader.read_line(&mut line).unwrap(),
+                0,
+                "EOF in upload headers"
+            );
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let mut chunk = [0; 1024];
+        let first = reader.read(&mut chunk).unwrap();
+        ready.send(()).unwrap();
+        draining.recv_timeout(Duration::from_secs(10)).unwrap();
+        let mut total = first;
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(count) => total += count,
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(error) => panic!("upload did not abort: {error}"),
+            }
+        }
+        observed.send(total).unwrap();
+    });
+    let client = crate::Client::new(&crate::PushOptions {
+        url: format!("http://{address}"),
+        credential,
+        sessions: Default::default(),
+        state: f.0.join("push-state"),
+    })
+    .unwrap();
+    let client = std::sync::Arc::new(client);
+    let kept_alive = std::sync::Arc::clone(&client);
+    let completed_transports = std::sync::Arc::clone(&client.completed_transports);
+    let (finished, uploaded) = std::sync::mpsc::channel();
+    let upload = std::thread::spawn(move || {
+        finished
+            .send(matches!(
+                client.post("append", "x".repeat(32 * 1024 * 1024)),
+                Err(crate::Failure::Stopped)
+            ))
+            .unwrap()
+    });
+    started.recv_timeout(Duration::from_secs(10)).unwrap();
+    let base = f.0.clone();
+    let (committed, disconnected) = std::sync::mpsc::channel();
+    let disconnect = std::thread::spawn(move || {
+        committed
+            .send(
+                Disconnect::open(&base, "https://receiver.example")
+                    .unwrap()
+                    .commit(),
+            )
+            .unwrap()
+    });
+    // Let the transport consume already-buffered bytes. Success must drain the
+    // request's shared lock, and the body reader must abort before its full size.
+    let marker =
+        f.0.join(custody_name("https://receiver.example:443"))
+            .join("disabled");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "disabled publication timed out"
+        );
+        std::thread::yield_now();
+    }
+    drain.send(()).unwrap();
+    disconnected
+        .recv_timeout(Duration::from_secs(15))
+        .unwrap()
+        .unwrap();
+    // The long-lived Client remains alive, but its delivery runtime was joined
+    // before disconnect acquired the exclusive lock and returned success.
+    assert_eq!(completed_transports.load(Ordering::SeqCst), 1);
+    assert!(kept_alive.stop.is_stopped());
+    assert!(uploaded.recv_timeout(Duration::from_secs(5)).unwrap());
+    assert!(received.recv_timeout(Duration::from_secs(5)).unwrap() < 32 * 1024 * 1024);
+    upload.join().unwrap();
+    disconnect.join().unwrap();
+    server.join().unwrap();
+}
+
+#[test]
+fn disconnect_success_waits_for_existing_delivery_guard() {
+    use std::time::{Duration, Instant};
+    let f = Fixture::new();
+    f.install();
+    let (_, credential) = load(&f.0, None).unwrap();
+    let crate::Credential::Enrolled { authority, .. } = credential else {
+        panic!("enrolled authority required")
+    };
+    let delivery = authority.delivery().unwrap();
+    let base = f.0.clone();
+    let (finished, completed) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        finished
+            .send(
+                Disconnect::open(&base, "https://receiver.example")
+                    .unwrap()
+                    .commit(),
+            )
+            .unwrap()
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while authority.is_active() {
+        assert!(Instant::now() < deadline, "disabled publication timed out");
+        std::thread::yield_now();
+    }
+    assert!(matches!(
+        completed.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+    drop(delivery);
+    completed
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    worker.join().unwrap();
+    assert!(authority.delivery().is_err());
+}
+
+#[test]
+fn disconnect_deadline_preserves_disabled_state_with_a_separate_lock_holder() {
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    let f = Fixture::new();
+    let name = f.install();
+    let path = f.0.join(&name).join("delivery.lock");
+    Directory::open(&f.0)
+        .unwrap()
+        .child(&name)
+        .unwrap()
+        .write("delivery.lock", b"")
+        .unwrap();
+    let mut child = Command::new("flock")
+        .arg(&path)
+        .args(["sh", "-c", "printf 'locked\\n'; read release"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (ready, started) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut line = String::new();
+        BufReader::new(stdout).read_line(&mut line).unwrap();
+        ready.send(line).unwrap();
+    });
+    assert_eq!(
+        started.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "locked\n"
+    );
+    let result = Disconnect::open(&f.0, "https://receiver.example")
+        .unwrap()
+        .commit_until(Instant::now() + Duration::from_millis(50));
+    // Release and reap before assertions so a failed assertion cannot orphan it.
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    reader.join().unwrap();
+    assert_eq!(result.unwrap_err(), DISCONNECT_UNCERTAIN);
+    assert!(load(&f.0, None).is_err());
+    let operation = Disconnect::open(&f.0, "https://receiver.example").unwrap();
+    assert!(operation.is_disconnected());
+    operation.commit().unwrap();
 }
