@@ -1,5 +1,15 @@
 # ASI query
 
+**Architecture amendment — owner, 2026-11-14:** [Centralized ASI](asi-centralized.md)
+is current for one owner's machines. Receiver SQL/search/evidence will read local
+materializations and durably received redacted text with receiver-local
+authorization/audit. The former per-read origin approval, remote body channel,
+cache and federation search sequencing below are superseded history. Current
+receiver body-query refusal remains shipped behavior until that integration; Hub
+body access still refuses. Readers are the loopback owner only in this release
+(owner, 2026-11-15). Existing query bounds/sandbox and local API contracts stay.
+[C1/C2/I]
+
 Status: accepted architecture/spec for #545 (revised 2026-11-09 for federation
 D1–D8 and DuckDB analytics). #566 delivers local SQL and schema through CLI and
 MCP; #567 adds origin-local search and focused view. #568 exposes the four

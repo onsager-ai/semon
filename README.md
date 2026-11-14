@@ -52,8 +52,10 @@ a hit. `semon query schema` describes the analytics tables. Materialization refr
 the full local Catalog; initial preparation can take time. It publishes one
 snapshot and exits. For ongoing publication, run `semon analytics materialize
 --watch` in another process; Viewer and MCP do not start that writer automatically.
-These commands keep data local. Remote ASI enrollment/viewing remains integration
-work; existing `push` copies redacted native logs and is a separate custody choice.
+These commands keep data local. The [centralized default contract](docs/design/asi-centralized.md)
+uses `push`/`receive` for durable redacted-log custody across one owner's machines;
+receiver ASI materialization/SQL/search and integrated startup remain implementation
+work. The runnable setup below still needs separate push and Viewer commands.
 
 | Goal | Current command family |
 | --- | --- |

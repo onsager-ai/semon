@@ -1,12 +1,14 @@
 # Federated ASI custody and on-demand viewing
 
-Status: **accepted architecture**, 2026-11-09, following the user's D1–D8
-answers through the PM's structured decision process on #587. This supersedes
-option B as the default and is reconciled with [ASI direction](asi-direction.md),
-[store](asi-store.md) and [query](asi-query.md). Acceptance is a design decision,
-not evidence that these safeguards have shipped. This docs change grants no merge,
-deployment or data-deletion authority. The PM applies the lane plan after the
-user approves the merge; this document does not itself redirect active lanes.
+Status: **superseded architecture history**. The owner's **2026-11-14**
+[centralized contract](asi-centralized.md) replaces federation as the default for
+one owner's machines, including D1/D2/D3/D6/D8 and P1's raw-replica exclusion.
+D4 (recorded costs) and D5 (one current format, preserved frozen data) stay;
+Hub remains body-free with tokenized paths. Origins authorize export; receivers
+hold durable redacted text and authorize/audit reads locally. The historical
+present-tense requirements below do not govern the centralized default. Runtime
+will be removed after the switch; rationale remains for possible future multi-user
+or third-party receiver design. This amendment changes no runtime or user data.
 
 ## Accepted direction and scope
 
@@ -1009,14 +1011,14 @@ open to user correction, not a new approval request.
 
 | Decision | Accepted choice | Consequence |
 | --- | --- | --- |
-| D1: Default architecture | Federation replaces option B as the default. | Mixed rules versions and possible permanent evidence loss are accepted. |
-| D2: Online reads | Origin authorizes and audits every read, including cache hits; no offline grants. | Cached bytes and replica custody do not authorize offline viewing. |
-| D3: Cache and origin retention | 256 MiB global, 64 MiB per source, 15-minute absolute TTL; stream-through opt-in. Origin retention unchanged until deliberately changed. | Reads do not extend TTL; no archive purge or cache-to-archive conversion. |
+| D1: Default architecture — superseded 2026-11-14 by [central contract](asi-centralized.md) | Federation replaces option B as the default. | Mixed rules versions and possible permanent evidence loss are accepted. |
+| D2: Online reads — superseded 2026-11-14 by [central contract](asi-centralized.md) | Origin authorizes and audits every read, including cache hits; no offline grants. | Cached bytes and replica custody do not authorize offline viewing. |
+| D3: Cache and origin retention — superseded 2026-11-14 by [central contract](asi-centralized.md) | 256 MiB global, 64 MiB per source, 15-minute absolute TTL; stream-through opt-in. Origin retention unchanged until deliberately changed. | Reads do not extend TTL; no archive purge or cache-to-archive conversion. |
 | D4: Costs | Keep origin recorded costs first. Separately named central valuation can come later. | Never silently mix valuations or add central repricing to current transforms. |
 | D5: Format compatibility | Refuse old-format origins; no multi-version exception. Preserve and export frozen data. | No adapters/dual readers; unavailable history is not silently reset or deleted. |
-| D6: Replicas | Opt-in replica; namespace-wide authority transfer only. Keep supported mirror and #572 custody. | Mixed-source replica/pull-only namespaces retain origin analytics authority; cache never becomes archive. |
+| D6: Replicas — superseded 2026-11-14 by [central contract](asi-centralized.md) | Opt-in replica; namespace-wide authority transfer only. Keep supported mirror and #572 custody. | Mixed-source replica/pull-only namespaces retain origin analytics authority; cache never becomes archive. |
 | D7: Metadata privacy | Plain names and paths for richer analytics. **PM interpretation:** this applies between origin and operator receiver; settled Hub rules remain, with paths tokenized at Hub boundary and no plain paths in Hub. Open to user correction of that interpretation. | Origin tokenization is not the default. Body exclusions, credential stripping and source policy still apply; receiver learns sensitive names and paths. |
-| D8: Search sequence | Local search plus remote view first. | Receiver search stays unavailable until federated coverage and audit exist. |
+| D8: Search sequence — superseded 2026-11-14 by [central contract](asi-centralized.md) | Local search plus remote view first. | Receiver search stays unavailable until federated coverage and audit exist. |
 
 ## Acceptance before implementation can claim these guarantees
 

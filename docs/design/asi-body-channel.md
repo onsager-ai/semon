@@ -1,9 +1,13 @@
 # Online body channel (#594)
 
-Status: reconciled with the current #593 enrollment contract on main (#634/#639).
-[ASI federation](asi-federation.md) remains binding, including D2/D3 and the
-#630 cache/#631 ACL/audit boundaries. [Enrollment](asi-enrollment.md) owns shared
-infrastructure; #568 owns receiver Viewer integration. Agreement is not runtime delivery.
+Status: **superseded transport history**, owner decision **2026-11-14**.
+[Centralized ASI](asi-centralized.md) replaces on-demand origin body pulls with
+receiver-local reads of durably mirrored redacted native logs. Origin export
+consent replaces per-read origin authorization; receiver read authorization/audit
+is local. #594 runtime, #593 publication/egress and #595 cache/dual audit will be
+removed after the switch and dependency pass. The text below records the former
+contract for possible future multi-user/third-party receivers; it is not a second
+supported architecture. Enrollment, TLS, renewal and mirror remain supported.
 
 ## Scope and shared transport
 
