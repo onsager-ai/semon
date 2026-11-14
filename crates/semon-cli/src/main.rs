@@ -987,15 +987,9 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
     if arguments.peek().is_some_and(|argument| argument == "token") {
         return Err("legacy token commands retired; re-pair with receive enroll; preserve existing tokens and history".into());
     }
-    if arguments
-        .peek()
-        .is_some_and(|a| a == "revoke" || a == "enable")
-    {
-        let action = if arguments.next().as_deref() == Some("revoke") {
-            semon_push::enrollment::OwnerAction::Revoke
-        } else {
-            semon_push::enrollment::OwnerAction::Enable
-        };
+    if arguments.peek().is_some_and(|a| a == "revoke") {
+        arguments.next();
+        let action = semon_push::enrollment::OwnerAction::Revoke;
         let (mut dir, mut machine, mut kind) = (None, None, None);
         while let Some(arg) = arguments.next() {
             let value = arguments
@@ -1007,9 +1001,6 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
                 "--kind" => kind = Some(value),
                 _ => return Err(format!("unknown receive argument: {arg}")),
             }
-        }
-        if action == semon_push::enrollment::OwnerAction::Enable && kind.is_none() {
-            return Err("receive enable requires --kind K".into());
         }
         return Ok(ReceiveArgs::Owner {
             dir: dir.ok_or("receive requires --dir DIR")?,

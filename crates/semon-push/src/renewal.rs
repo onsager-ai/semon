@@ -1,10 +1,10 @@
 //! Receiver renewal state. Pending nonces are process-local; rate state and
-//! committed delivery reservations share the credential registry transaction.
+//! committed results share the credential registry transaction.
 use crate::{
     credentials::{Bearer, Decision, Retiring, Secret},
     enrollment::{CertificatePin, Error, Registry, Store},
     provision_wire::{self, Refused},
-    renewal_wire::{self as wire, Action, Begun, Credential, Generation},
+    renewal_wire::{self as wire, Begun, Credential, Generation},
     serve::VerifiedClientIdentity,
 };
 use serde::{Deserialize, Serialize};
@@ -61,10 +61,9 @@ pub(crate) struct Receipt {
     pub application_hash: [u8; 32],
     pub created_at: u64,
     pub committed_at: u64,
-    pub recovery_until: u64,
+    pub retry_until: u64,
     pub credentials: Vec<Bearer>,
     pub client_certificate: Option<Vec<u8>>,
-    pub deliveries: u8,
 }
 #[derive(Clone)]
 struct Pending {
@@ -76,7 +75,6 @@ struct Pending {
 pub struct Receiver {
     pending: BTreeMap<String, Pending>,
     latest: u64,
-    terminal: BTreeMap<String, u64>,
     #[cfg(test)]
     fail_delivery: u8,
     #[cfg(test)]
@@ -160,7 +158,7 @@ impl Receipt {
         let Ok(e) = enrollment(registry, &self.begun.enrollment_id) else {
             return false;
         };
-        now < self.recovery_until
+        now < self.retry_until
             && self.begun.generations.iter().all(|g| {
                 e.credential_kinds.iter().any(|s| {
                     s.kind == g.kind && s.available && s.generations.current == g.generation
@@ -258,7 +256,6 @@ impl Receiver {
             audit(dir, &begun, "expired", now)?;
             self.pending.remove(&begun.enrollment_id);
         }
-        self.terminal.retain(|_, expires| now < *expires);
         Ok(())
     }
     fn begin(
@@ -288,7 +285,6 @@ impl Receiver {
                 now,
             )?;
             let begun = receipt.begun.clone();
-            observe(&mut store, &mut registry, now)?;
             return Ok(begun);
         }
         let e = enrollment(&registry, &message.enrollment_id)?.clone();
@@ -312,7 +308,6 @@ impl Receiver {
             identity,
             now,
         )?;
-        observe(&mut store, &mut registry, now)?;
         self.expire(dir, now)?;
         self.pending.retain(|id, pending| {
             registry.enrollments.iter().any(|e| {
@@ -324,18 +319,6 @@ impl Receiver {
                             s.kind == g.kind && s.available && s.generations.current == g.generation
                         })
                     })
-                    && pending
-                        .begun
-                        .enable_authorization_ids
-                        .iter()
-                        .all(|authorization_id| {
-                            e.credential_kinds.iter().any(|s| {
-                                s.enable_authorization.as_ref().is_some_and(|a| {
-                                    a.authorization_id == *authorization_id
-                                        && a.consumed_renewal_id.is_none()
-                                })
-                            })
-                        })
             })
         });
         if let Some(pending) = self.pending.get(&message.enrollment_id) {
@@ -360,15 +343,9 @@ impl Receiver {
         {
             return Err(Failure::ScopeMismatch);
         }
-        let mut authorizations = Vec::new();
         let mut targets = Vec::new();
         for scope in &e.credential_kinds {
-            if scope.available
-                || scope
-                    .enable_authorization
-                    .as_ref()
-                    .is_some_and(|a| a.consumed_renewal_id.is_none())
-            {
+            if scope.available {
                 targets.push(Generation {
                     kind: scope.kind,
                     generation: scope
@@ -377,16 +354,6 @@ impl Receiver {
                         .checked_add(1)
                         .ok_or(Failure::ScopeMismatch)?,
                 });
-                if !scope.available {
-                    authorizations.push(
-                        scope
-                            .enable_authorization
-                            .as_ref()
-                            .ok_or(Failure::ScopeMismatch)?
-                            .authorization_id
-                            .clone(),
-                    );
-                }
             }
             // Never overwrite a still-live retiring slot.
             if scope.generations.retiring.as_ref().is_some_and(|r| {
@@ -403,7 +370,6 @@ impl Receiver {
             }
         }
         targets.sort_by_key(|g| g.kind.wire_name());
-        authorizations.sort();
         authenticate(
             &registry,
             &message.enrollment_id,
@@ -413,15 +379,13 @@ impl Receiver {
             identity,
             now,
         )?;
-        if authorizations.is_empty()
-            && !registry.credentials.iter().any(|b| {
-                b.enrollment_id == message.enrollment_id
-                    && expected
-                        .iter()
-                        .any(|g| g.kind == b.kind && g.generation == b.generation)
-                    && b.valid_until.saturating_sub(now) < wire::WINDOW
-            })
-        {
+        if !registry.credentials.iter().any(|b| {
+            b.enrollment_id == message.enrollment_id
+                && expected
+                    .iter()
+                    .any(|g| g.kind == b.kind && g.generation == b.generation)
+                && b.valid_until.saturating_sub(now) < wire::WINDOW
+        }) {
             return Err(Failure::ScopeMismatch);
         }
         // Authentication precedes disk maintenance, audit work and clock writes.
@@ -464,7 +428,6 @@ impl Receiver {
                 .checked_add(wire::LIFETIME)
                 .ok_or(Failure::ScopeMismatch)?,
             generations: targets,
-            enable_authorization_ids: authorizations,
         };
         registry.renewal_admission[index].creations.push(now);
         registry.latest = now;
@@ -513,9 +476,6 @@ impl Receiver {
             if !receipt.live(&registry, now) {
                 return Err(Failure::EndedAuthority);
             }
-            if message.action != Action::Recover || receipt.deliveries != 1 {
-                return Err(Failure::ReplayTerminal);
-            }
             if receipt.application_hash != <[u8; 32]>::from(Sha256::digest(application.as_ref())) {
                 return Err(Failure::InvalidCredential);
             }
@@ -536,27 +496,7 @@ impl Receiver {
                 exporter,
                 &application,
             )?;
-            observe(&mut store, &mut registry, now)?;
-            self.expire(dir, now)?;
-            let bytes = delivery(&receipt, &application)?;
-            audit(dir, &receipt.begun, "recover_delivery_reserved", now)?;
-            registry
-                .renewal_receipts
-                .iter_mut()
-                .find(|r| r.begun.renewal_id == message.renewal_id)
-                .ok_or(Failure::ScopeMismatch)?
-                .deliveries = 2;
-            registry.latest = now;
-            self.commit_delivery(&mut store, &registry)?;
-            #[cfg(test)]
-            if self.fail_delivery == 3 {
-                self.fail_delivery = 0;
-                return Err(Failure::CommitUncertain);
-            }
-            return Ok(bytes);
-        }
-        if self.terminal.contains_key(&message.renewal_id) {
-            return Err(Failure::ReplayTerminal);
+            return delivery(&receipt, &application);
         }
         let pending = self
             .pending
@@ -564,7 +504,7 @@ impl Receiver {
             .filter(|p| p.begun.renewal_id == message.renewal_id)
             .cloned()
             .ok_or(Failure::ReplayTerminal)?;
-        if message.action == Action::Recover || now >= pending.begun.expires_at {
+        if now >= pending.begun.expires_at {
             return Err(Failure::ReplayTerminal);
         }
         authenticate(
@@ -585,21 +525,8 @@ impl Receiver {
             &application,
         )?;
         observe(&mut store, &mut registry, now)?;
-        let expiry = self.expire(dir, now);
-        if message.action != Action::Cancel {
-            expiry?;
-        }
+        self.expire(dir, now)?;
         let e = enrollment(&registry, &message.enrollment_id)?.clone();
-        for id in &pending.begun.enable_authorization_ids {
-            if !e.credential_kinds.iter().any(|s| {
-                !s.available
-                    && s.enable_authorization.as_ref().is_some_and(|a| {
-                        a.authorization_id == *id && a.consumed_renewal_id.is_none()
-                    })
-            }) {
-                return Err(Failure::ScopeMismatch);
-            }
-        }
         for g in &pending.authentication {
             if !e
                 .credential_kinds
@@ -608,25 +535,6 @@ impl Receiver {
             {
                 return Err(Failure::ScopeMismatch);
             }
-        }
-        if message.action == Action::Cancel {
-            // Cancellation removes pending authority even if audit custody is
-            // unavailable; it uses the same terminal rule as owner revocation.
-            let _ = audit(dir, &pending.begun, "cancel", now);
-            registry.latest = now;
-            store
-                .commit(registry.revision(), &registry)
-                .map_err(Failure::from)?;
-            self.pending.remove(&message.enrollment_id);
-            self.terminal
-                .insert(message.renewal_id.clone(), pending.begun.expires_at);
-            return provision_wire::encode_message(&wire::Cancelled {
-                version: 1,
-                enrollment_id: message.enrollment_id.clone(),
-                renewal_id: message.renewal_id.clone(),
-                cancelled: true,
-            })
-            .map_err(Failure::from);
         }
         let until = now
             .checked_add(provision_wire::INITIAL_CREDENTIAL_VALIDITY_SECONDS)
@@ -652,7 +560,7 @@ impl Receiver {
         } else {
             None
         };
-        let mut recovery_until = u64::MAX;
+        let mut retry_until = u64::MAX;
         let mut issued = Vec::new();
         for target in &pending.begun.generations {
             let scope = registry
@@ -688,26 +596,11 @@ impl Receiver {
                     .checked_add(wire::OVERLAP)
                     .ok_or(Failure::ScopeMismatch)?
                     .min(old.valid_until);
-                recovery_until = recovery_until.min(cutover_at);
+                retry_until = retry_until.min(cutover_at);
                 scope.generations.retiring = Some(Retiring {
                     generation: old.generation,
                     cutover_at,
                 });
-            } else {
-                let authorization = scope
-                    .enable_authorization
-                    .as_mut()
-                    .filter(|a| {
-                        pending
-                            .begun
-                            .enable_authorization_ids
-                            .contains(&a.authorization_id)
-                            && a.consumed_renewal_id.is_none()
-                    })
-                    .ok_or(Failure::ScopeMismatch)?;
-                authorization.consumed_renewal_id = Some(message.renewal_id.clone());
-                scope.available = true;
-                scope.generations.retiring = None;
             }
             scope.generations.current = target.generation;
             issued.push(Bearer {
@@ -759,10 +652,9 @@ impl Receiver {
             application_hash: Sha256::digest(application.as_ref()).into(),
             created_at: pending.created_at,
             committed_at: now,
-            recovery_until,
+            retry_until,
             credentials: issued.clone(),
             client_certificate: certificate,
-            deliveries: 1,
         };
         let bytes = delivery(&receipt, &application)?;
         registry.credentials.extend(issued);
@@ -774,7 +666,7 @@ impl Receiver {
         registry
             .check_renewal_admission(self.pending.len().saturating_sub(1))
             .map_err(Failure::from)?;
-        audit(dir, &pending.begun, "commit_delivery_reserved", now)?;
+        audit(dir, &pending.begun, "commit", now)?;
         #[cfg(test)]
         if self.fail_delivery == 1 {
             self.fail_delivery = 0;
@@ -840,7 +732,6 @@ fn verify(
         begun,
         authentication,
         exporter,
-        message.action,
         application,
     )?;
     ring::signature::UnparsedPublicKey::new(
@@ -981,15 +872,13 @@ impl Registry {
                 || wire::identifier(&r.begun.renewal_id).is_err()
                 || provision_wire::decode_fixed::<32>(&r.begun.receiver_nonce).is_err()
                 || r.begun.version != 1
-                || r.deliveries == 0
-                || r.deliveries > 2
                 || r.created_at > r.committed_at
                 || r.begun.expires_at
                     != r.created_at
                         .checked_add(wire::LIFETIME)
                         .ok_or(Error::Invalid)?
                 || r.committed_at >= r.begun.expires_at
-                || r.committed_at >= r.recovery_until
+                || r.committed_at >= r.retry_until
                 || r.scope_digest != wire::scope_digest(&r.authentication, &r.begun.generations)
                 || r.origin_key_hash != <[u8; 32]>::from(Sha256::digest(&e.origin_key))
                 || r.authentication.is_empty()
@@ -1009,18 +898,6 @@ impl Registry {
                 {
                     return Err(Error::Invalid);
                 }
-            }
-            if r.begun.enable_authorization_ids.len() > 3
-                || r.begun
-                    .enable_authorization_ids
-                    .iter()
-                    .any(|id| wire::identifier(id).is_err())
-                || r.begun
-                    .enable_authorization_ids
-                    .windows(2)
-                    .any(|w| w[0] >= w[1])
-            {
-                return Err(Error::Invalid);
             }
             if r.authentication.iter().any(|old| {
                 !r.begun.generations.iter().any(|new| {

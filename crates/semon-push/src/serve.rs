@@ -1288,12 +1288,7 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
     if reply.status >= 500 {
         eprintln!("semon receive: {machine}: {}", reply.body);
     }
-    let headers = if authenticated.renewal_due {
-        &[("Semon-Renewal", "due")][..]
-    } else {
-        &[]
-    };
-    match connection.respond(reply.status, &reply.body, head.close, headers) {
+    match connection.respond(reply.status, &reply.body, head.close, &[]) {
         Ok(()) => Next::Continue,
         Err(_) => Next::Close,
     }

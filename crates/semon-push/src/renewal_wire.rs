@@ -58,23 +58,6 @@ pub struct Begun {
     pub receiver_nonce: String,
     pub expires_at: u64,
     pub generations: Vec<Generation>,
-    pub enable_authorization_ids: Vec<String>,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Action {
-    Commit,
-    Recover,
-    Cancel,
-}
-impl Action {
-    pub fn wire_name(self) -> &'static str {
-        match self {
-            Self::Commit => "commit",
-            Self::Recover => "recover",
-            Self::Cancel => "cancel",
-        }
-    }
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -82,7 +65,6 @@ pub struct Finish {
     pub version: u32,
     pub enrollment_id: String,
     pub renewal_id: String,
-    pub action: Action,
     pub credentials: Vec<Credential>,
     pub application_key: String,
     pub proof: String,
@@ -116,15 +98,6 @@ pub struct Delivered {
     pub credentials: Vec<DeliveredCredential>,
     pub client_certificate: Option<String>,
 }
-#[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Cancelled {
-    pub version: u32,
-    pub enrollment_id: String,
-    pub renewal_id: String,
-    pub cancelled: bool,
-}
-
 pub enum Request {
     Begin(Begin),
     Finish(Finish),
@@ -208,14 +181,10 @@ pub fn possession_message(
     begun: &Begun,
     authentication: &[Generation],
     exporter: &[u8; 32],
-    action: Action,
     application: &[u8; 32],
 ) -> Result<Vec<u8>, Refused> {
     let nonce = provision_wire::decode_fixed::<32>(&begun.receiver_nonce)?;
     let scope = scope_digest(authentication, &begun.generations);
-    let mut ids = begun.enable_authorization_ids.clone();
-    ids.sort();
-    let ids_hash: [u8; 32] = Sha256::digest(serde_json::to_vec(&ids).map_err(|_| Refused)?).into();
     let application_hash: [u8; 32] = Sha256::digest(application).into();
     let mut message = b"semon-asi-renewal-pop-v1\0".to_vec();
     message.extend(fields(&[
@@ -226,9 +195,7 @@ pub fn possession_message(
         begun.renewal_id.as_bytes(),
         &nonce,
         exporter,
-        action.wire_name().as_bytes(),
         &scope,
-        &ids_hash,
         &application_hash,
     ]));
     Ok(message)
