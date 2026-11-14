@@ -14,7 +14,7 @@ enrollment_dir.mkdir(mode=0o700)
 token = secrets.token_hex(32)
 enrollment_id = secrets.token_hex(32)
 registry = {
-    "format": 2,
+    "format": 3,
     "latest": 0,
     "next_sequence": 2,
     "tombstones": [],
@@ -44,6 +44,8 @@ registry = {
         "revoked_at": None,
     }],
     "pairing_receipts": [],
+    "renewal_receipts": [],
+    "renewal_admission": [],
 }
 for path, value in [(enrollment_dir / "registry.json", json.dumps(registry)),
                     (enrollment_dir / "registry.lock", ""), (token_path, token)]:

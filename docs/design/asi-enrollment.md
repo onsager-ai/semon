@@ -49,7 +49,7 @@ controller and `receive enroll` terminal. Receiver-side public_tls provisioning
 creates mirror-only enrollments; origin connect/client and optional client certificates
 are integrated. Independently validated analytics/body admission, renewal and
 revocation CLI remain follow-up integrations. Shipped custody creates
-`DIR/enrollment/registry.json` (strict current format 2)
+`DIR/enrollment/registry.json` (strict current format 3)
 and `DIR/enrollment/registry.lock`, relative to receiver state directory `DIR`.
 One atomic registry document contains enrollment bindings, generation-scoped
 certificate pins and kind-scoped bearer hashes; raw bearer secrets are never
@@ -65,7 +65,7 @@ receiver identity/assertion-issuer custody comes from ReceiverCustody.
 all fields for the later `origin_read::EnrollmentScope` adapter. Revocation comes
 from a separate CLI process editing the registry and is observed through its
 revision; pairing holds `pairing.lock`, acquiring `registry.lock` only for short
-transactions so that external updates remain possible. Registry format 2 includes live nonsecret pairing
+transactions so that external updates remain possible. Registry format 3 includes live nonsecret pairing
 activation receipts in the same commit as enrollment and credential hashes. The
 activation input's commitment binds the exact machine, namespace/incarnation or
 mirror-only binding, kind settings, certificate pins and validity to B4. Secrets
@@ -444,7 +444,7 @@ Later enrollments reuse receiver identity, owner, keys and directories.
 
 Implementation status (slice 4a PR3.2a, part of #593): `receiver_custody`
 is a Unix library consumed by receiver-side provisioning. Under `DIR`, mode-0700 directories are `enrollment/`
-(current registry format 2), `issuer-secrets/`, `cache-secrets/`, `body-cache/`, `acl/` and
+(current registry format 3), `issuer-secrets/`, `cache-secrets/`, `body-cache/`, `acl/` and
 `receiver-audit/`. Mode-0600 files are `receiver.json` (strict JSON format 2:
 random receiver ID and current issuer key ID), `custody.lock`,
 `issuer-secrets/issuer-<key-id>.seed` (raw 32-byte Ed25519 seed),
@@ -589,11 +589,13 @@ slot; its revoked generation never regains authority.
 An ordinary new begin outside the renewal window refuses; an outstanding owner
 enable authorization permits an early begin under otherwise-valid current authority.
 
-When a certificate is required, reissue a clientAuth leaf through `client_ca.rs`
-for the SAME origin P-256 key and SAME tagged SPKI pin, with the renewed validity.
-Record the same pin under the new generation; never replace it with a new key or
-leaf fingerprint. CA validity still bounds issuance; renewal cannot repair expired
-CA custody or change its trust. The private origin key never leaves the origin.
+When the enrollment holds an enrolled certificate pin, reissue and deliver a
+clientAuth leaf through `client_ca.rs` for the SAME origin P-256 key and SAME tagged
+SPKI pin, with the renewed validity, even when all renewed kinds make presenting
+the certificate optional. Record the same pin under EVERY renewed generation;
+this preserves certificate authority for a later enable of a required kind after
+old generations are compacted. Never replace it with a new key or leaf fingerprint.
+CA validity still bounds issuance; renewal cannot repair expired CA custody or change its trust. The private origin key never leaves the origin.
 
 PR4.3 stages the complete renewed credential set, certificate, signed configuration
 and unchanged consent binding using connect's owned 0700 directories, 0600 files,
@@ -726,7 +728,9 @@ generation list, the SHA-256 of the sorted bound enable-authorization ID list
 (compact JSON array), and SHA-256 of the application key. Use pairing's eight-byte
 big-endian length prefix for each field; sort kind lists by their wire names and
 encode each list as compact JSON with the field order shown above, excluding
-bearer values from the identity list (`{ kind, generation }`). Sign with
+bearer values from the identity list (`{ kind, generation }`). The scope digest
+hashes the authentication-list JSON followed by the target-list JSON, each with
+its own eight-byte big-endian length prefix. Sign with
 `ECDSA_P256_SHA256_FIXED` and verify against the enrolled origin key. The receiver
 must retain that verified key from pairing in integrity-protected registry custody;
 a pin alone is not a proof-verification key. The nonce, action and live exporter
@@ -773,6 +777,8 @@ conservative refusal rule below; do not infer revocation or mint another generat
 Cancel is a signed finish action with the same credential checks and a staged
 application-key commitment. Before commit it terminally cancels the pending ID and
 issues nothing; after commit it refuses without changing committed authority.
+Unrelated expired attempts whose audit append fails remain retained for a later
+audit attempt and must not block cancellation of a still-live attempt.
 Stopping committed local use requires disconnect; receiver revocation is a separate
 owner action, never advice inferred from that generic refusal. Restart
 destroys uncommitted pending nonce state, so its finish cannot activate; a new begin
@@ -883,7 +889,28 @@ reservation/recovery, cancel, first-use cutover, expiry and refusals with time,
 nonsecret IDs, kind/generation, outcome and local reason class. Owner operations
 also record authenticated owner and target. Never audit bearer/application keys,
 private keys, proofs, exporter bytes or source text. Audit storage stays separate
-from registry/cache; audit failure refuses new authority or release. Revocation
+from registry/cache. Refusals use a separate, fixed 8 KiB summary
+(`renewal-refusals.json`), with saturating counts and the most recent nonsecret
+scope/time/outcome for each of eleven local failure classes: malformed/version,
+invalid bearer/key/certificate, revoked/expired/retired authority, scope mismatch,
+replay/terminal attempt, rate, capacity, custody, audit unavailable, commit uncertain
+and contention. All eleven worst-case records fit the fixed 8 KiB encoded budget.
+This aggregate intentionally retains counts rather than individual refusal
+history. Its own lock and one bounded replacement staging file are independent
+of the append-only successful-event journal; corrupt, full or unavailable refusal
+custody never consumes that journal's capacity or blocks a legitimate renewal.
+Release the receiver-wide renewal mutex before refusal storage IO, including file
+and directory fsync. Publish even the first summary by fsynced staging and atomic
+rename; an interrupted first publication leaves no empty final file. An existing
+empty/corrupt summary is preserved and reports local refusal-audit unavailability
+on stderr, rather than silently resetting evidence or disabling renewal. Expected
+refusal-summary lock contention drops that aggregate update silently. Storage
+failures emit at most one warning per process lifetime across all receivers;
+subsequent failures remain quiet, so hostile refusals cannot flood stderr.
+Authenticate before compaction, expiry auditing or persisted clock writes. Reuse
+journal validation only while its inode/size/change timestamps match the last
+fully validated snapshot; a changed journal is validated again before append.
+Audit failure in the successful-event journal refuses new authority or release. Revocation
 still removes authority under its reserved registry budget; audit failure must not
 turn revocation into permission to continue access.
 
@@ -931,7 +958,7 @@ owner-authorized extension to the normal unrevoked-kind result set. No client
 request can choose it, add a never-enrolled kind, alter consent/binding/pin or
 resurrect a revoked generation. A revoked enrollment is never reactivated.
 
-The PR4.2 registry is one strict current format, replacing format 1. Keep live
+The PR4.2 registry is one strict current format (3 for renewal), replacing earlier formats directly. Keep live
 credential records and compact tombstones; move ended-generation evidence to
 append-only audit custody using the audit-before-compaction rule above. Replace
 the terminal whole-kind `KindScope.revoked_at` shape with current kind availability
@@ -986,7 +1013,8 @@ concurrent renewal cannot publish active custody after disconnect wins the lock.
 | --- | --- |
 | 4.0, this docs-only PR | Accepted renewal/revoke/enable contract, exact operator strings and CI obligations; no runtime implementation |
 | 4.1, separately in flight | Credential-bound authority handle and in-flight checks independent of unrelated registry revisions |
-| 4.2 | Receiver renewal routes, current registry format, revoke/enable, audit-before-compaction, credential_generation_ended audit record, tombstones and live-state admission integration |
+| 4.2a (#665), shipped | Current registry, revoke/enable, audit-before-compaction, credential_generation_ended records, tombstones and first-use cutover |
+| 4.2b, implementation draft | Receiver renewal begin/finish during ordinary receive, enrolled-key proof, generation receipts and reserved recovery deliveries; strict registry format 3 adds renewal receipts and persisted admission. Receiver CI and independent review remain required. |
 | 4.3 | Origin push/watch renewal, staged installation/recovery, local disconnect and URL-based --receiver on connect/push/disconnect using one endpoint normalization; replace #651's hash selector in docs/tests together |
 
 PR3b private-root follows PR4; a future `--trust-root FILE` is outside this contract

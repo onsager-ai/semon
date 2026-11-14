@@ -317,6 +317,71 @@ fn compaction_crash_points_keep_durable_evidence_and_restart_idempotently() {
 }
 
 #[test]
+fn supported_three_kind_live_capacity_and_tombstones_fit_admission() {
+    let (template, _) = registry(Kind::AnalyticsPublish);
+    let mut enrollments = Vec::new();
+    let mut credentials = Vec::new();
+    for n in 1..=128u64 {
+        let mut enrollment = template.enrollments[0].clone();
+        enrollment.enrollment_id = format!("{n:064x}");
+        enrollment.machine = format!("machine-{n}");
+        enrollment.sequence = n;
+        let pin = Pin::Spki(Secret::new(format!("pin-{n}")).hash());
+        enrollment.enrolled_pin = Some(pin.clone());
+        enrollment.client_certificate_pins = [1, 2]
+            .into_iter()
+            .map(|generation| CertificatePin {
+                pin: pin.clone(),
+                generation,
+                revoked_at: None,
+            })
+            .collect();
+        if let Binding::Admitted { namespace, .. } = &mut enrollment.binding {
+            *namespace = format!("namespace-{n}");
+        }
+        enrollment.credential_kinds.clear();
+        for kind in [Kind::AnalyticsPublish, Kind::BodyChannel, Kind::MirrorPush] {
+            let mut scope = KindScope::new(kind, 2);
+            scope.generations.retiring = Some(crate::credentials::Retiring {
+                generation: 1,
+                cutover_at: 90,
+            });
+            enrollment.credential_kinds.push(scope);
+            for generation in [1, 2] {
+                let mut credential = template.credentials[0].clone();
+                credential.enrollment_id = enrollment.enrollment_id.clone();
+                credential.credential_id =
+                    format!("{:064x}", n * 10 + kind.index() as u64 * 2 + generation);
+                credential.sha256 =
+                    Secret::new(format!("bearer-{n}-{}-{generation}", kind.wire_name())).hash();
+                credential.kind = kind;
+                credential.generation = generation;
+                credentials.push(credential);
+            }
+        }
+        enrollments.push(enrollment);
+    }
+    let mut registry = Registry::from_records(enrollments, credentials).unwrap();
+    for n in 129..=640u64 {
+        registry.tombstones.push(Tombstone {
+            enrollment_id: format!("{n:064x}"),
+            machine: "m".repeat(63),
+            sequence: n,
+            pin: Some(Pin::Spki(Secret::new(format!("pin-{n}")).hash())),
+            high_water: [u64::MAX; 3],
+        });
+    }
+    registry.next_sequence = 641;
+    registry.validate().unwrap();
+    registry.check_admission().unwrap();
+    assert_eq!(registry.credentials.len(), 128 * 6);
+    assert_eq!(registry.tombstones.len(), 512);
+    let bytes = serde_json::to_vec(&registry).unwrap().len();
+    // Include four maximum encoded pending outcomes on top of all live records.
+    assert!(bytes + 4 * 8192 < ADMISSION_CAP as usize);
+}
+
+#[test]
 fn terminal_revoke_works_at_the_admission_boundary_without_audit() {
     let f = Fixture::new();
     let mut store = Store::initialize(&f.0).unwrap();
@@ -329,7 +394,7 @@ fn terminal_revoke_works_at_the_admission_boundary_without_audit() {
         pin: None,
         high_water: [u64::MAX; 3],
     };
-    let available = ADMISSION_CAP as usize - serde_json::to_vec(&r).unwrap().len();
+    let available = ADMISSION_CAP as usize - 4 * 8192 - serde_json::to_vec(&r).unwrap().len();
     let count = available / (serde_json::to_vec(&sample).unwrap().len() + 1);
     for n in 1..=count {
         let mut t = sample.clone();
@@ -343,7 +408,7 @@ fn terminal_revoke_works_at_the_admission_boundary_without_audit() {
     assert!(r.check_admission().is_ok());
     let bytes = serde_json::to_vec(&r).unwrap().len();
     assert!(bytes <= ADMISSION_CAP as usize);
-    assert!(bytes > ADMISSION_CAP as usize - 512);
+    assert!(bytes + 4 * 8192 > ADMISSION_CAP as usize - 512);
     store.commit(0, &r).unwrap();
     store
         .owner_update(&f.0, None, OwnerAction::Revoke, "owner", &id('a'), 20)

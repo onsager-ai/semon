@@ -870,6 +870,16 @@ impl CacheDirectory {
     }
 
     pub(crate) fn open_file(&self, path: &Path, flags: libc::c_int) -> Result<File> {
+        self.open_optional_file(path, flags)?
+            .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound).into())
+    }
+
+    /// Only ENOENT is absence; insecure members and other IO errors still fail.
+    pub(crate) fn open_optional_file(
+        &self,
+        path: &Path,
+        flags: libc::c_int,
+    ) -> Result<Option<File>> {
         let name = Self::name(path)?;
         // SAFETY: the directory fd is live, the name is NUL terminated and the
         // mode argument is provided even when O_CREAT is absent.
@@ -882,7 +892,12 @@ impl CacheDirectory {
             )
         };
         if fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
+            let error = std::io::Error::last_os_error();
+            return if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err(error.into())
+            };
         }
         // SAFETY: openat returned a fresh descriptor, now exclusively owned here.
         let file = unsafe { File::from_raw_fd(fd) };
@@ -898,14 +913,14 @@ impl CacheDirectory {
                 "cache member must be an owned regular 0600 file with one link",
             ));
         }
-        Ok(file)
+        Ok(Some(file))
     }
 
     fn create(&self, path: &Path) -> Result<File> {
         self.open_file(path, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)
     }
 
-    fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+    pub(crate) fn rename(&self, from: &Path, to: &Path) -> Result<()> {
         let from = Self::name(from)?;
         let to = Self::name(to)?;
         // SAFETY: both names are valid C strings and the directory fd stays open.

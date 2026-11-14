@@ -32,7 +32,13 @@ impl Registry {
         // Reserve the maximum terminal timestamp/availability deltas per record.
         let terminal_delta =
             self.credentials.len() as u64 * 20 + self.enrollments.len() as u64 * (20 + 512);
-        if size > ADMISSION_CAP || size.saturating_add(terminal_delta) > CAP {
+        // Four process-local pending attempts can each commit a receipt. Reserve
+        // their maximum encoded outcomes for every authority-producing writer,
+        // including pairing and owner enables in other processes.
+        let pending_outcomes = 4 * 8192;
+        if size.saturating_add(pending_outcomes) > ADMISSION_CAP
+            || size.saturating_add(terminal_delta) > CAP
+        {
             return Err(Error::Full);
         }
         Ok(())
@@ -320,7 +326,7 @@ impl Store {
     pub fn compact(&mut self, receiver: &Path, now: u64) -> Result<()> {
         self.compact_with_fault(receiver, now, |_| Ok(()))
     }
-    pub(super) fn compact_with_fault(
+    pub(crate) fn compact_with_fault(
         &mut self,
         receiver: &Path,
         now: u64,
@@ -346,6 +352,14 @@ impl Store {
         fault(Stage::Synced)?;
         let has_terminal = next.enrollments.iter().any(|e| e.revoked_at.is_some());
         let receipt_count = next.pairing_receipts.len();
+        let renewal_count = next.renewal_receipts.len();
+        let live_renewals: Vec<_> = next
+            .renewal_receipts
+            .iter()
+            .filter(|r| r.live(&next, now))
+            .cloned()
+            .collect();
+        next.renewal_receipts = live_renewals;
         next.pairing_receipts.retain(|r| {
             r.valid_until > now
                 && r.deliveries < 2
@@ -358,7 +372,11 @@ impl Store {
                             .all(|k| k.available && k.generations.current == 1)
                 })
         });
-        if records.is_empty() && !has_terminal && receipt_count == next.pairing_receipts.len() {
+        if records.is_empty()
+            && !has_terminal
+            && receipt_count == next.pairing_receipts.len()
+            && renewal_count == next.renewal_receipts.len()
+        {
             return Ok(());
         }
         next.credentials
@@ -400,6 +418,11 @@ impl Store {
             next.pairing_receipts
                 .retain(|r| r.enrollment_id != e.enrollment_id);
         }
+        next.renewal_admission.retain(|a| {
+            next.enrollments
+                .iter()
+                .any(|e| e.enrollment_id == a.enrollment_id)
+        });
         next.latest = now;
         self.commit_compacted(&next, fault)
     }
@@ -476,7 +499,29 @@ impl Store {
         if scope.generations.current == generation && scope.generations.retiring.take().is_some() {
             next.latest = now.max(next.latest);
             store.commit(next.revision(), &next)?;
-            return store.snapshot();
+            let committed = store.snapshot()?;
+            if let Some(receipt) = committed.renewal_receipts.iter().find(|r| {
+                r.begun.enrollment_id == enrollment_id
+                    && r.begun
+                        .generations
+                        .iter()
+                        .any(|g| g.kind == kind && g.generation == generation)
+            }) {
+                // Terminal cutover must remain available without audit custody.
+                // It never creates or releases credentials.
+                let _ = generation_audit::renewal(
+                    receiver,
+                    &generation_audit::RenewalRecord {
+                        version: 1,
+                        observed_at: now.max(committed.latest),
+                        enrollment_id,
+                        renewal_id: receipt.begun.renewal_id.clone(),
+                        generations: vec![crate::renewal_wire::Generation { kind, generation }],
+                        action: "first_use_cutover".into(),
+                    },
+                );
+            }
+            return Ok(committed);
         }
         Ok(next)
     }

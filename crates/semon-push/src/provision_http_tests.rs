@@ -143,6 +143,243 @@ impl Harness {
     }
 }
 #[test]
+fn renewal_hostile_transport_refuses_without_pairing_or_registry_changes() {
+    let mut h = Harness::new();
+    let shared = Arc::get_mut(&mut h.shared).unwrap();
+    shared.provisioning = None;
+    shared.provisioning_terminal = None;
+    let before = fs::read(h.dir.0.join("enrollment/registry.json")).unwrap();
+    let requests = [
+        "POST /v1/renew/begin HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n{}",
+        "POST /v1/renew/begin HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 8193\r\n\r\n",
+        "POST /v1/renew/begin HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        "POST /v1/renew/begin HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}",
+        "POST /v1/renew/finish HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: 25\r\n\r\n{\"version\":1,\"version\":1}",
+    ];
+    for request in requests {
+        let (mut client, worker) = h.connect();
+        client.write_all(request.as_bytes()).unwrap();
+        client.flush().unwrap();
+        let (status, body) = response(&mut client);
+        assert_eq!(status, 401);
+        assert!(!String::from_utf8_lossy(&body).contains("Semon-Renewal"));
+        drop(client);
+        worker.join().unwrap();
+        assert_eq!(
+            fs::read(h.dir.0.join("enrollment/registry.json")).unwrap(),
+            before
+        );
+        assert_eq!(h.shared.admission.lock().unwrap().provisioning, 0);
+    }
+    h.shared
+        .provisioning_timeout
+        .as_ref()
+        .unwrap()
+        .store(true, Ordering::Relaxed);
+    let (mut client, worker) = h.connect();
+    assert_eq!(post(&mut client, "/v1/renew/begin", b"{}").0, 401);
+    drop(client);
+    worker.join().unwrap();
+    assert_eq!(
+        fs::read(h.dir.0.join("enrollment/registry.json")).unwrap(),
+        before
+    );
+    assert_eq!(h.shared.admission.lock().unwrap().provisioning, 0);
+}
+
+#[test]
+fn ordinary_receive_renews_without_pairing_controller_or_terminal() {
+    ordinary_renewal(false);
+    ordinary_renewal(true);
+}
+fn ordinary_renewal(required_certificate: bool) {
+    use crate::{
+        credentials::{Bearer, Secret},
+        enrollment::{Binding, Enrollment, KindScope, Registry, Store},
+        renewal_wire as renewal,
+    };
+    let mut h = Harness::new();
+    let shared = Arc::get_mut(&mut h.shared).unwrap();
+    shared.provisioning = None;
+    shared.provisioning_terminal = None;
+    let rng = ring::rand::SystemRandom::new();
+    let private = ring::signature::EcdsaKeyPair::generate_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        &rng,
+    )
+    .unwrap();
+    let key = ring::signature::EcdsaKeyPair::from_pkcs8(
+        &ring::signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+        private.as_ref(),
+        &rng,
+    )
+    .unwrap();
+    let id = "a".repeat(64);
+    let secret = "existing-test-credential";
+    let pin = crate::client_ca::pin(key.public_key().as_ref()).unwrap();
+    let identity = required_certificate.then(|| crate::ClientIdentity {
+        private: zeroize::Zeroizing::new(private.as_ref().to_vec()),
+        certificate: crate::receiver_custody::ReceiverCustody::open_existing(&h.dir.0)
+            .unwrap()
+            .issue_client_certificate(key.public_key().as_ref(), &id, 100, 4_000_000)
+            .unwrap(),
+    });
+    let mut scope = KindScope::new(Kind::MirrorPush, 1);
+    scope.client_cert_required = required_certificate;
+    let registry = Registry::from_records(
+        vec![Enrollment {
+            enrollment_id: id.clone(),
+            receiver_id: "receiver".into(),
+            machine: "laptop".into(),
+            sequence: 1,
+            origin_key: key.public_key().as_ref().to_vec(),
+            endpoint: "https://localhost:443".into(),
+            enrolled_pin: required_certificate.then(|| pin.pin.clone()),
+            binding: Binding::Inapplicable,
+            client_certificate_pins: if required_certificate {
+                vec![pin.clone()]
+            } else {
+                vec![]
+            },
+            credential_kinds: vec![scope],
+            revoked_at: None,
+        }],
+        vec![Bearer {
+            credential_id: "b".repeat(64),
+            enrollment_id: id.clone(),
+            kind: Kind::MirrorPush,
+            sha256: Secret::new(secret.into()).hash(),
+            generation: 1,
+            valid_from: 0,
+            valid_until: 4_000_000,
+            revoked_at: None,
+        }],
+    )
+    .unwrap();
+    let mut store = Store::open(&h.dir.0).unwrap();
+    let revision = store.snapshot().unwrap().revision();
+    store.commit(revision, &registry).unwrap();
+    drop(store);
+    h.clock.store(2_000_000, Ordering::Relaxed);
+    let (mut client, worker) = h.connect_identity(identity.as_ref());
+    let begin = renewal::Begin {
+        version: 1,
+        enrollment_id: id.clone(),
+        credentials: vec![renewal::Credential {
+            kind: Kind::MirrorPush,
+            generation: 1,
+            bearer: secret.into(),
+        }],
+    };
+    if required_certificate {
+        let (mut missing, missing_worker) = h.connect();
+        let (status, _) = post(
+            &mut missing,
+            "/v1/renew/begin",
+            &wire::encode_message(&begin).unwrap(),
+        );
+        assert_eq!(status, 401);
+        drop(missing);
+        missing_worker.join().unwrap();
+    }
+    let foreign_key = rcgen::KeyPair::generate().unwrap();
+    let foreign = crate::ClientIdentity {
+        private: zeroize::Zeroizing::new(foreign_key.serialize_der()),
+        certificate: crate::receiver_custody::ReceiverCustody::open_existing(&h.dir.0)
+            .unwrap()
+            .issue_client_certificate(
+                foreign_key.public_key_raw(),
+                &"c".repeat(64),
+                100,
+                4_000_000,
+            )
+            .unwrap(),
+    };
+    let (mut foreign_client, foreign_worker) = h.connect_identity(Some(&foreign));
+    assert_eq!(
+        post(
+            &mut foreign_client,
+            "/v1/renew/begin",
+            &wire::encode_message(&begin).unwrap()
+        )
+        .0,
+        401
+    );
+    drop(foreign_client);
+    foreign_worker.join().unwrap();
+    let (status, body) = post(
+        &mut client,
+        "/v1/renew/begin",
+        &wire::encode_message(&begin).unwrap(),
+    );
+    assert_eq!(status, 200);
+    let begun: renewal::Begun = serde_json::from_slice(&body).unwrap();
+    let exporter = client
+        .conn
+        .export_keying_material([0; 32], wire::EXPORTER_LABEL, Some(&[]))
+        .unwrap();
+    let authentication = vec![renewal::Generation {
+        kind: Kind::MirrorPush,
+        generation: 1,
+    }];
+    let signed = renewal::possession_message(
+        "receiver",
+        "https://localhost:443",
+        &begun,
+        &authentication,
+        &exporter,
+        renewal::Action::Commit,
+        &[3; 32],
+    )
+    .unwrap();
+    let proof = key.sign(&rng, &signed).unwrap();
+    let finish = renewal::Finish {
+        version: 1,
+        enrollment_id: id,
+        renewal_id: begun.renewal_id.clone(),
+        action: renewal::Action::Commit,
+        credentials: vec![renewal::Credential {
+            kind: Kind::MirrorPush,
+            generation: 1,
+            bearer: secret.into(),
+        }],
+        application_key: wire::encode(&[3; 32]),
+        proof: wire::encode(proof.as_ref()),
+    };
+    let (status, body) = post(
+        &mut client,
+        "/v1/renew/finish",
+        &wire::encode_message(&finish).unwrap(),
+    );
+    assert_eq!(status, 200);
+    let delivered: renewal::Delivered = serde_json::from_slice(&body).unwrap();
+    assert_eq!(delivered.credentials[0].generation, 2);
+    assert_eq!(delivered.client_certificate.is_some(), required_certificate);
+    if required_certificate {
+        let registry = Registry::read_current(&h.dir.0).unwrap();
+        let receipt = &registry.renewal_receipts[0];
+        crate::client_ca::validate(
+            receipt.client_certificate.as_ref().unwrap(),
+            key.public_key().as_ref(),
+            2_000_000 + wire::INITIAL_CREDENTIAL_VALIDITY_SECONDS,
+        )
+        .unwrap();
+        assert!(
+            registry.enrollments()[0]
+                .client_certificate_pins
+                .iter()
+                .any(|p| p.generation == 2 && p.pin == pin.pin)
+        );
+        assert_eq!(
+            registry.enrollments()[0].enrolled_pin.as_ref(),
+            Some(&pin.pin)
+        );
+    }
+    drop(client);
+    worker.join().unwrap();
+    assert_eq!(h.shared.admission().provisioning, 0);
+}
+#[test]
 fn production_origin_connection_validates_roots_and_hostname() {
     for (host, trusted, accepted) in [
         ("localhost", true, true),
