@@ -177,9 +177,16 @@ the same binding. Recheck current ACL/policy before release; changes need fresh
 admission. Audit failure refuses release; later receipt failure stops emission and
 leaves an attempted read, not false success.
 
+The library's `ReceiverPolicy` provider returns the ACL grant version, receiver
+policy version, cache ceilings and stream-through restriction for a principal and
+enrollment scope. The ACL-backed provider reads grants at every decision, so
+revocation takes effect at the next recheck. The receiver can only tighten the
+authenticated origin's delivery mode and cache limits; any change to the captured
+receiver decision refuses the read.
+
 **Decision — origin controls custody (#595):** origin injects the response mode
 into `OriginRead`; #592 owns source consent persistence. The receiver's
-`ReadInput::stream_through` can only tighten it. Stream-through uses request-owned
+provider stream-through restriction can only tighten it. Stream-through uses request-owned
 bounded memory, bypasses cache lookup/insertion/discard and all cache metadata or
 staging writes, and has no retry spool. `PendingDelivery::no_store()` requires the
 future HTTP route to send `Cache-Control: no-store`. Buffers and typed text are

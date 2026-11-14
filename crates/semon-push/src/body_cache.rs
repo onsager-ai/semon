@@ -89,7 +89,7 @@ impl ReadAdmission {
 }
 
 /// Receiver ceilings; optional origin limits can only narrow these values.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     pub global_bytes: u64,
     pub source_bytes: u64,
