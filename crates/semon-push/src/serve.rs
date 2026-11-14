@@ -999,6 +999,15 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
     let refused = || Next::Refuse(401, "request refused", &[]);
     let renewal_route = crate::renewal_wire::Route::from_path(&head.target);
     let route = Route::from_path(&head.target);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |now| now.as_secs());
+    #[cfg(test)]
+    let now = slot
+        .shared
+        .provisioning_clock
+        .as_ref()
+        .map_or(now, |clock| clock());
     if route.is_none() && renewal_route.is_none() {
         return refused();
     }
@@ -1021,8 +1030,22 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
         || !head
             .content_length
             .is_some_and(|n| n <= provision_wire::MAX_MESSAGE_BYTES as u64)
-        || !slot.admit_provisioning()
     {
+        if renewal_route.is_some() {
+            slot.shared
+                .tokens
+                .registry()
+                .renewal_refused(crate::renewal::Failure::Malformed, now);
+        }
+        return refused();
+    }
+    if !slot.admit_provisioning() {
+        if renewal_route.is_some() {
+            slot.shared
+                .tokens
+                .registry()
+                .renewal_refused(crate::renewal::Failure::Capacity, now);
+        }
         return refused();
     }
     // read_head leaves the absolute request deadline on the live socket.
@@ -1049,6 +1072,12 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
         connection.read_body_until(head.content_length.unwrap_or(0) as usize, read_deadline)
     };
     let Ok(body) = body else {
+        if renewal_route.is_some() {
+            slot.shared
+                .tokens
+                .registry()
+                .renewal_refused(crate::renewal::Failure::Malformed, now);
+        }
         if renewal_route.is_none()
             && let Ok(exporter) = exporter
             && let Some(controller) = slot.shared.provisioning.as_ref()
@@ -1072,20 +1101,9 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
         return refused();
     };
     if let Some(route) = renewal_route {
-        let Ok(request) = crate::renewal_wire::Request::parse(route, &body) else {
-            return refused();
-        };
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |now| now.as_secs());
-        #[cfg(test)]
-        let now = slot
-            .shared
-            .provisioning_clock
-            .as_ref()
-            .map_or(now, |clock| clock());
-        let Ok(reply) = slot.shared.tokens.registry().renew(
-            request,
+        let Ok(reply) = slot.shared.tokens.registry().renew_encoded(
+            route,
+            &body,
             exporter,
             connection.authority.verified_client_identity.as_ref(),
             now,

@@ -367,11 +367,20 @@ fn pending_capacity_expires_before_admission_and_never_evicts_live_attempts() {
             first = Some(begun);
         }
     }
-    assert!(
+    assert_eq!(
         receiver
-            .begin(&f.dir, &request(5), None, 2_000_001)
-            .is_err()
+            .handle(
+                &f.dir,
+                wire::Request::Begin(request(5)),
+                [4; 32],
+                None,
+                2_000_001
+            )
+            .unwrap_err(),
+        Failure::Capacity
     );
+    let summary = fs::read_to_string(f.dir.join("receiver-audit/renewal-refusals.json")).unwrap();
+    assert!(summary.contains("\"class\":\"capacity\""));
     assert_eq!(
         Some(
             receiver
@@ -1363,4 +1372,702 @@ fn first_use_ends_recovery_and_preserves_new_authority() {
             .decision,
         Decision::Allowed { generation: 2, .. }
     ));
+}
+
+#[test]
+fn bogus_requests_have_fixed_audit_budget_and_leave_legitimate_renewal_capacity() {
+    let f = Fixture::new();
+    let mut receiver = Receiver::default();
+    let original = fs::read(f.dir.join("enrollment/registry.json")).unwrap();
+    for i in 0..256 {
+        let request = wire::Request::Begin(wire::Begin {
+            version: 1,
+            enrollment_id: if i % 2 == 0 {
+                "a".repeat(64)
+            } else {
+                format!("{i:064x}")
+            },
+            credentials: vec![Credential {
+                kind: Kind::MirrorPush,
+                generation: 1,
+                bearer: "bogus".into(),
+            }],
+        });
+        assert_eq!(
+            receiver
+                .handle(&f.dir, request, [4; 32], None, 2_000_000)
+                .unwrap_err(),
+            Failure::Authority
+        );
+    }
+    assert_eq!(
+        fs::read(f.dir.join("enrollment/registry.json")).unwrap(),
+        original
+    );
+    assert!(!f.dir.join("receiver-audit/renewals.jsonl").exists());
+    let summary = fs::read(
+        f.dir
+            .join("receiver-audit")
+            .join(crate::generation_audit::REFUSAL_FILE),
+    )
+    .unwrap();
+    assert!(summary.len() as u64 <= crate::generation_audit::REFUSAL_CAP);
+    let summary: serde_json::Value = serde_json::from_slice(&summary).unwrap();
+    assert_eq!(summary["classes"][0]["count"], 256);
+    assert_eq!(summary["classes"][0]["last"]["class"], "authority");
+    // Refusal custody cannot take the successful-event append lock either.
+    let lock = crate::body_cache::CacheDirectory::open(&f.dir.join("receiver-audit"))
+        .unwrap()
+        .open_file(Path::new("renewal-refusals.lock"), libc::O_RDWR)
+        .unwrap();
+    lock.try_lock().unwrap();
+    let begun = f.begin(&mut receiver, 2_000_000).unwrap();
+    let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    receiver
+        .finish(&f.dir, &commit, &[4; 32], None, 2_000_000)
+        .unwrap();
+    let recover = f.finish(&begun, Action::Recover, [3; 32], [5; 32]);
+    receiver
+        .finish(&f.dir, &recover, &[5; 32], None, 2_000_000)
+        .unwrap();
+    assert_eq!(
+        Registry::read_current(&f.dir).unwrap().renewal_receipts[0].deliveries,
+        2
+    );
+}
+
+#[test]
+fn local_failure_classes_survive_until_uniform_wire_dispatch() {
+    let f = Fixture::new();
+    let auth = crate::serve_auth::RegistryAuthenticator::open(&f.dir).unwrap();
+    for body in [br#"{"version":2}"#.as_slice(), b"{"] {
+        assert_eq!(
+            auth.renew_encoded(wire::Route::Begin, body, [4; 32], None, 2_000_000)
+                .unwrap_err(),
+            Failure::Malformed
+        );
+    }
+    let summary: serde_json::Value = serde_json::from_slice(
+        &fs::read(f.dir.join("receiver-audit/renewal-refusals.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(summary["classes"][0]["last"]["class"], "malformed");
+    assert_eq!(summary["classes"][0]["count"], 2);
+    let mut receiver = Receiver::default();
+    let now = 2_000_000;
+    for _ in 0..6 {
+        let begun = f.begin(&mut receiver, now).unwrap();
+        let cancel = f.finish(&begun, Action::Cancel, [3; 32], [4; 32]);
+        receiver
+            .finish(&f.dir, &cancel, &[4; 32], None, now)
+            .unwrap();
+    }
+    assert_eq!(f.begin(&mut receiver, now).unwrap_err(), Failure::Rate);
+    let rate = wire::Request::Begin(wire::Begin {
+        version: 1,
+        enrollment_id: "a".repeat(64),
+        credentials: f.credentials(),
+    });
+    assert_eq!(
+        receiver
+            .handle(&f.dir, rate, [4; 32], None, now)
+            .unwrap_err(),
+        Failure::Rate
+    );
+    let summary = fs::read_to_string(f.dir.join("receiver-audit/renewal-refusals.json")).unwrap();
+    assert!(summary.contains("\"class\":\"rate\""));
+    assert!(summary.contains(&"a".repeat(64)));
+    let f = Fixture::new();
+    let mut receiver = Receiver::default();
+    let begun = f.begin(&mut receiver, now).unwrap();
+    receiver.fail_registry = Some(crate::enrollment::Stage::Renamed);
+    let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    assert_eq!(
+        receiver
+            .handle(&f.dir, wire::Request::Finish(commit), [4; 32], None, now)
+            .unwrap_err(),
+        Failure::CommitUncertain
+    );
+    let summary = fs::read_to_string(f.dir.join("receiver-audit/renewal-refusals.json")).unwrap();
+    assert!(summary.contains("commit_uncertain"));
+    assert!(summary.contains(&begun.renewal_id));
+    assert!(summary.contains("\"generation\":2"));
+    fs::rename(f.dir.join("enrollment"), f.dir.join("saved-enrollment")).unwrap();
+    let request = wire::Request::Begin(wire::Begin {
+        version: 1,
+        enrollment_id: "a".repeat(64),
+        credentials: f.credentials(),
+    });
+    assert_eq!(
+        receiver
+            .handle(&f.dir, request, [4; 32], None, now)
+            .unwrap_err(),
+        Failure::Custody
+    );
+    let summary = fs::read_to_string(f.dir.join("receiver-audit/renewal-refusals.json")).unwrap();
+    assert!(summary.contains("\"class\":\"custody\""));
+    assert_eq!(Failure::from(Error::Full), Failure::Capacity);
+    assert_eq!(
+        Failure::from(Error::AuditUnavailable),
+        Failure::AuditUnavailable
+    );
+}
+
+#[test]
+fn audit_append_faults_preserve_compaction_evidence_and_delivery_reservations() {
+    use crate::generation_audit::{AppendFault, fail_next_append};
+    for fault in [AppendFault::Partial, AppendFault::Sync] {
+        for recovery in [false, true] {
+            let f = Fixture::new();
+            let mut receiver = Receiver::default();
+            let now = 2_000_000;
+            let begun = f.begin(&mut receiver, now).unwrap();
+            if recovery {
+                let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+                receiver
+                    .finish(&f.dir, &commit, &[4; 32], None, now)
+                    .unwrap();
+            }
+            let finish = f.finish(
+                &begun,
+                if recovery {
+                    Action::Recover
+                } else {
+                    Action::Commit
+                },
+                [3; 32],
+                [4; 32],
+            );
+            fail_next_append(fault);
+            assert_eq!(
+                receiver
+                    .finish(&f.dir, &finish, &[4; 32], None, now)
+                    .unwrap_err(),
+                Failure::AuditUnavailable
+            );
+            let registry = Registry::read_current(&f.dir).unwrap();
+            if recovery {
+                assert_eq!(registry.renewal_receipts[0].deliveries, 1);
+            } else {
+                assert!(registry.renewal_receipts.is_empty());
+                assert_eq!(
+                    registry.enrollments[0].credential_kinds[0]
+                        .generations
+                        .current,
+                    1
+                );
+            }
+            let retry = receiver.finish(&f.dir, &finish, &[4; 32], None, now);
+            match fault {
+                AppendFault::Partial => assert_eq!(retry.unwrap_err(), Failure::AuditUnavailable),
+                AppendFault::Sync => {
+                    retry.unwrap();
+                }
+            }
+        }
+        let f = Fixture::new();
+        let mut store = Store::open(&f.dir).unwrap();
+        fail_next_append(fault);
+        assert!(matches!(
+            store.compact(&f.dir, 4_000_000),
+            Err(Error::AuditUnavailable)
+        ));
+        assert_eq!(Registry::read_current(&f.dir).unwrap().credentials.len(), 1);
+        let retry = store.compact(&f.dir, 4_000_000);
+        match fault {
+            AppendFault::Partial => {
+                assert!(matches!(retry, Err(Error::AuditUnavailable)));
+                assert_eq!(Registry::read_current(&f.dir).unwrap().credentials.len(), 1);
+            }
+            AppendFault::Sync => {
+                retry.unwrap();
+                assert!(
+                    Registry::read_current(&f.dir)
+                        .unwrap()
+                        .credentials
+                        .is_empty()
+                );
+            }
+        }
+    }
+}
+
+// Spawned through the Rust test runner so a real independent process owns the
+// registry flock. stdin/stdout are barriers; there are no timing-based sleeps.
+#[test]
+fn registry_lock_child() {
+    use std::io::{Read, Write};
+    let Some(dir) = std::env::var_os("SEMON_RENEWAL_LOCK_CHILD") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir);
+    let mut store = Store::open(&dir).unwrap();
+    writeln!(std::io::stdout(), "REGISTRY_LOCKED").unwrap();
+    std::io::stdout().flush().unwrap();
+    let mut release = [0];
+    std::io::stdin().read_exact(&mut release).unwrap();
+    match release[0] {
+        b'r' => {
+            store
+                .owner_update(
+                    &dir,
+                    None,
+                    crate::enrollment::OwnerAction::Revoke,
+                    "owner",
+                    &"a".repeat(64),
+                    2_000_000,
+                )
+                .unwrap();
+        }
+        b'e' => {
+            store
+                .owner_update(
+                    &dir,
+                    Some(Kind::MirrorPush),
+                    crate::enrollment::OwnerAction::Enable,
+                    "owner",
+                    &"a".repeat(64),
+                    2_000_000,
+                )
+                .unwrap();
+        }
+        _ => {}
+    }
+}
+fn hold_registry_in_child(dir: &Path) -> std::process::Child {
+    use std::io::BufRead;
+    let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "renewal::tests::registry_lock_child",
+            "--nocapture",
+        ])
+        .env("SEMON_RENEWAL_LOCK_CHILD", dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = std::io::BufReader::new(child.stdout.take().unwrap());
+    loop {
+        let mut line = String::new();
+        assert_ne!(
+            output.read_line(&mut line).unwrap(),
+            0,
+            "child exited before acquiring registry lock"
+        );
+        if line.contains("REGISTRY_LOCKED") {
+            break;
+        }
+    }
+    child.stdout = Some(output.into_inner());
+    child
+}
+fn release_registry_child(mut child: std::process::Child, action: u8) {
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(&[action]).unwrap();
+    assert!(child.wait_with_output().unwrap().status.success());
+}
+#[test]
+fn cross_process_registry_contention_refuses_and_retry_reads_owner_commit() {
+    for revoke in [false, true] {
+        let f = Fixture::new();
+        let mut receiver = Receiver::default();
+        let now = 2_000_000;
+        let begun = f.begin(&mut receiver, now).unwrap();
+        let child = hold_registry_in_child(&f.dir);
+        assert_eq!(
+            f.begin(&mut receiver, now).unwrap_err(),
+            Failure::Contention
+        );
+        let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+        assert_eq!(
+            receiver
+                .finish(&f.dir, &commit, &[4; 32], None, now)
+                .unwrap_err(),
+            Failure::Contention
+        );
+        assert!(matches!(Store::open(&f.dir), Err(Error::InUse)));
+        assert!(
+            Registry::read_current(&f.dir)
+                .unwrap()
+                .renewal_receipts
+                .is_empty()
+        );
+        release_registry_child(child, if revoke { b'r' } else { b'x' });
+        if revoke {
+            assert_eq!(
+                receiver
+                    .finish(&f.dir, &commit, &[4; 32], None, now)
+                    .unwrap_err(),
+                Failure::Authority
+            );
+            assert!(
+                Registry::read_current(&f.dir)
+                    .unwrap()
+                    .renewal_receipts
+                    .is_empty()
+            );
+        } else {
+            assert_eq!(f.begin(&mut receiver, now).unwrap(), begun);
+            receiver
+                .finish(&f.dir, &commit, &[4; 32], None, now)
+                .unwrap();
+            // A distinct handler sees committed state after the lock is released.
+            let mut other = Receiver::default();
+            assert_eq!(f.begin(&mut other, now).unwrap(), begun);
+            assert!(other.finish(&f.dir, &commit, &[4; 32], None, now).is_err());
+            let recover = f.finish(&begun, Action::Recover, [3; 32], [5; 32]);
+            let child = hold_registry_in_child(&f.dir);
+            assert_eq!(
+                other
+                    .finish(&f.dir, &recover, &[5; 32], None, now)
+                    .unwrap_err(),
+                Failure::Contention
+            );
+            release_registry_child(child, b'x');
+            other.finish(&f.dir, &recover, &[5; 32], None, now).unwrap();
+            assert!(
+                receiver
+                    .finish(&f.dir, &recover, &[5; 32], None, now)
+                    .is_err()
+            );
+            assert_eq!(
+                Registry::read_current(&f.dir).unwrap().renewal_receipts[0].deliveries,
+                2
+            );
+        }
+    }
+}
+
+#[test]
+fn held_renewal_transaction_blocks_competing_owner_enable_and_revoke() {
+    let f = Fixture::new();
+    let mut receiver = Receiver::default();
+    let now = 2_000_000;
+    let begun = f.begin(&mut receiver, now).unwrap();
+    // Hold the same lock a begin/finish transaction holds, while another thread
+    // tries both owner actions. Neither action may mutate a cached snapshot.
+    let store = Store::open(&f.dir).unwrap();
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                for action in [
+                    crate::enrollment::OwnerAction::Enable,
+                    crate::enrollment::OwnerAction::Revoke,
+                ] {
+                    let result = Store::open(&f.dir).and_then(|mut store| {
+                        store.owner_update(
+                            &f.dir,
+                            Some(Kind::MirrorPush),
+                            action,
+                            "owner",
+                            &begun.enrollment_id,
+                            now,
+                        )
+                    });
+                    assert!(matches!(result, Err(Error::InUse)));
+                }
+            })
+            .join()
+            .unwrap();
+    });
+    drop(store);
+    let commit = f.finish(&begun, Action::Commit, [3; 32], [4; 32]);
+    receiver
+        .finish(&f.dir, &commit, &[4; 32], None, now)
+        .unwrap();
+    assert_eq!(
+        Registry::read_current(&f.dir).unwrap().renewal_receipts[0].deliveries,
+        1
+    );
+}
+
+#[test]
+fn three_kind_certificate_commit_recovery_and_fully_occupied_encoded_budget() {
+    let f = Fixture::with_custody(true);
+    let custody = crate::receiver_custody::ReceiverCustody::open_at_endpoint(
+        &f.dir,
+        100,
+        "https://receiver.example:443",
+    )
+    .unwrap();
+    let mut registry = Registry::read_current(&f.dir).unwrap();
+    let e = &mut registry.enrollments[0];
+    e.receiver_id = custody.receiver_id().into();
+    let pin = crate::client_ca::pin(f.key.public_key().as_ref()).unwrap();
+    e.enrolled_pin = Some(pin.pin.clone());
+    e.client_certificate_pins = vec![pin];
+    e.binding = Binding::Admitted {
+        namespace: "namespace".into(),
+        origin_incarnation: "origin".into(),
+        index_incarnation: "index".into(),
+        publisher_claim_epoch: crate::enrollment::ClaimEpoch::Unassigned,
+        issuer: crate::enrollment::Issuer {
+            kind: crate::enrollment::IssuerKind::Receiver,
+            origin_trust_acknowledged: true,
+        },
+        assertion_issuer_keys: vec![crate::enrollment::IssuerKey {
+            key_id: "issuer".into(),
+            public_key: [1; 32],
+        }],
+    };
+    e.credential_kinds.clear();
+    registry.credentials.clear();
+    for (index, kind) in [Kind::AnalyticsPublish, Kind::BodyChannel, Kind::MirrorPush]
+        .into_iter()
+        .enumerate()
+    {
+        let mut scope = KindScope::new(kind, 1);
+        scope.client_cert_required = true;
+        e.credential_kinds.push(scope);
+        registry.credentials.push(Bearer {
+            credential_id: format!("{:064x}", index + 10),
+            enrollment_id: e.enrollment_id.clone(),
+            kind,
+            sha256: Secret::new(format!("old-{}", kind.wire_name())).hash(),
+            generation: 1,
+            valid_from: 0,
+            valid_until: 4_000_000,
+            revoked_at: None,
+        });
+    }
+    let initial = Registry::from_records(registry.enrollments, registry.credentials).unwrap();
+    fs::write(
+        f.dir.join("enrollment/registry.json"),
+        serde_json::to_vec(&initial).unwrap(),
+    )
+    .unwrap();
+    let certificate = custody
+        .issue_client_certificate(f.key.public_key().as_ref(), &"a".repeat(64), 100, 4_000_000)
+        .unwrap();
+    let identity = crate::serve::renewal_test_identity(&certificate);
+    let credentials = || {
+        [Kind::AnalyticsPublish, Kind::BodyChannel, Kind::MirrorPush]
+            .into_iter()
+            .map(|kind| Credential {
+                kind,
+                generation: 1,
+                bearer: format!("old-{}", kind.wire_name()),
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut receiver = Receiver::default();
+    let now = 2_000_000;
+    let begun = receiver
+        .begin(
+            &f.dir,
+            &wire::Begin {
+                version: 1,
+                enrollment_id: "a".repeat(64),
+                credentials: credentials(),
+            },
+            Some(&identity),
+            now,
+        )
+        .unwrap();
+    let sign = |action, exporter| {
+        let credentials = credentials();
+        let signed = wire::possession_message(
+            custody.receiver_id(),
+            "https://receiver.example:443",
+            &begun,
+            &wire::identities(&credentials).unwrap(),
+            &exporter,
+            action,
+            &[3; 32],
+        )
+        .unwrap();
+        wire::Finish {
+            version: 1,
+            enrollment_id: begun.enrollment_id.clone(),
+            renewal_id: begun.renewal_id.clone(),
+            action,
+            credentials,
+            application_key: provision_wire::encode(&[3; 32]),
+            proof: provision_wire::encode(
+                f.key.sign(&SystemRandom::new(), &signed).unwrap().as_ref(),
+            ),
+        }
+    };
+    let commit = sign(Action::Commit, [4; 32]);
+    let delivered = receiver
+        .finish(&f.dir, &commit, &[4; 32], Some(&identity), now)
+        .unwrap();
+    assert!(delivered.len() <= provision_wire::MAX_MESSAGE_BYTES);
+    let message: wire::Delivered = serde_json::from_slice(&delivered).unwrap();
+    assert_eq!(message.credentials.len(), 3);
+    assert!(message.client_certificate.is_some());
+    // Recovery from a restarted handler must regenerate every bearer and leaf.
+    let mut receiver = Receiver::default();
+    let recover = sign(Action::Recover, [5; 32]);
+    assert_eq!(
+        receiver
+            .finish(&f.dir, &recover, &[5; 32], Some(&identity), now)
+            .unwrap(),
+        delivered
+    );
+    assert!(
+        receiver
+            .finish(&f.dir, &recover, &[5; 32], Some(&identity), now)
+            .is_err()
+    );
+    let template = Registry::read_current(&f.dir).unwrap();
+    assert_eq!(template.renewal_receipts[0].deliveries, 2);
+    assert!(
+        serde_json::to_vec(&template.renewal_receipts[0])
+            .unwrap()
+            .len()
+            <= 8192
+    );
+    assert!(
+        serde_json::to_vec(&template.renewal_admission[0])
+            .unwrap()
+            .len()
+            <= 1024
+    );
+    // Combine real receipt/certificate records with six live generations per
+    // enrollment, rolling admission, all tombstones and four reserved outcomes.
+    let mut enrollments = vec![];
+    let mut bearers = vec![];
+    let mut receipts = vec![];
+    let mut admission = vec![];
+    for n in 1..=128u64 {
+        let id = format!("{n:064x}");
+        let mut e = template.enrollments[0].clone();
+        e.enrollment_id = id.clone();
+        e.machine = format!("machine-{n}");
+        e.sequence = n;
+        if let Binding::Admitted { namespace, .. } = &mut e.binding {
+            *namespace = format!("namespace-{n}");
+        }
+        e.enrolled_pin = Some(crate::enrollment::Pin::Spki(
+            Secret::new(format!("pin-{n}")).hash(),
+        ));
+        for pin in &mut e.client_certificate_pins {
+            pin.pin = e.enrolled_pin.clone().unwrap();
+        }
+        enrollments.push(e);
+        let mut receipt = template.renewal_receipts[0].clone();
+        receipt.begun.enrollment_id = id.clone();
+        receipt.begun.renewal_id = format!("{:064x}", n + 1000);
+        for b in &template.credentials {
+            let mut b = b.clone();
+            b.enrollment_id = id.clone();
+            b.sha256 = Secret::new(format!(
+                "bearer-{n}-{}-{}",
+                b.kind.wire_name(),
+                b.generation
+            ))
+            .hash();
+            b.credential_id = format!("{:064x}", n * 10 + b.kind.index() as u64 * 2 + b.generation);
+            if b.generation == 2 {
+                let issued = receipt
+                    .credentials
+                    .iter_mut()
+                    .find(|issued| issued.kind == b.kind)
+                    .unwrap();
+                *issued = b.clone();
+            }
+            bearers.push(b);
+        }
+        receipts.push(receipt);
+        admission.push(Admission {
+            enrollment_id: id,
+            creations: vec![now; 6],
+        });
+    }
+    let mut full = Registry::from_records(enrollments, bearers).unwrap();
+    full.latest = now;
+    full.renewal_receipts = receipts;
+    full.renewal_admission = admission;
+    for n in 129..=640u64 {
+        full.tombstones.push(crate::enrollment::Tombstone {
+            enrollment_id: format!("{n:064x}"),
+            machine: "m".repeat(63),
+            sequence: n,
+            pin: Some(crate::enrollment::Pin::Spki(
+                Secret::new(format!("pin-{n}")).hash(),
+            )),
+            high_water: [u64::MAX; 3],
+        });
+    }
+    full.next_sequence = 641;
+    full.validate().unwrap();
+    full.check_renewal_admission(4).unwrap();
+    assert!(
+        serde_json::to_vec(&full).unwrap().len() + 4 * 4096
+            <= crate::enrollment::ADMISSION_CAP as usize
+    );
+}
+
+#[test]
+fn retry_after_cross_process_enable_reads_new_authorization_scope() {
+    let f = Fixture::new();
+    let mut registry = Registry::read_current(&f.dir).unwrap();
+    let e = &mut registry.enrollments[0];
+    e.binding = Binding::Admitted {
+        namespace: "namespace".into(),
+        origin_incarnation: "origin".into(),
+        index_incarnation: "index".into(),
+        publisher_claim_epoch: crate::enrollment::ClaimEpoch::Unassigned,
+        issuer: crate::enrollment::Issuer {
+            kind: crate::enrollment::IssuerKind::Receiver,
+            origin_trust_acknowledged: true,
+        },
+        assertion_issuer_keys: vec![crate::enrollment::IssuerKey {
+            key_id: "issuer".into(),
+            public_key: [1; 32],
+        }],
+    };
+    e.credential_kinds[0].available = false;
+    e.credential_kinds
+        .push(KindScope::new(Kind::AnalyticsPublish, 1));
+    let mut analytics = registry.credentials[0].clone();
+    registry.credentials[0].revoked_at = Some(100);
+    analytics.kind = Kind::AnalyticsPublish;
+    analytics.credential_id = "c".repeat(64);
+    analytics.sha256 = Secret::new("analytics-old".into()).hash();
+    registry.credentials.push(analytics);
+    let initial = Registry::from_records(registry.enrollments, registry.credentials).unwrap();
+    fs::write(
+        f.dir.join("enrollment/registry.json"),
+        serde_json::to_vec(&initial).unwrap(),
+    )
+    .unwrap();
+    let credentials = || {
+        vec![Credential {
+            kind: Kind::AnalyticsPublish,
+            generation: 1,
+            bearer: "analytics-old".into(),
+        }]
+    };
+    let request = || wire::Begin {
+        version: 1,
+        enrollment_id: "a".repeat(64),
+        credentials: credentials(),
+    };
+    let mut receiver = Receiver::default();
+    let child = hold_registry_in_child(&f.dir);
+    assert_eq!(
+        receiver
+            .begin(&f.dir, &request(), None, 2_000_000)
+            .unwrap_err(),
+        Failure::Contention
+    );
+    release_registry_child(child, b'e');
+    let begun = receiver.begin(&f.dir, &request(), None, 2_000_000).unwrap();
+    assert_eq!(begun.generations.len(), 2);
+    assert_eq!(begun.enable_authorization_ids.len(), 1);
+    let commit = f.finish_using(&begun, Action::Commit, [3; 32], [4; 32], credentials());
+    receiver
+        .finish(&f.dir, &commit, &[4; 32], None, 2_000_000)
+        .unwrap();
+    let registry = Registry::read_current(&f.dir).unwrap();
+    assert_eq!(registry.renewal_receipts[0].deliveries, 1);
+    assert!(
+        registry.enrollments[0]
+            .credential_kinds
+            .iter()
+            .all(|scope| scope.available && scope.generations.current == 2)
+    );
 }

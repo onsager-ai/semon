@@ -155,18 +155,68 @@ impl RegistryAuthenticator {
             renewal: std::sync::Mutex::new(crate::renewal::Receiver::default()),
         })
     }
+    pub(crate) fn renewal_refused(&self, class: crate::renewal::Failure, now: u64) {
+        crate::renewal::record_refusal(&self.dir, class, now, String::new(), String::new(), vec![]);
+    }
+    pub(crate) fn renew_encoded(
+        &self,
+        route: crate::renewal_wire::Route,
+        body: &[u8],
+        exporter: [u8; 32],
+        identity: Option<&VerifiedClientIdentity>,
+        now: u64,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::renewal::Failure> {
+        let request = crate::renewal_wire::Request::parse(route, body).map_err(|_| {
+            crate::renewal::record_refusal(
+                &self.dir,
+                crate::renewal::Failure::Malformed,
+                now,
+                String::new(),
+                String::new(),
+                vec![],
+            );
+            crate::renewal::Failure::Malformed
+        })?;
+        self.renew(request, exporter, identity, now)
+    }
     pub(crate) fn renew(
         &self,
         request: crate::renewal_wire::Request,
         exporter: [u8; 32],
         identity: Option<&VerifiedClientIdentity>,
         now: u64,
-    ) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::provision_wire::Refused> {
-        enrollment::refuse_legacy_tokens(&self.dir).map_err(|_| crate::provision_wire::Refused)?;
-        self.renewal
-            .try_lock()
-            .map_err(|_| crate::provision_wire::Refused)?
-            .handle(&self.dir, request, exporter, identity, now)
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::renewal::Failure> {
+        let result = enrollment::refuse_legacy_tokens(&self.dir)
+            .map_err(crate::renewal::Failure::from)
+            .and_then(|()| {
+                self.renewal
+                    .try_lock()
+                    .map_err(|_| crate::renewal::Failure::Contention)
+            });
+        match result {
+            Ok(mut receiver) => receiver.handle(&self.dir, request, exporter, identity, now),
+            Err(class) => {
+                let (id, renewal_id, credentials) = match &request {
+                    crate::renewal_wire::Request::Begin(m) => {
+                        (m.enrollment_id.clone(), String::new(), &m.credentials)
+                    }
+                    crate::renewal_wire::Request::Finish(m) => (
+                        m.enrollment_id.clone(),
+                        m.renewal_id.clone(),
+                        &m.credentials,
+                    ),
+                };
+                crate::renewal::record_refusal(
+                    &self.dir,
+                    class,
+                    now,
+                    id,
+                    renewal_id,
+                    crate::renewal_wire::identities(credentials).unwrap_or_default(),
+                );
+                Err(class)
+            }
+        }
     }
     /// Current state is read for every request; callers never receive local diagnostics.
     pub fn authenticated_enrollment(

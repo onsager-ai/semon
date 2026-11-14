@@ -12,7 +12,36 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, path::Path};
 use zeroize::Zeroizing;
 
-type Result<T> = std::result::Result<T, Refused>;
+type Result<T> = std::result::Result<T, Failure>;
+/// Local diagnostics only. Dispatch always returns the same wire refusal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Failure {
+    Malformed,
+    Authority,
+    Rate,
+    Capacity,
+    Custody,
+    AuditUnavailable,
+    CommitUncertain,
+    Contention,
+}
+impl From<Refused> for Failure {
+    fn from(_: Refused) -> Self {
+        Self::Malformed
+    }
+}
+impl From<Error> for Failure {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Full => Self::Capacity,
+            Error::AuditUnavailable => Self::AuditUnavailable,
+            Error::CommitUncertain => Self::CommitUncertain,
+            Error::InUse | Error::StaleSnapshot => Self::Contention,
+            _ => Self::Custody,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Admission {
@@ -60,7 +89,7 @@ fn enrollment<'a>(registry: &'a Registry, id: &str) -> Result<&'a crate::enrollm
                 && e.revoked_at.is_none()
                 && registry.endpoint() == Some(e.endpoint.as_str())
         })
-        .ok_or(Refused)
+        .ok_or(Failure::Authority)
 }
 fn authenticate(
     registry: &Registry,
@@ -71,8 +100,8 @@ fn authenticate(
     identity: Option<&VerifiedClientIdentity>,
     now: u64,
 ) -> Result<()> {
-    if wire::identities(supplied)? != expected {
-        return Err(Refused);
+    if wire::identities(supplied).map_err(|_| Failure::Authority)? != expected {
+        return Err(Failure::Authority);
     }
     let e = enrollment(registry, id)?;
     if output.iter().any(|g| {
@@ -81,7 +110,7 @@ fn authenticate(
             .any(|s| s.kind == g.kind && s.client_cert_required)
     }) && identity.is_none()
     {
-        return Err(Refused);
+        return Err(Failure::Authority);
     }
     for credential in supplied {
         let secret = Secret::new(credential.bearer.clone());
@@ -93,7 +122,7 @@ fn authenticate(
             None => authorized(None),
         };
         if !valid {
-            return Err(Refused);
+            return Err(Failure::Authority);
         }
     }
     Ok(())
@@ -143,27 +172,34 @@ impl Receiver {
         identity: Option<&VerifiedClientIdentity>,
         now: u64,
     ) -> Result<Zeroizing<Vec<u8>>> {
-        let (id, renewal_id) = match &request {
-            wire::Request::Begin(m) => (m.enrollment_id.clone(), String::new()),
-            wire::Request::Finish(m) => (m.enrollment_id.clone(), m.renewal_id.clone()),
+        let (id, renewal_id, supplied) = match &request {
+            wire::Request::Begin(m) => (m.enrollment_id.clone(), String::new(), &m.credentials),
+            wire::Request::Finish(m) => (
+                m.enrollment_id.clone(),
+                m.renewal_id.clone(),
+                &m.credentials,
+            ),
         };
+        let scope = wire::identities(supplied).unwrap_or_default();
         let result = match request {
             wire::Request::Begin(message) => self
                 .begin(dir, &message, identity, now)
-                .and_then(|m| provision_wire::encode_message(&m)),
+                .and_then(|m| provision_wire::encode_message(&m).map_err(Failure::from)),
             wire::Request::Finish(message) => self.finish(dir, &message, &exporter, identity, now),
         };
-        if result.is_err() {
-            let _ = crate::generation_audit::renewal(
+        if let Err(class) = &result {
+            let generations = self
+                .pending
+                .get(&id)
+                .map(|p| p.begun.generations.clone())
+                .unwrap_or(scope);
+            record_refusal(
                 dir,
-                &crate::generation_audit::RenewalRecord {
-                    version: 1,
-                    observed_at: now.max(self.latest),
-                    enrollment_id: id,
-                    renewal_id,
-                    generations: vec![],
-                    action: "refused".into(),
-                },
+                *class,
+                now.max(self.latest),
+                id,
+                renewal_id,
+                generations,
             );
         }
         result.map(Zeroizing::new)
@@ -189,18 +225,51 @@ impl Receiver {
         identity: Option<&VerifiedClientIdentity>,
         now: u64,
     ) -> Result<Begun> {
-        let mut store = Store::open(dir).map_err(|_| Refused)?;
-        store.compact(dir, now).map_err(|_| Refused)?;
-        let mut registry = store.snapshot().map_err(|_| Refused)?;
+        let mut store = Store::open(dir).map_err(Failure::from)?;
+        let mut registry = store.snapshot().map_err(Failure::from)?;
         let now = now.max(registry.latest).max(self.latest);
         self.latest = now;
-        if now > registry.latest {
-            registry.latest = now;
-            store
-                .commit(registry.revision(), &registry)
-                .map_err(|_| Refused)?;
-            registry = store.snapshot().map_err(|_| Refused)?;
+        let authentication = wire::identities(&message.credentials)?;
+        if let Some(receipt) = registry.renewal_receipts.iter().find(|r| {
+            r.begun.enrollment_id == message.enrollment_id
+                && r.authentication == authentication
+                && r.live(&registry, now)
+        }) {
+            authenticate(
+                &registry,
+                &message.enrollment_id,
+                &message.credentials,
+                &receipt.authentication,
+                &receipt.begun.generations,
+                identity,
+                now,
+            )?;
+            let begun = receipt.begun.clone();
+            observe(&mut store, &mut registry, now)?;
+            return Ok(begun);
         }
+        let e = enrollment(&registry, &message.enrollment_id)?.clone();
+        let mut expected: Vec<_> = e
+            .credential_kinds
+            .iter()
+            .filter(|s| s.available)
+            .map(|s| Generation {
+                kind: s.kind,
+                generation: s.generations.current,
+            })
+            .collect();
+        expected.sort_by_key(|g| g.kind.wire_name());
+        // Validate all bearer and presented-certificate authority before nonce allocation.
+        authenticate(
+            &registry,
+            &message.enrollment_id,
+            &message.credentials,
+            &expected,
+            &expected,
+            identity,
+            now,
+        )?;
+        observe(&mut store, &mut registry, now)?;
         self.expire(dir, now)?;
         self.pending.retain(|id, pending| {
             registry.enrollments.iter().any(|e| {
@@ -226,47 +295,9 @@ impl Receiver {
                         })
             })
         });
-        let authentication = wire::identities(&message.credentials)?;
-        if let Some(receipt) = registry.renewal_receipts.iter().find(|r| {
-            r.begun.enrollment_id == message.enrollment_id
-                && r.authentication == authentication
-                && r.live(&registry, now)
-        }) {
-            authenticate(
-                &registry,
-                &message.enrollment_id,
-                &message.credentials,
-                &receipt.authentication,
-                &receipt.begun.generations,
-                identity,
-                now,
-            )?;
-            return Ok(receipt.begun.clone());
-        }
-        let e = enrollment(&registry, &message.enrollment_id)?;
-        let mut expected: Vec<_> = e
-            .credential_kinds
-            .iter()
-            .filter(|s| s.available)
-            .map(|s| Generation {
-                kind: s.kind,
-                generation: s.generations.current,
-            })
-            .collect();
-        expected.sort_by_key(|g| g.kind.wire_name());
-        // Validate all bearer and presented-certificate authority before nonce allocation.
-        authenticate(
-            &registry,
-            &message.enrollment_id,
-            &message.credentials,
-            &expected,
-            &expected,
-            identity,
-            now,
-        )?;
         if let Some(pending) = self.pending.get(&message.enrollment_id) {
             if pending.authentication != expected {
-                return Err(Refused);
+                return Err(Failure::Authority);
             }
             authenticate(
                 &registry,
@@ -284,7 +315,7 @@ impl Receiver {
             .iter()
             .any(|r| r.begun.enrollment_id == message.enrollment_id && r.live(&registry, now))
         {
-            return Err(Refused);
+            return Err(Failure::Authority);
         }
         let mut authorizations = Vec::new();
         let mut targets = Vec::new();
@@ -297,14 +328,18 @@ impl Receiver {
             {
                 targets.push(Generation {
                     kind: scope.kind,
-                    generation: scope.generations.current.checked_add(1).ok_or(Refused)?,
+                    generation: scope
+                        .generations
+                        .current
+                        .checked_add(1)
+                        .ok_or(Failure::Authority)?,
                 });
                 if !scope.available {
                     authorizations.push(
                         scope
                             .enable_authorization
                             .as_ref()
-                            .ok_or(Refused)?
+                            .ok_or(Failure::Authority)?
                             .authorization_id
                             .clone(),
                     );
@@ -321,7 +356,7 @@ impl Receiver {
                             && b.revoked_at.is_none()
                     })
             }) {
-                return Err(Refused);
+                return Err(Failure::Authority);
             }
         }
         targets.sort_by_key(|g| g.kind.wire_name());
@@ -344,10 +379,13 @@ impl Receiver {
                     && b.valid_until.saturating_sub(now) < wire::WINDOW
             })
         {
-            return Err(Refused);
+            return Err(Failure::Authority);
         }
+        // Authentication precedes disk maintenance, audit work and clock writes.
+        store.compact(dir, now).map_err(Failure::from)?;
+        registry = store.snapshot().map_err(Failure::from)?;
         if self.pending.len() >= 4 {
-            return Err(Refused);
+            return Err(Failure::Capacity);
         }
         registry.renewal_admission.retain(|a| {
             registry
@@ -372,14 +410,14 @@ impl Receiver {
             registry.renewal_admission.len() - 1
         };
         if registry.renewal_admission[index].creations.len() >= 6 {
-            return Err(Refused);
+            return Err(Failure::Rate);
         }
         let begun = Begun {
             version: 1,
             enrollment_id: message.enrollment_id.clone(),
-            renewal_id: crate::enrollment::random_id().map_err(|_| Refused)?,
+            renewal_id: crate::enrollment::random_id().map_err(Failure::from)?,
             receiver_nonce: provision_wire::encode(&random_nonce()?),
-            expires_at: now.checked_add(wire::LIFETIME).ok_or(Refused)?,
+            expires_at: now.checked_add(wire::LIFETIME).ok_or(Failure::Authority)?,
             generations: targets,
             enable_authorization_ids: authorizations,
         };
@@ -388,11 +426,11 @@ impl Receiver {
         // Pending outcomes are charged even though restart destroys the nonce state.
         registry
             .check_renewal_admission(self.pending.len() + 1)
-            .map_err(|_| Refused)?;
+            .map_err(Failure::from)?;
         audit(dir, &begun, "begin", now)?;
         store
             .commit(registry.revision(), &registry)
-            .map_err(|_| Refused)?;
+            .map_err(Failure::from)?;
         self.pending.insert(
             message.enrollment_id.clone(),
             Pending {
@@ -411,21 +449,10 @@ impl Receiver {
         identity: Option<&VerifiedClientIdentity>,
         now: u64,
     ) -> Result<Vec<u8>> {
-        let mut store = Store::open(dir).map_err(|_| Refused)?;
-        let mut registry = store.snapshot().map_err(|_| Refused)?;
+        let mut store = Store::open(dir).map_err(Failure::from)?;
+        let mut registry = store.snapshot().map_err(Failure::from)?;
         let now = now.max(registry.latest).max(self.latest);
         self.latest = now;
-        if now > registry.latest {
-            registry.latest = now;
-            store
-                .commit(registry.revision(), &registry)
-                .map_err(|_| Refused)?;
-            registry = store.snapshot().map_err(|_| Refused)?;
-        }
-        let expiry = self.expire(dir, now);
-        if message.action != Action::Cancel {
-            expiry?;
-        }
         let application = Zeroizing::new(provision_wire::decode_fixed::<32>(
             &message.application_key,
         )?);
@@ -444,7 +471,7 @@ impl Receiver {
                 || receipt.application_hash
                     != <[u8; 32]>::from(Sha256::digest(application.as_ref()))
             {
-                return Err(Refused);
+                return Err(Failure::Authority);
             }
             authenticate(
                 &registry,
@@ -463,34 +490,36 @@ impl Receiver {
                 exporter,
                 &application,
             )?;
+            observe(&mut store, &mut registry, now)?;
+            self.expire(dir, now)?;
             let bytes = delivery(&receipt, &application)?;
             audit(dir, &receipt.begun, "recover_delivery_reserved", now)?;
             registry
                 .renewal_receipts
                 .iter_mut()
                 .find(|r| r.begun.renewal_id == message.renewal_id)
-                .ok_or(Refused)?
+                .ok_or(Failure::Authority)?
                 .deliveries = 2;
             registry.latest = now;
             self.commit_delivery(&mut store, &registry)?;
             #[cfg(test)]
             if self.fail_delivery == 3 {
                 self.fail_delivery = 0;
-                return Err(Refused);
+                return Err(Failure::CommitUncertain);
             }
             return Ok(bytes);
         }
         if self.terminal.contains_key(&message.renewal_id) {
-            return Err(Refused);
+            return Err(Failure::Authority);
         }
         let pending = self
             .pending
             .get(&message.enrollment_id)
             .filter(|p| p.begun.renewal_id == message.renewal_id)
             .cloned()
-            .ok_or(Refused)?;
+            .ok_or(Failure::Authority)?;
         if message.action == Action::Recover || now >= pending.begun.expires_at {
-            return Err(Refused);
+            return Err(Failure::Authority);
         }
         authenticate(
             &registry,
@@ -509,6 +538,11 @@ impl Receiver {
             exporter,
             &application,
         )?;
+        observe(&mut store, &mut registry, now)?;
+        let expiry = self.expire(dir, now);
+        if message.action != Action::Cancel {
+            expiry?;
+        }
         let e = enrollment(&registry, &message.enrollment_id)?.clone();
         for id in &pending.begun.enable_authorization_ids {
             if !e.credential_kinds.iter().any(|s| {
@@ -517,7 +551,7 @@ impl Receiver {
                         a.authorization_id == *id && a.consumed_renewal_id.is_none()
                     })
             }) {
-                return Err(Refused);
+                return Err(Failure::Authority);
             }
         }
         for g in &pending.authentication {
@@ -526,7 +560,7 @@ impl Receiver {
                 .iter()
                 .any(|s| s.kind == g.kind && s.available && s.generations.current == g.generation)
             {
-                return Err(Refused);
+                return Err(Failure::Authority);
             }
         }
         if message.action == Action::Cancel {
@@ -536,7 +570,7 @@ impl Receiver {
             registry.latest = now;
             store
                 .commit(registry.revision(), &registry)
-                .map_err(|_| Refused)?;
+                .map_err(Failure::from)?;
             self.pending.remove(&message.enrollment_id);
             self.terminal
                 .insert(message.renewal_id.clone(), pending.begun.expires_at);
@@ -545,11 +579,12 @@ impl Receiver {
                 enrollment_id: message.enrollment_id.clone(),
                 renewal_id: message.renewal_id.clone(),
                 cancelled: true,
-            });
+            })
+            .map_err(Failure::from);
         }
         let until = now
             .checked_add(provision_wire::INITIAL_CREDENTIAL_VALIDITY_SECONDS)
-            .ok_or(Refused)?;
+            .ok_or(Failure::Authority)?;
         let certificate = if e.enrolled_pin.is_some()
             || pending.begun.generations.iter().any(|g| {
                 e.credential_kinds
@@ -557,16 +592,16 @@ impl Receiver {
                     .any(|s| s.kind == g.kind && s.client_cert_required)
             }) {
             let pin = crate::client_ca::pin(&e.origin_key)
-                .map_err(|_| Refused)?
+                .map_err(|_| Failure::Custody)?
                 .pin;
             if e.enrolled_pin.as_ref() != Some(&pin) {
-                return Err(Refused);
+                return Err(Failure::Authority);
             }
             Some(
                 crate::receiver_custody::ReceiverCustody::open_existing(dir)
-                    .map_err(|_| Refused)?
+                    .map_err(|_| Failure::Custody)?
                     .issue_client_certificate(&e.origin_key, &e.enrollment_id, now, until)
-                    .map_err(|_| Refused)?,
+                    .map_err(|_| Failure::Custody)?,
             )
         } else {
             None
@@ -583,9 +618,15 @@ impl Receiver {
                         .iter_mut()
                         .find(|s| s.kind == target.kind)
                 })
-                .ok_or(Refused)?;
-            if target.generation != scope.generations.current.checked_add(1).ok_or(Refused)? {
-                return Err(Refused);
+                .ok_or(Failure::Authority)?;
+            if target.generation
+                != scope
+                    .generations
+                    .current
+                    .checked_add(1)
+                    .ok_or(Failure::Authority)?
+            {
+                return Err(Failure::Authority);
             }
             if scope.available {
                 let old = registry
@@ -596,10 +637,10 @@ impl Receiver {
                             && b.kind == target.kind
                             && b.generation == scope.generations.current
                     })
-                    .ok_or(Refused)?;
+                    .ok_or(Failure::Authority)?;
                 let cutover_at = now
                     .checked_add(wire::OVERLAP)
-                    .ok_or(Refused)?
+                    .ok_or(Failure::Authority)?
                     .min(old.valid_until);
                 recovery_until = recovery_until.min(cutover_at);
                 scope.generations.retiring = Some(Retiring {
@@ -617,14 +658,14 @@ impl Receiver {
                             .contains(&a.authorization_id)
                             && a.consumed_renewal_id.is_none()
                     })
-                    .ok_or(Refused)?;
+                    .ok_or(Failure::Authority)?;
                 authorization.consumed_renewal_id = Some(message.renewal_id.clone());
                 scope.available = true;
                 scope.generations.retiring = None;
             }
             scope.generations.current = target.generation;
             issued.push(Bearer {
-                credential_id: crate::enrollment::random_id().map_err(|_| Refused)?,
+                credential_id: crate::enrollment::random_id().map_err(Failure::from)?,
                 enrollment_id: message.enrollment_id.clone(),
                 kind: target.kind,
                 sha256: wire::bearer(
@@ -645,9 +686,9 @@ impl Receiver {
                 .enrollments
                 .iter_mut()
                 .find(|e| e.enrollment_id == message.enrollment_id)
-                .ok_or(Refused)?;
+                .ok_or(Failure::Authority)?;
             for target in &pending.begun.generations {
-                let pin = enrollment.enrolled_pin.clone().ok_or(Refused)?;
+                let pin = enrollment.enrolled_pin.clone().ok_or(Failure::Authority)?;
                 if !enrollment
                     .client_certificate_pins
                     .iter()
@@ -683,19 +724,19 @@ impl Receiver {
         registry.latest = now;
         registry
             .check_renewal_admission(self.pending.len().saturating_sub(1))
-            .map_err(|_| Refused)?;
+            .map_err(Failure::from)?;
         audit(dir, &pending.begun, "commit_delivery_reserved", now)?;
         #[cfg(test)]
         if self.fail_delivery == 1 {
             self.fail_delivery = 0;
-            return Err(Refused);
+            return Err(Failure::Authority);
         }
         self.commit_delivery(&mut store, &registry)?;
         self.pending.remove(&message.enrollment_id);
         #[cfg(test)]
         if self.fail_delivery == 2 {
             self.fail_delivery = 0;
-            return Err(Refused);
+            return Err(Failure::CommitUncertain);
         }
         Ok(bytes)
     }
@@ -710,19 +751,29 @@ impl Receiver {
                         Ok(())
                     }
                 })
-                .map_err(|_| Refused);
+                .map_err(Failure::from);
         }
         store
             .commit(registry.revision(), registry)
-            .map_err(|_| Refused)
+            .map_err(Failure::from)
     }
+}
+fn observe(store: &mut Store, registry: &mut Registry, now: u64) -> Result<()> {
+    if now > registry.latest {
+        registry.latest = now;
+        store
+            .commit(registry.revision(), registry)
+            .map_err(Failure::from)?;
+        *registry = store.snapshot().map_err(Failure::from)?;
+    }
+    Ok(())
 }
 fn random_nonce() -> Result<[u8; 32]> {
     let mut bytes = [0; 32];
     rustls::crypto::ring::default_provider()
         .secure_random
         .fill(&mut bytes)
-        .map_err(|_| Refused)?;
+        .map_err(|_| Failure::Custody)?;
     Ok(bytes)
 }
 fn verify(
@@ -751,7 +802,7 @@ fn verify(
         &signed,
         &provision_wire::decode_fixed::<64>(&message.proof)?,
     )
-    .map_err(|_| Refused)
+    .map_err(|_| Failure::Authority)
 }
 fn delivery(receipt: &Receipt, application: &[u8; 32]) -> Result<Vec<u8>> {
     provision_wire::encode_message(&wire::Delivered {
@@ -785,6 +836,27 @@ fn delivery(receipt: &Receipt, application: &[u8; 32]) -> Result<Vec<u8>> {
             .as_deref()
             .map(provision_wire::encode),
     })
+    .map_err(Failure::from)
+}
+pub(crate) fn record_refusal(
+    dir: &Path,
+    class: Failure,
+    now: u64,
+    enrollment_id: String,
+    renewal_id: String,
+    generations: Vec<Generation>,
+) {
+    let _ = crate::generation_audit::refusal(
+        dir,
+        crate::generation_audit::RefusalRecord {
+            class,
+            observed_at: now,
+            enrollment_id,
+            renewal_id,
+            generations,
+            outcome: "refused".into(),
+        },
+    );
 }
 fn audit(dir: &Path, begun: &Begun, action: &str, now: u64) -> Result<()> {
     crate::generation_audit::renewal(
@@ -798,7 +870,7 @@ fn audit(dir: &Path, begun: &Begun, action: &str, now: u64) -> Result<()> {
             action: action.into(),
         },
     )
-    .map_err(|_| Refused)
+    .map_err(Failure::from)
 }
 #[cfg(test)]
 #[path = "renewal_tests.rs"]

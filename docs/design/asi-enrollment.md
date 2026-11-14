@@ -889,7 +889,18 @@ reservation/recovery, cancel, first-use cutover, expiry and refusals with time,
 nonsecret IDs, kind/generation, outcome and local reason class. Owner operations
 also record authenticated owner and target. Never audit bearer/application keys,
 private keys, proofs, exporter bytes or source text. Audit storage stays separate
-from registry/cache; audit failure refuses new authority or release. Revocation
+from registry/cache. Refusals use a separate, fixed 8 KiB summary
+(`renewal-refusals.json`), with saturating counts and the most recent nonsecret
+scope/time/outcome for each local failure class (malformed/version, authority,
+rate, capacity, custody, audit unavailable, commit uncertain and contention).
+This aggregate intentionally retains counts rather than individual refusal
+history. Its own lock and one bounded replacement staging file are independent
+of the append-only successful-event journal; corrupt, full or unavailable refusal
+custody never consumes that journal's capacity or blocks a legitimate renewal.
+Authenticate before compaction, expiry auditing or persisted clock writes. Reuse
+journal validation only while its inode/size/change timestamps match the last
+fully validated snapshot; a changed journal is validated again before append.
+Audit failure in the successful-event journal refuses new authority or release. Revocation
 still removes authority under its reserved registry budget; audit failure must not
 turn revocation into permission to continue access.
 

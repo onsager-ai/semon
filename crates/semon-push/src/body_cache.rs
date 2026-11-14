@@ -905,7 +905,7 @@ impl CacheDirectory {
         self.open_file(path, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL)
     }
 
-    fn rename(&self, from: &Path, to: &Path) -> Result<()> {
+    pub(crate) fn rename(&self, from: &Path, to: &Path) -> Result<()> {
         let from = Self::name(from)?;
         let to = Self::name(to)?;
         // SAFETY: both names are valid C strings and the directory fd stays open.
