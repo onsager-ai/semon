@@ -565,8 +565,8 @@ identity or cache key, adds a kind, clears a revocation or transfers a claim.
 Initial and renewed credentials last 90 days (7,776,000 seconds). On each `push`,
 and continuously during `push --watch` even without new source events, check the
 remaining validity. Renew when strictly less than 30 days (2,592,000 seconds)
-remain. Emit the first due notice at the 30-day boundary. Validity is inclusive at
-`valid_from` and exclusive at `valid_until`; no grace applies after expiry.
+remain. Validity is inclusive at `valid_from` and exclusive at `valid_until`;
+no grace applies after expiry.
 
 For each unrevoked kind, issue generation N+1 with fresh credential IDs/secrets.
 Use the existing `Generations { current, retiring }` and
@@ -688,7 +688,9 @@ Use `Content-Type: application/json`, strict version 1 structs with
 an 8,192-byte encoded ceiling for every request/response. IDs are 64 lowercase hex
 characters, nonces/application keys 32 bytes, P-256 points 65 bytes and fixed-width
 ECDSA P-256/SHA-256 proofs 64 bytes. Times are Unix seconds; generations are
-positive u64 values with checked increment. All nested field lists below are exact.
+positive u64 values with checked increment. Begin response `expires_at` bounds only
+the ten-minute uncommitted finish; it never expires an already committed result.
+All nested field lists below are exact.
 
 | Message | Exact fields |
 | --- | --- |
@@ -764,10 +766,11 @@ and successor certificate requirements before returning the SAME committed crede
 and certificate. Derive them again from the staged application key; store hashes
 only at the receiver. There is no delivery budget.
 
-Committed retry authority ends at the earliest old authentication credential expiry
-or retiring cutover, or revocation of the enrollment or any bound kind. Pending successor
-expiry never extends old validity; first application use still atomically cuts over
-each kind. Temporary renewal errors never stop valid application traffic.
+A committed result remains retrievable after the ten-minute precommit deadline.
+Retry authority ends at the earliest old credential expiry, first-use cutover,
+overlap end or enrollment/bound-kind revocation. Pending successor expiry never
+extends old validity; first application use still atomically cuts over each kind.
+Temporary renewal errors never stop valid application traffic.
 
 Uncommitted attempts expire ten minutes after begin; there is no cancel action.
 Restart destroys uncommitted nonce state; a new begin may target the same next
@@ -870,10 +873,12 @@ Local error classes are malformed/version, invalid bearer/key/certificate,
 revoked/expired/retired authority, scope mismatch, replay/terminal attempt,
 capacity/rate limit, custody/unavailable and commit-uncertain. All externally use
 the same provisioning refusal status/body; no class, existence or remaining-budget
-oracle. Pre-HTTP/TLS failures may close without HTTP. Audit begin, commit, identical-result
-retry, first-use cutover, expiry and refusals with time,
-nonsecret IDs, kind/generation, outcome and local reason class. Owner operations
-also record authenticated owner and target. Never audit bearer/application keys,
+oracle. Pre-HTTP/TLS failures may close without HTTP. Durable renewal audit events
+are limited to attempt creation, commit, first-use cutover and expiry/ended events,
+bounded by creation/pending limits. Never durably audit repeated idempotent begins
+or identical-result retries: they must produce no audit growth or audit fsync work.
+Record time, nonsecret IDs, kind/generation, outcome and local reason class. Owner
+operations also record authenticated owner and target. Never audit bearer/application keys,
 private keys, proofs, exporter bytes or source text. Audit storage stays separate
 from registry/cache. Refusals use a separate, fixed 8 KiB summary
 (`renewal-refusals.json`), with saturating counts and the most recent nonsecret
@@ -1045,11 +1050,8 @@ exit 1; cancellation exits 0. No additional renewal prompts.
 | disconnect | Unknown receiver | `semon: receiver HOST was not found; use the HTTPS URL given to connect as --receiver URL, then retry.` | stderr; exit 1 |
 | disconnect | Wrong owner or missing terminal | `semon: disconnect requires the local owner's terminal; run this command there.` | stderr; exit 1 |
 | disconnect | Custody failure or uncertain commit | `semon: disconnect could not be confirmed; rerun the same command to check its earlier outcome before retrying.` | stderr; exit 1 |
-| push / --watch | 30-day boundary, no attempt under way | `Receiver HOST renewal is due soon; D days remain.` | stderr; no exit change |
-| push / --watch | Attempt actually under way, no failure in this cycle | `Receiver HOST credentials are renewing automatically; D days remain.` | stderr; no exit change |
-| --watch | 14-day or 7-day crossing, or daily reminder at that severity | `Automatic renewal has not completed; D days remain. Check receiver HOST is reachable; renewal will retry.` | stderr; no exit change |
-| --watch | First renewal error/refusal, changed failure outcome, or daily failure reminder | `Could not renew receiver HOST credentials; D days remain. Check the receiver is reachable; renewal will retry.` | stderr; valid traffic continues; no exit change |
-| one-shot push | Renewal error/refusal or 14/7-day escalation | `Could not renew receiver HOST credentials; D days remain. Check the receiver is reachable, then run semon push --receiver URL again.` | stderr; valid traffic continues; renewal alone changes no exit status |
+| --watch | First renewal failure, severity change, or reminder at most once per day | `Could not renew receiver HOST credentials; D days remain. Check the receiver is reachable; renewal will retry.` | stderr; valid traffic continues; no exit change |
+| one-shot push | Renewal error/refusal | `Could not renew receiver HOST credentials; D days remain. Check the receiver is reachable, then run semon push --receiver URL again.` | stderr; valid traffic continues; renewal alone changes no exit status |
 | push / --watch | Existing credential refused by application traffic | `Receiver HOST refused access.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; refusal does not prove revocation |
 | push / --watch | Credential expired | `Receiver HOST credentials expired.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; NEW enrollment ID |
 | push / --watch | Client certificate expired | `Receiver HOST client certificate expired.` followed by newline and the common recovery block below | stderr; stop channel; exit 1; NEW enrollment ID |
@@ -1063,19 +1065,12 @@ exit 1; cancellation exits 0. No additional renewal prompts.
 | receive enroll | Endpoint mismatch without confirmed change | `Receiver directory records endpoint URL. To change address, run semon receive enroll --advertise NEW with its listener/TLS options and confirm the address change.` | stderr; exit 1; preserve custody |
 | Receiver new authority | Audit unavailable | `Receiver audit is unavailable. Keep DIR unchanged; restore access to its audit storage before enrolling or renewing.` | local stderr; exit 1; wire remains generic; revoke/cutover still work |
 
-For watch, evaluate deadlines independently of file events, at least once per
-minute, using an injected clock/scheduler. Keep automatic retry attempts at most
-once per minute and within receiver admission limits. Notices follow a separate
-schedule: report the FIRST failure immediately, a changed outcome/severity, each
-30/14/7-day crossing, and at most one reminder per 24 hours while unchanged. If
-starting late, use only the highest reached severity. Suppress redundant due,
-attempt-start and failure lines within one cycle; failure/severity wins. A running
-watch never tells the operator to run push. At 30 days say due soon unless an
-attempt is actually under way. Attempt-start never resets suppression and never
-counts as a changed outcome: alternating starts and the same failure cannot flood
-the log. Reset notices only after success. One-shot push emits
-one combined outcome per cycle. Tests advance injected time; no real-time sleeps
-(#623).
+For watch, evaluate deadlines independently of file events at least once per
+minute using an injected clock/scheduler. Retry at most once per minute within
+receiver admission limits. Notice on the first failure, a severity change (entering
+the last seven days), and reminders at most once per 24 hours. Reset after success.
+A running watch never advises another push. One-shot push emits one outcome per
+cycle. Tests advance injected time without real-time sleeps (#623).
 
 Normal renewal never rotates the assertion issuer, receiver server/root identity
 or cache master key. Exceptional `semon receive rotate --identity` requires a
@@ -1259,6 +1254,10 @@ CI must verify the implementation, not infer safety from this docs PR:
 - Concurrent begin/finish, replay, expiry, restart, commit-uncertain writes and lost
   acknowledgements leave one committed target generation set. Repeated finish
   returns identical secrets/certificate without a delivery cap; no N+2 retry.
+  Retry a lost committed response after ten minutes while old authority remains
+  valid; refuse only when retry authority ends, not at begin's `expires_at`.
+  Hostile repeated idempotent begin/finish causes no durable audit growth or audit
+  fsync work; legitimate renewal remains available under that load.
 - Renewal preserves exactly the existing unrevoked kind set. Revoked kinds require
   fresh pairing/owner approval; no enable authorization, due header or renewal
   cancellation remains. Unfinished attempts expire at ten minutes without extension.
@@ -1310,12 +1309,11 @@ CI must verify the implementation, not infer safety from this docs PR:
 - Only the 30-day timer and idle-watch checks schedule renewal. Every generic
   renewal error preserves valid application traffic; only application refusal or
   expiry gives re-pair guidance and exits. Exercise this with one-shot and watch.
-- Exercise exact operator strings, confirmation/cancellation, 30/14/7-day escalation,
-  watch without source events, first-failure immediacy, changed outcomes/severity,
-  threshold crossings, daily reminder ceiling and suppressed duplicate due/failure
-  lines. Attempt-start never resets suppression or counts as a changed outcome;
-  alternating start/same-failure cycles stay quiet. A running watch never advises
-  another push. Test --receiver URL resolution through the SAME pairing endpoint
+- Exercise exact strings and confirmation/cancellation. For idle watch, verify
+  first-failure notice, severity change on entering the last seven days, reminders
+  at most daily, and reset after success. Repeated starts/failures do not reset
+  suppression. A running watch never advises another push. Test --receiver URL
+  resolution through the SAME pairing endpoint
   normalization on connect/push/disconnect, including default ports and IPv6,
   without hash aliases or DNS alias guessing. Notices never show userinfo/query.
   Distinguish certificate expiry and unsupported-format versus capacity guidance; all recovery strings use code/invitation consistently.
