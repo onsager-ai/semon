@@ -1383,8 +1383,11 @@ normalization for connect, push and disconnect, with
 `push [--receiver URL] [--watch]` under the contract above. Push consumes
 stored enrollment; the superseded `--to`/`--token-file` push CLI is removed.
 Custody is `$XDG_CONFIG_HOME/semon/origin/<sha256-canonical-endpoint>/` (default
-`~/.config/semon/origin/`): `enrollment.json` signed by `origin-key.pk8`,
-`mirror-push.secret`, and separately bound `source-consent.json`. Directories are
+`~/.config/semon/origin/`): a mode-0600 `selected` file names one complete
+`generation-N/`, containing format-2 `enrollment.json` signed by `origin-key.pk8`,
+`mirror-push.secret`, any `client-certificate.der`, and separately bound
+`source-consent.json`. Earlier flat origin custody is unsupported and left intact;
+fresh pairing is required. Directories are
 0700 and regular files 0600, owned by the local user; fd-relative no-follow opens
 refuse links. A private `stage-<random>/` is synced before its atomic publication;
 only the final directory is admitted. A durable `disabled` marker stops active
@@ -1396,8 +1399,22 @@ Each delivery drops its private HTTP client and joins its transport runtime
 before releasing its lock. Disconnect drains active delivery locks before
 reporting success. Lock acquisition has a five-second deadline; failure leaves
 the disabled marker in place and reports the uncertain-outcome guidance.
-Renewal installation/recovery is PR4.3b. Interrupted staging is
-retained, never silently deleted or loaded. No credential is written before
+PR4.3b provides the mirror-only renewal library and private TLS begin/finish
+client. `renewal.json` durably binds the begin response, protected application key,
+old generation and delivery reservation. Restart reconciles a complete signed
+staged generation before network use; uncertain commit uses at most one recovery.
+Without a verified local new generation, pending or refused renewal leaves the
+selected valid application credential usable. Expired unsent attempts and exhausted
+uncertain attempts become durable abandoned records, archived before a new begin;
+generic refusal never establishes revocation or cutover. New begin remains subject
+to receiver admission and receipt authority. Dispatch and delivery validation read
+fresh clock values, including after a network exchange crosses a second boundary.
+The atomic `selected` replacement publishes all credential/configuration files
+at once. Retained old generations are never selected as a fallback. Existing
+application authority also binds its generation, so selection ends stale clients.
+Interrupted staging is retained, never silently deleted or loaded. Push/watch
+scheduling, authenticated due-header triggers and exact operator notices remain
+a follow-up integration slice; automatic renewal is not yet wired to the CLI. No credential is written before
 receiver confirmation and approval delivery. `install.lock` serializes publication. Receiver selection
 accepts the enrolled HTTPS URL; the endpoint hash stays internal. An omitted URL
 requires one enrolled receiver.

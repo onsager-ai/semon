@@ -576,7 +576,10 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     else {
         panic!("required certificate was not installed")
     };
-    let certificate_path = origin.join(&name).join("client-certificate.der");
+    let certificate_path = origin
+        .join(&name)
+        .join("generation-1")
+        .join("client-certificate.der");
     let certificate_bytes = fs::read(&certificate_path).unwrap();
     fs::write(&certificate_path, [0]).unwrap();
     assert!(crate::origin_custody::load_at(&origin, Some(&config.endpoint), 100).is_err());
