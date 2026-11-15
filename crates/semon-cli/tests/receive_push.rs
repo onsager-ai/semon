@@ -98,9 +98,14 @@ impl Fixture {
 
     /// Starts `semon receive` on a free loopback port and returns its URL.
     fn start_receiver(&mut self) -> String {
+        self.start_receiver_with(&[])
+    }
+
+    fn start_receiver_with(&mut self, extra: &[&str]) -> String {
         let mut child = semon()
             .args(["receive", "--listen", "127.0.0.1:0", "--dir"])
             .arg(self.dir())
+            .args(extra)
             .env("HOME", self.path("home"))
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -673,4 +678,205 @@ fn pair_and_unpair_commands_store_replace_and_revoke_configuration() {
     assert_ok(&output, "offline unpair");
     assert!(stderr(&output).contains("warning: receiver unreachable"));
     assert!(!pair_path.exists());
+}
+
+#[test]
+fn receiver_viewer_read_tokens_login_revocation_and_route_separation() {
+    use std::io::{Read, Write};
+    fn http(url: &str, path: &str, headers: &str, body: Option<&str>) -> String {
+        let address = url.strip_prefix("http://").unwrap();
+        let mut socket = std::net::TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        let method = if body.is_some() { "POST" } else { "GET" };
+        let body = body.unwrap_or("");
+        write!(socket, "{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
+        let mut reply = String::new();
+        socket.read_to_string(&mut reply).unwrap();
+        reply
+    }
+    fn header<'a>(response: &'a str, name: &str) -> &'a str {
+        response
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                key.eq_ignore_ascii_case(name).then_some(value.trim())
+            })
+            .unwrap()
+    }
+    let mut f = Fixture::new();
+    let mut url = f.start_receiver();
+    let token_command = |arguments: &[&str]| {
+        semon()
+            .arg("token")
+            .args(arguments)
+            .arg("--dir")
+            .arg(f.dir())
+            .output()
+            .unwrap()
+    };
+    let created = token_command(&[]);
+    assert_ok(&created, "create read token");
+    let secret = String::from_utf8(created.stdout).unwrap().trim().to_owned();
+    let listing = token_command(&["--list"]);
+    assert_ok(&listing, "list read tokens");
+    let listing = String::from_utf8(listing.stdout).unwrap();
+    assert!(!listing.contains(&secret));
+    let id = listing
+        .lines()
+        .nth(1)
+        .unwrap()
+        .split('\t')
+        .next()
+        .unwrap()
+        .to_owned();
+    let stored = fs::read_to_string(f.dir().join("enrollment/registry.json")).unwrap();
+    assert!(!stored.contains(&secret));
+    assert!(stored.contains("created"));
+    assert!(http(&url, "/", "", None).starts_with("HTTP/1.1 403"));
+    let landing = http(&url, &format!("/?t={secret}&keep=1"), "", None);
+    assert!(landing.starts_with("HTTP/1.1 303"), "{landing}");
+    assert_eq!(header(&landing, "Location"), "/?keep=1");
+    let set_cookie = header(&landing, "Set-Cookie");
+    assert!(set_cookie.contains("HttpOnly; SameSite=Strict; Path=/"));
+    assert!(!set_cookie.contains("Secure"));
+    let cookie = set_cookie.split(';').next().unwrap().to_owned();
+    assert!(http(&url, "/", &format!("Cookie: {cookie}\r\n"), None).starts_with("HTTP/1.1 200"));
+    assert!(
+        http(
+            &url,
+            "/api/session-sources",
+            &format!("Authorization: Bearer {secret}\r\n"),
+            None
+        )
+        .starts_with("HTTP/1.1 200")
+    );
+    // Neither a malformed duplicate login nor a network-path redirect is admitted.
+    assert!(http(&url, &format!("/?t={secret}&t={secret}"), "", None).starts_with("HTTP/1.1 403"));
+    assert!(
+        http(&url, &format!("//other.example/?t={secret}"), "", None).starts_with("HTTP/1.1 403")
+    );
+    // Pairing and push credentials cannot authorize read routes, or each other's routes.
+    let (code, _) =
+        semon_push::simple_pair::issue(&f.dir(), semon_push::simple_pair::now().unwrap()).unwrap();
+    let pair_body = serde_json::json!({"version":1,"code":code.expose(),"machine_id":"machine-6754a9c1e83f27b4","hostname":"laptop"}).to_string();
+    assert!(
+        http(
+            &url,
+            "/v1/pair",
+            &format!("Authorization: Bearer {secret}\r\n"),
+            Some(&pair_body)
+        )
+        .starts_with("HTTP/1.1 403")
+    );
+    let paired = http(&url, "/v1/pair", "", Some(&pair_body));
+    assert!(paired.starts_with("HTTP/1.1 200"), "{paired}");
+    let paired: serde_json::Value =
+        serde_json::from_str(paired.split_once("\r\n\r\n").unwrap().1).unwrap();
+    let push = paired["token"].as_str().unwrap();
+    for wrong in [push, code.expose()] {
+        assert!(
+            http(
+                &url,
+                "/",
+                &format!("Authorization: Bearer {wrong}\r\n"),
+                None
+            )
+            .starts_with("HTTP/1.1 403")
+        );
+        assert!(http(&url, &format!("/?t={wrong}"), "", None).starts_with("HTTP/1.1 403"));
+    }
+    for wrong in [secret.as_str(), code.expose()] {
+        assert!(
+            http(
+                &url,
+                "/v1/push/status",
+                &format!("Authorization: Bearer {wrong}\r\n"),
+                Some("{}")
+            )
+            .starts_with("HTTP/1.1 401")
+        );
+    }
+    let status = http(
+        &url,
+        "/v1/push/status",
+        &format!("Authorization: Bearer {push}\r\n"),
+        Some("{}"),
+    );
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert!(
+        http(
+            &url,
+            "/v1/pair",
+            &format!("Authorization: Bearer {push}\r\n"),
+            Some(&pair_body)
+        )
+        .starts_with("HTTP/1.1 403")
+    );
+    // Tokens and ID-bound cookies survive restarting the server, including a port change.
+    let mut child = f.receiver.take().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    url = f.start_receiver_with(&["--public-url", "https://receiver.example"]);
+    assert!(http(&url, "/", &format!("Cookie: {cookie}\r\n"), None).starts_with("HTTP/1.1 200"));
+    let address = url.strip_prefix("http://").unwrap();
+    let public_request = |host: &str, origin: &str, path: &str| {
+        let mut socket = std::net::TcpStream::connect(address).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        write!(socket, "GET {path} HTTP/1.1\r\nHost: {host}\r\nOrigin: {origin}\r\nAuthorization: Bearer {secret}\r\nConnection: close\r\n\r\n").unwrap();
+        let mut reply = String::new();
+        socket.read_to_string(&mut reply).unwrap();
+        reply
+    };
+    assert!(
+        public_request("receiver.example", "https://receiver.example", "/")
+            .starts_with("HTTP/1.1 200")
+    );
+    let secure_login = public_request(
+        "receiver.example",
+        "https://receiver.example",
+        &format!("/?t={secret}"),
+    );
+    assert!(header(&secure_login, "Set-Cookie").contains("; Secure"));
+    assert!(
+        public_request("attacker.example", "https://attacker.example", "/")
+            .starts_with("HTTP/1.1 403")
+    );
+    assert!(
+        public_request("receiver.example", "https://attacker.example", "/")
+            .starts_with("HTTP/1.1 403")
+    );
+    let created_public = semon()
+        .args(["token", "--dir"])
+        .arg(f.dir())
+        .output()
+        .unwrap();
+    assert_ok(&created_public, "public read token");
+    assert!(
+        String::from_utf8(created_public.stdout)
+            .unwrap()
+            .contains("https://receiver.example/?t=")
+    );
+    let revoked = semon()
+        .args(["token", "--revoke", &id, "--dir"])
+        .arg(f.dir())
+        .output()
+        .unwrap();
+    assert_ok(&revoked, "revoke read token");
+    assert!(http(&url, "/", &format!("Cookie: {cookie}\r\n"), None).starts_with("HTTP/1.1 403"));
+    assert!(
+        http(
+            &url,
+            "/",
+            &format!("Authorization: Bearer {secret}\r\n"),
+            None
+        )
+        .starts_with("HTTP/1.1 403")
+    );
+    assert!(http(&url, &format!("/?t={secret}"), "", None).starts_with("HTTP/1.1 403"));
+    let stored = fs::read_to_string(f.dir().join("enrollment/registry.json")).unwrap();
+    assert!(stored.contains("revoked"));
 }

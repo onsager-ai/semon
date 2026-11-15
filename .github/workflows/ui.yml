@@ -350,7 +350,7 @@ jobs:
           recv="$RUNNER_TEMP/recv"; fixture_root="$RUNNER_TEMP/sample"
           mkdir -p "$RUNNER_TEMP/recv-home" "$RUNNER_TEMP/pushed"
           python3 -I tests/ui/enrollment-fixture.py "$recv" "$RUNNER_TEMP/recv.token"
-          setsid nohup target/debug/semon receive --listen 127.0.0.1:0 --dir "$recv" \
+          SEMON_TEST_NOW="$SEMON_NOW" XDG_CACHE_HOME="$RUNNER_TEMP/recv-cache" setsid nohup target/debug/semon receive --listen 127.0.0.1:0 --dir "$recv" \
             < /dev/null > "$RUNNER_TEMP/receive.log" 2>&1 &
           for _ in $(seq 1 100); do
             url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*' "$RUNNER_TEMP/receive.log" || true)
@@ -365,7 +365,7 @@ jobs:
             < /dev/null > "$RUNNER_TEMP/push.log" 2>&1 &
           SEMON_TEST_NOW="$SEMON_NOW" node tests/ui/pushed-parity.mjs --home "$fixture_root" --received "$recv" --scratch "$RUNNER_TEMP/pushed"
 
-      # The viewer over the pushed copy alone (--no-local), and the subset of the suite that shows the pushed data renders as
+      # The same receive listener serves the pushed copy with an owner read token. Verify it renders as
       # the local one does: the fixture gaps (the served model and every transcript against the retained fixture data, so the
       # pushed transcripts are the machine's own) and the native pages. The rest of the suite is about the viewer, not the
       # data, and runs on the local fixture above.
@@ -378,20 +378,13 @@ jobs:
           SEMON_REF_TOKEN: ${{ env.SEMON_TOKEN }}
         run: |
           [ -d "$RUNNER_TEMP/recv/machines/machine-6754a9c1e83f27b4" ] || { echo "nothing was received"; exit 1; }
-          reader="$RUNNER_TEMP/pushed/reader"
-          SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen 127.0.0.1:8769 \
-            --machines "$RUNNER_TEMP/recv" --no-local --claude-home "$reader/claude" --claude-json "$reader/.claude.json" --codex-home "$reader/codex" --copilot-home "$reader/copilot" \
-            --proc-root "$reader/proc" --cache "$reader/serve-index.json" < /dev/null > "$RUNNER_TEMP/pushed-viewer.log" 2>&1 &
-          for _ in $(seq 1 100); do
-            url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*/?t=[0-9a-f]*' "$RUNNER_TEMP/pushed-viewer.log" || true)
-            [ -n "$url" ] && break
-            sleep 0.2
-          done
-          [ -n "$url" ] || { cat "$RUNNER_TEMP/pushed-viewer.log"; exit 1; }
-          export SEMON_BASE="${url%%/?t=*}" SEMON_TOKEN="${url##*t=}"
+          url=$(grep -m1 -o 'http://127.0.0.1:[0-9]*' "$RUNNER_TEMP/receive.log")
+          token=$(target/debug/semon token --dir "$RUNNER_TEMP/recv")
+          export SEMON_BASE="$url" SEMON_TOKEN="$token"
           cd tests/ui
           node pushed-parity.mjs --native-pages
           node gaps.mjs --base "$SEMON_BASE" --token "$SEMON_TOKEN"
+          node receive-viewer.mjs
 
       # Lists of sessions keep their rows where they are while updates arrive; what they hold applies when the list is out of sight.
       - name: Stable session order

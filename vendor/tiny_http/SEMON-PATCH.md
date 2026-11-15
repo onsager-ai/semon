@@ -47,3 +47,11 @@ maximum duration on an actively transferring request.
 `crates/semon-relay/tests/security.rs` covers excess-peer rejection, idle-slot
 recovery, incomplete TLS handshakes alongside an authenticated sender, and the
 existing burst and signed-header/body-limit checks.
+
+## Receiver/Viewer composition
+
+`new_request` is re-exported without changing its implementation. The receiver's
+bounded parser uses this constructor to delegate non-protocol requests to the
+existing Viewer handler on the same listener. The adapter supplies the untouched
+body stream and closes the response connection; push requests retain the existing
+receiver parser, limits and keep-alive behavior.

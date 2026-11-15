@@ -1,6 +1,6 @@
 //! Durable owner read authority, separate from machine push credentials.
 use crate::{
-    credentials::{Bearer, Kind, Secret},
+    credentials::{Bearer, Secret},
     enrollment::{Error, Registry, Store},
 };
 use serde::{Deserialize, Serialize};
@@ -8,10 +8,16 @@ use std::path::{Path, PathBuf};
 
 type Result<T> = std::result::Result<T, Error>;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Read {
+    Read,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct State {
-    tokens: Vec<Bearer>,
+    tokens: Vec<Bearer<Read>>,
     audit: Vec<Audit>,
     public_url: Option<String>,
 }
@@ -60,7 +66,7 @@ pub fn create(dir: &Path, now: u64) -> Result<(Secret, Option<String>)> {
         r.read_tokens.tokens.push(Bearer {
             credential_id: id.clone(),
             enrollment_id: id.clone(),
-            kind: Kind::MirrorPush,
+            kind: Read::Read,
             sha256: secret.hash(),
             generation: 1,
             valid_from: now,
@@ -126,14 +132,6 @@ impl semon_sessions::ViewerAccess for Access {
             .find(|t| t.revoked_at.is_none() && crate::credentials::ct_eq(&hash, &t.sha256))
             .map(|t| t.credential_id.clone())
     }
-    fn active(&self, id: &str) -> bool {
-        Registry::read_current(&self.0).is_ok_and(|r| {
-            r.read_tokens
-                .tokens
-                .iter()
-                .any(|t| t.credential_id == id && t.revoked_at.is_none())
-        })
-    }
 }
 
 impl Registry {
@@ -141,7 +139,7 @@ impl Registry {
         let mut ids = std::collections::BTreeSet::new();
         let mut hashes = std::collections::BTreeSet::new();
         for t in &self.read_tokens.tokens {
-            if t.kind != Kind::MirrorPush
+            if t.kind != Read::Read
                 || t.enrollment_id != t.credential_id
                 || t.generation != 1
                 || t.valid_until != u64::MAX

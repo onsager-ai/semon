@@ -110,26 +110,44 @@ same archive after every batch or restart; see the
 
 `semon receive` is a receiver for `semon push`, for one person with several machines, and the [push protocol](docs/push-protocol.md)'s reference implementation (`semon_push::mirror::Receiver`). Each machine pushes with its own token, and its copy lands in `DIR/machines/NAME/`: `claude/` and `codex/` hold the input files at their paths under each home, and `facts.json` holds the machine's facts. A token decides the machine, so one machine's token can't write another's files.
 
-The receiver can listen on plain HTTP behind an HTTPS proxy such as Cloudflare
-Tunnel. Start it and print a one-time code on the receiver host:
+The five setup commands are `semon receive`, `semon pair` on the receiver,
+`semon pair URL CODE` on each machine, `semon unpair`, and `semon token` for
+owner read access:
 
 ```sh
-semon receive --dir ~/semon-received --listen 0.0.0.0:8080
-# In another terminal on that host:
+# Receiver host; deploy behind an HTTPS proxy:
+semon receive --dir ~/semon-received --listen 127.0.0.1:8080 --public-url https://receiver.example
+# In another terminal on the receiver:
 semon pair --dir ~/semon-received
-```
-
-On each machine, use the public HTTPS URL and that code:
-
-```sh
+# On each machine, using the printed one-time code:
 semon pair https://receiver.example CODE
-semon push --watch # advanced; automatic background sync arrives in P2
+semon unpair # revoke this machine when it should stop sending
+# On the receiver, print an owner read token and login URL once:
+semon token --dir ~/semon-received
 ```
 
-The four commands are `receive`, `pair` on the receiver, `pair URL CODE` on the
-machine, and `unpair`. A code expires in ten minutes; a new code replaces the
+Run `semon push --watch` on each paired machine to sync; automatic background
+sync arrives in P2. A code expires in ten minutes; a new code replaces the
 previous one. Three wrong guesses burn it, and three burns within an hour pause
 pairing for thirty minutes. Refusals reveal no details.
+
+One process and port serve pairing, push and the Viewer over received machines.
+Semon authenticates all three: `/v1/pair` accepts only the one-time code,
+`/v1/push/*` accepts only that machine's write token, and Viewer pages/APIs accept
+only an owner read token. Open the printed `/?t=TOKEN` URL; it sets an
+`HttpOnly; SameSite=Strict` session cookie and redirects without the token.
+HTTPS public URLs add `Secure`. API clients may send `Authorization: Bearer TOKEN`.
+Read tokens are stored only as hashes, survive restarts, and read all received
+history until revoked. `semon token --dir DIR --list` prints IDs and creation
+times, never secrets; `semon token --dir DIR --revoke ID` invalidates the token
+and its cookies on the next request. Creation and revocation are audited.
+
+Deploy behind any HTTPS proxy, including Cloudflare Tunnel, forwarding the
+original Host. The listener uses plain HTTP; `--public-url https://HOST` admits
+that exact public Host and Origin alongside loopback. Without it the Viewer
+remains loopback-only. Cloudflare supplies transport, not Semon authorization.
+The proxy can read logs in transit; a leaked owner read token reads everything
+until revoked. These are accepted owner tradeoffs.
 
 Pairing stores one receiver's URL, Bearer token and canonical machine ID in
 `$XDG_CONFIG_HOME/semon/pair.json` (fallback `~/.config/semon/pair.json`), atomically
@@ -145,12 +163,13 @@ Neither action deletes received logs. One receiver per machine is supported.
 
 The machine validates public-CA HTTPS and refuses plain HTTP except on loopback.
 The receiver's default remains `127.0.0.1:8735`; `--listen` selects a proxy-facing
-address, and optional `--tls-cert`/`--tls-key` serve TLS directly. Protect a plain
+address. The combined Viewer listener uses plain HTTP behind the HTTPS proxy. Protect a plain
 HTTP receiver's network access appropriately. The HTTPS proxy can read logs in
 transit, and a stolen token works until revoked: these are accepted owner tradeoffs.
 The old enroll/connect/disconnect and TLS-bound renewal commands remain available
 until their removal in P3; they are no longer the primary setup path. Legacy
-`DIR/tokens` is refused; preserve existing state and pair into a fresh directory.
+`DIR/tokens` and older receiver registry formats are refused; preserve existing
+state and pair into a fresh directory.
 
 Its limits:
 
@@ -176,7 +195,7 @@ keep that directory unchanged and re-enroll into a new receiver directory.
 A received directory without a machine record is skipped with a re-enrollment warning; recorded machines remain available;
 Semon never deletes or moves retained logs.
 
-To see the received machines, serve `DIR` with `semon sessions --serve --machines DIR` ([See all your machines](#see-all-your-machines)).
+`semon receive` serves the received machines directly. For a separate local view, use `semon sessions --serve --machines DIR` ([See all your machines](#see-all-your-machines)).
 
 ## See all your machines
 

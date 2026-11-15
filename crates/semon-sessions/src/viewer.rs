@@ -243,14 +243,12 @@ pub struct Viewer {
     asi: Option<Arc<dyn ViewerAsi>>,
     receive: Option<Arc<dyn ViewerAccess>>,
     public_origin: Option<String>,
-    sessions: Mutex<std::collections::HashMap<String, String>>,
 }
 
-/// Receiver-owned read authority. Session cookies carry random session IDs;
-/// their bound credential IDs are checked again on every request.
+/// Receiver-owned read authority. Session cookies bind the read credential ID to its secret;
+/// the registry is checked again on every request.
 pub trait ViewerAccess: Send + Sync {
     fn resolve(&self, secret: &str) -> Option<String>;
-    fn active(&self, id: &str) -> bool;
 }
 
 impl Viewer {
@@ -272,7 +270,6 @@ impl Viewer {
             asi: None,
             receive: Some(access),
             public_origin,
-            sessions: Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -298,6 +295,12 @@ impl Viewer {
         if !local && !public {
             return None;
         }
+        if !request.url().starts_with('/')
+            || request.url().starts_with("//")
+            || request.url().contains(['\r', '\n'])
+        {
+            return None;
+        }
         let origin = if public {
             self.public_origin.clone()?
         } else {
@@ -316,13 +319,16 @@ impl Viewer {
             }
             let secret = credentials[0].strip_prefix("t=")?;
             let id = access.resolve(secret)?;
-            let session = random_token().ok()?;
-            lock(&self.sessions).insert(session.clone(), id);
-            return Some(Some(session));
+            return Some(Some(format!("{id}.{secret}")));
         }
         if let Some(value) = request_header(request, "Authorization") {
             access.resolve(value.strip_prefix("Bearer ")?)?;
             return Some(None);
+        }
+        if request.method() == &Method::Post
+            && request_header(request, "Origin") != Some(origin.as_str())
+        {
+            return None;
         }
         let cookies: Vec<_> = request_header(request, "Cookie")?
             .split(';')
@@ -331,8 +337,8 @@ impl Viewer {
         if cookies.len() != 1 {
             return None;
         }
-        let id = lock(&self.sessions).get(cookies[0]).cloned()?;
-        access.active(&id).then_some(None)
+        let (id, secret) = cookies[0].split_once('.')?;
+        (access.resolve(secret).as_deref() == Some(id)).then_some(None)
     }
 
     /// Delegates a request admitted by the receiver's shared listener.
@@ -510,7 +516,6 @@ fn serve_server(
         asi,
         receive: None,
         public_origin: None,
-        sessions: Mutex::new(std::collections::HashMap::new()),
     });
     let server = Arc::new(server);
     println!("http://127.0.0.1:{port}/?t={}", viewer.token);
@@ -1948,7 +1953,6 @@ mod tests {
             asi: None,
             receive: None,
             public_origin: None,
-            sessions: Mutex::new(std::collections::HashMap::new()),
         };
         if let Some(expected_session) = expected_session {
             // This fixture owns a known warm publication. Prepare it directly,

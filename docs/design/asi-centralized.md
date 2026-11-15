@@ -61,37 +61,47 @@ define the current persisted identity and display contract. [C6]
 
 ## Reads and audit
 
-The receiver authorizes and audits reads locally, using its retained custody and
-authenticated loopback Viewer boundary. The origin does not approve or audit each
-receiver read. No online origin assertion, pull-body cache, or dual audit is part
-of this default. Local read/audit integration remains implementation work; this
-amendment chooses no new journal format or authentication protocol. In this
-release only the receiver's OS owner reads, through the authenticated loopback
-Viewer, CLI and MCP; no login or multi-user ACL is added. [C1, C2, C6, I]
+The receiver serves retained history through one `semon receive` process and
+port. Semon owns authorization; an HTTPS proxy (including Cloudflare) supplies
+transport only. The listener is plain HTTP, with `--public-url https://HOST`
+admitting exactly that public Host and Origin in addition to loopback. Without
+a configured public origin, Viewer admission remains loopback-only. [C1, C2, I]
 
-## Four-action journey
+Roles are split by path with no credential crossover: `/v1/pair` accepts only
+a one-time code; `/v1/push/*` accepts a per-machine, write-only push token;
+Viewer pages and APIs accept the owner's read token. Read tokens never expire
+or renew. They are stored only as hashes in the receiver registry, with audited
+creation/revocation. The `/?t=TOKEN` login establishes the existing HttpOnly,
+SameSite=Strict cookie (Secure for an HTTPS public URL), then redirects without
+the credential. Cookies bind a token ID and are rechecked against the registry
+on every request, so revocation takes effect on the next request. API clients
+can use Bearer read tokens. A leaked read token reads all retained history until
+revoked; the HTTPS proxy can read traffic. The owner accepts these tradeoffs.
+No login UI or multi-user ACL is added. Origin approval/audit for each retained
+read and the old online assertion/cache/dual-audit protocol are outside this
+own-machine default. Per-read local audit remains follow-up work. [C1, C2, C6, I]
 
-The owner decision on **2026-11-15** supersedes TLS-bound pairing with T3-style
-one-time codes and revocable, long-lived Bearer tokens. The user-facing commands
-are `semon receive`, `semon pair` on the receiver host, `semon pair URL CODE` on
-the machine, and `semon unpair`. In P1, receiver-local pair takes `--dir DIR`;
-client pairing prints the separate `semon push --watch` instruction. Background
-user-service installation and automatic sync start arrive in P2. Do not advertise
-automatic background sync as delivered by P1.
+## Five-command journey
 
-The receiver may run on plain HTTP behind any HTTPS proxy. Machines validate
-public-CA HTTPS; HTTP is allowed only on loopback. The proxy can read logs in
-transit, and a stolen token works until revoked: the owner accepts both tradeoffs.
-A ten-character code lasts ten minutes. Three wrong guesses burn it; three burns
+The owner decision on **2026-11-15** supersedes TLS-bound pairing with one-time
+codes and revocable, long-lived Bearer tokens. The commands are `semon receive`,
+`semon pair --dir DIR` on the receiver, `semon pair URL CODE` on each machine,
+`semon unpair`, and `semon token --dir DIR`. Token listing and revocation use
+`--list` and `--revoke ID`. Pairing prints the separate `semon push --watch`
+instruction; background user-service installation and automatic sync start
+arrive in P2.
+
+Machines validate public-CA HTTPS; HTTP is allowed only on loopback. A
+ten-character code lasts ten minutes. Three wrong guesses burn it; three burns
 within an hour persist a thirty-minute pause. Tokens never expire or renew.
-Pairing again replaces the machine's previous token. One receiver configuration
-is stored per machine in private pair.json. Unpair revokes authority and removes
-local configuration, preserving received logs.
+Pairing again replaces the machine's previous push token. One receiver
+configuration is stored per machine in private pair.json. Unpair revokes push
+authority and removes local configuration, preserving received logs.
 
-The previous enroll/connect/disconnect, renewal, client-certificate and TLS-exporter
-path is superseded and will be removed in P3. The historical plan below records
-prior sequencing; its instructions to keep TLS-bound enrollment and renewal no
-longer apply. Private-root pairing remains deferred; no pinned invitation is added.
+The previous enroll/connect/disconnect, renewal, client-certificate and
+TLS-exporter path is superseded and will be removed in P3. Its historical plan
+below does not authorize restoring it or adding public Viewer access to those
+surfaces. Private-root pairing remains deferred.
 
 ## Implementation plan
 

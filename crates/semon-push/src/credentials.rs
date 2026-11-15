@@ -66,10 +66,10 @@ impl fmt::Display for Secret {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Bearer {
+pub struct Bearer<K = Kind> {
     pub credential_id: String,
     pub enrollment_id: String,
-    pub kind: Kind,
+    pub kind: K,
     pub sha256: [u8; 32],
     pub generation: u64,
     /// Inclusive Unix seconds.

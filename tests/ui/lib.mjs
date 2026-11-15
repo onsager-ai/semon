@@ -425,7 +425,7 @@ export async function data(options = {}) {
 async function nativeFixtureData({ extras = false, base: sourceBase, token: sourceToken } = {}) {
   const base = sourceBase ?? (extras ? ENV.extraBase : ENV.base),
     token = sourceToken ?? (extras ? ENV.extraToken : ENV.token);
-  const landing = await fetch(base + '/?t=' + token);
+  const landing = await fetch(base + '/?t=' + token, { redirect: 'manual' });
   const cookie = landing.headers
     .getSetCookie()
     .map((value) => value.split(';')[0])

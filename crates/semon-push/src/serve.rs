@@ -965,7 +965,13 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
                     None => None,
                 };
         }
-        if !head.target.starts_with("/v1/")
+        if head.target != "/v1/pair"
+            && head.target != "/v1/unpair"
+            && !head.target.starts_with("/v1/push/")
+            && !head.target.starts_with("/v1/provision/")
+            && !head.target.starts_with("/v1/renew/")
+            && !head.target.starts_with("/v1/body/")
+            && !head.target.starts_with("/v1/analytics/")
             && let Some(viewer) = &shared.viewer
         {
             return serve_viewer(viewer, connection, head);

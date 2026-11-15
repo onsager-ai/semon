@@ -2541,10 +2541,11 @@ fn analytics_usage() -> String {
 }
 
 fn usage() -> String {
-    "Usage: semon receive --dir DIR [--listen ADDR]\n\
+    "Usage: semon receive --dir DIR [--listen ADDR] [--public-url https://HOST]\n\
          Usage: semon pair --dir DIR\n\
          Usage: semon pair URL CODE\n\
          Usage: semon unpair [MACHINE_ID --dir DIR]\n\
+         Usage: semon token --dir DIR [--list | --revoke ID]\n\
          Pair with one receiver; then run semon push --watch (advanced) to sync.\n\
          HTTPS proxies may forward to a plain HTTP receiver. Tokens work until revoked.\n\
          \n\
