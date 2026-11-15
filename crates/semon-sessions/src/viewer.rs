@@ -4517,7 +4517,17 @@ mod tests {
                 let b = core.respond("GET", path, "", None);
                 assert_eq!((a.status, a.content_type), (b.status, b.content_type));
                 if path == "/api/tree" {
-                    assert_eq!(without_age(&a.body), without_age(&b.body));
+                    let mut standalone_tree: Value =
+                        serde_json::from_str(&without_age(&a.body)).unwrap();
+                    let embedded_tree: Value = serde_json::from_str(&without_age(&b.body)).unwrap();
+                    for root in standalone_tree["roots"].as_array_mut().unwrap() {
+                        assert_eq!(root["source"], "");
+                        root["source"] = json!("some-key");
+                    }
+                    for root in embedded_tree["roots"].as_array().unwrap() {
+                        assert_eq!(root["source"], "some-key");
+                    }
+                    assert_eq!(standalone_tree, embedded_tree);
                 } else {
                     assert_eq!(a.body, b.body);
                 }
@@ -5224,10 +5234,72 @@ mod tests {
         );
     }
 
-    /// A receiver's copy of machine `name` under `dir/machines/`: one
-    /// session, `sid`, and a `facts.json` naming `host` when given.
+    /// Stable fixture identities, ordered independently of display hostnames.
+    fn machine_id(name: &str) -> String {
+        let index = [
+            "alpha",
+            "bravo",
+            "charlie",
+            "delta",
+            "echo",
+            "evil",
+            "foxtrot",
+            "fresh",
+            "gamma",
+            "golf",
+            "machine-0",
+            "machine-1",
+            "machine-2",
+            "machine-3",
+            "machine-4",
+            "machine-5",
+            "stale",
+            "twin",
+            "unrecorded",
+        ]
+        .iter()
+        .position(|candidate| *candidate == name)
+        .expect("known fixture machine");
+        let id = format!("machine-{index:016x}");
+        assert!(crate::machine_id::valid(&id));
+        id
+    }
+
+    fn register_received(dir: &Path, name: &str) -> PathBuf {
+        let id = machine_id(name);
+        let registry = dir.join("enrollment/registry.json");
+        let mut machines = if registry.exists() {
+            crate::received_registry::read_machines(dir).unwrap()
+        } else {
+            Vec::new()
+        };
+        if !machines.iter().any(|machine| machine.id == id) {
+            machines.push(crate::received_registry::ReceivedMachine {
+                id: id.clone(),
+                directory: id.clone(),
+                owner_name: None,
+            });
+        }
+        assert!(crate::received_registry::validate_machines(&machines));
+        fs::create_dir_all(registry.parent().unwrap()).unwrap();
+        // The writable enrollment Store lives in semon-push, which depends on
+        // this crate. Publish the typed reader contract directly in this fixture.
+        fs::write(
+            registry,
+            serde_json::to_vec(&json!({
+                "format": crate::received_registry::RECEIVER_FORMAT,
+                "machines": machines,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        dir.join("machines").join(id)
+    }
+
+    /// A registered receiver copy, addressed by machine ID; `name` is only
+    /// fixture shorthand and transcript content, while facts name `host`.
     fn receive(dir: &Path, name: &str, host: Option<&str>, sid: &str) -> PathBuf {
-        let root = dir.join("machines").join(name);
+        let root = register_received(dir, name);
         let path = root.join(format!("claude/projects/project/{sid}.jsonl"));
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let lines = [
@@ -5327,8 +5399,14 @@ mod tests {
         receive(&dir, "bravo", None, "lane-bravo");
         let delta = receive(&dir, "delta", None, "lane-delta");
         fs::write(delta.join("facts.json"), "{not json").unwrap();
-        fs::write(dir.join("machines/stray"), "not a machine").unwrap();
+        fs::write(
+            dir.join("machines").join(machine_id("unrecorded")),
+            "not a machine",
+        )
+        .unwrap();
         let before = contents(&dir);
+        let bravo_id = machine_id("bravo");
+        let delta_id = machine_id("delta");
 
         let core = ViewerCore::with_received(
             vec![(String::new(), local.options.clone())],
@@ -5338,12 +5416,20 @@ mod tests {
         let reply = core.respond("GET", "/api/viewer/home", "", None);
         assert_eq!(reply.status, 200);
         let model = body_of(&reply);
-        assert_eq!(machine_ids(&model), ["home", "alpha", "bravo", "delta"]);
+        assert_eq!(
+            machine_ids(&model),
+            [
+                "home".into(),
+                "alpha".into(),
+                machine_id("bravo"),
+                machine_id("delta")
+            ]
+        );
         let machines = model["machines"].as_array().unwrap();
         assert_eq!(machines[0]["up"], true);
         assert_eq!(machines[1]["up"], true);
         // No facts, or facts that can't be read: still shown, offline, by
-        // the directory's name.
+        // the machine ID.
         for machine in &machines[2..] {
             assert_eq!(machine["up"], false, "{machine}");
             assert!(machine["last"].is_i64(), "{machine}");
@@ -5352,8 +5438,8 @@ mod tests {
         for (sid, machine) in [
             ("lane-home", "home"),
             ("lane-alpha", "alpha"),
-            ("lane-bravo", "bravo"),
-            ("lane-delta", "delta"),
+            ("lane-bravo", bravo_id.as_str()),
+            ("lane-delta", delta_id.as_str()),
         ] {
             assert_eq!(home_owner(&model, sid).unwrap(), machine, "{sid}");
         }
@@ -5374,7 +5460,7 @@ mod tests {
         for (sid, machine) in [
             ("lane-home", "home"),
             ("lane-alpha", "alpha"),
-            ("lane-bravo", "bravo"),
+            ("lane-bravo", bravo_id.as_str()),
         ] {
             assert_eq!(roots.get(sid), Some(&machine), "{roots:?}");
         }
@@ -5383,7 +5469,7 @@ mod tests {
         let tx = core.respond(
             "GET",
             "/api/session-transcript",
-            "machine=bravo&sid=lane-bravo&limit=100",
+            &format!("machine={}&sid=lane-bravo&limit=100", machine_id("bravo")),
             None,
         );
         assert_eq!(tx.status, 200);
@@ -5391,17 +5477,17 @@ mod tests {
         let transcript = core.respond(
             "GET",
             "/api/session-transcript",
-            "machine=alpha&sid=lane-alpha&limit=100",
+            &format!("machine={}&sid=lane-alpha&limit=100", machine_id("alpha")),
             None,
         );
         assert_eq!(transcript.status, 200);
         assert!(String::from_utf8_lossy(&transcript.body).contains("done on alpha"));
         for path in [
-            "/session/alpha/lane-alpha",
-            "/machines/bravo",
-            "/machines/delta",
+            format!("/session/{}/lane-alpha", machine_id("alpha")),
+            format!("/machines/{}", machine_id("bravo")),
+            format!("/machines/{}", machine_id("delta")),
         ] {
-            let reply = core.respond("GET", path, "", None);
+            let reply = core.respond("GET", &path, "", None);
             assert_eq!(
                 (reply.status, reply.body.as_slice()),
                 (200, PAGE.as_bytes()),
@@ -5412,7 +5498,16 @@ mod tests {
             core.respond("GET", "/s/claude/lane-alpha", "", None).status,
             404
         );
-        assert_eq!(core.respond("GET", "/machines/stray", "", None).status, 404);
+        assert_eq!(
+            core.respond(
+                "GET",
+                &format!("/machines/{}", machine_id("unrecorded")),
+                "",
+                None
+            )
+            .status,
+            404
+        );
         // DIR is only read.
         assert_eq!(contents(&dir), before);
 
@@ -5423,12 +5518,20 @@ mod tests {
         assert_ne!(model["version"], version);
         assert_eq!(
             machine_ids(&model),
-            ["home", "alpha", "bravo", "charlie", "delta"]
+            [
+                "home".into(),
+                "alpha".into(),
+                machine_id("bravo"),
+                "charlie".into(),
+                machine_id("delta")
+            ]
         );
         assert_eq!(home_owner(&model, "lane-charlie").unwrap(), "charlie");
         // Facts that arrive later bring the machine online.
         crate::write_facts(
-            &dir.join("machines/bravo/facts.json"),
+            &dir.join("machines")
+                .join(machine_id("bravo"))
+                .join("facts.json"),
             &crate::Facts {
                 version: crate::FACTS_VERSION,
                 hostname: "bravo-host".into(),
@@ -5439,23 +5542,37 @@ mod tests {
         let model = native_home(&core);
         assert_eq!(
             machine_ids(&model),
-            ["home", "alpha", "bravo-host", "charlie", "delta"]
+            [
+                "home".into(),
+                "alpha".into(),
+                "bravo-host".into(),
+                "charlie".into(),
+                machine_id("delta")
+            ]
         );
         assert_eq!(model["machines"][2]["up"], true);
         assert_eq!(home_owner(&model, "lane-bravo").unwrap(), "bravo-host");
         // A machine removed is no longer served.
-        fs::remove_dir_all(dir.join("machines/charlie")).unwrap();
+        fs::remove_dir_all(dir.join("machines").join(machine_id("charlie"))).unwrap();
         let model = native_home(&core);
         assert_eq!(
             machine_ids(&model),
-            ["home", "alpha", "bravo-host", "delta"]
+            [
+                "home".into(),
+                "alpha".into(),
+                "bravo-host".into(),
+                machine_id("delta")
+            ]
         );
         assert!(home_owner(&model, "lane-charlie").is_none());
 
         // --no-local: the received machines only.
         let core = ViewerCore::with_received(Vec::new(), received(&receiver, &local.options));
         let model = native_home(&core);
-        assert_eq!(machine_ids(&model), ["alpha", "bravo-host", "delta"]);
+        assert_eq!(
+            machine_ids(&model),
+            ["alpha".into(), "bravo-host".into(), machine_id("delta")]
+        );
         assert!(home_owner(&model, "lane-home").is_none());
     }
 
@@ -5474,11 +5591,23 @@ mod tests {
             received(&receiver, &local.options),
         );
         let model = native_home(&core);
-        assert_eq!(machine_ids(&model), ["twin", "twin~twin"]);
-        assert_eq!(home_owner(&model, "lane-here").unwrap(), "twin");
-        assert_eq!(home_owner(&model, "lane-there").unwrap(), "twin~twin");
         assert_eq!(
-            core.respond("GET", "/machines/twin~twin", "", None).status,
+            machine_ids(&model),
+            ["twin".into(), format!("twin~{}", machine_id("twin"))]
+        );
+        assert_eq!(home_owner(&model, "lane-here").unwrap(), "twin");
+        assert_eq!(
+            home_owner(&model, "lane-there").unwrap(),
+            format!("twin~{}", machine_id("twin"))
+        );
+        assert_eq!(
+            core.respond(
+                "GET",
+                &format!("/machines/{}", machine_id("twin")),
+                "",
+                None
+            )
+            .status,
             200
         );
     }
@@ -5532,7 +5661,7 @@ mod tests {
         // Homes behind a link, and facts behind one.
         let bravo = receive(&dir, "bravo", Some("bravo"), "lane-bravo");
         symlink(outside.root.join("codex"), bravo.join("codex")).unwrap();
-        let charlie = dir.join("machines/charlie");
+        let charlie = register_received(&dir, "charlie");
         fs::create_dir_all(&charlie).unwrap();
         symlink(outside.root.join("claude"), charlie.join("claude")).unwrap();
         let facts = outside.root.join("facts.json");
@@ -5547,7 +5676,7 @@ mod tests {
         .unwrap();
         symlink(&facts, charlie.join("facts.json")).unwrap();
         // A machine directory that is a link.
-        symlink(&outside.root, dir.join("machines/evil")).unwrap();
+        symlink(&outside.root, register_received(&dir, "evil")).unwrap();
         let before = contents(&dir);
 
         let core = ViewerCore::with_received(Vec::new(), received(&receiver, &outside.options));
@@ -5556,7 +5685,10 @@ mod tests {
         assert_eq!(reply.status, 200);
         let text = String::from_utf8_lossy(&reply.body).into_owned();
         let model = body_of(&reply);
-        assert_eq!(machine_ids(&model), ["alpha", "bravo", "charlie"]);
+        assert_eq!(
+            machine_ids(&model),
+            ["alpha".into(), "bravo".into(), machine_id("charlie")]
+        );
         assert_eq!(model["machines"][2]["up"], false);
         assert!(home_owner(&model, "lane-alpha").is_some());
         assert!(home_owner(&model, "lane-bravo").is_some());
@@ -5577,20 +5709,32 @@ mod tests {
                 let reply = core.respond(
                     "GET",
                     "/api/session-transcript",
-                    &format!("machine={machine}&sid={sid}&limit=100"),
+                    &format!("machine={}&sid={sid}&limit=100", machine_id(machine)),
                     None,
                 );
                 assert_eq!(reply.status, 404, "{machine}:{sid}");
                 assert!(!String::from_utf8_lossy(&reply.body).contains("SECRET"));
             }
         }
-        assert_eq!(core.respond("GET", "/machines/evil", "", None).status, 404);
+        assert_eq!(
+            core.respond(
+                "GET",
+                &format!("/machines/{}", machine_id("evil")),
+                "",
+                None
+            )
+            .status,
+            404
+        );
         assert_eq!(contents(&dir), before);
     }
 
     /// `facts` as machine `name`'s received facts.
     fn received_facts(dir: &Path, name: &str, facts: crate::Facts) -> PathBuf {
-        let path = dir.join("machines").join(name).join("facts.json");
+        let path = dir
+            .join("machines")
+            .join(machine_id(name))
+            .join("facts.json");
         crate::write_facts(&path, &facts).unwrap();
         path
     }
@@ -5735,7 +5879,7 @@ mod tests {
     }
 
     #[test]
-    fn a_received_hostname_that_cant_name_a_machine_gives_way_to_its_directory() {
+    fn an_invalid_received_hostname_falls_back_to_its_machine_id() {
         let receiver = Fixture::new();
         let dir = receiver.root.join("received");
         for (name, host) in [
@@ -5755,9 +5899,19 @@ mod tests {
         let model = native_home(&core);
         assert_eq!(
             machine_ids(&model),
-            ["alpha-host", "delta", "echo", "foxtrot", "gamma", "golf"]
+            [
+                "alpha-host".into(),
+                machine_id("delta"),
+                machine_id("echo"),
+                machine_id("foxtrot"),
+                machine_id("gamma"),
+                machine_id("golf")
+            ]
         );
-        assert_eq!(home_owner(&model, "lane-gamma").unwrap(), "gamma");
+        assert_eq!(
+            home_owner(&model, "lane-gamma").unwrap(),
+            machine_id("gamma")
+        );
         let text = serde_json::to_string(&model).unwrap();
         assert!(!text.contains("bad~host") && !text.contains("\u{1b}"));
     }
@@ -5833,29 +5987,39 @@ mod tests {
     }
 
     #[test]
-    fn only_machine_names_are_served() {
-        let (longest, too_long) = ("x".repeat(63), "x".repeat(64));
-        for name in ["a", "alpha-1", "0", longest.as_str()] {
-            assert!(crate::is_machine_name(name), "{name}");
+    fn only_registered_machine_ids_are_served() {
+        for id in ["machine-0000000000000000", "machine-0123456789abcdef"] {
+            assert!(crate::machine_id::valid(id), "{id}");
         }
-        for name in [
+        for id in [
             "",
-            "Alpha",
-            "a.b",
-            "a~b",
-            "a_b",
-            "a b",
-            ".hidden",
-            "..",
-            too_long.as_str(),
-            "é",
+            "alpha",
+            "machine-0123456789abcde",
+            "machine-0123456789abcdef0",
+            "machine-0123456789abcdeF",
+            "machine-0123456789abcdeg",
+            "../machine-0123456789abcdef",
         ] {
-            assert!(!crate::is_machine_name(name), "{name}");
+            assert!(!crate::machine_id::valid(id), "{id}");
         }
         let receiver = Fixture::new();
         let dir = receiver.root.join("received");
-        for name in ["alpha", "Upper", "a~b", "a.b", ".hidden"] {
-            receive(&dir, name, Some(name), &format!("lane-{}", name.len()));
+        let alpha = receive(&dir, "alpha", Some("alpha"), "lane-5");
+        for name in [
+            "legacy-name",
+            "Upper",
+            "a~b",
+            "a.b",
+            ".hidden",
+            &machine_id("unrecorded"),
+        ] {
+            let root = dir.join("machines").join(name);
+            fs::create_dir_all(root.join("claude/projects/project")).unwrap();
+            fs::copy(
+                alpha.join("claude/projects/project/lane-5.jsonl"),
+                root.join("claude/projects/project/ignored.jsonl"),
+            )
+            .unwrap();
         }
         #[cfg(unix)]
         {
@@ -5865,13 +6029,28 @@ mod tests {
                 .join(std::ffi::OsStr::from_bytes(b"bad\xff"));
             fs::create_dir_all(odd.join("claude/projects/project")).unwrap();
             fs::copy(
-                dir.join("machines/alpha/claude/projects/project/lane-5.jsonl"),
+                alpha.join("claude/projects/project/lane-5.jsonl"),
                 odd.join("claude/projects/project/odd.jsonl"),
             )
             .unwrap();
         }
         let core = ViewerCore::with_received(Vec::new(), received(&receiver, &receiver.options));
         publish_core_native(&core);
+        for name in [
+            "legacy-name",
+            "Upper",
+            "a~b",
+            "a.b",
+            ".hidden",
+            &machine_id("unrecorded"),
+        ] {
+            assert_eq!(
+                core.respond("GET", &format!("/machines/{name}"), "", None)
+                    .status,
+                404,
+                "{name}"
+            );
+        }
         let reply = core.respond("GET", "/api/viewer/home", "", None);
         assert_eq!(reply.status, 200);
         let model = body_of(&reply);
