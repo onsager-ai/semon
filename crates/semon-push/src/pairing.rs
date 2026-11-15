@@ -688,7 +688,6 @@ pub(crate) fn validate_receipts(registry: &Registry) -> Result<()> {
 pub struct ActivationInput {
     pub machine_id: String,
     pub receiver_id: String,
-    pub machine: String,
     pub binding: Binding,
     pub kinds: Vec<(Kind, bool)>,
     pub client_certificate_pins: Vec<CertificatePin>,
@@ -878,10 +877,7 @@ impl Core {
                     fresh.next_sequence =
                         fresh.next_sequence.checked_add(1).ok_or(Error::Invalid)?;
                     fresh.latest = now.max(fresh.latest);
-                    fresh.ensure_machine(
-                        &enrollment.machine,
-                        self.owner_name.as_deref().unwrap_or(&input.machine),
-                    )?;
+                    fresh.ensure_machine(&enrollment.machine, self.owner_name.as_deref())?;
                     let machine = fresh
                         .machines
                         .iter()

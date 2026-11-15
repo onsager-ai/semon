@@ -141,7 +141,6 @@ impl Fixture {
         let private = semon_push::provision_wire::decode_fixed::<138>(encoded).unwrap();
         let scope = ActivationInput {
             receiver_id: "receiver-test".into(),
-            machine: "laptop".into(),
             machine_id: "machine-6754a9c1e83f27b4".into(),
             binding: Binding::Inapplicable,
             kinds: vec![(Kind::MirrorPush, false)],

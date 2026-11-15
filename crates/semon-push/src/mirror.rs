@@ -814,7 +814,7 @@ impl Receiver {
                     create_dir(&path)?;
                     sync_dir(&parent)?;
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(error),
             }
         }
         Ok(())

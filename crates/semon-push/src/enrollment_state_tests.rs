@@ -539,8 +539,8 @@ fn machine_identity_continuity_and_transactional_name_audit() {
     let mut store = Store::initialize(&f.0).unwrap();
     let mut r = Registry::empty();
     let first = "machine-6754a9c1e83f27b4".to_owned();
-    r.ensure_machine(&first, "Work").unwrap();
-    r.ensure_machine(&first, "Other").unwrap();
+    r.ensure_machine(&first, Some("Work")).unwrap();
+    r.ensure_machine(&first, Some("Other")).unwrap();
     assert_eq!(r.machines.len(), 1);
     store.commit(0, &r).unwrap();
     store.name_machine(&first, Some("Work"), 10).unwrap();

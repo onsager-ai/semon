@@ -1185,10 +1185,10 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
         }
         writeln!(terminal, "Pairing {id}: {}", code.expose()).map_err(|_| provision_wire::Refused)
     });
-    if let Some(message) = controller.take_paired() {
-        if let Ok(mut terminal) = fs::OpenOptions::new().write(true).open("/dev/tty") {
-            let _ = writeln!(terminal, "{message}");
-        }
+    if let Some(message) = controller.take_paired()
+        && let Ok(mut terminal) = fs::OpenOptions::new().write(true).open("/dev/tty")
+    {
+        let _ = writeln!(terminal, "{message}");
     }
     let unavailable = controller.take_unavailable();
     drop(controller);

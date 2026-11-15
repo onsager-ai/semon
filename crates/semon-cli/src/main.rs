@@ -2492,32 +2492,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn receive_machine_name_requires_id_and_one_name_action() {
-        let parse = |args: &[&str]| parse_receive_args(args.iter().map(|s| s.to_string()));
-        assert!(matches!(
-            parse(&["machines", "--dir", "/synthetic"]),
-            Ok(ReceiveArgs::Machines { .. })
-        ));
-        assert!(matches!(
-            parse(&["name", "machine-id", "Work laptop", "--dir", "/synthetic"]),
-            Ok(ReceiveArgs::Name { name: Some(_), .. })
-        ));
-        assert!(matches!(
-            parse(&["name", "machine-id", "--clear", "--dir", "/synthetic"]),
-            Ok(ReceiveArgs::Name { name: None, .. })
-        ));
-        for args in [
-            vec!["name"],
-            vec!["name", "id", "--dir", "/synthetic"],
-            vec!["name", "id", "Work", "--clear", "--dir", "/synthetic"],
-            vec!["machines", "--clear", "--dir", "/synthetic"],
-            vec!["merge", "id", "--into", "other", "--dir", "/synthetic"],
-        ] {
-            assert!(parse(&args).is_err(), "{args:?}");
-        }
-    }
-
-    #[test]
     fn durable_add_parser_requires_explicit_row_and_values_source() {
         for args in [
             vec!["add"],

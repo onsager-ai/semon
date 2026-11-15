@@ -882,7 +882,6 @@ fn real_tls_exporter_completes_receiver_pairing_and_activation() {
     .unwrap();
     let input = pairing::ActivationInput {
         receiver_id: opened.receiver_id.clone(),
-        machine: "machine-6754a9c1e83f27b4".into(),
         machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, false)],

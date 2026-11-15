@@ -1,5 +1,5 @@
 //! The origin's persistent machine identity, independent of names and credentials.
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write},
@@ -31,9 +31,9 @@ fn read(path: &Path) -> io::Result<String> {
         .custom_flags(libc::O_NOFOLLOW)
         .open(path)?;
     let metadata = file.metadata()?;
-    if !metadata.is_file() || metadata.permissions().mode() & 0o777 != 0o600 {
+    if !metadata.is_file() {
         return Err(io::Error::other(format!(
-            "machine ID {} must be a regular mode-0600 file; left unchanged",
+            "machine ID {} must be a regular file; left unchanged",
             path.display()
         )));
     }
@@ -92,6 +92,7 @@ pub fn load_or_create_at(path: &Path) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     #[test]
     fn create_load_and_refuse_malformed_without_overwrite() {
         let root = std::env::temp_dir().join(format!(
@@ -110,6 +111,7 @@ mod tests {
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
         assert_eq!(load_or_create_at(&path).unwrap(), id);
         fs::write(&path, "malformed\n").unwrap();
         assert!(

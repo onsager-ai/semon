@@ -38,7 +38,6 @@ impl Drop for Fixture {
 fn input() -> ActivationInput {
     ActivationInput {
         receiver_id: "receiver-1".into(),
-        machine: "machine-6754a9c1e83f27b4".into(),
         machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, false)],

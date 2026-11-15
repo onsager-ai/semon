@@ -366,7 +366,6 @@ pub(crate) fn connect_with(
     .map_err(|_| "origin key generation failed")?;
     let input = pairing::ActivationInput {
         receiver_id: opened.receiver_id.clone(),
-        machine: machine.into(),
         machine_id: semon_sessions::machine_id::load_or_create().map_err(|e| e.to_string())?,
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, terminal.require_client_certificate())],

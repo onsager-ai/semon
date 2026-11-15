@@ -135,7 +135,6 @@ fn key() -> EcdsaKeyPair {
 fn input(controller: &Controller, now: u64) -> pairing::ActivationInput {
     pairing::ActivationInput {
         receiver_id: controller.custody.receiver_id().into(),
-        machine: "machine-6754a9c1e83f27b4".into(),
         machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, false)],

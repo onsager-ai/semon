@@ -137,7 +137,6 @@ impl Harness {
             .unwrap()
             .receiver_id()
             .into(),
-            machine: "machine-6754a9c1e83f27b4".into(),
             machine_id: "machine-6754a9c1e83f27b4".into(),
             binding: crate::enrollment::Binding::Inapplicable,
             kinds: vec![(Kind::MirrorPush, false)],
@@ -666,7 +665,14 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     client.write_all(&bytes).unwrap();
     client.flush().unwrap();
     assert_eq!(response(&mut client).0, 200);
-    assert!(h.dir.0.join("machines/laptop/facts.json").exists());
+    assert!(
+        h.dir
+            .0
+            .join("machines")
+            .join(&config.machine)
+            .join("facts.json")
+            .exists()
+    );
     drop(client);
     worker.join().unwrap();
     // Missing certificate completes optional TLS but cannot use this credential.

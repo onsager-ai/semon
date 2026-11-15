@@ -30,10 +30,10 @@ def packed(value):
     return json.dumps(value, separators=(',', ':'), ensure_ascii=False).encode()
 # Test fixtures contain only admitted native files; enumerate them without source bodies.
 sources = sorted(str(path) for root in ('claude', 'codex', 'copilot') for path in (sample / root).rglob('*') if path.is_file())
-consent = packed(dict(receiver_id=record['receiver_id'], enrollment_id=record['enrollment_id'], machine='laptop', sources=sources))
+consent = packed(dict(receiver_id=record['receiver_id'], enrollment_id=record['enrollment_id'], machine=record['machine'], sources=sources))
 secret = token_path.read_bytes()
-scope = dict(receiver_id=record['receiver_id'], machine='laptop', binding={'state': 'inapplicable'}, kinds=[['mirror_push', False]], client_certificate_pins=[], valid_until=18446744073709551615)
-config = dict(version=2, generation=1, endpoint=endpoint, receiver_id=record['receiver_id'], enrollment_id=record['enrollment_id'], machine='laptop', server_roots='public_webpki', scope=scope, credential_file='mirror-push.secret', private_key_file='origin-key.pk8', consent_file='source-consent.json', consent_sha256=hashlib.sha256(consent).hexdigest(), credential_sha256=hashlib.sha256(secret).hexdigest(), client_certificate_sha256=None)
+scope = dict(receiver_id=record['receiver_id'], machine_id=record['machine'], binding={'state': 'inapplicable'}, kinds=[['mirror_push', False]], client_certificate_pins=[], valid_until=18446744073709551615)
+config = dict(version=2, generation=1, endpoint=endpoint, receiver_id=record['receiver_id'], enrollment_id=record['enrollment_id'], machine=record['machine'], server_roots='public_webpki', scope=scope, credential_file='mirror-push.secret', private_key_file='origin-key.pk8', consent_file='source-consent.json', consent_sha256=hashlib.sha256(consent).hexdigest(), credential_sha256=hashlib.sha256(secret).hexdigest(), client_certificate_sha256=None)
 key = subprocess.check_output(['openssl', 'genpkey', '-algorithm', 'EC', '-pkeyopt', 'ec_paramgen_curve:P-256', '-outform', 'DER'], stderr=subprocess.DEVNULL)
 # genpkey's DER EC output is SEC1; explicitly convert to PKCS#8 for ring.
 key = subprocess.check_output(['openssl', 'pkcs8', '-topk8', '-nocrypt', '-inform', 'DER', '-outform', 'DER'], input=key)

@@ -134,7 +134,8 @@ multi-user or third-party receiver can revisit it without dormant runtime. [C2, 
 - Each origin creates its own ID once: `machine-` plus eight lowercase hex Unix
   seconds and eight secure random hex digits. The shared loader stores one line
   at `$XDG_CONFIG_HOME/semon/machine-id` (fallback `~/.config/semon/machine-id`),
-  mode 0600, with atomic publication. Malformed existing files are refused unchanged.
+  mode 0600, with atomic publication. Malformed existing files are refused unchanged; valid restored files are read
+  regardless of mode, without following a final symlink.
 - `connect` includes this ID in the committed pairing input, authenticated by the
   existing transcript and proof. The origin stores no additional identity state.
 - Registry format 6 records `{id, directory, owner_name}`; `directory` equals the ID.

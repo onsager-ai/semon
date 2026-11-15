@@ -33,7 +33,6 @@ impl Fixture {
             "machine-6754a9c1e83f27b4",
             &ActivationInput {
                 receiver_id: "receiver".into(),
-                machine: "machine-6754a9c1e83f27b4".into(),
                 machine_id: "machine-6754a9c1e83f27b4".into(),
                 binding: Binding::Inapplicable,
                 kinds: vec![(Kind::MirrorPush, false)],
@@ -110,7 +109,6 @@ fn invalid_client_certificate_never_publishes_origin_custody() {
     let until = now + 3600;
     let scope = ActivationInput {
         receiver_id: "receiver".into(),
-        machine: "machine-6754a9c1e83f27b4".into(),
         machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, true)],
@@ -162,7 +160,6 @@ fn certificate_clock_refuses_future_install_and_expired_load() {
         crate::client_ca::issue(&ca, now, key.public_key_raw(), "enrollment", now, until).unwrap();
     let scope = ActivationInput {
         receiver_id: "receiver".into(),
-        machine: "machine-6754a9c1e83f27b4".into(),
         machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, true)],

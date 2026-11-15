@@ -22,7 +22,7 @@ pub enum OwnerState {
     LastKind,
 }
 impl Registry {
-    pub(crate) fn ensure_machine(&mut self, id: &str, name: &str) -> Result<()> {
+    pub(crate) fn ensure_machine(&mut self, id: &str, name: Option<&str>) -> Result<()> {
         if !semon_sessions::machine_id::valid(id) {
             return Err(Error::Invalid);
         }
@@ -31,7 +31,7 @@ impl Registry {
                 .push(semon_sessions::received_registry::ReceivedMachine {
                     id: id.into(),
                     directory: id.into(),
-                    owner_name: Some(name.into()),
+                    owner_name: name.map(str::to_owned),
                 });
         }
         Ok(())
