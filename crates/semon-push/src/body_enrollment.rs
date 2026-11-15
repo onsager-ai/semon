@@ -174,7 +174,7 @@ mod tests {
             std::fs::create_dir(&acl).unwrap();
             std::fs::set_permissions(&acl, std::fs::Permissions::from_mode(0o700)).unwrap();
             let grants = acl.join("grants.json");
-            std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"machine","namespace":"namespace","permissions":["body_read"]}]}"#).unwrap();
+            std::fs::write(&grants, br#"{"format":1,"grants":[{"principal":"subject","machine":"machine-6754a9c1e83f27b4","namespace":"namespace","permissions":["body_read"]}]}"#).unwrap();
             std::fs::set_permissions(&grants, std::fs::Permissions::from_mode(0o600)).unwrap();
             let acls = Acls::new(acl);
             let mut audit_a =
@@ -347,7 +347,7 @@ mod tests {
     fn scope(id: &str) -> EnrollmentScope {
         EnrollmentScope {
             enrollment_id: opaque(id),
-            machine: opaque("machine"),
+            machine: opaque("machine-6754a9c1e83f27b4"),
             namespace: opaque("namespace"),
             origin_incarnation: opaque("origin"),
             index_incarnation: opaque("index"),
@@ -381,7 +381,7 @@ mod tests {
             claim_epoch: 7,
             nonce: [n; 32],
             subject_principal: "subject".into(),
-            machine: "machine".into(),
+            machine: "machine-6754a9c1e83f27b4".into(),
             namespace: "namespace".into(),
             acl_grant_version: "acl".into(),
             receiver_policy_version: "policy".into(),
@@ -403,7 +403,7 @@ mod tests {
         let enrollment = Enrollment {
             enrollment_id: "a".repeat(64),
             receiver_id: "receiver-1".into(),
-            machine: "machine".into(),
+            machine: "machine-6754a9c1e83f27b4".into(),
             sequence: 1,
             origin_key: vec![4; 65],
             endpoint: "https://receiver.example:443".into(),

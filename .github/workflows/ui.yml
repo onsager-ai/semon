@@ -336,7 +336,7 @@ jobs:
         run: node checks/budget.mjs
 
       # A second machine the way one really arrives: the sample fixture pushed over loopback (plain http, so no TLS) to `semon
-      # receive`, which writes it under recv/machines/laptop. The token is written to a 0600 file and never echoed. Both the
+      # receive`, which writes it under recv/machines/machine-6754a9c1e83f27b4. The token is written to a 0600 file and never echoed. Both the
       # receiver and `semon push --watch` keep running for the step below, as they would on a real pair of machines.
       # The model built from that copy must equal the machine's own, byte for byte (tests/ui/pushed-parity.mjs).
       - name: Pushed data, received and compared with the machine's own model
@@ -376,7 +376,7 @@ jobs:
           SEMON_REF_BASE: ${{ env.SEMON_BASE }}
           SEMON_REF_TOKEN: ${{ env.SEMON_TOKEN }}
         run: |
-          [ -d "$RUNNER_TEMP/recv/machines/laptop" ] || { echo "nothing was received"; exit 1; }
+          [ -d "$RUNNER_TEMP/recv/machines/machine-6754a9c1e83f27b4" ] || { echo "nothing was received"; exit 1; }
           reader="$RUNNER_TEMP/pushed/reader"
           SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon sessions --serve --listen 127.0.0.1:8769 \
             --machines "$RUNNER_TEMP/recv" --no-local --claude-home "$reader/claude" --claude-json "$reader/.claude.json" --codex-home "$reader/codex" --copilot-home "$reader/copilot" \

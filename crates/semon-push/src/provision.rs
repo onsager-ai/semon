@@ -22,17 +22,13 @@ pub struct Controller {
     machine: String,
     pending: BTreeMap<String, Pending>,
     unavailable: Option<&'static str>,
+    paired: Option<String>,
     dir: std::path::PathBuf,
 }
 impl Controller {
     /// The caller is the authenticated local OS owner and authorizes exactly one
     /// machine. Codes must be delivered only to its trusted terminal callback.
-    pub fn open(
-        dir: &Path,
-        endpoint: &str,
-        machine: String,
-        predecessor: Option<String>,
-    ) -> Result<Self, String> {
+    pub fn open(dir: &Path, endpoint: &str, machine: String) -> Result<Self, String> {
         if !semon_sessions::is_machine_name(&machine) {
             return Err("invalid enrollment machine".into());
         }
@@ -56,9 +52,8 @@ impl Controller {
                 .commit(registry.revision(), &registry)
                 .map_err(|e| e.to_string())?;
         }
-        let mut core = Core::open(store, &endpoint, custody.receiver_id().into())
+        let core = Core::open(store, &endpoint, custody.receiver_id().into())
             .map_err(|e| e.to_string())?;
-        core.bind_predecessor(predecessor);
         Ok(Self {
             core,
             custody,
@@ -66,8 +61,12 @@ impl Controller {
             machine,
             pending: BTreeMap::new(),
             unavailable: None,
+            paired: None,
             dir: dir.to_owned(),
         })
+    }
+    pub(crate) fn take_paired(&mut self) -> Option<String> {
+        self.paired.take()
     }
     pub fn pending(&mut self, now: u64) -> Vec<(String, pairing::State)> {
         self.pending
@@ -269,11 +268,24 @@ impl Controller {
                     return Err(Refused);
                 }
                 let grants = self.grants(&message.input.binding)?;
+                self.core.set_owner_name(self.machine.clone());
+                crate::mirror::Receiver::prepare_machine(&self.dir, &message.input.machine_id)
+                    .map_err(|_| Refused)?;
                 self.core.approve(evidence, now).map_err(|_| Refused)?;
                 let delivery = self
                     .core
                     .activate_with_issuer(&message.session_id, message.input, now, &self.custody)
                     .map_err(|_| Refused)?;
+                self.paired = Some(format!(
+                    "Paired {} ({:?}); {}.",
+                    delivery.machine_id,
+                    delivery.owner_name.as_deref().unwrap_or("unnamed"),
+                    if delivery.replaced {
+                        "replaced previous enrollment"
+                    } else {
+                        "new enrollment"
+                    }
+                ));
                 // Fresh activation decision is held here; grants never precede commit.
                 if let Some(grants) = grants {
                     self.custody
@@ -347,9 +359,6 @@ impl Controller {
                     .iter()
                     .find(|e| e.enrollment_id == delivery.enrollment_id && e.revoked_at.is_none())
                     .ok_or(Refused)?;
-                if enrollment.machine != self.machine {
-                    return Err(Refused);
-                }
                 if let Some(grants) = self.grants(&enrollment.binding)? {
                     self.custody
                         .install_current_owner_grants(&delivery.enrollment_id, &grants)
@@ -378,7 +387,7 @@ impl Controller {
     }
     fn validate_input(&self, input: &pairing::ActivationInput, now: u64) -> Result<(), Refused> {
         if input.receiver_id != self.custody.receiver_id()
-            || input.machine != self.machine
+            || !semon_sessions::machine_id::valid(&input.machine_id)
             || input.valid_until <= now
             || input.valid_until > now.saturating_add(wire::INITIAL_CREDENTIAL_VALIDITY_SECONDS)
             || input.kinds.is_empty()

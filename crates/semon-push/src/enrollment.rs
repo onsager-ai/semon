@@ -18,7 +18,7 @@ use std::{
 pub const DIRECTORY: &str = "enrollment";
 pub const REGISTRY_FILE: &str = "registry.json";
 pub const LOCK_FILE: &str = "registry.lock";
-pub const FORMAT: u32 = 4;
+pub const FORMAT: u32 = semon_sessions::received_registry::RECEIVER_FORMAT;
 pub const CAP: u64 = 4 * 1024 * 1024;
 pub const TERMINAL_RESERVE: u64 = 256 * 1024;
 pub const ADMISSION_CAP: u64 = CAP - TERMINAL_RESERVE;
@@ -193,6 +193,8 @@ pub struct Registry {
     format: u32,
     revision: u64,
     pub(crate) endpoint: Option<String>,
+    pub(crate) machines: Vec<semon_sessions::received_registry::ReceivedMachine>,
+    pub(crate) machine_audit: Vec<semon_sessions::received_registry::MachineAudit>,
     pub(crate) enrollments: Vec<Enrollment>,
     pub(crate) credentials: Vec<Bearer>,
     pub(crate) pairing_receipts: Vec<crate::pairing::Receipt>,
@@ -208,6 +210,8 @@ impl Registry {
             format: FORMAT,
             revision: 0,
             endpoint: None,
+            machines: vec![],
+            machine_audit: vec![],
             enrollments: vec![],
             credentials: vec![],
             pairing_receipts: vec![],
@@ -217,6 +221,12 @@ impl Registry {
             latest: 0,
             next_sequence: 1,
         }
+    }
+    pub fn machines(&self) -> &[semon_sessions::received_registry::ReceivedMachine] {
+        &self.machines
+    }
+    pub fn machine_audit(&self) -> &[semon_sessions::received_registry::MachineAudit] {
+        &self.machine_audit
     }
     pub fn endpoint(&self) -> Option<&str> {
         self.endpoint.as_deref()
@@ -268,10 +278,24 @@ impl Registry {
             .checked_add(1)
             .ok_or(Error::Invalid)?;
         let endpoint = enrollments.first().map(|e| e.endpoint.clone());
+        let mut machine_records = Vec::new();
+        for e in &enrollments {
+            if !machine_records.iter().any(
+                |m: &semon_sessions::received_registry::ReceivedMachine| m.directory == e.machine,
+            ) {
+                machine_records.push(semon_sessions::received_registry::ReceivedMachine {
+                    id: e.machine.clone(),
+                    directory: e.machine.clone(),
+                    owner_name: None,
+                });
+            }
+        }
         let registry = Self {
             format: FORMAT,
             revision: 0,
             endpoint,
+            machines: machine_records,
+            machine_audit: vec![],
             enrollments,
             credentials,
             pairing_receipts: vec![],
@@ -294,6 +318,35 @@ impl Registry {
             .is_some_and(|e| crate::pairing::normalize_endpoint(e).as_ref() != Ok(e))
             || (self.endpoint.is_none() && !self.enrollments.is_empty())
         {
+            return Err(Error::Invalid);
+        }
+        if !semon_sessions::received_registry::validate_machines(&self.machines)
+            || self
+                .enrollments
+                .iter()
+                .any(|e| !self.machines.iter().any(|m| m.directory == e.machine))
+        {
+            return Err(Error::Invalid);
+        }
+        if self.machine_audit.iter().any(|entry| {
+            entry.ids != [entry.before.id.clone()]
+                || entry.before.id != entry.after.id
+                || entry.before.directory != entry.after.directory
+                || !self.machines.iter().any(|m| m.id == entry.after.id)
+                || entry.time > self.latest
+                || !semon_sessions::received_registry::validate_machines(std::slice::from_ref(
+                    &entry.before,
+                ))
+                || !semon_sessions::received_registry::validate_machines(std::slice::from_ref(
+                    &entry.after,
+                ))
+                || match entry.action.as_str() {
+                    "name_set" => entry.after.owner_name.is_none(),
+                    "name_clear" => entry.after.owner_name.is_some(),
+                    "paired" | "paired_replacement" => entry.before != entry.after,
+                    _ => true,
+                }
+        }) {
             return Err(Error::Invalid);
         }
         let mut identities = BTreeSet::new();
@@ -464,6 +517,28 @@ impl Registry {
     fn follows(&self, old: &Self) -> Result<()> {
         if self.latest < old.latest || self.next_sequence < old.next_sequence {
             return Err(Error::Terminal);
+        }
+        if !self.machine_audit.starts_with(&old.machine_audit) {
+            return Err(Error::Terminal);
+        }
+        for machine in &old.machines {
+            let next = self
+                .machines
+                .iter()
+                .find(|m| m.id == machine.id && m.directory == machine.directory)
+                .ok_or(Error::Terminal)?;
+            let mut expected = machine.clone();
+            for entry in &self.machine_audit[old.machine_audit.len()..] {
+                if entry.ids == [machine.id.clone()] {
+                    if entry.before != expected {
+                        return Err(Error::Invalid);
+                    }
+                    expected = entry.after.clone();
+                }
+            }
+            if &expected != next {
+                return Err(Error::Invalid);
+            }
         }
         for tombstone in &old.tombstones {
             if !self.tombstones.contains(tombstone) {

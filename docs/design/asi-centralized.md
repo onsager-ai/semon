@@ -2,8 +2,7 @@
 
 Status: **current architecture contract**, owner decisions of **2026-11-14**.
 This amends [ASI direction](asi-direction.md). It replaces federation as the
-default, not a claim that receiver ASI integration has shipped. This change is
-docs-only; implementation follows the plan below. No merge, deployment or data
+default, not a claim that receiver ASI integration has shipped. Implementation follows the plan below. No merge, deployment or data
 cleanup is authorized by this contract.
 
 ## Architecture
@@ -52,14 +51,13 @@ unredacted source proofs. Keep mirror archive custody and source validation. [M,
 
 Each received machine has a **generated stable ID**, independent of hostname,
 directory and enrollment name. It is shown as its hostname plus an optional name
-the owner chooses. Two IDs' histories, for example before and after an origin
-reinstall, are joined only by an explicit owner link on demand; Semon never infers
-a link. A session that appears on more than one machine counts **once** in
+the owner chooses. Machines with the same owner-set name are displayed and grouped under that name.
+Unnamed machines show their received hostname and are not grouped. Display names
+and hostnames never identify a source; each source retains its generated ID and path. A session that appears on more than one machine counts **once** in
 analytics only when native identity and provenance prove it is the same session;
 both source records are retained, and divergent same-ID copies are reported, not
-merged. Identity work precedes receiver materialization. PR1 brings the exact ID
-origin, persisted form and link/unlink behavior back for owner review before it
-encodes them. [C6]
+merged. Identity work precedes receiver materialization. The PR1a owner decisions below
+define the current persisted identity and display contract. [C6]
 
 ## Reads and audit
 
@@ -104,11 +102,13 @@ normal renewal neither widens consent nor revives revoked authority. [C5, M]
 ## Implementation plan
 
 Keep each PR at roughly **1,000 changed lines or fewer**; split a step as needed.
-These are implementation slices; PR1 returns its persisted identity/link design for owner review.
+These are implementation slices; PR1a implements the owner decisions below.
 
 | PR | Scope and verified starting point | Trace |
 | --- | --- | --- |
-| 1 | Received-machine stable identity and durable custody; generated machine ID, hostname/optional-name display, explicit owner link, proven-duplicate accounting and a receiver-wide refusal cap beside the per-machine cap (C6). Preserve mirror source/archive integrity. | C1, M, I |
+| 1a | Origin-generated persistent canonical machine ID, transcript-bound pairing, receiver storage and replacement keyed by ID, owner-name display/grouping and atomic audit, shared discovery. | C6, M, I |
+| 1b | Unified `harness:native@machine-id` addressing for all sessions and no silent same-ID drop. | C6, M, I |
+| 1c | Proven-duplicate accounting and a receiver-wide refusal cap beside the per-machine cap. Preserve both source rows and mirror source/archive integrity. | C6, M, I |
 | 2 | Received-machine indexing/materialization. Reuse [`ReceivedMachines`](../../crates/semon-sessions/src/received.rs) discovery and `SqliteAnalyticsInput` via [`analytics_writer.rs`](../../crates/semon-sessions/src/analytics_writer.rs). [`parse_materialize_args`](../../crates/semon-cli/src/main.rs) currently refuses `--machine`; this is a real integration gap. | C1, I |
 | 3 | Receiver SQL/search/evidence and local authorization/audit. [`body_query.rs`](../../crates/semon-sessions/src/body_query.rs) currently refuses `Access::Receiver` in `admit`; its search/view worker already accepts multiple indexes. Viewer machine aggregation exists in [`union.rs`](../../crates/semon-sessions/src/union.rs) and [`overview.rs`](../../crates/semon-sessions/src/overview.rs); it is not proof of receiver ASI SQL delivery. Readers are the loopback owner only (C6). | C1, I |
 | 4 | Four-action lifecycle and consent wording: combined trust/custody/source interaction, automatic push, integrated receiver/index/materializer/Viewer lifecycle. Keep enrollment, TLS and renewal. | C4, C5, M |
@@ -125,9 +125,38 @@ multi-user or third-party receiver can revisit it without dormant runtime. [C2, 
 | Choice | Decision |
 | --- | --- |
 | A. Duplicate sessions across machines | Count once only when native identity/provenance proves duplication; keep both source records; report divergent same-ID copies. |
-| B. Received-machine identity | Generated stable ID, displayed as hostname plus an optional owner-chosen name; histories join only through an explicit owner link on demand. PR1 returns the exact ID origin, persisted form and link/unlink behavior for review. |
+| B. Received-machine identity | Origin-generated canonical `machine-<8 hex Unix seconds><8 secure random hex>` ID; hostname/optional owner-name display. Shared owner names group presentation only. No merge, link or unlink. See PR1a below. |
 | C. Receiver storage | Keep the configurable per-machine cap and add a receiver-wide cap. Both refuse uploads with a clear message; nothing is deleted automatically. Default values are proposed in the implementing PR. |
 | D. Readers in this release | Receiver OS owner only, through the authenticated loopback Viewer, CLI and MCP. |
+
+## PR1a owner decisions (2026-11-15, amended)
+
+- Each origin creates its own ID once: `machine-` plus eight lowercase hex Unix
+  seconds and eight secure random hex digits. The shared loader stores one line
+  at `$XDG_CONFIG_HOME/semon/machine-id` (fallback `~/.config/semon/machine-id`),
+  mode 0600, with atomic publication. Malformed existing files are refused unchanged; valid restored files are read
+  regardless of mode, without following a final symlink.
+- `connect` includes this ID in the committed pairing input, authenticated by the
+  existing transcript and proof. The origin stores no additional identity state.
+- Registry format 6 records `{id, directory, owner_name}`; `directory` equals the ID.
+  Receiver storage is `machines/<machine-id>/`. Old state is refused: keep retained
+  logs unchanged and re-enroll in a fresh receiver directory. No migration or deletion.
+- `receive enroll --machine NAME` supplies the starting owner display name only.
+  Existing IDs retain their owner names. Re-pairing the same authenticated ID
+  replaces its previous enrollment; different IDs sharing NAME remain separate.
+  The old by-name replacement prompt is removed because names no longer select
+  enrollment authority. The trusted enrollment terminal reports ID, name and
+  whether replacement occurred. Pairing and name changes have transactional audit entries.
+- `receive machines --dir DIR` lists ID, owner name, received hostname and directory.
+  `receive name <ID> "<name>" --dir DIR` or `--clear` changes the name. Equal owner
+  names group display only; unnamed machines show hostname without grouping.
+  IDs remain canonical; names and hostnames never select authority. No merge/linking.
+- Discovery reads the same registry records. Unrecorded directories are skipped
+  with a once-per-directory re-enrollment warning; missing or unsupported registry
+  refuses the received set. Source IDs and paths remain original provenance.
+- PR1a leaves session addressing and the existing duplicate-drop behavior unchanged.
+  PR1b supplies unified addresses and keeps same-ID copies visible; PR1c implements
+  proven-duplicate accounting and the receiver-wide cap. Materialization remains PR2.
 
 ## Decision trace
 
@@ -139,7 +168,7 @@ All new mechanisms above use these sources; no historical document overrides the
 | C2 | Owner, **2026-11-14**: remove federation runtime after the switch; retain its rationale as superseded history; no dormant code. |
 | C3 | Owner, **2026-11-14**: recommend full-disk encryption plus encrypted backups; no app encryption or blocking setup check; keep 0600/0700. |
 | C4 | Owner, **2026-11-14**: UX/DX primary; four setup actions, combined narrowing/approval, automatic push, two processes; service install separately counted. |
-| C6 | Owner, **2026-11-15**: decisions A–D above (proven-duplicate accounting, generated machine ID with hostname/optional name and explicit link, receiver-wide refusal cap, loopback-owner readers only). |
+| C6 | Owner, **2026-11-15**: decisions A–D above (proven-duplicate accounting, generated canonical machine ID with hostname/optional-name grouping (amended: no linking), receiver-wide refusal cap, loopback-owner readers only). |
 | C5 | Owner, **2026-11-14**: private-root/LAN pairing deferred, pinned invitation removed (#680), no zero-findings scan gate for own-machine reads. |
 | M | Shipped [mirror](../mirror-protocol.md), [enrollment and renewal](asi-enrollment.md): source allowlist/redaction, export consent, transport authentication, credential custody and current trust lifecycle. |
 | I | [Repository invariants](../../AGENTS.md): native identity/lineage/provenance, source integrity and custody, body-free analytics/Hub, parser behavior, one current format, preserved frozen/user data and Viewer ownership/security. |

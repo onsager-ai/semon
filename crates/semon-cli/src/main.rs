@@ -240,6 +240,14 @@ struct PushArgs {
 /// `semon receive`: serve pushes, or manage the tokens that may push.
 enum ReceiveArgs {
     Serve(semon_push::serve::ServeOptions),
+    Machines {
+        dir: PathBuf,
+    },
+    Name {
+        dir: PathBuf,
+        id: String,
+        name: Option<String>,
+    },
     Owner {
         dir: PathBuf,
         machine: String,
@@ -987,6 +995,39 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
     if arguments.peek().is_some_and(|argument| argument == "token") {
         return Err("legacy token commands retired; re-pair with receive enroll; preserve existing tokens and history".into());
     }
+    if arguments
+        .peek()
+        .is_some_and(|a| a == "machines" || a == "name")
+    {
+        let command = arguments.next().unwrap();
+        let id = if command == "name" {
+            Some(arguments.next().ok_or("receive name requires ID")?)
+        } else {
+            None
+        };
+        let mut dir = None;
+        let mut name = None;
+        let mut clear = false;
+        while let Some(arg) = arguments.next() {
+            match arg.as_str() {
+                "--dir" => dir = Some(PathBuf::from(arguments.next().ok_or("--dir requires DIR")?)),
+                "--clear" if id.is_some() => clear = true,
+                value if id.is_some() && !value.starts_with('-') && name.is_none() => {
+                    name = Some(value.to_owned())
+                }
+                _ => return Err(format!("unknown receive {command} argument: {arg}")),
+            }
+        }
+        let dir = dir.ok_or("receive requires --dir DIR")?;
+        return if let Some(id) = id {
+            if clear == name.is_some() {
+                return Err("receive name requires a name or --clear".into());
+            }
+            Ok(ReceiveArgs::Name { dir, id, name })
+        } else {
+            Ok(ReceiveArgs::Machines { dir })
+        };
+    }
     if arguments.peek().is_some_and(|a| a == "revoke") {
         arguments.next();
         let action = semon_push::enrollment::OwnerAction::Revoke;
@@ -1100,6 +1141,8 @@ mod receive_owner;
 
 fn run_receive(args: ReceiveArgs) -> Result<(), String> {
     match args {
+        ReceiveArgs::Machines { dir } => receive_owner::machines(&dir),
+        ReceiveArgs::Name { dir, id, name } => receive_owner::name(&dir, &id, name.as_deref()),
         ReceiveArgs::Owner {
             dir,
             machine,
@@ -1126,9 +1169,8 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
             if !terminal.is_terminal() {
                 return Err("receive enroll requires a trusted local terminal".into());
             }
-            let mut predecessor = None;
             if options.dir.join("enrollment").exists() {
-                let mut registry = semon_push::enrollment::Registry::read_current(&options.dir)
+                let registry = semon_push::enrollment::Registry::read_current(&options.dir)
                     .map_err(|e| {
                         e.to_string()
                             .replace("DIR", &options.dir.display().to_string())
@@ -1167,30 +1209,12 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
                             now,
                         )
                         .map_err(|e| e.to_string())?;
-                    registry = store.snapshot().map_err(|e| e.to_string())?;
-                }
-                predecessor = registry.usable_machine(&machine, now).map(str::to_owned);
-                if predecessor.is_some()
-                    && !receive_owner::confirm(
-                        &mut terminal,
-                        &format!(
-                            "Replace the active enrollment for machine {machine}? Its access will stop when pairing completes. Type yes to confirm: "
-                        ),
-                    )?
-                {
-                    writeln!(
-                        terminal,
-                        "Enrollment replacement cancelled; nothing changed."
-                    )
-                    .map_err(|e| e.to_string())?;
-                    return Ok(());
                 }
             }
             let controller = Arc::new(Mutex::new(semon_push::provision::Controller::open(
                 &options.dir,
                 &advertise,
                 machine,
-                predecessor,
             )?));
             let server = semon_push::serve::Server::bind(&options)?
                 .with_provisioning(Arc::clone(&controller))?;
@@ -1782,14 +1806,14 @@ fn received_machines(
 fn print_received(args: &SessionsArgs, dir: &Path) -> Result<(), String> {
     let (local, received) = received_machines(args, dir);
     let mut core = semon_sessions::ViewerCore::with_received(local, received);
-    let printed = print_route(&mut core, "/api/tree", "the tree of these machines");
+    print_route(&mut core, "/api/tree", "the tree of these machines")?;
     if core.machines() == 0 {
         return Err(format!(
             "no machines: none under {} and --no-local",
             dir.join("machines").display()
         ));
     }
-    printed
+    Ok(())
 }
 
 /// Each `--machine DIR`'s options.
@@ -2452,9 +2476,12 @@ fn usage() -> String {
          \n\
          Usage: semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--max-bytes SIZE]\n\
          Usage: semon receive enroll --machine NAME --advertise HTTPS_URL --dir DIR [--listen ADDR] --tls-cert PEM --tls-key PEM\n\
+         Usage: semon receive machines --dir DIR\n\
+         Usage: semon receive name ID NAME --dir DIR\n\
+         Usage: semon receive name ID --clear --dir DIR\n\
          Enrollment stays in the foreground; its trusted terminal displays codes and accepts pending or cancel SESSION_ID.\n\
          A mirror-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
-         DIR/machines/NAME/. It listens on 127.0.0.1:8735 by default; another address needs TLS (an operator-supplied\n\
+         DIR/machines/ID/. It listens on 127.0.0.1:8735 by default; another address needs TLS (an operator-supplied\n\
          certificate and key). Enrollment supplies separate kind credentials; legacy DIR/tokens is refused.\n\
          --max-bytes caps each machine's copy (20G by default); a push past it gets 507."
 .to_owned()

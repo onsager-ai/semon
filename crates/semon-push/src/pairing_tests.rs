@@ -38,7 +38,7 @@ impl Drop for Fixture {
 fn input() -> ActivationInput {
     ActivationInput {
         receiver_id: "receiver-1".into(),
-        machine: "laptop".into(),
+        machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, false)],
         client_certificate_pins: vec![],
@@ -557,35 +557,6 @@ fn full_happy_path_and_interrupted_delivery_recovery_after_restart() {
     .unwrap();
     assert!(!String::from_utf8(bytes).unwrap().contains(&first_secret));
 }
-#[test]
-fn activation_refuses_a_changed_confirmed_predecessor_or_absence() {
-    for confirmed_existing in [false, true] {
-        let f = Fixture::new();
-        let mut core = f.core();
-        if confirmed_existing {
-            let (t, _) = confirmed(&mut core, "original", 100);
-            core.approve(evidence(&t), 100).unwrap();
-            let original = core.activate(&t.session_id, input(), 100).unwrap();
-            core.bind_predecessor(Some(original.enrollment_id));
-        }
-        let (pending, _) = confirmed(&mut core, "pending", 101);
-        core.approve(evidence(&pending), 101).unwrap();
-        // A competing approved session commits after the owner's observation.
-        let (competitor, _) = confirmed(&mut core, "competitor", 101);
-        core.approve(evidence(&competitor), 101).unwrap();
-        let winner = core.activate(&competitor.session_id, input(), 101).unwrap();
-        let before = core.registry().unwrap();
-        assert!(matches!(
-            core.activate(&pending.session_id, input(), 102),
-            Err(Error::Terminal)
-        ));
-        assert_eq!(core.registry().unwrap(), before);
-        assert_eq!(
-            before.usable_machine("laptop", 102),
-            Some(winner.enrollment_id.as_str())
-        );
-    }
-}
 
 #[test]
 fn cancellation_expiry_replay_competing_keys_and_duplicate_approval() {
@@ -627,7 +598,7 @@ fn activation_before_commit_failure_leaves_no_enrollment_and_scope_cannot_change
     let (t, _) = confirmed(&mut core, "c", 100);
     core.approve(evidence(&t), 100).unwrap();
     let mut changed = input();
-    changed.machine = "other".into();
+    changed.machine_id = "machine-6754a9c100000002".into();
     assert!(core.activate(&t.session_id, changed, 100).is_err());
     assert!(core.store.snapshot().unwrap().enrollments().is_empty());
     assert_eq!(core.state(&t.session_id, 100).unwrap(), State::Approved);
@@ -731,5 +702,74 @@ fn pbkdf2_confirmation_derivation_cost() {
     eprintln!(
         "PAIRING_KDF_COST_MS={} iterations={PBKDF2_ITERATIONS}",
         started.elapsed().as_millis()
+    );
+}
+
+#[test]
+fn replacement_uses_origin_id_and_audits_while_preserving_owner_name() {
+    let f = Fixture::new();
+    let mut core = f.core();
+    let (first, _) = confirmed(&mut core, "first", 100);
+    core.approve(evidence(&first), 100).unwrap();
+    core.activate(&first.session_id, input(), 100).unwrap();
+    let before = core.registry().unwrap().machines()[0].clone();
+    core.set_owner_name("Changed starting label".into());
+    let created = core.create_session("replacement".into(), 10_001).unwrap();
+    let mut renewed = input();
+    renewed.valid_until = 20_000;
+    let mut replacement = transcript(&created);
+    replacement.scope = renewed.commitment();
+    let keys = derive_keys(&created.code, &replacement).unwrap();
+    let verified = core
+        .reserve("replacement", replacement.clone(), 10_001)
+        .unwrap()
+        .verify(&keys.origin_confirmation(&replacement))
+        .unwrap();
+    core.confirm(verified, 10_001).unwrap();
+    core.approve(evidence(&replacement), 10_001).unwrap();
+    let replaced = core
+        .activate(&replacement.session_id, renewed, 10_001)
+        .unwrap();
+    assert!(replaced.replaced);
+    assert_eq!(replaced.machine_id, before.id);
+    let after = core.registry().unwrap();
+    assert_eq!(after.machines(), &[before]);
+    assert_eq!(after.enrollments().len(), 2);
+    assert!(after.enrollments()[0].revoked_at.is_some());
+    assert_eq!(after.machine_audit()[1].action, "paired_replacement");
+}
+
+#[test]
+fn different_origin_ids_with_same_name_keep_separate_records() {
+    let f = Fixture::new();
+    let mut core = f.core();
+    core.set_owner_name("Work".into());
+    for (index, machine) in ["machine-6754a9c100000001", "machine-6754a9c100000002"]
+        .iter()
+        .enumerate()
+    {
+        let binding = format!("source-{index}");
+        let created = core.create_session(binding.clone(), 100).unwrap();
+        let mut input = input();
+        input.machine_id = (*machine).into();
+        let mut t = transcript(&created);
+        t.scope = input.commitment();
+        let keys = derive_keys(&created.code, &t).unwrap();
+        let verified = core
+            .reserve(&binding, t.clone(), 100)
+            .unwrap()
+            .verify(&keys.origin_confirmation(&t))
+            .unwrap();
+        core.confirm(verified, 100).unwrap();
+        core.approve(evidence(&t), 100).unwrap();
+        assert!(!core.activate(&t.session_id, input, 100).unwrap().replaced);
+    }
+    let registry = core.registry().unwrap();
+    assert_eq!(registry.machines().len(), 2);
+    assert!(
+        registry
+            .machines()
+            .iter()
+            .all(|m| m.owner_name.as_deref() == Some("Work") && m.directory == m.id)
     );
 }

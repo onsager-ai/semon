@@ -156,7 +156,9 @@ pub use source_change::{
 mod source_inventory;
 pub use source_inventory::SessionSourceInventory;
 mod history_projection;
+pub mod machine_id;
 mod received;
+pub mod received_registry;
 mod refresh;
 mod repo;
 pub mod sealed;

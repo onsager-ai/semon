@@ -17,6 +17,7 @@ pub(crate) use runtime::RuntimeObservations;
 
 pub(crate) struct NativeEvidence {
     pub(crate) options: Options,
+    pub(crate) received_machine: RwLock<Option<crate::received_registry::ReceivedMachine>>,
     /// The source namespace its host configured. The producer binds its
     /// database to it and refuses a database bound to another namespace.
     /// Only test constructions observe a database without a host namespace.
@@ -492,6 +493,7 @@ impl NativeEvidence {
     ) -> Arc<Self> {
         Arc::new(Self {
             options,
+            received_machine: RwLock::default(),
             storage,
             catalog_demand: AtomicBool::new(false),
             catalog_search: Mutex::default(),

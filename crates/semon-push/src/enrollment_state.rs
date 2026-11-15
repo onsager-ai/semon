@@ -22,6 +22,20 @@ pub enum OwnerState {
     LastKind,
 }
 impl Registry {
+    pub(crate) fn ensure_machine(&mut self, id: &str, name: Option<&str>) -> Result<()> {
+        if !semon_sessions::machine_id::valid(id) {
+            return Err(Error::Invalid);
+        }
+        if !self.machines.iter().any(|m| m.id == id) {
+            self.machines
+                .push(semon_sessions::received_registry::ReceivedMachine {
+                    id: id.into(),
+                    directory: id.into(),
+                    owner_name: name.map(str::to_owned),
+                });
+        }
+        Ok(())
+    }
     pub(crate) fn check_admission(&self) -> Result<()> {
         let size = serde_json::to_vec(self).map_err(|_| Error::Invalid)?.len() as u64;
         // Reserve the maximum terminal timestamp/availability deltas per record.
@@ -164,6 +178,37 @@ impl Registry {
     }
 }
 impl Store {
+    pub fn name_machine(&mut self, id: &str, name: Option<&str>, now: u64) -> Result<()> {
+        if name.is_some_and(|n| !semon_sessions::received_registry::valid_owner_name(n)) {
+            return Err(Error::Invalid);
+        }
+        let mut next = self.snapshot()?;
+        let machine = next
+            .machines
+            .iter_mut()
+            .find(|m| m.id == id)
+            .ok_or(Error::Invalid)?;
+        let before = machine.clone();
+        machine.owner_name = name.map(str::to_owned);
+        let after = machine.clone();
+        let time = now.max(next.latest);
+        next.machine_audit
+            .push(semon_sessions::received_registry::MachineAudit {
+                time,
+                action: if name.is_some() {
+                    "name_set"
+                } else {
+                    "name_clear"
+                }
+                .into(),
+                ids: vec![id.into()],
+                before,
+                after,
+            });
+        next.latest = time;
+        next.check_admission()?;
+        self.commit(next.revision(), &next)
+    }
     pub fn change_endpoint(
         &mut self,
         receiver: &Path,

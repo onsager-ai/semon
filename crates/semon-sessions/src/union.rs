@@ -474,6 +474,19 @@ fn native_machine_ids(views: &Views) -> Vec<String> {
     }
     labels
 }
+/// Owner names label groups, never session addresses or source keys.
+fn machine_display_labels(views: &Views) -> Vec<String> {
+    let mut labels = native_machine_ids(views);
+    for (index, (_, view)) in views.iter().enumerate() {
+        if let Some(name) = read_lock(&view.evidence.received_machine)
+            .as_ref()
+            .and_then(|m| m.owner_name.clone())
+        {
+            labels[index] = name;
+        }
+    }
+    labels
+}
 /// Ownership and presentation identity are native semantics, shared by query
 /// evidence and compatibility transport. A version hash belongs only to the latter.
 struct IdentityPart<'a> {
@@ -590,12 +603,13 @@ impl QueryRead {
     }
 }
 /// Sets `machine` on a V1 tree node and every node under it.
-fn tag(node: &mut Value, machine: &str) {
+fn tag(node: &mut Value, machine: &str, source: &str) {
     if let Some(fields) = node.as_object_mut() {
         fields.insert("machine".into(), Value::from(machine));
+        fields.insert("source".into(), Value::from(source));
         if let Some(Value::Array(children)) = fields.get_mut("children") {
             for child in children {
-                tag(child, machine);
+                tag(child, machine, source);
             }
         }
     }
@@ -682,9 +696,8 @@ impl ViewerCore {
     /// name order. The received machines are followed: every request first
     /// takes one pass over `DIR/machines/` (file types and the facts file's
     /// stamp only), and a machine added or removed since is served, or no
-    /// longer, from that request on. A received machine's key is its
-    /// directory's name, so one with the same hostname as a fixed machine
-    /// is served as `<hostname>~<name>`.
+    /// longer, from that request on. A received machine's canonical generated
+    /// ID is its source key; hostname and owner name are presentation only.
     pub fn with_received(machines: Vec<(String, Options)>, received: ReceivedMachines) -> Self {
         let fixed = machines.len();
         let mut core = Self::with_machines(machines);
@@ -731,7 +744,7 @@ impl ViewerCore {
     }
 
     fn configured_source_inventory(views: &Views) -> Arc<crate::SessionSourceInventory> {
-        let labels = native_machine_ids(views);
+        let labels = machine_display_labels(views);
         Arc::new(crate::SessionSourceInventory::new(
             views.iter().enumerate().map(|(index, (key, _))| {
                 let key = if key.is_empty() {
@@ -762,14 +775,17 @@ impl ViewerCore {
     /// Brings the served machines in line with the received ones, when
     /// this core follows any: one pass over `DIR/machines/`, and changes
     /// only where it differs from the last. One request follows at a time.
-    fn follow(&self) {
+    fn follow(&self) -> io::Result<()> {
         let Some(received) = &self.received else {
-            return;
+            return Ok(());
         };
         let mut following = lock(&received.following);
-        let listing = following.machines.scan();
+        let Following {
+            machines, warned, ..
+        } = &mut *following;
+        let listing = machines.scan(warned)?;
         if following.seen.as_ref() == Some(&listing) {
-            return;
+            return Ok(());
         }
         let previous = following.seen.take().unwrap_or_default();
         let fixed = received.fixed;
@@ -832,7 +848,7 @@ impl ViewerCore {
                 continue;
             };
             let options = machines.options(name, seen);
-            let view = match old.remove(name) {
+            let view = match old.remove(&seen.machine.id) {
                 Some(view)
                     if view.options().claude_home == options.claude_home
                         && view.options().codex_home == options.codex_home
@@ -842,7 +858,7 @@ impl ViewerCore {
                 }
                 replaced => {
                     gone.extend(replaced);
-                    self.view(name, options)
+                    self.view(&seen.machine.id, options)
                 }
             };
             if previous
@@ -851,13 +867,22 @@ impl ViewerCore {
                 .is_none_or(|before| before.facts != seen.facts || before.stale != seen.stale)
             {
                 let sources = crate::SessionSources::from_evidence(vec![(
-                    name.clone(),
+                    seen.machine.id.clone(),
                     view.evidence.clone(),
                 )]);
                 machines.copy_facts(name, seen, hosts, warned, &sources);
             }
-            next.push((name.clone(), view));
+            *write_lock(&view.evidence.received_machine) = Some(seen.machine.clone());
+            next.push((seen.machine.id.clone(), view));
         }
+        next[fixed..].sort_by(|(a, av), (b, bv)| {
+            let am = read_lock(&av.evidence.received_machine);
+            let bm = read_lock(&bv.evidence.received_machine);
+            am.as_ref()
+                .and_then(|m| m.owner_name.as_ref())
+                .cmp(&bm.as_ref().and_then(|m| m.owner_name.as_ref()))
+                .then(a.cmp(b))
+        });
         gone.extend(old.into_values());
         *write_lock(&self.views) = Arc::new(next);
         following.seen = Some(listing);
@@ -869,6 +894,7 @@ impl ViewerCore {
             view.retire();
             retired.push(Arc::downgrade(&view));
         }
+        Ok(())
     }
 
     /// How many machines this core serves.
@@ -1098,7 +1124,9 @@ impl ViewerCore {
         if path.starts_with("/session/") {
             return self.session_page(path, query);
         }
-        self.follow();
+        if let Err(error) = self.follow() {
+            return text(503, &error.to_string());
+        }
         let views = self.views();
         if path == "/api/session-sources" {
             return self.source_inventory(&views).page(query);
@@ -1143,7 +1171,7 @@ impl ViewerCore {
             }) {
                 return text(404, "Not found");
             }
-            let labels = native_machine_ids(&views);
+            let labels = machine_display_labels(&views);
             let sources: Vec<_> = views
                 .iter()
                 .enumerate()
@@ -1220,7 +1248,9 @@ impl ViewerCore {
             Ok(route) => route,
             Err(_) => return text(400, "Malformed session address"),
         };
-        self.follow();
+        if let Err(error) = self.follow() {
+            return text(503, &error.to_string());
+        }
         let views = self.views();
         if views
             .iter()
@@ -1718,7 +1748,7 @@ impl ViewerCore {
         let Some(_entered) = self.open.enter() else {
             return Ok(None);
         };
-        self.follow();
+        self.follow()?;
         let views = self.views();
         let labels = native_machine_ids(&views);
         let lookup = |view: &MachineView,
@@ -1833,7 +1863,7 @@ impl ViewerCore {
     fn tree(&self, views: &Views) -> io::Result<ViewerReply> {
         // Tree identity depends on configured machine names and keys, not a
         // full Viewer model or its transcript/analytics ownership projection.
-        let machine_ids = native_machine_ids(views);
+        let machine_ids = machine_display_labels(views);
         let droppable = self.droppable();
         let mut roots = Vec::new();
         let mut seen = BTreeSet::new();
@@ -1846,7 +1876,7 @@ impl ViewerCore {
                     continue;
                 }
                 let mut root = serde_json::to_value(&root).map_err(io::Error::other)?;
-                tag(&mut root, &machine);
+                tag(&mut root, &machine, &views[index].0);
                 roots.push(root);
             }
         }

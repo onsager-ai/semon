@@ -21,10 +21,10 @@ fn install(base: &Path) {
     semon_push::origin_custody::install(
         base,
         URL,
-        "laptop",
+        "machine-6754a9c1e83f27b4",
         &ActivationInput {
+            machine_id: "machine-6754a9c1e83f27b4".into(),
             receiver_id: "receiver".into(),
-            machine: "laptop".into(),
             binding: Binding::Inapplicable,
             kinds: vec![(Kind::MirrorPush, false)],
             client_certificate_pins: vec![],

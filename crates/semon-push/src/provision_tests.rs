@@ -20,8 +20,7 @@ impl Fixture {
         Controller::open(
             &self.0,
             "https://receiver.example:443",
-            "laptop".into(),
-            None,
+            "machine-6754a9c1e83f27b4".into(),
         )
         .unwrap()
     }
@@ -136,7 +135,7 @@ fn key() -> EcdsaKeyPair {
 fn input(controller: &Controller, now: u64) -> pairing::ActivationInput {
     pairing::ActivationInput {
         receiver_id: controller.custody.receiver_id().into(),
-        machine: "laptop".into(),
+        machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, false)],
         client_certificate_pins: vec![],
@@ -221,7 +220,7 @@ fn confirmation_activation_and_recovery_preserve_one_registry_outcome() {
         .unwrap();
     let mut substituted: pairing::ActivationInput =
         serde_json::from_slice(&serde_json::to_vec(&input).unwrap()).unwrap();
-    substituted.valid_until -= 1;
+    substituted.machine_id = "machine-6754a9c100000002".into();
     assert!(
         controller
             .handle(
@@ -256,6 +255,20 @@ fn confirmation_activation_and_recovery_preserve_one_registry_outcome() {
     let registry = controller.core.registry().unwrap();
     assert_eq!(registry.enrollments().len(), 1);
     assert_eq!(registry.credentials().len(), 1);
+    assert_eq!(registry.machines()[0].id, "machine-6754a9c1e83f27b4");
+    assert_eq!(
+        registry.machines()[0].owner_name.as_deref(),
+        Some("machine-6754a9c1e83f27b4")
+    );
+    assert!(
+        fixture
+            .0
+            .join("machines")
+            .join("machine-6754a9c1e83f27b4")
+            .is_dir()
+    );
+    assert!(controller.take_paired().unwrap().contains("new enrollment"));
+    assert_eq!(registry.machine_audit()[0].action, "paired");
     let serialized = serde_json::to_value(&registry).unwrap();
     let (ca, _) = crate::client_ca::generate(100).unwrap();
     let foreign_key = self::key();
@@ -444,7 +457,7 @@ fn exact_expiry_cancellation_and_receiver_policy_refuse_without_activation() {
     input.kinds = vec![(Kind::MirrorPush, false), (Kind::MirrorPush, false)];
     assert!(controller.validate_input(&input, 700).is_err());
     input.kinds = vec![(Kind::MirrorPush, false)];
-    input.machine = "foreign".into();
+    input.machine_id = "foreign".into();
     assert!(controller.validate_input(&input, 700).is_err());
     assert!(controller.core.registry().unwrap().enrollments().is_empty());
 }

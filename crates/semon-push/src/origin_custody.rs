@@ -466,7 +466,7 @@ fn read_configuration(dir: &Directory, name: &str) -> Result<(Configuration, Ecd
         || config.private_key_file != "origin-key.pk8"
         || config.consent_file != "source-consent.json"
         || config.receiver_id != config.scope.receiver_id
-        || config.machine != config.scope.machine
+        || config.machine != config.scope.machine_id
         || config.scope.kinds.len() != 1
         || config.scope.kinds[0].0 != crate::credentials::Kind::MirrorPush
         || !matches!(

@@ -611,7 +611,7 @@ fn revoke_between_activation_and_install_never_restores_grants() {
     let enrollment = Enrollment {
         enrollment_id: id(1),
         receiver_id: custody.receiver_id().into(),
-        machine: "laptop".into(),
+        machine: "machine-6754a9c1e83f27b4".into(),
         sequence: 1,
         origin_key: vec![4; 65],
         endpoint: "https://receiver.example:443".into(),
@@ -639,7 +639,7 @@ fn revoke_between_activation_and_install_never_restores_grants() {
     drop(store);
     let grants = owner_grants(
         custody.owner(),
-        "laptop",
+        "machine-6754a9c1e83f27b4",
         "asi-0123456789abcdef0123456789abcdef",
         false,
     )
@@ -680,14 +680,9 @@ fn recorded_endpoint_is_normalized_and_retained() {
     );
     assert_eq!(fs::read(f.0.join(IDENTITY)).unwrap(), before);
     assert!(
-        crate::provision::Controller::open(
-            &f.0,
-            "https://different.example",
-            "laptop".into(),
-            None
-        )
-        .err()
-        .unwrap()
-        .contains("Receiver directory records endpoint https://receiver.example:443.")
+        crate::provision::Controller::open(&f.0, "https://different.example", "laptop".into())
+            .err()
+            .unwrap()
+            .contains("Receiver directory records endpoint https://receiver.example:443.")
     );
 }
