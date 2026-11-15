@@ -407,7 +407,8 @@ fn credential_handle_survives_unrelated_writes_and_sibling_renewal() {
     let mut next = store.snapshot().unwrap();
     let mut other = next.enrollments[0].clone();
     other.enrollment_id = "c".repeat(64);
-    other.machine = "desktop".into();
+    other.machine = "machine-6754a9c100000002".into();
+    next.ensure_machine(&other.machine, None).unwrap();
     other.client_certificate_pins.clear();
     next.enrollments.push(other);
     store.commit(next.revision(), &next).unwrap();
@@ -591,7 +592,8 @@ fn certificate_and_credential_must_match_and_no_switch() {
     let mut registry = records(true);
     let mut second = registry.enrollments[0].clone();
     second.enrollment_id = "c".repeat(64);
-    second.machine = "desktop".into();
+    second.machine = "machine-6754a9c100000002".into();
+    registry.ensure_machine(&second.machine, None).unwrap();
     second.client_certificate_pins.clear();
     second.credential_kinds[0].client_cert_required = false;
     let mut credential = registry.credentials[0].clone();

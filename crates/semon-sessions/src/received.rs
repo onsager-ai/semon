@@ -1,5 +1,5 @@
 //! [`ReceivedMachines`]: the machines a mirror receiver keeps under one
-//! directory, `DIR/machines/<name>/`, each with its `claude/` and `codex/`
+//! directory, `DIR/machines/<machine-id>/`, each with its `claude/` and `codex/`
 //! homes (the input files, as `semon_sessions::inputs` names them) and its
 //! `facts.json`.
 //!

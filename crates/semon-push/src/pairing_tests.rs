@@ -711,14 +711,24 @@ fn replacement_uses_origin_id_and_audits_while_preserving_owner_name() {
     let mut core = f.core();
     let (first, _) = confirmed(&mut core, "first", 100);
     core.approve(evidence(&first), 100).unwrap();
-    let enrolled = core.activate(&first.session_id, input(), 100).unwrap();
+    core.activate(&first.session_id, input(), 100).unwrap();
     let before = core.registry().unwrap().machines()[0].clone();
     core.set_owner_name("Changed starting label".into());
-    let _ = enrolled;
-    let (replacement, _) = confirmed(&mut core, "replacement", 101);
-    core.approve(evidence(&replacement), 101).unwrap();
+    let created = core.create_session("replacement".into(), 10_001).unwrap();
+    let mut renewed = input();
+    renewed.valid_until = 20_000;
+    let mut replacement = transcript(&created);
+    replacement.scope = renewed.commitment();
+    let keys = derive_keys(&created.code, &replacement).unwrap();
+    let verified = core
+        .reserve("replacement", replacement.clone(), 10_001)
+        .unwrap()
+        .verify(&keys.origin_confirmation(&replacement))
+        .unwrap();
+    core.confirm(verified, 10_001).unwrap();
+    core.approve(evidence(&replacement), 10_001).unwrap();
     let replaced = core
-        .activate(&replacement.session_id, input(), 101)
+        .activate(&replacement.session_id, renewed, 10_001)
         .unwrap();
     assert!(replaced.replaced);
     assert_eq!(replaced.machine_id, before.id);

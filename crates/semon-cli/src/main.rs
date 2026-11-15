@@ -2481,7 +2481,7 @@ fn usage() -> String {
          Usage: semon receive name ID --clear --dir DIR\n\
          Enrollment stays in the foreground; its trusted terminal displays codes and accepts pending or cancel SESSION_ID.\n\
          A mirror-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
-         DIR/machines/NAME/. It listens on 127.0.0.1:8735 by default; another address needs TLS (an operator-supplied\n\
+         DIR/machines/ID/. It listens on 127.0.0.1:8735 by default; another address needs TLS (an operator-supplied\n\
          certificate and key). Enrollment supplies separate kind credentials; legacy DIR/tokens is refused.\n\
          --max-bytes caps each machine's copy (20G by default); a push past it gets 507."
 .to_owned()

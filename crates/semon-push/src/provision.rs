@@ -279,7 +279,7 @@ impl Controller {
                 self.paired = Some(format!(
                     "Paired {} ({:?}); {}.",
                     delivery.machine_id,
-                    delivery.owner_name,
+                    delivery.owner_name.as_deref().unwrap_or("unnamed"),
                     if delivery.replaced {
                         "replaced previous enrollment"
                     } else {

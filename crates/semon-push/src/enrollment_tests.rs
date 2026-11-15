@@ -589,6 +589,7 @@ fn overlap_cutover_and_same_enrollment_generation_certificate_binding() {
         *namespace = "other".into();
     }
     other.client_certificate_pins[0].pin = Pin::Spki([9; 32]);
+    r.ensure_machine(&other.machine, None).unwrap();
     r.enrollments.push(other);
     r.validate().unwrap();
     assert_eq!(

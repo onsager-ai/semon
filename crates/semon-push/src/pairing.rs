@@ -867,8 +867,11 @@ impl Core {
                     }
                     fresh.endpoint = Some(enrollment.endpoint.clone());
                     let predecessor = fresh
-                        .usable_machine(&enrollment.machine, now)
-                        .map(str::to_owned);
+                        .enrollments
+                        .iter()
+                        .filter(|e| e.machine == enrollment.machine && e.revoked_at.is_none())
+                        .max_by_key(|e| e.sequence)
+                        .map(|e| e.enrollment_id.clone());
                     if let Some(id) = &predecessor {
                         fresh.revoke_enrollment(id, None, now);
                     }
