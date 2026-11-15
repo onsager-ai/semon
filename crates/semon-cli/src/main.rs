@@ -1825,14 +1825,14 @@ fn received_machines(
 fn print_received(args: &SessionsArgs, dir: &Path) -> Result<(), String> {
     let (local, received) = received_machines(args, dir);
     let mut core = semon_sessions::ViewerCore::with_received(local, received);
-    let printed = print_route(&mut core, "/api/tree", "the tree of these machines");
+    print_route(&mut core, "/api/tree", "the tree of these machines")?;
     if core.machines() == 0 {
         return Err(format!(
             "no machines: none under {} and --no-local",
             dir.join("machines").display()
         ));
     }
-    printed
+    Ok(())
 }
 
 /// Each `--machine DIR`'s options.

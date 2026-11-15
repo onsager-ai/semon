@@ -334,8 +334,12 @@ impl Registry {
                 || entry.before.directory != entry.after.directory
                 || !self.machines.iter().any(|m| m.id == entry.after.id)
                 || entry.time > self.latest
-                || !semon_sessions::received_registry::validate_machines(&[entry.before.clone()])
-                || !semon_sessions::received_registry::validate_machines(&[entry.after.clone()])
+                || !semon_sessions::received_registry::validate_machines(std::slice::from_ref(
+                    &entry.before,
+                ))
+                || !semon_sessions::received_registry::validate_machines(std::slice::from_ref(
+                    &entry.after,
+                ))
                 || match entry.action.as_str() {
                     "name_set" => entry.after.owner_name.is_none(),
                     "name_clear" => entry.after.owner_name.is_some(),

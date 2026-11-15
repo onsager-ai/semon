@@ -733,3 +733,22 @@ fn pbkdf2_confirmation_derivation_cost() {
         started.elapsed().as_millis()
     );
 }
+
+#[test]
+fn replacement_enrollment_preserves_generated_machine_identity() {
+    let f = Fixture::new();
+    let mut core = f.core();
+    let (first, _) = confirmed(&mut core, "first", 100);
+    core.approve(evidence(&first), 100).unwrap();
+    let enrolled = core.activate(&first.session_id, input(), 100).unwrap();
+    let before = core.registry().unwrap().machines()[0].clone();
+    core.bind_predecessor(Some(enrolled.enrollment_id));
+    let (replacement, _) = confirmed(&mut core, "replacement", 101);
+    core.approve(evidence(&replacement), 101).unwrap();
+    core.activate(&replacement.session_id, input(), 101)
+        .unwrap();
+    let after = core.registry().unwrap();
+    assert_eq!(after.machines(), &[before]);
+    assert_eq!(after.enrollments().len(), 2);
+    assert!(after.enrollments()[0].revoked_at.is_some());
+}

@@ -707,6 +707,9 @@ impl View {
             // The live process's run ids (RUN_VARIABLES only), or null.
             "run": facts.and_then(|facts| facts.run.clone()),
         });
+        if let Some(source) = session.get("source") {
+            row["source"] = source.clone();
+        }
         row["activity_analytics"] = session
             .get("activity_analytics")
             .cloned()
@@ -1007,6 +1010,10 @@ impl Query {
                 now,
             )?;
             answer["source"] = json!(key);
+            if let Some(session) = answer.get_mut("session") {
+                session["source"] = json!(key);
+                session["id"] = args["id"].clone();
+            }
             return Ok(answer);
         }
         let postgres = self

@@ -14,7 +14,7 @@
 //!
 //! What the reader keeps of its own (each machine's metadata cache, and the
 //! facts it serves) goes beside the `--cache` file, under
-//! `received/<DIR's hash>/<name>/`. A machine's facts are copied there,
+//! `received/<DIR's hash>/<machine-ID>/`. A machine's facts are copied there,
 //! checked: a `facts.json` that is missing, not a regular file or unreadable
 //! gives an offline machine named after its directory, with a warning, and
 //! so does a hostname that can't name a machine. Facts not rewritten for

@@ -686,9 +686,8 @@ impl ViewerCore {
     /// name order. The received machines are followed: every request first
     /// takes one pass over `DIR/machines/` (file types and the facts file's
     /// stamp only), and a machine added or removed since is served, or no
-    /// longer, from that request on. A received machine's key is its
-    /// directory's name, so one with the same hostname as a fixed machine
-    /// is served as `<hostname>~<name>`.
+    /// longer, from that request on. A received machine's canonical generated
+    /// ID is its source key; hostname and owner name are presentation only.
     pub fn with_received(machines: Vec<(String, Options)>, received: ReceivedMachines) -> Self {
         let fixed = machines.len();
         let mut core = Self::with_machines(machines);
