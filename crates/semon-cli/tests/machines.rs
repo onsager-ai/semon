@@ -372,6 +372,14 @@ fn shared_owner_names_group_display_but_keep_machine_sources() {
             {"id":format!("machine-{}", "b".repeat(16)), "directory":"machine-bbbbbbbbbbbbbbbb", "owner_name":"Work"}
         ]
     }).to_string());
+    root.claude(
+        "received/machines/machine-aaaaaaaaaaaaaaaa/claude",
+        "shared",
+    );
+    root.claude(
+        "received/machines/machine-bbbbbbbbbbbbbbbb/claude",
+        "shared",
+    );
     let tree = root.json(&[
         "sessions",
         "--json",
@@ -381,13 +389,29 @@ fn shared_owner_names_group_display_but_keep_machine_sources() {
         "--no-local",
     ]);
     let rows = tree["roots"].as_array().unwrap();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3); // Existing tree drop remains until PR1b.
     assert!(rows.iter().all(|row| row["machine"] == "Work"));
-    assert_ne!(rows[0]["source"], rows[1]["source"]);
-    assert!(
-        rows.iter()
-            .all(|row| row["source"].as_str().unwrap().starts_with("machine-"))
+    let options = semon_sessions::Options {
+        cache: root.0.join("group-test/index.json"),
+        all: true,
+        ..Default::default()
+    };
+    let core = semon_sessions::ViewerCore::with_received(
+        vec![],
+        semon_sessions::ReceivedMachines::new(root.0.join("received"), &options),
     );
+    for source in ["machine-aaaaaaaaaaaaaaaa", "machine-bbbbbbbbbbbbbbbb"] {
+        let reply = core.respond(
+            "GET",
+            "/api/sessions",
+            &format!("machine={source}&sid=shared"),
+            None,
+        );
+        assert_eq!(reply.status, 200);
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(body["items"][0]["key"], "shared");
+    }
+    core.close();
     let overview = root.overview(false);
     assert_eq!(machine_ids(&overview), ["Work", "Work"]);
     assert_ne!(

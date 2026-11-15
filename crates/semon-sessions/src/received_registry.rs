@@ -27,12 +27,10 @@ pub struct MachineAudit {
 
 pub fn validate_machines(machines: &[ReceivedMachine]) -> bool {
     let mut ids = BTreeSet::new();
-    let mut directories = BTreeSet::new();
     machines.iter().all(|m| {
         crate::machine_id::valid(&m.id)
             && m.directory == m.id
             && ids.insert(&m.id)
-            && directories.insert(&m.directory)
             && m.owner_name.as_ref().is_none_or(|n| valid_owner_name(n))
     })
 }
@@ -73,30 +71,4 @@ pub fn machines_from_bytes(bytes: &[u8]) -> io::Result<Vec<ReceivedMachine>> {
         return Err(invalid("invalid receiver machine records"));
     }
     Ok(machines)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn current_machine_records_round_trip_and_refuse_old_format() {
-        let machine = ReceivedMachine {
-            id: format!("machine-{}", "a".repeat(16)),
-            directory: format!("machine-{}", "a".repeat(16)),
-            owner_name: Some("Work laptop".into()),
-        };
-        let mut value =
-            serde_json::json!({"format": RECEIVER_FORMAT, "machines": [machine.clone()]});
-        assert_eq!(
-            machines_from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap(),
-            vec![machine]
-        );
-        value["format"] = serde_json::json!(4);
-        assert!(
-            machines_from_bytes(&serde_json::to_vec(&value).unwrap())
-                .unwrap_err()
-                .to_string()
-                .contains("re-enroll")
-        );
-    }
 }

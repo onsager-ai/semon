@@ -470,11 +470,20 @@ fn native_machine_ids(views: &Views) -> Vec<String> {
     let mut labels = Vec::with_capacity(views.len());
     for (index, (key, view)) in views.iter().enumerate() {
         let hostname = crate::facts::MachineFacts::of(view.options()).hostname(view.options());
-        let metadata = read_lock(&view.evidence.received_machine);
-        labels.push(match metadata.as_ref() {
-            Some(machine) => machine.owner_name.clone().unwrap_or(hostname),
-            None => machine_id(&hostname, key, index, &labels),
-        });
+        labels.push(machine_id(&hostname, key, index, &labels));
+    }
+    labels
+}
+/// Owner names label groups, never session addresses or source keys.
+fn machine_display_labels(views: &Views) -> Vec<String> {
+    let mut labels = native_machine_ids(views);
+    for (index, (_, view)) in views.iter().enumerate() {
+        if let Some(name) = read_lock(&view.evidence.received_machine)
+            .as_ref()
+            .and_then(|m| m.owner_name.clone())
+        {
+            labels[index] = name;
+        }
     }
     labels
 }
@@ -735,7 +744,7 @@ impl ViewerCore {
     }
 
     fn configured_source_inventory(views: &Views) -> Arc<crate::SessionSourceInventory> {
-        let labels = native_machine_ids(views);
+        let labels = machine_display_labels(views);
         Arc::new(crate::SessionSourceInventory::new(
             views.iter().enumerate().map(|(index, (key, _))| {
                 let key = if key.is_empty() {
@@ -1162,7 +1171,7 @@ impl ViewerCore {
             }) {
                 return text(404, "Not found");
             }
-            let labels = native_machine_ids(&views);
+            let labels = machine_display_labels(&views);
             let sources: Vec<_> = views
                 .iter()
                 .enumerate()
@@ -1854,7 +1863,7 @@ impl ViewerCore {
     fn tree(&self, views: &Views) -> io::Result<ViewerReply> {
         // Tree identity depends on configured machine names and keys, not a
         // full Viewer model or its transcript/analytics ownership projection.
-        let machine_ids = native_machine_ids(views);
+        let machine_ids = machine_display_labels(views);
         let droppable = self.droppable();
         let mut roots = Vec::new();
         let mut seen = BTreeSet::new();
