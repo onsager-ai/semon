@@ -275,7 +275,7 @@ const APPEND: &str = "/v1/mirror/append";
 
 #[test]
 fn an_append_is_answered_over_http() {
-    let (receiving, tokens) = receiving(&["laptop"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001"]);
     let answer = post(
         receiving.address,
         APPEND,
@@ -296,13 +296,16 @@ fn an_append_is_answered_over_http() {
         answer.body,
         json!({"length": 4, "head_sha256": head_sha256(b"one\n")})
     );
-    let copy = receiving.dir.join("machines/laptop/claude").join(LOG);
+    let copy = receiving
+        .dir
+        .join("machines/machine-6754a9c100000001/claude")
+        .join(LOG);
     assert_eq!(fs::read(copy).unwrap(), b"one\n");
 }
 
 #[test]
 fn unknown_and_revoked_tokens_are_401() {
-    let (receiving, tokens) = receiving(&["laptop", "desk"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001", "machine-6754a9c100000002"]);
     let body = append_body(LOG, b"", 0, b"one\n");
     for token in [None, Some("nope"), Some("")] {
         let answer = post(receiving.address, APPEND, token, &body);
@@ -326,7 +329,7 @@ fn unknown_and_revoked_tokens_are_401() {
     let mut enrollments = registry.enrollments().to_vec();
     enrollments
         .iter_mut()
-        .find(|e| e.machine == "laptop")
+        .find(|e| e.machine == "machine-6754a9c100000001")
         .unwrap()
         .revoked_at = Some(1);
     let next = Registry::from_records(enrollments, registry.credentials().to_vec()).unwrap();
@@ -363,7 +366,7 @@ fn unknown_and_revoked_tokens_are_401() {
 
 #[test]
 fn an_oversize_body_is_413_before_it_is_read() {
-    let (receiving, tokens) = receiving(&["laptop"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001"]);
     // Only the head is sent: the answer can't wait for the body.
     let request = format!(
         "POST {APPEND} HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n",
@@ -389,7 +392,7 @@ fn an_oversize_body_is_413_before_it_is_read() {
 
 #[test]
 fn only_post_to_the_two_endpoints() {
-    let (receiving, tokens) = receiving(&["laptop"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001"]);
     let answer = exchange(
         receiving.address,
         format!(
@@ -428,7 +431,7 @@ fn only_post_to_the_two_endpoints() {
 
 #[test]
 fn malformed_bodies_are_400() {
-    let (receiving, tokens) = receiving(&["laptop"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001"]);
     let bodies: [&[u8]; 5] = [b"", b"{", b"[1,2]", b"\"text\"", b"\xff"];
     for body in bodies {
         for route in [APPEND, "/v1/mirror/facts"] {
@@ -452,7 +455,7 @@ fn malformed_bodies_are_400() {
 
 #[test]
 fn a_token_writes_only_its_own_machine() {
-    let (receiving, tokens) = receiving(&["laptop", "desk"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001", "machine-6754a9c100000002"]);
     let desk = append_body(LOG, b"", 0, b"desk\n");
     assert_eq!(
         post(receiving.address, APPEND, Some(&tokens[1]), &desk).status,
@@ -471,18 +474,18 @@ fn a_token_writes_only_its_own_machine() {
     );
     let machines = receiving.dir.join("machines");
     assert_eq!(
-        fs::read(machines.join("desk/claude").join(LOG)).unwrap(),
+        fs::read(machines.join("machine-6754a9c100000002/claude").join(LOG)).unwrap(),
         b"desk\n"
     );
     assert_eq!(
-        fs::read(machines.join("laptop/claude").join(LOG)).unwrap(),
+        fs::read(machines.join("machine-6754a9c100000001/claude").join(LOG)).unwrap(),
         b"laptop\n"
     );
 }
 
 #[test]
 fn a_kept_alive_connection_serves_several_requests() {
-    let (receiving, tokens) = receiving(&["laptop"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001"]);
     let mut stream = TcpStream::connect(receiving.address).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
@@ -525,7 +528,8 @@ fn a_kept_alive_connection_serves_several_requests() {
 
 #[test]
 fn an_append_is_answered_over_tls() {
-    let (receiving, tokens) = receiving_with(&["laptop"], Limits::default(), true);
+    let (receiving, tokens) =
+        receiving_with(&["machine-6754a9c100000001"], Limits::default(), true);
     let mut stream = tls_client(receiving.address);
     let body = append_body(LOG, b"", 0, b"one\n");
     stream
@@ -536,13 +540,16 @@ fn an_append_is_answered_over_tls() {
     let answer = parse(&raw);
     assert_eq!(answer.status, 200, "{}", answer.head);
     assert_eq!(answer.body, json!({"length": 4}));
-    let copy = receiving.dir.join("machines/laptop/claude").join(LOG);
+    let copy = receiving
+        .dir
+        .join("machines/machine-6754a9c100000001/claude")
+        .join(LOG);
     assert_eq!(fs::read(copy).unwrap(), b"one\n");
 }
 
 #[test]
 fn a_trickled_tls_handshake_ends_at_the_head_deadline() {
-    let (receiving, _tokens) = receiving_with(&["laptop"], short(), true);
+    let (receiving, _tokens) = receiving_with(&["machine-6754a9c100000001"], short(), true);
     let socket = TcpStream::connect(receiving.address).unwrap();
     let started = Instant::now();
     // A handshake record of 512 bytes, sent a byte every 50 ms: each read
@@ -563,7 +570,7 @@ fn a_trickled_tls_handshake_ends_at_the_head_deadline() {
 
 #[test]
 fn a_trickled_head_gets_408_at_the_head_deadline() {
-    let (receiving, _tokens) = receiving_with(&["laptop"], short(), false);
+    let (receiving, _tokens) = receiving_with(&["machine-6754a9c100000001"], short(), false);
     let mut socket = TcpStream::connect(receiving.address).unwrap();
     let started = Instant::now();
     socket
@@ -593,7 +600,7 @@ fn one_address_gets_at_most_its_share_of_connections() {
         connections_per_ip: 2,
         ..short()
     };
-    let (receiving, tokens) = receiving_with(&["laptop"], limits, false);
+    let (receiving, tokens) = receiving_with(&["machine-6754a9c100000001"], limits, false);
     let first = TcpStream::connect(receiving.address).unwrap();
     let _second = TcpStream::connect(receiving.address).unwrap();
     let started = Instant::now();
@@ -626,7 +633,7 @@ fn one_address_gets_at_most_its_share_of_connections() {
 
 #[test]
 fn expect_100_continue_is_answered_only_once_the_request_may_go_on() {
-    let (receiving, tokens) = receiving(&["laptop"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001"]);
     let body = append_body(LOG, b"", 0, b"one\n");
     let head = |token: &str| {
         format!(
@@ -657,7 +664,7 @@ fn expect_100_continue_is_answered_only_once_the_request_may_go_on() {
 
 #[test]
 fn pipelined_requests_are_answered_in_order() {
-    let (receiving, tokens) = receiving(&["laptop"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001"]);
     let first = append_body(LOG, b"", 0, b"one\n");
     let second = append_body(LOG, b"one\n", 4, b"two\n");
     let keep = format!(
@@ -688,7 +695,7 @@ fn pipelined_requests_are_answered_in_order() {
 
 #[test]
 fn a_post_without_a_length_is_411() {
-    let (receiving, tokens) = receiving(&["laptop"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001"]);
     let request = format!(
         "POST {APPEND} HTTP/1.1\r\nAuthorization: Bearer {}\r\n\r\n",
         tokens[0]
@@ -698,7 +705,7 @@ fn a_post_without_a_length_is_411() {
 
 #[test]
 fn registry_keep_alive_cannot_switch_enrollments() {
-    let (receiving, tokens) = receiving(&["laptop", "desktop"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001", "machine-6754a9c100000003"]);
     let mut stream = TcpStream::connect(receiving.address).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
@@ -767,7 +774,7 @@ fn authenticated_connections_stop_counting_against_their_address() {
         ..Limits::default()
     };
     assert_eq!(limits.connections_per_ip, 4);
-    let (receiving, tokens) = receiving_with(&["laptop"], limits, false);
+    let (receiving, tokens) = receiving_with(&["machine-6754a9c100000001"], limits, false);
     let keep_alive = |path: &str, before: &[u8], line: &[u8]| {
         let body = append_body(path, before, before.len() as u64, line);
         let mut request = format!(
@@ -815,7 +822,7 @@ fn authenticated_connections_stop_counting_against_their_address() {
 
 #[test]
 fn a_connection_that_sends_nothing_is_closed_at_the_head_deadline() {
-    let (receiving, _tokens) = receiving_with(&["laptop"], short(), false);
+    let (receiving, _tokens) = receiving_with(&["machine-6754a9c100000001"], short(), false);
     let started = Instant::now();
     let socket = TcpStream::connect(receiving.address).unwrap();
     let elapsed = time_to_close(socket, started);
@@ -836,7 +843,7 @@ fn a_peer_that_never_reads_its_answer_is_closed_at_the_write_deadline() {
         linger: Duration::from_millis(200),
         ..Limits::default()
     };
-    let (receiving, tokens) = receiving_with(&["laptop"], limits, false);
+    let (receiving, tokens) = receiving_with(&["machine-6754a9c100000001"], limits, false);
     // A path the 400 echoes back: an answer of about 5.5 MiB, more than
     // the socket buffers hold while the peer reads nothing.
     let body = serde_json::to_vec(&Append {
@@ -881,7 +888,7 @@ fn a_peer_that_never_reads_its_answer_is_closed_at_the_write_deadline() {
 
 #[test]
 fn status_head_advertises_post_without_body_and_unknown_routes_stay_unsupported() {
-    let (receiving, tokens) = receiving(&["laptop"]);
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001"]);
     let head = format!(
         "HEAD /v1/mirror/status HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nConnection: close\r\n\r\n",
         receiving.address, tokens[0]

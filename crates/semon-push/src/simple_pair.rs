@@ -153,7 +153,10 @@ pub(crate) fn pair(dir: &Path, body: &[u8], now: u64) -> Result<Response> {
             .simple_pair
             .tokens
             .iter()
-            .any(|t| t.enrollment_id == request.machine_id);
+            .any(|t| t.enrollment_id == request.machine_id)
+            || r.enrollments
+                .iter()
+                .any(|e| e.machine == request.machine_id);
         revoke(r, &request.machine_id, now);
         r.ensure_machine(&request.machine_id, Some(&request.hostname))?;
         r.simple_pair.tokens.push(Bearer {
@@ -183,6 +186,16 @@ pub(crate) fn pair(dir: &Path, body: &[u8], now: u64) -> Result<Response> {
 }
 
 fn revoke(r: &mut Registry, machine: &str, now: u64) {
+    for token in &mut r.credentials {
+        if token.kind == Kind::MirrorPush
+            && token.revoked_at.is_none()
+            && r.enrollments
+                .iter()
+                .any(|e| e.enrollment_id == token.enrollment_id && e.machine == machine)
+        {
+            token.revoked_at = Some(now);
+        }
+    }
     for token in &mut r.simple_pair.tokens {
         if token.enrollment_id == machine && token.revoked_at.is_none() {
             token.revoked_at = Some(now);

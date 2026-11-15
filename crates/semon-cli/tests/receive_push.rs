@@ -186,7 +186,7 @@ impl Fixture {
         self.install_origin(url);
         let home = self.path("home");
         semon()
-            .args(["push"])
+            .args(["push", "--receiver", url])
             .arg("--state")
             .arg(self.path("state/push.json"))
             .arg("--claude-home")
@@ -491,7 +491,7 @@ fn push_watch_stops_on(name: &str, number: i32) {
     let home = fixture.path("home");
     fixture.install_origin(&url);
     let mut watch = semon()
-        .args(["push", "--watch"])
+        .args(["push", "--watch", "--receiver", &url])
         .env("XDG_CONFIG_HOME", fixture.path("config"))
         .arg("--state")
         .arg(fixture.path("state/push.json"))
