@@ -193,8 +193,8 @@ pub struct Registry {
     format: u32,
     revision: u64,
     pub(crate) endpoint: Option<String>,
-    pub machines: Vec<semon_sessions::received_registry::ReceivedMachine>,
-    pub machine_audit: Vec<semon_sessions::received_registry::MachineAudit>,
+    pub(crate) machines: Vec<semon_sessions::received_registry::ReceivedMachine>,
+    pub(crate) machine_audit: Vec<semon_sessions::received_registry::MachineAudit>,
     pub(crate) enrollments: Vec<Enrollment>,
     pub(crate) credentials: Vec<Bearer>,
     pub(crate) pairing_receipts: Vec<crate::pairing::Receipt>,
@@ -221,6 +221,12 @@ impl Registry {
             latest: 0,
             next_sequence: 1,
         }
+    }
+    pub fn machines(&self) -> &[semon_sessions::received_registry::ReceivedMachine] {
+        &self.machines
+    }
+    pub fn machine_audit(&self) -> &[semon_sessions::received_registry::MachineAudit] {
+        &self.machine_audit
     }
     pub fn endpoint(&self) -> Option<&str> {
         self.endpoint.as_deref()
@@ -320,6 +326,22 @@ impl Registry {
                 .iter()
                 .any(|e| !self.machines.iter().any(|m| m.directory == e.machine))
         {
+            return Err(Error::Invalid);
+        }
+        if self.machine_audit.iter().any(|entry| {
+            entry.ids != [entry.before.id.clone()]
+                || entry.before.id != entry.after.id
+                || entry.before.directory != entry.after.directory
+                || !self.machines.iter().any(|m| m.id == entry.after.id)
+                || entry.time > self.latest
+                || !semon_sessions::received_registry::validate_machines(&[entry.before.clone()])
+                || !semon_sessions::received_registry::validate_machines(&[entry.after.clone()])
+                || match entry.action.as_str() {
+                    "name_set" => entry.after.owner_name.is_none(),
+                    "name_clear" => entry.after.owner_name.is_some(),
+                    _ => true,
+                }
+        }) {
             return Err(Error::Invalid);
         }
         let mut identities = BTreeSet::new();
@@ -495,12 +517,22 @@ impl Registry {
             return Err(Error::Terminal);
         }
         for machine in &old.machines {
-            if !self
+            let next = self
                 .machines
                 .iter()
-                .any(|m| m.id == machine.id && m.directory == machine.directory)
-            {
-                return Err(Error::Terminal);
+                .find(|m| m.id == machine.id && m.directory == machine.directory)
+                .ok_or(Error::Terminal)?;
+            let mut expected = machine.clone();
+            for entry in &self.machine_audit[old.machine_audit.len()..] {
+                if entry.ids == [machine.id.clone()] {
+                    if entry.before != expected {
+                        return Err(Error::Invalid);
+                    }
+                    expected = entry.after.clone();
+                }
+            }
+            if &expected != next {
+                return Err(Error::Invalid);
             }
         }
         for tombstone in &old.tombstones {

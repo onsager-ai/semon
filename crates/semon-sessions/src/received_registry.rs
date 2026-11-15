@@ -46,11 +46,23 @@ pub fn valid_owner_name(name: &str) -> bool {
 
 /// Read the atomically published registry. No second metadata file is authoritative.
 pub fn read_machines(dir: &Path) -> io::Result<Vec<ReceivedMachine>> {
-    let bytes = crate::read_regular_at_most(&dir.join("enrollment/registry.json"), REGISTRY_CAP)?;
+    let bytes = crate::read_regular_at_most(&dir.join("enrollment/registry.json"), REGISTRY_CAP)
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!("receiver registry unavailable ({error}); {REENROLL}"),
+            )
+        })?;
     machines_from_bytes(&bytes)
 }
 
 pub fn machines_from_bytes(bytes: &[u8]) -> io::Result<Vec<ReceivedMachine>> {
+    if bytes.len() as u64 > REGISTRY_CAP {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "receiver registry exceeds its size limit",
+        ));
+    }
     let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(io::Error::other)?;
     if value["format"].as_u64() != Some(u64::from(RECEIVER_FORMAT)) {

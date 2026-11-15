@@ -17,6 +17,7 @@ pub(crate) use runtime::RuntimeObservations;
 
 pub(crate) struct NativeEvidence {
     pub(crate) options: Options,
+    pub(crate) received_machine: RwLock<Option<crate::received_registry::ReceivedMachine>>,
     /// The source namespace its host configured. The producer binds its
     /// database to it and refuses a database bound to another namespace.
     /// Only test constructions observe a database without a host namespace.
@@ -457,7 +458,18 @@ impl SessionSources {
             .iter()
             .map(|(key, evidence)| Ok((key.clone(), evidence.query_at(now)?)))
             .collect::<io::Result<Vec<_>>>()?;
-        Ok(crate::union::QueryRead::new(parts, usize::MAX))
+        let mut read = crate::union::QueryRead::new(parts, usize::MAX);
+        for (part, (_, evidence)) in read.parts.iter_mut().zip(&self.machines) {
+            if let Some(machine) = read_lock(&evidence.received_machine).as_ref() {
+                part.machine = Some(
+                    machine
+                        .owner_name
+                        .clone()
+                        .unwrap_or_else(|| part.data.machine_id.clone()),
+                );
+            }
+        }
+        Ok(read)
     }
 }
 
@@ -492,6 +504,7 @@ impl NativeEvidence {
     ) -> Arc<Self> {
         Arc::new(Self {
             options,
+            received_machine: RwLock::default(),
             storage,
             catalog_demand: AtomicBool::new(false),
             catalog_search: Mutex::default(),

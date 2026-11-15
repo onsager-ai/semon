@@ -14,7 +14,9 @@ enrollment_dir.mkdir(mode=0o700)
 token = secrets.token_hex(32)
 enrollment_id = secrets.token_hex(32)
 registry = {
-    "format": 4,
+    "format": 5,
+    "machines": [{"id": "machine-" + secrets.token_hex(32), "directory": "laptop", "owner_name": None}],
+    "machine_audit": [],
     "latest": 0,
     "next_sequence": 2,
     "tombstones": [],

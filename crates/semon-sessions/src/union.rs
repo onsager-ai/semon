@@ -428,13 +428,8 @@ struct Plan {
     owners: BTreeMap<String, (usize, String)>,
     /// Ids two machines both claim: refused.
     conflicts: BTreeSet<String>,
-    /// For each machine, its own session ids an earlier machine already
-    /// serves: left out. Only a received machine's are (see
-    /// [`Plan::droppable`]); between fixed machines a shared id is refused.
+    /// Empty exclusions: received copies remain separately addressable.
     dropped: Vec<BTreeSet<String>>,
-    /// The first machine whose ids an earlier machine's win over: the first
-    /// received machine. `usize::MAX` without received machines.
-    droppable: usize,
 }
 
 /// Which machine answers for a session id.
@@ -470,7 +465,7 @@ fn native_machine_ids(views: &Views) -> Vec<String> {
     let mut labels = Vec::with_capacity(views.len());
     for (index, (key, view)) in views.iter().enumerate() {
         let hostname = crate::facts::MachineFacts::of(view.options()).hostname(view.options());
-        let metadata = read_lock(&view.received_machine);
+        let metadata = read_lock(&view.evidence.received_machine);
         labels.push(match metadata.as_ref() {
             Some(machine) => machine.owner_name.clone().unwrap_or(hostname),
             None => machine_id(&hostname, key, index, &labels),
@@ -487,7 +482,7 @@ struct IdentityPart<'a> {
     transcripts: &'a BTreeMap<String, Arc<Transcript>>,
 }
 
-fn identity_plan(parts: &[IdentityPart<'_>], droppable: usize) -> Plan {
+fn identity_plan(parts: &[IdentityPart<'_>]) -> Plan {
     let mut machine_ids: Vec<String> = Vec::new();
     for (index, part) in parts.iter().enumerate() {
         let id = machine_id(part.machine, part.key, index, &machine_ids);
@@ -520,7 +515,6 @@ fn identity_plan(parts: &[IdentityPart<'_>], droppable: usize) -> Plan {
         owners,
         conflicts,
         dropped,
-        droppable,
     }
 }
 
@@ -552,7 +546,7 @@ impl QueryPart {
 }
 
 impl QueryRead {
-    pub(crate) fn new(machines: Vec<(String, Arc<QueryData>)>, droppable: usize) -> Self {
+    pub(crate) fn new(machines: Vec<(String, Arc<QueryData>)>, _droppable: usize) -> Self {
         let identities: Vec<_> = machines
             .iter()
             .map(|(key, data)| IdentityPart {
@@ -562,7 +556,7 @@ impl QueryRead {
                 transcripts: &data.tx,
             })
             .collect();
-        let plan = identity_plan(&identities, droppable);
+        let plan = identity_plan(&identities);
         let multiple = machines.len() > 1;
         let parts = machines
             .into_iter()
@@ -581,7 +575,7 @@ impl QueryRead {
     pub(crate) fn owner(&self, id: &str) -> Owner {
         match self.parts.len() {
             0 => Owner::Missing,
-            1 => Owner::At(0, id.to_owned()),
+            1 if !self.parts[0].source.starts_with("machine-") => Owner::At(0, id.to_owned()),
             _ if self.plan.conflicts.contains(id) => Owner::Conflict,
             _ => match self.plan.owners.get(id) {
                 Some((index, own)) => Owner::At(*index, own.clone()),
@@ -866,9 +860,17 @@ impl ViewerCore {
                 )]);
                 machines.copy_facts(name, seen, hosts, warned, &sources);
             }
-            *write_lock(&view.received_machine) = Some(seen.machine.clone());
+            *write_lock(&view.evidence.received_machine) = Some(seen.machine.clone());
             next.push((seen.machine.id.clone(), view));
         }
+        next[fixed..].sort_by(|(a, av), (b, bv)| {
+            let am = read_lock(&av.evidence.received_machine);
+            let bm = read_lock(&bv.evidence.received_machine);
+            am.as_ref()
+                .and_then(|m| m.owner_name.as_ref())
+                .cmp(&bm.as_ref().and_then(|m| m.owner_name.as_ref()))
+                .then(a.cmp(b))
+        });
         gone.extend(old.into_values());
         *write_lock(&self.views) = Arc::new(next);
         following.seen = Some(listing);
@@ -1111,7 +1113,7 @@ impl ViewerCore {
             return self.session_page(path, query);
         }
         if let Err(error) = self.follow() {
-            return failed(&error);
+            return text(503, &error.to_string());
         }
         let views = self.views();
         if path == "/api/session-sources" {
@@ -1235,7 +1237,7 @@ impl ViewerCore {
             Err(_) => return text(400, "Malformed session address"),
         };
         if let Err(error) = self.follow() {
-            return failed(&error);
+            return text(503, &error.to_string());
         }
         let views = self.views();
         if views
@@ -1893,6 +1895,41 @@ impl ViewerCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn received_same_native_id_keeps_both_canonical_sources() {
+        let first = format!("machine-{}", "a".repeat(64));
+        let second = format!("machine-{}", "b".repeat(64));
+        let sessions = BTreeMap::new();
+        let transcript = Arc::new(Transcript::default());
+        let transcripts = BTreeMap::from([("shared".to_owned(), transcript)]);
+        let parts = [
+            IdentityPart {
+                key: &first,
+                machine: "same-host",
+                sessions: &sessions,
+                transcripts: &transcripts,
+            },
+            IdentityPart {
+                key: &second,
+                machine: "same-host",
+                sessions: &sessions,
+                transcripts: &transcripts,
+            },
+        ];
+        let plan = identity_plan(&parts);
+        assert_eq!(plan.owners.len(), 2);
+        assert_eq!(
+            plan.owners[&format!("shared@{first}")],
+            (0, "shared".into())
+        );
+        assert_eq!(
+            plan.owners[&format!("shared@{second}")],
+            (1, "shared".into())
+        );
+        assert!(plan.conflicts.is_empty());
+        assert!(plan.dropped.iter().all(BTreeSet::is_empty));
+    }
 
     #[test]
     fn native_ownership_tracks_configuration_rewrites_and_removal() {

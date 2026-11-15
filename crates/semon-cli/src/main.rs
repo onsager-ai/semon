@@ -240,6 +240,14 @@ struct PushArgs {
 /// `semon receive`: serve pushes, or manage the tokens that may push.
 enum ReceiveArgs {
     Serve(semon_push::serve::ServeOptions),
+    Machines {
+        dir: PathBuf,
+    },
+    Name {
+        dir: PathBuf,
+        id: String,
+        name: Option<String>,
+    },
     Owner {
         dir: PathBuf,
         machine: String,
@@ -987,6 +995,39 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
     if arguments.peek().is_some_and(|argument| argument == "token") {
         return Err("legacy token commands retired; re-pair with receive enroll; preserve existing tokens and history".into());
     }
+    if arguments
+        .peek()
+        .is_some_and(|a| a == "machines" || a == "name")
+    {
+        let command = arguments.next().unwrap();
+        let id = if command == "name" {
+            Some(arguments.next().ok_or("receive name requires ID")?)
+        } else {
+            None
+        };
+        let mut dir = None;
+        let mut name = None;
+        let mut clear = false;
+        while let Some(arg) = arguments.next() {
+            match arg.as_str() {
+                "--dir" => dir = Some(PathBuf::from(arguments.next().ok_or("--dir requires DIR")?)),
+                "--clear" if id.is_some() => clear = true,
+                value if id.is_some() && !value.starts_with('-') && name.is_none() => {
+                    name = Some(value.to_owned())
+                }
+                _ => return Err(format!("unknown receive {command} argument: {arg}")),
+            }
+        }
+        let dir = dir.ok_or("receive requires --dir DIR")?;
+        return if let Some(id) = id {
+            if clear == name.is_some() {
+                return Err("receive name requires a name or --clear".into());
+            }
+            Ok(ReceiveArgs::Name { dir, id, name })
+        } else {
+            Ok(ReceiveArgs::Machines { dir })
+        };
+    }
     if arguments.peek().is_some_and(|a| a == "revoke") {
         arguments.next();
         let action = semon_push::enrollment::OwnerAction::Revoke;
@@ -1100,6 +1141,8 @@ mod receive_owner;
 
 fn run_receive(args: ReceiveArgs) -> Result<(), String> {
     match args {
+        ReceiveArgs::Machines { dir } => receive_owner::machines(&dir),
+        ReceiveArgs::Name { dir, id, name } => receive_owner::name(&dir, &id, name.as_deref()),
         ReceiveArgs::Owner {
             dir,
             machine,
@@ -2452,6 +2495,9 @@ fn usage() -> String {
          \n\
          Usage: semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--max-bytes SIZE]\n\
          Usage: semon receive enroll --machine NAME --advertise HTTPS_URL --dir DIR [--listen ADDR] --tls-cert PEM --tls-key PEM\n\
+         Usage: semon receive machines --dir DIR\n\
+         Usage: semon receive name ID NAME --dir DIR\n\
+         Usage: semon receive name ID --clear --dir DIR\n\
          Enrollment stays in the foreground; its trusted terminal displays codes and accepts pending or cancel SESSION_ID.\n\
          A mirror-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
          DIR/machines/NAME/. It listens on 127.0.0.1:8735 by default; another address needs TLS (an operator-supplied\n\
@@ -2463,6 +2509,32 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn receive_machine_name_requires_id_and_one_name_action() {
+        let parse = |args: &[&str]| parse_receive_args(args.iter().map(|s| s.to_string()));
+        assert!(matches!(
+            parse(&["machines", "--dir", "/synthetic"]),
+            Ok(ReceiveArgs::Machines { .. })
+        ));
+        assert!(matches!(
+            parse(&["name", "machine-id", "Work laptop", "--dir", "/synthetic"]),
+            Ok(ReceiveArgs::Name { name: Some(_), .. })
+        ));
+        assert!(matches!(
+            parse(&["name", "machine-id", "--clear", "--dir", "/synthetic"]),
+            Ok(ReceiveArgs::Name { name: None, .. })
+        ));
+        for args in [
+            vec!["name"],
+            vec!["name", "id", "--dir", "/synthetic"],
+            vec!["name", "id", "Work", "--clear", "--dir", "/synthetic"],
+            vec!["machines", "--clear", "--dir", "/synthetic"],
+            vec!["merge", "id", "--into", "other", "--dir", "/synthetic"],
+        ] {
+            assert!(parse(&args).is_err(), "{args:?}");
+        }
+    }
 
     #[test]
     fn durable_add_parser_requires_explicit_row_and_values_source() {

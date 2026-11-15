@@ -90,6 +90,13 @@ impl Root {
             ]
             .concat(),
         );
+        root.write("received/enrollment/registry.json", &json!({
+            "format": semon_sessions::received_registry::RECEIVER_FORMAT,
+            "machines": [
+                {"id": format!("machine-{}", "a".repeat(64)), "directory":"alpha", "owner_name":null},
+                {"id": format!("machine-{}", "b".repeat(64)), "directory":"bravo", "owner_name":null}
+            ]
+        }).to_string());
         root
     }
 
@@ -327,5 +334,50 @@ fn machines_flags_are_checked() {
         "--no-local",
     ]);
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no machines"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("re-enroll"));
+}
+
+#[test]
+fn unrecorded_machine_refuses_without_changing_retained_logs() {
+    let root = Root::new(MINUTE);
+    root.claude("received/machines/unrecorded/claude", "retained");
+    let before = root.received();
+    let output = root.semon(&["sessions", "--json", "--all", "--machines", &root.dir()]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("re-enroll"));
+    assert_eq!(root.received(), before);
+}
+
+#[test]
+fn shared_owner_names_group_display_but_keep_machine_sources() {
+    let root = Root::new(MINUTE);
+    root.write("received/enrollment/registry.json", &json!({
+        "format": semon_sessions::received_registry::RECEIVER_FORMAT,
+        "machines": [
+            {"id":format!("machine-{}", "a".repeat(64)), "directory":"alpha", "owner_name":"Work"},
+            {"id":format!("machine-{}", "b".repeat(64)), "directory":"bravo", "owner_name":"Work"}
+        ]
+    }).to_string());
+    let tree = root.json(&[
+        "sessions",
+        "--json",
+        "--all",
+        "--machines",
+        &root.dir(),
+        "--no-local",
+    ]);
+    let rows = tree["roots"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| row["machine"] == "Work"));
+    assert_ne!(rows[0]["source"], rows[1]["source"]);
+    assert!(
+        rows.iter()
+            .all(|row| row["source"].as_str().unwrap().starts_with("machine-"))
+    );
+    let overview = root.overview(false);
+    assert_eq!(machine_ids(&overview), ["Work", "Work"]);
+    assert_ne!(
+        overview["machines"][0]["key"],
+        overview["machines"][1]["key"]
+    );
 }

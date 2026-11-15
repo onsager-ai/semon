@@ -425,14 +425,17 @@ fn push_mirrors_a_home_into_semon_receive() {
     // Revoked while the receiver runs: the next push is refused.
     let mut store = semon_push::enrollment::Store::open(&dir).unwrap();
     let registry = store.snapshot().unwrap();
-    let mut enrollments = registry.enrollments().to_vec();
-    enrollments[0].revoked_at = Some(1);
-    let next = semon_push::enrollment::Registry::from_records(
-        enrollments,
-        registry.credentials().to_vec(),
-    )
-    .unwrap();
-    store.commit(registry.revision(), &next).unwrap();
+    let enrollment_id = registry.enrollments()[0].enrollment_id.clone();
+    store
+        .owner_update(
+            &dir,
+            None,
+            semon_push::enrollment::OwnerAction::Revoke,
+            "synthetic-owner",
+            &enrollment_id,
+            1,
+        )
+        .unwrap();
     fixture.append(&log, claude("after the revoke").as_bytes());
     let pushed = fixture.push(&url);
     assert!(!pushed.status.success());

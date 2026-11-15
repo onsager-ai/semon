@@ -4,6 +4,16 @@
 
 `semon receive` is the reference receiver (`semon_push::mirror::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<name>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and 507 (the machine's copy would pass its size cap); a client treats either as a failure.
 
+Registry format 5 additionally stores receiver-generated canonical machine IDs
+(`machine-<64 lowercase hex>`), immutable storage directory locators and optional
+owner display names. Re-enrolling a storage name retains its ID; new names receive
+new IDs. Equal owner names group presentation only. IDs remain the source keys;
+no history moves or merges. Name changes and their audit entries commit together.
+Received-machine discovery reads these same records and refuses unrecorded directories
+with a re-enrollment instruction. Older receiver formats require a new directory
+and re-enrollment; retained logs are never migrated or deleted.
+
+
 The reference receiver requires the current enrollment registry and a separate
 `mirror_push` bearer credential scoped to one machine. `connect` installs the
 Push client's protected input for that kind bearer; a bearer is machine transport

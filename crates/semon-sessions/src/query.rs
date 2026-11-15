@@ -530,8 +530,13 @@ impl View {
                 {
                     continue;
                 }
-                if !handoff_ids.insert(handoff.id.clone()) && multiple {
-                    conflicts.insert(handoff.id.clone());
+                let handoff_id = if part.source.starts_with("machine-") {
+                    format!("{}@{}", handoff.id, part.source)
+                } else {
+                    handoff.id.clone()
+                };
+                if !handoff_ids.insert(handoff_id.clone()) && multiple {
+                    conflicts.insert(handoff_id.clone());
                 }
                 let question = handoff.kind == "toyou"
                     && handoff.ask == Some("question")
@@ -554,6 +559,7 @@ impl View {
                         .read(&records)
                         .map_err(|error| QueryError::io(&error))?;
                 }
+                handoff.id = handoff_id;
                 handoff.from = part.served(&handoff.from);
                 handoff.to = handoff.to.map(|to| part.served(&to));
                 handoffs.push(json!(handoff));
@@ -564,8 +570,13 @@ impl View {
                 {
                     continue;
                 }
-                if !turn_ids.insert(turn.id.clone()) && multiple {
-                    conflicts.insert(turn.id.clone());
+                let turn_id = if part.source.starts_with("machine-") {
+                    format!("{}@{}", turn.id, part.source)
+                } else {
+                    turn.id.clone()
+                };
+                if !turn_ids.insert(turn_id.clone()) && multiple {
+                    conflicts.insert(turn_id);
                 }
                 if !matches!(shape, ReadShape::Session(id) if part.served(&turn.sid) == id) {
                     continue;
@@ -971,6 +982,33 @@ impl Query {
     }
 
     fn execute_tool(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
+        if matches!(
+            tool,
+            "get_session" | "get_session_activity" | "read_transcript"
+        ) && let Some((own, source)) = args["id"].as_str().and_then(|id| id.rsplit_once('@'))
+            && source.starts_with("machine-")
+            && let Some((key, evidence)) =
+                self.sources.machines.iter().find(|(key, _)| key == source)
+        {
+            let key = key.clone();
+            let target = evidence
+                .local_query_target(own, now)
+                .map_err(|error| QueryError::io(&error))?
+                .ok_or_else(|| QueryError::unknown_session(own))?;
+            let mut focused = args.clone();
+            focused["id"] = json!(own);
+            let mut answer = self.execute_selected_at(
+                &key,
+                &target,
+                tool,
+                &focused,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                now,
+            )?;
+            answer["source"] = json!(key);
+            return Ok(answer);
+        }
         let postgres = self
             .sources
             .machines
@@ -1451,11 +1489,19 @@ impl Query {
             .machines
             .iter()
             .zip(read.parts)
-            .map(|((key, _), part)| {
-                (
-                    key.clone(),
-                    part.machine.unwrap_or_else(|| part.data.machine_id.clone()),
-                )
+            .map(|((key, evidence), part)| {
+                let metadata = crate::viewer::read_lock(&evidence.received_machine);
+                let label = metadata
+                    .as_ref()
+                    .map(|m| {
+                        m.owner_name
+                            .clone()
+                            .unwrap_or_else(|| part.data.machine_id.clone())
+                    })
+                    .unwrap_or_else(|| {
+                        part.machine.unwrap_or_else(|| part.data.machine_id.clone())
+                    });
+                (key.clone(), label)
             })
             .collect()
     }
