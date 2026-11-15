@@ -1,4 +1,4 @@
-//! The receiving side of the mirror protocol (docs/mirror-protocol.md): the
+//! The receiving side of the mirror protocol (docs/push-protocol.md): the
 //! reference implementation, over a directory. [`Receiver::append`] and
 //! [`Receiver::facts`] each take a parsed request and return the documented
 //! answer; [`Receiver::handle`] parses a request body first. Who the machine
@@ -70,9 +70,9 @@ static NEXT_TEMPORARY: AtomicU64 = AtomicU64::new(0);
 /// The two requests of the protocol.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Endpoint {
-    /// `POST <url>/v1/mirror/append`
+    /// `POST <url>/v1/push/append`
     Append,
-    /// `POST <url>/v1/mirror/facts`
+    /// `POST <url>/v1/push/facts`
     Facts,
     /// Optional partial observation; never commits full facts.
     Status,
@@ -82,9 +82,9 @@ impl Endpoint {
     /// The endpoint an HTTP request path names, exactly.
     pub fn from_path(path: &str) -> Option<Self> {
         match path {
-            "/v1/mirror/append" => Some(Self::Append),
-            "/v1/mirror/facts" => Some(Self::Facts),
-            "/v1/mirror/status" => Some(Self::Status),
+            "/v1/push/append" => Some(Self::Append),
+            "/v1/push/facts" => Some(Self::Facts),
+            "/v1/push/status" => Some(Self::Status),
             _ => None,
         }
     }
@@ -297,7 +297,7 @@ impl Receiver {
         }
     }
 
-    /// `POST /v1/mirror/append` for `machine`: 200 `{length}` when applied,
+    /// `POST /v1/push/append` for `machine`: 200 `{length}` when applied,
     /// 409 `{length, head_sha256}` with this copy's length and head when
     /// `offset` isn't its length or the head doesn't match, 400 for an
     /// invalid body or path, 413 for more than 4 MiB of file bytes.
@@ -306,7 +306,7 @@ impl Receiver {
             .unwrap_or_else(Refusal::reply)
     }
 
-    /// `POST /v1/mirror/facts` for `machine`: stores them atomically, and
+    /// `POST /v1/push/facts` for `machine`: stores them atomically, and
     /// answers 200 `{}`.
     pub fn facts(&self, machine: &str, facts: &Facts) -> Reply {
         self.try_facts(machine, facts)
@@ -318,7 +318,7 @@ impl Receiver {
         let (root, path) = (request.root.as_str(), request.path.as_str());
         if !is_input_path(root, path) {
             return Err(Refusal::Invalid(format!(
-                "{root}/{path} is not a mirrored input path"
+                "{root}/{path} is not a supported push input path"
             )));
         }
         let bytes = base64_decode(&request.bytes)

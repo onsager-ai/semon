@@ -662,6 +662,34 @@ fn pair_and_unpair_commands_store_replace_and_revoke_configuration() {
     let second: serde_json::Value = serde_json::from_slice(&fs::read(&pair_path).unwrap()).unwrap();
     assert_eq!(first["machine_id"], second["machine_id"]);
     assert_ne!(first["token"], second["token"]);
+    let home = f.path("home");
+    let pushed = semon()
+        .arg("push")
+        .arg("--state")
+        .arg(f.path("paired-state.json"))
+        .arg("--claude-home")
+        .arg(home.join("claude"))
+        .arg("--codex-home")
+        .arg(home.join("codex"))
+        .arg("--copilot-home")
+        .arg(home.join("copilot"))
+        .arg("--proc-root")
+        .arg(home.join("proc"))
+        .arg("--cache")
+        .arg(f.path("paired-cache"))
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config)
+        .output()
+        .unwrap();
+    assert_ok(&pushed, "push with pair.json defaults");
+    assert!(
+        f.dir()
+            .join(format!(
+                "machines/{}/facts.json",
+                second["machine_id"].as_str().unwrap()
+            ))
+            .is_file()
+    );
     let output = semon()
         .arg("unpair")
         .env("XDG_CONFIG_HOME", &config)

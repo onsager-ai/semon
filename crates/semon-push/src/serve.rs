@@ -1,6 +1,6 @@
-//! `semon receive`'s listener: the mirror protocol over HTTP/1.1, plain on
+//! `semon receive`'s listener: the push protocol over HTTP/1.1, plain on
 //! a proxy-facing address or TLS with an operator-supplied certificate and key. It serves
-//! mirror routes to [`Receiver`], protected provisioning, and the closed reverse
+//! push routes to [`Receiver`], protected provisioning, and the closed reverse
 //! body poll/response routes when body custody is configured.
 //!
 //! Each connection has its own thread, up to [`Limits::connections`] in
@@ -1302,11 +1302,7 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         return authority_refusal();
     };
     if head.method != "POST" {
-        return Next::Refuse(
-            405,
-            "the mirror protocol is POST only",
-            &[("Allow", "POST")],
-        );
+        return Next::Refuse(405, "the push protocol is POST only", &[("Allow", "POST")]);
     }
     let Some(length) = head.content_length else {
         return Next::Refuse(411, "a Content-Length is required", &[]);
@@ -1350,11 +1346,11 @@ mod tests {
     #[test]
     fn a_head_is_parsed_strictly() {
         let head = parse_head(
-            b"POST /v1/mirror/append HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc\r\nContent-Length: 12\r\nConnection: close\r\n\r\n",
+            b"POST /v1/push/append HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc\r\nContent-Length: 12\r\nConnection: close\r\n\r\n",
         )
         .unwrap();
         assert_eq!(head.method, "POST");
-        assert_eq!(head.target, "/v1/mirror/append");
+        assert_eq!(head.target, "/v1/push/append");
         assert_eq!(head.content_length, Some(12));
         assert_eq!(head.authorization.as_deref(), Some("Bearer abc"));
         assert!(head.close);

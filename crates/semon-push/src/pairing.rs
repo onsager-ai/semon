@@ -711,7 +711,7 @@ fn kind_label(kind: Kind) -> &'static [u8] {
     match kind {
         Kind::AnalyticsPublish => b"analytics_publish",
         Kind::BodyChannel => b"body_channel",
-        Kind::MirrorPush => b"mirror_push",
+        Kind::MirrorPush => b"push",
     }
 }
 fn bearer_secret(application: &[u8], id: &str, kind: Kind) -> Secret {

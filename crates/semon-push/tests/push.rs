@@ -1,5 +1,5 @@
 //! `semon push` against a tiny in-process receiver that implements the
-//! mirror protocol (docs/mirror-protocol.md) as any receiver would.
+//! mirror protocol (docs/push-protocol.md) as any receiver would.
 
 use std::{
     collections::BTreeMap,
@@ -252,7 +252,7 @@ fn receiver() -> Receiver {
             let _ = request.as_reader().read_to_string(&mut body);
             let url = request.url().to_owned();
             if authorized
-                && url == "/v1/mirror/status"
+                && url == "/v1/push/status"
                 && request.method() == &tiny_http::Method::Head
             {
                 let mut state = shared.lock().unwrap();
@@ -276,10 +276,10 @@ fn receiver() -> Receiver {
                 request.respond(response).unwrap();
                 continue;
             }
-            if authorized && url == "/v1/mirror/status" {
+            if authorized && url == "/v1/push/status" {
                 shared.lock().unwrap().status_post_checks += 1;
             }
-            if authorized && url == "/v1/mirror/append" {
+            if authorized && url == "/v1/push/append" {
                 let mut received = shared.lock().unwrap();
                 if received
                     .hang_after
@@ -298,7 +298,7 @@ fn receiver() -> Receiver {
                     continue;
                 }
             }
-            if authorized && url == "/v1/mirror/facts" && shared.lock().unwrap().hang_facts {
+            if authorized && url == "/v1/push/facts" && shared.lock().unwrap().hang_facts {
                 let mut state = shared.lock().unwrap();
                 state.prepared_facts = serde_json::from_str(&body).ok();
                 state.held_requests.push(request);
@@ -306,12 +306,12 @@ fn receiver() -> Receiver {
             }
             let response = if !authorized {
                 json_response(401, json!({"error":"unauthorized"}))
-            } else if url == "/v1/mirror/facts" {
+            } else if url == "/v1/push/facts" {
                 shared.lock().unwrap().facts = serde_json::from_str(&body).ok();
                 json_response(200, json!({}))
-            } else if url == "/v1/mirror/status" && shared.lock().unwrap().status_cookie_gate {
+            } else if url == "/v1/push/status" && shared.lock().unwrap().status_cookie_gate {
                 json_response(401, json!({"error":"session_required"}))
-            } else if url == "/v1/mirror/status" && shared.lock().unwrap().status_supported {
+            } else if url == "/v1/push/status" && shared.lock().unwrap().status_supported {
                 shared
                     .lock()
                     .unwrap()
@@ -322,13 +322,13 @@ fn receiver() -> Receiver {
                 } else {
                     json_response(200, json!({}))
                 }
-            } else if url == "/v1/mirror/append" {
+            } else if url == "/v1/push/append" {
                 handle_append(&mut shared.lock().unwrap(), &body)
             } else {
                 json_response(404, json!({}))
             };
             if authorized
-                && url == "/v1/mirror/append"
+                && url == "/v1/push/append"
                 && std::mem::take(&mut shared.lock().unwrap().drop_ack_once)
             {
                 drop(request);
@@ -2259,7 +2259,7 @@ fn descriptor_invalid_reference_generation_forces_actual_client_replacement() {
     let observed = Arc::clone(&attempts);
     let worker = thread::spawn(move || {
         for mut request in listener.incoming_requests() {
-            assert_eq!(request.url(), "/v1/mirror/append");
+            assert_eq!(request.url(), "/v1/push/append");
             let mut body = String::new();
             request.as_reader().read_to_string(&mut body).unwrap();
             let append: Append = serde_json::from_str(&body).unwrap();

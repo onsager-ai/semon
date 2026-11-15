@@ -33,7 +33,7 @@ is an explicit counted opt-in. This integration is not shipped. [C4]
 
 `analytics_publish` and `body_channel` are retired design kinds, scheduled for
 runtime removal after the switch and a dependency pass. Do not add activation or
-mirror-to-analytics enablement integrations. Preserve `mirror_push`, its optional
+mirror-to-analytics enablement integrations. Preserve `push`, its optional
 client-certificate requirement and renewal. Issuer assertions, publication
 claims/heads, egress handles, receiver body cache and dual audit belong to the
 superseded federation design, not this default. Read audit is receiver-local. [C2/M]
@@ -70,8 +70,8 @@ PR4.2 renewal routes remain separate from body dispatch
 and pairing-ceremony state. See [receiver route registration](asi-body-channel.md#receiver-route-registration-part-of-594).
 The listener uses kind-scoped enrollment-registry authentication; the former
 flat-file token reader and commands are removed. Legacy `DIR/tokens` custody
-refuses startup/routes without import or deletion. The [mirror protocol](../mirror-protocol.md)
-and Push client retain supported mirror transport with enrolled mirror_push bearers.
+refuses startup/routes without import or deletion. The [mirror protocol](../push-protocol.md)
+and Push client retain supported mirror transport with enrolled push bearers.
 #630/#631 and #635 supply libraries, not integrated body service.
 
 The Unix enrollment/credential libraries now feed the receiver provisioning
@@ -335,7 +335,7 @@ verified origin MAC permits a `confirmed` response (version and receiver MAC).
 `approve` carries version, session ID, the full strict ActivationInput and 64-byte
 proof. Recompute input.commitment() and require transcript.scope equality. Apply
 receiver policy: named authorized machine, valid binding, offered kinds only,
-empty certificate pins and no client-cert requirement for mirror. Only mirror_push activates in this slice; analytics_publish refuses until origin connect / independently validated producer admission lands. Peer-supplied namespace/incarnation bindings cannot authorize activation.
+empty certificate pins and no client-cert requirement for mirror. Only push activates in this slice; analytics_publish refuses until origin connect / independently validated producer admission lands. Peer-supplied namespace/incarnation bindings cannot authorize activation.
 Unsupported-kind diagnostics are released only after connection/session binding, current confirmed state, exact commitment and origin possession proof verify; earlier failures remain generic. Body-channel enrollment is available after client-certificate issuance lands.
 The **initial credential validity ceiling** is 90 days (7,776,000 seconds) from
 activation now, exclusive lower bound (`valid_until > now`) and inclusive upper
@@ -360,7 +360,7 @@ Application key custody is equivalent to its derived bearer authority; it travel
 only to the enrolled TLS endpoint. The new exporter binds recovery to its current
 connection; generic failures and provisioning admission bounds apply. No raw
 application key or bearer is persisted. After two interrupted deliveries explicit
-revocation is required; recovery cannot revive authority. Receiver recovery refuses receipts with any kind not currently offered (mirror_push only) before reserving another delivery.
+revocation is required; recovery cannot revive authority. Receiver recovery refuses receipts with any kind not currently offered (push only) before reserving another delivery.
 
 The receiver controller is enabled only by local `receive enroll` authorization.
 Codes go directly to `/dev/tty`, never stdout/stderr or a wire field. Its local
@@ -526,7 +526,7 @@ by signed `enrollment.json`. No client-CA trust anchor is assumed at the origin.
 SPKI, clientAuth EKU and validity against its clock; it does not enforce
 BasicConstraints or KeyUsage. Expired and not-yet-valid certificates refuse with
 an explicit diagnostic, without falling back to certificate-less transport.
-`connect --require-client-certificate` enables this for mirror_push; `push` presents
+`connect --require-client-certificate` enables this for push; `push` presents
 the leaf with the existing `origin-key.pk8`. The default stays off. Body and
 analytics activation remain refused pending producer/storage admission. Renewal,
 rotation and private-root provisioning remain outside this issuance slice.
@@ -545,7 +545,7 @@ prints them for separate delivery.
 | --- | --- | --- |
 | `analytics_publish` — retired design | Historical `/v1/analytics/`; remove runtime after centralized switch [C2] | Historical setting only; no new activation |
 | `body_channel` — retired design | Historical `/v1/body/`; remove runtime after centralized switch [C2] | Historical mandatory mTLS; preserve supported mirror mTLS |
-| `mirror_push` | Existing `/v1/mirror/append`, `/facts`, `/status` | Explicit per-kind setting, default `false` for supported mirror Push |
+| `push` | Existing `/v1/push/append`, `/facts`, `/status` | Explicit per-kind setting, default `false` for supported mirror Push |
 
 A body credential permits machine transport only, with no `body_read`, metadata
 discovery, cache admission or source-policy permission. Mirror credentials cannot

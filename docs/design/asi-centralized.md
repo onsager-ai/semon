@@ -8,7 +8,7 @@ cleanup is authorized by this contract.
 ## Architecture
 
 Origins send selected, redacted native logs using the existing `semon push` →
-`semon receive` [mirror contract](../mirror-protocol.md). The receiver indexes
+`semon receive` [mirror contract](../push-protocol.md). The receiver indexes
 those logs, materializes ASI, runs analytics/SQL/search and serves transcripts
 locally. It is the durable custodian of the selected redacted session text.
 Origin availability is required for new uploads, not for reading retained copies.
@@ -164,5 +164,5 @@ All new mechanisms above use these sources; no historical document overrides the
 | C4 | Owner, **2026-11-14**: UX/DX primary; four setup actions, combined narrowing/approval, automatic push, two processes; service install separately counted. |
 | C6 | Owner, **2026-11-15**: decisions A–D above (proven-duplicate accounting, generated canonical machine ID with hostname/optional-name grouping (amended: no linking), receiver-wide refusal cap, loopback-owner readers only). |
 | C5 | Owner, **2026-11-14**: private-root/LAN pairing deferred, pinned invitation removed (#680), no zero-findings scan gate for own-machine reads. |
-| M | Shipped [mirror](../mirror-protocol.md), [enrollment and renewal](asi-enrollment.md): source allowlist/redaction, export consent, transport authentication, credential custody and current trust lifecycle. |
+| M | Shipped [mirror](../push-protocol.md), [enrollment and renewal](asi-enrollment.md): source allowlist/redaction, export consent, transport authentication, credential custody and current trust lifecycle. |
 | I | [Repository invariants](../../AGENTS.md): native identity/lineage/provenance, source integrity and custody, body-free analytics/Hub, parser behavior, one current format, preserved frozen/user data and Viewer ownership/security. |

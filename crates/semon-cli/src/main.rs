@@ -2522,8 +2522,8 @@ fn usage() -> String {
          Disables this machine's local receiver access after terminal confirmation; receiver access is not revoked.\n\
          \n\
          Advanced: semon push [--receiver URL] [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
-         Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\
-         (docs/mirror-protocol.md), appending as they grow. Run semon pair URL CODE first. --watch keeps going:\n\
+         Sends the session logs' input files, redacted, and this machine's facts to a push-protocol receiver\n\
+         (docs/push-protocol.md), appending as they grow. Run semon pair URL CODE first. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s.\n\
          \n\
          Usage: semon archive prune [--retention-days N] [--cache PATH]\n\
@@ -2535,7 +2535,7 @@ fn usage() -> String {
          Usage: semon receive name ID NAME --dir DIR\n\
          Usage: semon receive name ID --clear --dir DIR\n\
          Enrollment stays in the foreground; its trusted terminal displays codes and accepts pending or cancel SESSION_ID.\n\
-         A mirror-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
+         A push-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
          DIR/machines/ID/. It listens on 127.0.0.1:8735 by default; use --listen for a proxy-facing address.\n\
          Optional --tls-cert and --tls-key serve TLS directly. Legacy DIR/tokens is refused.\n\
          --max-bytes caps each machine's copy (20G by default); a push past it gets 507."

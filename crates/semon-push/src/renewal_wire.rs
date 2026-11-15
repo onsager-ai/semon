@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn strict_begin_grammar() {
         let valid = format!(
-            r#"{{"version":1,"enrollment_id":"{}","credentials":[{{"kind":"mirror_push","generation":1,"bearer":"secret"}}]}}"#,
+            r#"{{"version":1,"enrollment_id":"{}","credentials":[{{"kind":"push","generation":1,"bearer":"secret"}}]}}"#,
             "a".repeat(64)
         );
         assert!(Request::parse(Route::Begin, valid.as_bytes()).is_ok());

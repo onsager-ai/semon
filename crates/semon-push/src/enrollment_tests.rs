@@ -200,7 +200,7 @@ fn strict_document_refusals() {
         |v| v["credentials"][0]["credential_id"] = json!(""),
         |v| v["credentials"][0]["generation"] = json!(3),
         |v| v["credentials"][0]["valid_until"] = json!(10),
-        |v| v["credentials"][0]["kind"] = json!("mirror_push"),
+        |v| v["credentials"][0]["kind"] = json!("push"),
         |v| {
             let e = v["enrollments"][0].clone();
             v["enrollments"].as_array_mut().unwrap().push(e);

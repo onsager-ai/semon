@@ -41,7 +41,7 @@ fn revocation_between_requests_on_one_live_connection() {
     });
     let mut slot = Slot::admit(&shared, "127.0.0.1".parse().unwrap()).unwrap();
     let worker = thread::spawn(move || serve_connection(&mut slot, socket, Instant::now()));
-    let request = b"POST /v1/mirror/status HTTP/1.1\r\nAuthorization: Bearer test-bearer\r\nContent-Length: 2\r\n\r\n{}";
+    let request = b"POST /v1/push/status HTTP/1.1\r\nAuthorization: Bearer test-bearer\r\nContent-Length: 2\r\n\r\n{}";
     client.write_all(request).unwrap();
     fn response(client: &mut TcpStream) -> u16 {
         let mut head = Vec::new();
@@ -195,7 +195,7 @@ fn pipelined_body_reads_stop_at_each_authorized_boundary() {
     let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (socket, _) = listener.accept().unwrap();
     let first = format!(
-        "POST /v1/mirror/status HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 2\r\n\r\n{{}}"
+        "POST /v1/push/status HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: 2\r\n\r\n{{}}"
     );
     let second = "POST /unknown HTTP/1.1\r\nContent-Length: 32768\r\n\r\n";
     let pipeline = [first.as_bytes(), second.as_bytes(), &vec![b'x'; 32768]].concat();
@@ -1033,7 +1033,7 @@ fn unknown_routes_refuse_with_no_body_read_and_one_response_class() {
         "/v1/asi/x",
         "/v1/analytics/x",
         "/v1/body/x",
-        "/v1/mirror/status",
+        "/v1/push/status",
     ] {
         let head = Head {
             method: "POST".into(),

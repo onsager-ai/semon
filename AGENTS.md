@@ -88,7 +88,7 @@ Control delivery, managed runtime and SSH are retired; their code and active ent
 - AI-assisted UI/UX: docs/design/ai-design-workflow.md and ui-design skill.
   Storybook is the design/review surface; mockup and design-canvas tools are not
   used. Preserve the existing visual/implementation contract.
-- Relay/protocol changes: docs/mirror-protocol.md and
+- Relay/protocol changes: docs/push-protocol.md and
   docs/design/session-foundation-retirement.md.
 
 Pass an exact ref or isolated checkout path when delegating.

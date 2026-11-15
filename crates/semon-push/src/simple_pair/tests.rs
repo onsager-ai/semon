@@ -81,13 +81,18 @@ fn burns_and_pause_persist_across_store_reopen_and_clock_rollback() {
     assert!(issue(&f.0, 103).is_err());
     assert!(issue(&f.0, 0).is_err());
     assert!(issue(&f.0, 1901).is_err());
-    assert!(issue(&f.0, 1902).is_ok());
+    let (code, _) = issue(&f.0, 1902).unwrap();
+    for _ in 0..3 {
+        assert!(f.request("wrong", 1902).is_err());
+    }
+    assert!(f.request(code.expose(), 1902).is_err());
+    assert!(issue(&f.0, 1903).is_err());
     assert_eq!(
         Registry::read_current(&f.0)
             .unwrap()
             .simple_pair
             .pause_until,
-        1902
+        3702
     );
 }
 

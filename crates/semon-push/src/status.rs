@@ -202,7 +202,7 @@ fn bounded_body(status: &mut Status) -> Option<String> {
 // treating optional status POST refusal as authoritative token rejection.
 fn status_advertised(client: &Client) -> bool {
     let factory = Arc::clone(&client.http);
-    let url = format!("{}/v1/mirror/status", client.url);
+    let url = format!("{}/v1/push/status", client.url);
     let lock = client.lock.clone();
     let dispatch_stop = client.stop.clone();
     matches!(

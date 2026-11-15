@@ -175,7 +175,7 @@ are automatic within the approved enrollment.
 
 B1 authorizes `receive enroll`, B2 runs `connect --to URL [--machine NAME]`, B3
 enters its short code through a non-echoing controlling terminal, and B4 approves
-one receiver identity/endpoint, mirror_push scope and selected current-file list.
+one receiver identity/endpoint, push scope and selected current-file list.
 The source list can be narrowed before explicit `yes`. This separately authorizes
 redacted raw-log custody, plain paths and machine facts; it does not claim P1
 analytics/body activation, issuer authority, a client certificate or producer

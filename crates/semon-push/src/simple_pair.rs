@@ -1,4 +1,4 @@
-//! One-time pairing and long-lived, revocable mirror credentials.
+//! One-time pairing and long-lived, revocable push credentials.
 use crate::{
     credentials::{Bearer, Kind, Secret},
     enrollment::{Error, Registry, Store},
@@ -142,7 +142,6 @@ pub(crate) fn pair(dir: &Path, body: &[u8], now: u64) -> Result<Response> {
                 r.simple_pair.burns.push(now);
                 if r.simple_pair.burns.len() >= 3 {
                     r.simple_pair.pause_until = now.saturating_add(1800);
-                    r.simple_pair.burns.clear();
                 }
             }
             return Ok(Err(Error::Invalid));
@@ -259,7 +258,7 @@ impl Registry {
     pub(crate) fn validate_simple_pair(&self) -> Result<()> {
         let s = &self.simple_pair;
         if s.pending.as_ref().is_some_and(|p| p.wrong >= 3)
-            || s.burns.len() > 2
+            || s.burns.len() > 6
             || s.burns.iter().any(|t| *t > self.latest)
             || s.audit.iter().any(|a| {
                 a.time > self.latest
@@ -401,12 +400,16 @@ pub fn pair_machine(url: &str, code: &str) -> std::result::Result<String, String
         .to_owned();
     let response = client()?
         .post(format!("{url}/v1/pair"))
-        .json(&Request {
-            version: 1,
-            code: code.into(),
-            machine_id: machine_id.clone(),
-            hostname,
-        })
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(
+            serde_json::to_vec(&Request {
+                version: 1,
+                code: code.into(),
+                machine_id: machine_id.clone(),
+                hostname,
+            })
+            .map_err(|e| e.to_string())?,
+        )
         .send()
         .map_err(|e| e.to_string())?;
     if !response.status().is_success() {

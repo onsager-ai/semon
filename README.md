@@ -64,7 +64,7 @@ work. The runnable setup below still needs separate push and Viewer commands.
 | Produce and inspect analytics snapshots | `semon analytics materialize`, `coverage` |
 | Preserve a published analytics snapshot | `semon analytics export DESTINATION` |
 | Author or back up durable labels/work records | `semon asi add`, `backup` |
-| Explicitly mirror native logs to another machine | `semon push` and `semon receive` |
+| Push native logs to another machine | `semon push` and `semon receive` |
 
 `analytics reset` is exceptional destructive maintenance, not a first-run or
 routine error-recovery step. Preserve unsupported state and follow the custody
@@ -92,7 +92,7 @@ The Viewer is also a library API: `semon_sessions::ViewerCore` serves native pag
 
 Server-rendered pages that share the viewer's visual language can use the documented shell contract in [docs/shell.md](docs/shell.md).
 
-`semon push [--receiver URL] [--watch]` keeps a copy of these logs on another server that implements the [mirror protocol](docs/mirror-protocol.md). It sends only supported native source files (`semon_sessions::inputs`), redacted on this machine before they leave (known secret shapes become `*`, byte for byte). It also sends this machine's facts: hostname, live processes, held Codex locks and repositories (`semon_sessions::local_facts`). A copy built with `--facts FILE` (or `Options::facts`) preserves the source machine’s recorded identity and runtime observations. Run `semon pair URL CODE` first; it installs the private pairing configuration. `push` is an advanced command. The client's cursor state is kept under `$XDG_STATE_HOME/semon/push/`, 0600. One push at a time runs with a state file: it holds an OS lock on `<state>.lock` beside it, and a second push with the same state (by default, to the same receiver URL, however its scheme, host case or trailing slash is spelled) fails at once until the first ends. Ctrl-C or SIGTERM ends a push, `--watch` included, within a moment, from wherever it was, with the state file recording what the receiver acknowledged. An app that embeds the push calls `semon_push::push_until` with a `Stop`, and can pass the token in memory (`Credential::Memory`) instead of a file; a request or facts collection that such a stop leaves running keeps the state locked until it ends (a request within two minutes, its timeout; a facts collection has none), and a push started meanwhile says it is still finishing.
+`semon push [--receiver URL] [--watch]` keeps a copy of these logs on another server that implements the [push protocol](docs/push-protocol.md). It sends only supported native source files (`semon_sessions::inputs`), redacted on this machine before they leave (known secret shapes become `*`, byte for byte). It also sends this machine's facts: hostname, live processes, held Codex locks and repositories (`semon_sessions::local_facts`). A copy built with `--facts FILE` (or `Options::facts`) preserves the source machine’s recorded identity and runtime observations. Run `semon pair URL CODE` first; it installs the private pairing configuration. `push` is an advanced command. The client's cursor state is kept under `$XDG_STATE_HOME/semon/push/`, 0600. One push at a time runs with a state file: it holds an OS lock on `<state>.lock` beside it, and a second push with the same state (by default, to the same receiver URL, however its scheme, host case or trailing slash is spelled) fails at once until the first ends. Ctrl-C or SIGTERM ends a push, `--watch` included, within a moment, from wherever it was, with the state file recording what the receiver acknowledged. An app that embeds the push calls `semon_push::push_until` with a `Stop`, and can pass the token in memory (`Credential::Memory`) instead of a file; a request or facts collection that such a stop leaves running keeps the state locked until it ends (a request within two minutes, its timeout; a facts collection has none), and a push started meanwhile says it is still finishing.
 
 Live Claude statuses observed so far are `busy`, `idle`, `shell` (a finished turn with background shells running, not counted as working) and `waiting` (stopped on a question or permission prompt, shown as needs you); any other status on a verified live process is shown verbatim. An unreadable transcript or rollout shows `unknown` state with whatever metadata is available. The default view contains roots active in the last 24 hours plus live roots. `--all` includes older sessions; `--since 2h` or `--since 3d` changes the window; `--session ID` selects one subtree. `--claude-home`, `--codex-home`, `--proc-root`, and `--cache` override every source and the cache for fixtures or alternate installations. The configured cache stem defaults to `$XDG_STATE_HOME/semon/sessions-index.json`, or `~/.local/state/semon/sessions-index.json`. Tree and focused reads share the Session Event Index at the same stem with extension `.sqlite3`; existing tree JSON files are left untouched. The origin-local index stores metadata, evidence locations and supported message/tool body text for ASI search and focused view. Body rows and FTS have the same custody as native logs; they never enter analytics or the Hub. Back up existing index/history data before an explicit reset.
 
@@ -100,7 +100,7 @@ JSON output has `schema_version: 1` and a `roots` array of nested nodes. Every n
 
 Native `.jsonl.zst` history is included in normal `push` and `push --watch` runs,
 with no manual decompression. The sender verifies archives in bounded slices,
-redacts the logical records, and keeps the existing `.jsonl` mirror paths and
+redacts the logical records, and keeps the existing `.jsonl` push paths and
 cursors. It continues discovering new archives and following live logs after
 catchup. A private transport cache beside the cursor avoids decompressing the
 same archive after every batch or restart; see the
@@ -108,15 +108,15 @@ same archive after every batch or restart; see the
 
 ## Receive pushes from your other machines
 
-`semon receive` is a receiver for `semon push`, for one person with several machines, and the [mirror protocol](docs/mirror-protocol.md)'s reference implementation (`semon_push::mirror::Receiver`). Each machine pushes with its own token, and its copy lands in `DIR/machines/NAME/`: `claude/` and `codex/` hold the input files at their paths under each home, and `facts.json` holds the machine's facts. A token decides the machine, so one machine's token can't write another's files.
+`semon receive` is a receiver for `semon push`, for one person with several machines, and the [push protocol](docs/push-protocol.md)'s reference implementation (`semon_push::mirror::Receiver`). Each machine pushes with its own token, and its copy lands in `DIR/machines/NAME/`: `claude/` and `codex/` hold the input files at their paths under each home, and `facts.json` holds the machine's facts. A token decides the machine, so one machine's token can't write another's files.
 
 The receiver can listen on plain HTTP behind an HTTPS proxy such as Cloudflare
 Tunnel. Start it and print a one-time code on the receiver host:
 
 ```sh
-semon receive --dir ~/semon-mirror --listen 0.0.0.0:8080
+semon receive --dir ~/semon-received --listen 0.0.0.0:8080
 # In another terminal on that host:
-semon pair --dir ~/semon-mirror
+semon pair --dir ~/semon-received
 ```
 
 On each machine, use the public HTTPS URL and that code:
@@ -140,7 +140,7 @@ including requests on an existing connection. Received logs stay under
 
 Run `semon unpair` on the machine to revoke its token and remove pair.json. If the
 receiver is unreachable, the command warns and removes the local configuration;
-revoke remotely with `semon unpair MACHINE_ID --dir ~/semon-mirror` on the receiver.
+revoke remotely with `semon unpair MACHINE_ID --dir ~/semon-received` on the receiver.
 Neither action deletes received logs. One receiver per machine is supported.
 
 The machine validates public-CA HTTPS and refuses plain HTTP except on loopback.
@@ -216,7 +216,7 @@ The focused native tools read a window of recent logs: only the log files modifi
 
 Session summaries add nullable `activity_analytics`: ownership/context totals, compactions and per-session thrash, waste and empty-search signals, typed change counts and cost completeness. It measures wait time from exact interval unions and reports exclusive waste time and list cost by kind and category. Exact parent families receive aggregate totals only; wait measurements sum each physical session's union. Measurements retain known amounts and unknown-step coverage. See [session activity analytics](docs/design/session-activity-analytics.md) for fields and roll-up semantics. Activity pages contain no raw bytes, source paths, commands or output bodies.
 
-A summary has `id`, `harness`, `kind` (`session`, `subagent`, `codex-run`, `stub`), `name`, `model`, `repo`, `branch`, `machine`, `parent`, `children`, `state`, `start`, `last_activity`, `pid`, `alive`, `exit`, `open_question`, `tokens` (`input` uncached, `cached`, `output`), `run` and `turns_truncated`. Times are epoch milliseconds. `state` is one of `working`, `waiting-question`, `idle`, `ended`, `error` and `unknown`; `stall_reason` is one of `waiting-question`, `no-output` and `process-gone`, and every `stalls` answer states its rule. A field Semon can't know exactly is `null`: `pid` and `alive` come only from a Claude pid file checked against its process's start time, or from a held Codex writer lock. `run` holds a live session process's run ids, read from `/proc/<pid>/environ` by exact name: `OSTROM_RUN_ID` and `OSTROM_WORK_ORDER_ID` ([Ostrom's run environment contract](https://github.com/onsager-ai/ostrom/blob/main/docs/loops.md)), and nothing else. Every other entry of the environment is dropped as it is parsed, never kept or logged. `run` is `{}` when the process has neither variable, and `null` when there is no live process (a subagent has none of its own) or its environment can't be read whole: unreadable, over 256 KB, or a run id that isn't UTF-8. The facts `semon push` sends carry each live process's run ids, so a mirror answers `run` without reading `/proc`. `exit` is `null`: no log records a run's exit status (a Codex `task_complete` error is a turn's outcome, shown as the state `error`), and none is inferred. Turns and handoffs use the same native identities across Query, Transcript and Viewer reads. `since` is a duration back from now (`90m`, `2h`, `7d`) or an RFC 3339 time. A failure has a closed `code` (`unknown_session`, `unknown_turn`, `invalid_arguments`, `outside_window`, …): `semon query` exits nonzero, and `semon mcp` returns a tool result with `isError`.
+A summary has `id`, `harness`, `kind` (`session`, `subagent`, `codex-run`, `stub`), `name`, `model`, `repo`, `branch`, `machine`, `parent`, `children`, `state`, `start`, `last_activity`, `pid`, `alive`, `exit`, `open_question`, `tokens` (`input` uncached, `cached`, `output`), `run` and `turns_truncated`. Times are epoch milliseconds. `state` is one of `working`, `waiting-question`, `idle`, `ended`, `error` and `unknown`; `stall_reason` is one of `waiting-question`, `no-output` and `process-gone`, and every `stalls` answer states its rule. A field Semon can't know exactly is `null`: `pid` and `alive` come only from a Claude pid file checked against its process's start time, or from a held Codex writer lock. `run` holds a live session process's run ids, read from `/proc/<pid>/environ` by exact name: `OSTROM_RUN_ID` and `OSTROM_WORK_ORDER_ID` ([Ostrom's run environment contract](https://github.com/onsager-ai/ostrom/blob/main/docs/loops.md)), and nothing else. Every other entry of the environment is dropped as it is parsed, never kept or logged. `run` is `{}` when the process has neither variable, and `null` when there is no live process (a subagent has none of its own) or its environment can't be read whole: unreadable, over 256 KB, or a run id that isn't UTF-8. The facts `semon push` sends carry each live process's run ids, so a receiver answers `run` without reading `/proc`. `exit` is `null`: no log records a run's exit status (a Codex `task_complete` error is a turn's outcome, shown as the state `error`), and none is inferred. Turns and handoffs use the same native identities across Query, Transcript and Viewer reads. `since` is a duration back from now (`90m`, `2h`, `7d`) or an RFC 3339 time. A failure has a closed `code` (`unknown_session`, `unknown_turn`, `invalid_arguments`, `outside_window`, …): `semon query` exits nonzero, and `semon mcp` returns a tool result with `isError`.
 
 ```sh
 semon query list_sessions --state working --json
@@ -238,7 +238,7 @@ creates an empty current native index and records a random namespace plus an
 independent origin incarnation together in the private JSON
 `<index parent>/analytics-namespace`. Later calls reuse all three identities;
 initialization alone leaves publication pending and writes no empty snapshot.
-Non-mirror connect admission uses this initializer but still refuses enrollment
+Non-push connect admission uses this initializer but still refuses enrollment
 until its activation gate lands. Deleting that state directory creates a new namespace and new session IDs;
 there is no automatic reconciliation or rename/transfer workflow yet. Typed
 local paths can be present in the Parquet, so governed export remains a

@@ -1,4 +1,4 @@
-# The mirror protocol
+# The push protocol
 
 `semon push` keeps a copy of this machine's session logs on another server, a *receiver*, and sends it the machine's facts, so `semon-sessions` can discover, index and query those native sources using the recorded facts (`Options::facts`). This document is the whole contract: any server that implements it can receive a push.
 
@@ -7,7 +7,7 @@
 Registry format 7 stores the origin-generated canonical machine ID
 (`machine-<8 lowercase hex Unix seconds><8 secure random hex digits>`), matching
 directory locator, optional display name, pending code hash, pairing gate, hashed
-mirror Bearers and pairing/revocation audit. New machine names default to hostname;
+push Bearers and pairing/revocation audit. New machine names default to hostname;
 existing names survive re-pairing. Unsupported state is refused explicitly; use a
 fresh receiver directory, preserving all old state and received logs.
 
@@ -34,7 +34,7 @@ and audits `paired` with `replaced: bool`. It returns **200**:
 ```
 
 Tokens have no expiry or renewal. Only their SHA-256 hashes are stored on the
-receiver. Mirror requests use `Authorization: Bearer <token>`; the token selects
+receiver. Push requests use `Authorization: Bearer <token>`; the token selects
 exactly one machine directory. Unknown/revoked tokens receive **401**. Revocation
 is rechecked on every request, including kept-alive connections.
 
@@ -53,7 +53,7 @@ pairing contract. Legacy `DIR/tokens` remains refused and preserved.
 
 The reference receiver takes an exclusive, non-blocking OS lock on its store directory for its lifetime. A second receiver on that directory is refused at startup, so preservation and replacement cannot interleave across receiver instances.
 
-The generic mirror protocol is independent of the retired Encrypted Relay.
+The generic push protocol is independent of the retired Encrypted Relay.
 Mirrored content is readable by the receiver; sender redaction and HTTPS do not
 provide end-to-end encryption. A source mirror does not contain the complete
 workspace and native harness state required for independent recovery.
@@ -70,13 +70,13 @@ workspace and native harness state required for independent recovery.
 
 ## Requests
 
-Mirror requests are `POST` with a JSON body and `Authorization: Bearer <token>`. `<url>` is the base URL passed to `semon pair URL CODE`. It must be `https`, except plain `http` to a loopback address (`localhost`, `[::1]`, 127.0.0.0/8).
+Push requests are `POST` with a JSON body and `Authorization: Bearer <token>`. `<url>` is the base URL passed to `semon pair URL CODE`. It must be `https`, except plain `http` to a loopback address (`localhost`, `[::1]`, 127.0.0.0/8).
 
 Request bodies currently use identity encoding. Response gzip/Brotli and sealed
 storage are independent. See [native archive transport and codec measurements](native-archive-transport.md)
 for the bounded archive reader, coexistence/restart rules and upload experiment.
 
-### `POST <url>/v1/mirror/append`
+### `POST <url>/v1/push/append`
 
 ```json
 {"root": "claude", "path": "projects/-work/abc.jsonl", "redactor_version": 1, "offset": 0, "head_sha256": "…", "bytes": "…", "replace": false}
@@ -96,7 +96,7 @@ Answers:
 - **409** `{"length": N, "head_sha256": "…"}`: not applied, because `offset` isn't the copy's length or the head doesn't match. `N` is the copy's current length, and `head_sha256` is the hash of its first `min(4096, N)` bytes.
 - **400**: the body or the path is invalid. **401**: the token is unknown or revoked. **413**: the body is too large.
 
-### `POST <url>/v1/mirror/facts`
+### `POST <url>/v1/push/facts`
 
 The body is a `Facts` object:
 
@@ -128,7 +128,7 @@ A receiver may seal an idle copy to save space (`semon_sessions::sealed`). Its b
 
 ## Optional partial sync observations (status v1)
 
-`POST <url>/v1/mirror/status` is an optional extension, authenticated, admitted, size limited and scoped to the same machine as append and facts. Before posting status, a sender performs a cancellable bearer-authenticated HEAD capability request to that exact path, without following redirects, and requires 405 with `Allow: POST`. A cookie-gated 401/403 fallback, unknown route or other non-advertisement disables only this optional extension; append and full-facts refusals remain fatal. Once advertised, status POST token refusal is fatal, including subsequent revocation. A sender still disables status after POST 404 or 405, because an old generic HEAD handler can advertise POST globally. Successful status never lifts an append pause, storage restriction or retry delay. It does not replace `/facts`, delete retained copies, establish a complete collector selection or imply that an agent is executing.
+`POST <url>/v1/push/status` is an optional extension, authenticated, admitted, size limited and scoped to the same machine as append and facts. Before posting status, a sender performs a cancellable bearer-authenticated HEAD capability request to that exact path, without following redirects, and requires 405 with `Allow: POST`. A cookie-gated 401/403 fallback, unknown route or other non-advertisement disables only this optional extension; append and full-facts refusals remain fatal. Once advertised, status POST token refusal is fatal, including subsequent revocation. A sender still disables status after POST 404 or 405, because an old generic HEAD handler can advertise POST globally. Successful status never lifts an append pause, storage restriction or retry delay. It does not replace `/facts`, delete retained copies, establish a complete collector selection or imply that an agent is executing.
 
 ```json
 {"version":1,"observation_id":"0123456789abcdef0123456789abcdef","sequence":1,"observed_at_ms":1791539000000,"phase":"syncing","runtime":{"version":2,"hostname":"laptop","home":"/home/me","proc_starts":{},"codex_locks":{},"repos":{},"repo_ids":{}},"inventory_complete":true,"targets":[{"root":"codex","path":"sessions/native.jsonl","generation":"abcdef0123456789abcdef0123456789","target_bytes":12000,"acked_bytes":4096,"head_sha256":"…"}]}

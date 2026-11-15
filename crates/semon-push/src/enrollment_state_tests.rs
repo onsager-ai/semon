@@ -363,7 +363,7 @@ fn deterministic_generation_event_id_uses_length_prefixed_domain() {
     for part in [
         b"semon-generation-ended-v1".as_slice(),
         b.enrollment_id.as_bytes(),
-        b"mirror_push",
+        b"push",
         b"2",
         b.credential_id.as_bytes(),
     ] {

@@ -661,7 +661,7 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
         ..Default::default()
     })
     .unwrap();
-    write!(client, "POST /v1/mirror/facts HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n", token.expose(), bytes.len()).unwrap();
+    write!(client, "POST /v1/push/facts HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n", token.expose(), bytes.len()).unwrap();
     client.write_all(&bytes).unwrap();
     client.flush().unwrap();
     assert_eq!(response(&mut client).0, 200);
@@ -679,7 +679,7 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     let (mut client, worker) = h.connect();
     write!(
         client,
-        "GET /v1/mirror/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
+        "GET /v1/push/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
         token.expose()
     )
     .unwrap();
@@ -717,7 +717,7 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
         let (mut client, worker) = h.connect_identity(Some(&foreign));
         let sent = write!(
             client,
-            "GET /v1/mirror/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
+            "GET /v1/push/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
             token.expose()
         )
         .and_then(|_| client.flush());
@@ -735,7 +735,7 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
         .store(config.scope.valid_until + 1, Ordering::Relaxed);
     let (mut client, worker) = h.connect_identity(Some(&identity));
     let sent = client
-        .write_all(b"GET /v1/mirror/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .write_all(b"GET /v1/push/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .and_then(|_| client.flush());
     let mut byte = [0];
     assert!(sent.is_err() || client.read(&mut byte).is_err());
@@ -755,7 +755,7 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     let (mut client, worker) = h.connect_identity(Some(&identity));
     write!(
         client,
-        "GET /v1/mirror/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
+        "GET /v1/push/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\n\r\n",
         token.expose()
     )
     .unwrap();
@@ -1087,7 +1087,7 @@ fn http_tls_pairing_activates_and_mirror_stays_serving() {
     let activated: wire::Activated = serde_json::from_slice(&body).unwrap();
     // Another route continues on the same shared listener while provisioning is enabled.
     let (mut mirror, other) = h.connect();
-    write!(mirror,"POST /v1/mirror/status HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",activated.credentials[0].1).unwrap();
+    write!(mirror,"POST /v1/push/status HTTP/1.1\r\nAuthorization: Bearer {}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",activated.credentials[0].1).unwrap();
     mirror.flush().unwrap();
     let (status, _) = response(&mut mirror);
     assert_ne!(status, 401);
