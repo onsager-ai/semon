@@ -266,6 +266,5 @@ jobs:
       - name: cargo clippy (query engine and worker)
         run: cargo clippy -p semon-asi -p semon-cli --all-targets --features semon-asi/duckdb-tests,semon-cli/asi-query --locked -- --no-deps -D warnings
 
-  codex-conformance:
-    name: Pinned Codex fixture conformance
-    uses: ./.github/workflows/codex-conformance.yml
+  # Pinned Codex fixture conformance is disabled in PR and main CI by owner
+  # decision (2026-11-15); run codex-conformance.yml by manual dispatch.

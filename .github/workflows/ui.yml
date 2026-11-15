@@ -13,9 +13,8 @@ on:
         description: Compare recovery live refresh with the pinned recovery baseline
         type: boolean
         default: false
-  pull_request:
-  push:
-    branches: [main]
+  # PR and main triggers are disabled by owner decision (2026-11-15) to cut CI
+  # time; run this workflow by manual dispatch.
 
 permissions:
   contents: read
