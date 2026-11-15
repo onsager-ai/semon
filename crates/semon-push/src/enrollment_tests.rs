@@ -680,6 +680,7 @@ fn stale_snapshots_cannot_restore_replaced_pins_or_other_authority() {
     other.enrollment_id = id('d');
     other.machine = "machine-6754a9c100000002".into();
     other.client_certificate_pins.clear();
+    stale.ensure_machine(&other.machine, None).unwrap();
     stale.enrollments.push(other);
     assert_eq!(
         store.commit(snapshot_a.revision(), &stale),
