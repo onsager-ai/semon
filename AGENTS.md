@@ -61,11 +61,10 @@ cargo clippy --all-targets --locked -- --no-deps -D warnings
 cargo test --locked
 ```
 
-Viewer changes require the full fixture/browser matrix; other code changes run
-the navigation, live-update and transport smoke suites, while docs-only and
-`crates/semon-asi/`-only PRs skip Viewer browser suites. Pushes to main and manual
-dispatch run the full matrix. The required `viewer browser checks` aggregate
-passes when the selected tier passes and when suites are intentionally skipped.
+The Viewer UI workflow and pinned Codex fixture conformance no longer run on
+PRs or pushes to main (owner decision, 2026-11-15); run them by manual dispatch
+(`ui.yml`, `codex-conformance.yml`) when a change needs them. Manual dispatch of
+`ui.yml` runs the full fixture/browser matrix.
 CI makes no pixel comparison; review uploaded screenshots for visible changes.
 Reconcile current product decisions with the baseline scope before UI work;
 follow docs/design/ai-design-workflow.md for actual-image review and classification.
