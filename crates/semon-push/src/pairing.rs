@@ -83,7 +83,7 @@ pub fn parse_code(input: &str) -> Result<Secret> {
             .collect(),
     ))
 }
-fn generate_code() -> Result<Secret> {
+pub(crate) fn generate_code() -> Result<Secret> {
     // Masking uniform independent bytes yields unbiased five-bit symbols.
     let mut values = random::<9>()?;
     for v in values.iter_mut() {

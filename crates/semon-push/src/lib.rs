@@ -97,6 +97,7 @@ mod renewal_trigger;
 #[cfg(unix)]
 pub mod renewal_wire;
 pub mod serve;
+pub mod simple_pair;
 mod status;
 mod stop;
 pub mod tokens;

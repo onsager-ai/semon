@@ -71,33 +71,27 @@ Viewer, CLI and MCP; no login or multi-user ACL is added. [C1, C2, C6, I]
 
 ## Four-action journey
 
-Low friction, easy setup and easy daily use are primary design criteria. After
-installation and endpoint reachability, the target is exactly four setup actions:
+The owner decision on **2026-11-15** supersedes TLS-bound pairing with T3-style
+one-time codes and revocable, long-lived Bearer tokens. The user-facing commands
+are `semon receive`, `semon pair` on the receiver host, `semon pair URL CODE` on
+the machine, and `semon unpair`. In P1, receiver-local pair takes `--dir DIR`;
+client pairing prints the separate `semon push --watch` instruction. Background
+user-service installation and automatic sync start arrive in P2. Do not advertise
+automatic background sync as delivered by P1.
 
-1. Run one receiver command that starts receive, received-machine indexing/ASI
-   materialization and the authenticated loopback Viewer. Exact command spelling
-   is not selected here.
-2. Run origin `semon connect` to that receiver.
-3. Enter the receiver's code in the trusted origin prompt.
-4. Approve one combined trust, durable custody and source summary, with narrowing
-   available inside that interaction. Push starts automatically after approval.
+The receiver may run on plain HTTP behind any HTTPS proxy. Machines validate
+public-CA HTTPS; HTTP is allowed only on loopback. The proxy can read logs in
+transit, and a stolen token works until revoked: the owner accepts both tradeoffs.
+A ten-character code lasts ten minutes. Three wrong guesses burn it; three burns
+within an hour persist a thirty-minute pause. Tokens never expire or renew.
+Pairing again replaces the machine's previous token. One receiver configuration
+is stored per machine in private pair.json. Unpair revokes authority and removes
+local configuration, preserving received logs.
 
-There are two long-running processes: origin push and receiver. Unattended service
-installation remains an explicit, separately counted opt-in. Network/TLS setup and
-installation are counted separately when needed; browser use and initial indexing
-waits are also reported. [C4]
-
-The shipped baseline still needs **seven setup actions**: receiver enrollment
-command, origin connect command, code entry, source-selection response, approval,
-separate push command, and separate Viewer command. See [README setup](../../README.md#receive-pushes-from-your-other-machines)
-and [`connect_terminal.rs`](../../crates/semon-cli/src/connect_terminal.rs).
-Do not advertise the four-action target as delivered. [C4, M]
-
-Use shipped public-CA TLS pairing and automatic idempotent renewal under enrolled
-trust. The owner deferred private-root/LAN pairing on **2026-11-14**, and #680
-removed the rejected 71-character pinned invitation. Do not restore it or invent
-a private-root profile. Loss/compromise still requires explicit trust recovery;
-normal renewal neither widens consent nor revives revoked authority. [C5, M]
+The previous enroll/connect/disconnect, renewal, client-certificate and TLS-exporter
+path is superseded and will be removed in P3. The historical plan below records
+prior sequencing; its instructions to keep TLS-bound enrollment and renewal no
+longer apply. Private-root pairing remains deferred; no pinned invitation is added.
 
 ## Implementation plan
 

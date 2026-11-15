@@ -193,6 +193,7 @@ pub struct Registry {
     format: u32,
     revision: u64,
     pub(crate) endpoint: Option<String>,
+    pub(crate) simple_pair: crate::simple_pair::State,
     pub(crate) machines: Vec<semon_sessions::received_registry::ReceivedMachine>,
     pub(crate) machine_audit: Vec<semon_sessions::received_registry::MachineAudit>,
     pub(crate) enrollments: Vec<Enrollment>,
@@ -209,6 +210,7 @@ impl Registry {
         Self {
             format: FORMAT,
             revision: 0,
+            simple_pair: crate::simple_pair::State::default(),
             endpoint: None,
             machines: vec![],
             machine_audit: vec![],
@@ -293,6 +295,7 @@ impl Registry {
         let registry = Self {
             format: FORMAT,
             revision: 0,
+            simple_pair: crate::simple_pair::State::default(),
             endpoint,
             machines: machine_records,
             machine_audit: vec![],
@@ -510,11 +513,13 @@ impl Registry {
                 return Err(Error::Invalid);
             }
         }
+        self.validate_simple_pair()?;
         crate::pairing::validate_receipts(self)?;
         self.validate_renewal()?;
         Ok(())
     }
     fn follows(&self, old: &Self) -> Result<()> {
+        self.simple_pair_follows(old)?;
         if self.latest < old.latest || self.next_sequence < old.next_sequence {
             return Err(Error::Terminal);
         }
@@ -967,6 +972,7 @@ impl Store {
         next.follows(&current)?;
         if next.enrollments.len() > current.enrollments.len()
             || next.credentials.len() > current.credentials.len()
+            || next.simple_pair.tokens.len() > current.simple_pair.tokens.len()
         {
             next.check_admission()?;
         }
@@ -996,6 +1002,7 @@ impl Store {
         next.follows(&current)?;
         if next.enrollments.len() > current.enrollments.len()
             || next.credentials.len() > current.credentials.len()
+            || next.simple_pair.tokens.len() > current.simple_pair.tokens.len()
         {
             next.check_admission()?;
         }

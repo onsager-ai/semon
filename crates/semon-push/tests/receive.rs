@@ -906,3 +906,75 @@ fn status_head_advertises_post_without_body_and_unknown_routes_stay_unsupported(
     );
     assert_eq!(unauthorized.status, 401);
 }
+
+#[test]
+fn pair_http_route_issues_scoped_tokens_and_unpair_revokes_them() {
+    let (r, _) = receiving(&[]);
+    let now = semon_push::simple_pair::now().unwrap();
+    let (code, _) = semon_push::simple_pair::issue(&r.dir, now).unwrap();
+    let machine = "machine-12345678abcdef01";
+    let body =
+        json!({"version":1,"code":code.expose(),"machine_id":machine,"hostname":"synthetic"});
+    let mut invalid = body.clone();
+    invalid["extra"] = json!(true);
+    let refused = post(
+        r.address,
+        "/v1/pair",
+        None,
+        &serde_json::to_vec(&invalid).unwrap(),
+    );
+    assert_eq!(refused.status, 403);
+    let paired = post(
+        r.address,
+        "/v1/pair",
+        None,
+        &serde_json::to_vec(&body).unwrap(),
+    );
+    assert_eq!(paired.status, 200);
+    let token = paired.body["token"].as_str().unwrap();
+    let facts = serde_json::to_vec(&json!({"version":1,"hostname":"synthetic","home":null,"proc_starts":{},"codex_locks":{},"repos":{}})).unwrap();
+    assert_eq!(
+        post(r.address, "/v1/mirror/facts", Some(token), &facts).status,
+        200
+    );
+    assert!(
+        r.dir
+            .join(format!("machines/{machine}/facts.json"))
+            .is_file()
+    );
+    assert_eq!(
+        post(r.address, "/v1/mirror/facts", Some("unknown"), &facts).status,
+        401
+    );
+    assert_eq!(
+        post(
+            r.address,
+            "/v1/pair",
+            None,
+            &serde_json::to_vec(&body).unwrap()
+        )
+        .status,
+        403
+    );
+    assert_eq!(post(r.address, "/v1/unpair", Some(token), b"").status, 200);
+    assert_eq!(
+        post(r.address, "/v1/mirror/facts", Some(token), &facts).status,
+        401
+    );
+    assert!(
+        r.dir
+            .join(format!("machines/{machine}/facts.json"))
+            .is_file()
+    );
+}
+
+#[test]
+fn receiver_can_bind_plain_http_for_a_proxy() {
+    let dir = std::env::temp_dir().join(format!("semon-proxy-bind-{}", std::process::id()));
+    let mut options = ServeOptions::new(&dir);
+    options.listen = "0.0.0.0:0".parse().unwrap();
+    let server = Server::bind(&options).unwrap();
+    assert_eq!(server.scheme(), "http");
+    drop(server);
+    fs::remove_dir_all(dir).unwrap();
+}

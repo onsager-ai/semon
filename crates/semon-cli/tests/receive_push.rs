@@ -571,16 +571,9 @@ fn push_watch_stops_on(name: &str, number: i32) {
 }
 
 #[test]
-fn receive_refuses_plain_http_off_loopback() {
+fn receive_requires_both_tls_files_when_tls_is_selected() {
     let fixture = Fixture::new();
     let dir = fixture.dir();
-    let refused = fixture.receive(&["--listen", "0.0.0.0:0", "--dir", dir.to_str().unwrap()]);
-    assert!(!refused.status.success());
-    assert!(
-        stderr(&refused).contains("--tls-cert"),
-        "{}",
-        stderr(&refused)
-    );
     let refused = fixture.receive(&[
         "--listen",
         "0.0.0.0:0",

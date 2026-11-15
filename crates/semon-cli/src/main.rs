@@ -91,6 +91,8 @@ enum Command {
     Version,
     Sessions(SessionsArgs),
     Push(PushArgs),
+    Pair(Vec<String>),
+    Unpair(Vec<String>),
     Connect {
         endpoint: String,
         machine: String,
@@ -294,6 +296,8 @@ fn parse_args() -> Result<Command, String> {
             Ok(Command::Disconnect { receiver })
         }
         Some("push") => parse_push_args(arguments).map(Command::Push),
+        Some("pair") => Ok(Command::Pair(arguments.collect())),
+        Some("unpair") => Ok(Command::Unpair(arguments.collect())),
         Some("receive") => parse_receive_args(arguments).map(Command::Receive),
         Some("query") => parse_query_command(arguments),
         Some("analytics") => parse_analytics_args(arguments),
@@ -973,9 +977,17 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
-    let base = semon_push::origin_custody::default_directory()?;
-    let (config, credential) = semon_push::origin_custody::load(&base, receiver.as_deref())?;
-    let url = config.endpoint;
+    let (url, credential) = if let Some(receiver) = receiver {
+        let base = semon_push::origin_custody::default_directory()?;
+        let (config, credential) = semon_push::origin_custody::load(&base, Some(&receiver))?;
+        (config.endpoint, credential)
+    } else {
+        let config = semon_push::simple_pair::Config::load()?;
+        (
+            config.url,
+            semon_push::Credential::Memory(semon_push::Token::new(&config.token)?),
+        )
+    };
     let state = state.unwrap_or_else(|| semon_push::default_state_path(&url));
     Ok(PushArgs {
         options: semon_push::PushOptions {
@@ -1246,7 +1258,7 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
             );
             if server.tokens() == 0 {
                 eprintln!(
-                    "semon receive: no enrolled credentials; authorize pairing with receive enroll --dir {}",
+                    "semon receive: no paired machines; run semon pair --dir {}",
                     options.dir.display()
                 );
             }
@@ -1323,6 +1335,8 @@ fn run(command: Command) -> Result<(), String> {
         }
         Command::Sessions(args) => run_sessions(args),
         Command::Push(args) => run_push(&args),
+        Command::Pair(args) => run_pair(&args),
+        Command::Unpair(args) => run_unpair(&args),
         Command::Connect {
             endpoint,
             machine,
@@ -1653,6 +1667,40 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
         interrupt::raise_received();
     }
     result
+}
+
+fn run_pair(args: &[String]) -> Result<(), String> {
+    match args {
+        [flag, dir] if flag == "--dir" => {
+            let dir = PathBuf::from(dir);
+            semon_push::simple_pair::initialize(&dir)?;
+            let (code, expires) =
+                semon_push::simple_pair::issue(&dir, semon_push::simple_pair::now()?)
+                    .map_err(|e| e.to_string())?;
+            println!(
+                "{} (expires at Unix {expires}, in 10 minutes)",
+                semon_push::pairing::display_code(&code).expose()
+            );
+            Ok(())
+        }
+        [url, code] if !url.starts_with('-') => {
+            println!("{}", semon_push::simple_pair::pair_machine(url, code)?);
+            Ok(())
+        }
+        _ => Err("Usage: semon pair --dir DIR | semon pair URL CODE".into()),
+    }
+}
+fn run_unpair(args: &[String]) -> Result<(), String> {
+    match args {
+        [] => semon_push::simple_pair::unpair_machine(),
+        [machine, flag, dir] if flag == "--dir" => semon_push::simple_pair::unpair(
+            &PathBuf::from(dir),
+            machine,
+            semon_push::simple_pair::now()?,
+        )
+        .map_err(|e| e.to_string()),
+        _ => Err("Usage: semon unpair [MACHINE_ID --dir DIR]".into()),
+    }
 }
 
 /// `semon push`, stopped by Ctrl-C or SIGTERM through the same
@@ -2433,7 +2481,14 @@ fn analytics_usage() -> String {
 }
 
 fn usage() -> String {
-    "Usage: semon sessions [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
+    "Usage: semon receive --dir DIR [--listen ADDR]\n\
+         Usage: semon pair --dir DIR\n\
+         Usage: semon pair URL CODE\n\
+         Usage: semon unpair [MACHINE_ID --dir DIR]\n\
+         Pair with one receiver; then run semon push --watch (advanced) to sync.\n\
+         HTTPS proxies may forward to a plain HTTP receiver. Tokens work until revoked.\n\
+         \n\
+         Usage: semon sessions [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
          Shows a read-only tree of native Claude Code, Codex and Copilot sessions.\n\
          --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
          --machine DIR (repeated, with --json or --serve): one view over several machines' homes, DIR/{claude,codex,proc}.\n\
@@ -2466,9 +2521,9 @@ fn usage() -> String {
          Usage: semon disconnect --receiver URL\n\
          Disables this machine's local receiver access after terminal confirmation; receiver access is not revoked.\n\
          \n\
-         Usage: semon push [--receiver URL] [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
+         Advanced: semon push [--receiver URL] [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a mirror-protocol receiver\n\
-         (docs/mirror-protocol.md), appending as they grow. Run connect first to install private enrollment custody. --watch keeps going:\n\
+         (docs/mirror-protocol.md), appending as they grow. Run semon pair URL CODE first. --watch keeps going:\n\
          new lines every 2 s, facts every 10 s.\n\
          \n\
          Usage: semon archive prune [--retention-days N] [--cache PATH]\n\
@@ -2481,8 +2536,8 @@ fn usage() -> String {
          Usage: semon receive name ID --clear --dir DIR\n\
          Enrollment stays in the foreground; its trusted terminal displays codes and accepts pending or cancel SESSION_ID.\n\
          A mirror-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
-         DIR/machines/ID/. It listens on 127.0.0.1:8735 by default; another address needs TLS (an operator-supplied\n\
-         certificate and key). Enrollment supplies separate kind credentials; legacy DIR/tokens is refused.\n\
+         DIR/machines/ID/. It listens on 127.0.0.1:8735 by default; use --listen for a proxy-facing address.\n\
+         Optional --tls-cert and --tls-key serve TLS directly. Legacy DIR/tokens is refused.\n\
          --max-bytes caps each machine's copy (20G by default); a push past it gets 507."
 .to_owned()
 }

@@ -4,28 +4,52 @@
 
 `semon receive` is the reference receiver (`semon_push::mirror::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<machine-id>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and 507 (the machine's copy would pass its size cap); a client treats either as a failure.
 
-Registry format 6 stores the origin-generated canonical machine ID
-(`machine-<8 lowercase hex Unix seconds><8 secure random hex digits>`), its
-identical directory locator and optional owner display name. `connect` commits
-the origin ID into the authenticated pairing input. The receiver creates
-`machines/<machine-id>/`; re-pairing that ID replaces its enrollment. The enroll
-NAME initializes only a new record's owner name; equal names group presentation.
-Pairing/replacement and name-change audit entries commit with registry state.
-Discovery uses the shared registry reader and skips unrecorded directories with
-a re-enrollment warning. Missing/unsupported registry refuses the received set.
-Old state requires a fresh receiver directory and re-enrollment; retained logs
-are never migrated, moved or deleted.
+Registry format 7 stores the origin-generated canonical machine ID
+(`machine-<8 lowercase hex Unix seconds><8 secure random hex digits>`), matching
+directory locator, optional display name, pending code hash, pairing gate, hashed
+mirror Bearers and pairing/revocation audit. New machine names default to hostname;
+existing names survive re-pairing. Unsupported state is refused explicitly; use a
+fresh receiver directory, preserving all old state and received logs.
 
-The reference receiver requires the current enrollment registry and a separate
-`mirror_push` bearer credential scoped to one machine. `connect` installs the
-Push client's protected input for that kind bearer; a bearer is machine transport
-authority, never user identity or source authority. Legacy `DIR/tokens` state and
-`receive token` commands are refused; preserve old tokens/history and explicitly
-re-pair through the enrollment flow in a fresh receiver directory. No import, conversion or deletion occurs.
-Local receiver enrollment starts with `receive enroll --machine NAME --advertise
-HTTPS_URL --dir DIR --tls-cert PEM --tls-key PEM`; origin `connect --to HTTPS_URL`
-confirms the code and trust/source summary and atomically installs mirror custody.
-A kept-alive connection cannot switch enrollments.
+`semon pair --dir DIR` replaces the single pending ten-character checked code.
+Its hash and ten-minute expiry commit under the registry lock. Three wrong guesses
+consume it; three burns within an hour persist a thirty-minute pairing pause.
+The running receiver reads this state per request, without IPC.
+
+### `POST <url>/v1/pair`
+
+No Authorization header is required. The strict JSON request is at most 8 KiB:
+
+```json
+{"version":1,"code":"01234-5678X","machine_id":"machine-12345678abcdef01","hostname":"laptop"}
+```
+
+Unknown fields, invalid/expired codes, paused pairing and all other pairing
+refusals produce the same generic **403**. Success atomically consumes the code,
+creates or reuses the machine record, revokes that ID's previous paired token,
+and audits `paired` with `replaced: bool`. It returns **200**:
+
+```json
+{"version":1,"token":"<random bearer>","machine_id":"machine-12345678abcdef01"}
+```
+
+Tokens have no expiry or renewal. Only their SHA-256 hashes are stored on the
+receiver. Mirror requests use `Authorization: Bearer <token>`; the token selects
+exactly one machine directory. Unknown/revoked tokens receive **401**. Revocation
+is rechecked on every request, including kept-alive connections.
+
+### `POST <url>/v1/unpair`
+
+Send the paired Bearer and an empty body (`Content-Length: 0`). Success revokes
+the token and audits `unpaired`, returning **200** `{"version":1}`; an unknown or
+revoked token gets **401**. Receiver-local `semon unpair MACHINE_ID --dir DIR`
+performs the same revocation. Neither route nor command deletes retained logs.
+
+The client requires public-CA HTTPS, with HTTP accepted only on loopback and
+redirects disabled. The receiver may listen on HTTP behind an HTTPS proxy. The
+proxy can read logs in transit; stolen tokens work until revoked. Old TLS-bound
+enrollment/connect/renewal remains available pending removal in P3, outside this
+pairing contract. Legacy `DIR/tokens` remains refused and preserved.
 
 The reference receiver takes an exclusive, non-blocking OS lock on its store directory for its lifetime. A second receiver on that directory is refused at startup, so preservation and replacement cannot interleave across receiver instances.
 
@@ -46,7 +70,7 @@ workspace and native harness state required for independent recovery.
 
 ## Requests
 
-All requests are `POST` with a JSON body and `Authorization: Bearer <token>`. `<url>` is the base URL the user gives `--to`. It must be `https`, except plain `http` to a loopback address (`localhost`, `[::1]`, 127.0.0.0/8).
+Mirror requests are `POST` with a JSON body and `Authorization: Bearer <token>`. `<url>` is the base URL passed to `semon pair URL CODE`. It must be `https`, except plain `http` to a loopback address (`localhost`, `[::1]`, 127.0.0.0/8).
 
 Request bodies currently use identity encoding. Response gzip/Brotli and sealed
 storage are independent. See [native archive transport and codec measurements](native-archive-transport.md)
