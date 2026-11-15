@@ -63,6 +63,7 @@ impl Harness {
                 ..Limits::default()
             },
             admission: Mutex::new(Admission::default()),
+            viewer: None,
             body: None,
             provisioning: Some(Arc::new(Mutex::new(controller))),
             provisioning_clock: Some(Arc::new(move || clock_hook.load(Ordering::Relaxed))),

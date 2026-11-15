@@ -289,7 +289,7 @@ fn credential_authority_refusal(
     }
 }
 
-fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+pub(crate) fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     let mut difference = 0u8;
     for i in 0..32 {
         difference |= a[i] ^ b[i];

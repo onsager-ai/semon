@@ -214,7 +214,8 @@ pub use union::{
     AccountLink, AccountMenu, AccountWorkspace, AdminLink, Extras, LinkMethod, Refresh, ViewerCore,
 };
 pub use viewer::{
-    SECURITY_HEADERS, ServeOptions, ViewerAsi, ViewerReply, serve, serve_listener, serve_with_asi,
+    SECURITY_HEADERS, ServeOptions, Viewer, ViewerAccess, ViewerAsi, ViewerReply, serve,
+    serve_listener, serve_with_asi,
 };
 
 #[derive(Clone, Debug)]
