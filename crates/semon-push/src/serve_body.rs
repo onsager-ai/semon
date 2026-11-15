@@ -400,6 +400,7 @@ mod tests {
             limits: Limits::default(),
             admission: Mutex::new(Admission::default()),
             body: host,
+            viewer: None,
             provisioning: None,
             provisioning_clock: Some(Arc::new(|| 100)),
             provisioning_timeout: None,

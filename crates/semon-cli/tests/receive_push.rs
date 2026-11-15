@@ -742,7 +742,17 @@ fn receiver_viewer_read_tokens_login_revocation_and_route_separation() {
     assert!(set_cookie.contains("HttpOnly; SameSite=Strict; Path=/"));
     assert!(!set_cookie.contains("Secure"));
     let cookie = set_cookie.split(';').next().unwrap().to_owned();
-    assert!(http(&url, "/", &format!("Cookie: {cookie}\r\n"), None).starts_with("HTTP/1.1 200"));
+    // Authentication succeeds, but the existing Viewer has no root page until
+    // a machine is paired. Its source inventory remains available when empty.
+    let empty_page = http(&url, "/", &format!("Cookie: {cookie}\r\n"), None);
+    assert!(empty_page.starts_with("HTTP/1.1 404"), "{empty_page}");
+    let inventory = http(
+        &url,
+        "/api/session-sources",
+        &format!("Cookie: {cookie}\r\n"),
+        None,
+    );
+    assert!(inventory.starts_with("HTTP/1.1 200"), "{inventory}");
     assert!(
         http(
             &url,
@@ -858,7 +868,8 @@ fn receiver_viewer_read_tokens_login_revocation_and_route_separation() {
     child.kill().unwrap();
     child.wait().unwrap();
     url = f.start_receiver_with(&["--public-url", "https://receiver.example"]);
-    assert!(http(&url, "/", &format!("Cookie: {cookie}\r\n"), None).starts_with("HTTP/1.1 200"));
+    let page = http(&url, "/", &format!("Cookie: {cookie}\r\n"), None);
+    assert!(page.starts_with("HTTP/1.1 200"), "{page}");
     let address = url.strip_prefix("http://").unwrap();
     let public_request = |host: &str, origin: &str, path: &str| {
         let mut socket = std::net::TcpStream::connect(address).unwrap();
