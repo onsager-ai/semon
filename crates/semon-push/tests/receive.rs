@@ -932,7 +932,7 @@ fn pair_http_route_issues_scoped_tokens_and_unpair_revokes_them() {
     );
     assert_eq!(paired.status, 200);
     let token = paired.body["token"].as_str().unwrap();
-    let facts = serde_json::to_vec(&json!({"version":1,"hostname":"synthetic","home":null,"proc_starts":{},"codex_locks":{},"repos":{}})).unwrap();
+    let facts = serde_json::to_vec(&json!({"version":2,"hostname":"synthetic","home":null,"proc_starts":{},"codex_locks":{},"repos":{},"repo_ids":{}})).unwrap();
     assert_eq!(
         post(r.address, "/v1/mirror/facts", Some(token), &facts).status,
         200

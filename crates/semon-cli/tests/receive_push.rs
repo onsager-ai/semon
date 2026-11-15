@@ -616,3 +616,76 @@ fn enroll_refuses_legacy_tokens_before_terminal_or_custody_initialization() {
     assert_eq!(std::fs::read(dir.join("tokens")).unwrap(), tokens);
     assert!(!dir.join("receiver.json").exists());
 }
+
+#[test]
+fn pair_and_unpair_commands_store_replace_and_revoke_configuration() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = Fixture::new();
+    let url = f.start_receiver();
+    let config = f.path("config");
+    let pair_path = config.join("semon/pair.json");
+    let issue = || {
+        let output = semon()
+            .args(["pair", "--dir"])
+            .arg(f.dir())
+            .output()
+            .unwrap();
+        assert_ok(&output, "receiver pair");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let run_pair = |code: &str| {
+        semon()
+            .args(["pair", &url, code])
+            .env("XDG_CONFIG_HOME", &config)
+            .env("HOME", f.path("home"))
+            .output()
+            .unwrap()
+    };
+    let first = run_pair(&issue());
+    assert_ok(&first, "machine pair");
+    assert!(
+        String::from_utf8(first.stdout)
+            .unwrap()
+            .contains("Run semon push --watch to sync.")
+    );
+    let first: serde_json::Value = serde_json::from_slice(&fs::read(&pair_path).unwrap()).unwrap();
+    assert_eq!(
+        fs::metadata(&pair_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_ok(&run_pair(&issue()), "re-pair");
+    let second: serde_json::Value = serde_json::from_slice(&fs::read(&pair_path).unwrap()).unwrap();
+    assert_eq!(first["machine_id"], second["machine_id"]);
+    assert_ne!(first["token"], second["token"]);
+    let output = semon()
+        .arg("unpair")
+        .env("XDG_CONFIG_HOME", &config)
+        .output()
+        .unwrap();
+    assert_ok(&output, "machine unpair");
+    assert!(!pair_path.exists());
+    assert_ok(&run_pair(&issue()), "pair after unpair");
+    let output = semon()
+        .args(["unpair", second["machine_id"].as_str().unwrap(), "--dir"])
+        .arg(f.dir())
+        .output()
+        .unwrap();
+    assert_ok(&output, "receiver unpair");
+    // Losing reachability still removes the local configuration with a warning.
+    let mut child = f.receiver.take().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let output = semon()
+        .arg("unpair")
+        .env("XDG_CONFIG_HOME", &config)
+        .output()
+        .unwrap();
+    assert_ok(&output, "offline unpair");
+    assert!(stderr(&output).contains("warning: receiver unreachable"));
+    assert!(!pair_path.exists());
+}

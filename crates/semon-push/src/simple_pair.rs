@@ -381,9 +381,11 @@ pub fn pair_machine(url: &str, code: &str) -> std::result::Result<String, String
     let url = crate::check_url(url)?;
     crate::pairing::parse_code(code).map_err(|_| "invalid pairing code")?;
     let machine_id = semon_sessions::machine_id::load_or_create().map_err(|e| e.to_string())?;
-    let hostname = semon_sessions::local_facts(&semon_sessions::Options::default(), &machine_id)
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
         .map_err(|e| e.to_string())?
-        .hostname;
+        .trim()
+        .to_owned();
     let response = client()?
         .post(format!("{url}/v1/pair"))
         .json(&Request {
