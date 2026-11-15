@@ -166,6 +166,7 @@ impl ServeOptions {
 struct Admission {
     open: usize,
     provisioning: usize,
+    viewers: usize,
     per_ip: HashMap<IpAddr, usize>,
 }
 
@@ -205,6 +206,7 @@ struct Slot {
     /// The address it counts against, until it authenticates.
     ip: Option<IpAddr>,
     provisioning: bool,
+    viewer: bool,
 }
 
 fn release_ip(admission: &mut Admission, ip: IpAddr) {
@@ -232,7 +234,23 @@ impl Slot {
             shared: Arc::clone(shared),
             ip: Some(ip),
             provisioning: false,
+            viewer: false,
         })
+    }
+
+    // Browser work must not consume the unauthenticated share of one tunnel
+    // address. Four Viewer requests may run, leaving the remaining total for push.
+    fn admit_viewer(&mut self) -> bool {
+        let mut admission = self.shared.admission();
+        if admission.viewers >= 4 {
+            return false;
+        }
+        admission.viewers += 1;
+        self.viewer = true;
+        if let Some(ip) = self.ip.take() {
+            release_ip(&mut admission, ip);
+        }
+        true
     }
 
     fn admit_provisioning(&mut self) -> bool {
@@ -261,6 +279,9 @@ impl Drop for Slot {
     fn drop(&mut self) {
         let mut admission = self.shared.admission();
         admission.open = admission.open.saturating_sub(1);
+        if self.viewer {
+            admission.viewers -= 1;
+        }
         if self.provisioning {
             admission.provisioning -= 1;
         }
@@ -974,6 +995,9 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
             && !head.target.starts_with("/v1/analytics/")
             && let Some(viewer) = &shared.viewer
         {
+            if !slot.admit_viewer() {
+                return connection.refuse(503, "request refused", &[]);
+            }
             return serve_viewer(viewer, connection, head);
         }
         connection.head_only = head.method == "HEAD";
@@ -1005,11 +1029,14 @@ fn serve_viewer(viewer: &semon_sessions::Viewer, mut connection: Connection, hea
     let Ok(method) = head.method.parse::<tiny_http::Method>() else {
         return;
     };
-    let mut headers: Vec<_> = head
+    let Ok(mut headers) = head
         .headers
         .into_iter()
-        .filter_map(|(name, value)| tiny_http::Header::from_bytes(name, value).ok())
-        .collect();
+        .map(|(name, value)| tiny_http::Header::from_bytes(name, value))
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return;
+    };
     headers.retain(|h| !h.field.equiv("Connection"));
     headers.push(tiny_http::Header::from_bytes("Connection", "close").unwrap());
     if let Ok(request) = tiny_http::new_request(

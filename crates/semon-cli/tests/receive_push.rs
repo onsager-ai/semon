@@ -798,13 +798,19 @@ fn receiver_viewer_read_tokens_login_revocation_and_route_separation() {
             .starts_with("HTTP/1.1 401")
         );
     }
-    let status = http(
+    let facts = serde_json::json!({"version":2,"hostname":"laptop","home":null,"proc_starts":{},"codex_locks":{},"repos":{},"repo_ids":{}}).to_string();
+    let pushed = http(
         &url,
-        "/v1/push/status",
+        "/v1/push/facts",
         &format!("Authorization: Bearer {push}\r\n"),
-        Some("{}"),
+        Some(&facts),
     );
-    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    assert!(pushed.starts_with("HTTP/1.1 200"), "{pushed}");
+    assert!(
+        f.dir()
+            .join("machines/machine-6754a9c1e83f27b4/facts.json")
+            .is_file()
+    );
     assert!(
         http(
             &url,
@@ -814,6 +820,39 @@ fn receiver_viewer_read_tokens_login_revocation_and_route_separation() {
         )
         .starts_with("HTTP/1.1 403")
     );
+    // Four slow Viewer bodies from the tunnel peer cannot consume its four
+    // unauthenticated push slots. 100 Continue witnesses admission without sleeps.
+    let mut held = Vec::new();
+    for _ in 0..4 {
+        let mut socket =
+            std::net::TcpStream::connect(url.strip_prefix("http://").unwrap()).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        write!(socket, "POST /api/viewer/home HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {secret}\r\nContent-Length: 4096\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n", url.strip_prefix("http://").unwrap()).unwrap();
+        let mut interim = Vec::new();
+        while !interim.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            socket.read_exact(&mut byte).unwrap();
+            interim.push(byte[0]);
+        }
+        assert!(
+            String::from_utf8(interim)
+                .unwrap()
+                .starts_with("HTTP/1.1 100")
+        );
+        held.push(socket);
+    }
+    assert!(
+        http(
+            &url,
+            "/v1/push/facts",
+            &format!("Authorization: Bearer {push}\r\n"),
+            Some(&facts)
+        )
+        .starts_with("HTTP/1.1 200")
+    );
+    drop(held);
     // Tokens and ID-bound cookies survive restarting the server, including a port change.
     let mut child = f.receiver.take().unwrap();
     child.kill().unwrap();
