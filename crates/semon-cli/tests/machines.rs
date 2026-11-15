@@ -338,12 +338,14 @@ fn machines_flags_are_checked() {
 }
 
 #[test]
-fn unrecorded_machine_refuses_without_changing_retained_logs() {
+fn unrecorded_machine_is_refused_while_other_sources_remain_visible() {
     let root = Root::new(MINUTE);
     root.claude("received/machines/unrecorded/claude", "retained");
     let before = root.received();
     let output = root.semon(&["sessions", "--json", "--all", "--machines", &root.dir()]);
-    assert!(!output.status.success());
+    assert!(output.status.success());
+    let tree: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(tree["roots"].as_array().unwrap().len(), 3);
     assert!(String::from_utf8_lossy(&output.stderr).contains("re-enroll"));
     assert_eq!(root.received(), before);
 }

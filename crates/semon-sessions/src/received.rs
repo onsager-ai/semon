@@ -124,7 +124,7 @@ impl ReceivedMachines {
 
     /// One pass over `DIR/machines/`: file types and the facts file's stamp
     /// only, nothing opened.
-    pub(crate) fn scan(&self) -> io::Result<Listing> {
+    pub(crate) fn scan(&self, warned: &mut BTreeSet<String>) -> io::Result<Listing> {
         let mut listing = BTreeMap::new();
         let records = crate::received_registry::read_machines(&self.dir)?;
         let Ok(entries) = fs::read_dir(self.dir.join("machines")) else {
@@ -141,16 +141,16 @@ impl ReceivedMachines {
                 listing.insert(format!("{file_name:?}"), None);
                 continue;
             };
-            let machine = records
-                .iter()
-                .find(|m| m.directory == name)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!("machine {name}: {}", crate::received_registry::REENROLL),
-                    )
-                })?
-                .clone();
+            let Some(machine) = records.iter().find(|m| m.directory == name).cloned() else {
+                if warned.insert(format!("unrecorded:{name}")) {
+                    eprintln!(
+                        "semon: received machine {name}: {}; ignored",
+                        crate::received_registry::REENROLL
+                    );
+                }
+                continue;
+            };
+            warned.remove(&format!("unrecorded:{name}"));
             let root = entry.path();
             let claude = root.join("claude");
             let codex = root.join("codex");
@@ -410,7 +410,7 @@ mod tests {
         let mut warned = BTreeSet::new();
         let copy = |facts: &Facts, warned: &mut BTreeSet<String>| {
             crate::write_facts(&incoming.join("facts.json"), facts).unwrap();
-            let listing = receiver.scan().unwrap();
+            let listing = receiver.scan(&mut BTreeSet::new()).unwrap();
             let seen = listing["synthetic"].as_ref().unwrap();
             let sources = crate::SessionSources::with_machines(vec![(
                 metadata.id.clone(),

@@ -456,9 +456,15 @@ impl SessionSources {
         let parts = self
             .machines
             .iter()
-            .map(|(key, evidence)| Ok((key.clone(), evidence.query_at(now)?)))
+            .map(|(key, evidence)| {
+                Ok((
+                    key.clone(),
+                    evidence.query_at(now)?,
+                    read_lock(&evidence.received_machine).is_some(),
+                ))
+            })
             .collect::<io::Result<Vec<_>>>()?;
-        let mut read = crate::union::QueryRead::new(parts, usize::MAX);
+        let mut read = crate::union::QueryRead::new(parts);
         for (part, (_, evidence)) in read.parts.iter_mut().zip(&self.machines) {
             if let Some(machine) = read_lock(&evidence.received_machine).as_ref() {
                 part.machine = Some(

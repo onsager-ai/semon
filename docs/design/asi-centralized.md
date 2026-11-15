@@ -146,7 +146,7 @@ multi-user or third-party receiver can revisit it without dormant runtime. [C2, 
   grouping; no owner name means hostname display without grouping. Every source row
   retains its original machine ID and path. Names never select machines or alter identity.
 - Received discovery uses the shared reader of those registry records. Unrecorded
-  directories are refused with a re-enrollment message; directories never move and
+  directories are skipped with a re-enrollment warning while recorded machines remain served; directories never move and
   retained logs are never deleted. Same-native-ID sessions from separate machines
   stay visible and separately addressable, counted separately until PR1b proves duplication.
 

@@ -428,8 +428,6 @@ struct Plan {
     owners: BTreeMap<String, (usize, String)>,
     /// Ids two machines both claim: refused.
     conflicts: BTreeSet<String>,
-    /// Empty exclusions: received copies remain separately addressable.
-    dropped: Vec<BTreeSet<String>>,
 }
 
 /// Which machine answers for a session id.
@@ -477,6 +475,7 @@ fn native_machine_ids(views: &Views) -> Vec<String> {
 /// evidence and compatibility transport. A version hash belongs only to the latter.
 struct IdentityPart<'a> {
     key: &'a str,
+    received: bool,
     machine: &'a str,
     sessions: &'a BTreeMap<String, Session>,
     transcripts: &'a BTreeMap<String, Arc<Transcript>>,
@@ -490,7 +489,6 @@ fn identity_plan(parts: &[IdentityPart<'_>]) -> Plan {
     }
     let mut owners: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let mut conflicts = BTreeSet::new();
-    let dropped = vec![BTreeSet::new(); parts.len()];
     for (index, part) in parts.iter().enumerate() {
         let ids: BTreeSet<&String> = part
             .sessions
@@ -498,7 +496,7 @@ fn identity_plan(parts: &[IdentityPart<'_>]) -> Plan {
             .chain(part.transcripts.keys())
             .collect();
         for id in ids {
-            let served = if part.key.starts_with("machine-") {
+            let served = if part.received {
                 format!("{id}@{}", part.key)
             } else if session_local(part.sessions, id) {
                 format!("{id}@{}", machine_ids[index])
@@ -514,7 +512,6 @@ fn identity_plan(parts: &[IdentityPart<'_>]) -> Plan {
         machine_ids,
         owners,
         conflicts,
-        dropped,
     }
 }
 
@@ -529,13 +526,12 @@ pub(crate) struct QueryPart {
     pub(crate) data: Arc<QueryData>,
     pub(crate) machine: Option<String>,
     pub(crate) source: String,
-    pub(crate) dropped: BTreeSet<String>,
-    pub(crate) droppable: bool,
+    pub(crate) received: bool,
 }
 
 impl QueryPart {
     pub(crate) fn served(&self, id: &str) -> String {
-        if self.source.starts_with("machine-") {
+        if self.received {
             return format!("{id}@{}", self.source);
         }
         match &self.machine {
@@ -546,11 +542,12 @@ impl QueryPart {
 }
 
 impl QueryRead {
-    pub(crate) fn new(machines: Vec<(String, Arc<QueryData>)>, _droppable: usize) -> Self {
+    pub(crate) fn new(machines: Vec<(String, Arc<QueryData>, bool)>) -> Self {
         let identities: Vec<_> = machines
             .iter()
-            .map(|(key, data)| IdentityPart {
+            .map(|(key, data, received)| IdentityPart {
                 key,
+                received: *received,
                 machine: &data.machine_id,
                 sessions: &data.sessions,
                 transcripts: &data.tx,
@@ -561,12 +558,11 @@ impl QueryRead {
         let parts = machines
             .into_iter()
             .enumerate()
-            .map(|(index, (source, data))| QueryPart {
+            .map(|(index, (source, data, received))| QueryPart {
+                received,
                 source,
                 data,
                 machine: multiple.then(|| plan.machine_ids[index].clone()),
-                dropped: plan.dropped[index].clone(),
-                droppable: false,
             })
             .collect();
         Self { parts, plan }
@@ -575,7 +571,7 @@ impl QueryRead {
     pub(crate) fn owner(&self, id: &str) -> Owner {
         match self.parts.len() {
             0 => Owner::Missing,
-            1 if !self.parts[0].source.starts_with("machine-") => Owner::At(0, id.to_owned()),
+            1 if !self.parts[0].received => Owner::At(0, id.to_owned()),
             _ if self.plan.conflicts.contains(id) => Owner::Conflict,
             _ => match self.plan.owners.get(id) {
                 Some((index, own)) => Owner::At(*index, own.clone()),
@@ -770,7 +766,10 @@ impl ViewerCore {
             return Ok(());
         };
         let mut following = lock(&received.following);
-        let listing = following.machines.scan()?;
+        let Following {
+            machines, warned, ..
+        } = &mut *following;
+        let listing = machines.scan(warned)?;
         if following.seen.as_ref() == Some(&listing) {
             return Ok(());
         }
@@ -1813,15 +1812,14 @@ impl ViewerCore {
             && let Some((own, label)) = id.rsplit_once('@')
         {
             for (index, (key, view)) in views.iter().enumerate() {
-                if (key.starts_with("machine-") && key != label)
-                    || (!key.starts_with("machine-") && labels[index] != label)
-                {
+                let received = read_lock(&view.evidence.received_machine).is_some();
+                if (received && key != label) || (!received && labels[index] != label) {
                     continue;
                 }
                 let source = if key.is_empty() { "local" } else { key };
                 match lookup(view, source, own) {
                     Ok(Some(_)) if selected.is_none() => {
-                        selected = Some((key.clone(), label.to_owned()))
+                        selected = Some((key.clone(), labels[index].clone()))
                     }
                     Ok(Some(_)) | Err(_) => return Ok(None),
                     Ok(None) => {}
@@ -1905,12 +1903,14 @@ mod tests {
         let parts = [
             IdentityPart {
                 key: &first,
+                received: true,
                 machine: "same-host",
                 sessions: &sessions,
                 transcripts: &transcripts,
             },
             IdentityPart {
                 key: &second,
+                received: true,
                 machine: "same-host",
                 sessions: &sessions,
                 transcripts: &transcripts,
@@ -1927,7 +1927,18 @@ mod tests {
             (1, "shared".into())
         );
         assert!(plan.conflicts.is_empty());
-        assert!(plan.dropped.iter().all(BTreeSet::is_empty));
+        let fixed = [IdentityPart {
+            key: &first,
+            received: false,
+            machine: "fixed-host",
+            sessions: &sessions,
+            transcripts: &transcripts,
+        }];
+        let plan = identity_plan(&fixed);
+        assert!(
+            plan.owners.contains_key("shared"),
+            "fixed key prefix never marks a received source"
+        );
     }
 
     #[test]

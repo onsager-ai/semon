@@ -9,8 +9,8 @@ Registry format 5 additionally stores receiver-generated canonical machine IDs
 owner display names. Re-enrolling a storage name retains its ID; new names receive
 new IDs. Equal owner names group presentation only. IDs remain the source keys;
 no history moves or merges. Name changes and their audit entries commit together.
-Received-machine discovery reads these same records and refuses unrecorded directories
-with a re-enrollment instruction. Older receiver formats require a new directory
+Received-machine discovery reads these same records and skips unrecorded directories
+with a re-enrollment warning, preserving service for recorded machines. Older receiver formats require a new directory
 and re-enrollment; retained logs are never migrated or deleted.
 
 

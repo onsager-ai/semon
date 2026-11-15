@@ -504,13 +504,10 @@ impl View {
         for part in &read.parts {
             let records = part.data.sources.reader_with(provider);
             for (id, session) in &part.data.sessions {
-                if part.dropped.contains(id) {
-                    continue;
-                }
                 // The tools expose only these session fields. Pricing tables,
                 // workspace transport and per-transcript growth marks stay out.
                 let mut row = session_fields(session, part.machine.as_deref());
-                if part.source.starts_with("machine-") {
+                if part.received {
                     row["source"] = json!(part.source);
                 }
                 sessions.insert(part.served(id), row);
@@ -521,16 +518,7 @@ impl View {
                 facts.insert(part.served(id), own);
             }
             for handoff in &part.data.handoffs {
-                if part.dropped.contains(&handoff.from)
-                    || handoff
-                        .to
-                        .as_ref()
-                        .is_some_and(|to| part.dropped.contains(to))
-                    || (part.droppable && handoff_ids.contains(&handoff.id))
-                {
-                    continue;
-                }
-                let handoff_id = if part.source.starts_with("machine-") {
+                let handoff_id = if part.received {
                     format!("{}@{}", handoff.id, part.source)
                 } else {
                     handoff.id.clone()
@@ -565,12 +553,7 @@ impl View {
                 handoffs.push(json!(handoff));
             }
             for turn in &part.data.turns {
-                if part.dropped.contains(&turn.sid)
-                    || (part.droppable && turn_ids.contains(&turn.id))
-                {
-                    continue;
-                }
-                let turn_id = if part.source.starts_with("machine-") {
+                let turn_id = if part.received {
                     format!("{}@{}", turn.id, part.source)
                 } else {
                     turn.id.clone()
@@ -989,9 +972,9 @@ impl Query {
             tool,
             "get_session" | "get_session_activity" | "read_transcript"
         ) && let Some((own, source)) = args["id"].as_str().and_then(|id| id.rsplit_once('@'))
-            && source.starts_with("machine-")
-            && let Some((key, evidence)) =
-                self.sources.machines.iter().find(|(key, _)| key == source)
+            && let Some((key, evidence)) = self.sources.machines.iter().find(|(key, evidence)| {
+                key == source && crate::viewer::read_lock(&evidence.received_machine).is_some()
+            })
         {
             let key = key.clone();
             let target = evidence
@@ -1446,10 +1429,14 @@ impl Query {
                         } else {
                             Arc::new(crate::model::QueryData::identity(&source.options, now))
                         };
-                        (key.clone(), part)
+                        (
+                            key.clone(),
+                            part,
+                            crate::viewer::read_lock(&source.received_machine).is_some(),
+                        )
                     })
                     .collect();
-                let native = QueryRead::new(parts, usize::MAX);
+                let native = QueryRead::new(parts);
                 self.start = native
                     .parts
                     .iter()
@@ -1488,10 +1475,11 @@ impl Query {
                 (
                     key.clone(),
                     Arc::new(crate::model::QueryData::identity(&source.options, now_ms())),
+                    crate::viewer::read_lock(&source.received_machine).is_some(),
                 )
             })
             .collect();
-        let read = QueryRead::new(identities, usize::MAX);
+        let read = QueryRead::new(identities);
         self.sources
             .machines
             .iter()

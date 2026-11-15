@@ -184,7 +184,7 @@ semon receive name machine-<ID> --clear --dir ~/semon-machines
 Use the complete generated ID from the listing. Name changes are audited in the
 same registry transaction. Registry format 5 refuses older state explicitly;
 keep that directory unchanged and re-enroll into a new receiver directory.
-A received directory without a machine record is refused until re-enrollment;
+A received directory without a machine record is skipped with a re-enrollment warning; recorded machines remain available;
 Semon never deletes or moves retained logs.
 
 To see the received machines, serve `DIR` with `semon sessions --serve --machines DIR` ([See all your machines](#see-all-your-machines)).
