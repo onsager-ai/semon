@@ -132,7 +132,7 @@ multi-user or third-party receiver can revisit it without dormant runtime. [C2, 
   regardless of mode, without following a final symlink.
 - `connect` includes this ID in the committed pairing input, authenticated by the
   existing transcript and proof. The origin stores no additional identity state.
-- Registry format 6 records `{id, directory, owner_name}`; `directory` equals the ID.
+- Registry format 7 retains `{id, directory, owner_name}` plus pairing state; `directory` equals the ID.
   Receiver storage is `machines/<machine-id>/`. Old state is refused: keep retained
   logs unchanged and re-enroll in a fresh receiver directory. No migration or deletion.
 - `receive enroll --machine NAME` supplies the starting owner display name only.

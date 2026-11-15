@@ -237,7 +237,7 @@ impl PrivateDir {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        prepare_private_dir(&dir, true).unwrap();
+        crate::tokens::prepare_private_dir(&dir, true).unwrap();
         Self(dir)
     }
 }

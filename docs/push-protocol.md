@@ -54,13 +54,13 @@ pairing contract. Legacy `DIR/tokens` remains refused and preserved.
 The reference receiver takes an exclusive, non-blocking OS lock on its store directory for its lifetime. A second receiver on that directory is refused at startup, so preservation and replacement cannot interleave across receiver instances.
 
 The generic push protocol is independent of the retired Encrypted Relay.
-Mirrored content is readable by the receiver; sender redaction and HTTPS do not
-provide end-to-end encryption. A source mirror does not contain the complete
+Received content is readable by the receiver; sender redaction and HTTPS do not
+provide end-to-end encryption. A received source copy does not contain the complete
 workspace and native harness state required for independent recovery.
 
 ## What is sent
 
-- **The input set:** supported native logs and sidecars listed by `semon_sessions::inputs`. Decoded mirror target paths are checked by `semon_sessions::is_input_path`. Nothing else under the agent homes is read. `*.key` files never are.
+- **The input set:** supported native logs and sidecars listed by `semon_sessions::inputs`. Decoded push target paths are checked by `semon_sessions::is_input_path`. Nothing else under the agent homes is read. `*.key` files never are.
   - `claude` root: `projects/**/*.jsonl`, `projects/**/subagents/agent-<id>.meta.json`, `sessions/<pid>.json`.
   - `codex` root: `sessions/**/*.jsonl`, `archived_sessions/**/*.jsonl` and their native `.jsonl.zst` archive equivalents. Native databases are excluded.
   - Native `.jsonl.zst` equivalents of supported Claude and Copilot logs are also transport sources. The sender decodes and verifies each archive internally, then sends complete redacted logical records under the corresponding `.jsonl` path. Encoded byte positions never enter append cursors, status targets, quota accounting or source proofs. Full Codex inventory uses those same logical target paths. This changes neither the receiver allowlist nor the wire forms.
@@ -120,7 +120,7 @@ The answer is 200 when it is stored. A receiver that hasn't had facts for a whil
 - **409.** When the receiver's copy is the client's redacted file up to a line boundary (same length prefix, same head hash), the client resumes from the receiver's length. Otherwise it sends the file again with `replace`.
 - **Deleted files** are not deleted on the receiver.
 - **Cadence.** One complete pass and one facts post, then exit. With `--watch`, each sweep sends at most four complete redaction batches before waiting 2 s and discovering fresh targets. Recent/live batches and history retain the scheduler's three-to-one preference; a long line remains one indivisible redaction batch. Full facts are posted at most every 10 s, after a complete sweep only; a bounded partial sweep never commits a complete source inventory. Optional status heartbeats continue during backfill.
-- **Credential.** `semon connect --to HTTPS_URL [--machine NAME]` installs a mirror-only enrollment after mutually confirmed pairing and explicit terminal approval. `--receiver URL` also selects the endpoint on connect. `semon disconnect --receiver URL` disables only local use after terminal confirmation, retaining history, keys, consent and audits. `semon push [--receiver URL] [--watch]` reads its protected origin custody; it sends the bearer only in the `Authorization` header. The superseded push `--to`/`--token-file` CLI is removed.
+- **Credential.** `semon pair URL CODE` atomically installs URL, token and machine ID in private pair.json. Advanced `semon push [--watch]` reads it by default and sends the Bearer only in the Authorization header. `semon unpair` revokes it and removes local pairing configuration. Old custody can still be selected explicitly with `push --receiver URL` until its removal in P3.
 
 ## Sealed copies on the receiver
 
@@ -189,7 +189,7 @@ Full `/facts` requests optionally carry paired `mirror_observation_id` and `mirr
 
 `machines/<machine-id>/archive/` is the receiver's raw archive (`semon_sessions::archive`):
 
-- `sources.log` maps each mirrored file (`<root>/<path>`) to a random `archive_source_id`: one JSON record per line, appended and synced under the archive lock before anything is written under the new id, so another instance reuses the id and a crash cannot orphan a directory. A torn final line is ignored and cut off by the next append. Every journal read holds the archive's shared flock, and every write (including torn-tail repair) holds its exclusive flock; the flock is always acquired before the in-memory cache mutex.
+- `sources.log` maps each received file (`<root>/<path>`) to a random `archive_source_id`: one JSON record per line, appended and synced under the archive lock before anything is written under the new id, so another instance reuses the id and a crash cannot orphan a directory. A torn final line is ignored and cut off by the next append. Every journal read holds the archive's shared flock, and every write (including torn-tail repair) holds its exclusive flock; the flock is always acquired before the in-memory cache mutex.
 - `<archive_source_id>/manifest.json` names its source (so a directory can always be attributed) and lists that file's chains in order. Each entry has a random `chain_id`, the plain `length`, the `sha256` of the plain bytes, the stored size and the `redactor_version`. A manifest is published by writing a temporary file, syncing it, renaming it over the old one and syncing the directory, so a failure before the rename leaves the last manifest intact.
 - `<archive_source_id>/<chain_id>.zst` is one immutable chain: the logical bytes of the file as they were just before a `replace`.
 - Before a replace, the receiver records in the copy's `.seal/` directory that a chain holds its bytes, but only for the seal that describes that file (bound to it, or agreeing with its bytes). A seal left by other content is not certified. The custody record binds the seal generation to an archive directory, source and exact chain record (including its length and digest). Immediately before retirement (`seal`, `tidy`, `forget`), the archive verification cache rechecks that chain's file identity and manifest, and the chain's bytes are compared directly with every named segment, under the shared archive flock through deletion. Missing, damaged or mismatched custody keeps the segments. Only that verified generation's named files are removed. Unnamed segments survive even if a new manifest is created after a lost one; `forget` never recursively deletes a directory and refuses while unverified files remain.

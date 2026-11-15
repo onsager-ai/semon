@@ -129,55 +129,12 @@ impl Fixture {
     }
 
     fn install_origin(&self, url: &str) {
-        use semon_push::{
-            credentials::Kind, enrollment::Binding, pairing::ActivationInput,
-            provision_wire::Activated,
-        };
-        let base = self.path("config/semon/origin");
-        if base.exists() {
-            return;
-        }
-        let encoded = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgL_E8qFEyPcpHM_jv-bQj0alxU3tkrY_1OSwOWVOwhs-hRANCAATA08frMi95YZiy3BekFDqwQHAS2SIpv7yA1ckqs3drjLLJqCyFKRx7VY_MJawLw_RbjwOyGKFasQHvnfrO1MUQ";
-        let private = semon_push::provision_wire::decode_fixed::<138>(encoded).unwrap();
-        let scope = ActivationInput {
-            receiver_id: "receiver-test".into(),
+        semon_push::simple_pair::Config {
+            url: url.into(),
+            token: fs::read_to_string(self.path("token")).unwrap(),
             machine_id: "machine-6754a9c1e83f27b4".into(),
-            binding: Binding::Inapplicable,
-            kinds: vec![(Kind::MirrorPush, false)],
-            client_certificate_pins: vec![],
-            valid_until: u64::MAX,
-        };
-        let delivery = Activated {
-            version: 1,
-            enrollment_id: "enrollment-test".into(),
-            client_certificate: None,
-            credentials: vec![(
-                Kind::MirrorPush,
-                fs::read_to_string(self.path("token")).unwrap(),
-            )],
-        };
-        let home = self.path("home");
-        let options = semon_sessions::Options {
-            claude_home: home.join("claude"),
-            codex_home: home.join("codex"),
-            copilot_home: home.join("copilot"),
-            proc_root: home.join("proc"),
-            ..Default::default()
-        };
-        let sources = semon_sessions::inputs(&options)
-            .unwrap()
-            .iter()
-            .map(|input| input.full_path(&options))
-            .collect::<Vec<_>>();
-        semon_push::origin_custody::install(
-            &base,
-            url,
-            "machine-6754a9c1e83f27b4",
-            &scope,
-            &delivery,
-            &private,
-            &sources,
-        )
+        }
+        .save_at(&self.path("config/semon/pair.json"))
         .unwrap();
     }
 
@@ -186,7 +143,7 @@ impl Fixture {
         self.install_origin(url);
         let home = self.path("home");
         semon()
-            .args(["push", "--receiver", url])
+            .args(["push"])
             .arg("--state")
             .arg(self.path("state/push.json"))
             .arg("--claude-home")
@@ -399,7 +356,7 @@ fn push_mirrors_a_home_into_semon_receive() {
     assert_eq!(overview["machines"][0]["up"], true);
     core.close();
 
-    // New files after enrollment are not silently included in source consent.
+    // Paired push discovers new supported files on each pass.
     fixture.write(
         "home/claude/projects/-work-app/unapproved.jsonl",
         claude("future source").as_bytes(),
@@ -410,7 +367,7 @@ fn push_mirrors_a_home_into_semon_receive() {
     let pushed = fixture.push(&url);
     assert_ok(&pushed, "the push after a rewrite");
     assert!(
-        !machine
+        machine
             .join("claude/projects/-work-app/unapproved.jsonl")
             .exists()
     );
@@ -491,7 +448,7 @@ fn push_watch_stops_on(name: &str, number: i32) {
     let home = fixture.path("home");
     fixture.install_origin(&url);
     let mut watch = semon()
-        .args(["push", "--watch", "--receiver", &url])
+        .args(["push", "--watch"])
         .env("XDG_CONFIG_HOME", fixture.path("config"))
         .arg("--state")
         .arg(fixture.path("state/push.json"))
