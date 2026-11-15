@@ -112,6 +112,7 @@ pub(crate) fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
 /// short snapshot lock and never takes the Viewer locks or starts its workers.
 pub(crate) struct MachineView {
     pub(crate) evidence: Arc<NativeEvidence>,
+    pub(crate) received_machine: RwLock<Option<crate::received_registry::ReceivedMachine>>,
     /// Its [`Refresh`] mode ([`Refresh::code`]).
     mode: AtomicU8,
     shown: RwLock<Shown>,
@@ -849,6 +850,7 @@ impl MachineView {
     pub(crate) fn from_evidence(evidence: Arc<NativeEvidence>) -> Arc<Self> {
         Arc::new_cyclic(|me| Self {
             evidence,
+            received_machine: RwLock::default(),
             mode: AtomicU8::new(Refresh::OnRead.code()),
             shown: RwLock::default(),
             live: Live {

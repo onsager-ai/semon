@@ -1,0 +1,93 @@
+//! Shared machine metadata in the receiver's single enrollment registry.
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeSet, io, path::Path};
+
+pub const RECEIVER_FORMAT: u32 = 5;
+pub const REGISTRY_CAP: u64 = 4 * 1024 * 1024;
+pub const REENROLL: &str = "received machine has no current registry record; keep retained logs unchanged and re-enroll the machine";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReceivedMachine {
+    pub id: String,
+    /// Immutable name of the existing machines/<name>/ directory.
+    pub directory: String,
+    pub owner_name: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MachineAudit {
+    pub time: u64,
+    pub action: String,
+    pub ids: Vec<String>,
+    pub before: ReceivedMachine,
+    pub after: ReceivedMachine,
+}
+
+pub fn validate_machines(machines: &[ReceivedMachine]) -> bool {
+    let mut ids = BTreeSet::new();
+    let mut directories = BTreeSet::new();
+    machines.iter().all(|m| {
+        m.id.strip_prefix("machine-").is_some_and(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        }) && crate::is_machine_name(&m.directory)
+            && ids.insert(&m.id)
+            && directories.insert(&m.directory)
+            && m.owner_name.as_ref().is_none_or(|n| valid_owner_name(n))
+    })
+}
+
+pub fn valid_owner_name(name: &str) -> bool {
+    !name.trim().is_empty() && name.len() <= 253 && !name.chars().any(char::is_control)
+}
+
+/// Read the atomically published registry. No second metadata file is authoritative.
+pub fn read_machines(dir: &Path) -> io::Result<Vec<ReceivedMachine>> {
+    let bytes = crate::read_regular_at_most(&dir.join("enrollment/registry.json"), REGISTRY_CAP)?;
+    machines_from_bytes(&bytes)
+}
+
+pub fn machines_from_bytes(bytes: &[u8]) -> io::Result<Vec<ReceivedMachine>> {
+    let invalid = |message| io::Error::new(io::ErrorKind::InvalidData, message);
+    let value: serde_json::Value = serde_json::from_slice(bytes).map_err(io::Error::other)?;
+    if value["format"].as_u64() != Some(u64::from(RECEIVER_FORMAT)) {
+        return Err(invalid(
+            "unsupported receiver registry format; keep retained logs unchanged and re-enroll in a new receiver directory",
+        ));
+    }
+    let machines: Vec<ReceivedMachine> =
+        serde_json::from_value(value["machines"].clone()).map_err(io::Error::other)?;
+    if !validate_machines(&machines) {
+        return Err(invalid("invalid receiver machine records"));
+    }
+    Ok(machines)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn current_machine_records_round_trip_and_refuse_old_format() {
+        let machine = ReceivedMachine {
+            id: format!("machine-{}", "a".repeat(64)),
+            directory: "synthetic".into(),
+            owner_name: Some("Work laptop".into()),
+        };
+        let mut value =
+            serde_json::json!({"format": RECEIVER_FORMAT, "machines": [machine.clone()]});
+        assert_eq!(
+            machines_from_bytes(&serde_json::to_vec(&value).unwrap()).unwrap(),
+            vec![machine]
+        );
+        value["format"] = serde_json::json!(4);
+        assert!(
+            machines_from_bytes(&serde_json::to_vec(&value).unwrap())
+                .unwrap_err()
+                .to_string()
+                .contains("re-enroll")
+        );
+    }
+}

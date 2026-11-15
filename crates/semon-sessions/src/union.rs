@@ -470,7 +470,11 @@ fn native_machine_ids(views: &Views) -> Vec<String> {
     let mut labels = Vec::with_capacity(views.len());
     for (index, (key, view)) in views.iter().enumerate() {
         let hostname = crate::facts::MachineFacts::of(view.options()).hostname(view.options());
-        labels.push(machine_id(&hostname, key, index, &labels));
+        let metadata = read_lock(&view.received_machine);
+        labels.push(match metadata.as_ref() {
+            Some(machine) => machine.owner_name.clone().unwrap_or(hostname),
+            None => machine_id(&hostname, key, index, &labels),
+        });
     }
     labels
 }
@@ -491,7 +495,7 @@ fn identity_plan(parts: &[IdentityPart<'_>], droppable: usize) -> Plan {
     }
     let mut owners: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let mut conflicts = BTreeSet::new();
-    let mut dropped = vec![BTreeSet::new(); parts.len()];
+    let dropped = vec![BTreeSet::new(); parts.len()];
     for (index, part) in parts.iter().enumerate() {
         let ids: BTreeSet<&String> = part
             .sessions
@@ -499,14 +503,14 @@ fn identity_plan(parts: &[IdentityPart<'_>], droppable: usize) -> Plan {
             .chain(part.transcripts.keys())
             .collect();
         for id in ids {
-            let served = if session_local(part.sessions, id) {
+            let served = if part.key.starts_with("machine-") {
+                format!("{id}@{}", part.key)
+            } else if session_local(part.sessions, id) {
                 format!("{id}@{}", machine_ids[index])
             } else {
                 id.clone()
             };
-            if owners.contains_key(&served) && index >= droppable {
-                dropped[index].insert(id.clone());
-            } else if owners.insert(served.clone(), (index, id.clone())).is_some() {
+            if owners.insert(served.clone(), (index, id.clone())).is_some() {
                 conflicts.insert(served);
             }
         }
@@ -530,12 +534,16 @@ pub(crate) struct QueryRead {
 pub(crate) struct QueryPart {
     pub(crate) data: Arc<QueryData>,
     pub(crate) machine: Option<String>,
+    pub(crate) source: String,
     pub(crate) dropped: BTreeSet<String>,
     pub(crate) droppable: bool,
 }
 
 impl QueryPart {
     pub(crate) fn served(&self, id: &str) -> String {
+        if self.source.starts_with("machine-") {
+            return format!("{id}@{}", self.source);
+        }
         match &self.machine {
             Some(machine) if session_local(&self.data.sessions, id) => format!("{id}@{machine}"),
             _ => id.to_owned(),
@@ -559,11 +567,12 @@ impl QueryRead {
         let parts = machines
             .into_iter()
             .enumerate()
-            .map(|(index, (_, data))| QueryPart {
+            .map(|(index, (source, data))| QueryPart {
+                source,
                 data,
                 machine: multiple.then(|| plan.machine_ids[index].clone()),
                 dropped: plan.dropped[index].clone(),
-                droppable: multiple && index >= plan.droppable,
+                droppable: false,
             })
             .collect();
         Self { parts, plan }
@@ -590,12 +599,13 @@ impl QueryRead {
     }
 }
 /// Sets `machine` on a V1 tree node and every node under it.
-fn tag(node: &mut Value, machine: &str) {
+fn tag(node: &mut Value, machine: &str, source: &str) {
     if let Some(fields) = node.as_object_mut() {
         fields.insert("machine".into(), Value::from(machine));
+        fields.insert("source".into(), Value::from(source));
         if let Some(Value::Array(children)) = fields.get_mut("children") {
             for child in children {
-                tag(child, machine);
+                tag(child, machine, source);
             }
         }
     }
@@ -762,14 +772,14 @@ impl ViewerCore {
     /// Brings the served machines in line with the received ones, when
     /// this core follows any: one pass over `DIR/machines/`, and changes
     /// only where it differs from the last. One request follows at a time.
-    fn follow(&self) {
+    fn follow(&self) -> io::Result<()> {
         let Some(received) = &self.received else {
-            return;
+            return Ok(());
         };
         let mut following = lock(&received.following);
-        let listing = following.machines.scan();
+        let listing = following.machines.scan()?;
         if following.seen.as_ref() == Some(&listing) {
-            return;
+            return Ok(());
         }
         let previous = following.seen.take().unwrap_or_default();
         let fixed = received.fixed;
@@ -832,7 +842,7 @@ impl ViewerCore {
                 continue;
             };
             let options = machines.options(name, seen);
-            let view = match old.remove(name) {
+            let view = match old.remove(&seen.machine.id) {
                 Some(view)
                     if view.options().claude_home == options.claude_home
                         && view.options().codex_home == options.codex_home
@@ -842,7 +852,7 @@ impl ViewerCore {
                 }
                 replaced => {
                     gone.extend(replaced);
-                    self.view(name, options)
+                    self.view(&seen.machine.id, options)
                 }
             };
             if previous
@@ -851,12 +861,13 @@ impl ViewerCore {
                 .is_none_or(|before| before.facts != seen.facts || before.stale != seen.stale)
             {
                 let sources = crate::SessionSources::from_evidence(vec![(
-                    name.clone(),
+                    seen.machine.id.clone(),
                     view.evidence.clone(),
                 )]);
                 machines.copy_facts(name, seen, hosts, warned, &sources);
             }
-            next.push((name.clone(), view));
+            *write_lock(&view.received_machine) = Some(seen.machine.clone());
+            next.push((seen.machine.id.clone(), view));
         }
         gone.extend(old.into_values());
         *write_lock(&self.views) = Arc::new(next);
@@ -869,6 +880,7 @@ impl ViewerCore {
             view.retire();
             retired.push(Arc::downgrade(&view));
         }
+        Ok(())
     }
 
     /// How many machines this core serves.
@@ -1098,7 +1110,9 @@ impl ViewerCore {
         if path.starts_with("/session/") {
             return self.session_page(path, query);
         }
-        self.follow();
+        if let Err(error) = self.follow() {
+            return failed(&error);
+        }
         let views = self.views();
         if path == "/api/session-sources" {
             return self.source_inventory(&views).page(query);
@@ -1220,7 +1234,9 @@ impl ViewerCore {
             Ok(route) => route,
             Err(_) => return text(400, "Malformed session address"),
         };
-        self.follow();
+        if let Err(error) = self.follow() {
+            return failed(&error);
+        }
         let views = self.views();
         if views
             .iter()
@@ -1698,13 +1714,6 @@ impl ViewerCore {
         }
         reply
     }
-    /// The first view whose ids an earlier view's win over: the first
-    /// received machine's.
-    fn droppable(&self) -> usize {
-        self.received
-            .as_ref()
-            .map_or(usize::MAX, |received| received.fixed)
-    }
     /// The caller-supplied machine key that owns a served session. Hostnames
     /// are presentation labels; embedders use this key to bind native controls.
     /// Missing or ambiguous native IDs never select a writable destination.
@@ -1718,7 +1727,7 @@ impl ViewerCore {
         let Some(_entered) = self.open.enter() else {
             return Ok(None);
         };
-        self.follow();
+        self.follow()?;
         let views = self.views();
         let labels = native_machine_ids(&views);
         let lookup = |view: &MachineView,
@@ -1788,11 +1797,8 @@ impl ViewerCore {
             let source = if key.is_empty() { "local" } else { key };
             match lookup(view, source, id) {
                 Ok(Some(_)) => {
-                    // Received copies give way to an earlier qualified owner.
                     if selected.is_some() {
-                        if index < self.droppable() {
-                            return Ok(None);
-                        }
+                        return Ok(None);
                     } else {
                         selected = Some((key.clone(), labels[index].clone()));
                     }
@@ -1806,7 +1812,9 @@ impl ViewerCore {
             && let Some((own, label)) = id.rsplit_once('@')
         {
             for (index, (key, view)) in views.iter().enumerate() {
-                if labels[index] != label {
+                if (key.starts_with("machine-") && key != label)
+                    || (!key.starts_with("machine-") && labels[index] != label)
+                {
                     continue;
                 }
                 let source = if key.is_empty() { "local" } else { key };
@@ -1834,19 +1842,12 @@ impl ViewerCore {
         // Tree identity depends on configured machine names and keys, not a
         // full Viewer model or its transcript/analytics ownership projection.
         let machine_ids = native_machine_ids(views);
-        let droppable = self.droppable();
         let mut roots = Vec::new();
-        let mut seen = BTreeSet::new();
-        for (index, (_, view)) in views.iter().enumerate() {
+        for (index, (key, view)) in views.iter().enumerate() {
             let machine = machine_ids.get(index).cloned().unwrap_or_default();
             for root in view.tree_roots()? {
-                // A received machine's copy of a root an earlier machine
-                // has is left out using the existing received-copy policy.
-                if !seen.insert((root.harness.clone(), root.id.clone())) && index >= droppable {
-                    continue;
-                }
                 let mut root = serde_json::to_value(&root).map_err(io::Error::other)?;
-                tag(&mut root, &machine);
+                tag(&mut root, &machine, key);
                 roots.push(root);
             }
         }

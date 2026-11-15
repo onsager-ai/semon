@@ -88,6 +88,7 @@ pub(crate) struct Seen {
     pub(crate) facts: FactsSeen,
     /// The facts file is older than [`STALE_AFTER`].
     pub(crate) stale: bool,
+    pub(crate) machine: crate::received_registry::ReceivedMachine,
 }
 
 /// Every entry of `DIR/machines/`, by name: a machine, or `None` for an
@@ -123,10 +124,11 @@ impl ReceivedMachines {
 
     /// One pass over `DIR/machines/`: file types and the facts file's stamp
     /// only, nothing opened.
-    pub(crate) fn scan(&self) -> Listing {
+    pub(crate) fn scan(&self) -> io::Result<Listing> {
         let mut listing = BTreeMap::new();
+        let records = crate::received_registry::read_machines(&self.dir)?;
         let Ok(entries) = fs::read_dir(self.dir.join("machines")) else {
-            return listing;
+            return Ok(listing);
         };
         let now = SystemTime::now();
         for entry in entries.flatten() {
@@ -139,6 +141,16 @@ impl ReceivedMachines {
                 listing.insert(format!("{file_name:?}"), None);
                 continue;
             };
+            let machine = records
+                .iter()
+                .find(|m| m.directory == name)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("machine {name}: {}", crate::received_registry::REENROLL),
+                    )
+                })?
+                .clone();
             let root = entry.path();
             let claude = root.join("claude");
             let codex = root.join("codex");
@@ -175,10 +187,11 @@ impl ReceivedMachines {
                     }
                 },
                 stale,
+                machine,
             };
             listing.insert(name.to_owned(), Some(seen));
         }
-        listing
+        Ok(listing)
     }
 
     /// Machine `name`'s options: its homes under DIR (or nowhere, for a home
@@ -186,7 +199,7 @@ impl ReceivedMachines {
     /// directory. `proc_root` and `claude_json` are never read with facts.
     pub(crate) fn options(&self, name: &str, seen: &Seen) -> Options {
         let root = self.dir.join("machines").join(name);
-        let state = self.state.join(name);
+        let state = self.state.join(&seen.machine.id);
         // Never created: a home that can't be read reads as empty.
         let nowhere = state.join("none");
         Options {
@@ -283,7 +296,7 @@ impl ReceivedMachines {
             }
             .offline(modified_ms(&root)),
         };
-        let copy = self.state.join(name).join("facts.json");
+        let copy = self.state.join(&seen.machine.id).join("facts.json");
         // A heartbeat refreshes the receiver's liveness stamp, but identical
         // normalized facts must not rewrite this copy and rebuild every model.
         if read_facts(&copy).is_ok_and(|previous| previous == facts) {
@@ -294,7 +307,8 @@ impl ReceivedMachines {
         // acquire that mutex. Serialize publication under the same facts fence
         // as hosted receivers, and retain dirty work if publication fails.
         let publish = || -> io::Result<()> {
-            let intent = crate::SessionFactsWrite::begin_observed_in(sources, name, &facts)?;
+            let intent =
+                crate::SessionFactsWrite::begin_observed_in(sources, &seen.machine.id, &facts)?;
             crate::write_facts(&copy, &facts)?;
             intent.complete()
         };
@@ -373,6 +387,20 @@ mod tests {
                 ..Options::default()
             },
         );
+        let metadata = crate::received_registry::ReceivedMachine {
+            id: format!("machine-{}", "a".repeat(64)),
+            directory: "synthetic".into(),
+            owner_name: None,
+        };
+        fs::create_dir_all(root.join("input/enrollment")).unwrap();
+        fs::write(
+            root.join("input/enrollment/registry.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "format": crate::received_registry::RECEIVER_FORMAT, "machines": [metadata.clone()]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let mut facts = Facts {
             version: FACTS_VERSION,
             hostname: "synthetic".into(),
@@ -382,10 +410,10 @@ mod tests {
         let mut warned = BTreeSet::new();
         let copy = |facts: &Facts, warned: &mut BTreeSet<String>| {
             crate::write_facts(&incoming.join("facts.json"), facts).unwrap();
-            let listing = receiver.scan();
+            let listing = receiver.scan().unwrap();
             let seen = listing["synthetic"].as_ref().unwrap();
             let sources = crate::SessionSources::with_machines(vec![(
-                "synthetic".into(),
+                metadata.id.clone(),
                 receiver.options("synthetic", seen),
             )]);
             receiver.copy_facts("synthetic", seen, &[], warned, &sources);

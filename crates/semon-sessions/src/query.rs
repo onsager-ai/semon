@@ -509,7 +509,10 @@ impl View {
                 }
                 // The tools expose only these session fields. Pricing tables,
                 // workspace transport and per-transcript growth marks stay out.
-                let row = session_fields(session, part.machine.as_deref());
+                let mut row = session_fields(session, part.machine.as_deref());
+                if part.source.starts_with("machine-") {
+                    row["source"] = json!(part.source);
+                }
                 sessions.insert(part.served(id), row);
             }
             for (id, own) in &part.data.facts {

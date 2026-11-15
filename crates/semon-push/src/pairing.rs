@@ -872,6 +872,7 @@ impl Core {
                 enrollment.sequence = fresh.next_sequence;
                 fresh.next_sequence = fresh.next_sequence.checked_add(1).ok_or(Error::Invalid)?;
                 fresh.latest = now.max(fresh.latest);
+                fresh.ensure_machine(&enrollment.machine)?;
                 fresh.enrollments.push(enrollment);
                 fresh.credentials.extend(added_bearers);
                 fresh.pairing_receipts.push(receipt);

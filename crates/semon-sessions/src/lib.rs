@@ -157,6 +157,7 @@ mod source_inventory;
 pub use source_inventory::SessionSourceInventory;
 mod history_projection;
 mod received;
+pub mod received_registry;
 mod refresh;
 mod repo;
 pub mod sealed;

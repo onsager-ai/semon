@@ -528,3 +528,33 @@ fn address_commit_crashes_never_mix_old_records_and_endpoint_authority() {
         assert_eq!(allowed, current.endpoint() == before.endpoint());
     }
 }
+
+#[test]
+fn machine_identity_continuity_and_transactional_name_audit() {
+    let f = Fixture::new();
+    let mut store = Store::initialize(&f.0).unwrap();
+    let mut r = Registry::empty();
+    let first = r.ensure_machine("laptop").unwrap();
+    assert_eq!(first, r.ensure_machine("laptop").unwrap());
+    assert_ne!(first, r.ensure_machine("desktop").unwrap());
+    assert!(first.starts_with("machine-"));
+    assert_eq!(first.len(), 72);
+    store.commit(0, &r).unwrap();
+    store.name_machine(&first, Some("Work"), 10).unwrap();
+    let named = store.snapshot().unwrap();
+    assert_eq!(named.machines[0].owner_name.as_deref(), Some("Work"));
+    assert_eq!(named.machine_audit.len(), 1);
+    assert_eq!(named.machine_audit[0].ids, vec![first.clone()]);
+    assert_eq!(named.machine_audit[0].before.owner_name, None);
+    store.name_machine(&first, None, 11).unwrap();
+    let cleared = store.snapshot().unwrap();
+    assert_eq!(cleared.machines[0].owner_name, None);
+    assert_eq!(cleared.machine_audit.len(), 2);
+    assert_eq!(cleared.machine_audit[1].action, "name_clear");
+    assert_eq!(cleared.machines[0].id, first);
+    assert!(store.name_machine("unknown", Some("Work"), 12).is_err());
+    assert_eq!(
+        Registry::parse(&serde_json::to_vec(&cleared).unwrap()).unwrap(),
+        cleared
+    );
+}
