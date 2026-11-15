@@ -1169,9 +1169,8 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
             if !terminal.is_terminal() {
                 return Err("receive enroll requires a trusted local terminal".into());
             }
-            let mut predecessor = None;
             if options.dir.join("enrollment").exists() {
-                let mut registry = semon_push::enrollment::Registry::read_current(&options.dir)
+                let registry = semon_push::enrollment::Registry::read_current(&options.dir)
                     .map_err(|e| {
                         e.to_string()
                             .replace("DIR", &options.dir.display().to_string())
@@ -1210,30 +1209,12 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
                             now,
                         )
                         .map_err(|e| e.to_string())?;
-                    registry = store.snapshot().map_err(|e| e.to_string())?;
-                }
-                predecessor = registry.usable_machine(&machine, now).map(str::to_owned);
-                if predecessor.is_some()
-                    && !receive_owner::confirm(
-                        &mut terminal,
-                        &format!(
-                            "Replace the active enrollment for machine {machine}? Its access will stop when pairing completes. Type yes to confirm: "
-                        ),
-                    )?
-                {
-                    writeln!(
-                        terminal,
-                        "Enrollment replacement cancelled; nothing changed."
-                    )
-                    .map_err(|e| e.to_string())?;
-                    return Ok(());
                 }
             }
             let controller = Arc::new(Mutex::new(semon_push::provision::Controller::open(
                 &options.dir,
                 &advertise,
                 machine,
-                predecessor,
             )?));
             let server = semon_push::serve::Server::bind(&options)?
                 .with_provisioning(Arc::clone(&controller))?;

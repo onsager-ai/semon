@@ -38,7 +38,8 @@ impl Drop for Fixture {
 fn input() -> ActivationInput {
     ActivationInput {
         receiver_id: "receiver-1".into(),
-        machine: "laptop".into(),
+        machine: "machine-6754a9c1e83f27b4".into(),
+        machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, false)],
         client_certificate_pins: vec![],
@@ -557,35 +558,6 @@ fn full_happy_path_and_interrupted_delivery_recovery_after_restart() {
     .unwrap();
     assert!(!String::from_utf8(bytes).unwrap().contains(&first_secret));
 }
-#[test]
-fn activation_refuses_a_changed_confirmed_predecessor_or_absence() {
-    for confirmed_existing in [false, true] {
-        let f = Fixture::new();
-        let mut core = f.core();
-        if confirmed_existing {
-            let (t, _) = confirmed(&mut core, "original", 100);
-            core.approve(evidence(&t), 100).unwrap();
-            let original = core.activate(&t.session_id, input(), 100).unwrap();
-            core.bind_predecessor(Some(original.enrollment_id));
-        }
-        let (pending, _) = confirmed(&mut core, "pending", 101);
-        core.approve(evidence(&pending), 101).unwrap();
-        // A competing approved session commits after the owner's observation.
-        let (competitor, _) = confirmed(&mut core, "competitor", 101);
-        core.approve(evidence(&competitor), 101).unwrap();
-        let winner = core.activate(&competitor.session_id, input(), 101).unwrap();
-        let before = core.registry().unwrap();
-        assert!(matches!(
-            core.activate(&pending.session_id, input(), 102),
-            Err(Error::Terminal)
-        ));
-        assert_eq!(core.registry().unwrap(), before);
-        assert_eq!(
-            before.usable_machine("laptop", 102),
-            Some(winner.enrollment_id.as_str())
-        );
-    }
-}
 
 #[test]
 fn cancellation_expiry_replay_competing_keys_and_duplicate_approval() {
@@ -742,7 +714,7 @@ fn replacement_enrollment_preserves_generated_machine_identity() {
     core.approve(evidence(&first), 100).unwrap();
     let enrolled = core.activate(&first.session_id, input(), 100).unwrap();
     let before = core.registry().unwrap().machines()[0].clone();
-    core.bind_predecessor(Some(enrolled.enrollment_id));
+    let _ = enrolled;
     let (replacement, _) = confirmed(&mut core, "replacement", 101);
     core.approve(evidence(&replacement), 101).unwrap();
     core.activate(&replacement.session_id, input(), 101)

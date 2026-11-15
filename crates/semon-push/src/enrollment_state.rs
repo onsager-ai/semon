@@ -22,19 +22,19 @@ pub enum OwnerState {
     LastKind,
 }
 impl Registry {
-    /// Enrollment names locate storage; only the generated ID identifies a machine.
-    pub(crate) fn ensure_machine(&mut self, directory: &str) -> Result<String> {
-        if let Some(machine) = self.machines.iter().find(|m| m.directory == directory) {
-            return Ok(machine.id.clone());
+    pub(crate) fn ensure_machine(&mut self, id: &str, name: &str) -> Result<()> {
+        if !semon_sessions::machine_id::valid(id) {
+            return Err(Error::Invalid);
         }
-        let id = format!("machine-{}", random_id()?);
-        self.machines
-            .push(semon_sessions::received_registry::ReceivedMachine {
-                id: id.clone(),
-                directory: directory.into(),
-                owner_name: None,
-            });
-        Ok(id)
+        if !self.machines.iter().any(|m| m.id == id) {
+            self.machines
+                .push(semon_sessions::received_registry::ReceivedMachine {
+                    id: id.into(),
+                    directory: id.into(),
+                    owner_name: Some(name.into()),
+                });
+        }
+        Ok(())
     }
     pub(crate) fn check_admission(&self) -> Result<()> {
         let size = serde_json::to_vec(self).map_err(|_| Error::Invalid)?.len() as u64;

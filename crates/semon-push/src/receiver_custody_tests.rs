@@ -171,7 +171,7 @@ fn generated_key_signs_and_verifies_pinned_assertion() {
         claim_epoch: 1,
         nonce: [1; 32],
         subject_principal: custody.owner.principal.clone(),
-        machine: "laptop".into(),
+        machine: "machine-6754a9c1e83f27b4".into(),
         namespace: "work".into(),
         acl_grant_version: "grant".into(),
         receiver_policy_version: "policy".into(),
@@ -310,19 +310,24 @@ fn crash_before_identity_refuses_without_replacing_keys() {
 fn owner_grants_are_pending_exact_and_revocable_per_enrollment() {
     let f = Fixture::new();
     let custody = f.open();
-    let grants = owner_grants(custody.owner(), "laptop", "work", false).unwrap();
+    let grants = owner_grants(custody.owner(), "machine-6754a9c1e83f27b4", "work", false).unwrap();
     let policy = receiver_acl::Policy::parse(&grants_document(&grants).unwrap()).unwrap();
     assert!(matches!(
         policy.decide(
             &custody.owner.principal,
-            "laptop",
+            "machine-6754a9c1e83f27b4",
             "work",
             Permission::Analytics
         ),
         Decision::Granted(_)
     ));
     for (principal, machine, namespace, permission) in [
-        ("stranger", "laptop", "work", Permission::Analytics),
+        (
+            "stranger",
+            "machine-6754a9c1e83f27b4",
+            "work",
+            Permission::Analytics,
+        ),
         (
             &custody.owner.principal,
             "other",
@@ -331,13 +336,13 @@ fn owner_grants_are_pending_exact_and_revocable_per_enrollment() {
         ),
         (
             &custody.owner.principal,
-            "laptop",
+            "machine-6754a9c1e83f27b4",
             "other",
             Permission::Analytics,
         ),
         (
             &custody.owner.principal,
-            "laptop",
+            "machine-6754a9c1e83f27b4",
             "work",
             Permission::BodyRead,
         ),
@@ -351,7 +356,7 @@ fn owner_grants_are_pending_exact_and_revocable_per_enrollment() {
     let decide = || {
         acls.decide(
             &custody.owner.principal,
-            "laptop",
+            "machine-6754a9c1e83f27b4",
             "work",
             Permission::Analytics,
         )
@@ -364,7 +369,7 @@ fn owner_grants_are_pending_exact_and_revocable_per_enrollment() {
         custody.install_owner_grants(&id(2), &grants),
         Err(Error::Conflict)
     );
-    let wider = owner_grants(custody.owner(), "laptop", "work", true).unwrap();
+    let wider = owner_grants(custody.owner(), "machine-6754a9c1e83f27b4", "work", true).unwrap();
     assert_eq!(
         custody.install_owner_grants(&id(1), &wider),
         Err(Error::Conflict)
@@ -403,7 +408,7 @@ fn real_acl_transaction_unlocks_even_with_a_duplicated_descriptor() {
     let acl = root.child(ACL).unwrap();
     let guard = acl.lock("owners.lock").unwrap();
     let inherited = guard.0.try_clone().unwrap();
-    let grants = owner_grants(custody.owner(), "laptop", "work", false).unwrap();
+    let grants = owner_grants(custody.owner(), "machine-6754a9c1e83f27b4", "work", false).unwrap();
     assert_eq!(
         custody.install_owner_grants(&id(1), &grants),
         Err(Error::InUse)
@@ -418,7 +423,7 @@ fn durable_redo_completes_acl_installation() {
     let f = Fixture::new();
     let custody = f.open();
     let acl = Directory::open(&custody.acl_dir()).unwrap();
-    let grants = owner_grants(custody.owner(), "laptop", "work", true).unwrap();
+    let grants = owner_grants(custody.owner(), "machine-6754a9c1e83f27b4", "work", true).unwrap();
     let ledger = GrantLedger {
         format: 1,
         enrollments: BTreeMap::from([(id(1), grants.clone())]),
@@ -430,7 +435,7 @@ fn durable_redo_completes_acl_installation() {
     assert!(matches!(
         Acls::new(custody.acl_dir()).decide(
             &custody.owner.principal,
-            "laptop",
+            "machine-6754a9c1e83f27b4",
             "work",
             Permission::BodyRead
         ),
@@ -538,7 +543,8 @@ fn pending_retirement_recovers_before_and_after_acl_publication() {
     for already_published in [false, true] {
         let f = Fixture::new();
         let custody = f.open();
-        let removed = owner_grants(custody.owner(), "laptop", "work", true).unwrap();
+        let removed =
+            owner_grants(custody.owner(), "machine-6754a9c1e83f27b4", "work", true).unwrap();
         let retained = owner_grants(custody.owner(), "desktop", "personal", false).unwrap();
         custody.install_owner_grants(&id(1), &removed).unwrap();
         custody.install_owner_grants(&id(2), &retained).unwrap();
@@ -564,7 +570,7 @@ fn pending_retirement_recovers_before_and_after_acl_publication() {
         assert_eq!(
             acls.decide(
                 &custody.owner.principal,
-                "laptop",
+                "machine-6754a9c1e83f27b4",
                 "work",
                 Permission::Analytics
             ),
@@ -611,7 +617,7 @@ fn revoke_between_activation_and_install_never_restores_grants() {
     let enrollment = Enrollment {
         enrollment_id: id(1),
         receiver_id: custody.receiver_id().into(),
-        machine: "laptop".into(),
+        machine: "machine-6754a9c1e83f27b4".into(),
         sequence: 1,
         origin_key: vec![4; 65],
         endpoint: "https://receiver.example:443".into(),
@@ -639,7 +645,7 @@ fn revoke_between_activation_and_install_never_restores_grants() {
     drop(store);
     let grants = owner_grants(
         custody.owner(),
-        "laptop",
+        "machine-6754a9c1e83f27b4",
         "asi-0123456789abcdef0123456789abcdef",
         false,
     )
@@ -683,8 +689,7 @@ fn recorded_endpoint_is_normalized_and_retained() {
         crate::provision::Controller::open(
             &f.0,
             "https://different.example",
-            "laptop".into(),
-            None
+            "machine-6754a9c1e83f27b4".into()
         )
         .err()
         .unwrap()

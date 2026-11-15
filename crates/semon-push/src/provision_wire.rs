@@ -351,6 +351,7 @@ mod tests {
                     input: pairing::ActivationInput {
                         receiver_id: "receiver-1".into(),
                         machine: "laptop".into(),
+                        machine_id: "machine-6754a9c1e83f27b4".into(),
                         binding: crate::enrollment::Binding::Inapplicable,
                         kinds: vec![(crate::credentials::Kind::MirrorPush, false)],
                         client_certificate_pins: vec![],

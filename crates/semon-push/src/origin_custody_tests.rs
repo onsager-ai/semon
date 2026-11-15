@@ -30,10 +30,11 @@ impl Fixture {
         install(
             &self.0,
             endpoint,
-            "laptop",
+            "machine-6754a9c1e83f27b4",
             &ActivationInput {
                 receiver_id: "receiver".into(),
-                machine: "laptop".into(),
+                machine: "machine-6754a9c1e83f27b4".into(),
+                machine_id: "machine-6754a9c1e83f27b4".into(),
                 binding: Binding::Inapplicable,
                 kinds: vec![(Kind::MirrorPush, false)],
                 client_certificate_pins: vec![],
@@ -109,7 +110,8 @@ fn invalid_client_certificate_never_publishes_origin_custody() {
     let until = now + 3600;
     let scope = ActivationInput {
         receiver_id: "receiver".into(),
-        machine: "laptop".into(),
+        machine: "machine-6754a9c1e83f27b4".into(),
+        machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, true)],
         client_certificate_pins: vec![crate::client_ca::pin(key.public_key_raw()).unwrap()],
@@ -138,7 +140,7 @@ fn invalid_client_certificate_never_publishes_origin_custody() {
             install(
                 &f.0,
                 "https://receiver.example:443",
-                "laptop",
+                "machine-6754a9c1e83f27b4",
                 &scope,
                 &delivery,
                 &key.serialize_der(),
@@ -160,7 +162,8 @@ fn certificate_clock_refuses_future_install_and_expired_load() {
         crate::client_ca::issue(&ca, now, key.public_key_raw(), "enrollment", now, until).unwrap();
     let scope = ActivationInput {
         receiver_id: "receiver".into(),
-        machine: "laptop".into(),
+        machine: "machine-6754a9c1e83f27b4".into(),
+        machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, true)],
         client_certificate_pins: vec![crate::client_ca::pin(key.public_key_raw()).unwrap()],
@@ -177,7 +180,7 @@ fn certificate_clock_refuses_future_install_and_expired_load() {
         install_at(
             &f.0,
             "https://receiver.example:443",
-            "laptop",
+            "machine-6754a9c1e83f27b4",
             &scope,
             &delivery,
             &key.serialize_der(),
@@ -191,7 +194,7 @@ fn certificate_clock_refuses_future_install_and_expired_load() {
     install_at(
         &f.0,
         "https://receiver.example:443",
-        "laptop",
+        "machine-6754a9c1e83f27b4",
         &scope,
         &delivery,
         &key.serialize_der(),

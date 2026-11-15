@@ -284,7 +284,7 @@ impl Registry {
                 |m: &semon_sessions::received_registry::ReceivedMachine| m.directory == e.machine,
             ) {
                 machine_records.push(semon_sessions::received_registry::ReceivedMachine {
-                    id: format!("machine-{}", random_id()?),
+                    id: e.machine.clone(),
                     directory: e.machine.clone(),
                     owner_name: None,
                 });
@@ -343,6 +343,7 @@ impl Registry {
                 || match entry.action.as_str() {
                     "name_set" => entry.after.owner_name.is_none(),
                     "name_clear" => entry.after.owner_name.is_some(),
+                    "paired" | "paired_replacement" => entry.before != entry.after,
                     _ => true,
                 }
         }) {

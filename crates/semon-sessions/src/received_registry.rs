@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, io, path::Path};
 
-pub const RECEIVER_FORMAT: u32 = 5;
+pub const RECEIVER_FORMAT: u32 = 6;
 pub const REGISTRY_CAP: u64 = 4 * 1024 * 1024;
 pub const REENROLL: &str = "received machine has no current registry record; keep retained logs unchanged and re-enroll the machine";
 
@@ -29,11 +29,8 @@ pub fn validate_machines(machines: &[ReceivedMachine]) -> bool {
     let mut ids = BTreeSet::new();
     let mut directories = BTreeSet::new();
     machines.iter().all(|m| {
-        m.id.strip_prefix("machine-").is_some_and(|s| {
-            s.len() == 64
-                && s.bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        }) && crate::is_machine_name(&m.directory)
+        crate::machine_id::valid(&m.id)
+            && m.directory == m.id
             && ids.insert(&m.id)
             && directories.insert(&m.directory)
             && m.owner_name.as_ref().is_none_or(|n| valid_owner_name(n))
@@ -84,8 +81,8 @@ mod tests {
     #[test]
     fn current_machine_records_round_trip_and_refuse_old_format() {
         let machine = ReceivedMachine {
-            id: format!("machine-{}", "a".repeat(64)),
-            directory: "synthetic".into(),
+            id: format!("machine-{}", "a".repeat(16)),
+            directory: format!("machine-{}", "a".repeat(16)),
             owner_name: Some("Work laptop".into()),
         };
         let mut value =

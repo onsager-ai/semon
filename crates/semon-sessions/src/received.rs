@@ -373,7 +373,7 @@ mod tests {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        let incoming = root.join("input/machines/synthetic");
+        let incoming = root.join("input/machines/machine-aaaaaaaaaaaaaaaa");
         fs::create_dir_all(&incoming).unwrap();
         let selected = "sessions/2026/10/19/selected.jsonl";
         let log = incoming.join("codex").join(selected);
@@ -388,8 +388,8 @@ mod tests {
             },
         );
         let metadata = crate::received_registry::ReceivedMachine {
-            id: format!("machine-{}", "a".repeat(64)),
-            directory: "synthetic".into(),
+            id: format!("machine-{}", "a".repeat(16)),
+            directory: "machine-aaaaaaaaaaaaaaaa".into(),
             owner_name: None,
         };
         fs::create_dir_all(root.join("input/enrollment")).unwrap();
@@ -411,13 +411,13 @@ mod tests {
         let copy = |facts: &Facts, warned: &mut BTreeSet<String>| {
             crate::write_facts(&incoming.join("facts.json"), facts).unwrap();
             let listing = receiver.scan(&mut BTreeSet::new()).unwrap();
-            let seen = listing["synthetic"].as_ref().unwrap();
+            let seen = listing["machine-aaaaaaaaaaaaaaaa"].as_ref().unwrap();
             let sources = crate::SessionSources::with_machines(vec![(
                 metadata.id.clone(),
-                receiver.options("synthetic", seen),
+                receiver.options("machine-aaaaaaaaaaaaaaaa", seen),
             )]);
-            receiver.copy_facts("synthetic", seen, &[], warned, &sources);
-            receiver.options("synthetic", seen)
+            receiver.copy_facts("machine-aaaaaaaaaaaaaaaa", seen, &[], warned, &sources);
+            receiver.options("machine-aaaaaaaaaaaaaaaa", seen)
         };
         let options = copy(&facts, &mut warned);
         assert!(

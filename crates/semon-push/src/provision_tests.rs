@@ -20,8 +20,7 @@ impl Fixture {
         Controller::open(
             &self.0,
             "https://receiver.example:443",
-            "laptop".into(),
-            None,
+            "machine-6754a9c1e83f27b4".into(),
         )
         .unwrap()
     }
@@ -136,7 +135,8 @@ fn key() -> EcdsaKeyPair {
 fn input(controller: &Controller, now: u64) -> pairing::ActivationInput {
     pairing::ActivationInput {
         receiver_id: controller.custody.receiver_id().into(),
-        machine: "laptop".into(),
+        machine: "machine-6754a9c1e83f27b4".into(),
+        machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, false)],
         client_certificate_pins: vec![],
@@ -444,7 +444,7 @@ fn exact_expiry_cancellation_and_receiver_policy_refuse_without_activation() {
     input.kinds = vec![(Kind::MirrorPush, false), (Kind::MirrorPush, false)];
     assert!(controller.validate_input(&input, 700).is_err());
     input.kinds = vec![(Kind::MirrorPush, false)];
-    input.machine = "foreign".into();
+    input.machine_id = "foreign".into();
     assert!(controller.validate_input(&input, 700).is_err());
     assert!(controller.core.registry().unwrap().enrollments().is_empty());
 }

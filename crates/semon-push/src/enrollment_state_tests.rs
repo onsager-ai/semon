@@ -63,7 +63,7 @@ fn revoke_is_terminal_and_rerun_reports_state() {
     store.commit(0, &r).unwrap();
     assert_eq!(
         store.snapshot().unwrap().owner_state(
-            "laptop",
+            "machine-6754a9c1e83f27b4",
             Some(Kind::MirrorPush),
             OwnerAction::Revoke,
             20
@@ -81,7 +81,7 @@ fn revoke_is_terminal_and_rerun_reports_state() {
         Decision::Refused
     );
     assert!(matches!(
-        ended.owner_state("laptop", None, OwnerAction::Revoke, 20),
+        ended.owner_state("machine-6754a9c1e83f27b4", None, OwnerAction::Revoke, 20),
         OwnerState::Complete { .. }
     ));
     assert_eq!(store.snapshot().unwrap().revision(), ended.revision());
@@ -196,7 +196,7 @@ fn replacement_requires_a_fresh_confirmation() {
     store.commit(next.revision(), &next).unwrap();
     let current = store.snapshot().unwrap();
     assert!(
-        matches!(current.owner_state("laptop", None, OwnerAction::Revoke, 20), OwnerState::Confirm { enrollment_id, .. } if enrollment_id == id('c'))
+        matches!(current.owner_state("machine-6754a9c1e83f27b4", None, OwnerAction::Revoke, 20), OwnerState::Confirm { enrollment_id, .. } if enrollment_id == id('c'))
     );
     assert_eq!(
         store.owner_update(&f.0, None, OwnerAction::Revoke, "owner", &id('a'), 20),
@@ -254,7 +254,7 @@ fn supported_three_kind_live_capacity_and_tombstones_fit_admission() {
     for n in 1..=128u64 {
         let mut enrollment = template.enrollments[0].clone();
         enrollment.enrollment_id = format!("{n:064x}");
-        enrollment.machine = format!("machine-{n}");
+        enrollment.machine = format!("machine-{n:016x}");
         enrollment.sequence = n;
         let pin = Pin::Spki(Secret::new(format!("pin-{n}")).hash());
         enrollment.enrolled_pin = Some(pin.clone());
@@ -409,7 +409,11 @@ fn address_change_atomically_ends_authority_without_mutating_enrollments() {
             .decision,
         Decision::Refused
     );
-    assert!(after.usable_machine("laptop", 20).is_none());
+    assert!(
+        after
+            .usable_machine("machine-6754a9c1e83f27b4", 20)
+            .is_none()
+    );
     drop(store);
     assert!(Store::authorize_cutover(&f.0, Kind::MirrorPush, &secret, None, 20).is_err());
     let current = Store::open(&f.0).unwrap().snapshot().unwrap();
@@ -464,7 +468,7 @@ fn revoked_new_address_tombstone_remains_the_owner_target() {
             .any(|t| t.enrollment_id == id('c'))
     );
     assert!(matches!(
-        current.owner_state("laptop", None, OwnerAction::Revoke, 20),
+        current.owner_state("machine-6754a9c1e83f27b4", None, OwnerAction::Revoke, 20),
         OwnerState::Complete { .. }
     ));
     assert_eq!(store.snapshot().unwrap(), current);
@@ -534,18 +538,20 @@ fn machine_identity_continuity_and_transactional_name_audit() {
     let f = Fixture::new();
     let mut store = Store::initialize(&f.0).unwrap();
     let mut r = Registry::empty();
-    let first = r.ensure_machine("laptop").unwrap();
-    assert_eq!(first, r.ensure_machine("laptop").unwrap());
-    assert_ne!(first, r.ensure_machine("desktop").unwrap());
-    assert!(first.starts_with("machine-"));
-    assert_eq!(first.len(), 72);
+    let first = "machine-6754a9c1e83f27b4".to_owned();
+    r.ensure_machine(&first, "Work").unwrap();
+    r.ensure_machine(&first, "Other").unwrap();
+    assert_eq!(r.machines.len(), 1);
     store.commit(0, &r).unwrap();
     store.name_machine(&first, Some("Work"), 10).unwrap();
     let named = store.snapshot().unwrap();
     assert_eq!(named.machines[0].owner_name.as_deref(), Some("Work"));
     assert_eq!(named.machine_audit.len(), 1);
     assert_eq!(named.machine_audit[0].ids, vec![first.clone()]);
-    assert_eq!(named.machine_audit[0].before.owner_name, None);
+    assert_eq!(
+        named.machine_audit[0].before.owner_name.as_deref(),
+        Some("Work")
+    );
     store.name_machine(&first, None, 11).unwrap();
     let cleared = store.snapshot().unwrap();
     assert_eq!(cleared.machines[0].owner_name, None);

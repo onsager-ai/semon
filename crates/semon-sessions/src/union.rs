@@ -428,6 +428,13 @@ struct Plan {
     owners: BTreeMap<String, (usize, String)>,
     /// Ids two machines both claim: refused.
     conflicts: BTreeSet<String>,
+    /// For each machine, its own session ids an earlier machine already
+    /// serves: left out. Only a received machine's are (see
+    /// [`Plan::droppable`]); between fixed machines a shared id is refused.
+    dropped: Vec<BTreeSet<String>>,
+    /// The first machine whose ids an earlier machine's win over: the first
+    /// received machine. `usize::MAX` without received machines.
+    droppable: usize,
 }
 
 /// Which machine answers for a session id.
@@ -475,13 +482,12 @@ fn native_machine_ids(views: &Views) -> Vec<String> {
 /// evidence and compatibility transport. A version hash belongs only to the latter.
 struct IdentityPart<'a> {
     key: &'a str,
-    received: bool,
     machine: &'a str,
     sessions: &'a BTreeMap<String, Session>,
     transcripts: &'a BTreeMap<String, Arc<Transcript>>,
 }
 
-fn identity_plan(parts: &[IdentityPart<'_>]) -> Plan {
+fn identity_plan(parts: &[IdentityPart<'_>], droppable: usize) -> Plan {
     let mut machine_ids: Vec<String> = Vec::new();
     for (index, part) in parts.iter().enumerate() {
         let id = machine_id(part.machine, part.key, index, &machine_ids);
@@ -489,6 +495,7 @@ fn identity_plan(parts: &[IdentityPart<'_>]) -> Plan {
     }
     let mut owners: BTreeMap<String, (usize, String)> = BTreeMap::new();
     let mut conflicts = BTreeSet::new();
+    let mut dropped = vec![BTreeSet::new(); parts.len()];
     for (index, part) in parts.iter().enumerate() {
         let ids: BTreeSet<&String> = part
             .sessions
@@ -496,14 +503,14 @@ fn identity_plan(parts: &[IdentityPart<'_>]) -> Plan {
             .chain(part.transcripts.keys())
             .collect();
         for id in ids {
-            let served = if part.received {
-                format!("{id}@{}", part.key)
-            } else if session_local(part.sessions, id) {
+            let served = if session_local(part.sessions, id) {
                 format!("{id}@{}", machine_ids[index])
             } else {
                 id.clone()
             };
-            if owners.insert(served.clone(), (index, id.clone())).is_some() {
+            if owners.contains_key(&served) && index >= droppable {
+                dropped[index].insert(id.clone());
+            } else if owners.insert(served.clone(), (index, id.clone())).is_some() {
                 conflicts.insert(served);
             }
         }
@@ -512,6 +519,8 @@ fn identity_plan(parts: &[IdentityPart<'_>]) -> Plan {
         machine_ids,
         owners,
         conflicts,
+        dropped,
+        droppable,
     }
 }
 
@@ -525,15 +534,12 @@ pub(crate) struct QueryRead {
 pub(crate) struct QueryPart {
     pub(crate) data: Arc<QueryData>,
     pub(crate) machine: Option<String>,
-    pub(crate) source: String,
-    pub(crate) received: bool,
+    pub(crate) dropped: BTreeSet<String>,
+    pub(crate) droppable: bool,
 }
 
 impl QueryPart {
     pub(crate) fn served(&self, id: &str) -> String {
-        if self.received {
-            return format!("{id}@{}", self.source);
-        }
         match &self.machine {
             Some(machine) if session_local(&self.data.sessions, id) => format!("{id}@{machine}"),
             _ => id.to_owned(),
@@ -542,27 +548,26 @@ impl QueryPart {
 }
 
 impl QueryRead {
-    pub(crate) fn new(machines: Vec<(String, Arc<QueryData>, bool)>) -> Self {
+    pub(crate) fn new(machines: Vec<(String, Arc<QueryData>)>, droppable: usize) -> Self {
         let identities: Vec<_> = machines
             .iter()
-            .map(|(key, data, received)| IdentityPart {
+            .map(|(key, data)| IdentityPart {
                 key,
-                received: *received,
                 machine: &data.machine_id,
                 sessions: &data.sessions,
                 transcripts: &data.tx,
             })
             .collect();
-        let plan = identity_plan(&identities);
+        let plan = identity_plan(&identities, droppable);
         let multiple = machines.len() > 1;
         let parts = machines
             .into_iter()
             .enumerate()
-            .map(|(index, (source, data, received))| QueryPart {
-                received,
-                source,
+            .map(|(index, (_, data))| QueryPart {
                 data,
                 machine: multiple.then(|| plan.machine_ids[index].clone()),
+                dropped: plan.dropped[index].clone(),
+                droppable: multiple && index >= plan.droppable,
             })
             .collect();
         Self { parts, plan }
@@ -571,7 +576,7 @@ impl QueryRead {
     pub(crate) fn owner(&self, id: &str) -> Owner {
         match self.parts.len() {
             0 => Owner::Missing,
-            1 if !self.parts[0].received => Owner::At(0, id.to_owned()),
+            1 => Owner::At(0, id.to_owned()),
             _ if self.plan.conflicts.contains(id) => Owner::Conflict,
             _ => match self.plan.owners.get(id) {
                 Some((index, own)) => Owner::At(*index, own.clone()),
@@ -1714,6 +1719,13 @@ impl ViewerCore {
         }
         reply
     }
+    /// The first view whose ids an earlier view's win over: the first
+    /// received machine's.
+    fn droppable(&self) -> usize {
+        self.received
+            .as_ref()
+            .map_or(usize::MAX, |received| received.fixed)
+    }
     /// The caller-supplied machine key that owns a served session. Hostnames
     /// are presentation labels; embedders use this key to bind native controls.
     /// Missing or ambiguous native IDs never select a writable destination.
@@ -1797,8 +1809,11 @@ impl ViewerCore {
             let source = if key.is_empty() { "local" } else { key };
             match lookup(view, source, id) {
                 Ok(Some(_)) => {
+                    // Received copies give way to an earlier qualified owner.
                     if selected.is_some() {
-                        return Ok(None);
+                        if index < self.droppable() {
+                            return Ok(None);
+                        }
                     } else {
                         selected = Some((key.clone(), labels[index].clone()));
                     }
@@ -1812,14 +1827,13 @@ impl ViewerCore {
             && let Some((own, label)) = id.rsplit_once('@')
         {
             for (index, (key, view)) in views.iter().enumerate() {
-                let received = read_lock(&view.evidence.received_machine).is_some();
-                if (received && key != label) || (!received && labels[index] != label) {
+                if labels[index] != label {
                     continue;
                 }
                 let source = if key.is_empty() { "local" } else { key };
                 match lookup(view, source, own) {
                     Ok(Some(_)) if selected.is_none() => {
-                        selected = Some((key.clone(), labels[index].clone()))
+                        selected = Some((key.clone(), label.to_owned()))
                     }
                     Ok(Some(_)) | Err(_) => return Ok(None),
                     Ok(None) => {}
@@ -1841,12 +1855,19 @@ impl ViewerCore {
         // Tree identity depends on configured machine names and keys, not a
         // full Viewer model or its transcript/analytics ownership projection.
         let machine_ids = native_machine_ids(views);
+        let droppable = self.droppable();
         let mut roots = Vec::new();
-        for (index, (key, view)) in views.iter().enumerate() {
+        let mut seen = BTreeSet::new();
+        for (index, (_, view)) in views.iter().enumerate() {
             let machine = machine_ids.get(index).cloned().unwrap_or_default();
             for root in view.tree_roots()? {
+                // A received machine's copy of a root an earlier machine
+                // has is left out using the existing received-copy policy.
+                if !seen.insert((root.harness.clone(), root.id.clone())) && index >= droppable {
+                    continue;
+                }
                 let mut root = serde_json::to_value(&root).map_err(io::Error::other)?;
-                tag(&mut root, &machine, key);
+                tag(&mut root, &machine, &views[index].0);
                 roots.push(root);
             }
         }
@@ -1892,54 +1913,6 @@ impl ViewerCore {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn received_same_native_id_keeps_both_canonical_sources() {
-        let first = format!("machine-{}", "a".repeat(64));
-        let second = format!("machine-{}", "b".repeat(64));
-        let sessions = BTreeMap::new();
-        let transcript = Arc::new(Transcript::default());
-        let transcripts = BTreeMap::from([("shared".to_owned(), transcript)]);
-        let parts = [
-            IdentityPart {
-                key: &first,
-                received: true,
-                machine: "same-host",
-                sessions: &sessions,
-                transcripts: &transcripts,
-            },
-            IdentityPart {
-                key: &second,
-                received: true,
-                machine: "same-host",
-                sessions: &sessions,
-                transcripts: &transcripts,
-            },
-        ];
-        let plan = identity_plan(&parts);
-        assert_eq!(plan.owners.len(), 2);
-        assert_eq!(
-            plan.owners[&format!("shared@{first}")],
-            (0, "shared".into())
-        );
-        assert_eq!(
-            plan.owners[&format!("shared@{second}")],
-            (1, "shared".into())
-        );
-        assert!(plan.conflicts.is_empty());
-        let fixed = [IdentityPart {
-            key: &first,
-            received: false,
-            machine: "fixed-host",
-            sessions: &sessions,
-            transcripts: &transcripts,
-        }];
-        let plan = identity_plan(&fixed);
-        assert!(
-            plan.owners.contains_key("shared"),
-            "fixed key prefix never marks a received source"
-        );
-    }
 
     #[test]
     fn native_ownership_tracks_configuration_rewrites_and_removal() {

@@ -59,9 +59,12 @@ impl Root {
         root.write("proc/locks", "");
         root.write("proc/sys/kernel/hostname", "homebox\n");
         root.claude("claude", "lane-home");
-        root.claude("received/machines/alpha/claude", "lane-alpha");
+        root.claude(
+            "received/machines/machine-aaaaaaaaaaaaaaaa/claude",
+            "lane-alpha",
+        );
         root.write(
-            "received/machines/alpha/facts.json",
+            "received/machines/machine-aaaaaaaaaaaaaaaa/facts.json",
             &json!({"version": 2, "hostname": "alpha", "home": null, "proc_starts": {},
                 "codex_locks": {}, "repos": {}, "repo_ids": {}})
             .to_string(),
@@ -70,7 +73,7 @@ impl Root {
             json!({"timestamp": time, "type": kind, "payload": payload}).to_string() + "\n"
         };
         root.write(
-            "received/machines/bravo/codex/sessions/2026/09/24/rollout-lane-bravo.jsonl",
+            "received/machines/machine-bbbbbbbbbbbbbbbb/codex/sessions/2026/09/24/rollout-lane-bravo.jsonl",
             &[
                 codex(
                     ts(bravo_age + 3 * MINUTE),
@@ -93,8 +96,8 @@ impl Root {
         root.write("received/enrollment/registry.json", &json!({
             "format": semon_sessions::received_registry::RECEIVER_FORMAT,
             "machines": [
-                {"id": format!("machine-{}", "a".repeat(64)), "directory":"alpha", "owner_name":null},
-                {"id": format!("machine-{}", "b".repeat(64)), "directory":"bravo", "owner_name":null}
+                {"id": format!("machine-{}", "a".repeat(16)), "directory":"machine-aaaaaaaaaaaaaaaa", "owner_name":null},
+                {"id": format!("machine-{}", "b".repeat(16)), "directory":"machine-bbbbbbbbbbbbbbbb", "owner_name":null}
             ]
         }).to_string());
         root
@@ -232,11 +235,14 @@ fn machines_shows_this_machine_and_every_received_one_and_only_reads_dir() {
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("received machine bravo") && stderr.contains("offline"),
+        stderr.contains("received machine machine-bbbbbbbbbbbbbbbb") && stderr.contains("offline"),
         "{stderr}"
     );
     let overview = root.overview(true);
-    assert_eq!(machine_ids(&overview), ["homebox", "alpha", "bravo"]);
+    assert_eq!(
+        machine_ids(&overview),
+        ["homebox", "alpha", "machine-bbbbbbbbbbbbbbbb"]
+    );
     assert_eq!(overview["machines"][1]["up"], true);
     assert_eq!(overview["machines"][2]["up"], false);
     let tree: Value = serde_json::from_slice(&output.stdout).unwrap();
@@ -244,7 +250,7 @@ fn machines_shows_this_machine_and_every_received_one_and_only_reads_dir() {
     let expected: BTreeMap<String, String> = [
         ("lane-home", "homebox"),
         ("lane-alpha", "alpha"),
-        ("lane-bravo", "bravo"),
+        ("lane-bravo", "machine-bbbbbbbbbbbbbbbb"),
     ]
     .into_iter()
     .map(|(sid, machine)| (sid.to_owned(), machine.to_owned()))
@@ -261,7 +267,10 @@ fn machines_shows_this_machine_and_every_received_one_and_only_reads_dir() {
         "--no-local",
     ]);
     let overview = root.overview(false);
-    assert_eq!(machine_ids(&overview), ["alpha", "bravo"]);
+    assert_eq!(
+        machine_ids(&overview),
+        ["alpha", "machine-bbbbbbbbbbbbbbbb"]
+    );
     assert!(!roots(&tree).contains_key("lane-home"));
     assert_eq!(roots(&tree).len(), 2);
 
@@ -281,7 +290,7 @@ fn received_machines_keep_the_local_window_rules() {
         .append(true)
         .open(
             root.0
-                .join("received/machines/bravo/codex/sessions/2026/09/24/rollout-lane-bravo.jsonl"),
+                .join("received/machines/machine-bbbbbbbbbbbbbbbb/codex/sessions/2026/09/24/rollout-lane-bravo.jsonl"),
         )
         .unwrap()
         .set_modified(old)
@@ -290,7 +299,10 @@ fn received_machines_keep_the_local_window_rules() {
     assert!(recent.contains_key("lane-home") && recent.contains_key("lane-alpha"));
     assert!(!recent.contains_key("lane-bravo"), "{recent:?}");
     let all = roots(&root.json(&["sessions", "--json", "--all", "--machines", dir]));
-    assert_eq!(all.get("lane-bravo").map(String::as_str), Some("bravo"));
+    assert_eq!(
+        all.get("lane-bravo").map(String::as_str),
+        Some("machine-bbbbbbbbbbbbbbbb")
+    );
 }
 
 #[test]
@@ -356,8 +368,8 @@ fn shared_owner_names_group_display_but_keep_machine_sources() {
     root.write("received/enrollment/registry.json", &json!({
         "format": semon_sessions::received_registry::RECEIVER_FORMAT,
         "machines": [
-            {"id":format!("machine-{}", "a".repeat(64)), "directory":"alpha", "owner_name":"Work"},
-            {"id":format!("machine-{}", "b".repeat(64)), "directory":"bravo", "owner_name":"Work"}
+            {"id":format!("machine-{}", "a".repeat(16)), "directory":"machine-aaaaaaaaaaaaaaaa", "owner_name":"Work"},
+            {"id":format!("machine-{}", "b".repeat(16)), "directory":"machine-bbbbbbbbbbbbbbbb", "owner_name":"Work"}
         ]
     }).to_string());
     let tree = root.json(&[

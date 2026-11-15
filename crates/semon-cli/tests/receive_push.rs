@@ -142,6 +142,7 @@ impl Fixture {
         let scope = ActivationInput {
             receiver_id: "receiver-test".into(),
             machine: "laptop".into(),
+            machine_id: "machine-6754a9c1e83f27b4".into(),
             binding: Binding::Inapplicable,
             kinds: vec![(Kind::MirrorPush, false)],
             client_certificate_pins: vec![],
@@ -170,7 +171,13 @@ impl Fixture {
             .map(|input| input.full_path(&options))
             .collect::<Vec<_>>();
         semon_push::origin_custody::install(
-            &base, url, "laptop", &scope, &delivery, &private, &sources,
+            &base,
+            url,
+            "machine-6754a9c1e83f27b4",
+            &scope,
+            &delivery,
+            &private,
+            &sources,
         )
         .unwrap();
     }
@@ -224,7 +231,12 @@ impl Fixture {
 
     /// The receiver's copy of a file under the home.
     fn copy(&self, relative: &str) -> Vec<u8> {
-        fs::read(self.dir().join("machines/laptop").join(relative)).unwrap_or_default()
+        fs::read(
+            self.dir()
+                .join("machines/machine-6754a9c1e83f27b4")
+                .join(relative),
+        )
+        .unwrap_or_default()
     }
 
     /// The file under the home as a push sends it.
@@ -283,7 +295,7 @@ fn enroll_fixture(dir: &Path) -> String {
         vec![Enrollment {
             enrollment_id: id.clone(),
             receiver_id: "receiver-1".into(),
-            machine: "laptop".into(),
+            machine: "machine-6754a9c1e83f27b4".into(),
             sequence: 1,
             origin_key: vec![4; 65],
             endpoint: "https://receiver.example:443".into(),
@@ -352,7 +364,7 @@ fn push_mirrors_a_home_into_semon_receive() {
     assert!(!String::from_utf8_lossy(&fixture.copy(LOG)).contains(SECRET));
     assert_eq!(fixture.copy(ROLLOUT), fixture.redacted(ROLLOUT));
     assert!(fixture.copy(ROLLOUT).len() > 100);
-    let machine = dir.join("machines/laptop");
+    let machine = dir.join("machines/machine-6754a9c1e83f27b4");
     assert!(!machine.join("claude/settings.json").exists());
     let facts = semon_sessions::read_facts(&machine.join("facts.json")).unwrap();
     assert_eq!(facts.hostname, "laptop");

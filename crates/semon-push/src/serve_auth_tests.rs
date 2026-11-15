@@ -260,7 +260,7 @@ pub(super) fn records(cert_required: bool) -> Registry {
     let enrollment = Enrollment {
         enrollment_id: "a".repeat(64),
         receiver_id: "receiver-1".into(),
-        machine: "laptop".into(),
+        machine: "machine-6754a9c1e83f27b4".into(),
         sequence: 1,
         origin_key: vec![4; 65],
         endpoint: "https://receiver.example:443".into(),
@@ -834,9 +834,12 @@ fn real_tls_exporter_completes_receiver_pairing_and_activation() {
     use ring::signature::KeyPair;
     let dir = PrivateDir::new();
     // Custody initializes only an absent/empty receiver root.
-    let mut controller =
-        provision::Controller::open(&dir.0, "https://localhost:443", "laptop".into(), None)
-            .unwrap();
+    let mut controller = provision::Controller::open(
+        &dir.0,
+        "https://localhost:443",
+        "machine-6754a9c1e83f27b4".into(),
+    )
+    .unwrap();
     let (mut tls, mut client) = tls_pair(None);
     handshake(&mut tls, &mut client).unwrap();
     assert_eq!(
@@ -879,7 +882,8 @@ fn real_tls_exporter_completes_receiver_pairing_and_activation() {
     .unwrap();
     let input = pairing::ActivationInput {
         receiver_id: opened.receiver_id.clone(),
-        machine: "laptop".into(),
+        machine: "machine-6754a9c1e83f27b4".into(),
+        machine_id: "machine-6754a9c1e83f27b4".into(),
         binding: Binding::Inapplicable,
         kinds: vec![(Kind::MirrorPush, false)],
         client_certificate_pins: vec![],

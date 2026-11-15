@@ -30,9 +30,12 @@ impl Harness {
             "https://localhost:443",
         )
         .unwrap();
-        let controller =
-            provision::Controller::open(&dir.0, "https://localhost:443", "laptop".into(), None)
-                .unwrap();
+        let controller = provision::Controller::open(
+            &dir.0,
+            "https://localhost:443",
+            "machine-6754a9c1e83f27b4".into(),
+        )
+        .unwrap();
         let clock = Arc::new(AtomicU64::new(100));
         let codes = Arc::new(Mutex::new(HashMap::new()));
         let clock_hook = Arc::clone(&clock);
@@ -134,7 +137,8 @@ impl Harness {
             .unwrap()
             .receiver_id()
             .into(),
-            machine: "laptop".into(),
+            machine: "machine-6754a9c1e83f27b4".into(),
+            machine_id: "machine-6754a9c1e83f27b4".into(),
             binding: crate::enrollment::Binding::Inapplicable,
             kinds: vec![(Kind::MirrorPush, false)],
             client_certificate_pins: vec![],
@@ -230,7 +234,7 @@ fn ordinary_renewal(required_certificate: bool) {
         vec![Enrollment {
             enrollment_id: id.clone(),
             receiver_id: "receiver".into(),
-            machine: "laptop".into(),
+            machine: "machine-6754a9c1e83f27b4".into(),
             sequence: 1,
             origin_key: key.public_key().as_ref().to_vec(),
             endpoint: "https://localhost:443".into(),
@@ -548,7 +552,7 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     };
     let name = crate::connect::connect_with(
         "https://localhost:443",
-        "laptop",
+        "machine-6754a9c1e83f27b4",
         &mut terminal,
         &origin,
         &h.dir.0.join("analytics-state"),
@@ -645,7 +649,7 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     production
         .send_facts(&semon_sessions::Facts {
             version: semon_sessions::FACTS_VERSION,
-            hostname: "laptop".into(),
+            hostname: "machine-6754a9c1e83f27b4".into(),
             ..Default::default()
         })
         .unwrap();
@@ -654,7 +658,7 @@ fn origin_connect_over_real_tls_installs_usable_mirror_credential() {
     let (mut client, worker) = h.connect_identity(Some(&identity));
     let bytes = serde_json::to_vec(&semon_sessions::Facts {
         version: semon_sessions::FACTS_VERSION,
-        hostname: "laptop".into(),
+        hostname: "machine-6754a9c1e83f27b4".into(),
         ..Default::default()
     })
     .unwrap();
@@ -775,7 +779,7 @@ fn origin_decline_malformed_and_expired_never_write_custody() {
         assert!(
             crate::connect::connect_with(
                 "https://localhost:443",
-                "laptop",
+                "machine-6754a9c1e83f27b4",
                 &mut terminal,
                 &origin,
                 &h.dir.0.join("analytics-state"),
@@ -817,7 +821,7 @@ fn origin_substitution_mac_mismatch_and_delivery_recovery() {
         let mut connections = 0;
         let result = crate::connect::connect_with(
             "https://localhost:443",
-            "laptop",
+            "machine-6754a9c1e83f27b4",
             &mut terminal,
             &origin,
             &h.dir.0.join("analytics-state"),
@@ -1274,5 +1278,9 @@ fn http_authenticated_analytics_reports_unavailable_without_authority() {
             .join(crate::receiver_acl::ACL_FILE),
     )
     .unwrap();
-    assert!(!String::from_utf8(acl).unwrap().contains("laptop"));
+    assert!(
+        !String::from_utf8(acl)
+            .unwrap()
+            .contains("machine-6754a9c1e83f27b4")
+    );
 }

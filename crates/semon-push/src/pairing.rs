@@ -294,7 +294,6 @@ pub enum State {
     Revoked,
 }
 struct Session {
-    predecessor: Option<String>,
     binding: String,
     created: u64,
     confirmed: Option<u64>,
@@ -401,7 +400,7 @@ pub struct Core {
     gate: Gate,
     sessions: BTreeMap<String, Session>,
     gate_unavailable: bool,
-    predecessor: Option<String>,
+    owner_name: Option<String>,
 }
 impl Core {
     /// Fresh registry fields populate origin_read::EnrollmentScope; no extra
@@ -422,11 +421,11 @@ impl Core {
             gate,
             sessions: BTreeMap::new(),
             gate_unavailable: false,
-            predecessor: None,
+            owner_name: None,
         })
     }
-    pub(crate) fn bind_predecessor(&mut self, predecessor: Option<String>) {
-        self.predecessor = predecessor;
+    pub(crate) fn set_owner_name(&mut self, name: String) {
+        self.owner_name = Some(name);
     }
     fn observe(&mut self, now: u64) -> Result<u64> {
         if self.gate_unavailable {
@@ -509,7 +508,6 @@ impl Core {
         self.sessions.insert(
             session_id.clone(),
             Session {
-                predecessor: self.predecessor.clone(),
                 binding: connection_binding,
                 created: now,
                 confirmed: None,
@@ -688,6 +686,7 @@ pub(crate) fn validate_receipts(registry: &Registry) -> Result<()> {
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ActivationInput {
+    pub machine_id: String,
     pub receiver_id: String,
     pub machine: String,
     pub binding: Binding,
@@ -702,6 +701,9 @@ impl ActivationInput {
     }
 }
 pub struct Delivery {
+    pub machine_id: String,
+    pub owner_name: Option<String>,
+    pub replaced: bool,
     pub enrollment_id: String,
     pub credentials: Vec<(Kind, Secret)>,
     pub client_certificate: Option<Vec<u8>>,
@@ -763,7 +765,10 @@ impl Core {
         }
         let t = session.transcript.as_ref().ok_or(Error::Invalid)?;
         let application = session.application.as_ref().ok_or(Error::Invalid)?;
-        if input.receiver_id != self.receiver_id || input.commitment() != t.scope {
+        if input.receiver_id != self.receiver_id
+            || input.commitment() != t.scope
+            || !semon_sessions::machine_id::valid(&input.machine_id)
+        {
             return Err(Error::Invalid);
         }
         let mut snapshot = self.store.snapshot()?; // fresh under lock; no stale cached authority
@@ -803,7 +808,7 @@ impl Core {
         let enrollment = Enrollment {
             enrollment_id: enrollment_id.clone(),
             receiver_id: self.receiver_id.clone(),
-            machine: input.machine,
+            machine: input.machine_id,
             sequence: snapshot.next_sequence,
             origin_key: t.origin_key.clone(),
             endpoint: t.endpoint.clone(),
@@ -848,39 +853,66 @@ impl Core {
             deliveries: u8::from(deliver),
             client_certificate: client_certificate.clone(),
         };
-        self.store
-            .pairing_transaction(snapshot.revision(), |fresh| {
-                if fresh.pairing_receipts.iter().any(|r| r.session_id == id) {
-                    return Err(Error::Terminal);
-                }
-                if fresh
-                    .endpoint
-                    .as_ref()
-                    .is_some_and(|endpoint| endpoint != &enrollment.endpoint)
-                {
-                    return Err(Error::Terminal);
-                }
-                fresh.endpoint = Some(enrollment.endpoint.clone());
-                if fresh.usable_machine(&enrollment.machine, now) != session.predecessor.as_deref()
-                {
-                    return Err(Error::Terminal);
-                }
-                if let Some(id) = &session.predecessor {
-                    fresh.revoke_enrollment(id, None, now);
-                }
-                let mut enrollment = enrollment;
-                enrollment.sequence = fresh.next_sequence;
-                fresh.next_sequence = fresh.next_sequence.checked_add(1).ok_or(Error::Invalid)?;
-                fresh.latest = now.max(fresh.latest);
-                fresh.ensure_machine(&enrollment.machine)?;
-                fresh.enrollments.push(enrollment);
-                fresh.credentials.extend(added_bearers);
-                fresh.pairing_receipts.push(receipt);
-                Ok(())
-            })?;
+        let (machine_id, owner_name, replaced) =
+            self.store
+                .pairing_transaction(snapshot.revision(), |fresh| {
+                    if fresh.pairing_receipts.iter().any(|r| r.session_id == id) {
+                        return Err(Error::Terminal);
+                    }
+                    if fresh
+                        .endpoint
+                        .as_ref()
+                        .is_some_and(|endpoint| endpoint != &enrollment.endpoint)
+                    {
+                        return Err(Error::Terminal);
+                    }
+                    fresh.endpoint = Some(enrollment.endpoint.clone());
+                    let predecessor = fresh
+                        .usable_machine(&enrollment.machine, now)
+                        .map(str::to_owned);
+                    if let Some(id) = &predecessor {
+                        fresh.revoke_enrollment(id, None, now);
+                    }
+                    let mut enrollment = enrollment;
+                    enrollment.sequence = fresh.next_sequence;
+                    fresh.next_sequence =
+                        fresh.next_sequence.checked_add(1).ok_or(Error::Invalid)?;
+                    fresh.latest = now.max(fresh.latest);
+                    fresh.ensure_machine(
+                        &enrollment.machine,
+                        self.owner_name.as_deref().unwrap_or(&input.machine),
+                    )?;
+                    let machine = fresh
+                        .machines
+                        .iter()
+                        .find(|m| m.id == enrollment.machine)
+                        .ok_or(Error::Invalid)?
+                        .clone();
+                    fresh
+                        .machine_audit
+                        .push(semon_sessions::received_registry::MachineAudit {
+                            time: now,
+                            action: if predecessor.is_some() {
+                                "paired_replacement"
+                            } else {
+                                "paired"
+                            }
+                            .into(),
+                            ids: vec![machine.id.clone()],
+                            before: machine.clone(),
+                            after: machine.clone(),
+                        });
+                    fresh.enrollments.push(enrollment);
+                    fresh.credentials.extend(added_bearers);
+                    fresh.pairing_receipts.push(receipt);
+                    Ok((machine.id, machine.owner_name, predecessor.is_some()))
+                })?;
         session.state = State::Active;
         session.application = None;
         Ok(Delivery {
+            machine_id,
+            owner_name,
+            replaced,
             enrollment_id,
             credentials,
             client_certificate,
@@ -936,6 +968,13 @@ impl Core {
                 return Err(Error::Terminal);
             }
             let delivery = Delivery {
+                machine_id: enrollment.machine.clone(),
+                owner_name: snapshot
+                    .machines
+                    .iter()
+                    .find(|m| m.id == enrollment.machine)
+                    .and_then(|m| m.owner_name.clone()),
+                replaced: false,
                 enrollment_id: receipt.enrollment_id.clone(),
                 client_certificate: receipt.client_certificate.clone(),
                 credentials: enrollment

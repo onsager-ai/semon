@@ -56,7 +56,7 @@ impl Fixture {
         let enrollment = Enrollment {
             enrollment_id: "a".repeat(64),
             receiver_id: "receiver".into(),
-            machine: "origin".into(),
+            machine: "machine-6754a9c1e83f27b4".into(),
             sequence: 1,
             origin_key: key.public_key().as_ref().to_vec(),
             endpoint: "https://receiver.example:443".into(),
@@ -236,7 +236,7 @@ fn renewal_first_use_cuts_over_each_kind_independently() {
     let e = &mut registry.enrollments[0];
     e.binding = Binding::Admitted {
         namespace: "namespace".into(),
-        origin_incarnation: "origin".into(),
+        origin_incarnation: "machine-6754a9c1e83f27b4".into(),
         index_incarnation: "index".into(),
         publisher_claim_epoch: crate::enrollment::ClaimEpoch::Unassigned,
         issuer: crate::enrollment::Issuer {

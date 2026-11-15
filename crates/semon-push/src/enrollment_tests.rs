@@ -44,7 +44,7 @@ fn enrollment(kind: Kind) -> Enrollment {
     Enrollment {
         enrollment_id: id('a'),
         receiver_id: "receiver-1".into(),
-        machine: "laptop".into(),
+        machine: "machine-6754a9c1e83f27b4".into(),
         sequence: 1,
         origin_key: vec![4; 65],
         endpoint: "https://receiver.example:443".into(),
@@ -242,7 +242,7 @@ fn duplicate_active_bindings_and_cross_enrollment_pins_refuse() {
     let mut other = r.enrollments[0].clone();
     other.enrollment_id = id('c');
     assert!(Registry::from_records(vec![r.enrollments[0].clone(), other.clone()], vec![]).is_err());
-    other.machine = "desktop".into();
+    other.machine = "machine-6754a9c100000002".into();
     assert!(Registry::from_records(vec![r.enrollments[0].clone(), other.clone()], vec![]).is_err());
     if let Binding::Admitted { namespace, .. } = &mut other.binding {
         *namespace = "other".into();
@@ -584,7 +584,7 @@ fn overlap_cutover_and_same_enrollment_generation_certificate_binding() {
     );
     let mut other = enrollment(Kind::BodyChannel);
     other.enrollment_id = id('d');
-    other.machine = "desktop".into();
+    other.machine = "machine-6754a9c100000002".into();
     if let Binding::Admitted { namespace, .. } = &mut other.binding {
         *namespace = "other".into();
     }
@@ -677,7 +677,7 @@ fn stale_snapshots_cannot_restore_replaced_pins_or_other_authority() {
     let mut stale = snapshot_a.clone();
     let mut other = enrollment(Kind::MirrorPush);
     other.enrollment_id = id('d');
-    other.machine = "desktop".into();
+    other.machine = "machine-6754a9c100000002".into();
     other.client_certificate_pins.clear();
     stale.enrollments.push(other);
     assert_eq!(

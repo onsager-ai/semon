@@ -20,10 +20,11 @@ impl Fixture {
         install_at(
             &f.0,
             ENDPOINT,
-            "laptop",
+            "machine-6754a9c1e83f27b4",
             &ActivationInput {
                 receiver_id: "a".repeat(64),
-                machine: "laptop".into(),
+                machine: "machine-6754a9c1e83f27b4".into(),
+                machine_id: "machine-6754a9c1e83f27b4".into(),
                 binding: Binding::Inapplicable,
                 kinds: vec![(Kind::MirrorPush, false)],
                 client_certificate_pins: vec![],
