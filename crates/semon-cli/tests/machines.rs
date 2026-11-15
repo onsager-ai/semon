@@ -352,7 +352,10 @@ fn machines_flags_are_checked() {
 #[test]
 fn unrecorded_machine_is_refused_while_other_sources_remain_visible() {
     let root = Root::new(MINUTE);
-    root.claude("received/machines/unrecorded/claude", "retained");
+    root.claude(
+        "received/machines/machine-cccccccccccccccc/claude",
+        "retained",
+    );
     let before = root.received();
     let output = root.semon(&["sessions", "--json", "--all", "--machines", &root.dir()]);
     assert!(output.status.success());
