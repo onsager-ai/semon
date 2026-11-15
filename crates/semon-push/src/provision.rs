@@ -269,6 +269,8 @@ impl Controller {
                 }
                 let grants = self.grants(&message.input.binding)?;
                 self.core.set_owner_name(self.machine.clone());
+                crate::mirror::Receiver::prepare_machine(&self.dir, &message.input.machine_id)
+                    .map_err(|_| Refused)?;
                 self.core.approve(evidence, now).map_err(|_| Refused)?;
                 let delivery = self
                     .core

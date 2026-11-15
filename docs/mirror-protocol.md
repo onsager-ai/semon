@@ -2,17 +2,19 @@
 
 `semon push` keeps a copy of this machine's session logs on another server, a *receiver*, and sends it the machine's facts, so `semon-sessions` can discover, index and query those native sources using the recorded facts (`Options::facts`). This document is the whole contract: any server that implements it can receive a push.
 
-`semon receive` is the reference receiver (`semon_push::mirror::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<name>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and 507 (the machine's copy would pass its size cap); a client treats either as a failure.
+`semon receive` is the reference receiver (`semon_push::mirror::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<machine-id>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and 507 (the machine's copy would pass its size cap); a client treats either as a failure.
 
-Registry format 5 additionally stores receiver-generated canonical machine IDs
-(`machine-<64 lowercase hex>`), immutable storage directory locators and optional
-owner display names. Re-enrolling a storage name retains its ID; new names receive
-new IDs. Equal owner names group presentation only. IDs remain the source keys;
-no history moves or merges. Name changes and their audit entries commit together.
-Received-machine discovery reads these same records and skips unrecorded directories
-with a re-enrollment warning, preserving service for recorded machines. Older receiver formats require a new directory
-and re-enrollment; retained logs are never migrated or deleted.
-
+Registry format 6 stores the origin-generated canonical machine ID
+(`machine-<8 lowercase hex Unix seconds><8 secure random hex digits>`), its
+identical directory locator and optional owner display name. `connect` commits
+the origin ID into the authenticated pairing input. The receiver creates
+`machines/<machine-id>/`; re-pairing that ID replaces its enrollment. The enroll
+NAME initializes only a new record's owner name; equal names group presentation.
+Pairing/replacement and name-change audit entries commit with registry state.
+Discovery uses the shared registry reader and skips unrecorded directories with
+a re-enrollment warning. Missing/unsupported registry refuses the received set.
+Old state requires a fresh receiver directory and re-enrollment; retained logs
+are never migrated, moved or deleted.
 
 The reference receiver requires the current enrollment registry and a separate
 `mirror_push` bearer credential scoped to one machine. `connect` installs the
@@ -61,7 +63,7 @@ for the bounded archive reader, coexistence/restart rules and upload experiment.
 - `bytes` holds the file bytes, as standard base64 with padding. One request carries at most 4 MiB of file bytes.
 - `offset` is where `bytes` go. Without `replace`, the receiver appends only when `offset` equals its copy's current length; a missing file has length 0.
 - `replace: true` means: empty the copy, then write `bytes` from offset 0. `offset` is then 0.
-- Before a `replace` of a non-empty copy is acknowledged, the reference receiver copies the bytes being replaced, read through `sealed::LogFile` so plain and sealed copies alike, into an immutable zstd chain under `machines/<name>/archive/` (see [Raw custody](#raw-custody)). A failure to keep them refuses the replace and leaves the copy as it was.
+- Before a `replace` of a non-empty copy is acknowledged, the reference receiver copies the bytes being replaced, read through `sealed::LogFile` so plain and sealed copies alike, into an immutable zstd chain under `machines/<machine-id>/archive/` (see [Raw custody](#raw-custody)). A failure to keep them refuses the replace and leaves the copy as it was.
 - `head_sha256` is the lowercase hex SHA-256 of the first `min(4096, offset + len(bytes))` bytes of the file as it will be once this request is applied. The receiver checks it against its own copy plus `bytes`. A mismatch means the two copies have diverged.
 
 Answers:
@@ -161,7 +163,7 @@ Full `/facts` requests optionally carry paired `mirror_observation_id` and `mirr
 
 ## Raw custody
 
-`machines/<name>/archive/` is the receiver's raw archive (`semon_sessions::archive`):
+`machines/<machine-id>/archive/` is the receiver's raw archive (`semon_sessions::archive`):
 
 - `sources.log` maps each mirrored file (`<root>/<path>`) to a random `archive_source_id`: one JSON record per line, appended and synced under the archive lock before anything is written under the new id, so another instance reuses the id and a crash cannot orphan a directory. A torn final line is ignored and cut off by the next append. Every journal read holds the archive's shared flock, and every write (including torn-tail repair) holds its exclusive flock; the flock is always acquired before the in-memory cache mutex.
 - `<archive_source_id>/manifest.json` names its source (so a directory can always be attributed) and lists that file's chains in order. Each entry has a random `chain_id`, the plain `length`, the `sha256` of the plain bytes, the stored size and the `redactor_version`. A manifest is published by writing a temporary file, syncing it, renaming it over the old one and syncing the directory, so a failure before the rename leaves the last manifest intact.

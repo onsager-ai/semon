@@ -599,7 +599,7 @@ fn activation_before_commit_failure_leaves_no_enrollment_and_scope_cannot_change
     let (t, _) = confirmed(&mut core, "c", 100);
     core.approve(evidence(&t), 100).unwrap();
     let mut changed = input();
-    changed.machine = "other".into();
+    changed.machine_id = "machine-6754a9c100000002".into();
     assert!(core.activate(&t.session_id, changed, 100).is_err());
     assert!(core.store.snapshot().unwrap().enrollments().is_empty());
     assert_eq!(core.state(&t.session_id, 100).unwrap(), State::Approved);
@@ -707,20 +707,60 @@ fn pbkdf2_confirmation_derivation_cost() {
 }
 
 #[test]
-fn replacement_enrollment_preserves_generated_machine_identity() {
+fn replacement_uses_origin_id_and_audits_while_preserving_owner_name() {
     let f = Fixture::new();
     let mut core = f.core();
     let (first, _) = confirmed(&mut core, "first", 100);
     core.approve(evidence(&first), 100).unwrap();
     let enrolled = core.activate(&first.session_id, input(), 100).unwrap();
     let before = core.registry().unwrap().machines()[0].clone();
+    core.set_owner_name("Changed starting label".into());
     let _ = enrolled;
     let (replacement, _) = confirmed(&mut core, "replacement", 101);
     core.approve(evidence(&replacement), 101).unwrap();
-    core.activate(&replacement.session_id, input(), 101)
+    let replaced = core
+        .activate(&replacement.session_id, input(), 101)
         .unwrap();
+    assert!(replaced.replaced);
+    assert_eq!(replaced.machine_id, before.id);
     let after = core.registry().unwrap();
     assert_eq!(after.machines(), &[before]);
     assert_eq!(after.enrollments().len(), 2);
     assert!(after.enrollments()[0].revoked_at.is_some());
+    assert_eq!(after.machine_audit()[1].action, "paired_replacement");
+}
+
+#[test]
+fn different_origin_ids_with_same_name_keep_separate_records() {
+    let f = Fixture::new();
+    let mut core = f.core();
+    core.set_owner_name("Work".into());
+    for (index, machine) in ["machine-6754a9c100000001", "machine-6754a9c100000002"]
+        .iter()
+        .enumerate()
+    {
+        let binding = format!("source-{index}");
+        let created = core.create_session(binding.clone(), 100).unwrap();
+        let mut input = input();
+        input.machine_id = (*machine).into();
+        let mut t = transcript(&created);
+        t.scope = input.commitment();
+        let keys = derive_keys(&created.code, &t).unwrap();
+        let verified = core
+            .reserve(&binding, t.clone(), 100)
+            .unwrap()
+            .verify(&keys.origin_confirmation(&t))
+            .unwrap();
+        core.confirm(verified, 100).unwrap();
+        core.approve(evidence(&t), 100).unwrap();
+        assert!(!core.activate(&t.session_id, input, 100).unwrap().replaced);
+    }
+    let registry = core.registry().unwrap();
+    assert_eq!(registry.machines().len(), 2);
+    assert!(
+        registry
+            .machines()
+            .iter()
+            .all(|m| m.owner_name.as_deref() == Some("Work") && m.directory == m.id)
+    );
 }

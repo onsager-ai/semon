@@ -177,12 +177,12 @@ List machine IDs and received hostnames, then optionally choose display names:
 
 ```sh
 semon receive machines --dir ~/semon-machines
-semon receive name machine-<ID> "Work laptop" --dir ~/semon-machines
-semon receive name machine-<ID> --clear --dir ~/semon-machines
+semon receive name machine-6754a9c1e83f27b4 "Work laptop" --dir ~/semon-machines
+semon receive name machine-6754a9c1e83f27b4 --clear --dir ~/semon-machines
 ```
 
 Use the complete generated ID from the listing. Name changes are audited in the
-same registry transaction. Registry format 5 refuses older state explicitly;
+same registry transaction. Registry format 6 refuses older state explicitly;
 keep that directory unchanged and re-enroll into a new receiver directory.
 A received directory without a machine record is skipped with a re-enrollment warning; recorded machines remain available;
 Semon never deletes or moves retained logs.
@@ -191,7 +191,7 @@ To see the received machines, serve `DIR` with `semon sessions --serve --machine
 
 ## See all your machines
 
-`semon push` sends a machine's session logs, and `semon receive` writes each machine it receives under one directory, `DIR/machines/<name>/`: that machine's `claude/` and `codex/` input files, and its `facts.json`. `semon sessions --serve --machines DIR` shows every one of them in one viewer, next to this machine's own sessions:
+`semon push` sends a machine's session logs, and `semon receive` writes each machine it receives under one directory, `DIR/machines/<machine-id>/`: that machine's `claude/` and `codex/` input files, and its `facts.json`. `semon sessions --serve --machines DIR` shows every one of them in one viewer, next to this machine's own sessions:
 
 ```sh
 semon sessions --serve --machines ~/semon-machines              # this machine and every received one
@@ -199,7 +199,7 @@ semon sessions --serve --machines ~/semon-machines --no-local   # the received m
 semon sessions --json --machines ~/semon-machines               # the tree, each node with its machine
 ```
 
-Every session keeps its canonical machine ID and source path; each machine answers for its own transcripts. Equal owner-set names group display only; no histories are merged or linked. The viewer follows DIR while it runs: the stat pass that already decides whether to rebuild also looks at `DIR/machines/`, so a machine received after the viewer started appears on the next poll, and one removed goes away. Only directories named with `a-z`, `0-9` and `-` (1 to 63 of them) are machines; any other entry is ignored, with a warning. A machine whose `facts.json` is missing or can't be read is still shown, offline and named after its directory, with a warning on stderr; it comes online when its facts arrive. `semon push --watch` rewrites a machine's facts every 10 seconds, so facts over two minutes old make it offline since they were written, with nothing running. A received hostname that can't name a machine (empty, over 253 bytes, or holding whitespace, a control character or `~`) gives way to the directory's name. Each received machine has a generated `machine-<64 lowercase hex>` ID independent of its hostname and immutable storage directory. Same-name re-enrollment keeps that ID and history; a new enrollment name gets a new ID. Same-native-ID sessions on different machines remain visible and separately addressable by source ID; they count separately until duplicate proof is implemented. An optional owner name controls display grouping only; unnamed machines show their hostname without grouping. Received machines are read with the same rules as this one's homes: the model indexes every log, and the tree takes `--since` and `--all`.
+Every session keeps its canonical machine ID and source path; each machine answers for its own transcripts. Equal owner-set names group display only; no histories are merged or linked. The viewer follows DIR while it runs: the stat pass that already decides whether to rebuild also looks at `DIR/machines/`, so a machine received after the viewer started appears on the next poll, and one removed goes away. Only directories named with `a-z`, `0-9` and `-` (1 to 63 of them) are machines; any other entry is ignored, with a warning. A machine whose `facts.json` is missing or can't be read is still shown, offline and named after its directory, with a warning on stderr; it comes online when its facts arrive. `semon push --watch` rewrites a machine's facts every 10 seconds, so facts over two minutes old make it offline since they were written, with nothing running. A received hostname that can't name a machine (empty, over 253 bytes, or holding whitespace, a control character or `~`) gives way to the directory's name. Each origin generates `machine-<8 hex Unix seconds><8 secure random hex>` once, stored as a private single line in `$XDG_CONFIG_HOME/semon/machine-id` (fallback `~/.config/semon/machine-id`). `connect` binds that ID into authenticated pairing; malformed identity files are refused unchanged. Receiver directories and enrollment replacement use that ID. `receive enroll --machine NAME` supplies a new record's starting owner name; an existing ID retains its name. The terminal reports the paired ID/name and whether it replaced an enrollment, with an audit entry. Different IDs sharing a name remain separate sources, grouped for display. Unified session addressing and removal of the existing same-ID drop are deferred to PR1b; proven-duplicate accounting and the receiver-wide cap are PR1c. Received machines are read with the same rules as this one's homes: the model indexes every log, and the tree takes `--since` and `--all`.
 
 DIR is only read. Nothing is written there, and no symbolic link is followed out of a machine's directory: a machine directory, a home (`claude/`, `codex/` or their `projects/` and `sessions/`), a `facts.json` or a log file that is a link is ignored. What the viewer keeps for each received machine (its metadata cache and the facts it serves) goes beside `--cache`, under `received/`.
 

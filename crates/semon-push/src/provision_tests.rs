@@ -221,7 +221,7 @@ fn confirmation_activation_and_recovery_preserve_one_registry_outcome() {
         .unwrap();
     let mut substituted: pairing::ActivationInput =
         serde_json::from_slice(&serde_json::to_vec(&input).unwrap()).unwrap();
-    substituted.valid_until -= 1;
+    substituted.machine_id = "machine-6754a9c100000002".into();
     assert!(
         controller
             .handle(
@@ -256,6 +256,20 @@ fn confirmation_activation_and_recovery_preserve_one_registry_outcome() {
     let registry = controller.core.registry().unwrap();
     assert_eq!(registry.enrollments().len(), 1);
     assert_eq!(registry.credentials().len(), 1);
+    assert_eq!(registry.machines()[0].id, "machine-6754a9c1e83f27b4");
+    assert_eq!(
+        registry.machines()[0].owner_name.as_deref(),
+        Some("machine-6754a9c1e83f27b4")
+    );
+    assert!(
+        fixture
+            .0
+            .join("machines")
+            .join("machine-6754a9c1e83f27b4")
+            .is_dir()
+    );
+    assert!(controller.take_paired().unwrap().contains("new enrollment"));
+    assert_eq!(registry.machine_audit()[0].action, "paired");
     let serialized = serde_json::to_value(&registry).unwrap();
     let (ca, _) = crate::client_ca::generate(100).unwrap();
     let foreign_key = self::key();

@@ -128,7 +128,7 @@ pub(super) fn machines(dir: &Path) -> Result<(), String> {
         semon_sessions::received_registry::read_machines(dir).map_err(|e| e.to_string())?;
     // Shared names sort together, while every row keeps its canonical ID.
     rows.sort_by(|a, b| a.owner_name.cmp(&b.owner_name).then(a.id.cmp(&b.id)));
-    println!("ID\tMACHINE\tHOSTNAME\tOWNER NAME");
+    println!("ID\tOWNER NAME\tHOSTNAME\tDIRECTORY");
     for machine in rows {
         let hostname = semon_sessions::read_facts(
             &dir.join("machines")
@@ -140,9 +140,9 @@ pub(super) fn machines(dir: &Path) -> Result<(), String> {
         println!(
             "{}\t{}\t{:?}\t{:?}",
             machine.id,
-            machine.directory,
+            machine.owner_name.unwrap_or_default(),
             hostname,
-            machine.owner_name.unwrap_or_default()
+            machine.directory
         );
     }
     Ok(())

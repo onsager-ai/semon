@@ -153,7 +153,7 @@ fn pending_capacity_expires_before_admission_and_never_evicts_live_attempts() {
     for n in 1..=5 {
         let mut e = original.enrollments[0].clone();
         e.enrollment_id = format!("{n:064x}");
-        e.machine = format!("origin-{n}");
+        e.machine = format!("machine-{n:016x}");
         e.sequence = n;
         let mut b = original.credentials[0].clone();
         b.enrollment_id = e.enrollment_id.clone();

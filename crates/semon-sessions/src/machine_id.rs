@@ -63,7 +63,8 @@ pub fn load_or_create_at(path: &Path) -> io::Result<String> {
     let seconds = u32::try_from(seconds)
         .map_err(|_| io::Error::other("machine ID timestamp exceeds 8 hex digits"))?;
     let mut random = [0u8; 4];
-    getrandom::fill(&mut random).map_err(io::Error::other)?;
+    getrandom::fill(&mut random)
+        .map_err(|_| io::Error::other("machine ID secure randomness unavailable"))?;
     let id = format!("machine-{seconds:08x}{:08x}", u32::from_be_bytes(random));
     let stage = parent.join(format!(".machine-id-{}-{}", std::process::id(), &id[8..]));
     let mut file = OpenOptions::new()

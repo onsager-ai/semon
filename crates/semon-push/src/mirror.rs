@@ -799,6 +799,26 @@ impl Receiver {
 
     /// `DIR/<parts…>`, each directory created (0700) when missing. A part
     /// that is a symbolic link, or not a directory, refuses the request.
+    pub(crate) fn prepare_machine(dir: &Path, machine: &str) -> io::Result<()> {
+        if !semon_sessions::machine_id::valid(machine) {
+            return Err(io::Error::other("invalid machine ID"));
+        }
+        let mut path = dir.to_owned();
+        for part in [MACHINES_DIR, machine] {
+            let parent = path.clone();
+            path.push(part);
+            match fs::symlink_metadata(&path) {
+                Ok(metadata) => check_directory(&metadata, part)
+                    .map_err(|_| io::Error::other("insecure machine directory"))?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    create_dir(&path)?;
+                    sync_dir(&parent)?;
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
     fn directories(&self, parts: &[&str]) -> Result<PathBuf, Refusal> {
         let mut dir = self.dir.clone();
         for part in parts {
