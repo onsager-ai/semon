@@ -249,6 +249,8 @@ pub struct Viewer {
 /// the registry is checked again on every request.
 pub trait ViewerAccess: Send + Sync {
     fn resolve(&self, secret: &str) -> Option<String>;
+    /// Issue a one-time machine pairing code under the receiver's read authority.
+    fn issue_pairing_code(&self) -> Result<Value, String>;
 }
 
 impl Viewer {
@@ -885,6 +887,35 @@ impl Viewer {
                 }
                 Some(None) => {}
             }
+        }
+        if path == "/api/viewer/pair"
+            && let Some(access) = &self.receive
+        {
+            // receive_auth checks the exact Origin for cookie-authenticated POSTs.
+            let reply = if request.method() != &Method::Post {
+                json_reply(405, serde_json::json!({"error":"Method not allowed"}))
+            } else {
+                match access.issue_pairing_code() {
+                    Ok(code) => json_reply(200, code),
+                    Err(_) => json_reply(
+                        503,
+                        serde_json::json!({"error":"Pairing unavailable. Try again later."}),
+                    ),
+                }
+            };
+            respond(request, reply, None);
+            return;
+        }
+        if path == "/api/viewer/pairing"
+            && self.receive.is_some()
+            && request.method() == &Method::Get
+        {
+            respond(
+                request,
+                json_reply(200, serde_json::json!({"available":true})),
+                None,
+            );
+            return;
         }
         if matches!(
             path,
@@ -1680,51 +1711,61 @@ impl MachineView {
         }
     }
     fn route(&self, path: &str, _query: &str) -> io::Result<(u16, &'static str, Vec<u8>)> {
-        let html = "text/html; charset=utf-8";
-        let json = "application/json; charset=utf-8";
-        match path {
-            "/" | "/analytics" | "/sessions" | "/machines" => Ok((200, html, PAGE.into())),
-            "/viewer.js" => Ok((
+        if path == "/api/tree" {
+            return Ok((
                 200,
-                "text/javascript; charset=utf-8",
-                crate::shell::VIEWER_JS.into(),
-            )),
-            "/viewer.css" => Ok((
-                200,
-                "text/css; charset=utf-8",
-                crate::shell::VIEWER_CSS.into(),
-            )),
-            "/mark.svg" => Ok((200, "image/svg+xml", include_str!("mark.svg").into())),
-            _ if crate::HARNESS_ICONS
-                .iter()
-                .any(|(icon_path, _)| *icon_path == path) =>
-            {
-                let svg = crate::HARNESS_ICONS
-                    .iter()
-                    .find_map(|(icon_path, svg)| (*icon_path == path).then_some(*svg))
-                    .expect("icon path was matched in HARNESS_ICONS");
-                Ok((200, "image/svg+xml", svg.as_bytes().to_vec()))
-            }
-            "/favicon.svg" => Ok((200, "image/svg+xml", include_str!("favicon.svg").into())),
-            "/shell.js" => Ok((
-                200,
-                "text/javascript; charset=utf-8",
-                crate::shell::JS.into(),
-            )),
-            "/shell.css" => Ok((200, "text/css; charset=utf-8", crate::shell::CSS.into())),
-            "/api/tree" => Ok((200, json, self.tree_json()?.into_bytes())),
-            _ if path.starts_with("/fonts/") => {
-                let name = path["/fonts/".len()..]
-                    .strip_suffix(".woff2")
-                    .ok_or(io::ErrorKind::NotFound)?;
-                FONTS
-                    .iter()
-                    .find(|(font, _)| *font == name)
-                    .map(|(_, bytes)| (200, "font/woff2", bytes.to_vec()))
-                    .ok_or_else(|| io::ErrorKind::NotFound.into())
-            }
-            _ => Err(io::ErrorKind::NotFound.into()),
+                "application/json; charset=utf-8",
+                self.tree_json()?.into_bytes(),
+            ));
         }
+        static_route(path)
+    }
+}
+
+/// Source-independent shell and assets also serve a receiver with no machines.
+pub(crate) fn static_route(path: &str) -> io::Result<(u16, &'static str, Vec<u8>)> {
+    let html = "text/html; charset=utf-8";
+    match path {
+        "/" | "/analytics" | "/sessions" | "/machines" => Ok((200, html, PAGE.into())),
+        "/viewer.js" => Ok((
+            200,
+            "text/javascript; charset=utf-8",
+            crate::shell::VIEWER_JS.into(),
+        )),
+        "/viewer.css" => Ok((
+            200,
+            "text/css; charset=utf-8",
+            crate::shell::VIEWER_CSS.into(),
+        )),
+        "/mark.svg" => Ok((200, "image/svg+xml", include_str!("mark.svg").into())),
+        _ if crate::HARNESS_ICONS
+            .iter()
+            .any(|(icon_path, _)| *icon_path == path) =>
+        {
+            let svg = crate::HARNESS_ICONS
+                .iter()
+                .find_map(|(icon_path, svg)| (*icon_path == path).then_some(*svg))
+                .expect("icon path was matched in HARNESS_ICONS");
+            Ok((200, "image/svg+xml", svg.as_bytes().to_vec()))
+        }
+        "/favicon.svg" => Ok((200, "image/svg+xml", include_str!("favicon.svg").into())),
+        "/shell.js" => Ok((
+            200,
+            "text/javascript; charset=utf-8",
+            crate::shell::JS.into(),
+        )),
+        "/shell.css" => Ok((200, "text/css; charset=utf-8", crate::shell::CSS.into())),
+        _ if path.starts_with("/fonts/") => {
+            let name = path["/fonts/".len()..]
+                .strip_suffix(".woff2")
+                .ok_or(io::ErrorKind::NotFound)?;
+            FONTS
+                .iter()
+                .find(|(font, _)| *font == name)
+                .map(|(_, bytes)| (200, "font/woff2", bytes.to_vec()))
+                .ok_or_else(|| io::ErrorKind::NotFound.into())
+        }
+        _ => Err(io::ErrorKind::NotFound.into()),
     }
 }
 

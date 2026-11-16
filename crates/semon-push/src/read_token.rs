@@ -122,6 +122,12 @@ pub fn revoke(dir: &Path, id: &str, now: u64) -> Result<()> {
 
 pub struct Access(pub PathBuf);
 impl semon_sessions::ViewerAccess for Access {
+    fn issue_pairing_code(&self) -> std::result::Result<serde_json::Value, String> {
+        let now = crate::simple_pair::now()?;
+        let (code, expires) = crate::simple_pair::issue(&self.0, now).map_err(|e| e.to_string())?;
+        Ok(serde_json::json!({"code": code.expose(), "expires": expires}))
+    }
+
     fn resolve(&self, secret: &str) -> Option<String> {
         let hash = Secret::new(secret.to_owned()).hash();
         let registry = Registry::read_current(&self.0).ok()?;
