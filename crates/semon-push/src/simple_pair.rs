@@ -434,9 +434,7 @@ pub fn pair_machine(url: &str, code: &str) -> std::result::Result<String, String
         machine_id: machine_id.clone(),
     }
     .save_at(&Config::path()?)?;
-    Ok(format!(
-        "Paired with {url} as {machine_id}. Run semon push --watch to sync."
-    ))
+    Ok(format!("Paired with {url} as {machine_id}."))
 }
 pub fn unpair_machine() -> std::result::Result<(), String> {
     let path = Config::path()?;
