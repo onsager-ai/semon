@@ -1,5 +1,7 @@
 # Incremental native Catalog publication
 
+Proposed replacement: [streaming Catalog maintenance](streaming-catalog.md) (draft; current behavior below remains authoritative until cutover).
+
 NativeEvidence owns discovery, dependency expansion, native derivation and
 publication. Viewer schedules that producer; CLI, MCP and selected Query reads
 reuse it. The producer opens the existing SQLite Event Index without restoring

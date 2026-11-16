@@ -182,6 +182,18 @@ usage/cost facts in the existing deterministic ordering and rounding contract.
 A contribution consumed by another projection dirties that projection, and each
 edge is processed once per target revision, even if several causes reach it.
 
+Reducer ordering follows native semantics: lineage/key/copy and call attachment;
+parent selection and relay candidate selection; effective ancestry/root indexes;
+ordered runs/events and turn partitioning; source-turn witnesses, summaries and
+family totals; recipes and public indexes. Dependency invalidation may flow back
+to an earlier reducer, but a reducer never consumes its own partly written output.
+Separate semantic parent/endpoint selection from turn-placement annotation: a new
+source-turn witness updates placement without becoming new parent evidence.
+Cycles in the native graph use the full builder's existing selection/reduction
+rules over V. If extracting those rules reveals a true mutually recursive
+selection, specify its finite deterministic reduction and test termination before
+cutover; an unbounded “iterate until nothing changes” loop is not acceptable.
+
 ### The eight non-monotonic cases
 
 All cases below use the admitted V and publish replacements atomically. Listed
@@ -313,6 +325,14 @@ transaction. CAS uses the task's target and cursor, not the latest physical stat
 Two producers cannot consume the same page twice. Work claims do not require a
 wall-clock lease for correctness: a replacement resumes the committed cursor.
 
+Discovery can race semantic computation. When a completed reducer registers a
+selector dependency, the transaction checks whether that selector already changed
+within the admitted batch. If so, enqueue its consumer before declaring closure.
+This closes the lost-wakeup race for a consumer first discovered after the initial
+dirty expansion. Closure means no unprocessed delta memberships, selector pages,
+reducer tasks or newly registered dependencies remain for V; newer queued deltas
+do not participate in that test.
+
 A target's transitive dirty work must finish before that target becomes public.
 Otherwise a rekey could expose an old source map or a parent move could expose
 new ancestry with old family totals. There is no public partially derived row.
@@ -416,9 +436,16 @@ remain as documented in `session-source-reader.md:68`; this design does not
 promise successful byte reads through arbitrarily frequent physical changes.
 
 A genuinely changed consumed prefix can invalidate in-flight dependent work.
-Confine restart/refusal to that source and its transitive affected keys. Repeated
-rewrites of the same dependency can prevent that dependency becoming current;
-they cannot reset independent published owners or block all machine work.
+Confine restart/refusal to that source and its transitive affected keys. If its
+old V cannot be read safely, consume the source's invalidation as a withdrawal
+into the candidate cut: retract its current contributions, retain its last
+provenance under existing lifecycle rules, and keep repair pending separately.
+Do not skip the delta while claiming its source interpretation is current.
+Independent deltas can then advance through ordered publication; the broken
+source is not a permanent head-of-queue blocker. Repeated rewrites of the same
+dependency can prevent that dependency becoming current; they cannot reset
+independent published owners or block all machine work. Missing evidence can
+still prevent rebuilding that source's selected history; expose that refusal.
 
 ## Replacement and reuse
 
@@ -561,9 +588,13 @@ recipes and affected contracts together; retain full builder only for tests.
 
 Files: `native_evidence.rs`, `events/store.rs`, `events/store/semantic_stage.rs`
 (deleted), `model/relation_stage.rs`, `catalog.rs`, `query_source.rs`,
-`query/transcript.rs`, `origin_projection.rs`, `union.rs`, proof/publication modules
-and the five governing design docs. Reader submodule names must be confirmed in
-implementation; this is a scope inventory, not permission to omit their callers.
+`query/transcript.rs`, `slot_projection.rs`, `origin_projection.rs`, `union.rs`,
+`events/store/session_activity.rs`, `events/store/native_usage.rs`,
+proof/publication modules and the five governing design docs. Audit the indexed
+list/selection seams at `crates/semon-sessions/src/catalog.rs:346`, `:1077` and
+recipe source capture at `crates/semon-sessions/src/slot_projection.rs:285`.
+Reader submodule names must be confirmed in implementation; this scope inventory
+does not authorize omitting their callers.
 Tests: complete differential suite, selected old-snapshot/new-result races,
 retained originals, scoped rewrite refusal, >64 source list/transcript/resolution,
 continuous-append first publication on receiver and local paths, fresh-process
