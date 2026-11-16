@@ -187,7 +187,7 @@ impl Drop for Heartbeat {
 fn bounded_body(status: &mut Status) -> Option<String> {
     loop {
         match serde_json::to_string(status) {
-            Ok(body) if body.len() <= crate::mirror::MAX_BODY_BYTES => return Some(body),
+            Ok(body) if body.len() <= crate::receiver::MAX_BODY_BYTES => return Some(body),
             Ok(_) if !status.targets.is_empty() => {
                 status.inventory_complete = false;
                 status.targets.truncate(status.targets.len() / 2);
@@ -319,9 +319,9 @@ mod tests {
             inventory_complete: true,
             targets: progress.ordered_targets(),
         };
-        assert!(serde_json::to_string(&status).unwrap().len() > crate::mirror::MAX_BODY_BYTES);
+        assert!(serde_json::to_string(&status).unwrap().len() > crate::receiver::MAX_BODY_BYTES);
         let body = bounded_body(&mut status).unwrap();
-        assert!(body.len() <= crate::mirror::MAX_BODY_BYTES);
+        assert!(body.len() <= crate::receiver::MAX_BODY_BYTES);
         let parsed: Status = serde_json::from_str(&body).unwrap();
         assert!(!parsed.inventory_complete);
         assert!(parsed.targets.len() < wire::MAX_STATUS_TARGETS);

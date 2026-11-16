@@ -158,7 +158,7 @@ pub(crate) fn pair(dir: &Path, body: &[u8], now: u64) -> Result<Response> {
         r.simple_pair.tokens.push(Bearer {
             credential_id,
             enrollment_id: request.machine_id.clone(),
-            kind: Kind::MirrorPush,
+            kind: Kind::Push,
             sha256: token.hash(),
             generation: 1,
             valid_from: now,
@@ -259,7 +259,7 @@ impl Registry {
         let mut hashes = std::collections::BTreeSet::new();
         let mut live = std::collections::BTreeSet::new();
         for b in &s.tokens {
-            if b.kind != Kind::MirrorPush
+            if b.kind != Kind::Push
                 || b.generation != 1
                 || b.valid_until != u64::MAX
                 || b.valid_from > self.latest

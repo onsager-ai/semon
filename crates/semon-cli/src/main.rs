@@ -951,7 +951,7 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
     let mut public_url = None;
     let mut dir = None;
     let mut listen = semon_push::serve::DEFAULT_LISTEN.to_owned();
-    let mut max_bytes = semon_push::mirror::DEFAULT_MAX_BYTES;
+    let mut max_bytes = semon_push::receiver::DEFAULT_MAX_BYTES;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -1038,7 +1038,10 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
             eprintln!(
                 "semon receive: listening on {}://{address}, writing {}",
                 server.scheme(),
-                options.dir.join(semon_push::mirror::MACHINES_DIR).display()
+                options
+                    .dir
+                    .join(semon_push::receiver::MACHINES_DIR)
+                    .display()
             );
             if server.tokens() == 0 {
                 eprintln!(

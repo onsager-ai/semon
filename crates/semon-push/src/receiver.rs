@@ -1,4 +1,4 @@
-//! The receiving side of the mirror protocol (docs/push-protocol.md): the
+//! The receiving side of the push protocol (docs/push-protocol.md): the
 //! reference implementation, over a directory. [`Receiver::append`] and
 //! [`Receiver::facts`] each take a parsed request and return the documented
 //! answer; [`Receiver::handle`] parses a request body first. Who the machine
@@ -55,8 +55,8 @@ use crate::wire::{
 pub const MACHINES_DIR: &str = "machines";
 /// A machine's facts, in its directory.
 pub const FACTS_FILE: &str = "facts.json";
-/// Beside each machine's copy: what each mirrored file's bytes were
-/// redacted with, one small file per mirrored file.
+/// Beside each machine's copy: what each pushed file's bytes were
+/// redacted with, one small file per pushed file.
 const VERSIONS_DIR: &str = "redactor-versions";
 /// The largest request body accepted: one append's 4 MiB of file bytes is
 /// 5.34 MiB as base64, plus the JSON around it, rounded up to 6 MiB.
@@ -613,8 +613,8 @@ impl Receiver {
             || status.targets.len() > MAX_STATUS_TARGETS
             || status.observed_at_ms > now.saturating_add(60_000)
             || status.observed_at_ms < now.saturating_sub(60_000)
-            || status.runtime.mirror_observation_id.is_some()
-            || status.runtime.mirror_sequence.is_some()
+            || status.runtime.push_observation_id.is_some()
+            || status.runtime.push_sequence.is_some()
             || status.runtime.codex_rollouts.is_some()
             || status.runtime.codex_provisional_rollouts.is_some()
             || !status.runtime.repos.is_empty()
@@ -638,7 +638,7 @@ impl Receiver {
         self.locks.with(&format!("{machine}/status.json"), || {
             let dir = self.directories(&[MACHINES_DIR, machine])?;
             let fence = read_stored_facts(&dir.join(FACTS_FILE))?;
-            if fence.as_ref().is_some_and(|facts| facts.mirror_observation_id.as_ref() == Some(&status.observation_id) && facts.mirror_sequence.is_some_and(|seq| status.sequence <= seq)) {
+            if fence.as_ref().is_some_and(|facts| facts.push_observation_id.as_ref() == Some(&status.observation_id) && facts.push_sequence.is_some_and(|seq| status.sequence <= seq)) {
                 return Ok(Reply::new(409, json!({"error":"stale_observation"})));
             }
             let prior = read_stored_status(&dir.join("status.json"))?;
@@ -730,7 +730,7 @@ impl Receiver {
         }
         let bytes =
             serde_json::to_vec(facts).map_err(|error| Refusal::Invalid(error.to_string()))?;
-        let paired = match (&facts.mirror_observation_id, facts.mirror_sequence) {
+        let paired = match (&facts.push_observation_id, facts.push_sequence) {
             (None, None) => true,
             (Some(id), Some(sequence)) => is_generation(id) && sequence > 0,
             _ => false,
@@ -741,7 +741,7 @@ impl Receiver {
         self.locks.with(&format!("{machine}/status.json"), || {
             let dir = self.directories(&[MACHINES_DIR, machine])?;
             let prior = read_stored_status(&dir.join("status.json"))?;
-            if let Some(id) = &facts.mirror_observation_id {
+            if let Some(id) = &facts.push_observation_id {
                 if prior
                     .as_ref()
                     .is_some_and(|p| p.retired.iter().any(|(old, _)| old == id))
@@ -749,8 +749,8 @@ impl Receiver {
                     return Ok(Reply::new(409, json!({"error":"stale_observation"})));
                 }
                 if read_stored_facts(&dir.join(FACTS_FILE))?.is_some_and(|p| {
-                    p.mirror_observation_id.as_ref() == Some(id)
-                        && p.mirror_sequence >= facts.mirror_sequence
+                    p.push_observation_id.as_ref() == Some(id)
+                        && p.push_sequence >= facts.push_sequence
                 }) {
                     return Ok(Reply::new(409, json!({"error":"stale_observation"})));
                 }
@@ -853,7 +853,7 @@ fn read_control<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>
     Ok(Some(decoded))
 }
 
-/// What a mirrored file's bytes were redacted with: a version, `unknown`,
+/// What a pushed file's bytes were redacted with: a version, `unknown`,
 /// or `mixed`. `None` when nothing was recorded.
 #[derive(Serialize, Deserialize)]
 struct StoredVersion {
@@ -1251,7 +1251,7 @@ mod tests {
     fn receiver() -> (Dir, Receiver) {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "semon-mirror-{}-{}",
+            "semon-receiver-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -2192,8 +2192,8 @@ mod status_tests {
         let facts = Facts {
             version: semon_sessions::FACTS_VERSION,
             codex_rollouts: Some(Default::default()),
-            mirror_observation_id: Some(status.observation_id.clone()),
-            mirror_sequence: Some(2),
+            push_observation_id: Some(status.observation_id.clone()),
+            push_sequence: Some(2),
             ..Facts::default()
         };
         assert_eq!(receiver.facts("laptop", &facts).status, 200);
@@ -2226,12 +2226,12 @@ mod status_tests {
         .unwrap();
         assert!(committed.codex_rollouts.unwrap().is_empty());
         let orphan = Facts {
-            mirror_observation_id: Some(later.observation_id.clone()),
+            push_observation_id: Some(later.observation_id.clone()),
             ..Facts::default()
         };
         assert_eq!(receiver.facts("laptop", &orphan).status, 400);
         later.sequence = 4;
-        later.runtime.mirror_sequence = Some(1);
+        later.runtime.push_sequence = Some(1);
         assert_eq!(receiver.status("laptop", &later).status, 400);
         fs::remove_dir_all(dir).unwrap();
     }

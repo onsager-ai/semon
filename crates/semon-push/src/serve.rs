@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 mod auth;
 use auth::{Authenticator, ConnectionAuthority};
 
-use crate::mirror::{DEFAULT_MAX_BYTES, Endpoint, MAX_BODY_BYTES, Receiver};
+use crate::receiver::{DEFAULT_MAX_BYTES, Endpoint, MAX_BODY_BYTES, Receiver};
 
 /// Where `semon receive` listens unless told otherwise.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8735";

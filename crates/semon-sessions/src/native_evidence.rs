@@ -2155,8 +2155,8 @@ pub(crate) fn recorded_runtime_fingerprint_excluding(
 ) -> io::Result<String> {
     use sha2::{Digest, Sha256};
     let mut facts = facts.clone();
-    facts.mirror_observation_id = None;
-    facts.mirror_sequence = None;
+    facts.push_observation_id = None;
+    facts.push_sequence = None;
     facts.codex_rollouts = None;
     facts.codex_provisional_rollouts = None;
     for name in &mut facts.native_names {

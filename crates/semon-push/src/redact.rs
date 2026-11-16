@@ -17,7 +17,7 @@
 //! line stays valid JSON. No pattern spans a newline: redacting a file line
 //! by line gives the same bytes as redacting it whole.
 
-/// Version of the rules used to redact mirror bytes.
+/// Version of the rules used to redact pushed bytes.
 pub const VERSION: u32 = 1;
 
 /// Whether redaction may replace this byte.
