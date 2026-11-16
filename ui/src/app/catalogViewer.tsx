@@ -1592,20 +1592,20 @@ export function createCatalogViewer(
       shell.topbar({
         titleSlot: content && !active?.findOpen && !active?.errorMode ? content.titleSlot : title,
         mode: (active?.findOpen || active?.errorMode) && content ? [content.mode] : undefined,
-        actions:
-          pairingAvailable && !active && route !== 'trace'
-            ? [pairButton, ...(route === 'analytics' ? [overview.actions] : [])]
-            : route === 'analytics'
-              ? [overview.actions]
-              : active
-                ? content
-                  ? [content.actions]
-                  : [sources]
-                : route === 'sessions' && !sourcesOpen && capabilities.source_candidates
-                  ? [sources]
-                  : route === 'trace'
-                    ? [traceActions]
-                    : [],
+        actions: [
+          ...(pairingAvailable && !active && route !== 'trace' ? [pairButton] : []),
+          ...(route === 'analytics'
+            ? [overview.actions]
+            : active
+              ? content
+                ? [content.actions]
+                : [sources]
+              : route === 'sessions' && !sourcesOpen && capabilities.source_candidates
+                ? [sources]
+                : route === 'trace'
+                  ? [traceActions]
+                  : []),
+        ],
         session: !!active,
         lead:
           route === 'trace' && navigation.route.v === 'trace'
