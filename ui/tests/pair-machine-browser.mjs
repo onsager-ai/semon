@@ -83,7 +83,14 @@ for (const width of [390, 820, 1280])
             path: join(process.env.SEMON_CATALOG_OUT, `pair-${state}-${width}-${colorScheme}.png`),
           });
         };
-        await page.getByText('Pair your first machine', { exact: false }).waitFor();
+        await page.getByRole('heading', { name: 'Pair your first machine', exact: true }).waitFor();
+        await page
+          .getByText(
+            'Run one command on each machine whose sessions you want here. Sync starts automatically.',
+            { exact: true },
+          )
+          .waitFor();
+        assert.equal(await page.getByRole('link', { name: 'Manage machines' }).count(), 0);
         await capture('empty');
         await page.getByRole('button', { name: 'Pair a machine', exact: true }).click();
         await page
