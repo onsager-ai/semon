@@ -528,6 +528,7 @@ dialog.panel::backdrop { background: color-mix(in srgb, #000 40%, transparent); 
 /* ---- Now -------------------------------------------------------------------- */
 .nrow { display: grid; grid-template-columns: 12px minmax(0, 1fr) auto; gap: 2px 10px; align-items: center; border: 0; border-bottom: 1px solid var(--line); background: none; padding: 11px 0; text-align: left; width: 100%; }
 .nrow .nm { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nrow[data-source-key] .nm { grid-column: 1 / -1; }
 .nrow .ag { font-size: var(--fs-cap); color: var(--muted); }
 .nrow .for, .nrow .act { grid-column: 2 / 4; min-width: 0; }
 .nrow .for { font-size: var(--fs-sm); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
