@@ -166,6 +166,24 @@ native and independently configured mounts with deliberately late responses.
 
 `ViewerHost.catalogRuntimeStream` supplies a selected read-only observation. Passive recorded questions and outcomes remain visible. Metadata search and in-session selected-text navigation remain active.
 
+## Viewer security boundary
+
+The existing standalone `semon sessions --serve` mode uses a per-run token and
+exact loopback Host checks. The combined `semon receive` mode serves the same
+Viewer over received machines on its receiver listener, using durable owner read
+tokens from the registry. No frontend login UI or separate application is added.
+
+In receive mode, `--public-url https://HOST` admits exactly that public Host and
+Origin alongside loopback; without it, loopback-only admission remains. A proxy
+must preserve Host. Semon owns authentication; the proxy supplies HTTPS transport.
+`/?t=TOKEN` sets the existing HttpOnly, SameSite=Strict cookie and redirects to
+the same path without `t`; HTTPS public origins add Secure. Cookies bind the read
+token ID and secret and recheck the registry every request. Read Bearer tokens
+also admit API clients; revoked tokens and their sessions fail immediately on
+the next request. Pair codes and machine push credentials cannot read Viewer
+content. Owner read tokens grant all retained-history reads until revoked.
+Shared chrome, Catalog/transcript ownership, CSP and body custody are unchanged.
+
 ## Formatting and local hooks
 
 Run `npm --prefix ui run format` for authored UI TypeScript, build/test MJS and

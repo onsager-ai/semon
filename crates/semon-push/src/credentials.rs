@@ -66,10 +66,10 @@ impl fmt::Display for Secret {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Bearer {
+pub struct Bearer<K = Kind> {
     pub credential_id: String,
     pub enrollment_id: String,
-    pub kind: Kind,
+    pub kind: K,
     pub sha256: [u8; 32],
     pub generation: u64,
     /// Inclusive Unix seconds.
@@ -289,7 +289,7 @@ fn credential_authority_refusal(
     }
 }
 
-fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+pub(crate) fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     let mut difference = 0u8;
     for i in 0..32 {
         difference |= a[i] ^ b[i];

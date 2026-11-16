@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, io, path::Path};
 
-pub const RECEIVER_FORMAT: u32 = 7;
+pub const RECEIVER_FORMAT: u32 = 8;
 pub const REGISTRY_CAP: u64 = 4 * 1024 * 1024;
 pub const REENROLL: &str = "received machine has no current registry record; keep retained logs unchanged and re-enroll the machine";
 

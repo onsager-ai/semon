@@ -193,6 +193,7 @@ pub struct Registry {
     format: u32,
     revision: u64,
     pub(crate) endpoint: Option<String>,
+    pub(crate) read_tokens: crate::read_token::State,
     pub(crate) simple_pair: crate::simple_pair::State,
     pub(crate) machines: Vec<semon_sessions::received_registry::ReceivedMachine>,
     pub(crate) machine_audit: Vec<semon_sessions::received_registry::MachineAudit>,
@@ -210,6 +211,7 @@ impl Registry {
         Self {
             format: FORMAT,
             revision: 0,
+            read_tokens: crate::read_token::State::default(),
             simple_pair: crate::simple_pair::State::default(),
             endpoint: None,
             machines: vec![],
@@ -295,6 +297,7 @@ impl Registry {
         let registry = Self {
             format: FORMAT,
             revision: 0,
+            read_tokens: crate::read_token::State::default(),
             simple_pair: crate::simple_pair::State::default(),
             endpoint,
             machines: machine_records,
@@ -513,12 +516,14 @@ impl Registry {
                 return Err(Error::Invalid);
             }
         }
+        self.validate_read_tokens()?;
         self.validate_simple_pair()?;
         crate::pairing::validate_receipts(self)?;
         self.validate_renewal()?;
         Ok(())
     }
     fn follows(&self, old: &Self) -> Result<()> {
+        self.read_tokens_follow(old)?;
         self.simple_pair_follows(old)?;
         if self.latest < old.latest || self.next_sequence < old.next_sequence {
             return Err(Error::Terminal);

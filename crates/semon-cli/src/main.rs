@@ -92,6 +92,7 @@ enum Command {
     Sessions(SessionsArgs),
     Push(PushArgs),
     Pair(Vec<String>),
+    Token(Vec<String>),
     Unpair(Vec<String>),
     Connect {
         endpoint: String,
@@ -241,7 +242,7 @@ struct PushArgs {
 
 /// `semon receive`: serve pushes, or manage the tokens that may push.
 enum ReceiveArgs {
-    Serve(semon_push::serve::ServeOptions),
+    Serve(semon_push::serve::ServeOptions, Option<String>),
     Machines {
         dir: PathBuf,
     },
@@ -296,6 +297,7 @@ fn parse_args() -> Result<Command, String> {
             Ok(Command::Disconnect { receiver })
         }
         Some("push") => parse_push_args(arguments).map(Command::Push),
+        Some("token") => Ok(Command::Token(arguments.collect())),
         Some("pair") => Ok(Command::Pair(arguments.collect())),
         Some("unpair") => Ok(Command::Unpair(arguments.collect())),
         Some("receive") => parse_receive_args(arguments).map(Command::Receive),
@@ -1069,6 +1071,7 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
         arguments.next();
     }
     let mut advertise = None;
+    let mut public_url = None;
     let mut machine = None;
     let mut dir = None;
     let mut listen = semon_push::serve::DEFAULT_LISTEN.to_owned();
@@ -1087,6 +1090,9 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
             "--tls-cert" => certificate = Some(PathBuf::from(value()?)),
             "--tls-key" => private_key = Some(PathBuf::from(value()?)),
             "--max-bytes" => max_bytes = parse_size(&value()?)?,
+            "--public-url" if !enroll => {
+                public_url = Some(semon_push::read_token::public_origin(&value()?)?)
+            }
             "--advertise" if enroll => advertise = Some(value()?),
             "--machine" if enroll => machine = Some(value()?),
             "-h" | "--help" => return Err(usage()),
@@ -1118,7 +1124,7 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
             machine: machine.ok_or("receive enroll requires --machine NAME")?,
         })
     } else {
-        Ok(ReceiveArgs::Serve(options))
+        Ok(ReceiveArgs::Serve(options, public_url))
     }
 }
 
@@ -1246,8 +1252,26 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
             }).map_err(|e| e.to_string())?;
             server.run()
         }
-        ReceiveArgs::Serve(options) => {
+        ReceiveArgs::Serve(options, public_url) => {
             let server = semon_push::serve::Server::bind(&options)?;
+            semon_push::read_token::configure(&options.dir, public_url.as_deref())
+                .map_err(|e| e.to_string())?;
+            let sessions = semon_sessions::Options::default();
+            let viewer = semon_sessions::Viewer::received(
+                semon_sessions::ServeOptions {
+                    sessions: sessions.clone(),
+                    machines: vec![],
+                    received: Some(semon_sessions::ReceivedMachines::new(
+                        options.dir.clone(),
+                        &sessions,
+                    )),
+                    listen: options.listen.to_string(),
+                },
+                server.local_addr().map_err(|e| e.to_string())?.port(),
+                public_url,
+                std::sync::Arc::new(semon_push::read_token::Access(options.dir.clone())),
+            );
+            let server = server.with_viewer(viewer)?;
             let address = server
                 .local_addr()
                 .map_err(|error| format!("the listening address: {error}"))?;
@@ -1335,6 +1359,7 @@ fn run(command: Command) -> Result<(), String> {
         }
         Command::Sessions(args) => run_sessions(args),
         Command::Push(args) => run_push(&args),
+        Command::Token(args) => run_token(&args),
         Command::Pair(args) => run_pair(&args),
         Command::Unpair(args) => run_unpair(&args),
         Command::Connect {
@@ -1667,6 +1692,41 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
         interrupt::raise_received();
     }
     result
+}
+
+fn run_token(args: &[String]) -> Result<(), String> {
+    let (mut dir, mut list, mut revoke) = (None, false, None);
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--dir" => dir = Some(PathBuf::from(args.next().ok_or("--dir requires DIR")?)),
+            "--list" => list = true,
+            "--revoke" => revoke = Some(args.next().ok_or("--revoke requires ID")?.as_str()),
+            _ => return Err("Usage: semon token --dir DIR [--list | --revoke ID]".into()),
+        }
+    }
+    let dir = dir.ok_or("token requires --dir DIR")?;
+    if list && revoke.is_some() {
+        return Err("choose --list or --revoke".into());
+    }
+    if list {
+        println!("ID\tCREATED (UNIX)\tREVOKED");
+        for (id, time, revoked) in semon_push::read_token::list(&dir).map_err(|e| e.to_string())? {
+            println!("{id}\t{time}\t{revoked}");
+        }
+    } else if let Some(id) = revoke {
+        semon_push::read_token::revoke(&dir, id, semon_push::simple_pair::now()?)
+            .map_err(|e| e.to_string())?;
+        println!("Revoked {id}.");
+    } else {
+        let (secret, url) = semon_push::read_token::create(&dir, semon_push::simple_pair::now()?)
+            .map_err(|e| e.to_string())?;
+        println!("{}", secret.expose());
+        if let Some(url) = url {
+            println!("{url}/?t={}", secret.expose());
+        }
+    }
+    Ok(())
 }
 
 fn run_pair(args: &[String]) -> Result<(), String> {
@@ -2481,10 +2541,11 @@ fn analytics_usage() -> String {
 }
 
 fn usage() -> String {
-    "Usage: semon receive --dir DIR [--listen ADDR]\n\
+    "Usage: semon receive --dir DIR [--listen ADDR] [--public-url https://HOST]\n\
          Usage: semon pair --dir DIR\n\
          Usage: semon pair URL CODE\n\
          Usage: semon unpair [MACHINE_ID --dir DIR]\n\
+         Usage: semon token --dir DIR [--list | --revoke ID]\n\
          Pair with one receiver; then run semon push --watch (advanced) to sync.\n\
          HTTPS proxies may forward to a plain HTTP receiver. Tokens work until revoked.\n\
          \n\

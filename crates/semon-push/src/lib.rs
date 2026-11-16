@@ -83,6 +83,7 @@ pub mod pairing;
 pub mod provision;
 #[cfg(unix)]
 pub mod provision_wire;
+pub mod read_token;
 #[cfg(unix)]
 pub mod receiver_acl;
 #[cfg(unix)]

@@ -236,11 +236,115 @@ const _: fn() = || {
 
 /// The loopback server around a [`ViewerCore`]: the per-run token and its
 /// cookie, the exact local Host check and GET only.
-struct Viewer {
+pub struct Viewer {
     core: ViewerCore,
     token: String,
     port: u16,
     asi: Option<Arc<dyn ViewerAsi>>,
+    receive: Option<Arc<dyn ViewerAccess>>,
+    public_origin: Option<String>,
+}
+
+/// Receiver-owned read authority. Session cookies bind the read credential ID to its secret;
+/// the registry is checked again on every request.
+pub trait ViewerAccess: Send + Sync {
+    fn resolve(&self, secret: &str) -> Option<String>;
+}
+
+impl Viewer {
+    pub fn received(
+        options: ServeOptions,
+        port: u16,
+        public_origin: Option<String>,
+        access: Arc<dyn ViewerAccess>,
+    ) -> Self {
+        let mut core = ViewerCore::with_received(
+            options.machines,
+            options.received.expect("received machines"),
+        );
+        core.set_refresh(Refresh::Background);
+        Self {
+            core,
+            token: String::new(),
+            port,
+            asi: None,
+            receive: Some(access),
+            public_origin,
+        }
+    }
+
+    fn receive_auth(&self, request: &Request, query: &str) -> Option<Option<String>> {
+        let access = self.receive.as_ref()?;
+        for name in ["Host", "Origin", "Authorization", "Cookie"] {
+            let count = request
+                .headers()
+                .iter()
+                .filter(|h| h.field.equiv(name))
+                .count();
+            if count > 1 || (name == "Host" && count != 1) {
+                return None;
+            }
+        }
+        let host = request_header(request, "Host")?;
+        let local = host == format!("127.0.0.1:{}", self.port)
+            || host == format!("localhost:{}", self.port);
+        let public = self
+            .public_origin
+            .as_deref()
+            .is_some_and(|origin| origin.split_once("://").map(|(_, h)| h) == Some(host));
+        if !local && !public {
+            return None;
+        }
+        if !request.url().starts_with('/')
+            || request.url().starts_with("//")
+            || request.url().contains(['\r', '\n'])
+        {
+            return None;
+        }
+        let origin = if public {
+            self.public_origin.clone()?
+        } else {
+            format!("http://{host}")
+        };
+        if request_header(request, "Origin").is_some_and(|value| value != origin) {
+            return None;
+        }
+        let credentials: Vec<_> = query
+            .split('&')
+            .filter(|part| decoded(part.split('=').next().unwrap_or("")).as_deref() == Some("t"))
+            .collect();
+        if !credentials.is_empty() {
+            if request.method() != &Method::Get || credentials.len() != 1 {
+                return None;
+            }
+            let secret = credentials[0].strip_prefix("t=")?;
+            let id = access.resolve(secret)?;
+            return Some(Some(format!("{id}.{secret}")));
+        }
+        if let Some(value) = request_header(request, "Authorization") {
+            access.resolve(value.strip_prefix("Bearer ")?)?;
+            return Some(None);
+        }
+        if request.method() == &Method::Post
+            && request_header(request, "Origin") != Some(origin.as_str())
+        {
+            return None;
+        }
+        let cookies: Vec<_> = request_header(request, "Cookie")?
+            .split(';')
+            .filter_map(|p| p.trim().strip_prefix("semon_session="))
+            .collect();
+        if cookies.len() != 1 {
+            return None;
+        }
+        let (id, secret) = cookies[0].split_once('.')?;
+        (access.resolve(secret).as_deref() == Some(id)).then_some(None)
+    }
+
+    /// Delegates a request admitted by the receiver's shared listener.
+    pub fn handle_received(&self, request: Request) {
+        self.handle(request);
+    }
 }
 
 /// An already scoped ASI worker surface supplied by the local CLI host.
@@ -410,6 +514,8 @@ fn serve_server(
         token,
         port,
         asi,
+        receive: None,
+        public_origin: None,
     });
     let server = Arc::new(server);
     println!("http://127.0.0.1:{port}/?t={}", viewer.token);
@@ -650,7 +756,9 @@ impl Viewer {
         // ASI never accepts the bootstrap credential or data in a URL. The
         // launch page establishes the HttpOnly cookie before API access.
         let schema = path == "/api/asi/schema";
-        let auth = if schema && request.method() == &Method::Get {
+        let auth = if self.receive.is_some() {
+            true
+        } else if schema && request.method() == &Method::Get {
             // GET reuses cookie/Host admission, with an optional same-origin Origin.
             asi_schema_authorized(&request, &self.token, self.port)
         } else {
@@ -738,6 +846,46 @@ impl Viewer {
     fn handle(&self, mut request: Request) {
         let url = request.url().to_owned();
         let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+        if self.receive.is_some() {
+            match self.receive_auth(&request, query) {
+                None => {
+                    respond(
+                        request,
+                        json_reply(403, serde_json::json!({"error":"Forbidden"})),
+                        None,
+                    );
+                    return;
+                }
+                Some(Some(session)) => {
+                    let clean = query
+                        .split('&')
+                        .filter(|part| !part.starts_with("t=") && !part.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("&");
+                    let location =
+                        format!("{path}{}{}", if clean.is_empty() { "" } else { "?" }, clean);
+                    let secure = self
+                        .public_origin
+                        .as_deref()
+                        .is_some_and(|o| o.starts_with("https://"));
+                    let mut response = Response::empty(303);
+                    response.add_header(header("Location", &location));
+                    response.add_header(header(
+                        "Set-Cookie",
+                        &format!(
+                            "semon_session={session}; HttpOnly; SameSite=Strict; Path=/{}",
+                            if secure { "; Secure" } else { "" }
+                        ),
+                    ));
+                    for (name, value) in SECURITY_HEADERS {
+                        response.add_header(header(name, value));
+                    }
+                    let _ = request.respond(response);
+                    return;
+                }
+                Some(None) => {}
+            }
+        }
         if matches!(
             path,
             "/api/asi/sql" | "/api/asi/schema" | "/api/asi/search" | "/api/asi/view"
@@ -753,7 +901,8 @@ impl Viewer {
                 decoded(name).as_deref() == Some("t")
             })
             .collect();
-        if !credentials.is_empty()
+        if self.receive.is_none()
+            && !credentials.is_empty()
             && (credentials.len() != 1
                 || credentials[0].strip_prefix("t=") != Some(self.token.as_str()))
         {
@@ -764,7 +913,11 @@ impl Viewer {
             );
             return;
         }
-        let accepted = if request.method() == &Method::Post && path == "/api/viewer/home" {
+        let accepted = if self.receive.is_some() {
+            (request.method() == &Method::Get
+                || (request.method() == &Method::Post && path == "/api/viewer/home"))
+                .then_some(false)
+        } else if request.method() == &Method::Post && path == "/api/viewer/home" {
             post_authorized(&request, &self.token, self.port).then_some(false)
         } else {
             authorized(&request, query, &self.token, self.port)
@@ -1798,6 +1951,8 @@ mod tests {
             token: "0123456789abcdef0123456789abcdef".into(),
             port,
             asi: None,
+            receive: None,
+            public_origin: None,
         };
         if let Some(expected_session) = expected_session {
             // This fixture owns a known warm publication. Prepare it directly,

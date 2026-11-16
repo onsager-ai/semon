@@ -54,7 +54,7 @@ if (process.argv.includes('--native-pages')) {
   };
   const nativeCorpus = async (base, token) => {
     const fixture = await data({ base, token });
-    const landing = await fetch(base + '/?t=' + token);
+    const landing = await fetch(base + '/?t=' + token, { redirect: 'manual' });
     const cookie = landing.headers
       .getSetCookie()
       .map((value) => value.split(';')[0])
