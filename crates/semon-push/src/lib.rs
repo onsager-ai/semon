@@ -93,8 +93,6 @@ pub mod receiver_custody;
 pub mod redact;
 #[cfg(unix)]
 pub mod renewal;
-#[cfg(all(unix, test))]
-mod renewal_trigger;
 #[cfg(unix)]
 pub mod renewal_wire;
 pub mod serve;
