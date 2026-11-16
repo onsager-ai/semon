@@ -14,6 +14,16 @@ tree and native Query reads do not create a second producer cache. Source snapsh
 the existing file, process, facts and writer-lock observations; request-owned
 readers still verify source bytes and completion independently.
 
+Ordinary local calls retry the complete query once only for the typed
+`source_changed` failure (a physical change during source verification/read with
+an unchanged captured prefix). The failed cohort and in-memory preparation are
+discarded before preparing and deriving again. Exhaustion returns
+`{"error":{"code":"source_changed","message":"native query source changed during verification or read"}}`.
+Permanent proof, source-root and rewrite failures remain refusals. Hosted admitted
+sources and selected reads retain their source-generation contract and do not
+retry automatically. Completion preserves the first read failure even when a
+presentation parser omits a failed record.
+
 Ordinary single-machine CLI/stdio `get_session` and `read_transcript` reuse
 focused Query when an existing Catalog closure is current. Qualification checks native file
 generations and the Catalog role against independently current sidecar evidence;

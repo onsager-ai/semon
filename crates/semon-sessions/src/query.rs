@@ -164,7 +164,7 @@ impl QueryError {
         self.reason = self.reason.or(match self.code {
             "io" | "unavailable" if exhausted => Some("limit_exceeded"),
             "unavailable" => Some("interrupted"),
-            "io" | "stale_projection" => Some("source_unavailable"),
+            "io" | "stale_projection" | "source_changed" => Some("source_unavailable"),
             "unknown_session" => Some("no_activity"),
             "capability_unavailable" => Some("unsupported_storage"),
             _ => None,
@@ -966,7 +966,21 @@ impl Query {
         // The scope outlives the call, so a refusal sees its accounting state.
         let _activity_scope =
             (tool == "get_session_activity").then(crate::selected_read::Scope::ensure);
-        let result = self.execute_tool(tool, args, now);
+        let mut result = self.execute_tool(tool, args, now);
+        if !self.embedded && matches!(&result, Err(error) if error.code == "source_changed") {
+            // Discard every request and derivation cache from the failed call.
+            // The persistent index is requalified against native sources again.
+            self.native = None;
+            self.start = None;
+            self.sources = Arc::new(SessionSources::with_machines(
+                self.sources
+                    .machines
+                    .iter()
+                    .map(|(key, evidence)| (key.clone(), evidence.options.clone()))
+                    .collect(),
+            ));
+            result = self.execute_tool(tool, args, now);
+        }
         if tool == "get_session_activity" {
             result.map_err(QueryError::activity_refusal)
         } else {

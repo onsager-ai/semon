@@ -71,7 +71,7 @@ impl FailureStage {
     }
 
     pub(crate) fn of(error: &io::Error) -> Option<Self> {
-        error
+        crate::query_source::original_error(error)
             .get_ref()?
             .downcast_ref::<SourceFailure>()
             .map(|failure| failure.stage)

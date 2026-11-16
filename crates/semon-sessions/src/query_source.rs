@@ -45,7 +45,7 @@ pub(crate) struct Sources {
     proofs: BTreeMap<PathBuf, Proof>,
     paths: BTreeMap<(String, String), PathBuf>,
     diagnostic_scope: PathBuf,
-    #[cfg(feature = "test-hooks")]
+    #[cfg(any(test, feature = "test-hooks"))]
     cache: PathBuf,
 }
 
@@ -69,6 +69,19 @@ impl std::error::Error for SourceChanged {}
 
 fn source_changed() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, SourceChanged)
+}
+
+// A concurrent append can be retried; a changed consumed prefix still refuses.
+fn changed_source(proof: &Proof, file: &mut LogFile) -> io::Error {
+    if file
+        .metadata()
+        .and_then(|metadata| Stat::from_metadata(&metadata))
+        .is_ok_and(|after| proof.ledger.resumes(&after, file))
+    {
+        source_changed()
+    } else {
+        unavailable()
+    }
 }
 
 #[derive(Debug)]
@@ -118,7 +131,7 @@ impl Sources {
             proofs: BTreeMap::new(),
             paths: BTreeMap::new(),
             diagnostic_scope: crate::events::EventCache::path(&options.cache),
-            #[cfg(feature = "test-hooks")]
+            #[cfg(any(test, feature = "test-hooks"))]
             cache: options.cache.clone(),
         }
     }
@@ -627,7 +640,7 @@ impl Records<'_> {
                 self.recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
-                return Err(source_changed());
+                return Err(changed_source(proof, &mut file));
             }
             self.checked_evidence
                 .lock()
@@ -793,8 +806,10 @@ impl Records<'_> {
             self.recheck(path, &file, &before)?;
         } else {
             let valid = unchanged || proof.ledger.resumes(&before, &mut file);
+            #[cfg(any(test, feature = "test-hooks"))]
+            crate::test_hooks::run_cache(&self.sources.cache, "query_source_after_verify");
             if Stat::from_metadata(&file.metadata()?)? != before {
-                return Err(source_changed());
+                return Err(changed_source(proof, &mut file));
             }
             if !valid {
                 return Err(unavailable());
@@ -914,7 +929,7 @@ impl Records<'_> {
                 self.recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
-                return Err(source_changed());
+                return Err(changed_source(proof, &mut file));
             }
         }
         for (path, records) in self
@@ -944,7 +959,7 @@ impl Records<'_> {
                 self.recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
-                return Err(source_changed());
+                return Err(changed_source(proof, &mut file));
             }
         }
         Ok(())
@@ -1117,13 +1132,13 @@ impl Records<'_> {
             let hi = (end - start).min(part.len() as u64) as usize;
             bytes.extend_from_slice(&part[lo..hi]);
         }
-        #[cfg(feature = "test-hooks")]
+        #[cfg(any(test, feature = "test-hooks"))]
         crate::test_hooks::run_cache(&self.sources.cache, "query_source_after_read");
         if qualified {
             self.recheck(path, &file, &before)?;
         }
         if Stat::from_metadata(&file.metadata()?)? != before {
-            return Err(source_changed());
+            return Err(changed_source(proof, &mut file));
         }
         if !qualified && before.changed_ns.is_none() && !proof.ledger.resumes(&before, &mut file) {
             return Err(unavailable());
@@ -1415,6 +1430,33 @@ mod tests {
             );
             after
         }
+    }
+
+    #[test]
+    fn finish_and_query_error_keep_the_first_failure() {
+        let sources = Sources::new(&Options::default());
+        let records = sources.reader();
+        records.remember_error(source_changed());
+        records.remember_error(unavailable());
+        assert_eq!(
+            crate::QueryError::io(&records.finish().unwrap_err()).code,
+            "source_changed"
+        );
+        assert_eq!(
+            records.query_error("parser discarded the error").code,
+            "source_changed"
+        );
+
+        let records = sources.reader();
+        records.remember_error(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "first cause",
+        ));
+        records.remember_error(source_changed());
+        let error = records.finish().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(crate::QueryError::io(&error).message, "first cause");
+        assert_eq!(records.query_error("later cause").message, "first cause");
     }
 
     #[test]

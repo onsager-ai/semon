@@ -253,6 +253,19 @@ Session summaries add nullable `activity_analytics`: ownership/context totals, c
 
 A summary has `id`, `harness`, `kind` (`session`, `subagent`, `codex-run`, `stub`), `name`, `model`, `repo`, `branch`, `machine`, `parent`, `children`, `state`, `start`, `last_activity`, `pid`, `alive`, `exit`, `open_question`, `tokens` (`input` uncached, `cached`, `output`), `run` and `turns_truncated`. Times are epoch milliseconds. `state` is one of `working`, `waiting-question`, `idle`, `ended`, `error` and `unknown`; `stall_reason` is one of `waiting-question`, `no-output` and `process-gone`, and every `stalls` answer states its rule. A field Semon can't know exactly is `null`: `pid` and `alive` come only from a Claude pid file checked against its process's start time, or from a held Codex writer lock. `run` holds a live session process's run ids, read from `/proc/<pid>/environ` by exact name: `OSTROM_RUN_ID` and `OSTROM_WORK_ORDER_ID` ([Ostrom's run environment contract](https://github.com/onsager-ai/ostrom/blob/main/docs/loops.md)), and nothing else. Every other entry of the environment is dropped as it is parsed, never kept or logged. `run` is `{}` when the process has neither variable, and `null` when there is no live process (a subagent has none of its own) or its environment can't be read whole: unreadable, over 256 KB, or a run id that isn't UTF-8. The facts `semon push` sends carry each live process's run ids, so a receiver answers `run` without reading `/proc`. `exit` is `null`: no log records a run's exit status (a Codex `task_complete` error is a turn's outcome, shown as the state `error`), and none is inferred. Turns and handoffs use the same native identities across Query, Transcript and Viewer reads. `since` is a duration back from now (`90m`, `2h`, `7d`) or an RFC 3339 time. A failure has a closed `code` (`unknown_session`, `unknown_turn`, `invalid_arguments`, `outside_window`, …): `semon query` exits nonzero, and `semon mcp` returns a tool result with `isError`.
 
+When a native log changes during verification or reading, ordinary local
+`semon query` / stdio MCP calls discard the failed attempt and retry the complete
+query once, including preparation and derivation. If that retry also races a
+writer, the JSON error has `error.code: "source_changed"`. No partial answer is
+returned. Invalid proofs, rewritten sources, and sources outside the native homes
+remain refusals and do not trigger this retry.
+
+An older session index schema is refused with the actual SQLite index path and
+recovery instructions. The index is a derived cache: move its `.sqlite3` file and
+its `-wal` and `-shm` sidecars aside by renaming them, then run the command again.
+Keep the native logs available for rebuilding. Semon does not rename, migrate or
+delete these files automatically.
+
 ```sh
 semon query list_sessions --state working --json
 semon query get_session SESSION_ID
