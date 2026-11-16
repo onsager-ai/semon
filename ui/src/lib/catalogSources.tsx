@@ -12,11 +12,16 @@ export function renderCatalogSources(
   },
   host: { select(key: string): void; more(): void; retry(): void },
 ) {
+  const emptyReceiver = !view.items.length && !view.updating && !view.note && !!view.pair;
   render(
     <>
       <div class="ph">
-        <h1>Choose a machine</h1>
-        <p class="sub">Browse recorded history from one authorized source.</p>
+        <h1>{emptyReceiver ? 'Pair your first machine' : 'Choose a machine'}</h1>
+        <p class="sub">
+          {emptyReceiver
+            ? 'Run one command on each machine whose sessions you want here. Sync starts automatically.'
+            : 'Browse recorded history from one authorized source.'}
+        </p>
       </div>
       {view.note && (
         <p class="catalog-note" role="status">
@@ -46,11 +51,7 @@ export function renderCatalogSources(
       </div>
       {!view.items.length && !view.updating && !view.note && (
         <div class="catalog-note">
-          <p>
-            {view.pair
-              ? 'Pair your first machine to start syncing its session history.'
-              : 'No authorized recorded sources are available.'}
-          </p>
+          {!view.pair && <p>No authorized recorded sources are available.</p>}
           {view.pair && (
             <button type="button" class="btn sh-compact" onClick={view.pair}>
               Pair a machine
@@ -63,11 +64,13 @@ export function renderCatalogSources(
           Load more machines
         </button>
       )}
-      <p class="catalog-note">
-        <a class="link" href={view.machinesHref}>
-          Manage machines
-        </a>
-      </p>
+      {!emptyReceiver && (
+        <p class="catalog-note">
+          <a class="link" href={view.machinesHref}>
+            Manage machines
+          </a>
+        </p>
+      )}
     </>,
     root,
   );
