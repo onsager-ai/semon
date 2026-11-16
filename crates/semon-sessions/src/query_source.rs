@@ -1284,13 +1284,13 @@ impl SessionSourceReader for Records<'_> {
         max: usize,
     ) -> io::Result<SessionSourceRange> {
         let result = self.range(source, expected, offset, max, false);
-        if let Err(error) = &result {
-            if let Some(stage) = crate::source_carrier::FailureStage::of(error) {
-                self.failure_stage
-                    .lock()
-                    .map_err(|_| unavailable())?
-                    .get_or_insert(stage);
-            }
+        if let Err(error) = &result
+            && let Some(stage) = crate::source_carrier::FailureStage::of(error)
+        {
+            self.failure_stage
+                .lock()
+                .map_err(|_| unavailable())?
+                .get_or_insert(stage);
         }
         result.map_err(|error| self.remember_error(error))
     }
