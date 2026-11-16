@@ -905,7 +905,9 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         Err(_) => return Next::Close,
     };
     let reply = shared.receiver.handle(&machine, endpoint, &body);
-    if reply.status >= 400 {
+    if reply.status >= 500 {
+        eprintln!("semon receive: {machine}: {}", reply.body);
+    } else if reply.status >= 400 {
         log_refusal(head, reply.status);
     }
     match connection.respond(reply.status, &reply.body, head.close, &[]) {
