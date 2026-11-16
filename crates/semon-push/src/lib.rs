@@ -695,7 +695,7 @@ impl Client {
                     ));
                 drop(http);
                 #[cfg(unix)]
-                if matches!(&result, Ok((200..=299, _, _)))
+                if matches!(&result, Ok(Ok((200..=299, _, _))))
                     && let (Some(authority), Some(generation)) =
                         (&dispatch_stop.authority, generation)
                 {
