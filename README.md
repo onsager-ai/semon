@@ -344,7 +344,7 @@ Choose backup operations by what you need to preserve:
 
 | Operation | Preserves | Does not replace |
 | --- | --- | --- |
-| `semon analytics export DESTINATION` | Verified current published analytics snapshot and its namespace | Durable free-text backup, native history/archive custody, private enrollment state or the egress-handle mapping |
+| `semon analytics export DESTINATION` | Verified current published analytics snapshot and its namespace | Durable free-text backup, native history/archive custody, private pairing state |
 | `semon asi backup PATH` | Author-owned durable SQLite state, including its local body fields | Analytics snapshot export or native history/archive custody |
 
 Neither command is a complete machine backup. Keep destinations private, and

@@ -1,6 +1,5 @@
-//! Receiver enrollment registry, deliberately unwired from receive/CLI defaults.
-//! A single transaction contains bindings and hashes; missing custody never means
-//! an empty registry. Unix custody follows the receiver ACL/audit conventions.
+//! Atomic receiver registry for pairing, read tokens and machine metadata.
+//! Missing custody never means an empty registry.
 use serde::{Deserialize, Serialize};
 use std::os::{
     fd::{AsRawFd, FromRawFd},
@@ -23,12 +22,10 @@ pub const ADMISSION_CAP: u64 = CAP - TERMINAL_RESERVE;
 
 pub const UNSUPPORTED_FORMAT: &str = "Receiver state uses an unsupported format. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. No state is migrated or deleted.";
 pub const STATE_FULL: &str = "Receiver state is full. Keep DIR unchanged; use a new empty receiver directory and pair each origin again. No state is migrated or deleted.";
-pub const AUDIT_UNAVAILABLE: &str = "Receiver audit is unavailable. Keep DIR unchanged; restore access to its audit storage before pairing.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     Custody,
-    GateUnavailable,
     InUse,
     Invalid,
     UnsupportedVersion,
@@ -39,24 +36,21 @@ pub enum Error {
     CommitUncertain,
     LegacyTokens,
     Full,
-    AuditUnavailable,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Custody => "enrollment custody is missing, unreadable or insecure",
-            Self::GateUnavailable => "pairing gate is unavailable; session creation refused",
             Self::InUse => "enrollment registry is locked",
             Self::Invalid => "invalid enrollment registry",
             Self::UnsupportedVersion => UNSUPPORTED_FORMAT,
             Self::Full => STATE_FULL,
-            Self::AuditUnavailable => AUDIT_UNAVAILABLE,
-            Self::Terminal => "terminal enrollment or credential history cannot be cleared; recover with a new enrollment ID",
+            Self::Terminal => "terminal pairing or credential history cannot be cleared",
             Self::StaleSnapshot => "stale enrollment snapshot; reload before updating",
             Self::Random => "system random source failed",
             Self::Write => "enrollment update failed before commit",
             Self::CommitUncertain => "enrollment update was renamed; reopen custody to resolve commit outcome",
-            Self::LegacyTokens => "legacy tokens found; re-issue kind credentials through explicit enrollment; leave tokens and history untouched",
+            Self::LegacyTokens => "legacy tokens found; keep this directory unchanged and pair origins into a fresh receiver directory",
         })
     }
 }
@@ -515,5 +509,30 @@ impl Store {
         next.latest = time;
         next.check_admission()?;
         self.commit(next.revision(), &next)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn current_registry_roundtrips_and_retired_state_is_refused() {
+        let registry = Registry::empty();
+        let mut value = serde_json::to_value(&registry).unwrap();
+        assert_eq!(
+            Registry::parse(&serde_json::to_vec(&value).unwrap()).unwrap(),
+            registry
+        );
+        value["format"] = serde_json::json!(FORMAT - 1);
+        assert_eq!(
+            Registry::parse(&serde_json::to_vec(&value).unwrap()),
+            Err(Error::UnsupportedVersion)
+        );
+        value["format"] = serde_json::json!(FORMAT);
+        value["enrollments"] = serde_json::json!([]);
+        assert_eq!(
+            Registry::parse(&serde_json::to_vec(&value).unwrap()),
+            Err(Error::Invalid)
+        );
     }
 }

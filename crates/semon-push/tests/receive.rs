@@ -1,5 +1,5 @@
 //! `semon receive`'s listener over HTTP: each answer a client can get, from
-//! raw requests on loopback, over plain HTTP and TLS, and the deadlines and
+//! raw requests on loopback, over plain HTTP, and the deadlines and
 //! limits that keep a slow or greedy client from holding it. Tests that
 //! wait on a deadline use short limits rather than the real ones.
 
@@ -17,10 +17,10 @@ use std::{
 };
 
 use semon_push::{
-    credentials::{Bearer, Kind, Secret},
-    enrollment::{Binding, Enrollment, KindScope, Registry, Store},
+    credentials::Secret,
+    enrollment::{Registry, Store},
     mirror::MAX_BODY_BYTES,
-    serve::{Limits, ServeOptions, Server, TlsFiles},
+    serve::{Limits, ServeOptions, Server},
     wire::{Append, base64_encode, head_sha256},
 };
 use serde_json::{Value, json};
@@ -40,14 +40,7 @@ impl Drop for Receiving {
 
 /// A receiver on a free loopback port, with a token for each machine.
 fn receiving(machines: &[&str]) -> (Receiving, Vec<String>) {
-    receiving_with(machines, Limits::default(), false)
-}
-
-/// The test-only certificate and key (tests/fixtures/README.md).
-fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures")
-        .join(name)
+    receiving_with(machines, Limits::default())
 }
 
 /// Limits short enough to wait out in a test.
@@ -59,7 +52,7 @@ fn short() -> Limits {
     }
 }
 
-fn receiving_with(machines: &[&str], limits: Limits, tls: bool) -> (Receiving, Vec<String>) {
+fn receiving_with(machines: &[&str], limits: Limits) -> (Receiving, Vec<String>) {
     let dir = std::env::temp_dir().join(format!(
         "semon-receive-{}-{}",
         std::process::id(),
@@ -71,51 +64,20 @@ fn receiving_with(machines: &[&str], limits: Limits, tls: bool) -> (Receiving, V
         .iter()
         .map(|name| format!("test-bearer-{name}"))
         .collect();
-    let enrollments: Vec<_> = machines
-        .iter()
-        .enumerate()
-        .map(|(index, name)| Enrollment {
-            enrollment_id: format!("{:064x}", index + 1),
-            receiver_id: "receiver-1".into(),
-            machine: (*name).into(),
-            sequence: index as u64 + 1,
-            origin_key: vec![4; 65],
-            endpoint: "https://receiver.example:443".into(),
-            enrolled_pin: None,
-            binding: Binding::Inapplicable,
-            client_certificate_pins: vec![],
-            credential_kinds: vec![KindScope::new(Kind::MirrorPush, 1)],
-            revoked_at: None,
-        })
-        .collect();
-    let credentials = enrollments
-        .iter()
-        .zip(&tokens)
-        .enumerate()
-        .map(|(index, (enrollment, token))| Bearer {
-            credential_id: format!("{:064x}", index + 100),
-            enrollment_id: enrollment.enrollment_id.clone(),
-            kind: Kind::MirrorPush,
-            sha256: Secret::new(token.clone()).hash(),
-            generation: 1,
-            valid_from: 0,
-            valid_until: u64::MAX,
-            revoked_at: None,
-        })
-        .collect();
-    let registry = Registry::from_records(enrollments, credentials).unwrap();
-    Store::initialize(&dir)
-        .unwrap()
-        .commit(0, &registry)
-        .unwrap();
+    Store::initialize(&dir).unwrap();
+    let path = dir.join("enrollment/registry.json");
+    let mut registry: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    registry["machines"] = json!(
+        machines
+            .iter()
+            .map(|name| json!({"id":name,"directory":name,"owner_name":null}))
+            .collect::<Vec<_>>()
+    );
+    registry["simple_pair"]["tokens"] = json!(machines.iter().zip(&tokens).enumerate().map(|(i,(name,token))| json!({"credential_id":format!("{:064x}",i+100),"enrollment_id":name,"kind":"push","sha256":Secret::new(token.clone()).hash(),"generation":1,"valid_from":0,"valid_until":u64::MAX,"revoked_at":null})).collect::<Vec<_>>());
+    Registry::parse(&serde_json::to_vec(&registry).unwrap()).unwrap();
+    fs::write(path, serde_json::to_vec(&registry).unwrap()).unwrap();
     let mut options = ServeOptions::new(&dir);
     options.listen = "127.0.0.1:0".parse().unwrap();
-    if tls {
-        options.tls = Some(TlsFiles {
-            certificate: fixture("test-cert.pem"),
-            private_key: fixture("test-key.pem"),
-        });
-    }
     let server = Server::bind(&options).unwrap().with_limits(limits);
     let address = server.local_addr().unwrap();
     thread::spawn(move || server.run());
@@ -193,30 +155,6 @@ fn answers(raw: &[u8]) -> Vec<Answer> {
     found
 }
 
-/// A rustls client that trusts the test certificate alone.
-fn tls_client(address: SocketAddr) -> rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
-    use rustls::pki_types::{CertificateDer, ServerName, pem::PemObject};
-    let mut roots = rustls::RootCertStore::empty();
-    for certificate in CertificateDer::pem_file_iter(fixture("test-cert.pem")).unwrap() {
-        roots.add(certificate.unwrap()).unwrap();
-    }
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .unwrap()
-    .with_root_certificates(roots)
-    .with_no_client_auth();
-    let name = ServerName::try_from("127.0.0.1").unwrap().to_owned();
-    let connection = rustls::ClientConnection::new(Arc::new(config), name).unwrap();
-    let socket = TcpStream::connect(address).unwrap();
-    socket
-        .set_read_timeout(Some(Duration::from_secs(20)))
-        .unwrap();
-    rustls::StreamOwned::new(connection, socket)
-}
-
-/// Writes `bytes` one at a time, every 50 ms, until `stop` or an error.
 fn trickle(mut socket: TcpStream, bytes: Vec<u8>, stop: Arc<AtomicBool>) {
     thread::spawn(move || {
         for byte in bytes {
@@ -324,16 +262,7 @@ fn unknown_and_revoked_tokens_are_401() {
     );
 
     // Revoked while the receiver runs: refused from the next request on.
-    let mut store = Store::open(&receiving.dir).unwrap();
-    let registry = store.snapshot().unwrap();
-    let mut enrollments = registry.enrollments().to_vec();
-    enrollments
-        .iter_mut()
-        .find(|e| e.machine == "machine-6754a9c100000001")
-        .unwrap()
-        .revoked_at = Some(1);
-    let next = Registry::from_records(enrollments, registry.credentials().to_vec()).unwrap();
-    store.commit(registry.revision(), &next).unwrap();
+    semon_push::simple_pair::unpair(&receiving.dir, "machine-6754a9c100000001", 1).unwrap();
     let more = append_body(LOG, b"one\n", 4, b"two\n");
     assert_eq!(
         post(receiving.address, APPEND, Some(&tokens[0]), &more).status,
@@ -527,50 +456,8 @@ fn a_kept_alive_connection_serves_several_requests() {
 }
 
 #[test]
-fn an_append_is_answered_over_tls() {
-    let (receiving, tokens) =
-        receiving_with(&["machine-6754a9c100000001"], Limits::default(), true);
-    let mut stream = tls_client(receiving.address);
-    let body = append_body(LOG, b"", 0, b"one\n");
-    stream
-        .write_all(&request(receiving.address, APPEND, Some(&tokens[0]), &body))
-        .unwrap();
-    let mut raw = Vec::new();
-    let _ = stream.read_to_end(&mut raw);
-    let answer = parse(&raw);
-    assert_eq!(answer.status, 200, "{}", answer.head);
-    assert_eq!(answer.body, json!({"length": 4}));
-    let copy = receiving
-        .dir
-        .join("machines/machine-6754a9c100000001/claude")
-        .join(LOG);
-    assert_eq!(fs::read(copy).unwrap(), b"one\n");
-}
-
-#[test]
-fn a_trickled_tls_handshake_ends_at_the_head_deadline() {
-    let (receiving, _tokens) = receiving_with(&["machine-6754a9c100000001"], short(), true);
-    let socket = TcpStream::connect(receiving.address).unwrap();
-    let started = Instant::now();
-    // A handshake record of 512 bytes, sent a byte every 50 ms: each read
-    // returns at once, so only the deadline can end it.
-    let mut hello = vec![
-        0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc, 0x03, 0x03,
-    ];
-    hello.resize(5 + 512, 0);
-    let stop = Arc::new(AtomicBool::new(false));
-    trickle(socket.try_clone().unwrap(), hello, Arc::clone(&stop));
-    let elapsed = time_to_close(socket, started);
-    stop.store(true, Ordering::Relaxed);
-    assert!(
-        elapsed >= Duration::from_millis(900) && elapsed < Duration::from_secs(4),
-        "closed after {elapsed:?}; the head deadline is 1 s"
-    );
-}
-
-#[test]
 fn a_trickled_head_gets_408_at_the_head_deadline() {
-    let (receiving, _tokens) = receiving_with(&["machine-6754a9c100000001"], short(), false);
+    let (receiving, _tokens) = receiving_with(&["machine-6754a9c100000001"], short());
     let mut socket = TcpStream::connect(receiving.address).unwrap();
     let started = Instant::now();
     socket
@@ -600,7 +487,7 @@ fn one_address_gets_at_most_its_share_of_connections() {
         connections_per_ip: 2,
         ..short()
     };
-    let (receiving, tokens) = receiving_with(&["machine-6754a9c100000001"], limits, false);
+    let (receiving, tokens) = receiving_with(&["machine-6754a9c100000001"], limits);
     let first = TcpStream::connect(receiving.address).unwrap();
     let _second = TcpStream::connect(receiving.address).unwrap();
     let started = Instant::now();
@@ -704,7 +591,7 @@ fn a_post_without_a_length_is_411() {
 }
 
 #[test]
-fn registry_keep_alive_cannot_switch_enrollments() {
+fn registry_keep_alive_cannot_switch_machines() {
     let (receiving, tokens) = receiving(&["machine-6754a9c100000001", "machine-6754a9c100000003"]);
     let mut stream = TcpStream::connect(receiving.address).unwrap();
     stream
@@ -774,7 +661,7 @@ fn authenticated_connections_stop_counting_against_their_address() {
         ..Limits::default()
     };
     assert_eq!(limits.connections_per_ip, 4);
-    let (receiving, tokens) = receiving_with(&["machine-6754a9c100000001"], limits, false);
+    let (receiving, tokens) = receiving_with(&["machine-6754a9c100000001"], limits);
     let keep_alive = |path: &str, before: &[u8], line: &[u8]| {
         let body = append_body(path, before, before.len() as u64, line);
         let mut request = format!(
@@ -822,7 +709,7 @@ fn authenticated_connections_stop_counting_against_their_address() {
 
 #[test]
 fn a_connection_that_sends_nothing_is_closed_at_the_head_deadline() {
-    let (receiving, _tokens) = receiving_with(&["machine-6754a9c100000001"], short(), false);
+    let (receiving, _tokens) = receiving_with(&["machine-6754a9c100000001"], short());
     let started = Instant::now();
     let socket = TcpStream::connect(receiving.address).unwrap();
     let elapsed = time_to_close(socket, started);
@@ -843,7 +730,7 @@ fn a_peer_that_never_reads_its_answer_is_closed_at_the_write_deadline() {
         linger: Duration::from_millis(200),
         ..Limits::default()
     };
-    let (receiving, tokens) = receiving_with(&["machine-6754a9c100000001"], limits, false);
+    let (receiving, tokens) = receiving_with(&["machine-6754a9c100000001"], limits);
     // A path the 400 echoes back: an answer of about 5.5 MiB, more than
     // the socket buffers hold while the peer reads nothing.
     let body = serde_json::to_vec(&Append {

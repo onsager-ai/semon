@@ -1,7 +1,6 @@
 //! `semon receive`'s listener: the push protocol over HTTP/1.1, plain on
-//! a proxy-facing address or TLS with an operator-supplied certificate and key. It serves
-//! push routes to [`Receiver`], pairing, and the closed reverse
-//! body poll/response routes when body custody is configured.
+//! a proxy-facing address behind an HTTPS proxy. It serves push routes to
+//! [`Receiver`], pairing, and the read-only Viewer.
 //!
 //! Each connection has its own thread, up to [`Limits::connections`] in
 //! all. Until one of its requests passes the token check, a connection also
@@ -11,8 +10,7 @@
 //! several machines behind one address (an SSH tunnel, a NAT) each keep
 //! their connection. A request's token is checked, and its
 //! declared length against [`MAX_BODY_BYTES`], before any of its body is
-//! read. Every read and write of the socket, the TLS handshake's included,
-//! runs against a deadline (see [`Limits`]), so a client that trickles bytes
+//! read. Every read and write of the socket, runs against a deadline (see [`Limits`]), so a client that trickles bytes
 //! can't hold a connection past it. Semon never opens a port in a firewall
 //! or obtains a certificate.
 
@@ -53,7 +51,7 @@ pub struct Limits {
     /// address by its /64) at once (4).
     pub connections_per_ip: usize,
     /// From accepting a connection to the end of its first request's head,
-    /// the TLS handshake included; for a later request, from its first byte
+    /// for a later request, from its first byte
     /// (10 s).
     pub head: Duration,
     /// The longest wait for the next request on a kept-alive connection
@@ -284,7 +282,7 @@ impl Server {
         self.listener.local_addr()
     }
 
-    /// `https` with TLS, `http` without.
+    /// Plain HTTP; HTTPS terminates at the proxy.
     pub fn scheme(&self) -> &'static str {
         "http"
     }
@@ -340,8 +338,6 @@ impl Server {
 }
 
 struct Timed {
-    #[cfg(test)]
-    bytes_read: usize,
     socket: TcpStream,
     deadline: Instant,
     gap: Duration,
@@ -362,10 +358,6 @@ impl Read for Timed {
         let timeout = self.remaining()?;
         self.socket.set_read_timeout(Some(timeout))?;
         let read = self.socket.read(buffer)?;
-        #[cfg(test)]
-        {
-            self.bytes_read += read;
-        }
         Ok(read)
     }
 }
@@ -379,40 +371,6 @@ impl Write for Timed {
 
     fn flush(&mut self) -> io::Result<()> {
         self.socket.flush()
-    }
-}
-
-enum Stream {
-    Plain(Timed),
-}
-
-impl Stream {
-    fn timed(&mut self) -> &mut Timed {
-        match self {
-            Self::Plain(timed) => timed,
-        }
-    }
-}
-
-impl Read for Stream {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::Plain(stream) => stream.read(buffer),
-        }
-    }
-}
-
-impl Write for Stream {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::Plain(stream) => stream.write(buffer),
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::Plain(stream) => stream.flush(),
-        }
     }
 }
 
@@ -445,7 +403,7 @@ enum NoHead {
 }
 
 struct Connection {
-    stream: Stream,
+    stream: Timed,
     head_only: bool,
     authority: ConnectionAuthority,
     /// Bytes read and not yet used.
@@ -463,7 +421,7 @@ fn is_timeout(error: &io::Error) -> bool {
 impl Connection {
     /// Reads once, by `deadline`.
     fn read_more(&mut self, deadline: Instant, remaining: usize) -> io::Result<usize> {
-        self.stream.timed().deadline = deadline;
+        self.stream.deadline = deadline;
         let mut chunk = [0u8; 16 * 1024];
         let bound = remaining.min(chunk.len());
         let read = self.stream.read(&mut chunk[..bound])?;
@@ -497,7 +455,7 @@ impl Connection {
                 return Err(NoHead::Refused(431, "the request head is too large"));
             }
             searched = self.buffer.len().saturating_sub(3);
-            self.stream.timed().deadline = deadline.unwrap_or(wait);
+            self.stream.deadline = deadline.unwrap_or(wait);
             let mut byte = [0u8; 1];
             let read = self.stream.read(&mut byte);
             if let Ok(1) = read {
@@ -535,7 +493,7 @@ impl Connection {
 
     /// Writes `bytes`, within [`Limits::write`].
     fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.stream.timed().deadline = Instant::now() + self.limits.write;
+        self.stream.deadline = Instant::now() + self.limits.write;
         self.stream.write_all(bytes)?;
         self.stream.flush()
     }
@@ -572,12 +530,12 @@ impl Connection {
         self.close();
     }
 
-    /// Ends the connection: TLS close_notify, no more writes, then what the
+    /// Ends the connection: no more writes, then what the
     /// client still sends is read and dropped for [`Limits::linger`], so it
     /// reads the answer before the socket closes rather than a reset.
     fn close(mut self) {
         let linger = self.limits.linger;
-        let socket = &mut self.stream.timed().socket;
+        let socket = &mut self.stream.socket;
         let _ = socket.shutdown(Shutdown::Write);
         let deadline = Instant::now() + linger;
         let mut sink = [0u8; 16 * 1024];
@@ -740,14 +698,12 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
     let _ = socket.set_nodelay(true);
     let limits = shared.limits;
     let timed = Timed {
-        #[cfg(test)]
-        bytes_read: 0,
         socket,
         deadline: accepted + limits.head,
         gap: limits.gap,
     };
     let mut connection = Connection {
-        stream: Stream::Plain(timed),
+        stream: timed,
         head_only: false,
         authority: ConnectionAuthority::default(),
         buffer: Vec::new(),
@@ -791,9 +747,7 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
 // The receiver parser reads exactly through the head, leaving the body on the
 // socket. tiny_http retains the Viewer's body framing and response behavior.
 fn serve_viewer(viewer: &semon_sessions::Viewer, mut connection: Connection, head: Head) {
-    let Stream::Plain(timed) = &mut connection.stream else {
-        return;
-    };
+    let timed = &mut connection.stream;
     let Ok(writer) = timed.socket.try_clone() else {
         return;
     };

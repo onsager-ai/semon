@@ -359,8 +359,7 @@ struct Source {
     prepared: bool,
 }
 
-type HttpFactory =
-    dyn Fn(Option<Credential>) -> Result<(reqwest::blocking::Client, Token)> + Send + Sync;
+type HttpFactory = dyn Fn() -> Result<(reqwest::blocking::Client, Token)> + Send + Sync;
 
 pub struct Client {
     url: String,
@@ -378,12 +377,11 @@ pub struct Client {
     archives: archives::Cache,
     sources: BTreeMap<String, Source>,
     catchup_pending: bool,
-    allowed_sources: Option<BTreeSet<PathBuf>>,
     #[cfg(test)]
     completed_transports: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-/// Bound each upload read and recheck local authority before releasing bytes.
+/// Bound each upload read and check cancellation before releasing bytes.
 struct UploadBody {
     bytes: std::io::Cursor<Vec<u8>>,
     stop: Stop,
@@ -412,8 +410,7 @@ impl Client {
         let url = check_url(&options.url)?;
         options.credential.token()?;
         let credential = options.credential.clone();
-        let http: Arc<HttpFactory> = Arc::new(move |selected| {
-            let credential = selected.as_ref().unwrap_or(&credential);
+        let http: Arc<HttpFactory> = Arc::new(move || {
             let token = credential.token()?;
             let http = builder();
             http.redirect(reqwest::redirect::Policy::none())
@@ -450,7 +447,6 @@ impl Client {
             catchup_pending: false,
             #[cfg(test)]
             completed_transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            allowed_sources: None,
         })
     }
 
@@ -474,9 +470,8 @@ impl Client {
         self
     }
 
-    /// Each request rechecks enrolled authority at dispatch and between upload
-    /// chunks. Its worker retains state and delivery locks until HTTP ends;
-    /// disconnect drains delivery locks before reporting success.
+    /// Check cancellation at dispatch and between upload chunks. The worker
+    /// retains the state lock until HTTP ends.
     fn post(&self, route: &str, body: String) -> std::result::Result<(u16, String), Failure> {
         self.post_wait(route, body, |delay| self.stop.sleep(delay))
     }
@@ -501,9 +496,8 @@ impl Client {
                 if dispatch_stop.is_stopped() {
                     return Err("delivery stopped".to_owned());
                 }
-                // Declared after the delivery guard: the last handle joins its
-                // private reqwest runtime before the guard can be released.
-                let (http, token) = factory(None)?;
+                // The last handle joins its private reqwest runtime.
+                let (http, token) = factory()?;
                 let request = http
                     .post(request_url)
                     .bearer_auth(token.expose())
@@ -844,13 +838,6 @@ impl Client {
         // must agree over their common prefix before selecting the longer one.
         let mut inputs = BTreeMap::<String, (Input, Source)>::new();
         for source in discovered {
-            if self
-                .allowed_sources
-                .as_ref()
-                .is_some_and(|allowed| !allowed.contains(&source.full_path(sessions)))
-            {
-                continue;
-            }
             let mut input = source.clone();
             let archive = input.path.ends_with(".jsonl.zst");
             if archive {

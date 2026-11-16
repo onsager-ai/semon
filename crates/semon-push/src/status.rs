@@ -208,22 +208,10 @@ fn status_advertised(client: &Client) -> bool {
     matches!(
         client.stop.run("status-capability", move || {
             let _lock = lock;
-            #[cfg(unix)]
-            let admitted = dispatch_stop
-                .authority
-                .as_ref()
-                .map(|authority| authority.admit())
-                .transpose()?;
-            #[cfg(unix)]
-            let (_delivery, selected) = admitted.map_or((None, None), |(guard, credential, _)| {
-                (Some(guard), Some(credential))
-            });
-            #[cfg(not(unix))]
-            let selected = None;
             if dispatch_stop.is_stopped() {
                 return Err("delivery stopped".to_owned());
             }
-            let (http, token) = factory(selected)?;
+            let (http, token) = factory()?;
             let request = http
                 .head(url)
                 .bearer_auth(token.expose())

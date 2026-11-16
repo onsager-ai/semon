@@ -141,15 +141,14 @@ pub fn verify_export(bundle: &Path) -> Result<ExportReceipt> {
 /// is removed before every other store entry so a partial failure is never readable as a
 /// valid snapshot. The lock file and store root remain so another writer cannot acquire a
 /// replacement lock inode before this operation has released ownership.
-/// `retire_namespace_handles` is `None` to keep namespace identity and mappings;
-/// `Some(state_dir/analytics-egress-handles.sqlite)` retires both under this lock.
+/// `retire_namespace` explicitly removes the namespace under this lock.
 pub fn reset_snapshot(
     root: &Path,
     namespace_file: &Path,
     expected_namespace: &str,
     verified_export: Option<&Path>,
     expected_generation: u64,
-    retire_namespace_handles: Option<&Path>,
+    retire_namespace: bool,
 ) -> Result<ResetSummary> {
     reset_snapshot_with(
         root,
@@ -157,14 +156,14 @@ pub fn reset_snapshot(
         expected_namespace,
         verified_export,
         expected_generation,
-        retire_namespace_handles,
+        retire_namespace,
         |_| Ok(()),
     )
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum ResetStage {
-    HandlesRetired,
+    NamespaceRetiring,
     Completed,
 }
 
@@ -174,7 +173,7 @@ pub(crate) fn reset_snapshot_with<F: FnMut(ResetStage) -> Result<()>>(
     expected_namespace: &str,
     verified_export: Option<&Path>,
     expected_generation: u64,
-    retire_namespace_handles: Option<&Path>,
+    retire_namespace: bool,
     mut on_locked: F,
 ) -> Result<ResetSummary> {
     let _lock = open_lock(root, true)?;
@@ -200,19 +199,6 @@ pub(crate) fn reset_snapshot_with<F: FnMut(ResetStage) -> Result<()>>(
             "published manifest changed after verified export; export again before reset",
         ));
     }
-    if let Some(handles) = retire_namespace_handles {
-        let parent = namespace_file
-            .parent()
-            .ok_or_else(|| Error::invalid("namespace has no state directory"))?;
-        if handles != parent.join(crate::egress::HANDLES_FILE) {
-            return Err(Error::invalid("handle registry must be beside namespace"));
-        }
-        match fs::symlink_metadata(handles) {
-            Ok(_) => require_regular_file(handles, "egress handle registry")?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
     let analytics = root.join(ANALYTICS_DIR);
     let manifest_path = analytics.join(MANIFEST_FILE);
     fs::remove_file(&manifest_path)?;
@@ -231,15 +217,10 @@ pub(crate) fn reset_snapshot_with<F: FnMut(ResetStage) -> Result<()>>(
     }
     fs::remove_dir(&analytics)?;
     removed.push(ANALYTICS_DIR.to_owned());
-    if let Some(handles) = retire_namespace_handles {
-        match fs::remove_file(handles) {
-            Ok(()) => removed.push(crate::egress::HANDLES_FILE.to_owned()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
+    if retire_namespace {
         let state = File::open(namespace_file.parent().expect("validated namespace parent"))?;
         state.sync_all()?;
-        on_locked(ResetStage::HandlesRetired)?;
+        on_locked(ResetStage::NamespaceRetiring)?;
         fs::remove_file(namespace_file)?;
         removed.push("analytics-namespace".to_owned());
         state.sync_all()?;
@@ -711,11 +692,11 @@ mod tests {
         assert!(result.is_err());
         drop(Store::open(&root).unwrap());
         let (result, error_fds) =
-            inherited_during(|| reset_snapshot(&root, &namespace, "wrong", None, 1, None));
+            inherited_during(|| reset_snapshot(&root, &namespace, "wrong", None, 1, false));
         assert!(result.is_err());
         drop(Store::open(&root).unwrap());
         let (result, reset_fds) =
-            inherited_during(|| reset_snapshot(&root, &namespace, "origin-test", None, 1, None));
+            inherited_during(|| reset_snapshot(&root, &namespace, "origin-test", None, 1, false));
         result.unwrap();
         drop(Store::open(&root).unwrap());
         drop((
@@ -771,18 +752,12 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let handles_path = state.join(crate::egress::HANDLES_FILE);
-        drop(crate::egress::Handles::open(state, namespace).unwrap());
-        let summary = reset_snapshot_with(
-            &root,
-            &namespace_file,
-            namespace,
-            None,
-            1,
-            Some(&handles_path),
-            |stage| {
-                assert_eq!(namespace_file.exists(), stage == ResetStage::HandlesRetired);
-                assert!(!handles_path.exists());
+        let summary =
+            reset_snapshot_with(&root, &namespace_file, namespace, None, 1, true, |stage| {
+                assert_eq!(
+                    namespace_file.exists(),
+                    stage == ResetStage::NamespaceRetiring
+                );
                 let lock = OpenOptions::new()
                     .write(true)
                     .open(root.join(LOCK_FILE))
@@ -792,9 +767,8 @@ mod tests {
                     Err(std::fs::TryLockError::WouldBlock)
                 ));
                 Ok(())
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         assert!(
             summary

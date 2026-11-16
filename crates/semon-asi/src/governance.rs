@@ -649,17 +649,6 @@ pub(crate) fn validate_receiver_value(
     column: &schema::Column,
     value: &Value,
 ) -> Result<(), GovernanceError> {
-    if let Some(tag) = crate::egress::handle_tag(column.name) {
-        validate_value(column.data_type, column.nullable, value, column.values)?;
-        if value.is_null()
-            || value
-                .as_str()
-                .is_some_and(|text| crate::egress::handle_hex(tag, text).is_some())
-        {
-            return Ok(());
-        }
-        return Err(GovernanceError::Denied);
-    }
     validate_column_value(column, value, Destination::Receiver)
 }
 

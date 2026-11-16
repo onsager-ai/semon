@@ -1,5 +1,4 @@
 use super::*;
-use crate::serve::{ConnectionAuthority, RegistryAuthenticator};
 use std::sync::atomic::{AtomicU64, Ordering};
 const MACHINE: &str = "machine-12345678abcdef01";
 
@@ -29,14 +28,9 @@ impl Fixture {
         )
     }
     fn accepts(&self, token: &str) -> bool {
-        RegistryAuthenticator::open(&self.0)
+        Registry::read_current(&self.0)
             .unwrap()
-            .authenticated_enrollment(
-                &mut ConnectionAuthority::default(),
-                Some(&format!("Bearer {token}")),
-                Kind::MirrorPush,
-                100,
-            )
+            .paired_token(&Secret::new(token.into()))
             .is_some()
     }
 }
@@ -113,17 +107,7 @@ fn repair_and_both_unpair_paths_revoke_without_removing_logs() {
     let f = Fixture::new();
     let (code, _) = issue(&f.0, 100).unwrap();
     let first = f.request(code.expose(), 100).unwrap();
-    let auth = RegistryAuthenticator::open(&f.0).unwrap();
-    let handle = auth
-        .authenticated_enrollment(
-            &mut ConnectionAuthority::default(),
-            Some(&format!("Bearer {}", first.token)),
-            Kind::MirrorPush,
-            100,
-        )
-        .unwrap()
-        .authority;
-    assert!(handle.is_current_at(100));
+    assert!(f.accepts(&first.token));
     assert!(!f.accepts("unknown"));
     let path = f.0.join(format!(
         "machines/{MACHINE}/claude/projects/synthetic.jsonl"
@@ -133,7 +117,6 @@ fn repair_and_both_unpair_paths_revoke_without_removing_logs() {
     let (code, _) = issue(&f.0, 101).unwrap();
     let second = f.request(code.expose(), 101).unwrap();
     assert!(!f.accepts(&first.token));
-    assert!(!handle.is_current_at(101));
     assert!(f.accepts(&second.token));
     assert!(
         Registry::read_current(&f.0)

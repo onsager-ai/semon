@@ -116,12 +116,12 @@ configuration, preserving received logs and Linux linger. A missing service does
 not prevent unpairing.
 
 P3a removes the previous enroll/connect/disconnect commands, provision/renew
-HTTP routes and automatic push renewal. P3b removes the remaining library stack,
-certificate registry fields and mirror naming after resolving the retained
-body/analytics certificate-authentication boundary. Direct TLS remains for that
-boundary, outside the pair/Viewer journey. The historical plan below does not
-authorize restoring removed entry points or adding public Viewer access to those
-surfaces. Private-root pairing remains deferred.
+HTTP routes and automatic push renewal. The 2026-11-16 owner decision pulls
+federation retirement forward: P3b removes the unused body/publication runtime,
+remaining certificate libraries and registry fields, and direct receive TLS.
+Receive serves plain HTTP behind an HTTPS proxy. Local body/FTS search and read
+audit remain. Internal mirror naming is a separate mechanical follow-up.
+Private-root pairing remains deferred.
 
 ## Implementation plan
 

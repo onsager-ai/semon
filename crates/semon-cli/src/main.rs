@@ -12,14 +12,6 @@ const DURABLE_VALUES_LIMIT: usize = 256 * 1024;
 const DURABLE_VALUES_TOO_LARGE: &str = "durable values exceed the 256 KiB authoring limit";
 
 fn main() -> ExitCode {
-    if env::args().skip(1).eq(["asi", "object-worker"]) {
-        use std::io::IsTerminal;
-        if std::io::stdin().is_terminal() {
-            eprintln!("internal worker; not a user command");
-            return ExitCode::FAILURE;
-        }
-        return ExitCode::from(semon_asi::objects::worker_stdio() as u8);
-    }
     #[cfg(feature = "asi-query")]
     if env::args().skip(1).eq(["asi", "body-worker"]) {
         return ExitCode::from(semon_sessions::body_query::worker_stdio() as u8);
@@ -1224,14 +1216,13 @@ fn run_reset(args: ResetArgs) -> Result<(), String> {
             .ok_or_else(|| format!("no analytics store at {}", store_root.display()))?
             .generation
     };
-    let handles_path = state_dir.join(semon_asi::egress::HANDLES_FILE);
     let summary = semon_asi::reset_snapshot(
         &store_root,
         &state_dir.join(ANALYTICS_NAMESPACE_FILE),
         &namespace,
         args.verified_export.as_deref(),
         expected_generation,
-        args.new_namespace.then_some(handles_path.as_path()),
+        args.new_namespace,
     )
     .map_err(|error| match error {
         semon_asi::Error::WriterBusy => {

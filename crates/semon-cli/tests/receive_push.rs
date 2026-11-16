@@ -86,16 +86,6 @@ impl Fixture {
         self.path("receiver")
     }
 
-    /// `semon receive …` with no environment beyond the synthetic home.
-    fn receive(&self, arguments: &[&str]) -> Output {
-        semon()
-            .arg("receive")
-            .args(arguments)
-            .env("HOME", self.path("home"))
-            .output()
-            .unwrap()
-    }
-
     /// Starts `semon receive` on a free loopback port and returns its URL.
     fn start_receiver(&mut self) -> String {
         self.start_receiver_with(&[])
@@ -244,44 +234,17 @@ fn private(path: &Path) {
 #[cfg(not(unix))]
 fn private(_path: &Path) {}
 
-fn enroll_fixture(dir: &Path) -> String {
-    use semon_push::{
-        credentials::{Bearer, Kind, Secret},
-        enrollment::{Binding, Enrollment, KindScope, Registry, Store},
-    };
-    semon_push::tokens::prepare_private_dir(dir, true).unwrap();
-    let token = "enrolled-test-mirror-bearer".to_owned();
-    let id = "a".repeat(64);
-    let registry = Registry::from_records(
-        vec![Enrollment {
-            enrollment_id: id.clone(),
-            receiver_id: "receiver-1".into(),
-            machine: "machine-6754a9c1e83f27b4".into(),
-            sequence: 1,
-            origin_key: vec![4; 65],
-            endpoint: "https://receiver.example:443".into(),
-            enrolled_pin: None,
-            binding: Binding::Inapplicable,
-            client_certificate_pins: vec![],
-            credential_kinds: vec![KindScope::new(Kind::MirrorPush, 1)],
-            revoked_at: None,
-        }],
-        vec![Bearer {
-            credential_id: "b".repeat(64),
-            enrollment_id: id,
-            kind: Kind::MirrorPush,
-            sha256: Secret::new(token.clone()).hash(),
-            generation: 1,
-            valid_from: 0,
-            valid_until: u64::MAX,
-            revoked_at: None,
-        }],
-    )
-    .unwrap();
-    Store::initialize(dir)
-        .unwrap()
-        .commit(0, &registry)
-        .unwrap();
+fn pair_fixture(dir: &Path) -> String {
+    semon_push::simple_pair::initialize(dir).unwrap();
+    let registry_path = dir.join("enrollment/registry.json");
+    let mut registry: serde_json::Value =
+        serde_json::from_slice(&fs::read(&registry_path).unwrap()).unwrap();
+    let token = "paired-test-push-bearer".to_owned();
+    use semon_push::credentials::Secret;
+    registry["simple_pair"]["pending"] = serde_json::Value::Null;
+    registry["machines"] = json!([{"id":"machine-6754a9c1e83f27b4","directory":"machine-6754a9c1e83f27b4","owner_name":null}]);
+    registry["simple_pair"]["tokens"] = json!([{"credential_id":"b".repeat(64),"enrollment_id":"machine-6754a9c1e83f27b4","kind":"push","sha256":Secret::new(token.clone()).hash(),"generation":1,"valid_from":0,"valid_until":u64::MAX,"revoked_at":null}]);
+    fs::write(registry_path, serde_json::to_vec(&registry).unwrap()).unwrap();
     token
 }
 
@@ -290,7 +253,7 @@ fn push_mirrors_a_home_into_semon_receive() {
     let mut fixture = Fixture::new();
     let dir = fixture.dir();
 
-    let token = enroll_fixture(&dir);
+    let token = pair_fixture(&dir);
     fixture.write("token", token.as_bytes());
     private(&fixture.path("token"));
 
@@ -432,7 +395,7 @@ fn push_watch_stops_on(name: &str, number: i32) {
 
     let mut fixture = Fixture::new();
     let dir = fixture.dir();
-    let token = enroll_fixture(&dir);
+    let token = pair_fixture(&dir);
     fixture.write("token", token.as_bytes());
     private(&fixture.path("token"));
     let url = fixture.start_receiver();
@@ -519,26 +482,6 @@ fn push_watch_stops_on(name: &str, number: i32) {
     let pushed = fixture.push(&url);
     assert_ok(&pushed, "a push after the watch stopped");
     assert_eq!(fixture.copy(LOG), fixture.redacted(LOG));
-}
-
-#[test]
-fn receive_requires_both_tls_files_when_tls_is_selected() {
-    let fixture = Fixture::new();
-    let dir = fixture.dir();
-    let refused = fixture.receive(&[
-        "--listen",
-        "0.0.0.0:0",
-        "--tls-cert",
-        "cert.pem",
-        "--dir",
-        dir.to_str().unwrap(),
-    ]);
-    assert!(!refused.status.success());
-    assert!(
-        stderr(&refused).contains("both --tls-cert and --tls-key"),
-        "{}",
-        stderr(&refused)
-    );
 }
 
 #[test]

@@ -469,7 +469,7 @@ mod tests {
                 &binding.namespace,
                 None,
                 1,
-                None
+                false
             )
             .is_err()
         );
@@ -480,7 +480,7 @@ mod tests {
             &binding.namespace,
             None,
             1,
-            None,
+            false,
         )
         .unwrap();
         let retained = initialize(&index, Some(&binding), || false).unwrap();
@@ -505,14 +505,13 @@ mod tests {
             crate::AnalyticsWriterStatus::Idle
         );
         writer.stop_and_join();
-        let handles = root.join(semon_asi::egress::HANDLES_FILE);
         semon_asi::reset_snapshot(
             &root.join("analytics-store"),
             &root.join("analytics-namespace"),
             &binding.namespace,
             None,
             1,
-            Some(&handles),
+            true,
         )
         .unwrap();
         assert_eq!(
