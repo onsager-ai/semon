@@ -1,5 +1,5 @@
 //! `semon push` against `semon receive`, both the real binary, on loopback:
-//! a synthetic home with one Claude session and one Codex run is mirrored,
+//! a synthetic home with one Claude session and one Codex run is pushed,
 //! redacted, into the receiver's directory, and `semon sessions --machines
 //! DIR` then shows that machine and both its sessions; a rewrite is sent again with
 //! `replace`; a copy lost on the receiver is recovered through a 409; and a
@@ -249,7 +249,7 @@ fn pair_fixture(dir: &Path) -> String {
 }
 
 #[test]
-fn push_mirrors_a_home_into_semon_receive() {
+fn push_copies_a_home_into_semon_receive() {
     let mut fixture = Fixture::new();
     let dir = fixture.dir();
 

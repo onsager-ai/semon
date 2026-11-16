@@ -14,7 +14,7 @@
 //!   in-process.
 //!
 //! The receiving side is here too, as the protocol's reference
-//! implementation: [`mirror::Receiver`] over a directory, its tokens
+//! implementation: [`receiver::Receiver`] over a directory, its tokens
 //! ([`tokens`]) and `semon receive`'s listener ([`serve`]).
 
 use sha2::Digest;
@@ -41,10 +41,10 @@ pub mod credentials;
 #[cfg(unix)]
 pub mod enrollment;
 mod lock;
-pub mod mirror;
 #[cfg(unix)]
 pub mod pairing;
 pub mod read_token;
+pub mod receiver;
 pub mod redact;
 pub mod serve;
 pub mod simple_pair;
@@ -614,8 +614,8 @@ impl Client {
             // Progress snapshot and facts fence share the status allocator.
             let mut context = self.progress.lock().unwrap_or_else(|e| e.into_inner());
             context.sequence += 1;
-            prepared.mirror_observation_id = Some(context.observation_id.clone());
-            prepared.mirror_sequence = Some(context.sequence);
+            prepared.push_observation_id = Some(context.observation_id.clone());
+            prepared.push_sequence = Some(context.sequence);
         }
         let body =
             serde_json::to_string(&prepared).map_err(|error| Failure::Remote(error.to_string()))?;
@@ -858,7 +858,7 @@ impl Client {
         let runtime = semon_sessions::local_runtime_facts(sessions).map_err(|e| e.to_string())?;
         let mut fresh = Vec::new();
         let discovered = semon_sessions::inputs(sessions).map_err(|e| e.to_string())?;
-        // Both encodings name one logical mirror path. Coexisting sources
+        // Both encodings name one logical pushed path. Coexisting sources
         // must agree over their common prefix before selecting the longer one.
         let mut inputs = BTreeMap::<String, (Input, Source)>::new();
         for source in discovered {
@@ -2057,7 +2057,7 @@ mod tests {
     ) -> (
         Receiver,
         Arc<std::sync::atomic::AtomicBool>,
-        Arc<mirror::Receiver>,
+        Arc<receiver::Receiver>,
     ) {
         let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
         let url = format!("http://{}", server.server_addr().to_ip().unwrap());
@@ -2065,7 +2065,7 @@ mod tests {
         let upgraded = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let directory = fixture.root.join("receiver");
         fs::create_dir_all(&directory).unwrap();
-        let reference = Arc::new(mirror::Receiver::new(directory).unwrap());
+        let reference = Arc::new(receiver::Receiver::new(directory).unwrap());
         let (worker, recorded, enabled, sink) = (
             Arc::clone(&server),
             Arc::clone(&appends),
@@ -2330,9 +2330,9 @@ mod tests {
         let recent = fixture.root.join("codex/sessions/fresh.jsonl");
         let fresh_bytes =
             b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"fresh-native\"}}\n".to_vec();
-        let mirror_dir = fixture.root.join("receiver");
-        fs::create_dir_all(&mirror_dir).unwrap();
-        let receiver = Arc::new(mirror::Receiver::new(&mirror_dir).unwrap());
+        let receiver_dir = fixture.root.join("receiver");
+        fs::create_dir_all(&receiver_dir).unwrap();
+        let receiver = Arc::new(receiver::Receiver::new(&receiver_dir).unwrap());
         let sink = Arc::clone(&receiver);
         let listener = Arc::clone(&server);
         let (waiting, first_pending) = mpsc::channel();
@@ -2392,7 +2392,7 @@ mod tests {
                         }
                         "/v1/push/status" => {
                             let observation: wire::Status = serde_json::from_slice(&body).unwrap();
-                            let answer = sink.handle("fixture", mirror::Endpoint::Status, &body);
+                            let answer = sink.handle("fixture", receiver::Endpoint::Status, &body);
                             assert_eq!(answer.status, 200);
                             if let Some((pending, append)) = initial.take() {
                                 assert_eq!(
@@ -2468,7 +2468,7 @@ mod tests {
         assert!(
             !receiver
                 .machine_dir("fixture")
-                .join(mirror::FACTS_FILE)
+                .join(receiver::FACTS_FILE)
                 .exists(),
             "backfill must not commit early full facts"
         );
@@ -2875,9 +2875,9 @@ mod tests {
         let path = fixture.write("claude/projects/-work/old.jsonl", b"already sent\n");
         let server = Server::http("127.0.0.1:0").unwrap();
         let url = format!("http://{}", server.server_addr());
-        let mirror = fixture.root.join("mirror");
-        fs::create_dir_all(&mirror).unwrap();
-        let reference = mirror::Receiver::new(&mirror).unwrap();
+        let reference_dir = fixture.root.join("reference");
+        fs::create_dir_all(&reference_dir).unwrap();
+        let reference = receiver::Receiver::new(&reference_dir).unwrap();
         let bytes = b"already sent\n";
         let existing = Append {
             redactor_version: redact::VERSION,

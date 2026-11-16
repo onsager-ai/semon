@@ -19,7 +19,7 @@ use std::{
 use semon_push::{
     credentials::Secret,
     enrollment::{Registry, Store},
-    mirror::MAX_BODY_BYTES,
+    receiver::MAX_BODY_BYTES,
     serve::{Limits, ServeOptions, Server},
     wire::{Append, base64_encode, head_sha256},
 };

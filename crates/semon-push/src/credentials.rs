@@ -7,7 +7,7 @@ pub use zeroize::Zeroizing;
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     #[serde(rename = "push")]
-    MirrorPush,
+    Push,
 }
 /// No serializer; exposure is explicit for future protected provisioning only.
 pub struct Secret(Zeroizing<String>);

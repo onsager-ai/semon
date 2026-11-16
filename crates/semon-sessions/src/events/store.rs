@@ -9367,8 +9367,8 @@ mod tests {
                 version: crate::FACTS_VERSION,
                 hostname: "synthetic-traversal".into(),
                 codex_rollouts: Some(paths),
-                mirror_observation_id: Some("00000000000000000000000000000001".into()),
-                mirror_sequence: Some(1),
+                push_observation_id: Some("00000000000000000000000000000001".into()),
+                push_sequence: Some(1),
                 ..crate::Facts::default()
             },
         )

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "The mirror protocol: the client that sends the session logs' input files, redacted, and the machine's facts to a receiver, and a reference receiver."
+description = "The push protocol: the client that sends the session logs' input files, redacted, and the machine's facts to a receiver, and a reference receiver."
 
 [dependencies]
 tiny_http.workspace = true

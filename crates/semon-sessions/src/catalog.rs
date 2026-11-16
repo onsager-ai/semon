@@ -8508,8 +8508,8 @@ mod tests {
                 );
             }
             let before = metadata();
-            facts.mirror_sequence = Some(123);
-            facts.mirror_observation_id = Some("heartbeat".into());
+            facts.push_sequence = Some(123);
+            facts.push_observation_id = Some("heartbeat".into());
             facts.native_names[0].observed_at = 2;
             let write = crate::SessionFactsWrite::begin(&fixture.options, "", &facts).unwrap();
             crate::write_facts(fixture.options.facts.as_ref().unwrap(), &facts).unwrap();

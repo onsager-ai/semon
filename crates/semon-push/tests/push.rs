@@ -1,5 +1,5 @@
 //! `semon push` against a tiny in-process receiver that implements the
-//! mirror protocol (docs/push-protocol.md) as any receiver would.
+//! push protocol (docs/push-protocol.md) as any receiver would.
 
 use std::{
     collections::BTreeMap,
@@ -761,7 +761,7 @@ fn native_relocation_sender_reuses_redacted_prefix_and_replays_lost_ack() {
         assert_eq!(
             state.files[active],
             redacted(&initial),
-            "stale mirror was deleted or overwritten"
+            "stale received copy was deleted or overwritten"
         );
         if supported {
             assert_eq!(
@@ -899,13 +899,13 @@ fn facts_are_sent_and_a_bad_token_is_refused() {
     let mut facts = receiver.state.lock().unwrap().facts.clone().unwrap();
     assert!(
         facts
-            .mirror_observation_id
+            .push_observation_id
             .as_deref()
             .is_some_and(semon_push::wire::is_generation)
     );
-    assert!(facts.mirror_sequence.is_some_and(|sequence| sequence > 0));
-    facts.mirror_observation_id = None;
-    facts.mirror_sequence = None;
+    assert!(facts.push_sequence.is_some_and(|sequence| sequence > 0));
+    facts.push_observation_id = None;
+    facts.push_sequence = None;
     assert_eq!(facts.hostname, "laptop");
     assert_eq!(
         facts,
@@ -959,7 +959,7 @@ fn a_token_file_others_can_read_is_refused() {
 #[test]
 fn only_https_or_loopback_http() {
     for good in [
-        "https://mirror.example/api/push",
+        "https://receiver.example/api/push",
         "http://127.0.0.1:8080/x",
         "http://127.0.0.2:8781/api/push",
         "http://localhost:1",
@@ -967,12 +967,12 @@ fn only_https_or_loopback_http() {
         assert!(semon_push::check_url(good).is_ok(), "{good}");
     }
     for bad in [
-        "http://mirror.example/api/push",
+        "http://receiver.example/api/push",
         "http://10.0.0.1/api/push",
         "ftp://127.0.0.1",
-        "https://user:pw@mirror.example",
-        "https://mirror.example/?x=1",
-        "mirror.example",
+        "https://user:pw@receiver.example",
+        "https://receiver.example/?x=1",
+        "receiver.example",
     ] {
         assert!(semon_push::check_url(bad).is_err(), "{bad}");
     }
@@ -1232,18 +1232,18 @@ fn a_refused_token_is_reported_even_when_a_stop_comes_with_it() {
 #[test]
 fn spellings_of_one_receiver_share_one_state_file_and_lock() {
     assert_eq!(
-        semon_push::check_url("HTTPS://Mirror.Example/api/Push/").unwrap(),
-        "https://mirror.example/api/Push"
+        semon_push::check_url("HTTPS://Receiver.Example/api/Push/").unwrap(),
+        "https://receiver.example/api/Push"
     );
     assert_eq!(
         semon_push::check_url("http://LOCALHOST:8735").unwrap(),
         "http://localhost:8735"
     );
-    let state = semon_push::default_state_path("https://mirror.example");
+    let state = semon_push::default_state_path("https://receiver.example");
     for spelling in [
-        "https://mirror.example/",
-        "HTTPS://MIRROR.EXAMPLE",
-        "https://Mirror.Example//",
+        "https://receiver.example/",
+        "HTTPS://RECEIVER.EXAMPLE",
+        "https://Receiver.Example//",
     ] {
         assert_eq!(
             semon_push::default_state_path(spelling),
@@ -1252,7 +1252,7 @@ fn spellings_of_one_receiver_share_one_state_file_and_lock() {
         );
     }
     assert_ne!(
-        semon_push::default_state_path("https://mirror.example/other"),
+        semon_push::default_state_path("https://receiver.example/other"),
         state
     );
 }
@@ -1319,7 +1319,7 @@ fn files_under(directory: &Path) -> Vec<PathBuf> {
 }
 
 #[test]
-fn copied_claude_usage_has_redacted_http_mirror_and_restart_parity() {
+fn copied_claude_usage_has_redacted_http_push_and_restart_parity() {
     let mut home = Home::new();
     home.options.all = true;
     let receiver = receiver();
@@ -1404,7 +1404,7 @@ fn copied_claude_usage_has_redacted_http_mirror_and_restart_parity() {
 }
 
 #[test]
-fn copilot_redacted_mirror_survives_lost_ack_restart_partial_and_replacement() {
+fn copilot_redacted_push_survives_lost_ack_restart_partial_and_replacement() {
     for version in ["1.0.90", "1.0.91"] {
         let mut home = Home::new();
         home.options.all = true;
@@ -2101,7 +2101,7 @@ fn heartbeat_after_prepared_full_facts_uses_the_frozen_current_targets_and_share
                 state
                     .statuses
                     .iter()
-                    .any(|s| s.sequence > facts.mirror_sequence.unwrap())
+                    .any(|s| s.sequence > facts.push_sequence.unwrap())
             })
         },
     );
@@ -2117,11 +2117,11 @@ fn heartbeat_after_prepared_full_facts_uses_the_frozen_current_targets_and_share
         let fresh = state
             .statuses
             .iter()
-            .find(|s| s.sequence > facts.mirror_sequence.unwrap())
+            .find(|s| s.sequence > facts.push_sequence.unwrap())
             .unwrap();
         assert_eq!(
             Some(&fresh.observation_id),
-            facts.mirror_observation_id.as_ref()
+            facts.push_observation_id.as_ref()
         );
         assert!(
             fresh
@@ -2136,8 +2136,7 @@ fn heartbeat_after_prepared_full_facts_uses_the_frozen_current_targets_and_share
                 .any(|t| t.path == "archived_sessions/moved.jsonl")
         );
         assert!(
-            fresh.runtime.mirror_sequence.is_none()
-                && fresh.runtime.mirror_observation_id.is_none()
+            fresh.runtime.push_sequence.is_none() && fresh.runtime.push_observation_id.is_none()
         );
     }
     stop_and_join(&stop, worker).unwrap();
@@ -2249,9 +2248,9 @@ fn descriptor_invalid_reference_generation_forces_actual_client_replacement() {
     let home = Home::new();
     let text = line(&"x".repeat(6000));
     home.write(LOG, &text);
-    let mirror = home.root.join("reference");
-    fs::create_dir_all(&mirror).unwrap();
-    let reference = Arc::new(semon_push::mirror::Receiver::new(&mirror).unwrap());
+    let reference_dir = home.root.join("reference");
+    fs::create_dir_all(&reference_dir).unwrap();
+    let reference = Arc::new(semon_push::receiver::Receiver::new(&reference_dir).unwrap());
     let server = Arc::new(Server::http("127.0.0.1:0").unwrap());
     let listener = Arc::clone(&server);
     let sink = Arc::clone(&reference);
