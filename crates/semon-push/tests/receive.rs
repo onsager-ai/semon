@@ -320,7 +320,24 @@ fn an_oversize_body_is_413_before_it_is_read() {
 }
 
 #[test]
-fn only_post_to_the_two_endpoints() {
+fn unknown_endpoints_are_404_and_known_endpoints_require_a_token() {
+    let (receiving, tokens) = receiving(&["machine-6754a9c100000001"]);
+    for token in [None, Some("unknown-token"), Some(tokens[0].as_str())] {
+        let answer = post(receiving.address, "/v1/push/unknown", token, b"{}");
+        assert_eq!(answer.status, 404);
+        assert!(!answer.head.contains("WWW-Authenticate"));
+    }
+    for route in [APPEND, "/v1/push/facts", "/v1/push/status"] {
+        for token in [None, Some("unknown-token")] {
+            let answer = post(receiving.address, route, token, b"{}");
+            assert_eq!(answer.status, 401, "{route}");
+            assert!(answer.head.contains("WWW-Authenticate: Bearer"));
+        }
+    }
+}
+
+#[test]
+fn only_post_to_known_endpoints() {
     let (receiving, tokens) = receiving(&["machine-6754a9c100000001"]);
     let answer = exchange(
         receiving.address,
@@ -341,13 +358,13 @@ fn only_post_to_the_two_endpoints() {
     ] {
         assert_eq!(
             post(receiving.address, route, Some(&tokens[0]), b"{}").status,
-            401,
+            404,
             "{route}"
         );
         let get = format!("GET {route} HTTP/1.1\r\n\r\n");
         assert_eq!(
             exchange(receiving.address, get.as_bytes()).status,
-            401,
+            404,
             "{route}"
         );
     }
@@ -591,14 +608,19 @@ fn a_post_without_a_length_is_411() {
 }
 
 #[test]
-fn registry_keep_alive_cannot_switch_machines() {
-    let (receiving, tokens) = receiving(&["machine-6754a9c100000001", "machine-6754a9c100000003"]);
+fn registry_keep_alive_authenticates_each_request_for_its_own_machine() {
+    let machines = ["machine-6754a9c100000001", "machine-6754a9c100000003"];
+    let (receiving, tokens) = receiving(&machines);
     let mut stream = TcpStream::connect(receiving.address).unwrap();
     stream
         .set_read_timeout(Some(Duration::from_secs(20)))
         .unwrap();
-    for (index, token) in tokens.iter().enumerate() {
-        let body = append_body(LOG, b"", 0, b"hello\n");
+    let mut copies = [Vec::new(), Vec::new()];
+    for index in [0, 1, 0, 1] {
+        let token = &tokens[index];
+        let line = format!("machine {index}\n");
+        let before = &copies[index];
+        let body = append_body(LOG, before, before.len() as u64, line.as_bytes());
         let head = format!(
             "POST {APPEND} HTTP/1.1\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n",
             body.len()
@@ -606,12 +628,19 @@ fn registry_keep_alive_cannot_switch_machines() {
         stream.write_all(head.as_bytes()).unwrap();
         stream.write_all(&body).unwrap();
         let answer = read_one(&mut stream);
-        assert_eq!(
-            answer.status,
-            if index == 0 { 200 } else { 401 },
-            "machine {index}: {}",
-            answer.body
-        );
+        assert_eq!(answer.status, 200, "machine {index}: {}", answer.body);
+        copies[index].extend_from_slice(line.as_bytes());
+        for (machine, expected) in machines.iter().zip(&copies) {
+            if !expected.is_empty() {
+                let path = receiving
+                    .dir
+                    .join("machines")
+                    .join(machine)
+                    .join("claude")
+                    .join(LOG);
+                assert_eq!(fs::read(path).unwrap(), *expected);
+            }
+        }
     }
 }
 
@@ -791,7 +820,7 @@ fn status_head_advertises_post_without_body_and_unknown_routes_stay_unsupported(
     assert!(answer.body.is_null());
     assert_eq!(answer.body_bytes, 0, "HEAD must not send an error body");
     let unknown = head.replace("/v1/push/status", "/v1/push/unknown-status");
-    assert_eq!(exchange(receiving.address, unknown.as_bytes()).status, 401);
+    assert_eq!(exchange(receiving.address, unknown.as_bytes()).status, 404);
     let unauthorized = post(
         receiving.address,
         "/v1/push/status",
