@@ -145,7 +145,7 @@ test('empty receiver shows pairing guidance in the full catalog viewer', async (
     await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
     await page.getByRole('heading', { name: 'Pair your first machine', exact: true }).waitFor();
     await page.waitForFunction(
-      () => document.querySelector('#topbar .l1 .t')?.textContent === 'Pair your first machine',
+      () => document.querySelector('#topbar .t.l1')?.textContent === 'Pair your first machine',
     );
     assert.equal(
       await page
