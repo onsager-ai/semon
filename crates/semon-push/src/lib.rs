@@ -629,6 +629,7 @@ impl Client {
         mut wait: impl FnMut(Duration) -> bool,
     ) -> std::result::Result<(u16, String), Failure> {
         let mut retries = 0;
+        let mut transient_retries = 0;
         loop {
             let factory = Arc::clone(&self.http);
             let request_url = format!("{}/v1/push/{route}", self.url);
@@ -669,30 +670,32 @@ impl Client {
                         },
                         body.len() as u64,
                     ));
-                let result = request
-                    .send()
-                    .map_err(|error| error.to_string())
-                    .map(|response| {
-                        let status = response.status().as_u16();
-                        let retry = response
-                            .headers()
-                            .get("retry-after")
-                            .and_then(|value| value.to_str().ok())
-                            .and_then(|value| {
-                                value.parse::<u64>().ok().or_else(|| {
-                                    httpdate::parse_http_date(value).ok().map(|date| {
-                                        date.duration_since(std::time::SystemTime::now())
-                                            .unwrap_or_default()
-                                            .as_secs()
+                // The outer error is a local refusal; the inner one is a
+                // transport failure, which an idempotent route may retry.
+                let result =
+                    Ok::<_, String>(request.send().map_err(|error| error.to_string()).map(
+                        |response| {
+                            let status = response.status().as_u16();
+                            let retry = response
+                                .headers()
+                                .get("retry-after")
+                                .and_then(|value| value.to_str().ok())
+                                .and_then(|value| {
+                                    value.parse::<u64>().ok().or_else(|| {
+                                        httpdate::parse_http_date(value).ok().map(|date| {
+                                            date.duration_since(std::time::SystemTime::now())
+                                                .unwrap_or_default()
+                                                .as_secs()
+                                        })
                                     })
                                 })
-                            })
-                            .unwrap_or(2);
-                        (status, response.text().unwrap_or_default(), retry)
-                    });
+                                .unwrap_or(2);
+                            (status, response.text().unwrap_or_default(), retry)
+                        },
+                    ));
                 drop(http);
                 #[cfg(unix)]
-                if matches!(&result, Ok((200..=299, _, _)))
+                if matches!(&result, Ok(Ok((200..=299, _, _))))
                     && let (Some(authority), Some(generation)) =
                         (&dispatch_stop.authority, generation)
                 {
@@ -702,13 +705,34 @@ impl Client {
                 completed_transports.fetch_add(1, Ordering::SeqCst);
                 result
             });
-            let (status, text, retry) = match answer {
-                Ok(Some(Ok(answer))) => answer,
-                Ok(Some(Err(_))) if self.stop.is_stopped() => return Err(Failure::Stopped),
-                Ok(Some(Err(error))) => return Err(Failure::Remote(format!("{route}: {error}"))),
+            // Append (offset/head checked), facts (a snapshot) and status
+            // (sequenced) are safe to repeat after a proxy or connection blip.
+            let transient = |answer: &std::result::Result<(u16, String, u64), String>| {
+                matches!(route, "append" | "facts" | "status")
+                    && match answer {
+                        Ok((status, _, _)) => matches!(status, 502..=504),
+                        Err(_) => true,
+                    }
+            };
+            let answer = match answer {
+                Ok(Some(Err(_) | Ok(Err(_)))) if self.stop.is_stopped() => {
+                    return Err(Failure::Stopped);
+                }
+                Ok(Some(Ok(answer))) if transient_retries < 3 && transient(&answer) => {
+                    transient_retries += 1;
+                    if wait(Duration::from_millis(500 << (transient_retries - 1))) {
+                        return Err(Failure::Stopped);
+                    }
+                    continue;
+                }
+                Ok(Some(Ok(Ok(answer)))) => answer,
+                Ok(Some(Ok(Err(error)) | Err(error))) => {
+                    return Err(Failure::Remote(format!("{route}: {error}")));
+                }
                 Ok(None) => return Err(Failure::Stopped),
                 Err(error) => return Err(Failure::Remote(error)),
             };
+            let (status, text, retry) = answer;
             if route == "append" && status == 429 {
                 self.progress
                     .lock()
@@ -2654,6 +2678,95 @@ mod tests {
         drop(lock);
         server.unblock();
         http.join().unwrap();
+    }
+
+    #[test]
+    fn transient_http_failures_retry_with_bounded_backoff() {
+        fn run(
+            responses: Vec<Option<u16>>,
+        ) -> (
+            std::result::Result<(u16, String), Failure>,
+            Vec<Duration>,
+            usize,
+        ) {
+            use std::net::TcpListener;
+            let fixture = Fixture::new();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let expected = responses.len();
+            let worker = thread::spawn(move || {
+                use std::io::{Read, Write};
+                for status in responses {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut buffer = [0; 4096];
+                    loop {
+                        let count = stream.read(&mut buffer).unwrap();
+                        if count == 0 {
+                            break;
+                        }
+                        request.extend_from_slice(&buffer[..count]);
+                        if let Some(body_start) = request
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .map(|offset| offset + 4)
+                        {
+                            let headers = String::from_utf8_lossy(&request[..body_start]);
+                            let length = headers
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length: ")
+                                        .and_then(|v| v.trim().parse::<usize>().ok())
+                                })
+                                .unwrap();
+                            if request.len() >= body_start + length {
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(status) = status {
+                        let body = "{}";
+                        write!(stream, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                        stream.flush().unwrap();
+                    }
+                }
+                expected
+            });
+            let client = Client::new(&fixture.push_options(&format!("http://{address}"))).unwrap();
+            let mut waits = Vec::new();
+            let result = client.post_wait("append", "{}".into(), |delay| {
+                waits.push(delay);
+                false
+            });
+            let count = worker.join().unwrap();
+            (result, waits, count)
+        }
+
+        let (result, waits, count) = run(vec![Some(502), Some(200)]);
+        assert_eq!(result.unwrap().0, 200);
+        assert_eq!(count, 2);
+        assert_eq!(waits, vec![Duration::from_millis(500)]);
+
+        let (result, waits, count) = run(vec![None, Some(200)]);
+        assert_eq!(result.unwrap().0, 200);
+        assert_eq!(count, 2);
+        assert_eq!(waits, vec![Duration::from_millis(500)]);
+
+        let (result, waits, count) = run(vec![Some(502), Some(502), Some(502), Some(502)]);
+        assert_eq!(result.unwrap().0, 502);
+        assert_eq!(count, 4);
+        assert_eq!(
+            waits,
+            vec![
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+                Duration::from_secs(2)
+            ]
+        );
     }
 
     #[test]

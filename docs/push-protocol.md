@@ -76,6 +76,8 @@ Request bodies currently use identity encoding. Response gzip/Brotli and sealed
 storage are independent. See [native archive transport and codec measurements](native-archive-transport.md)
 for the bounded archive reader, coexistence/restart rules and upload experiment.
 
+The client retries append, facts and status requests up to three times after HTTP 502/503/504 or a connection reset/close before a response, using fresh connections and short backoff; repeat requests are safe under the receiver's offset/head reconciliation or snapshot/sequence semantics.
+
 ### `POST <url>/v1/push/append`
 
 ```json
