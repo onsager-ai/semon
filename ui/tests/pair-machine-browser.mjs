@@ -91,6 +91,10 @@ for (const width of [390, 820, 1280])
           )
           .waitFor();
         assert.equal(await page.getByRole('link', { name: 'Manage machines' }).count(), 0);
+        assert.equal(
+          await page.getByRole('button', { name: 'Pair a machine', exact: true }).count(),
+          1,
+        );
         await capture('empty');
         await page.getByRole('button', { name: 'Pair a machine', exact: true }).click();
         await page

@@ -111,6 +111,67 @@ const list = (items) => ({
   next_cursor: null,
 });
 
+test('empty receiver shows pairing guidance in the full catalog viewer', async () => {
+  const browser = await chromium.launch();
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  try {
+    await page.route('http://catalog.test/**', (route) => {
+      const url = new URL(route.request().url());
+      if (url.pathname === '/api/session-sources')
+        return route.fulfill({ json: { api: 1, items: [], next_cursor: null } });
+      if (url.pathname === '/api/viewer/pairing')
+        return route.fulfill({ json: { available: true } });
+      if (url.pathname === '/api/viewer/home')
+        return route.fulfill({
+          json: {
+            api: 1,
+            version: 'a'.repeat(64),
+            now: 10000,
+            next: { inbox: null, working: null, answered: null },
+            totals: { waiting: 0, working: 0, answered: 0 },
+            machines: [],
+            recent: [],
+            inbox: [],
+            working: [],
+            answered: [],
+            observations: [],
+          },
+        });
+      if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+      return fulfillCatalogStatic(route, url);
+    });
+    await page.goto('http://catalog.test/');
+    await page.addScriptTag({ content: outputFiles[0].text });
+    await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+    await page.getByRole('heading', { name: 'Pair your first machine', exact: true }).waitFor();
+    await page.waitForFunction(
+      () => document.querySelector('#topbar .l1 .t')?.textContent === 'Pair your first machine',
+    );
+    assert.equal(
+      await page
+        .locator('#topbar')
+        .getByRole('button', { name: 'Pair a machine', exact: true })
+        .count(),
+      0,
+    );
+    assert.equal(
+      await page
+        .locator('#page')
+        .getByRole('button', { name: 'Pair a machine', exact: true })
+        .count(),
+      1,
+    );
+    await page.locator('#lanes').getByText('No machines paired yet', { exact: true }).waitFor();
+    assert.equal(
+      await page.locator('#lanes').getByText('No sessions match', { exact: true }).count(),
+      0,
+    );
+    await page.evaluate(() => app.destroy());
+  } finally {
+    await browser.close();
+  }
+});
+
 for (const sourceCount of [1, 2])
   test(`cold root discovers ${sourceCount} sources before scoped capabilities`, async () => {
     const browser = await chromium.launch();
