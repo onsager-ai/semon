@@ -126,10 +126,20 @@ semon unpair # revoke this machine when it should stop sending
 semon token --dir ~/semon-received
 ```
 
-Run `semon push --watch` on each paired machine to sync; automatic background
-sync arrives in P2. A code expires in ten minutes; a new code replaces the
-previous one. Three wrong guesses burn it, and three burns within an hour pause
-pairing for thirty minutes. Refusals reveal no details.
+`semon pair URL CODE` starts background sync automatically using the current
+binary's absolute path and `push --watch`. Linux installs
+`$XDG_CONFIG_HOME/systemd/user/semon-push.service` (fallback
+`~/.config/systemd/user/semon-push.service`), enables and starts it, and enables
+linger so it keeps syncing after logout. If linger needs permission, pairing
+prints the `loginctl enable-linger` command to run. Logs are at
+`journalctl --user -u semon-push`. macOS installs
+`~/Library/LaunchAgents/ai.onsager.semon-push.plist`; logs are at
+`~/Library/Logs/semon-push.log`. Pairing again replaces the service and restarts
+sync. Keep the installed binary at that path, or pair again after moving it.
+Without a working user service manager, pairing still succeeds and prints the
+exact foreground `push --watch` command to run. A code expires in ten minutes;
+a new code replaces the previous one. Three wrong guesses burn it, and three
+burns within an hour pause pairing for thirty minutes. Refusals reveal no details.
 
 One process and port serve pairing, push and the Viewer over received machines.
 Semon authenticates all three: `/v1/pair` accepts only the one-time code,
@@ -156,9 +166,11 @@ re-pairing an ID revokes its previous token. Each request checks current authori
 including requests on an existing connection. Received logs stay under
 `DIR/machines/<machine-id>/`; new display names default to the paired hostname.
 
-Run `semon unpair` on the machine to revoke its token and remove pair.json. If the
-receiver is unreachable, the command warns and removes the local configuration;
-revoke remotely with `semon unpair MACHINE_ID --dir ~/semon-received` on the receiver.
+Run `semon unpair` on the machine to revoke its token, stop and remove the user
+service, and remove pair.json. It leaves Linux linger enabled. If the receiver
+is unreachable, the command warns and still removes the service and local
+configuration; revoke remotely with
+`semon unpair MACHINE_ID --dir ~/semon-received` on the receiver.
 Neither action deletes received logs. One receiver per machine is supported.
 
 The machine validates public-CA HTTPS and refuses plain HTTP except on loopback.
