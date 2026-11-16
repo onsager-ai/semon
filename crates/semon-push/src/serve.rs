@@ -1,7 +1,6 @@
 //! `semon receive`'s listener: the push protocol over HTTP/1.1, plain on
-//! a proxy-facing address or TLS with an operator-supplied certificate and key. It serves
-//! push routes to [`Receiver`], pairing, and the closed reverse
-//! body poll/response routes when body custody is configured.
+//! a proxy-facing address behind an HTTPS proxy. It serves push routes to
+//! [`Receiver`], pairing, and the read-only Viewer.
 //!
 //! Each connection has its own thread, up to [`Limits::connections`] in
 //! all. Until one of its requests passes the token check, a connection also
@@ -11,17 +10,15 @@
 //! several machines behind one address (an SSH tunnel, a NAT) each keep
 //! their connection. A request's token is checked, and its
 //! declared length against [`MAX_BODY_BYTES`], before any of its body is
-//! read. Every read and write of the socket, the TLS handshake's included,
-//! runs against a deadline (see [`Limits`]), so a client that trickles bytes
+//! read. Every read and write of the socket, runs against a deadline (see [`Limits`]), so a client that trickles bytes
 //! can't hold a connection past it. Semon never opens a port in a firewall
 //! or obtains a certificate.
 
 use std::{
     collections::HashMap,
-    fs,
     io::{self, Read, Write},
     net::{IpAddr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex, PoisonError},
     thread,
     time::{Duration, Instant},
@@ -31,20 +28,7 @@ use serde_json::{Value, json};
 
 #[path = "serve_auth.rs"]
 mod auth;
-#[path = "serve_body.rs"]
-mod body;
-use crate::credentials::Kind;
-use auth::Authenticator;
-pub use auth::{
-    AuthenticatedEnrollment, ConnectionAuthority, CredentialHandle, RegistryAuthenticator,
-    VerifiedClientIdentity,
-};
-
-#[cfg(test)]
-pub(crate) fn renewal_test_identity(certificate: &[u8]) -> VerifiedClientIdentity {
-    VerifiedClientIdentity::from_verified_der(&rustls::pki_types::CertificateDer::from(certificate))
-        .unwrap()
-}
+use auth::{Authenticator, ConnectionAuthority};
 
 use crate::mirror::{DEFAULT_MAX_BYTES, Endpoint, MAX_BODY_BYTES, Receiver};
 
@@ -67,7 +51,7 @@ pub struct Limits {
     /// address by its /64) at once (4).
     pub connections_per_ip: usize,
     /// From accepting a connection to the end of its first request's head,
-    /// the TLS handshake included; for a later request, from its first byte
+    /// for a later request, from its first byte
     /// (10 s).
     pub head: Duration,
     /// The longest wait for the next request on a kept-alive connection
@@ -131,19 +115,11 @@ fn ip_key(ip: IpAddr) -> IpAddr {
     }
 }
 
-/// An operator-supplied certificate chain and private key, PEM.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TlsFiles {
-    pub certificate: PathBuf,
-    pub private_key: PathBuf,
-}
-
 #[derive(Clone, Debug)]
 pub struct ServeOptions {
     /// The receiver's directory: `tokens` and `machines/`.
     pub dir: PathBuf,
     pub listen: SocketAddr,
-    pub tls: Option<TlsFiles>,
     /// The most bytes one machine's copy may hold ([`DEFAULT_MAX_BYTES`]).
     pub max_bytes: u64,
 }
@@ -155,7 +131,6 @@ impl ServeOptions {
         Self {
             dir: dir.into(),
             listen: DEFAULT_LISTEN.parse().expect("the default address parses"),
-            tls: None,
             max_bytes: DEFAULT_MAX_BYTES,
         }
     }
@@ -172,13 +147,9 @@ struct Admission {
 struct Shared {
     receiver: Receiver,
     tokens: Authenticator,
-    tls: Option<Arc<rustls::ServerConfig>>,
     limits: Limits,
     admission: Mutex<Admission>,
-    body: Option<crate::body_host::BodyHost<'static>>,
     viewer: Option<Arc<semon_sessions::Viewer>>,
-    #[cfg(test)]
-    test_clock: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
 }
 
 impl Shared {
@@ -268,7 +239,6 @@ pub struct Server {
     credential_count: usize,
     receiver: Receiver,
     tokens: Authenticator,
-    tls: Option<Arc<rustls::ServerConfig>>,
     limits: Limits,
     viewer: Option<Arc<semon_sessions::Viewer>>,
 }
@@ -281,11 +251,6 @@ impl Server {
         crate::simple_pair::initialize(dir)?;
         let tokens = Authenticator::open(dir)?;
         let credential_count = tokens.count()?;
-        let tls = options
-            .tls
-            .as_ref()
-            .map(|files| tls_config(files, dir))
-            .transpose()?;
         let listener = TcpListener::bind(options.listen)
             .map_err(|error| format!("cannot listen on {}: {error}", options.listen))?;
         Ok(Self {
@@ -295,7 +260,6 @@ impl Server {
                 .map_err(|error| error.to_string())?
                 .with_max_bytes(options.max_bytes),
             tokens,
-            tls,
             limits: Limits::default(),
             viewer: None,
         })
@@ -303,9 +267,6 @@ impl Server {
 
     /// Attach the existing Viewer handler to this listener.
     pub fn with_viewer(mut self, viewer: semon_sessions::Viewer) -> Result<Self, String> {
-        if self.tls.is_some() {
-            return Err("receive Viewer uses plain HTTP behind an HTTPS proxy".into());
-        }
         self.viewer = Some(Arc::new(viewer));
         Ok(self)
     }
@@ -321,9 +282,9 @@ impl Server {
         self.listener.local_addr()
     }
 
-    /// `https` with TLS, `http` without.
+    /// Plain HTTP; HTTPS terminates at the proxy.
     pub fn scheme(&self) -> &'static str {
-        if self.tls.is_some() { "https" } else { "http" }
+        "http"
     }
 
     /// Number of configured credentials observed at startup.
@@ -333,29 +294,12 @@ impl Server {
 
     /// Serves until the process ends.
     pub fn run(self) -> Result<(), String> {
-        let body = if self.tls.is_some() {
-            crate::body_host::BodyHost::configured(
-                self.receiver.dir(),
-                crate::body_broker::Config {
-                    max_connections: self.limits.connections,
-                    poll_share_percent: 50,
-                },
-                &crate::body_host::CLOCK,
-            )
-            .map_err(|_| "body channel unavailable".to_owned())?
-        } else {
-            None
-        };
         let shared = Arc::new(Shared {
             receiver: self.receiver,
             tokens: self.tokens,
-            tls: self.tls,
             limits: self.limits,
             admission: Mutex::new(Admission::default()),
-            body,
             viewer: self.viewer,
-            #[cfg(test)]
-            test_clock: None,
         });
         for accepted in self.listener.incoming() {
             let socket = match accepted {
@@ -393,100 +337,7 @@ impl Server {
     }
 }
 
-fn tls_config(files: &TlsFiles, dir: &Path) -> Result<Arc<rustls::ServerConfig>, String> {
-    use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
-    let read = |path: &Path| {
-        fs::read(path).map_err(|error| format!("cannot read TLS file {}: {error}", path.display()))
-    };
-    let (certificate, private_key) = (read(&files.certificate)?, read(&files.private_key)?);
-    let chain = CertificateDer::pem_slice_iter(&certificate)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("{}: {error}", files.certificate.display()))?;
-    if chain.is_empty() {
-        return Err(format!(
-            "{} holds no PEM certificate",
-            files.certificate.display()
-        ));
-    }
-    let key = PrivateKeyDer::from_pem_slice(&private_key)
-        .map_err(|error| format!("{}: {error}", files.private_key.display()))?;
-    let trust = client_trust(dir)?;
-    let verifier = match trust {
-        Some(roots) => rustls::server::WebPkiClientVerifier::builder_with_provider(
-            Arc::new(roots),
-            Arc::new(rustls::crypto::ring::default_provider()),
-        )
-        .allow_unauthenticated()
-        .build()
-        .map_err(|e| e.to_string())?,
-        None => rustls::server::WebPkiClientVerifier::no_client_auth(),
-    };
-    let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::ring::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(|error| error.to_string())?
-    .with_client_cert_verifier(verifier)
-    .with_single_cert(chain, key)
-    .map_err(|error| format!("the TLS certificate and key: {error}"))?;
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(Arc::new(config))
-}
-
-/// The sole client-trust input: a private, owned, non-symlink PEM root bundle.
-const CLIENT_TRUST_FILE: &str = "client-trust.pem";
-fn client_trust(dir: &Path) -> Result<Option<rustls::RootCertStore>, String> {
-    use rustls::pki_types::{CertificateDer, pem::PemObject};
-    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-    let path = dir.join(CLIENT_TRUST_FILE);
-    let file = match fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(&path)
-    {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
-    };
-    let meta = file.metadata().map_err(|e| e.to_string())?;
-    // SAFETY: geteuid has no memory preconditions.
-    if !meta.is_file()
-        || meta.uid() != unsafe { libc::geteuid() }
-        || meta.nlink() != 1
-        || meta.mode() & 0o777 != 0o600
-    {
-        return Err(format!(
-            "{} must be an owned private 0600 regular file",
-            path.display()
-        ));
-    }
-    let mut bytes = Vec::new();
-    file.take(1024 * 1024 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|e| e.to_string())?;
-    if bytes.len() > 1024 * 1024 {
-        return Err("client trust bundle too large".into());
-    }
-    let mut roots = rustls::RootCertStore::empty();
-    for cert in CertificateDer::pem_slice_iter(&bytes) {
-        roots
-            .add(cert.map_err(|e| e.to_string())?)
-            .map_err(|e| e.to_string())?;
-    }
-    if roots.is_empty() {
-        return Err("client trust bundle contains no certificates".into());
-    }
-    Ok(Some(roots))
-}
-
-/// The socket, with a deadline that every read and write honors: before
-/// each, its timeout is set to what is left of the deadline (at most
-/// `gap`), and once the deadline has passed each fails with `TimedOut`.
-/// rustls reads through it too, so a TLS record, or a handshake, trickled
-/// in a byte at a time still ends at the deadline.
 struct Timed {
-    #[cfg(test)]
-    bytes_read: usize,
     socket: TcpStream,
     deadline: Instant,
     gap: Duration,
@@ -506,12 +357,7 @@ impl Read for Timed {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let timeout = self.remaining()?;
         self.socket.set_read_timeout(Some(timeout))?;
-        let read = self.socket.read(buffer)?;
-        #[cfg(test)]
-        {
-            self.bytes_read += read;
-        }
-        Ok(read)
+        self.socket.read(buffer)
     }
 }
 
@@ -524,45 +370,6 @@ impl Write for Timed {
 
     fn flush(&mut self) -> io::Result<()> {
         self.socket.flush()
-    }
-}
-
-enum Stream {
-    Plain(Timed),
-    Tls(Box<rustls::StreamOwned<rustls::ServerConnection, Timed>>),
-}
-
-impl Stream {
-    fn timed(&mut self) -> &mut Timed {
-        match self {
-            Self::Plain(timed) => timed,
-            Self::Tls(stream) => &mut stream.sock,
-        }
-    }
-}
-
-impl Read for Stream {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        match self {
-            Self::Plain(stream) => stream.read(buffer),
-            Self::Tls(stream) => stream.read(buffer),
-        }
-    }
-}
-
-impl Write for Stream {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        match self {
-            Self::Plain(stream) => stream.write(buffer),
-            Self::Tls(stream) => stream.write(buffer),
-        }
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        match self {
-            Self::Plain(stream) => stream.flush(),
-            Self::Tls(stream) => stream.flush(),
-        }
     }
 }
 
@@ -595,7 +402,7 @@ enum NoHead {
 }
 
 struct Connection {
-    stream: Stream,
+    stream: Timed,
     head_only: bool,
     authority: ConnectionAuthority,
     /// Bytes read and not yet used.
@@ -613,7 +420,7 @@ fn is_timeout(error: &io::Error) -> bool {
 impl Connection {
     /// Reads once, by `deadline`.
     fn read_more(&mut self, deadline: Instant, remaining: usize) -> io::Result<usize> {
-        self.stream.timed().deadline = deadline;
+        self.stream.deadline = deadline;
         let mut chunk = [0u8; 16 * 1024];
         let bound = remaining.min(chunk.len());
         let read = self.stream.read(&mut chunk[..bound])?;
@@ -621,8 +428,7 @@ impl Connection {
         Ok(read)
     }
 
-    /// The next request's head. The first request's (and the TLS
-    /// handshake) must be in within [`Limits::head`] of `accepted`; a later
+    /// The next request's head. The first request must be in within [`Limits::head`] of `accepted`; a later
     /// one may wait [`Limits::idle`] to start, then has [`Limits::head`].
     fn read_head(&mut self, accepted: Option<Instant>) -> Result<Head, NoHead> {
         let now = Instant::now();
@@ -647,7 +453,7 @@ impl Connection {
                 return Err(NoHead::Refused(431, "the request head is too large"));
             }
             searched = self.buffer.len().saturating_sub(3);
-            self.stream.timed().deadline = deadline.unwrap_or(wait);
+            self.stream.deadline = deadline.unwrap_or(wait);
             let mut byte = [0u8; 1];
             let read = self.stream.read(&mut byte);
             if let Ok(1) = read {
@@ -685,7 +491,7 @@ impl Connection {
 
     /// Writes `bytes`, within [`Limits::write`].
     fn send(&mut self, bytes: &[u8]) -> io::Result<()> {
-        self.stream.timed().deadline = Instant::now() + self.limits.write;
+        self.stream.deadline = Instant::now() + self.limits.write;
         self.stream.write_all(bytes)?;
         self.stream.flush()
     }
@@ -722,17 +528,12 @@ impl Connection {
         self.close();
     }
 
-    /// Ends the connection: TLS close_notify, no more writes, then what the
+    /// Ends the connection: no more writes, then what the
     /// client still sends is read and dropped for [`Limits::linger`], so it
     /// reads the answer before the socket closes rather than a reset.
     fn close(mut self) {
         let linger = self.limits.linger;
-        if let Stream::Tls(stream) = &mut self.stream {
-            stream.sock.deadline = Instant::now() + linger;
-            stream.conn.send_close_notify();
-            let _ = stream.flush();
-        }
-        let socket = &mut self.stream.timed().socket;
+        let socket = &mut self.stream.socket;
         let _ = socket.shutdown(Shutdown::Write);
         let deadline = Instant::now() + linger;
         let mut sink = [0u8; 16 * 1024];
@@ -895,21 +696,12 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
     let _ = socket.set_nodelay(true);
     let limits = shared.limits;
     let timed = Timed {
-        #[cfg(test)]
-        bytes_read: 0,
         socket,
         deadline: accepted + limits.head,
         gap: limits.gap,
     };
-    let stream = match &shared.tls {
-        Some(config) => match rustls::ServerConnection::new(Arc::clone(config)) {
-            Ok(tls) => Stream::Tls(Box::new(rustls::StreamOwned::new(tls, timed))),
-            Err(_) => return,
-        },
-        None => Stream::Plain(timed),
-    };
     let mut connection = Connection {
-        stream,
+        stream: timed,
         head_only: false,
         authority: ConnectionAuthority::default(),
         buffer: Vec::new(),
@@ -929,21 +721,9 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
                 return connection.close();
             }
         };
-        if let Stream::Tls(stream) = &connection.stream {
-            connection.authority.verified_client_identity =
-                match stream.conn.peer_certificates().and_then(|c| c.first()) {
-                    Some(cert) => match VerifiedClientIdentity::from_verified_der(cert) {
-                        Ok(identity) => Some(identity),
-                        Err(_) => return connection.close(),
-                    },
-                    None => None,
-                };
-        }
         if head.target != "/v1/pair"
             && head.target != "/v1/unpair"
             && !head.target.starts_with("/v1/push/")
-            && !head.target.starts_with("/v1/body/")
-            && !head.target.starts_with("/v1/analytics/")
             && let Some(viewer) = &shared.viewer
         {
             if !slot.admit_viewer() {
@@ -965,9 +745,7 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
 // The receiver parser reads exactly through the head, leaving the body on the
 // socket. tiny_http retains the Viewer's body framing and response behavior.
 fn serve_viewer(viewer: &semon_sessions::Viewer, mut connection: Connection, head: Head) {
-    let Stream::Plain(timed) = &mut connection.stream else {
-        return;
-    };
+    let timed = &mut connection.stream;
     let Ok(writer) = timed.socket.try_clone() else {
         return;
     };
@@ -1017,18 +795,6 @@ enum Next {
 fn authority_refusal() -> Next {
     Next::Refuse(401, "request refused", &[("WWW-Authenticate", "Bearer")])
 }
-fn classify_route(path: &str) -> Option<(Kind, Option<Endpoint>)> {
-    if let Some(endpoint) = Endpoint::from_path(path) {
-        Some((Kind::MirrorPush, Some(endpoint)))
-    } else if path.starts_with("/v1/analytics/") {
-        Some((Kind::AnalyticsPublish, None))
-    } else if path.starts_with("/v1/body/") {
-        Some((Kind::BodyChannel, None))
-    } else {
-        None
-    }
-}
-
 fn answer_pair(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
     let refused = || Next::Refuse(403, "pairing refused", &[]);
     if (head.target == "/v1/pair" && head.authorization.is_some())
@@ -1089,31 +855,14 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
     if head.expect_other {
         return Next::Refuse(417, "only Expect: 100-continue is understood", &[]);
     }
-    let Some((kind, endpoint)) = classify_route(&head.target) else {
+    let Some(endpoint) = Endpoint::from_path(&head.target) else {
         return authority_refusal();
     };
-    if kind != Kind::MirrorPush && shared.tls.is_none() {
-        return authority_refusal();
-    }
-    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(now) => now.as_secs(),
-        Err(_) => return authority_refusal(),
-    };
-    #[cfg(test)]
-    let now = shared.test_clock.as_ref().map_or(now, |clock| clock());
-    if kind == Kind::BodyChannel {
-        return body::answer_body(shared, slot, connection, head, now);
-    }
-    let Some(authenticated) = shared.tokens.registry().authenticated_enrollment(
-        &mut connection.authority,
-        head.authorization.as_deref(),
-        kind,
-        now,
-    ) else {
-        return authority_refusal();
-    };
-    // Classified routes are closed until their owning slices install handlers.
-    let Some(endpoint) = endpoint else {
+    let Some(machine) = shared
+        .tokens
+        .registry()
+        .authenticate(&mut connection.authority, head.authorization.as_deref())
+    else {
         return authority_refusal();
     };
     if head.method != "POST" {
@@ -1136,7 +885,6 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         }
         Err(_) => return Next::Close,
     };
-    let machine = authenticated.machine;
     let reply = shared.receiver.handle(&machine, endpoint, &body);
     if reply.status >= 500 {
         eprintln!("semon receive: {machine}: {}", reply.body);
@@ -1146,10 +894,6 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         Err(_) => Next::Close,
     }
 }
-
-#[cfg(test)]
-#[path = "serve_auth_tests.rs"]
-mod auth_tests;
 
 #[cfg(test)]
 mod tests {

@@ -178,8 +178,10 @@ The receiver's default remains `127.0.0.1:8735`; `--listen` selects a proxy-faci
 address. The combined Viewer listener uses plain HTTP behind the HTTPS proxy. Protect a plain
 HTTP receiver's network access appropriately. The HTTPS proxy can read logs in
 transit, and a stolen token works until revoked: these are accepted owner tradeoffs.
-The old enroll/connect/disconnect commands and provision/renew HTTP routes are
-removed. Push does not start certificate renewal. Legacy
+Federation body/publication channels, direct receiver TLS, client certificates,
+and the old enroll/connect/disconnect and renewal libraries are retired. Receive
+serves plain HTTP behind an HTTPS proxy. Registry format 9 refuses older state
+unchanged; pair origins into a new empty receiver directory. Legacy
 `DIR/tokens` and older receiver registry formats are refused; preserve existing
 state and pair into a fresh directory.
 
@@ -188,7 +190,7 @@ Its limits:
 - A request body is at most 6 MiB (one append's 4 MiB of file bytes, as base64, plus the JSON around it). A larger declared body gets 413 before any of it is read. A body needs a `Content-Length`: without one, or chunked, it gets 411.
 - The token is checked (401) before the body is read.
 - At most 32 connections at once. A connection that hasn't yet passed the token check also counts against its address (an IPv6 one by its /64), which may have 4 such; once a request on it is authenticated it counts only toward the 32, so machines behind one address (for example, behind a NAT) each keep their `--watch` connection. One more over either limit is closed as soon as it is accepted.
-- Every read and write, the TLS handshake's included, runs against a deadline, so trickling bytes doesn't stretch it. The first request's head must be in within 10 s of the connection being accepted, a later one's within 10 s of its first byte, and a body within 120 s. A kept-alive connection closes after 30 s idle, and no single read or write waits more than 30 s.
+- Every read and write runs against a deadline, so trickling bytes doesn't stretch it. The first request's head must be in within 10 s of the connection being accepted, a later one's within 10 s of its first byte, and a body within 120 s. A kept-alive connection closes after 30 s idle, and no single read or write waits more than 30 s.
 - Each machine's copy holds at most 20 GiB (`--max-bytes SIZE`, as in `500G`), counted by a walk of `DIR/machines/` at start and then by each write. A push that would pass it gets 507, and `semon push` reports the failure and stops that pass. To recover, raise `--max-bytes` and restart the receiver. Deleting copies under `DIR` doesn't lower the count until a restart, and the machine sends deleted copies again anyway.
 - Paths are checked with `semon_sessions::is_input_path`. The receiver creates its directories itself and refuses a request whose path meets a symbolic link.
 - Each file has one writer at a time. A 200 is answered only once the bytes are synced to disk. An append that fails partway is cut back off before the 500, so the copy is as it was. A replace is a rename, so the copy is the old one or the new one; if only the directory sync after the rename fails, the answer is 500 with the new copy in place. A replace's temporary files left by a crash are removed when the receiver starts.
@@ -269,8 +271,7 @@ creates an empty current native index and records a random namespace plus an
 independent origin incarnation together in the private JSON
 `<index parent>/analytics-namespace`. Later calls reuse all three identities;
 initialization alone leaves publication pending and writes no empty snapshot.
-Non-push connect admission uses this initializer but still refuses enrollment
-until its activation gate lands. Deleting that state directory creates a new namespace and new session IDs;
+Deleting that state directory creates a new namespace and new session IDs;
 there is no automatic reconciliation or rename/transfer workflow yet. Typed
 local paths can be present in the Parquet, so governed export remains a
 separate operation. Writer ownership is acquired before namespace creation or
@@ -343,7 +344,7 @@ Choose backup operations by what you need to preserve:
 
 | Operation | Preserves | Does not replace |
 | --- | --- | --- |
-| `semon analytics export DESTINATION` | Verified current published analytics snapshot and its namespace | Durable free-text backup, native history/archive custody, private enrollment state or the egress-handle mapping |
+| `semon analytics export DESTINATION` | Verified current published analytics snapshot and its namespace | Durable free-text backup, native history/archive custody, private pairing state |
 | `semon asi backup PATH` | Author-owned durable SQLite state, including its local body fields | Analytics snapshot export or native history/archive custody |
 
 Neither command is a complete machine backup. Keep destinations private, and

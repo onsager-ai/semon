@@ -5187,37 +5187,6 @@ fn archived_index(connection: &Connection, path: &str) -> rusqlite::Result<Optio
         .transpose()
 }
 
-/// Read only the archive identity already bound to this exact indexed prefix.
-/// No archive file or manifest is opened by this evidence lookup.
-pub(crate) fn cohort_chain(
-    connection: &Connection,
-    source: &semon_asi::input::Source,
-) -> Result<String, crate::origin_projection::CohortReadError> {
-    use crate::origin_projection::CohortReadError::{NotIndexed, Stale, Unavailable};
-    let evidence = connection.query_row(
-        "SELECT native_id,chain_id,consumed_offset,prefix_sha256,recorded_size FROM native_chain_evidence WHERE source_path=?1",
-        [&source.local_path],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, uint(row.get::<_, i64>(2)?), row.get::<_, String>(3)?, uint(row.get::<_, i64>(4)?))),
-    ).optional().map_err(|error| match error {
-        rusqlite::Error::SqliteFailure(_, _) => Unavailable,
-        _ => Stale,
-    })?.ok_or(NotIndexed)?;
-    let (native_id, chain, offset, prefix, size) = evidence;
-    if chain.len() != 32
-        || !chain
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || native_id != source.native_id
-        || size < source.consumed_offset
-        || offset != source.consumed_offset
-        || source.prefix_sha256.len() != 64
-        || prefix != source.prefix_sha256
-    {
-        return Err(Stale);
-    }
-    Ok(chain)
-}
-
 fn proof_ledger(proof: &crate::SessionSourceProof) -> Ledger {
     Ledger {
         stat: Stat {
@@ -6863,7 +6832,6 @@ fn put_run(statement: &mut Statement<'_>, run: &ReportedRunSnapshot) -> rusqlite
 #[cfg(test)]
 mod tests {
     mod bounded_input;
-    mod cohort_generations;
 
     use std::collections::BTreeSet;
 

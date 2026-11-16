@@ -12,14 +12,6 @@ const DURABLE_VALUES_LIMIT: usize = 256 * 1024;
 const DURABLE_VALUES_TOO_LARGE: &str = "durable values exceed the 256 KiB authoring limit";
 
 fn main() -> ExitCode {
-    if env::args().skip(1).eq(["asi", "object-worker"]) {
-        use std::io::IsTerminal;
-        if std::io::stdin().is_terminal() {
-            eprintln!("internal worker; not a user command");
-            return ExitCode::FAILURE;
-        }
-        return ExitCode::from(semon_asi::objects::worker_stdio() as u8);
-    }
     #[cfg(feature = "asi-query")]
     if env::args().skip(1).eq(["asi", "body-worker"]) {
         return ExitCode::from(semon_sessions::body_query::worker_stdio() as u8);
@@ -905,17 +897,9 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
             _ => return Err(format!("unknown argument: {argument}")),
         }
     }
-    let (url, credential) = if let Some(receiver) = receiver {
-        let base = semon_push::origin_custody::default_directory()?;
-        let (config, credential) = semon_push::origin_custody::load(&base, Some(&receiver))?;
-        (config.endpoint, credential)
-    } else {
-        let config = semon_push::simple_pair::Config::load()?;
-        (
-            config.url,
-            semon_push::Credential::Memory(semon_push::Token::new(&config.token)?),
-        )
-    };
+    let config = semon_push::simple_pair::Config::load()?;
+    let url = receiver.unwrap_or(config.url);
+    let credential = semon_push::Credential::Memory(semon_push::Token::new(&config.token)?);
     let state = state.unwrap_or_else(|| semon_push::default_state_path(&url));
     Ok(PushArgs {
         options: semon_push::PushOptions {
@@ -967,8 +951,6 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
     let mut public_url = None;
     let mut dir = None;
     let mut listen = semon_push::serve::DEFAULT_LISTEN.to_owned();
-    let mut certificate = None;
-    let mut private_key = None;
     let mut max_bytes = semon_push::mirror::DEFAULT_MAX_BYTES;
     while let Some(argument) = arguments.next() {
         let mut value = || {
@@ -979,8 +961,6 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
         match argument.as_str() {
             "--dir" => dir = Some(PathBuf::from(value()?)),
             "--listen" => listen = value()?,
-            "--tls-cert" => certificate = Some(PathBuf::from(value()?)),
-            "--tls-key" => private_key = Some(PathBuf::from(value()?)),
             "--max-bytes" => max_bytes = parse_size(&value()?)?,
             "--public-url" => public_url = Some(semon_push::read_token::public_origin(&value()?)?),
             "-h" | "--help" => return Err(usage()),
@@ -991,18 +971,9 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
     let listen = listen
         .parse::<std::net::SocketAddr>()
         .map_err(|error| format!("invalid --listen address {listen}: {error}"))?;
-    let tls = match (certificate, private_key) {
-        (Some(certificate), Some(private_key)) => Some(semon_push::serve::TlsFiles {
-            certificate,
-            private_key,
-        }),
-        (None, None) => None,
-        _ => return Err("TLS requires both --tls-cert and --tls-key".into()),
-    };
     let options = semon_push::serve::ServeOptions {
         dir,
         listen,
-        tls,
         max_bytes,
     };
     Ok(ReceiveArgs::Serve(options, public_url))
@@ -1245,14 +1216,13 @@ fn run_reset(args: ResetArgs) -> Result<(), String> {
             .ok_or_else(|| format!("no analytics store at {}", store_root.display()))?
             .generation
     };
-    let handles_path = state_dir.join(semon_asi::egress::HANDLES_FILE);
     let summary = semon_asi::reset_snapshot(
         &store_root,
         &state_dir.join(ANALYTICS_NAMESPACE_FILE),
         &namespace,
         args.verified_export.as_deref(),
         expected_generation,
-        args.new_namespace.then_some(handles_path.as_path()),
+        args.new_namespace,
     )
     .map_err(|error| match error {
         semon_asi::Error::WriterBusy => {
@@ -2373,13 +2343,13 @@ fn usage() -> String {
          Usage: semon archive prune [--retention-days N] [--cache PATH]\n\
          Explicit archive maintenance. Omit retention to keep every chain indefinitely; native logs are never deleted.\n\
          \n\
-         Usage: semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--max-bytes SIZE]\n\
+         Usage: semon receive --dir DIR [--listen ADDR] [--max-bytes SIZE]\n\
          Usage: semon receive machines --dir DIR\n\
          Usage: semon receive name ID NAME --dir DIR\n\
          Usage: semon receive name ID --clear --dir DIR\n\
          A push-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
          DIR/machines/ID/. It listens on 127.0.0.1:8735 by default; use --listen for a proxy-facing address.\n\
-         Optional --tls-cert and --tls-key serve TLS directly. Legacy DIR/tokens is refused.\n\
+         Serve plain HTTP behind an HTTPS proxy. Legacy DIR/tokens is refused.\n\
          --max-bytes caps each machine's copy (20G by default); a push past it gets 507."
 .to_owned()
 }

@@ -4,7 +4,7 @@
 
 `semon receive` is the reference receiver (`semon_push::mirror::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<machine-id>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and 507 (the machine's copy would pass its size cap); a client treats either as a failure.
 
-Registry format 7 stores the origin-generated canonical machine ID
+Registry format 9 stores the origin-generated canonical machine ID
 (`machine-<8 lowercase hex Unix seconds><8 secure random hex digits>`), matching
 directory locator, optional display name, pending code hash, pairing gate, hashed
 push Bearers and pairing/revocation audit. New machine names default to hostname;
@@ -51,10 +51,13 @@ proxy can read logs in transit; stolen tokens work until revoked. The old enroll
 `/v1/renew/*` routes are removed; push does not start certificate renewal. Legacy
 `DIR/tokens` remains refused and preserved.
 
-The retained body/analytics surfaces still use the separate certificate-based
-authorization contract. Direct TLS and shared certificate registry fields remain
-until that contract is resolved in P3b; they do not participate in pairing or
-Viewer access.
+The federation body channel, publication objects and receiver body cache are retired
+(owner decision, 2026-11-16). `/v1/body/*` and `/v1/analytics/*` have no handlers or
+credential kinds. The receiver serves plain HTTP behind an HTTPS proxy; direct
+TLS, client certificates and TLS-exporter enrollment/renewal are removed. Registry
+format 9 stores pairing, read tokens and canonical machine metadata only. Older
+registry formats are refused unchanged; use a new empty receiver directory and pair
+each origin again. Origin-local ASI search, focused view and read audit remain.
 
 The reference receiver takes an exclusive, non-blocking OS lock on its store directory for its lifetime. A second receiver on that directory is refused at startup, so preservation and replacement cannot interleave across receiver instances.
 
