@@ -16,6 +16,24 @@ Its hash and ten-minute expiry commit under the registry lock. Three wrong guess
 consume it; three burns within an hour persist a thirty-minute pairing pause.
 The running receiver reads this state per request, without IPC.
 
+### Viewer pairing codes
+
+`GET /api/viewer/pairing` returns `{"available":true}` on the receiver under
+existing Viewer read authentication. `POST /api/viewer/pair` uses that same
+read token or session cookie to issue a code with `simple_pair::issue`, returning
+**200** `{"code":"01234-5678X","expires":1234567890}`. `expires` is Unix seconds.
+It replaces the previous code and preserves the ten-minute expiry, burn counters
+and pause rules above. Paused/unavailable issuance returns generic **503**;
+other methods return **405**. Responses use `Cache-Control: no-store`; plaintext
+codes are neither logged nor retained by the Viewer.
+
+Cookie-authenticated POSTs require an exact admitted `Origin`, as other Viewer
+POSTs do. Missing or invalid read authority and cross-origin requests receive the
+Viewer's **403** refusal. A push token grants no Viewer access. The Viewer builds
+`semon pair <receiver URL> <CODE>` from the browser's public origin, shows expiry,
+and offers copy and replacement actions. An empty receiver serves the same Viewer
+shell and assets, with an invitation to pair its first machine.
+
 ### `POST <url>/v1/pair`
 
 No Authorization header is required. The strict JSON request is at most 8 KiB:

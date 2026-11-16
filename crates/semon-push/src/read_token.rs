@@ -125,7 +125,9 @@ impl semon_sessions::ViewerAccess for Access {
     fn issue_pairing_code(&self) -> std::result::Result<serde_json::Value, String> {
         let now = crate::simple_pair::now()?;
         let (code, expires) = crate::simple_pair::issue(&self.0, now).map_err(|e| e.to_string())?;
-        Ok(serde_json::json!({"code": code.expose(), "expires": expires}))
+        Ok(
+            serde_json::json!({"code": crate::pairing::display_code(&code).expose(), "expires": expires}),
+        )
     }
 
     fn resolve(&self, secret: &str) -> Option<String> {

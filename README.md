@@ -110,20 +110,22 @@ same archive after every batch or restart; see the
 
 `semon receive` is a receiver for `semon push`, for one person with several machines, and the [push protocol](docs/push-protocol.md)'s reference implementation (`semon_push::receiver::Receiver`). Each machine pushes with its own token, and its copy lands in `DIR/machines/NAME/`: `claude/` and `codex/` hold the input files at their paths under each home, and `facts.json` holds the machine's facts. A token decides the machine, so one machine's token can't write another's files.
 
-The five setup commands are `semon receive`, `semon pair` on the receiver,
-`semon pair URL CODE` on each machine, `semon unpair`, and `semon token` for
-owner read access:
+Start the receiver, create an owner token, and open its login URL. In the
+Viewer, choose **Pair a machine** and copy the displayed command to each machine.
+This also works before any machine has synced. Anyone with Viewer access can
+issue a one-time pairing code; keep the owner token and login URL private.
+Receiver-local `semon pair --dir DIR` remains available for terminal setup:
 
 ```sh
 # Receiver host; deploy behind an HTTPS proxy:
 semon receive --dir ~/semon-received --listen 127.0.0.1:8080 --public-url https://receiver.example
-# In another terminal on the receiver:
+# In another terminal on the receiver, print the Viewer login URL once:
+semon token --dir ~/semon-received
+# Open that URL and choose Pair a machine, or issue a code in the terminal:
 semon pair --dir ~/semon-received
-# On each machine, using the printed one-time code:
+# On each machine, using the one-time code:
 semon pair https://receiver.example CODE
 semon unpair # revoke this machine when it should stop sending
-# On the receiver, print an owner read token and login URL once:
-semon token --dir ~/semon-received
 ```
 
 `semon pair URL CODE` starts background sync automatically using the current
