@@ -59,7 +59,7 @@ pub(crate) fn run(options: &crate::Options, point: &'static str) {
     run_cache(&options.cache, point);
 }
 
-#[cfg(feature = "test-hooks")]
+#[cfg(any(test, feature = "test-hooks"))]
 pub(crate) fn run_cache(cache: &Path, point: &'static str) {
     let hook = hooks().lock().unwrap().get(cache).cloned();
     if let Some(hook) = hook {

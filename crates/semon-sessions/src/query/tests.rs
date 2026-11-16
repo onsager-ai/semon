@@ -725,6 +725,129 @@ fn native_tools_refuse_changed_bytes_even_with_indistinguishable_file_stamps() {
 }
 
 #[test]
+fn local_query_retries_one_append_during_verification_or_read() {
+    use std::io::Write;
+    use std::sync::Arc;
+    for point in ["query_source_after_verify", "query_source_after_read"] {
+        let home = Home::new("query-retry");
+        home.top("lead", &[human("lead", ts(1, 0), "original prompt")]);
+        let path = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/lead.jsonl");
+        let calls = Arc::new(AtomicU64::new(0));
+        let observed = calls.clone();
+        let hook = crate::test_hooks::register(&home.options.cache, move |at| {
+            if at == point && observed.fetch_add(1, Ordering::Relaxed) == 0 {
+                writeln!(
+                    fs::OpenOptions::new().append(true).open(&path).unwrap(),
+                    "{}",
+                    assistant("lead", ts(1, 1), vec![text("retry evidence")])
+                )
+                .unwrap();
+            }
+        });
+        let args = json!({"id":"lead"});
+        let mut query = Query::new(home.options.clone());
+        let answer = query.call_at("read_transcript", &args, NOW).unwrap();
+        assert!(calls.load(Ordering::Relaxed) >= 2);
+        assert!(
+            answer.to_string().contains("retry evidence"),
+            "fresh derivation must include the append"
+        );
+        drop(hook);
+        assert_eq!(
+            answer,
+            Query::new(home.options.clone())
+                .call_at("read_transcript", &args, NOW)
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn local_query_reports_source_changed_when_its_single_retry_is_exhausted() {
+    use std::io::Write;
+    use std::sync::Arc;
+    for point in ["query_source_after_verify", "query_source_after_read"] {
+        let home = Home::new("query-retry-exhausted");
+        home.top("lead", &[human("lead", ts(1, 0), "original prompt")]);
+        let path = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/lead.jsonl");
+        let calls = Arc::new(AtomicU64::new(0));
+        let observed = calls.clone();
+        let attempts = Arc::new(AtomicU64::new(0));
+        let observed_attempts = attempts.clone();
+        let _hook = crate::test_hooks::register(&home.options.cache, move |at| {
+            if at == "query_attempt" {
+                observed_attempts.fetch_add(1, Ordering::Relaxed);
+            }
+            if at == point {
+                observed.fetch_add(1, Ordering::Relaxed);
+                writeln!(
+                    fs::OpenOptions::new().append(true).open(&path).unwrap(),
+                    "{}",
+                    assistant("lead", ts(1, 1), vec![text("more evidence")])
+                )
+                .unwrap();
+            }
+        });
+        let error = Query::new(home.options.clone())
+            .call_at("read_transcript", &json!({"id":"lead"}), NOW)
+            .unwrap_err();
+        assert_eq!(
+            attempts.load(Ordering::Relaxed),
+            2,
+            "one initial attempt and one retry"
+        );
+        assert!(
+            calls.load(Ordering::Relaxed) >= 2,
+            "both attempts must race a writer"
+        );
+        assert_eq!(
+            error.to_json(),
+            json!({"error":{
+                "code":"source_changed",
+                "message":"native query source changed during verification or read"
+            }})
+        );
+    }
+}
+
+#[test]
+fn local_query_does_not_retry_a_rewritten_source() {
+    use std::sync::Arc;
+    for point in ["query_source_after_verify", "query_source_after_read"] {
+        let home = Home::new("query-rewrite");
+        home.top("lead", &[human("lead", ts(1, 0), "original prompt")]);
+        let path = home
+            .options
+            .claude_home
+            .join("projects/-work-proj/lead.jsonl");
+        let calls = Arc::new(AtomicU64::new(0));
+        let observed = calls.clone();
+        let _hook = crate::test_hooks::register(&home.options.cache, move |at| {
+            if at == point {
+                observed.fetch_add(1, Ordering::Relaxed);
+                let bytes = fs::read_to_string(&path).unwrap();
+                fs::write(&path, bytes.replace("original prompt", "replaced prompt")).unwrap();
+            }
+        });
+        let error = Query::new(home.options.clone())
+            .call_at("read_transcript", &json!({"id":"lead"}), NOW)
+            .unwrap_err();
+        assert_eq!(error.code, "io");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "rewrites are permanent refusals"
+        );
+    }
+}
+
+#[test]
 fn query_source_reads_allow_append_without_reading_beyond_the_cohort() {
     use std::io::Write;
     let home = fixture();
@@ -3449,8 +3572,8 @@ fn selected_query_refuses_changed_bytes_generations_and_revocation() {
             assert!(!error.message.contains("revoked"));
             assert!(!error.message.contains("Permission denied"));
         } else {
-            // Prompt parsing tolerates the provider read error, but its sticky
-            // failure makes finish() retain the pre-R5 generic refusal.
+            // Provider error text is untrusted. Preserve its sanitized refusal
+            // even when prompt parsing tolerates the failed read until finish().
             assert_eq!(
                 error.message, "native query source generation unavailable",
                 "fault={fault}"

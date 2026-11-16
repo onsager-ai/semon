@@ -112,7 +112,7 @@ const LIST_MAX: i64 = 1000;
 pub struct QueryError {
     /// `unknown_tool`, `invalid_arguments`, `unknown_session`,
     /// `unknown_turn`, `outside_window`, `id_conflict`, `capability_unavailable`,
-    /// `stale_projection` or `io`.
+    /// `stale_projection`, `source_changed` or `io`.
     pub code: &'static str,
     pub message: String,
     /// With `outside_window`: where the window starts (epoch ms).
@@ -164,7 +164,7 @@ impl QueryError {
         self.reason = self.reason.or(match self.code {
             "io" | "unavailable" if exhausted => Some("limit_exceeded"),
             "unavailable" => Some("interrupted"),
-            "io" | "stale_projection" => Some("source_unavailable"),
+            "io" | "stale_projection" | "source_changed" => Some("source_unavailable"),
             "unknown_session" => Some("no_activity"),
             "capability_unavailable" => Some("unsupported_storage"),
             _ => None,
@@ -184,6 +184,13 @@ impl QueryError {
     }
 
     pub(crate) fn io(error: &io::Error) -> Self {
+        let error = crate::query_source::original_error(error);
+        if error
+            .get_ref()
+            .is_some_and(|error| error.is::<crate::query_source::SourceChanged>())
+        {
+            return Self::new("source_changed", error.to_string());
+        }
         if let Some(stage) = crate::source_carrier::FailureStage::of(error) {
             return Self::source_failure(stage);
         }
@@ -959,7 +966,21 @@ impl Query {
         // The scope outlives the call, so a refusal sees its accounting state.
         let _activity_scope =
             (tool == "get_session_activity").then(crate::selected_read::Scope::ensure);
-        let result = self.execute_tool(tool, args, now);
+        let mut result = self.execute_tool(tool, args, now);
+        if !self.embedded && matches!(&result, Err(error) if error.code == "source_changed") {
+            // Discard every request and derivation cache from the failed call.
+            // The persistent index is requalified against native sources again.
+            self.native = None;
+            self.start = None;
+            self.sources = Arc::new(SessionSources::with_machines(
+                self.sources
+                    .machines
+                    .iter()
+                    .map(|(key, evidence)| (key.clone(), evidence.options.clone()))
+                    .collect(),
+            ));
+            result = self.execute_tool(tool, args, now);
+        }
         if tool == "get_session_activity" {
             result.map_err(QueryError::activity_refusal)
         } else {
@@ -968,6 +989,10 @@ impl Query {
     }
 
     fn execute_tool(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        for (_, evidence) in &self.sources.machines {
+            crate::test_hooks::run_cache(&evidence.options.cache, "query_attempt");
+        }
         let postgres = self
             .sources
             .machines

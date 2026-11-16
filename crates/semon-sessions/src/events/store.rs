@@ -1958,7 +1958,9 @@ pub(crate) fn focused_connection(path: &Path) -> io::Result<Connection> {
     let read = db.unchecked_transaction().map_err(io::Error::other)?;
     match qualify_contract(&read).map_err(io::Error::other)? {
         Init::Ready => {}
-        Init::Unsupported(reason) => return Err(io::Error::other(reason)),
+        Init::Unsupported(reason) => {
+            return Err(io::Error::other(unsupported_message(&read, reason)));
+        }
         _ => return Err(io::Error::other("session index is not initialized")),
     }
     read.commit().map_err(io::Error::other)?;
@@ -4140,7 +4142,7 @@ impl SqliteStore {
             db.busy_timeout(BUSY_TIMEOUT).map_err(classify)?;
             let read = db.unchecked_transaction().map_err(classify)?;
             if let Init::Unsupported(reason) = qualify_producer(&read).map_err(classify)? {
-                return Err(Unopened::Unsupported(reason.into()));
+                return Err(Unopened::Unsupported(unsupported_message(&read, reason)));
             }
             read.commit().map_err(classify)?;
         }
@@ -4167,7 +4169,12 @@ impl SqliteStore {
                     "its filesystem doesn't support WAL".to_owned(),
                 ));
             }
-            Init::Unsupported(reason) => return Err(Unopened::Unsupported(reason.into())),
+            Init::Unsupported(reason) => {
+                return Err(Unopened::Unsupported(unsupported_message(
+                    &connection,
+                    reason,
+                )));
+            }
             Init::Fresh => unreachable!("init initializes fresh storage"),
         }
         let store = Self {
@@ -4222,7 +4229,7 @@ impl SqliteStore {
             match qualify_contract(&read).map_err(classify)? {
                 Init::Ready => {}
                 Init::Unsupported(reason) => {
-                    return Err(Unopened::Unsupported(reason.into()));
+                    return Err(Unopened::Unsupported(unsupported_message(&read, reason)));
                 }
                 _ => {
                     return Err(Unopened::Unsupported(
@@ -4739,6 +4746,20 @@ pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connecti
     }
 }
 
+fn unsupported_message(connection: &Connection, reason: &str) -> String {
+    if reason != "unsupported session index: older schema" {
+        return reason.to_owned();
+    }
+    let Some(path) = connection.path() else {
+        return reason.to_owned();
+    };
+    format!(
+        "{reason}; this index is a derived cache rebuilt from native logs. Move (rename, never delete) {path:?}, {wal:?} and {shm:?} aside, then run the command again. Native logs must remain available to rebuild the index.",
+        wal = format!("{path}-wal"),
+        shm = format!("{path}-shm"),
+    )
+}
+
 /// Classify in a read snapshot, before journal, schema or recovery writes.
 /// Version zero is fresh only when there are no schema objects.
 fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
@@ -4890,7 +4911,7 @@ fn qualify_load_schema(connection: &Connection) -> rusqlite::Result<()> {
 pub(crate) fn require_current(connection: &Connection) -> io::Result<()> {
     match qualify_contract(connection).map_err(io::Error::other)? {
         Init::Ready => Ok(()),
-        Init::Unsupported(reason) => Err(io::Error::other(reason)),
+        Init::Unsupported(reason) => Err(io::Error::other(unsupported_message(connection, reason))),
         _ => Err(io::Error::other("session index is not initialized")),
     }
 }
@@ -4902,7 +4923,7 @@ pub(crate) fn current_or_fresh(connection: &Connection) -> io::Result<bool> {
     match qualify_contract(connection).map_err(io::Error::other)? {
         Init::Ready => Ok(true),
         Init::Fresh => Ok(false),
-        Init::Unsupported(reason) => Err(io::Error::other(reason)),
+        Init::Unsupported(reason) => Err(io::Error::other(unsupported_message(connection, reason))),
         _ => Err(io::Error::other("session index is not initialized")),
     }
 }
@@ -4913,7 +4934,9 @@ pub(crate) fn current_or_fresh(connection: &Connection) -> io::Result<bool> {
 pub(crate) fn require_current_sql(connection: &Connection) -> rusqlite::Result<()> {
     match qualify_contract(connection)? {
         Init::Ready => Ok(()),
-        Init::Unsupported(reason) => Err(rusqlite::Error::InvalidParameterName(reason.into())),
+        Init::Unsupported(reason) => Err(rusqlite::Error::InvalidParameterName(
+            unsupported_message(connection, reason),
+        )),
         _ => Err(rusqlite::Error::InvalidParameterName(
             "session index is not initialized".to_owned(),
         )),
@@ -11016,10 +11039,21 @@ mod tests {
                 .unwrap();
             drop(store);
             let original = fs::read(&path).unwrap();
-            assert!(matches!(
-                SqliteStore::attempt(&path),
-                Err(Unopened::Unsupported(error)) if error.contains("older schema")
-            ));
+            let error = match SqliteStore::attempt(&path) {
+                Err(Unopened::Unsupported(error)) => error,
+                _ => panic!("older schema must be refused"),
+            };
+            assert_eq!(
+                error,
+                format!(
+                    "unsupported session index: older schema; this index is a derived cache rebuilt from native logs. Move (rename, never delete) {path:?}, {wal:?} and {shm:?} aside, then run the command again. Native logs must remain available to rebuild the index.",
+                    path = path.to_str().unwrap(),
+                    wal = format!("{}-wal", path.display()),
+                    shm = format!("{}-shm", path.display()),
+                )
+            );
+            let focused = focused_connection(&path).err().unwrap();
+            assert_eq!(focused.to_string(), error);
             assert_eq!(fs::read(&path).unwrap(), original);
             let reader =
                 Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
