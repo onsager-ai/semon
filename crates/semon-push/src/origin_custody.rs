@@ -568,10 +568,6 @@ impl Authority {
         self.confirmed
             .fetch_max(generation, std::sync::atomic::Ordering::Release);
     }
-    #[cfg(test)]
-    pub(crate) fn confirmed_generation(&self) -> u64 {
-        self.confirmed.load(std::sync::atomic::Ordering::Acquire)
-    }
     pub(crate) fn is_active(&self) -> bool {
         Directory::open(&self.base)
             .and_then(|root| root.child(&self.name))
