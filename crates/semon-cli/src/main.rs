@@ -5,51 +5,7 @@ use std::{
     process::ExitCode,
 };
 
-mod connect_terminal;
-mod disconnect_terminal;
 mod push_service;
-
-fn parse_connect_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
-    let mut endpoint = None;
-    let mut machine = None;
-    let mut require_client_certificate = false;
-    while let Some(argument) = arguments.next() {
-        match argument.as_str() {
-            "--to" | "--receiver" => {
-                endpoint = Some(
-                    arguments
-                        .next()
-                        .ok_or_else(|| format!("{argument} requires URL"))?,
-                );
-            }
-            "--require-client-certificate" => require_client_certificate = true,
-            "--machine" => machine = Some(arguments.next().ok_or("--machine requires NAME")?),
-            "-h" | "--help" => {
-                return Err(
-                    "Usage: semon connect (--to URL | --receiver URL) [--machine NAME] [--require-client-certificate]"
-                        .into(),
-                );
-            }
-            _ => return Err(format!("unknown connect argument: {argument}")),
-        }
-    }
-    let machine = machine.unwrap_or_else(|| {
-        std::fs::read_to_string("/proc/sys/kernel/hostname")
-            .unwrap_or_default()
-            .trim()
-            .into()
-    });
-    if !semon_sessions::is_machine_name(&machine) {
-        return Err("hostname is not a machine name; use --machine NAME".into());
-    }
-    Ok(Command::Connect {
-        endpoint: semon_push::origin_custody::receiver_endpoint(
-            &endpoint.ok_or("connect requires --to URL or --receiver URL")?,
-        )?,
-        machine,
-        require_client_certificate,
-    })
-}
 
 const ANALYTICS_NAMESPACE_FILE: &str = "analytics-namespace";
 const DURABLE_VALUES_LIMIT: usize = 256 * 1024;
@@ -95,14 +51,6 @@ enum Command {
     Pair(Vec<String>),
     Token(Vec<String>),
     Unpair(Vec<String>),
-    Connect {
-        endpoint: String,
-        machine: String,
-        require_client_certificate: bool,
-    },
-    Disconnect {
-        receiver: String,
-    },
     Receive(ReceiveArgs),
     Query(QueryArgs),
     #[cfg(feature = "asi-query")]
@@ -252,17 +200,6 @@ enum ReceiveArgs {
         id: String,
         name: Option<String>,
     },
-    Owner {
-        dir: PathBuf,
-        machine: String,
-        kind: Option<String>,
-        action: semon_push::enrollment::OwnerAction,
-    },
-    Enroll {
-        options: semon_push::serve::ServeOptions,
-        advertise: String,
-        machine: String,
-    },
 }
 
 struct SessionsArgs {
@@ -285,18 +222,6 @@ fn parse_args() -> Result<Command, String> {
     match arguments.next().as_deref() {
         Some("--version") if arguments.next().is_none() => Ok(Command::Version),
         Some("sessions") => parse_sessions_args(arguments).map(Command::Sessions),
-        Some("connect") => parse_connect_args(arguments),
-        Some("disconnect") => {
-            if arguments.next().as_deref() != Some("--receiver") {
-                return Err("disconnect requires --receiver URL".into());
-            }
-            let receiver = arguments.next().ok_or("--receiver requires URL")?;
-            if arguments.next().is_some() {
-                return Err("Usage: semon disconnect --receiver URL".into());
-            }
-            let receiver = semon_push::origin_custody::receiver_endpoint(&receiver)?;
-            Ok(Command::Disconnect { receiver })
-        }
         Some("push") => parse_push_args(arguments).map(Command::Push),
         Some("token") => Ok(Command::Token(arguments.collect())),
         Some("pair") => Ok(Command::Pair(arguments.collect())),
@@ -1003,13 +928,9 @@ fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushAr
     })
 }
 
-/// `semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM]`,
-/// or `semon receive enroll --machine NAME --advertise HTTPS_URL ...`.
+/// `semon receive --dir DIR [--listen ADDR] [--public-url HTTPS_URL]`.
 fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<ReceiveArgs, String> {
     let mut arguments = arguments.peekable();
-    if arguments.peek().is_some_and(|argument| argument == "token") {
-        return Err("legacy token commands retired; re-pair with receive enroll; preserve existing tokens and history".into());
-    }
     if arguments
         .peek()
         .is_some_and(|a| a == "machines" || a == "name")
@@ -1043,37 +964,7 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
             Ok(ReceiveArgs::Machines { dir })
         };
     }
-    if arguments.peek().is_some_and(|a| a == "revoke") {
-        arguments.next();
-        let action = semon_push::enrollment::OwnerAction::Revoke;
-        let (mut dir, mut machine, mut kind) = (None, None, None);
-        while let Some(arg) = arguments.next() {
-            let value = arguments
-                .next()
-                .ok_or_else(|| format!("{arg} requires a value"))?;
-            match arg.as_str() {
-                "--dir" => dir = Some(PathBuf::from(value)),
-                "--machine" => machine = Some(value),
-                "--kind" => kind = Some(value),
-                _ => return Err(format!("unknown receive argument: {arg}")),
-            }
-        }
-        return Ok(ReceiveArgs::Owner {
-            dir: dir.ok_or("receive requires --dir DIR")?,
-            machine: machine.ok_or("receive requires --machine M")?,
-            kind,
-            action,
-        });
-    }
-    let enroll = arguments
-        .peek()
-        .is_some_and(|argument| argument == "enroll");
-    if enroll {
-        arguments.next();
-    }
-    let mut advertise = None;
     let mut public_url = None;
-    let mut machine = None;
     let mut dir = None;
     let mut listen = semon_push::serve::DEFAULT_LISTEN.to_owned();
     let mut certificate = None;
@@ -1091,11 +982,7 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
             "--tls-cert" => certificate = Some(PathBuf::from(value()?)),
             "--tls-key" => private_key = Some(PathBuf::from(value()?)),
             "--max-bytes" => max_bytes = parse_size(&value()?)?,
-            "--public-url" if !enroll => {
-                public_url = Some(semon_push::read_token::public_origin(&value()?)?)
-            }
-            "--advertise" if enroll => advertise = Some(value()?),
-            "--machine" if enroll => machine = Some(value()?),
+            "--public-url" => public_url = Some(semon_push::read_token::public_origin(&value()?)?),
             "-h" | "--help" => return Err(usage()),
             _ => return Err(format!("unknown receive argument: {argument}")),
         }
@@ -1118,15 +1005,7 @@ fn parse_receive_args(arguments: impl Iterator<Item = String>) -> Result<Receive
         tls,
         max_bytes,
     };
-    if enroll {
-        Ok(ReceiveArgs::Enroll {
-            options,
-            advertise: advertise.ok_or("receive enroll requires --advertise HTTPS_URL")?,
-            machine: machine.ok_or("receive enroll requires --machine NAME")?,
-        })
-    } else {
-        Ok(ReceiveArgs::Serve(options, public_url))
-    }
+    Ok(ReceiveArgs::Serve(options, public_url))
 }
 
 /// A byte count: digits, optionally followed by K, M, G or T (powers of
@@ -1162,97 +1041,6 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
     match args {
         ReceiveArgs::Machines { dir } => receive_owner::machines(&dir),
         ReceiveArgs::Name { dir, id, name } => receive_owner::name(&dir, &id, name.as_deref()),
-        ReceiveArgs::Owner {
-            dir,
-            machine,
-            kind,
-            action,
-        } => receive_owner::run(&dir, &machine, kind.as_deref(), action),
-        ReceiveArgs::Enroll {
-            options,
-            advertise,
-            machine,
-        } => {
-            use std::io::{BufRead, IsTerminal, Write};
-            use std::sync::{Arc, Mutex};
-            semon_push::enrollment::refuse_legacy_tokens(&options.dir)
-                .map_err(|e| format!("{e}; choose a fresh receiver directory to enroll"))?;
-            if options.tls.is_none() {
-                return Err("receive enroll requires --tls-cert and --tls-key".into());
-            }
-            let mut terminal = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/dev/tty")
-                .map_err(|_| "receive enroll requires a trusted local terminal")?;
-            if !terminal.is_terminal() {
-                return Err("receive enroll requires a trusted local terminal".into());
-            }
-            if options.dir.join("enrollment").exists() {
-                let registry = semon_push::enrollment::Registry::read_current(&options.dir)
-                    .map_err(|e| {
-                        e.to_string()
-                            .replace("DIR", &options.dir.display().to_string())
-                    })?;
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| e.to_string())?
-                    .as_secs();
-                let endpoint = semon_push::pairing::normalize_endpoint(&advertise)
-                    .map_err(|e| e.to_string())?;
-                if let Some(recorded) = registry.endpoint().filter(|recorded| *recorded != endpoint)
-                {
-                    let recorded = recorded.to_owned();
-                    let owner =
-                        semon_push::receiver_custody::ReceiverCustody::open_existing(&options.dir)
-                            .map_err(|e| e.to_string())?;
-                    if !receive_owner::confirm(
-                        &mut terminal,
-                        &format!(
-                            "Change this receiver's address from {recorded} to {endpoint}? Existing origins must pair again. Type yes to confirm: "
-                        ),
-                    )? {
-                        writeln!(terminal, "Address change cancelled; nothing changed.")
-                            .map_err(|e| e.to_string())?;
-                        return Ok(());
-                    }
-                    writeln!(terminal, "Confirmation received.").map_err(|e| e.to_string())?;
-                    let mut store = semon_push::enrollment::Store::open(&options.dir)
-                        .map_err(|e| e.to_string())?;
-                    store
-                        .change_endpoint(
-                            &options.dir,
-                            &recorded,
-                            &endpoint,
-                            &owner.owner().principal,
-                            now,
-                        )
-                        .map_err(|e| e.to_string())?;
-                }
-            }
-            let controller = Arc::new(Mutex::new(semon_push::provision::Controller::open(
-                &options.dir,
-                &advertise,
-                machine,
-            )?));
-            let server = semon_push::serve::Server::bind(&options)?
-                .with_provisioning(Arc::clone(&controller))?;
-            std::thread::Builder::new().name("semon-receive-owner".into()).spawn(move || {
-                let input = match terminal.try_clone() { Ok(input) => input, Err(_) => return };
-                let _ = writeln!(terminal, "Pairing authorized. Local commands: pending; cancel SESSION_ID. Codes appear here when an origin connects.");
-                for line in std::io::BufReader::new(input).lines() {
-                    let Ok(line) = line else { break; };
-                    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) { Ok(now) => now.as_secs(), Err(_) => break };
-                    let Ok(mut controller) = controller.lock() else { break; };
-                    if line.trim() == "pending" {
-                        for (id, state) in controller.pending(now) { let _ = writeln!(terminal, "{id} {state:?}"); }
-                    } else if let Some(id) = line.trim().strip_prefix("cancel ") {
-                        let _ = writeln!(terminal, "{}", if controller.cancel(id, now).is_ok() { "cancelled" } else { "request refused" });
-                    } else { let _ = writeln!(terminal, "Use pending or cancel SESSION_ID"); }
-                }
-            }).map_err(|e| e.to_string())?;
-            server.run()
-        }
         ReceiveArgs::Serve(options, public_url) => {
             let server = semon_push::serve::Server::bind(&options)?;
             semon_push::read_token::configure(&options.dir, public_url.as_deref())
@@ -1363,12 +1151,6 @@ fn run(command: Command) -> Result<(), String> {
         Command::Token(args) => run_token(&args),
         Command::Pair(args) => run_pair(&args),
         Command::Unpair(args) => run_unpair(&args),
-        Command::Connect {
-            endpoint,
-            machine,
-            require_client_certificate,
-        } => connect_terminal::run(&endpoint, &machine, require_client_certificate),
-        Command::Disconnect { receiver } => disconnect_terminal::run(&receiver),
         Command::Receive(args) => run_receive(args),
         Command::Query(args) => run_query(args),
         #[cfg(feature = "asi-query")]
@@ -2583,10 +2365,6 @@ fn usage() -> String {
          The query tools plus local durable asi_add (with asi-query) over Model Context Protocol on stdin and stdout; no listener. Queries read\n\
          the log files modified within the window, --since (30d by default), or all of them with --all.\n\
          \n\
-         Usage: semon connect (--to URL | --receiver URL) [--machine NAME] [--require-client-certificate]\n\
-         Usage: semon disconnect --receiver URL\n\
-         Disables this machine's local receiver access after terminal confirmation; receiver access is not revoked.\n\
-         \n\
          Advanced: semon push [--receiver URL] [--watch] [--state PATH] [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH]\n\
          Sends the session logs' input files, redacted, and this machine's facts to a push-protocol receiver\n\
          (docs/push-protocol.md), appending as they grow. Run semon pair URL CODE first. --watch keeps going:\n\
@@ -2596,11 +2374,9 @@ fn usage() -> String {
          Explicit archive maintenance. Omit retention to keep every chain indefinitely; native logs are never deleted.\n\
          \n\
          Usage: semon receive --dir DIR [--listen ADDR] [--tls-cert PEM --tls-key PEM] [--max-bytes SIZE]\n\
-         Usage: semon receive enroll --machine NAME --advertise HTTPS_URL --dir DIR [--listen ADDR] --tls-cert PEM --tls-key PEM\n\
          Usage: semon receive machines --dir DIR\n\
          Usage: semon receive name ID NAME --dir DIR\n\
          Usage: semon receive name ID --clear --dir DIR\n\
-         Enrollment stays in the foreground; its trusted terminal displays codes and accepts pending or cancel SESSION_ID.\n\
          A push-protocol receiver for semon push from your other machines: it writes each machine's copy to\n\
          DIR/machines/ID/. It listens on 127.0.0.1:8735 by default; use --listen for a proxy-facing address.\n\
          Optional --tls-cert and --tls-key serve TLS directly. Legacy DIR/tokens is refused.\n\
@@ -2772,45 +2548,6 @@ mod tests {
         assert_eq!(parse_size("1T").unwrap(), 1u64 << 40);
         for bad in ["", "G", "-1", "1.5G", "10GB", "99999999999T"] {
             assert!(parse_size(bad).is_err(), "{bad}");
-        }
-    }
-}
-
-#[cfg(test)]
-mod receiver_selector_tests {
-    use super::*;
-    #[test]
-    fn connect_receiver_and_to_use_the_pairing_url_contract() {
-        for flag in ["--receiver", "--to"] {
-            for (url, normalized) in [
-                ("https://RECEIVER.example/", "https://receiver.example:443"),
-                ("https://[::1]/", "https://[::1]:443"),
-            ] {
-                let command = parse_connect_args(
-                    [flag, url, "--machine", "laptop"]
-                        .map(str::to_owned)
-                        .into_iter(),
-                )
-                .unwrap();
-                let Command::Connect { endpoint, .. } = command else {
-                    panic!("connect expected")
-                };
-                assert_eq!(endpoint, normalized);
-            }
-            for invalid in [
-                "a".repeat(64),
-                "https://user:secret@receiver.example".into(),
-                "https://receiver.example?secret".into(),
-            ] {
-                assert!(
-                    parse_connect_args(
-                        [flag, &invalid, "--machine", "laptop"]
-                            .map(str::to_owned)
-                            .into_iter()
-                    )
-                    .is_err()
-                );
-            }
         }
     }
 }

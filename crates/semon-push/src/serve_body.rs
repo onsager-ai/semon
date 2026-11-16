@@ -401,10 +401,7 @@ mod tests {
             admission: Mutex::new(Admission::default()),
             body: host,
             viewer: None,
-            provisioning: None,
-            provisioning_clock: Some(Arc::new(|| 100)),
-            provisioning_timeout: None,
-            provisioning_terminal: None,
+            test_clock: Some(Arc::new(|| 100)),
         });
         (dir, shared)
     }

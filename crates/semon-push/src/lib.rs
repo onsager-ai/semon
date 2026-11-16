@@ -93,7 +93,7 @@ pub mod receiver_custody;
 pub mod redact;
 #[cfg(unix)]
 pub mod renewal;
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 mod renewal_trigger;
 #[cfg(unix)]
 pub mod renewal_wire;
@@ -1762,13 +1762,7 @@ pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()>
         .with_lock(hold.share());
     let heartbeat =
         status::Heartbeat::start(options, stop, hold.share(), Arc::clone(&client.progress))?;
-    #[cfg(unix)]
-    let mut renewal = renewal_trigger::Trigger::start(options, watch, stop)?;
     let result = push_running(options, watch, stop, &hold, &mut client);
-    #[cfg(unix)]
-    if !watch && let Some(renewal) = renewal.as_mut() {
-        renewal.finish(stop);
-    }
     if let Some(error) = heartbeat.fatal() {
         return Err(error);
     }

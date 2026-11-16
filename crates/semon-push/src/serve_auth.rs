@@ -149,6 +149,7 @@ impl CredentialHandle {
 
 pub struct RegistryAuthenticator {
     dir: PathBuf,
+    #[cfg(test)]
     renewal: std::sync::Mutex<crate::renewal::Receiver>,
 }
 impl RegistryAuthenticator {
@@ -158,6 +159,7 @@ impl RegistryAuthenticator {
             .map_err(|e| e.to_string().replace("DIR", &dir.display().to_string()))?;
         Ok(Self {
             dir: dir.to_owned(),
+            #[cfg(test)]
             renewal: std::sync::Mutex::new(crate::renewal::Receiver::default()),
         })
     }
@@ -175,30 +177,7 @@ impl RegistryAuthenticator {
     ) -> Result<(), enrollment::Error> {
         crate::simple_pair::unpair_token(&self.dir, authorization, now)
     }
-    pub(crate) fn renewal_refused(&self, class: crate::renewal::Failure, now: u64) {
-        crate::renewal::record_refusal(&self.dir, class, now, String::new(), String::new(), vec![]);
-    }
-    pub(crate) fn renew_encoded(
-        &self,
-        route: crate::renewal_wire::Route,
-        body: &[u8],
-        exporter: [u8; 32],
-        identity: Option<&VerifiedClientIdentity>,
-        now: u64,
-    ) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::renewal::Failure> {
-        let request = crate::renewal_wire::Request::parse(route, body).map_err(|_| {
-            crate::renewal::record_refusal(
-                &self.dir,
-                crate::renewal::Failure::Malformed,
-                now,
-                String::new(),
-                String::new(),
-                vec![],
-            );
-            crate::renewal::Failure::Malformed
-        })?;
-        self.renew(request, exporter, identity, now)
-    }
+    #[cfg(test)]
     pub(crate) fn renew(
         &self,
         request: crate::renewal_wire::Request,
