@@ -5,11 +5,6 @@ use crate::{
 };
 use std::path::{Path, PathBuf};
 
-#[derive(Default)]
-pub(super) struct ConnectionAuthority {
-    machine: Option<String>,
-}
-
 pub(super) struct RegistryAuthenticator {
     dir: PathBuf,
 }
@@ -35,11 +30,7 @@ impl RegistryAuthenticator {
     ) -> Result<(), enrollment::Error> {
         crate::simple_pair::unpair_token(&self.dir, authorization, now)
     }
-    pub(super) fn authenticate(
-        &self,
-        conn: &mut ConnectionAuthority,
-        authorization: Option<&str>,
-    ) -> Option<String> {
+    pub(super) fn authenticate(&self, authorization: Option<&str>) -> Option<String> {
         enrollment::refuse_legacy_tokens(&self.dir).ok()?;
         let registry = Registry::read_current(&self.dir).ok()?;
         let bearer = authorization?.strip_prefix("Bearer ")?;
@@ -48,12 +39,7 @@ impl RegistryAuthenticator {
         }
         let secret = Secret::new(bearer.to_owned());
         let credential = registry.paired_token(&secret)?;
-        let machine = &credential.enrollment_id;
-        if conn.machine.as_ref().is_some_and(|id| id != machine) {
-            return None;
-        }
-        conn.machine = Some(machine.clone());
-        Some(machine.clone())
+        Some(credential.enrollment_id.clone())
     }
 }
 

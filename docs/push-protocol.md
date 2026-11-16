@@ -53,8 +53,18 @@ and audits `paired` with `replaced: bool`. It returns **200**:
 
 Tokens have no expiry or renewal. Only their SHA-256 hashes are stored on the
 receiver. Push requests use `Authorization: Bearer <token>`; the token selects
-exactly one machine directory. Unknown/revoked tokens receive **401**. Revocation
-is rechecked on every request, including kept-alive connections.
+exactly one machine directory. Each request authenticates independently: a
+kept-alive connection may carry alternating tokens for different machines, as
+HTTPS proxies may pool their origin connections. Missing, unknown or revoked
+tokens on known push endpoints receive **401**. Revocation is rechecked on every
+request. Unknown `/v1/push/*` endpoints receive **404** before authentication.
+
+The receiver logs each refused push, pair or unpair request as one stderr line:
+`semon receive: endpoint=/v1/push/append status=401 reason=missing_token`.
+Reason classes include `missing_token`, `unknown_token` (also malformed or revoked
+tokens), `unknown_endpoint`, `pairing_refused` and `request_refused`. Unknown routes
+use `endpoint=unknown`; raw targets, tokens, pairing codes and bodies are never
+included.
 
 ### `POST <url>/v1/unpair`
 

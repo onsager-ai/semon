@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 
 #[path = "serve_auth.rs"]
 mod auth;
-use auth::{Authenticator, ConnectionAuthority};
+use auth::Authenticator;
 
 use crate::receiver::{DEFAULT_MAX_BYTES, Endpoint, MAX_BODY_BYTES, Receiver};
 
@@ -404,7 +404,6 @@ enum NoHead {
 struct Connection {
     stream: Timed,
     head_only: bool,
-    authority: ConnectionAuthority,
     /// Bytes read and not yet used.
     buffer: Vec<u8>,
     limits: Limits,
@@ -703,7 +702,6 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
     let mut connection = Connection {
         stream: timed,
         head_only: false,
-        authority: ConnectionAuthority::default(),
         buffer: Vec::new(),
         limits,
     };
@@ -736,6 +734,7 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
             Next::Continue if !head.close => {}
             Next::Continue | Next::Close => return connection.close(),
             Next::Refuse(status, message, headers) => {
+                log_refusal(&head, status);
                 return connection.refuse(status, message, headers);
             }
         }
@@ -792,6 +791,26 @@ enum Next {
     Refuse(u16, &'static str, &'static [(&'static str, &'static str)]),
 }
 
+// Use only fixed route labels: an unknown target can contain secrets or control bytes.
+fn log_refusal(head: &Head, status: u16) {
+    let endpoint = match head.target.as_str() {
+        "/v1/pair" => "/v1/pair",
+        "/v1/unpair" => "/v1/unpair",
+        "/v1/push/append" => "/v1/push/append",
+        "/v1/push/facts" => "/v1/push/facts",
+        "/v1/push/status" => "/v1/push/status",
+        _ => "unknown",
+    };
+    let reason = match status {
+        401 if head.authorization.is_none() => "missing_token",
+        401 => "unknown_token",
+        404 => "unknown_endpoint",
+        403 if head.target == "/v1/pair" || head.target == "/v1/unpair" => "pairing_refused",
+        _ => "request_refused",
+    };
+    eprintln!("semon receive: endpoint={endpoint} status={status} reason={reason}");
+}
+
 fn authority_refusal() -> Next {
     Next::Refuse(401, "request refused", &[("WWW-Authenticate", "Bearer")])
 }
@@ -839,12 +858,15 @@ fn answer_pair(shared: &Shared, slot: &mut Slot, connection: &mut Connection, he
     }
 }
 
-/// Checks a request in order (endpoint, method, framing, token, size) and,
+/// Checks a request in order (endpoint, framing, token, method, size) and,
 /// only once all pass, reads its body and answers it.
 fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
     if head.target == "/v1/pair" || head.target == "/v1/unpair" {
         return answer_pair(shared, slot, connection, head);
     }
+    let Some(endpoint) = Endpoint::from_path(&head.target) else {
+        return Next::Refuse(404, "unknown endpoint", &[]);
+    };
     if head.transfer_encoding {
         return Next::Refuse(
             411,
@@ -855,13 +877,10 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
     if head.expect_other {
         return Next::Refuse(417, "only Expect: 100-continue is understood", &[]);
     }
-    let Some(endpoint) = Endpoint::from_path(&head.target) else {
-        return authority_refusal();
-    };
     let Some(machine) = shared
         .tokens
         .registry()
-        .authenticate(&mut connection.authority, head.authorization.as_deref())
+        .authenticate(head.authorization.as_deref())
     else {
         return authority_refusal();
     };
@@ -886,8 +905,8 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         Err(_) => return Next::Close,
     };
     let reply = shared.receiver.handle(&machine, endpoint, &body);
-    if reply.status >= 500 {
-        eprintln!("semon receive: {machine}: {}", reply.body);
+    if reply.status >= 400 {
+        log_refusal(head, reply.status);
     }
     match connection.respond(reply.status, &reply.body, head.close, &[]) {
         Ok(()) => Next::Continue,
