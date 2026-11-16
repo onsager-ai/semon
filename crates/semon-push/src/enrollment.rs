@@ -461,7 +461,7 @@ impl Store {
         }
         // Never continue with a cached pre-commit view after rename uncertainty.
         if fault(Stage::Renamed).is_err()
-            || { self.dir.0.sync_all().is_err() }
+            || self.dir.0.sync_all().is_err()
             || fault(Stage::DirectorySynced).is_err()
         {
             self.failed = true;

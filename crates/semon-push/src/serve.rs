@@ -357,8 +357,7 @@ impl Read for Timed {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let timeout = self.remaining()?;
         self.socket.set_read_timeout(Some(timeout))?;
-        let read = self.socket.read(buffer)?;
-        Ok(read)
+        self.socket.read(buffer)
     }
 }
 
@@ -429,8 +428,7 @@ impl Connection {
         Ok(read)
     }
 
-    /// The next request's head. The first request's (and the TLS
-    /// handshake) must be in within [`Limits::head`] of `accepted`; a later
+    /// The next request's head. The first request must be in within [`Limits::head`] of `accepted`; a later
     /// one may wait [`Limits::idle`] to start, then has [`Limits::head`].
     fn read_head(&mut self, accepted: Option<Instant>) -> Result<Head, NoHead> {
         let now = Instant::now();
