@@ -1,15 +1,25 @@
 //! Receiver renewal state. Pending nonces are process-local; rate state and
 //! committed results share the credential registry transaction.
+#[cfg(test)]
+use crate::renewal_wire::Credential;
 use crate::{
-    credentials::{Bearer, Decision, Retiring, Secret},
-    enrollment::{CertificatePin, Error, Registry, Store},
+    credentials::Bearer,
+    enrollment::{Error, Registry},
     provision_wire::{self, Refused},
-    renewal_wire::{self as wire, Begun, Credential, Generation},
+    renewal_wire::{self as wire, Begun, Generation},
+};
+
+#[cfg(test)]
+use crate::{
+    credentials::{Decision, Retiring, Secret},
+    enrollment::{CertificatePin, Store},
     serve::VerifiedClientIdentity,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(test)]
 use std::{collections::BTreeMap, path::Path};
+#[cfg(test)]
 use zeroize::Zeroizing;
 
 #[cfg(test)]
@@ -82,12 +92,14 @@ pub(crate) struct Receipt {
     pub credentials: Vec<Bearer>,
     pub client_certificate: Option<Vec<u8>>,
 }
+#[cfg(test)]
 #[derive(Clone)]
 struct Pending {
     begun: Begun,
     authentication: Vec<Generation>,
     created_at: u64,
 }
+#[cfg(test)]
 #[derive(Default)]
 pub struct Receiver {
     pending: BTreeMap<String, Pending>,
@@ -112,6 +124,7 @@ fn enrollment<'a>(registry: &'a Registry, id: &str) -> Result<&'a crate::enrollm
     }
     Ok(enrollment)
 }
+#[cfg(test)]
 fn authenticate(
     registry: &Registry,
     id: &str,
@@ -205,6 +218,7 @@ impl Receipt {
             })
     }
 }
+#[cfg(test)]
 impl Receiver {
     pub(crate) fn handle(
         &mut self,
@@ -720,6 +734,7 @@ impl Receiver {
             .map_err(Failure::from)
     }
 }
+#[cfg(test)]
 fn observe(store: &mut Store, registry: &mut Registry, now: u64) -> Result<()> {
     if now > registry.latest {
         registry.latest = now;
@@ -730,6 +745,7 @@ fn observe(store: &mut Store, registry: &mut Registry, now: u64) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(test)]
 fn random_nonce() -> Result<[u8; 32]> {
     let mut bytes = [0; 32];
     rustls::crypto::ring::default_provider()
@@ -738,6 +754,7 @@ fn random_nonce() -> Result<[u8; 32]> {
         .map_err(|_| Failure::Custody)?;
     Ok(bytes)
 }
+#[cfg(test)]
 fn verify(
     registry: &Registry,
     message: &wire::Finish,
@@ -765,6 +782,7 @@ fn verify(
     )
     .map_err(|_| Failure::InvalidCredential)
 }
+#[cfg(test)]
 fn delivery(receipt: &Receipt, application: &[u8; 32]) -> Result<Vec<u8>> {
     provision_wire::encode_message(&wire::Delivered {
         version: 1,
@@ -799,6 +817,7 @@ fn delivery(receipt: &Receipt, application: &[u8; 32]) -> Result<Vec<u8>> {
     })
     .map_err(Failure::from)
 }
+#[cfg(test)]
 pub(crate) fn record_refusal(
     dir: &Path,
     class: Failure,
@@ -821,7 +840,9 @@ pub(crate) fn record_refusal(
 }
 // Refusals are attacker-controlled. Permit at most one storage warning for the
 // process lifetime, across receivers; expected aggregate-lock contention is quiet.
+#[cfg(test)]
 static REFUSAL_WARNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
 fn refusal_warning(
     latch: &std::sync::atomic::AtomicBool,
     result: &std::result::Result<(), Error>,
@@ -829,6 +850,7 @@ fn refusal_warning(
     matches!(result, Err(error) if !matches!(error, Error::InUse))
         && !latch.swap(true, std::sync::atomic::Ordering::Relaxed)
 }
+#[cfg(test)]
 pub(crate) fn write_refusal(dir: &Path, record: crate::generation_audit::RefusalRecord) {
     let result = crate::generation_audit::refusal(dir, record);
     if refusal_warning(&REFUSAL_WARNING, &result) {
@@ -837,6 +859,7 @@ pub(crate) fn write_refusal(dir: &Path, record: crate::generation_audit::Refusal
         );
     }
 }
+#[cfg(test)]
 fn audit(dir: &Path, begun: &Begun, action: &str, now: u64) -> Result<()> {
     crate::generation_audit::renewal(
         dir,
@@ -856,6 +879,7 @@ fn audit(dir: &Path, begun: &Begun, action: &str, now: u64) -> Result<()> {
 mod tests;
 
 impl Registry {
+    #[cfg(test)]
     pub(crate) fn check_renewal_admission(&self, pending: usize) -> std::result::Result<(), Error> {
         self.check_admission()?;
         if serde_json::to_vec(self).map_err(|_| Error::Invalid)?.len() as u64

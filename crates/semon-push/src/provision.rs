@@ -65,9 +65,6 @@ impl Controller {
             dir: dir.to_owned(),
         })
     }
-    pub(crate) fn take_paired(&mut self) -> Option<String> {
-        self.paired.take()
-    }
     pub fn pending(&mut self, now: u64) -> Vec<(String, pairing::State)> {
         self.pending
             .keys()
@@ -81,27 +78,6 @@ impl Controller {
     }
     pub fn cancel(&mut self, id: &str, now: u64) -> Result<(), Refused> {
         self.core.cancel(id, now).map_err(|_| Refused)
-    }
-    #[cfg(test)]
-    pub(crate) fn reserve_probe(&mut self, id: &str, exporter: [u8; 32], now: u64) -> bool {
-        let Some(pending) = self.pending.get(id) else {
-            return false;
-        };
-        let malformed = Transcript {
-            version: 0,
-            session_id: id.into(),
-            endpoint: self.endpoint.clone(),
-            exporter: exporter.to_vec(),
-            origin_key: vec![],
-            scope: [0; 32],
-            origin_nonce: [0; 32],
-            receiver_nonce: pending.nonce,
-            origin_role: "origin".into(),
-            receiver_role: "receiver".into(),
-            profile: "public_tls".into(),
-        };
-        let _ = self.core.reserve(&wire::encode(&exporter), malformed, now);
-        self.core.state(id, now) == Ok(pairing::State::Rejected)
     }
     /// Malformed messages on a known pending connection spend an attempt. Foreign
     /// identifiers never charge another connection. Dropping a reserved ticket
@@ -132,11 +108,6 @@ impl Controller {
         show: impl FnOnce(&str, &crate::credentials::Secret) -> Result<(), Refused>,
     ) -> Result<Zeroizing<Vec<u8>>, Refused> {
         self.handle_with_clock(request, exporter, &|| now, show)
-    }
-    /// Diagnostic exists only for the last authenticated approval; transport
-    /// consumes it while still holding the controller mutex.
-    pub(crate) fn take_unavailable(&mut self) -> Option<&'static str> {
-        self.unavailable.take()
     }
     pub fn handle_with_clock(
         &mut self,

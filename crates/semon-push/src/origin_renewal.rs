@@ -266,11 +266,6 @@ impl Renewal {
             Err(error) => Err(error),
         }
     }
-    pub(crate) fn awaiting_confirmation(&self) -> bool {
-        self.attempt
-            .as_ref()
-            .is_some_and(|a| a.state == State::Installed)
-    }
     pub fn pending(&self) -> bool {
         self.attempt
             .as_ref()

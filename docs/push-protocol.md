@@ -47,9 +47,14 @@ performs the same revocation. Neither route nor command deletes retained logs.
 
 The client requires public-CA HTTPS, with HTTP accepted only on loopback and
 redirects disabled. The receiver may listen on HTTP behind an HTTPS proxy. The
-proxy can read logs in transit; stolen tokens work until revoked. Old TLS-bound
-enrollment/connect/renewal remains available pending removal in P3, outside this
-pairing contract. Legacy `DIR/tokens` remains refused and preserved.
+proxy can read logs in transit; stolen tokens work until revoked. The old enroll/connect/disconnect commands and `/v1/provision/*` and
+`/v1/renew/*` routes are removed; push does not start certificate renewal. Legacy
+`DIR/tokens` remains refused and preserved.
+
+The retained body/analytics surfaces still use the separate certificate-based
+authorization contract. Direct TLS and shared certificate registry fields remain
+until that contract is resolved in P3b; they do not participate in pairing or
+Viewer access.
 
 The reference receiver takes an exclusive, non-blocking OS lock on its store directory for its lifetime. A second receiver on that directory is refused at startup, so preservation and replacement cannot interleave across receiver instances.
 

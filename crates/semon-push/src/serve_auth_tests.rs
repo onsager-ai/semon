@@ -35,10 +35,7 @@ fn revocation_between_requests_on_one_live_connection() {
         admission: Mutex::new(Admission::default()),
         viewer: None,
         body: None,
-        provisioning: None,
-        provisioning_clock: None,
-        provisioning_timeout: None,
-        provisioning_terminal: None,
+        test_clock: None,
     });
     let mut slot = Slot::admit(&shared, "127.0.0.1".parse().unwrap()).unwrap();
     let worker = thread::spawn(move || serve_connection(&mut slot, socket, Instant::now()));
@@ -188,10 +185,7 @@ fn pipelined_body_reads_stop_at_each_authorized_boundary() {
         admission: Mutex::new(Admission::default()),
         viewer: None,
         body: None,
-        provisioning: None,
-        provisioning_clock: None,
-        provisioning_timeout: None,
-        provisioning_terminal: None,
+        test_clock: None,
     });
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -998,10 +992,7 @@ fn unknown_routes_refuse_with_no_body_read_and_one_response_class() {
         admission: Mutex::new(Admission::default()),
         viewer: None,
         body: None,
-        provisioning: None,
-        provisioning_clock: None,
-        provisioning_timeout: None,
-        provisioning_terminal: None,
+        test_clock: None,
     });
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let mut client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
@@ -1033,6 +1024,13 @@ fn unknown_routes_refuse_with_no_body_read_and_one_response_class() {
     conn.stream.read_exact(&mut body).unwrap();
     assert_eq!(&body, b"body");
     for path in [
+        "/v1/provision/open",
+        "/v1/provision/confirm",
+        "/v1/provision/approve",
+        "/v1/provision/recover",
+        "/v1/provision/cancel",
+        "/v1/renew/begin",
+        "/v1/renew/finish",
         "/v1/asi/x",
         "/v1/analytics/x",
         "/v1/body/x",

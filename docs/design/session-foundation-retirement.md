@@ -28,7 +28,8 @@ operation reconciliation without adding speculative recovery infrastructure.
 > control delivery, managed runtime and SSH. The `semon-control`, `semon-runtime`
 > and `semon-ssh` crates, their active CLI/HTTP/MCP/UI entry points, managed E2B
 > workflows and SSH qualification scripts are removed in step 2, landed in this
-> branch. Multi-machine collection uses non-SSH Push/receive over TLS.
+> branch. Multi-machine collection uses non-SSH Push/receive with Bearer tokens over
+> plain HTTP behind an HTTPS proxy.
 
 ASI SQL and schema queries are available; full-text search follows in #567. Retirement
 never deletes user data, credentials, native history or installed services, and

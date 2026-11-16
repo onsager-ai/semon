@@ -1,6 +1,6 @@
 //! `semon receive`'s listener: the push protocol over HTTP/1.1, plain on
 //! a proxy-facing address or TLS with an operator-supplied certificate and key. It serves
-//! push routes to [`Receiver`], protected provisioning, and the closed reverse
+//! push routes to [`Receiver`], pairing, and the closed reverse
 //! body poll/response routes when body custody is configured.
 //!
 //! Each connection has its own thread, up to [`Limits::connections`] in
@@ -165,15 +165,9 @@ impl ServeOptions {
 #[derive(Default)]
 struct Admission {
     open: usize,
-    provisioning: usize,
     viewers: usize,
     per_ip: HashMap<IpAddr, usize>,
 }
-
-#[cfg(test)]
-type ProvisioningTerminal = dyn Fn(&str, &crate::credentials::Secret) -> Result<(), crate::provision_wire::Refused>
-    + Send
-    + Sync;
 
 struct Shared {
     receiver: Receiver,
@@ -183,13 +177,8 @@ struct Shared {
     admission: Mutex<Admission>,
     body: Option<crate::body_host::BodyHost<'static>>,
     viewer: Option<Arc<semon_sessions::Viewer>>,
-    provisioning: Option<Arc<Mutex<crate::provision::Controller>>>,
     #[cfg(test)]
-    provisioning_clock: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
-    #[cfg(test)]
-    provisioning_timeout: Option<Arc<std::sync::atomic::AtomicBool>>,
-    #[cfg(test)]
-    provisioning_terminal: Option<Arc<ProvisioningTerminal>>,
+    test_clock: Option<Arc<dyn Fn() -> u64 + Send + Sync>>,
 }
 
 impl Shared {
@@ -205,7 +194,6 @@ struct Slot {
     shared: Arc<Shared>,
     /// The address it counts against, until it authenticates.
     ip: Option<IpAddr>,
-    provisioning: bool,
     viewer: bool,
 }
 
@@ -233,7 +221,6 @@ impl Slot {
         Some(Self {
             shared: Arc::clone(shared),
             ip: Some(ip),
-            provisioning: false,
             viewer: false,
         })
     }
@@ -253,19 +240,6 @@ impl Slot {
         true
     }
 
-    fn admit_provisioning(&mut self) -> bool {
-        if self.provisioning {
-            return true;
-        }
-        let mut admission = self.shared.admission();
-        if admission.provisioning >= crate::provision_wire::MAX_CONNECTIONS {
-            return false;
-        }
-        admission.provisioning += 1;
-        self.provisioning = true;
-        true
-    }
-
     /// A request on this connection passed the token check: from now on it
     /// counts in the total only, not against its address.
     fn authenticated(&mut self) {
@@ -282,9 +256,6 @@ impl Drop for Slot {
         if self.viewer {
             admission.viewers -= 1;
         }
-        if self.provisioning {
-            admission.provisioning -= 1;
-        }
         if let Some(ip) = self.ip.take() {
             release_ip(&mut admission, ip);
         }
@@ -300,7 +271,6 @@ pub struct Server {
     tls: Option<Arc<rustls::ServerConfig>>,
     limits: Limits,
     viewer: Option<Arc<semon_sessions::Viewer>>,
-    provisioning: Option<Arc<Mutex<crate::provision::Controller>>>,
 }
 
 impl Server {
@@ -328,7 +298,6 @@ impl Server {
             tls,
             limits: Limits::default(),
             viewer: None,
-            provisioning: None,
         })
     }
 
@@ -338,17 +307,6 @@ impl Server {
             return Err("receive Viewer uses plain HTTP behind an HTTPS proxy".into());
         }
         self.viewer = Some(Arc::new(viewer));
-        Ok(self)
-    }
-
-    pub fn with_provisioning(
-        mut self,
-        controller: Arc<Mutex<crate::provision::Controller>>,
-    ) -> Result<Self, String> {
-        if self.tls.is_none() {
-            return Err("pairing requires TLS".into());
-        }
-        self.provisioning = Some(controller);
         Ok(self)
     }
 
@@ -396,13 +354,8 @@ impl Server {
             admission: Mutex::new(Admission::default()),
             body,
             viewer: self.viewer,
-            provisioning: self.provisioning,
             #[cfg(test)]
-            provisioning_clock: None,
-            #[cfg(test)]
-            provisioning_timeout: None,
-            #[cfg(test)]
-            provisioning_terminal: None,
+            test_clock: None,
         });
         for accepted in self.listener.incoming() {
             let socket = match accepted {
@@ -989,8 +942,6 @@ fn serve_connection(slot: &mut Slot, socket: TcpStream, accepted: Instant) {
         if head.target != "/v1/pair"
             && head.target != "/v1/unpair"
             && !head.target.starts_with("/v1/push/")
-            && !head.target.starts_with("/v1/provision/")
-            && !head.target.starts_with("/v1/renew/")
             && !head.target.starts_with("/v1/body/")
             && !head.target.starts_with("/v1/analytics/")
             && let Some(viewer) = &shared.viewer
@@ -1078,232 +1029,6 @@ fn classify_route(path: &str) -> Option<(Kind, Option<Endpoint>)> {
     }
 }
 
-/// Separate bounded dispatcher, enabled only through local owner authorization.
-/// No machine credential, cookie or body route can authorize this surface.
-fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
-    use crate::provision_wire::{self, Request, Route};
-    let refused = || Next::Refuse(401, "request refused", &[]);
-    let renewal_route = crate::renewal_wire::Route::from_path(&head.target);
-    let route = Route::from_path(&head.target);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |now| now.as_secs());
-    #[cfg(test)]
-    let now = slot
-        .shared
-        .provisioning_clock
-        .as_ref()
-        .map_or(now, |clock| clock());
-    if route.is_none() && renewal_route.is_none() {
-        return refused();
-    }
-    let Stream::Tls(stream) = &connection.stream else {
-        return refused();
-    };
-    if stream.conn.protocol_version() != Some(rustls::ProtocolVersion::TLSv1_3) {
-        return refused();
-    }
-    let exporter = stream.conn.export_keying_material(
-        [0u8; provision_wire::EXPORTER_LENGTH],
-        provision_wire::EXPORTER_LABEL,
-        Some(&[]),
-    );
-    if exporter.is_err()
-        || head.method != "POST"
-        || head.content_type.as_deref() != Some("application/json")
-        || head.transfer_encoding
-        || head.expect_other
-        || !head
-            .content_length
-            .is_some_and(|n| n <= provision_wire::MAX_MESSAGE_BYTES as u64)
-    {
-        if renewal_route.is_some() {
-            slot.shared
-                .tokens
-                .registry()
-                .renewal_refused(crate::renewal::Failure::Malformed, now);
-        }
-        return refused();
-    }
-    if !slot.admit_provisioning() {
-        if renewal_route.is_some() {
-            slot.shared
-                .tokens
-                .registry()
-                .renewal_refused(crate::renewal::Failure::Capacity, now);
-        }
-        return refused();
-    }
-    // read_head leaves the absolute request deadline on the live socket.
-    // Keep that deadline through the body instead of granting another ten seconds.
-    let read_deadline = connection
-        .stream
-        .timed()
-        .deadline
-        .min(Instant::now() + Duration::from_secs(provision_wire::READ_SECONDS));
-    if head.expect_continue && connection.send(b"HTTP/1.1 100 Continue\r\n\r\n").is_err() {
-        return Next::Close;
-    }
-    #[cfg(test)]
-    let injected_timeout = slot
-        .shared
-        .provisioning_timeout
-        .as_ref()
-        .is_some_and(|flag| flag.swap(false, std::sync::atomic::Ordering::Relaxed));
-    #[cfg(not(test))]
-    let injected_timeout = false;
-    let body = if injected_timeout {
-        Err(io::ErrorKind::TimedOut.into())
-    } else {
-        connection.read_body_until(head.content_length.unwrap_or(0) as usize, read_deadline)
-    };
-    let Ok(body) = body else {
-        if renewal_route.is_some() {
-            slot.shared
-                .tokens
-                .registry()
-                .renewal_refused(crate::renewal::Failure::Malformed, now);
-        }
-        if renewal_route.is_none()
-            && let Ok(exporter) = exporter
-            && let Some(controller) = slot.shared.provisioning.as_ref()
-            && let Ok(mut controller) = controller.lock()
-        {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |now| now.as_secs());
-            #[cfg(test)]
-            let now = slot
-                .shared
-                .provisioning_clock
-                .as_ref()
-                .map_or(now, |clock| clock());
-            controller.malformed(exporter, now);
-        }
-        return refused();
-    };
-    let body = zeroize::Zeroizing::new(body);
-    let Ok(exporter) = exporter else {
-        return refused();
-    };
-    if let Some(route) = renewal_route {
-        let Ok(reply) = slot.shared.tokens.registry().renew_encoded(
-            route,
-            &body,
-            exporter,
-            connection.authority.verified_client_identity.as_ref(),
-            now,
-        ) else {
-            return refused();
-        };
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{}\r\n",
-            reply.len(),
-            if head.close {
-                "Connection: close\r\n"
-            } else {
-                ""
-            }
-        );
-        return if connection
-            .send(response.as_bytes())
-            .and_then(|()| connection.send(&reply))
-            .is_ok()
-        {
-            Next::Continue
-        } else {
-            Next::Close
-        };
-    }
-    let Some(route) = route else {
-        return refused();
-    };
-    let Some(controller) = slot.shared.provisioning.as_ref() else {
-        return refused();
-    };
-    let mut controller = match controller.lock() {
-        Ok(controller) => controller,
-        Err(_) => return refused(),
-    };
-    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
-        Ok(now) => now.as_secs(),
-        Err(_) => return refused(),
-    };
-    #[cfg(test)]
-    let now = slot
-        .shared
-        .provisioning_clock
-        .as_ref()
-        .map_or(now, |clock| clock());
-    let request = match Request::parse(route, &body) {
-        Ok(request) => request,
-        Err(_) => {
-            controller.malformed(exporter, now);
-            return refused();
-        }
-    };
-    let clock = || {
-        let current = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(now, |now| now.as_secs());
-        #[cfg(test)]
-        let current = slot
-            .shared
-            .provisioning_clock
-            .as_ref()
-            .map_or(current, |clock| clock());
-        current
-    };
-    let reply = controller.handle_with_clock(request, exporter, &clock, |id, code| {
-        #[cfg(test)]
-        if let Some(terminal) = &slot.shared.provisioning_terminal {
-            return terminal(id, code);
-        }
-        use std::io::IsTerminal;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut terminal = fs::OpenOptions::new()
-            .write(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open("/dev/tty")
-            .map_err(|_| provision_wire::Refused)?;
-        if !terminal.is_terminal() {
-            return Err(provision_wire::Refused);
-        }
-        writeln!(terminal, "Pairing {id}: {}", code.expose()).map_err(|_| provision_wire::Refused)
-    });
-    if let Some(message) = controller.take_paired()
-        && let Ok(mut terminal) = fs::OpenOptions::new().write(true).open("/dev/tty")
-    {
-        let _ = writeln!(terminal, "{message}");
-    }
-    let unavailable = controller.take_unavailable();
-    drop(controller);
-    if let Some(message) = unavailable {
-        return Next::Refuse(409, message, &[]);
-    }
-    let Ok(reply) = reply else {
-        return refused();
-    };
-    let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nCache-Control: no-store\r\n{}\r\n",
-        reply.len(),
-        if head.close {
-            "Connection: close\r\n"
-        } else {
-            ""
-        }
-    );
-    if connection
-        .send(head.as_bytes())
-        .and_then(|()| connection.send(&reply))
-        .is_err()
-    {
-        Next::Close
-    } else {
-        Next::Continue
-    }
-}
-
 fn answer_pair(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
     let refused = || Next::Refuse(403, "pairing refused", &[]);
     if (head.target == "/v1/pair" && head.authorization.is_some())
@@ -1354,9 +1079,6 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
     if head.target == "/v1/pair" || head.target == "/v1/unpair" {
         return answer_pair(shared, slot, connection, head);
     }
-    if head.target.starts_with("/v1/provision/") || head.target.starts_with("/v1/renew/") {
-        return answer_provisioning(slot, connection, head);
-    }
     if head.transfer_encoding {
         return Next::Refuse(
             411,
@@ -1378,10 +1100,7 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         Err(_) => return authority_refusal(),
     };
     #[cfg(test)]
-    let now = shared
-        .provisioning_clock
-        .as_ref()
-        .map_or(now, |clock| clock());
+    let now = shared.test_clock.as_ref().map_or(now, |clock| clock());
     if kind == Kind::BodyChannel {
         return body::answer_body(shared, slot, connection, head, now);
     }
@@ -1431,9 +1150,6 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
 #[cfg(test)]
 #[path = "serve_auth_tests.rs"]
 mod auth_tests;
-#[cfg(test)]
-#[path = "provision_http_tests.rs"]
-mod provision_http_tests;
 
 #[cfg(test)]
 mod tests {

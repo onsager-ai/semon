@@ -267,7 +267,7 @@ fn confirmation_activation_and_recovery_preserve_one_registry_outcome() {
             .join("machine-6754a9c1e83f27b4")
             .is_dir()
     );
-    assert!(controller.take_paired().unwrap().contains("new enrollment"));
+    assert!(controller.paired.take().unwrap().contains("new enrollment"));
     assert_eq!(registry.machine_audit()[0].action, "paired");
     let serialized = serde_json::to_value(&registry).unwrap();
     let (ca, _) = crate::client_ca::generate(100).unwrap();
@@ -560,7 +560,7 @@ fn analytics_refusal_changes_no_authority_and_never_refunds_attempts() {
             .is_err()
     );
     assert_eq!(
-        controller.take_unavailable(),
+        controller.unavailable.take(),
         Some("analytics_publish available after origin connect / producer admission lands")
     );
     assert_eq!(controller.core.registry().unwrap(), registry);
