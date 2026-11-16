@@ -129,6 +129,13 @@ impl CredentialHandle {
             && now < self.valid_until
             && enrollment::refuse_legacy_tokens(&self.dir).is_ok()
             && Registry::read_current(&self.dir).is_ok_and(|registry| {
+                if registry.simple_pair.tokens.iter().any(|c| {
+                    c.credential_id == self.credential_id
+                        && c.enrollment_id == self.enrollment_id
+                        && c.revoked_at.is_none()
+                }) {
+                    return self.kind == Kind::MirrorPush;
+                }
                 registry
                     .current_credential(&self.credential_id, self.verified_pin.as_ref(), now)
                     .is_some_and(|credential| {
@@ -153,6 +160,20 @@ impl RegistryAuthenticator {
             dir: dir.to_owned(),
             renewal: std::sync::Mutex::new(crate::renewal::Receiver::default()),
         })
+    }
+    pub(crate) fn pair(
+        &self,
+        body: &[u8],
+        now: u64,
+    ) -> Result<crate::simple_pair::Response, enrollment::Error> {
+        crate::simple_pair::pair(&self.dir, body, now)
+    }
+    pub(crate) fn unpair(
+        &self,
+        authorization: Option<&str>,
+        now: u64,
+    ) -> Result<(), enrollment::Error> {
+        crate::simple_pair::unpair_token(&self.dir, authorization, now)
     }
     pub(crate) fn renewal_refused(&self, class: crate::renewal::Failure, now: u64) {
         crate::renewal::record_refusal(&self.dir, class, now, String::new(), String::new(), vec![]);
@@ -240,6 +261,38 @@ impl RegistryAuthenticator {
             return None;
         }
         let secret = Secret::new(bearer.to_owned());
+        if required_kind == Kind::MirrorPush
+            && let Some(credential) = registry.paired_token(&secret)
+        {
+            if conn
+                .enrollment_id
+                .as_ref()
+                .is_some_and(|id| id != &credential.enrollment_id)
+            {
+                return None;
+            }
+            conn.enrollment_id = Some(credential.enrollment_id.clone());
+            return Some(AuthenticatedEnrollment {
+                enrollment_id: credential.enrollment_id.clone(),
+                machine: credential.enrollment_id.clone(),
+                namespace: None,
+                origin_incarnation: None,
+                index_incarnation: None,
+                publisher_claim_epoch: None,
+                kinds: vec![Kind::MirrorPush],
+                verified_client_identity: None,
+                authority: CredentialHandle {
+                    dir: self.dir.clone(),
+                    credential_id: credential.credential_id.clone(),
+                    enrollment_id: credential.enrollment_id.clone(),
+                    kind: Kind::MirrorPush,
+                    generation: 1,
+                    verified_pin: None,
+                    valid_from: credential.valid_from,
+                    valid_until: u64::MAX,
+                },
+            });
+        }
         let identity = conn.verified_client_identity.as_ref();
         if required_kind == Kind::BodyChannel && identity.is_none() {
             return None;
@@ -346,7 +399,14 @@ impl Authenticator {
     }
     pub(super) fn count(&self) -> Result<usize, String> {
         Registry::read_current(&self.0.dir)
-            .map(|r| r.credentials().len())
+            .map(|r| {
+                r.credentials().len()
+                    + r.simple_pair
+                        .tokens
+                        .iter()
+                        .filter(|t| t.revoked_at.is_none())
+                        .count()
+            })
             .map_err(|e| e.to_string())
     }
     #[cfg(test)]

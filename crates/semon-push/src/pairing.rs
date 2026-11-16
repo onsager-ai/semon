@@ -83,7 +83,7 @@ pub fn parse_code(input: &str) -> Result<Secret> {
             .collect(),
     ))
 }
-fn generate_code() -> Result<Secret> {
+pub(crate) fn generate_code() -> Result<Secret> {
     // Masking uniform independent bytes yields unbiased five-bit symbols.
     let mut values = random::<9>()?;
     for v in values.iter_mut() {
@@ -711,7 +711,7 @@ fn kind_label(kind: Kind) -> &'static [u8] {
     match kind {
         Kind::AnalyticsPublish => b"analytics_publish",
         Kind::BodyChannel => b"body_channel",
-        Kind::MirrorPush => b"mirror_push",
+        Kind::MirrorPush => b"push",
     }
 }
 fn bearer_secret(application: &[u8], id: &str, kind: Kind) -> Secret {

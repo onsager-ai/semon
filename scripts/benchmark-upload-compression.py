@@ -141,7 +141,7 @@ def run(mode, mib):
             cpu['encode_s'] += time.thread_time()-encoded_at
             json_bytes += len(body)
             payload_bytes += len(data)
-            connection.request('POST', '/v1/mirror/append', data, {'Content-Type':'application/json', 'Content-Encoding':mode})
+            connection.request('POST', '/v1/push/append', data, {'Content-Type':'application/json', 'Content-Encoding':mode})
             response = connection.getresponse()
             assert response.status == 200
             ack = json.loads(response.read())

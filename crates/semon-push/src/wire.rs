@@ -1,4 +1,4 @@
-//! The mirror protocol's wire forms (docs/mirror-protocol.md): request and
+//! The push protocol's wire forms (docs/push-protocol.md): request and
 //! response bodies, standard base64 for the bytes, and the head hash.
 
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ pub const HEAD_BYTES: usize = 4096;
 /// The most file bytes one append carries.
 pub const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
-/// `POST <url>/v1/mirror/append`.
+/// `POST <url>/v1/push/append`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Append {
     /// Optional native Codex relocation; receivers that lack this extension

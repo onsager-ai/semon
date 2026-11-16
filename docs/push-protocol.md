@@ -1,42 +1,66 @@
-# The mirror protocol
+# The push protocol
 
 `semon push` keeps a copy of this machine's session logs on another server, a *receiver*, and sends it the machine's facts, so `semon-sessions` can discover, index and query those native sources using the recorded facts (`Options::facts`). This document is the whole contract: any server that implements it can receive a push.
 
 `semon receive` is the reference receiver (`semon_push::mirror::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<machine-id>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and 507 (the machine's copy would pass its size cap); a client treats either as a failure.
 
-Registry format 6 stores the origin-generated canonical machine ID
-(`machine-<8 lowercase hex Unix seconds><8 secure random hex digits>`), its
-identical directory locator and optional owner display name. `connect` commits
-the origin ID into the authenticated pairing input. The receiver creates
-`machines/<machine-id>/`; re-pairing that ID replaces its enrollment. The enroll
-NAME initializes only a new record's owner name; equal names group presentation.
-Pairing/replacement and name-change audit entries commit with registry state.
-Discovery uses the shared registry reader and skips unrecorded directories with
-a re-enrollment warning. Missing/unsupported registry refuses the received set.
-Old state requires a fresh receiver directory and re-enrollment; retained logs
-are never migrated, moved or deleted.
+Registry format 7 stores the origin-generated canonical machine ID
+(`machine-<8 lowercase hex Unix seconds><8 secure random hex digits>`), matching
+directory locator, optional display name, pending code hash, pairing gate, hashed
+push Bearers and pairing/revocation audit. New machine names default to hostname;
+existing names survive re-pairing. Unsupported state is refused explicitly; use a
+fresh receiver directory, preserving all old state and received logs.
 
-The reference receiver requires the current enrollment registry and a separate
-`mirror_push` bearer credential scoped to one machine. `connect` installs the
-Push client's protected input for that kind bearer; a bearer is machine transport
-authority, never user identity or source authority. Legacy `DIR/tokens` state and
-`receive token` commands are refused; preserve old tokens/history and explicitly
-re-pair through the enrollment flow in a fresh receiver directory. No import, conversion or deletion occurs.
-Local receiver enrollment starts with `receive enroll --machine NAME --advertise
-HTTPS_URL --dir DIR --tls-cert PEM --tls-key PEM`; origin `connect --to HTTPS_URL`
-confirms the code and trust/source summary and atomically installs mirror custody.
-A kept-alive connection cannot switch enrollments.
+`semon pair --dir DIR` replaces the single pending ten-character checked code.
+Its hash and ten-minute expiry commit under the registry lock. Three wrong guesses
+consume it; three burns within an hour persist a thirty-minute pairing pause.
+The running receiver reads this state per request, without IPC.
+
+### `POST <url>/v1/pair`
+
+No Authorization header is required. The strict JSON request is at most 8 KiB:
+
+```json
+{"version":1,"code":"01234-5678X","machine_id":"machine-12345678abcdef01","hostname":"laptop"}
+```
+
+Unknown fields, invalid/expired codes, paused pairing and all other pairing
+refusals produce the same generic **403**. Success atomically consumes the code,
+creates or reuses the machine record, revokes that ID's previous paired token,
+and audits `paired` with `replaced: bool`. It returns **200**:
+
+```json
+{"version":1,"token":"<random bearer>","machine_id":"machine-12345678abcdef01"}
+```
+
+Tokens have no expiry or renewal. Only their SHA-256 hashes are stored on the
+receiver. Push requests use `Authorization: Bearer <token>`; the token selects
+exactly one machine directory. Unknown/revoked tokens receive **401**. Revocation
+is rechecked on every request, including kept-alive connections.
+
+### `POST <url>/v1/unpair`
+
+Send the paired Bearer and an empty body (`Content-Length: 0`). Success revokes
+the token and audits `unpaired`, returning **200** `{"version":1}`; an unknown or
+revoked token gets **401**. Receiver-local `semon unpair MACHINE_ID --dir DIR`
+performs the same revocation. Neither route nor command deletes retained logs.
+
+The client requires public-CA HTTPS, with HTTP accepted only on loopback and
+redirects disabled. The receiver may listen on HTTP behind an HTTPS proxy. The
+proxy can read logs in transit; stolen tokens work until revoked. Old TLS-bound
+enrollment/connect/renewal remains available pending removal in P3, outside this
+pairing contract. Legacy `DIR/tokens` remains refused and preserved.
 
 The reference receiver takes an exclusive, non-blocking OS lock on its store directory for its lifetime. A second receiver on that directory is refused at startup, so preservation and replacement cannot interleave across receiver instances.
 
-The generic mirror protocol is independent of the retired Encrypted Relay.
-Mirrored content is readable by the receiver; sender redaction and HTTPS do not
-provide end-to-end encryption. A source mirror does not contain the complete
+The generic push protocol is independent of the retired Encrypted Relay.
+Received content is readable by the receiver; sender redaction and HTTPS do not
+provide end-to-end encryption. A received source copy does not contain the complete
 workspace and native harness state required for independent recovery.
 
 ## What is sent
 
-- **The input set:** supported native logs and sidecars listed by `semon_sessions::inputs`. Decoded mirror target paths are checked by `semon_sessions::is_input_path`. Nothing else under the agent homes is read. `*.key` files never are.
+- **The input set:** supported native logs and sidecars listed by `semon_sessions::inputs`. Decoded push target paths are checked by `semon_sessions::is_input_path`. Nothing else under the agent homes is read. `*.key` files never are.
   - `claude` root: `projects/**/*.jsonl`, `projects/**/subagents/agent-<id>.meta.json`, `sessions/<pid>.json`.
   - `codex` root: `sessions/**/*.jsonl`, `archived_sessions/**/*.jsonl` and their native `.jsonl.zst` archive equivalents. Native databases are excluded.
   - Native `.jsonl.zst` equivalents of supported Claude and Copilot logs are also transport sources. The sender decodes and verifies each archive internally, then sends complete redacted logical records under the corresponding `.jsonl` path. Encoded byte positions never enter append cursors, status targets, quota accounting or source proofs. Full Codex inventory uses those same logical target paths. This changes neither the receiver allowlist nor the wire forms.
@@ -46,13 +70,13 @@ workspace and native harness state required for independent recovery.
 
 ## Requests
 
-All requests are `POST` with a JSON body and `Authorization: Bearer <token>`. `<url>` is the base URL the user gives `--to`. It must be `https`, except plain `http` to a loopback address (`localhost`, `[::1]`, 127.0.0.0/8).
+Push requests are `POST` with a JSON body and `Authorization: Bearer <token>`. `<url>` is the base URL passed to `semon pair URL CODE`. It must be `https`, except plain `http` to a loopback address (`localhost`, `[::1]`, 127.0.0.0/8).
 
 Request bodies currently use identity encoding. Response gzip/Brotli and sealed
 storage are independent. See [native archive transport and codec measurements](native-archive-transport.md)
 for the bounded archive reader, coexistence/restart rules and upload experiment.
 
-### `POST <url>/v1/mirror/append`
+### `POST <url>/v1/push/append`
 
 ```json
 {"root": "claude", "path": "projects/-work/abc.jsonl", "redactor_version": 1, "offset": 0, "head_sha256": "…", "bytes": "…", "replace": false}
@@ -72,7 +96,7 @@ Answers:
 - **409** `{"length": N, "head_sha256": "…"}`: not applied, because `offset` isn't the copy's length or the head doesn't match. `N` is the copy's current length, and `head_sha256` is the hash of its first `min(4096, N)` bytes.
 - **400**: the body or the path is invalid. **401**: the token is unknown or revoked. **413**: the body is too large.
 
-### `POST <url>/v1/mirror/facts`
+### `POST <url>/v1/push/facts`
 
 The body is a `Facts` object:
 
@@ -96,7 +120,7 @@ The answer is 200 when it is stored. A receiver that hasn't had facts for a whil
 - **409.** When the receiver's copy is the client's redacted file up to a line boundary (same length prefix, same head hash), the client resumes from the receiver's length. Otherwise it sends the file again with `replace`.
 - **Deleted files** are not deleted on the receiver.
 - **Cadence.** One complete pass and one facts post, then exit. With `--watch`, each sweep sends at most four complete redaction batches before waiting 2 s and discovering fresh targets. Recent/live batches and history retain the scheduler's three-to-one preference; a long line remains one indivisible redaction batch. Full facts are posted at most every 10 s, after a complete sweep only; a bounded partial sweep never commits a complete source inventory. Optional status heartbeats continue during backfill.
-- **Credential.** `semon connect --to HTTPS_URL [--machine NAME]` installs a mirror-only enrollment after mutually confirmed pairing and explicit terminal approval. `--receiver URL` also selects the endpoint on connect. `semon disconnect --receiver URL` disables only local use after terminal confirmation, retaining history, keys, consent and audits. `semon push [--receiver URL] [--watch]` reads its protected origin custody; it sends the bearer only in the `Authorization` header. The superseded push `--to`/`--token-file` CLI is removed.
+- **Credential.** `semon pair URL CODE` atomically installs URL, token and machine ID in private pair.json. Advanced `semon push [--watch]` reads it by default and sends the Bearer only in the Authorization header. `semon unpair` revokes it and removes local pairing configuration. Old custody can still be selected explicitly with `push --receiver URL` until its removal in P3.
 
 ## Sealed copies on the receiver
 
@@ -104,7 +128,7 @@ A receiver may seal an idle copy to save space (`semon_sessions::sealed`). Its b
 
 ## Optional partial sync observations (status v1)
 
-`POST <url>/v1/mirror/status` is an optional extension, authenticated, admitted, size limited and scoped to the same machine as append and facts. Before posting status, a sender performs a cancellable bearer-authenticated HEAD capability request to that exact path, without following redirects, and requires 405 with `Allow: POST`. A cookie-gated 401/403 fallback, unknown route or other non-advertisement disables only this optional extension; append and full-facts refusals remain fatal. Once advertised, status POST token refusal is fatal, including subsequent revocation. A sender still disables status after POST 404 or 405, because an old generic HEAD handler can advertise POST globally. Successful status never lifts an append pause, storage restriction or retry delay. It does not replace `/facts`, delete retained copies, establish a complete collector selection or imply that an agent is executing.
+`POST <url>/v1/push/status` is an optional extension, authenticated, admitted, size limited and scoped to the same machine as append and facts. Before posting status, a sender performs a cancellable bearer-authenticated HEAD capability request to that exact path, without following redirects, and requires 405 with `Allow: POST`. A cookie-gated 401/403 fallback, unknown route or other non-advertisement disables only this optional extension; append and full-facts refusals remain fatal. Once advertised, status POST token refusal is fatal, including subsequent revocation. A sender still disables status after POST 404 or 405, because an old generic HEAD handler can advertise POST globally. Successful status never lifts an append pause, storage restriction or retry delay. It does not replace `/facts`, delete retained copies, establish a complete collector selection or imply that an agent is executing.
 
 ```json
 {"version":1,"observation_id":"0123456789abcdef0123456789abcdef","sequence":1,"observed_at_ms":1791539000000,"phase":"syncing","runtime":{"version":2,"hostname":"laptop","home":"/home/me","proc_starts":{},"codex_locks":{},"repos":{},"repo_ids":{}},"inventory_complete":true,"targets":[{"root":"codex","path":"sessions/native.jsonl","generation":"abcdef0123456789abcdef0123456789","target_bytes":12000,"acked_bytes":4096,"head_sha256":"…"}]}
@@ -165,7 +189,7 @@ Full `/facts` requests optionally carry paired `mirror_observation_id` and `mirr
 
 `machines/<machine-id>/archive/` is the receiver's raw archive (`semon_sessions::archive`):
 
-- `sources.log` maps each mirrored file (`<root>/<path>`) to a random `archive_source_id`: one JSON record per line, appended and synced under the archive lock before anything is written under the new id, so another instance reuses the id and a crash cannot orphan a directory. A torn final line is ignored and cut off by the next append. Every journal read holds the archive's shared flock, and every write (including torn-tail repair) holds its exclusive flock; the flock is always acquired before the in-memory cache mutex.
+- `sources.log` maps each received file (`<root>/<path>`) to a random `archive_source_id`: one JSON record per line, appended and synced under the archive lock before anything is written under the new id, so another instance reuses the id and a crash cannot orphan a directory. A torn final line is ignored and cut off by the next append. Every journal read holds the archive's shared flock, and every write (including torn-tail repair) holds its exclusive flock; the flock is always acquired before the in-memory cache mutex.
 - `<archive_source_id>/manifest.json` names its source (so a directory can always be attributed) and lists that file's chains in order. Each entry has a random `chain_id`, the plain `length`, the `sha256` of the plain bytes, the stored size and the `redactor_version`. A manifest is published by writing a temporary file, syncing it, renaming it over the old one and syncing the directory, so a failure before the rename leaves the last manifest intact.
 - `<archive_source_id>/<chain_id>.zst` is one immutable chain: the logical bytes of the file as they were just before a `replace`.
 - Before a replace, the receiver records in the copy's `.seal/` directory that a chain holds its bytes, but only for the seal that describes that file (bound to it, or agreeing with its bytes). A seal left by other content is not certified. The custody record binds the seal generation to an archive directory, source and exact chain record (including its length and digest). Immediately before retirement (`seal`, `tidy`, `forget`), the archive verification cache rechecks that chain's file identity and manifest, and the chain's bytes are compared directly with every named segment, under the shared archive flock through deletion. Missing, damaged or mismatched custody keeps the segments. Only that verified generation's named files are removed. Unnamed segments survive even if a new manifest is created after a lost one; `forget` never recursively deletes a directory and refuses while unverified files remain.

@@ -868,7 +868,7 @@ policy, audit receipts and the integrity/availability of analytics history.
 - [`redact.rs`](../../crates/semon-push/src/redact.rs) documents and implements
   best-effort, length-preserving masking of known secret shapes. It is not a PII,
   proprietary-code or general secret detector; unrecognized shapes can pass.
-- The [mirror protocol](../mirror-protocol.md) and
+- The [mirror protocol](../push-protocol.md) and
   [Copilot redacted viewing copies](../copilot-cli.md#redacted-viewing-copies)
   explicitly say the mirror is receiver-readable and not end-to-end encrypted.
   Zstd “sealed” copies are compression/storage representation, not encryption.

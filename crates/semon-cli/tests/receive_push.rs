@@ -129,55 +129,12 @@ impl Fixture {
     }
 
     fn install_origin(&self, url: &str) {
-        use semon_push::{
-            credentials::Kind, enrollment::Binding, pairing::ActivationInput,
-            provision_wire::Activated,
-        };
-        let base = self.path("config/semon/origin");
-        if base.exists() {
-            return;
-        }
-        let encoded = "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgL_E8qFEyPcpHM_jv-bQj0alxU3tkrY_1OSwOWVOwhs-hRANCAATA08frMi95YZiy3BekFDqwQHAS2SIpv7yA1ckqs3drjLLJqCyFKRx7VY_MJawLw_RbjwOyGKFasQHvnfrO1MUQ";
-        let private = semon_push::provision_wire::decode_fixed::<138>(encoded).unwrap();
-        let scope = ActivationInput {
-            receiver_id: "receiver-test".into(),
+        semon_push::simple_pair::Config {
+            url: url.into(),
+            token: fs::read_to_string(self.path("token")).unwrap(),
             machine_id: "machine-6754a9c1e83f27b4".into(),
-            binding: Binding::Inapplicable,
-            kinds: vec![(Kind::MirrorPush, false)],
-            client_certificate_pins: vec![],
-            valid_until: u64::MAX,
-        };
-        let delivery = Activated {
-            version: 1,
-            enrollment_id: "enrollment-test".into(),
-            client_certificate: None,
-            credentials: vec![(
-                Kind::MirrorPush,
-                fs::read_to_string(self.path("token")).unwrap(),
-            )],
-        };
-        let home = self.path("home");
-        let options = semon_sessions::Options {
-            claude_home: home.join("claude"),
-            codex_home: home.join("codex"),
-            copilot_home: home.join("copilot"),
-            proc_root: home.join("proc"),
-            ..Default::default()
-        };
-        let sources = semon_sessions::inputs(&options)
-            .unwrap()
-            .iter()
-            .map(|input| input.full_path(&options))
-            .collect::<Vec<_>>();
-        semon_push::origin_custody::install(
-            &base,
-            url,
-            "machine-6754a9c1e83f27b4",
-            &scope,
-            &delivery,
-            &private,
-            &sources,
-        )
+        }
+        .save_at(&self.path("config/semon/pair.json"))
         .unwrap();
     }
 
@@ -399,7 +356,7 @@ fn push_mirrors_a_home_into_semon_receive() {
     assert_eq!(overview["machines"][0]["up"], true);
     core.close();
 
-    // New files after enrollment are not silently included in source consent.
+    // Paired push discovers new supported files on each pass.
     fixture.write(
         "home/claude/projects/-work-app/unapproved.jsonl",
         claude("future source").as_bytes(),
@@ -410,7 +367,7 @@ fn push_mirrors_a_home_into_semon_receive() {
     let pushed = fixture.push(&url);
     assert_ok(&pushed, "the push after a rewrite");
     assert!(
-        !machine
+        machine
             .join("claude/projects/-work-app/unapproved.jsonl")
             .exists()
     );
@@ -571,16 +528,9 @@ fn push_watch_stops_on(name: &str, number: i32) {
 }
 
 #[test]
-fn receive_refuses_plain_http_off_loopback() {
+fn receive_requires_both_tls_files_when_tls_is_selected() {
     let fixture = Fixture::new();
     let dir = fixture.dir();
-    let refused = fixture.receive(&["--listen", "0.0.0.0:0", "--dir", dir.to_str().unwrap()]);
-    assert!(!refused.status.success());
-    assert!(
-        stderr(&refused).contains("--tls-cert"),
-        "{}",
-        stderr(&refused)
-    );
     let refused = fixture.receive(&[
         "--listen",
         "0.0.0.0:0",
@@ -622,4 +572,105 @@ fn enroll_refuses_legacy_tokens_before_terminal_or_custody_initialization() {
     assert!(stderr(&output).contains("fresh receiver directory"));
     assert_eq!(std::fs::read(dir.join("tokens")).unwrap(), tokens);
     assert!(!dir.join("receiver.json").exists());
+}
+
+#[test]
+fn pair_and_unpair_commands_store_replace_and_revoke_configuration() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = Fixture::new();
+    let url = f.start_receiver();
+    let config = f.path("config");
+    let pair_path = config.join("semon/pair.json");
+    let issue = || {
+        let output = semon()
+            .args(["pair", "--dir"])
+            .arg(f.dir())
+            .output()
+            .unwrap();
+        assert_ok(&output, "receiver pair");
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_owned()
+    };
+    let run_pair = |code: &str| {
+        semon()
+            .args(["pair", &url, code])
+            .env("XDG_CONFIG_HOME", &config)
+            .env("HOME", f.path("home"))
+            .output()
+            .unwrap()
+    };
+    let first = run_pair(&issue());
+    assert_ok(&first, "machine pair");
+    assert!(
+        String::from_utf8(first.stdout)
+            .unwrap()
+            .contains("Run semon push --watch to sync.")
+    );
+    let first: serde_json::Value = serde_json::from_slice(&fs::read(&pair_path).unwrap()).unwrap();
+    assert_eq!(
+        fs::metadata(&pair_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_ok(&run_pair(&issue()), "re-pair");
+    let second: serde_json::Value = serde_json::from_slice(&fs::read(&pair_path).unwrap()).unwrap();
+    assert_eq!(first["machine_id"], second["machine_id"]);
+    assert_ne!(first["token"], second["token"]);
+    let home = f.path("home");
+    let pushed = semon()
+        .arg("push")
+        .arg("--state")
+        .arg(f.path("paired-state.json"))
+        .arg("--claude-home")
+        .arg(home.join("claude"))
+        .arg("--codex-home")
+        .arg(home.join("codex"))
+        .arg("--copilot-home")
+        .arg(home.join("copilot"))
+        .arg("--proc-root")
+        .arg(home.join("proc"))
+        .arg("--cache")
+        .arg(f.path("paired-cache"))
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", &config)
+        .output()
+        .unwrap();
+    assert_ok(&pushed, "push with pair.json defaults");
+    assert!(
+        f.dir()
+            .join(format!(
+                "machines/{}/facts.json",
+                second["machine_id"].as_str().unwrap()
+            ))
+            .is_file()
+    );
+    let output = semon()
+        .arg("unpair")
+        .env("XDG_CONFIG_HOME", &config)
+        .output()
+        .unwrap();
+    assert_ok(&output, "machine unpair");
+    assert!(!pair_path.exists());
+    assert_ok(&run_pair(&issue()), "pair after unpair");
+    let output = semon()
+        .args(["unpair", second["machine_id"].as_str().unwrap(), "--dir"])
+        .arg(f.dir())
+        .output()
+        .unwrap();
+    assert_ok(&output, "receiver unpair");
+    // Losing reachability still removes the local configuration with a warning.
+    let mut child = f.receiver.take().unwrap();
+    child.kill().unwrap();
+    child.wait().unwrap();
+    let output = semon()
+        .arg("unpair")
+        .env("XDG_CONFIG_HOME", &config)
+        .output()
+        .unwrap();
+    assert_ok(&output, "offline unpair");
+    assert!(stderr(&output).contains("warning: receiver unreachable"));
+    assert!(!pair_path.exists());
 }

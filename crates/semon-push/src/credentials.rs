@@ -10,6 +10,7 @@ pub use zeroize::Zeroizing;
 pub enum Kind {
     AnalyticsPublish,
     BodyChannel,
+    #[serde(rename = "push")]
     MirrorPush,
 }
 
@@ -18,14 +19,14 @@ impl Kind {
         match self {
             Self::AnalyticsPublish => "analytics_publish",
             Self::BodyChannel => "body_channel",
-            Self::MirrorPush => "mirror_push",
+            Self::MirrorPush => "push",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "analytics_publish" => Some(Self::AnalyticsPublish),
             "body_channel" => Some(Self::BodyChannel),
-            "mirror_push" => Some(Self::MirrorPush),
+            "push" => Some(Self::MirrorPush),
             _ => None,
         }
     }

@@ -1,6 +1,6 @@
-//! `semon receive`'s listener: the mirror protocol over HTTP/1.1, plain on
-//! loopback or TLS with an operator-supplied certificate and key. It serves
-//! mirror routes to [`Receiver`], protected provisioning, and the closed reverse
+//! `semon receive`'s listener: the push protocol over HTTP/1.1, plain on
+//! a proxy-facing address or TLS with an operator-supplied certificate and key. It serves
+//! push routes to [`Receiver`], protected provisioning, and the closed reverse
 //! body poll/response routes when body custody is configured.
 //!
 //! Each connection has its own thread, up to [`Limits::connections`] in
@@ -46,10 +46,7 @@ pub(crate) fn renewal_test_identity(certificate: &[u8]) -> VerifiedClientIdentit
         .unwrap()
 }
 
-use crate::{
-    mirror::{DEFAULT_MAX_BYTES, Endpoint, MAX_BODY_BYTES, Receiver},
-    tokens::prepare_private_dir,
-};
+use crate::mirror::{DEFAULT_MAX_BYTES, Endpoint, MAX_BODY_BYTES, Receiver};
 
 /// Where `semon receive` listens unless told otherwise.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8735";
@@ -288,10 +285,7 @@ impl Server {
     /// existing one others can read is refused), and binds.
     pub fn bind(options: &ServeOptions) -> Result<Self, String> {
         let dir = &options.dir;
-        if !options.listen.ip().is_loopback() && options.tls.is_none() {
-            return Err("non-loopback receiver requires --tls-cert and --tls-key".into());
-        }
-        prepare_private_dir(dir, true)?;
+        crate::simple_pair::initialize(dir)?;
         let tokens = Authenticator::open(dir)?;
         let credential_count = tokens.count()?;
         let tls = options
@@ -1218,9 +1212,52 @@ fn answer_provisioning(slot: &mut Slot, connection: &mut Connection, head: &Head
     }
 }
 
+fn answer_pair(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
+    let refused = || Next::Refuse(403, "pairing refused", &[]);
+    if head.method != "POST" || head.transfer_encoding || head.expect_other {
+        return refused();
+    }
+    let Some(length) = head.content_length.filter(|n| *n <= 8192) else {
+        return refused();
+    };
+    if head.expect_continue && connection.send(b"HTTP/1.1 100 Continue\r\n\r\n").is_err() {
+        return Next::Close;
+    }
+    let Ok(body) = connection.read_body(length as usize) else {
+        return refused();
+    };
+    let Ok(now) = crate::simple_pair::now() else {
+        return refused();
+    };
+    let reply = if head.target == "/v1/pair" {
+        let Ok(reply) = shared.tokens.registry().pair(&body, now) else {
+            return refused();
+        };
+        serde_json::to_value(&reply).expect("pair response serializes")
+    } else {
+        if shared
+            .tokens
+            .registry()
+            .unpair(head.authorization.as_deref(), now)
+            .is_err()
+        {
+            return authority_refusal();
+        }
+        json!({"version": 1})
+    };
+    slot.authenticated();
+    match connection.respond(200, &reply, head.close, &[]) {
+        Ok(()) => Next::Continue,
+        Err(_) => Next::Close,
+    }
+}
+
 /// Checks a request in order (endpoint, method, framing, token, size) and,
 /// only once all pass, reads its body and answers it.
 fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &Head) -> Next {
+    if head.target == "/v1/pair" || head.target == "/v1/unpair" {
+        return answer_pair(shared, slot, connection, head);
+    }
     if head.target.starts_with("/v1/provision/") || head.target.starts_with("/v1/renew/") {
         return answer_provisioning(slot, connection, head);
     }
@@ -1265,11 +1302,7 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         return authority_refusal();
     };
     if head.method != "POST" {
-        return Next::Refuse(
-            405,
-            "the mirror protocol is POST only",
-            &[("Allow", "POST")],
-        );
+        return Next::Refuse(405, "the push protocol is POST only", &[("Allow", "POST")]);
     }
     let Some(length) = head.content_length else {
         return Next::Refuse(411, "a Content-Length is required", &[]);
@@ -1313,11 +1346,11 @@ mod tests {
     #[test]
     fn a_head_is_parsed_strictly() {
         let head = parse_head(
-            b"POST /v1/mirror/append HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc\r\nContent-Length: 12\r\nConnection: close\r\n\r\n",
+            b"POST /v1/push/append HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer abc\r\nContent-Length: 12\r\nConnection: close\r\n\r\n",
         )
         .unwrap();
         assert_eq!(head.method, "POST");
-        assert_eq!(head.target, "/v1/mirror/append");
+        assert_eq!(head.target, "/v1/push/append");
         assert_eq!(head.content_length, Some(12));
         assert_eq!(head.authorization.as_deref(), Some("Bearer abc"));
         assert!(head.close);

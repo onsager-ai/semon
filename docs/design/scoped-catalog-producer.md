@@ -154,7 +154,7 @@ of the same transcript. Replacement or mismatched evidence withdraws that trust.
 Facts still select the authoritative current path. Stale mirrored copies may
 remain and cannot create duplicate current sources or grant control authority.
 Native archived state is distinct from retained-history and Hub object-storage
-lifecycle. The wire contract is in [the mirror protocol](../mirror-protocol.md).
+lifecycle. The wire contract is in [the mirror protocol](../push-protocol.md).
 
 ## Instrumented evidence and limits
 
