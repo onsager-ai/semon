@@ -56,6 +56,40 @@ fn unavailable() -> io::Error {
     )
 }
 
+/// A physical observation changed while verifying or consuming a local source.
+#[derive(Debug)]
+pub(crate) struct SourceChanged;
+
+impl std::fmt::Display for SourceChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("native query source changed during verification or read")
+    }
+}
+impl std::error::Error for SourceChanged {}
+
+fn source_changed() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, SourceChanged)
+}
+
+#[derive(Debug)]
+struct FirstFailure(Arc<io::Error>);
+impl std::fmt::Display for FirstFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+impl std::error::Error for FirstFailure {}
+
+pub(crate) fn original_error(error: &io::Error) -> &io::Error {
+    match error
+        .get_ref()
+        .and_then(|error| error.downcast_ref::<FirstFailure>())
+    {
+        Some(first) => original_error(&first.0),
+        None => error,
+    }
+}
+
 fn note_focused_source_interest(scope: &Path, source: &CatalogSource) {
     crate::source_carrier::note_diagnostic_interest(
         scope,
@@ -372,7 +406,7 @@ impl Sources {
             checked_chunks: Mutex::default(),
             checked_evidence: Mutex::default(),
             prepared: Mutex::default(),
-            failed: Mutex::new(false),
+            failed: Mutex::new(None),
             revision: Mutex::new(None),
             failure_stage: Mutex::new(None),
         }
@@ -397,7 +431,7 @@ pub(crate) struct Records<'a> {
     // Only scalar preparation reuses bytes; ordinary ranges verify the current
     // block on every read. Completion reopens and checks every used source.
     prepared: Mutex<Option<PreparedBlock>>,
-    failed: Mutex<bool>,
+    failed: Mutex<Option<Arc<io::Error>>>,
     revision: Mutex<Option<crate::source_carrier::RevisionReason>>,
     failure_stage: Mutex<Option<crate::source_carrier::FailureStage>>,
 }
@@ -413,6 +447,14 @@ struct PreparedBlock {
 }
 
 impl Records<'_> {
+    fn remember_error(&self, error: io::Error) -> io::Error {
+        let error = Arc::new(error);
+        if let Ok(mut first) = self.failed.lock() {
+            first.get_or_insert_with(|| error.clone());
+        }
+        io::Error::new(error.kind(), FirstFailure(error))
+    }
+
     // Preserve the first physical revision failure even when a presentation
     // parser tolerates a missing record. No partial answer may hide this fence.
     fn reject_revision(&self, reason: crate::source_carrier::RevisionReason) -> io::Error {
@@ -451,6 +493,9 @@ impl Records<'_> {
     }
 
     pub(crate) fn query_error(&self, error: impl std::fmt::Display) -> crate::QueryError {
+        if let Some(first) = self.failed.lock().ok().and_then(|first| first.clone()) {
+            return crate::QueryError::io(original_error(&first));
+        }
         if let Some(stage) = self.failure_stage.lock().ok().and_then(|stage| *stage) {
             return crate::QueryError::source_failure(stage);
         }
@@ -503,10 +548,7 @@ impl Records<'_> {
             };
             crate::native_marker::decode(&self.evidence(path, record)?)
         })();
-        if result.is_err() {
-            *self.failed.lock().map_err(|_| unavailable())? = true;
-        }
-        result
+        result.map_err(|error| self.remember_error(error))
     }
 
     /// Private indexed evidence can include a valid EOF record; its digest and
@@ -585,7 +627,7 @@ impl Records<'_> {
                 self.recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
-                return Err(unavailable());
+                return Err(source_changed());
             }
             self.checked_evidence
                 .lock()
@@ -595,10 +637,7 @@ impl Records<'_> {
                 .insert(record.clone());
             Ok(value)
         })();
-        if result.is_err() {
-            *self.failed.lock().map_err(|_| unavailable())? = true;
-        }
-        result
+        result.map_err(|error| self.remember_error(error))
     }
     /// Read a native launch's allowlisted fields and fail the entire observation
     /// on either an evidence or decoded-location mismatch.
@@ -623,10 +662,7 @@ impl Records<'_> {
             }
             call.read(path, self)
         })();
-        if result.is_err() {
-            *self.failed.lock().map_err(|_| unavailable())? = true;
-        }
-        result
+        result.map_err(|error| self.remember_error(error))
     }
 
     /// Native scalar-recipe preparation keeps its original bounded complete-line
@@ -683,10 +719,7 @@ impl Records<'_> {
             reader.read_until(b'\n', &mut bytes)?;
             Ok(serde_json::from_slice(&bytes).ok())
         })();
-        if result.is_err() {
-            *self.failed.lock().map_err(|_| unavailable())? = true;
-        }
-        result
+        result.map_err(|error| self.remember_error(error))
     }
 
     /// Metadata and cached derivations also belong to the captured cohort.
@@ -758,10 +791,14 @@ impl Records<'_> {
                     .insert(0);
             }
             self.recheck(path, &file, &before)?;
-        } else if (!unchanged && !proof.ledger.resumes(&before, &mut file))
-            || Stat::from_metadata(&file.metadata()?)? != before
-        {
-            return Err(unavailable());
+        } else {
+            let valid = unchanged || proof.ledger.resumes(&before, &mut file);
+            if Stat::from_metadata(&file.metadata()?)? != before {
+                return Err(source_changed());
+            }
+            if !valid {
+                return Err(unavailable());
+            }
         }
         checked.insert(path.to_owned(), before);
         Ok(())
@@ -780,10 +817,7 @@ impl Records<'_> {
                 offset,
             )
         })();
-        if result.is_err() {
-            *self.failed.lock().map_err(|_| unavailable())? = true;
-        }
-        result
+        result.map_err(|error| self.remember_error(error))
     }
 
     pub(crate) fn prompt(
@@ -792,7 +826,7 @@ impl Records<'_> {
         offset: u64,
     ) -> Option<(serde_json::Value, u64)> {
         let Some(proof) = self.sources.proofs.get(&file.path) else {
-            *self.failed.lock().ok()? = true;
+            self.remember_error(unavailable());
             return None;
         };
         file.prompts.record_from(
@@ -810,11 +844,11 @@ impl Records<'_> {
     /// Recheck touched sources before returning an answer, including native
     /// records served from the pager's short-lived line cache.
     pub(crate) fn finish(&self) -> io::Result<()> {
+        if let Some(error) = self.failed.lock().map_err(|_| unavailable())?.as_ref() {
+            return Err(io::Error::new(error.kind(), FirstFailure(error.clone())));
+        }
         if let Some(reason) = *self.revision.lock().map_err(|_| unavailable())? {
             return Err(reason.error());
-        }
-        if *self.failed.lock().map_err(|_| unavailable())? {
-            return Err(unavailable());
         }
         for (path, proof) in &self.sources.proofs {
             if let Some(archive) = &proof.archive {
@@ -880,7 +914,7 @@ impl Records<'_> {
                 self.recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
-                return Err(unavailable());
+                return Err(source_changed());
             }
         }
         for (path, records) in self
@@ -910,7 +944,7 @@ impl Records<'_> {
                 self.recheck(path, &file, &before)?;
             }
             if Stat::from_metadata(&file.metadata()?)? != before {
-                return Err(unavailable());
+                return Err(source_changed());
             }
         }
         Ok(())
@@ -1088,11 +1122,10 @@ impl Records<'_> {
         if qualified {
             self.recheck(path, &file, &before)?;
         }
-        if Stat::from_metadata(&file.metadata()?)? != before
-            || (!qualified
-                && before.changed_ns.is_none()
-                && !proof.ledger.resumes(&before, &mut file))
-        {
+        if Stat::from_metadata(&file.metadata()?)? != before {
+            return Err(source_changed());
+        }
+        if !qualified && before.changed_ns.is_none() && !proof.ledger.resumes(&before, &mut file) {
             return Err(unavailable());
         }
         checked.insert(path.to_owned(), before);
@@ -1243,9 +1276,8 @@ impl SessionSourceReader for Records<'_> {
                     .map_err(|_| unavailable())?
                     .get_or_insert(stage);
             }
-            *self.failed.lock().map_err(|_| unavailable())? = true;
         }
-        result
+        result.map_err(|error| self.remember_error(error))
     }
 }
 
@@ -1277,10 +1309,7 @@ impl Read for RangeFile<'_, '_> {
         let result =
             self.records
                 .range_native(self.path, self.proof, self.position, max, self.prepared);
-        if result.is_err() {
-            *self.records.failed.lock().map_err(|_| unavailable())? = true;
-        }
-        let part = result?;
+        let part = result.map_err(|error| self.records.remember_error(error))?;
         buffer[..part.bytes.len()].copy_from_slice(&part.bytes);
         self.position += part.bytes.len() as u64;
         Ok(part.bytes.len())
@@ -1296,8 +1325,7 @@ impl Seek for RangeFile<'_, '_> {
         }
         .filter(|position| *position <= self.proof.ledger.offset);
         let Some(position) = position else {
-            *self.records.failed.lock().map_err(|_| unavailable())? = true;
-            return Err(unavailable());
+            return Err(self.records.remember_error(unavailable()));
         };
         self.position = position;
         Ok(position)

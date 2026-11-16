@@ -112,7 +112,7 @@ const LIST_MAX: i64 = 1000;
 pub struct QueryError {
     /// `unknown_tool`, `invalid_arguments`, `unknown_session`,
     /// `unknown_turn`, `outside_window`, `id_conflict`, `capability_unavailable`,
-    /// `stale_projection` or `io`.
+    /// `stale_projection`, `source_changed` or `io`.
     pub code: &'static str,
     pub message: String,
     /// With `outside_window`: where the window starts (epoch ms).
@@ -184,6 +184,13 @@ impl QueryError {
     }
 
     pub(crate) fn io(error: &io::Error) -> Self {
+        let error = crate::query_source::original_error(error);
+        if error
+            .get_ref()
+            .is_some_and(|error| error.is::<crate::query_source::SourceChanged>())
+        {
+            return Self::new("source_changed", error.to_string());
+        }
         if let Some(stage) = crate::source_carrier::FailureStage::of(error) {
             return Self::source_failure(stage);
         }
