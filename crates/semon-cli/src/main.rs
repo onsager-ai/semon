@@ -7,6 +7,7 @@ use std::{
 
 mod connect_terminal;
 mod disconnect_terminal;
+mod push_service;
 
 fn parse_connect_args(mut arguments: impl Iterator<Item = String>) -> Result<Command, String> {
     let mut endpoint = None;
@@ -1745,6 +1746,7 @@ fn run_pair(args: &[String]) -> Result<(), String> {
         }
         [url, code] if !url.starts_with('-') => {
             println!("{}", semon_push::simple_pair::pair_machine(url, code)?);
+            push_service::start();
             Ok(())
         }
         _ => Err("Usage: semon pair --dir DIR | semon pair URL CODE".into()),
@@ -1752,7 +1754,10 @@ fn run_pair(args: &[String]) -> Result<(), String> {
 }
 fn run_unpair(args: &[String]) -> Result<(), String> {
     match args {
-        [] => semon_push::simple_pair::unpair_machine(),
+        [] => {
+            semon_push::simple_pair::unpair_machine()?;
+            push_service::stop()
+        }
         [machine, flag, dir] if flag == "--dir" => semon_push::simple_pair::unpair(
             &PathBuf::from(dir),
             machine,
@@ -2546,7 +2551,7 @@ fn usage() -> String {
          Usage: semon pair URL CODE\n\
          Usage: semon unpair [MACHINE_ID --dir DIR]\n\
          Usage: semon token --dir DIR [--list | --revoke ID]\n\
-         Pair with one receiver; then run semon push --watch (advanced) to sync.\n\
+         Pair with one receiver and start background sync as a user service.\n\
          HTTPS proxies may forward to a plain HTTP receiver. Tokens work until revoked.\n\
          \n\
          Usage: semon sessions [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\

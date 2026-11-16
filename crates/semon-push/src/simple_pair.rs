@@ -388,16 +388,34 @@ fn client() -> std::result::Result<reqwest::blocking::Client, String> {
         .build()
         .map_err(|e| e.to_string())
 }
+#[cfg(not(target_os = "macos"))]
+fn local_hostname() -> std::result::Result<String, String> {
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
+        .map(|name| name.trim().to_owned())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn local_hostname() -> std::result::Result<String, String> {
+    let mut buffer = [0u8; 256];
+    // SAFETY: buffer is writable for the supplied length; gethostname retains no pointer.
+    if unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let end = buffer
+        .iter()
+        .position(|b| *b == 0)
+        .ok_or("hostname is too long")?;
+    String::from_utf8(buffer[..end].to_vec()).map_err(|e| e.to_string())
+}
+
 pub fn pair_machine(url: &str, code: &str) -> std::result::Result<String, String> {
     use std::io::Read;
     let url = crate::check_url(url)?;
     crate::pairing::parse_code(code).map_err(|_| "invalid pairing code")?;
     let machine_id = semon_sessions::machine_id::load_or_create().map_err(|e| e.to_string())?;
-    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname")
-        .or_else(|_| std::fs::read_to_string("/etc/hostname"))
-        .map_err(|e| e.to_string())?
-        .trim()
-        .to_owned();
+    let hostname = local_hostname()?;
     let response = client()?
         .post(format!("{url}/v1/pair"))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -434,9 +452,7 @@ pub fn pair_machine(url: &str, code: &str) -> std::result::Result<String, String
         machine_id: machine_id.clone(),
     }
     .save_at(&Config::path()?)?;
-    Ok(format!(
-        "Paired with {url} as {machine_id}. Run semon push --watch to sync."
-    ))
+    Ok(format!("Paired with {url} as {machine_id}."))
 }
 pub fn unpair_machine() -> std::result::Result<(), String> {
     let path = Config::path()?;

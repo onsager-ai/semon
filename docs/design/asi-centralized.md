@@ -87,16 +87,33 @@ The owner decision on **2026-11-15** supersedes TLS-bound pairing with one-time
 codes and revocable, long-lived Bearer tokens. The commands are `semon receive`,
 `semon pair --dir DIR` on the receiver, `semon pair URL CODE` on each machine,
 `semon unpair`, and `semon token --dir DIR`. Token listing and revocation use
-`--list` and `--revoke ID`. Pairing prints the separate `semon push --watch`
-instruction; background user-service installation and automatic sync start
-arrive in P2.
+`--list` and `--revoke ID`. `semon pair URL CODE` also installs and starts
+background sync, running the absolute current binary path with `push --watch`.
+No separate start command is needed.
+
+On Linux, pairing writes `$XDG_CONFIG_HOME/systemd/user/semon-push.service`
+(fallback `~/.config/systemd/user/semon-push.service`), reloads the user manager,
+and enables/starts the unit with `Restart=on-failure` and a five-second restart
+delay. It also runs `loginctl enable-linger` for the current user so SSH-only
+machines keep syncing after logout. If linger fails, pairing preserves the
+service and prints the command to run. Logs: `journalctl --user -u semon-push`.
+On macOS, pairing writes
+`~/Library/LaunchAgents/ai.onsager.semon-push.plist`, with RunAtLoad and KeepAlive,
+and bootstraps it in `gui/<uid>`. Logs: `~/Library/Logs/semon-push.log`.
+Both service files preserve HOME, the pairing process's XDG config/state
+locations, and any CLAUDE_CONFIG_DIR, CODEX_HOME or COPILOT_HOME overrides. Keep the binary at its installed path, or pair again after moving it.
+Re-pairing replaces the service file and restarts sync. If the user service
+manager is unavailable, pairing still succeeds and prints the exact foreground
+`push --watch` command; the service file remains available for a later pairing.
 
 Machines validate public-CA HTTPS; HTTP is allowed only on loopback. A
 ten-character code lasts ten minutes. Three wrong guesses burn it; three burns
 within an hour persist a thirty-minute pause. Tokens never expire or renew.
 Pairing again replaces the machine's previous push token. One receiver
 configuration is stored per machine in private pair.json. Unpair revokes push
-authority and removes local configuration, preserving received logs.
+authority, stops/disables and removes the user service, and removes local
+configuration, preserving received logs and Linux linger. A missing service does
+not prevent unpairing.
 
 The previous enroll/connect/disconnect, renewal, client-certificate and
 TLS-exporter path is superseded and will be removed in P3. Its historical plan

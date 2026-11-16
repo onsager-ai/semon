@@ -586,6 +586,14 @@ fn pair_and_unpair_commands_store_replace_and_revoke_configuration() {
     let url = f.start_receiver();
     let config = f.path("config");
     let pair_path = config.join("semon/pair.json");
+    // Pair/unpair must never contact the host's service manager, including in CI.
+    let fake_bin = f.path("fake-service-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    for program in ["systemctl", "loginctl", "launchctl"] {
+        let path = fake_bin.join(program);
+        fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let issue = || {
         let output = semon()
             .args(["pair", "--dir"])
@@ -603,6 +611,7 @@ fn pair_and_unpair_commands_store_replace_and_revoke_configuration() {
     let run_pair = |code: &str| {
         semon()
             .args(["pair", &url, code])
+            .env("PATH", &fake_bin)
             .env("XDG_CONFIG_HOME", &config)
             .env("HOME", f.path("home"))
             .output()
@@ -613,7 +622,7 @@ fn pair_and_unpair_commands_store_replace_and_revoke_configuration() {
     assert!(
         String::from_utf8(first.stdout)
             .unwrap()
-            .contains("Run semon push --watch to sync.")
+            .contains("Background sync started; logs:")
     );
     let first: serde_json::Value = serde_json::from_slice(&fs::read(&pair_path).unwrap()).unwrap();
     assert_eq!(
@@ -654,12 +663,23 @@ fn pair_and_unpair_commands_store_replace_and_revoke_configuration() {
     );
     let output = semon()
         .arg("unpair")
+        .env("PATH", &fake_bin)
+        .env("HOME", f.path("home"))
         .env("XDG_CONFIG_HOME", &config)
         .output()
         .unwrap();
     assert_ok(&output, "machine unpair");
     assert!(!pair_path.exists());
-    assert_ok(&run_pair(&issue()), "pair after unpair");
+    // A container without a user bus/logind still pairs and can be unpaired.
+    for program in ["systemctl", "loginctl", "launchctl"] {
+        fs::write(fake_bin.join(program), "#!/bin/sh\nexit 1\n").unwrap();
+    }
+    let without_init = run_pair(&issue());
+    assert_ok(&without_init, "pair without user service manager");
+    let message = String::from_utf8(without_init.stdout).unwrap();
+    assert!(message.contains("Background sync is not running"));
+    assert!(message.contains("push --watch"));
+    assert!(pair_path.exists());
     let output = semon()
         .args(["unpair", second["machine_id"].as_str().unwrap(), "--dir"])
         .arg(f.dir())
@@ -672,6 +692,8 @@ fn pair_and_unpair_commands_store_replace_and_revoke_configuration() {
     child.wait().unwrap();
     let output = semon()
         .arg("unpair")
+        .env("PATH", &fake_bin)
+        .env("HOME", f.path("home"))
         .env("XDG_CONFIG_HOME", &config)
         .output()
         .unwrap();
