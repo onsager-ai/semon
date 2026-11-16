@@ -221,6 +221,12 @@ for (const sourceCount of [1, 2])
       await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
       if (sourceCount === 2) {
         await page.locator('[data-source-key="second"]').waitFor();
+        assert.ok(
+          await page
+            .locator('[data-source-key="second"] .nm')
+            .evaluate((name) => name.scrollWidth <= name.clientWidth && name.clientWidth > 40),
+          'source names must use the row width, not the 12px marker column',
+        );
         assert.deepEqual(capabilityScopes, [], 'cold multi-source entry must await selection');
         assert.deepEqual(catalogScopes, [], 'source discovery must not admit a scoped list');
         assert.equal(new URL(page.url()).hash, '#retained');
