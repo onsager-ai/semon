@@ -1320,6 +1320,8 @@ export function createCatalogViewer(
       return;
     }
     const route = navigation.route.v;
+    const emptyReceiver =
+      sourcesOpen && !sourceItems.length && !sourcesUpdating && !sourcesNote && pairingAvailable;
     title.classList.toggle('catalog-title', route !== 'machine' && route !== 'trace');
     const name =
       route === 'host'
@@ -1339,7 +1341,9 @@ export function createCatalogViewer(
                   : route === 'trace'
                     ? 'Trace'
                     : sourcesOpen
-                      ? 'Choose a machine'
+                      ? emptyReceiver
+                        ? 'Pair your first machine'
+                        : 'Choose a machine'
                       : (active?.meta?.name ?? (active ? 'Session' : 'Sessions'));
     const recentHeading = document.querySelector('.side-h'),
       recentTree = shell.slots.recent.querySelector<HTMLElement>('#lanes'),
@@ -1593,7 +1597,9 @@ export function createCatalogViewer(
         titleSlot: content && !active?.findOpen && !active?.errorMode ? content.titleSlot : title,
         mode: (active?.findOpen || active?.errorMode) && content ? [content.mode] : undefined,
         actions: [
-          ...(pairingAvailable && !active && route !== 'trace' ? [pairButton] : []),
+          ...(pairingAvailable && !active && route !== 'trace' && !emptyReceiver
+            ? [pairButton]
+            : []),
           ...(route === 'analytics'
             ? [overview.actions]
             : active
@@ -1643,15 +1649,16 @@ export function createCatalogViewer(
     )
       recent.update(overview.recentSnapshot(undefined, [], undefined, rail));
     else
-      recent.update(
-        overview.recentSnapshot(
+      recent.update({
+        ...overview.recentSnapshot(
           capabilities.source_key,
           items,
           navigation.route.v === 'trace' ? navigation.route.sid : active?.key,
           rail,
           active && active.sourceKey === capabilities.source_key ? active.meta : undefined,
         ),
-      );
+        ...(emptyReceiver ? { emptyLabel: 'No machines paired yet' } : {}),
+      });
     const pinned = shell.slots.recent.querySelector<HTMLElement>('.tree-row.stuck');
     setGeometry(shell.slots.recent, 'scrollPaddingTop', pinned ? pinned.offsetHeight + 8 : null);
     if (ordering.scopes.get('recent')?.n) {

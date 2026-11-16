@@ -32,6 +32,7 @@ export interface RecentItem {
 export interface RecentSnapshot {
   items: readonly RecentItem[];
   empty: boolean;
+  emptyLabel?: string;
 }
 export interface RecentHost {
   open(id: string): void;
@@ -298,7 +299,7 @@ export function createRecentRenderer(root: HTMLElement, host: RecentHost): Recen
           ))}
           {snapshot.empty && (
             <p class="ghead" role="none">
-              No sessions match
+              {snapshot.emptyLabel ?? 'No sessions match'}
             </p>
           )}
         </>,
