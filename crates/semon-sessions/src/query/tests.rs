@@ -778,7 +778,12 @@ fn local_query_reports_source_changed_when_its_single_retry_is_exhausted() {
             .join("projects/-work-proj/lead.jsonl");
         let calls = Arc::new(AtomicU64::new(0));
         let observed = calls.clone();
+        let attempts = Arc::new(AtomicU64::new(0));
+        let observed_attempts = attempts.clone();
         let _hook = crate::test_hooks::register(&home.options.cache, move |at| {
+            if at == "query_attempt" {
+                observed_attempts.fetch_add(1, Ordering::Relaxed);
+            }
             if at == point {
                 observed.fetch_add(1, Ordering::Relaxed);
                 writeln!(
@@ -793,9 +798,13 @@ fn local_query_reports_source_changed_when_its_single_retry_is_exhausted() {
             .call_at("read_transcript", &json!({"id":"lead"}), NOW)
             .unwrap_err();
         assert_eq!(
-            calls.load(Ordering::Relaxed),
+            attempts.load(Ordering::Relaxed),
             2,
             "one initial attempt and one retry"
+        );
+        assert!(
+            calls.load(Ordering::Relaxed) >= 2,
+            "both attempts must race a writer"
         );
         assert_eq!(
             error.to_json(),
@@ -3563,8 +3572,8 @@ fn selected_query_refuses_changed_bytes_generations_and_revocation() {
             assert!(!error.message.contains("revoked"));
             assert!(!error.message.contains("Permission denied"));
         } else {
-            // Prompt parsing tolerates the provider read error, but its sticky
-            // failure makes finish() retain the pre-R5 generic refusal.
+            // Provider error text is untrusted. Preserve its sanitized refusal
+            // even when prompt parsing tolerates the failed read until finish().
             assert_eq!(
                 error.message, "native query source generation unavailable",
                 "fault={fault}"

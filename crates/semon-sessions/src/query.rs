@@ -989,6 +989,10 @@ impl Query {
     }
 
     fn execute_tool(&mut self, tool: &str, args: &Value, now: i64) -> Result<Value, QueryError> {
+        #[cfg(any(test, feature = "test-hooks"))]
+        for (_, evidence) in &self.sources.machines {
+            crate::test_hooks::run_cache(&evidence.options.cache, "query_attempt");
+        }
         let postgres = self
             .sources
             .machines
