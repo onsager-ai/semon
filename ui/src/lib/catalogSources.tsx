@@ -8,6 +8,7 @@ export function renderCatalogSources(
     note: string;
     more: boolean;
     machinesHref: string;
+    pair?(): void;
   },
   host: { select(key: string): void; more(): void; retry(): void },
 ) {
@@ -44,7 +45,18 @@ export function renderCatalogSources(
         ))}
       </div>
       {!view.items.length && !view.updating && !view.note && (
-        <p class="catalog-note">No authorized recorded sources are available.</p>
+        <div class="catalog-note">
+          <p>
+            {view.pair
+              ? 'Pair your first machine to start syncing its session history.'
+              : 'No authorized recorded sources are available.'}
+          </p>
+          {view.pair && (
+            <button type="button" class="btn sh-compact" onClick={view.pair}>
+              Pair a machine
+            </button>
+          )}
+        </div>
       )}
       {view.more && (
         <button class="link" type="button" disabled={view.updating} onClick={() => host.more()}>

@@ -669,10 +669,9 @@ fn receiver_viewer_read_tokens_login_revocation_and_route_separation() {
     assert!(set_cookie.contains("HttpOnly; SameSite=Strict; Path=/"));
     assert!(!set_cookie.contains("Secure"));
     let cookie = set_cookie.split(';').next().unwrap().to_owned();
-    // Authentication succeeds, but the existing Viewer has no root page until
-    // a machine is paired. Its source inventory remains available when empty.
+    // An empty receiver still serves the Viewer shell, which invites pairing.
     let empty_page = http(&url, "/", &format!("Cookie: {cookie}\r\n"), None);
-    assert!(empty_page.starts_with("HTTP/1.1 404"), "{empty_page}");
+    assert!(empty_page.starts_with("HTTP/1.1 200"), "{empty_page}");
     let inventory = http(
         &url,
         "/api/session-sources",

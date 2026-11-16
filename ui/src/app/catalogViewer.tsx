@@ -14,6 +14,7 @@ import {
 } from '../state/catalog-source-candidates';
 import { render } from 'preact';
 import { createOverviewPages } from './overviewPages';
+import { openPairMachine } from './pairMachine';
 import { parseCausalTrace, renderCausalTrace, type CausalTrace } from './tracePresentation';
 import { reachableResultIds } from '../domain/trace';
 import type { ViewerApplication } from './viewer';
@@ -562,6 +563,14 @@ export function createCatalogViewer(
   render(<Glyph path={I.more} className="" />, traceMenu);
   traceActions.append(traceMenu);
   scope.listen(traceMenu, 'click', () => openSessionMenu(null, traceMenu));
+  let pairingAvailable = false;
+  const pairButton = document.createElement('button');
+  pairButton.type = 'button';
+  pairButton.className = 'btn sh-compact';
+  pairButton.textContent = 'Pair a machine';
+  const openPairing = (trigger: HTMLElement) =>
+    openPairMachine({ opened: panelOpened, closed: panelClosed }, trigger);
+  scope.listen(pairButton, 'click', () => openPairing(pairButton));
   let sessionPanel: { destroy(): void } | null = null;
   function panelOpened(panel: { destroy(): void }) {
     sessionPanel?.destroy();
@@ -1583,8 +1592,9 @@ export function createCatalogViewer(
       shell.topbar({
         titleSlot: content && !active?.findOpen && !active?.errorMode ? content.titleSlot : title,
         mode: (active?.findOpen || active?.errorMode) && content ? [content.mode] : undefined,
-        actions:
-          route === 'analytics'
+        actions: [
+          ...(pairingAvailable && !active && route !== 'trace' ? [pairButton] : []),
+          ...(route === 'analytics'
             ? [overview.actions]
             : active
               ? content
@@ -1594,7 +1604,8 @@ export function createCatalogViewer(
                 ? [sources]
                 : route === 'trace'
                   ? [traceActions]
-                  : [],
+                  : []),
+        ],
         session: !!active,
         lead:
           route === 'trace' && navigation.route.v === 'trace'
@@ -3998,6 +4009,7 @@ export function createCatalogViewer(
         note: sourcesNote,
         more: sourceCursor !== null,
         machinesHref: machinesHref(),
+        pair: pairingAvailable ? () => openPairing(pairButton) : undefined,
       },
       {
         select(key) {
@@ -4455,6 +4467,15 @@ export function createCatalogViewer(
     if (active?.meta?.details?.live_observation) updateSessionClock(active.root, Date.now(), {});
   }, 1000);
   const removeNavigation = viewerHost?.subscribeNavigation?.(chrome);
+  if (!viewerHost)
+    void api('/api/viewer/pairing')
+      .then((value) => {
+        if (disposed) return;
+        pairingAvailable = object(value).available === true;
+        chrome();
+        if (sourcesOpen) drawSources();
+      })
+      .catch(() => {});
   if (!viewerHost)
     void api('/api/viewer/chrome')
       .then((value) => {

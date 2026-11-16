@@ -1230,6 +1230,14 @@ impl ViewerCore {
         ) {
             return self.catalog(&views, path, query, deadline, allow_catalog_wait);
         }
+        if let Ok((status, content_type, body)) = crate::viewer::static_route(path) {
+            return ViewerReply {
+                status,
+                content_type,
+                body,
+                etag: None,
+            };
+        }
         if views.is_empty() {
             return text(404, "Not found");
         }
