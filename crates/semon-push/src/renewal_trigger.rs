@@ -1,9 +1,8 @@
-//! Process-owned renewal timer. Application workers only report authenticated use.
+//! Test support for the retired renewal cycle, retained with origin renewal tests.
 use crate::{
-    Credential, PushOptions, Result, Stop,
+    Result,
     origin_custody::{self, Authority, renewal::Renewal},
 };
-use std::{sync::mpsc, thread, time::Duration};
 
 const MINUTE: u64 = 60;
 const DAY: u64 = 86_400;
@@ -53,74 +52,6 @@ impl Schedule {
                 "Could not renew receiver {host} credentials; {days} days remain. Check the receiver is reachable, then run semon push --receiver {endpoint} again."
             )
         })
-    }
-}
-
-pub(crate) struct Trigger {
-    end: mpsc::Sender<()>,
-    worker: Option<thread::JoinHandle<()>>,
-}
-impl Trigger {
-    pub fn start(options: &PushOptions, watch: bool, stop: &Stop) -> Result<Option<Self>> {
-        let Credential::Enrolled { authority, .. } = &options.credential else {
-            return Ok(None);
-        };
-        let (base, endpoint) = authority.renewal_location()?;
-        let authority = authority.clone();
-        let stop = stop.clone();
-        let (end, ended) = mpsc::channel();
-        let worker = thread::Builder::new()
-            .name("semon-push-renewal".into())
-            .spawn(move || {
-                let mut cycle = Cycle::new(authority, endpoint.clone(), watch);
-                loop {
-                    if stop.is_stopped() {
-                        break;
-                    }
-                    cycle.tick(&base, &origin_custody::now, &mut |line| eprintln!("{line}"));
-                    if !watch {
-                        while !stop.is_stopped() {
-                            match ended.recv_timeout(Duration::from_millis(20)) {
-                                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                                _ => break,
-                            }
-                        }
-                        break;
-                    }
-                    match ended.recv_timeout(Duration::from_secs(1)) {
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        _ => break,
-                    }
-                }
-                cycle.confirm(&mut |line| eprintln!("{line}"));
-            })
-            .map_err(|e| format!("renewal: {e}"))?;
-        Ok(Some(Self {
-            end,
-            worker: Some(worker),
-        }))
-    }
-    // One-shot traffic has already completed. Wait for its one renewal outcome,
-    // while retaining the caller's cancellation behavior.
-    pub fn finish(&mut self, stop: &Stop) {
-        let _ = self.end.send(());
-        while self
-            .worker
-            .as_ref()
-            .is_some_and(|worker| !worker.is_finished())
-        {
-            if stop.sleep(Duration::from_millis(20)) {
-                return;
-            }
-        }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-impl Drop for Trigger {
-    fn drop(&mut self) {
-        let _ = self.end.send(());
     }
 }
 

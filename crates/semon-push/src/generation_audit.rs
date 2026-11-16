@@ -162,6 +162,7 @@ pub(crate) fn renewal(receiver: &Path, record: &RenewalRecord) -> Result<(), Err
 }
 /// Refusals never append to the authority journal or take its lock. Eleven
 /// saturating counters and one last nonsecret scope per class have a fixed budget.
+#[cfg(test)]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RefusalRecord {
@@ -172,20 +173,25 @@ pub(crate) struct RefusalRecord {
     pub generations: Vec<crate::renewal_wire::Generation>,
     pub outcome: String,
 }
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RefusalCount {
     count: u64,
     last: RefusalRecord,
 }
+#[cfg(test)]
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Refusals {
     version: u32,
     classes: Vec<RefusalCount>,
 }
+#[cfg(test)]
 pub(crate) const REFUSAL_FILE: &str = "renewal-refusals.json";
+#[cfg(test)]
 pub(crate) const REFUSAL_CAP: u64 = 8192;
+#[cfg(test)]
 pub(crate) fn refusal(receiver: &Path, record: RefusalRecord) -> Result<(), Error> {
     let directory = CacheDirectory::open(&receiver.join("receiver-audit"))
         .map_err(|_| Error::AuditUnavailable)?;

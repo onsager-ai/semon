@@ -115,9 +115,12 @@ authority, stops/disables and removes the user service, and removes local
 configuration, preserving received logs and Linux linger. A missing service does
 not prevent unpairing.
 
-The previous enroll/connect/disconnect, renewal, client-certificate and
-TLS-exporter path is superseded and will be removed in P3. Its historical plan
-below does not authorize restoring it or adding public Viewer access to those
+P3a removes the previous enroll/connect/disconnect commands, provision/renew
+HTTP routes and automatic push renewal. P3b removes the remaining library stack,
+certificate registry fields and mirror naming after resolving the retained
+body/analytics certificate-authentication boundary. Direct TLS remains for that
+boundary, outside the pair/Viewer journey. The historical plan below does not
+authorize restoring removed entry points or adding public Viewer access to those
 surfaces. Private-root pairing remains deferred.
 
 ## Implementation plan

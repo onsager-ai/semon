@@ -1024,6 +1024,13 @@ fn unknown_routes_refuse_with_no_body_read_and_one_response_class() {
     conn.stream.read_exact(&mut body).unwrap();
     assert_eq!(&body, b"body");
     for path in [
+        "/v1/provision/open",
+        "/v1/provision/confirm",
+        "/v1/provision/approve",
+        "/v1/provision/recover",
+        "/v1/provision/cancel",
+        "/v1/renew/begin",
+        "/v1/renew/finish",
         "/v1/asi/x",
         "/v1/analytics/x",
         "/v1/body/x",

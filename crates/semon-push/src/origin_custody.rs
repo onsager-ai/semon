@@ -568,17 +568,9 @@ impl Authority {
         self.confirmed
             .fetch_max(generation, std::sync::atomic::Ordering::Release);
     }
+    #[cfg(test)]
     pub(crate) fn confirmed_generation(&self) -> u64 {
         self.confirmed.load(std::sync::atomic::Ordering::Acquire)
-    }
-    pub(crate) fn renewal_location(&self) -> Result<(PathBuf, String)> {
-        let root = Directory::open(&self.base)?;
-        let dir = root.child(&self.name)?;
-        let (config, _) = read_configuration(&selected_directory(&dir)?, &self.name)?;
-        if dir.disabled()? || config.enrollment_id != self.enrollment_id {
-            return Err(ERROR.into());
-        }
-        Ok((self.base.clone(), config.endpoint))
     }
     pub(crate) fn is_active(&self) -> bool {
         Directory::open(&self.base)

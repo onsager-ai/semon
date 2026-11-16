@@ -2551,3 +2551,19 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod retired_receive_tests {
+    use super::*;
+
+    #[test]
+    fn old_enrollment_subcommands_are_not_accepted() {
+        for command in ["enroll", "revoke", "token"] {
+            let error =
+                parse_receive_args([command, "--dir", "/unused"].map(str::to_owned).into_iter())
+                    .err()
+                    .expect("retired command must be refused");
+            assert!(error.contains("unknown receive argument"), "{error}");
+        }
+    }
+}

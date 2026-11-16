@@ -178,8 +178,8 @@ The receiver's default remains `127.0.0.1:8735`; `--listen` selects a proxy-faci
 address. The combined Viewer listener uses plain HTTP behind the HTTPS proxy. Protect a plain
 HTTP receiver's network access appropriately. The HTTPS proxy can read logs in
 transit, and a stolen token works until revoked: these are accepted owner tradeoffs.
-The old enroll/connect/disconnect and TLS-bound renewal commands remain available
-until their removal in P3; they are no longer the primary setup path. Legacy
+The old enroll/connect/disconnect commands and provision/renew HTTP routes are
+removed. Push does not start certificate renewal. Legacy
 `DIR/tokens` and older receiver registry formats are refused; preserve existing
 state and pair into a fresh directory.
 
