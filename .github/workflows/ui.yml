@@ -357,7 +357,7 @@ jobs:
             sleep 0.2
           done
           [ -n "$url" ] || { cat "$RUNNER_TEMP/receive.log"; exit 1; }
-          python3 -I tests/ui/origin-enrollment-fixture.py "$RUNNER_TEMP/origin-config/semon/origin" "$recv" "$RUNNER_TEMP/recv.token" "$url" "$fixture_root"
+          python3 -I tests/ui/origin-enrollment-fixture.py "$RUNNER_TEMP/origin-config/semon" "$RUNNER_TEMP/recv.token" "$url"
           XDG_CONFIG_HOME="$RUNNER_TEMP/origin-config" XDG_STATE_HOME="$RUNNER_TEMP/push-state" SEMON_TEST_NOW="$SEMON_NOW" setsid nohup target/debug/semon push --watch \
             --state "$RUNNER_TEMP/push-state.json" \
             --claude-home "$fixture_root/claude" --claude-json "$fixture_root/.claude.json" --codex-home "$fixture_root/codex" --copilot-home "$fixture_root/copilot" --proc-root "$fixture_root/proc" --cache "$RUNNER_TEMP/push-index.json" \

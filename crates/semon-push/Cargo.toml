@@ -8,23 +8,12 @@ description = "The mirror protocol: the client that sends the session logs' inpu
 
 [dependencies]
 tiny_http.workspace = true
-chacha20poly1305 = { version = "=0.10.1", default-features = false, features = ["alloc"] }
 getrandom.workspace = true
 libc.workspace = true
 zeroize = { version = "1.9.0", default-features = false, features = ["alloc"] }
 hex.workspace = true
 httpdate = "1.0"
 reqwest.workspace = true
-ring = "=0.17.14"
-rcgen = { version = "=0.14.10", default-features = false, features = ["ring", "crypto", "zeroize"] }
-# rcgen's own transitive types are used only by client_ca for time and DER reading.
-time = { version = "=0.3.55", default-features = false }
-yasna = { version = "=0.6.0", features = ["std", "time"] }
-webpki-roots = { version = "=1.0.9", default-features = false }
-# Already built for reqwest (same version and features); used directly for
-# `semon receive`'s TLS listener and its token randomness.
-rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
-semon-asi = { path = "../semon-asi" }
 semon-sessions = { path = "../semon-sessions" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json.workspace = true

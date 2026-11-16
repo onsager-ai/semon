@@ -93,10 +93,7 @@ pub const MAX_STATUS_TARGETS: usize = 4096;
 /// Content-free identifiers, generated without reading credentials.
 pub(crate) fn new_generation() -> Result<String, String> {
     let mut bytes = [0; 16];
-    rustls::crypto::ring::default_provider()
-        .secure_random
-        .fill(&mut bytes)
-        .map_err(|_| "the system's random source failed".to_owned())?;
+    getrandom::fill(&mut bytes).map_err(|_| "the system's random source failed".to_owned())?;
     Ok(hex::encode(bytes))
 }
 

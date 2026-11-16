@@ -35,66 +35,17 @@ use std::{
 use semon_sessions::{Facts, FactsSource, Input, Options};
 use serde::{Deserialize, Serialize};
 
-#[cfg(unix)]
-pub mod append_receiver;
-#[cfg(unix)]
-pub mod append_source;
 mod archives;
-#[cfg(unix)]
-pub mod body_adapter;
-pub mod body_assertion;
-#[cfg(unix)]
-pub mod body_broker;
-#[cfg(unix)]
-pub mod body_cache;
-#[cfg(unix)]
-pub mod body_enrollment;
-#[cfg(unix)]
-pub mod body_host;
-#[cfg(unix)]
-pub mod body_lease;
-#[cfg(unix)]
-pub mod body_wire;
-#[cfg(unix)]
-mod client_ca;
-#[cfg(unix)]
-pub mod connect;
 #[cfg(unix)]
 pub mod credentials;
 #[cfg(unix)]
 pub mod enrollment;
-#[cfg(unix)]
-pub mod generation_audit;
-#[cfg(unix)]
-pub mod handle_resolver;
 mod lock;
 pub mod mirror;
 #[cfg(unix)]
-pub mod origin_audit;
-#[cfg(unix)]
-pub mod origin_client;
-#[cfg(unix)]
-pub mod origin_custody;
-#[cfg(unix)]
-pub mod origin_read;
-#[cfg(unix)]
 pub mod pairing;
-#[cfg(unix)]
-pub mod provision;
-#[cfg(unix)]
-pub mod provision_wire;
 pub mod read_token;
-#[cfg(unix)]
-pub mod receiver_acl;
-#[cfg(unix)]
-pub mod receiver_audit;
-#[cfg(unix)]
-pub mod receiver_custody;
 pub mod redact;
-#[cfg(unix)]
-pub mod renewal;
-#[cfg(unix)]
-pub mod renewal_wire;
 pub mod serve;
 pub mod simple_pair;
 mod status;
@@ -149,40 +100,13 @@ pub enum Credential {
     /// A token an embedding app holds in memory, from its OS credential
     /// store for instance. It is never written to disk.
     Memory(Token),
-    #[cfg(unix)]
-    MutualTls {
-        token: Token,
-        identity: ClientIdentity,
-    },
-    /// Stored origin consent constrains discovery, including future watch passes.
-    #[cfg(unix)]
-    Enrolled {
-        token: Token,
-        sources: Vec<PathBuf>,
-        authority: origin_custody::Authority,
-        identity: Option<ClientIdentity>,
-    },
 }
 
-#[cfg(unix)]
-#[derive(Clone)]
-pub struct ClientIdentity {
-    certificate: Vec<u8>,
-    private: zeroize::Zeroizing<Vec<u8>>,
-}
-#[cfg(unix)]
-impl fmt::Debug for ClientIdentity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("ClientIdentity(<redacted>)")
-    }
-}
 impl Credential {
     fn token(&self) -> Result<Token> {
         match self {
             Self::File(path) => read_token(path).map(Token),
             Self::Memory(token) => Ok(token.clone()),
-            #[cfg(unix)]
-            Self::Enrolled { token, .. } | Self::MutualTls { token, .. } => Ok(token.clone()),
         }
     }
 }
@@ -492,41 +416,6 @@ impl Client {
             let credential = selected.as_ref().unwrap_or(&credential);
             let token = credential.token()?;
             let http = builder();
-            #[cfg(unix)]
-            let http = match &credential {
-                Credential::MutualTls { identity, .. }
-                | Credential::Enrolled {
-                    identity: Some(identity),
-                    ..
-                } => {
-                    let mut pem = zeroize::Zeroizing::new(client_ca::pem(&identity.certificate));
-                    let mut private =
-                        zeroize::Zeroizing::new(crate::provision_wire::encode(&identity.private));
-                    // Both substitutions preserve ASCII and byte length.
-                    let mut bytes =
-                        zeroize::Zeroizing::new(std::mem::take(&mut *private).into_bytes());
-                    for byte in bytes.iter_mut() {
-                        match *byte {
-                            b'-' => *byte = b'+',
-                            b'_' => *byte = b'/',
-                            _ => {}
-                        }
-                    }
-                    *private =
-                        String::from_utf8(std::mem::take(&mut *bytes)).expect("base64 ASCII");
-                    while !private.len().is_multiple_of(4) {
-                        private.push('=');
-                    }
-                    pem.extend_from_slice(b"-----BEGIN PRIVATE KEY-----\n");
-                    pem.extend_from_slice(private.as_bytes());
-                    pem.extend_from_slice(b"\n-----END PRIVATE KEY-----\n");
-                    let identity = reqwest::Identity::from_pem(&pem)
-                        .map_err(|_| "invalid enrolled TLS identity")?;
-                    drop(private);
-                    http.identity(identity)
-                }
-                _ => http,
-            };
             http.redirect(reqwest::redirect::Policy::none())
                 .timeout(Duration::from_secs(120))
                 .user_agent(concat!("semon-push/", env!("CARGO_PKG_VERSION")))
@@ -543,28 +432,10 @@ impl Client {
                 url: url.clone(),
                 files: BTreeMap::new(),
             });
-        #[cfg(unix)]
-        if let Credential::Enrolled { authority, .. } = &options.credential
-            && !authority.is_active()
-        {
-            return Err("receiver is disconnected or its custody is unavailable".into());
-        }
         Ok(Self {
             url,
             http,
-            stop: {
-                let stop = Stop::new();
-                #[cfg(unix)]
-                if let Credential::Enrolled { authority, .. } = &options.credential {
-                    stop.with_authority(authority.clone())
-                } else {
-                    stop
-                }
-                #[cfg(not(unix))]
-                {
-                    stop
-                }
-            },
+            stop: Stop::new(),
             lock: None,
             state_path: options.state.clone(),
             state,
@@ -579,11 +450,7 @@ impl Client {
             catchup_pending: false,
             #[cfg(test)]
             completed_transports: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            allowed_sources: match &options.credential {
-                #[cfg(unix)]
-                Credential::Enrolled { sources, .. } => Some(sources.iter().cloned().collect()),
-                _ => None,
-            },
+            allowed_sources: None,
         })
     }
 
@@ -596,12 +463,6 @@ impl Client {
 
     /// Ends passes and requests early once `stop` is stopped.
     pub fn with_stop(mut self, stop: Stop) -> Self {
-        #[cfg(unix)]
-        let stop = if let Some(authority) = self.stop.authority.clone() {
-            stop.with_authority(authority)
-        } else {
-            stop
-        };
         self.stop = stop;
         self
     }
@@ -637,25 +498,12 @@ impl Client {
             let completed_transports = Arc::clone(&self.completed_transports);
             let answer = self.stop.run(route, move || {
                 let _lock = lock;
-                #[cfg(unix)]
-                let admitted = dispatch_stop
-                    .authority
-                    .as_ref()
-                    .map(|authority| authority.admit())
-                    .transpose()?;
-                #[cfg(unix)]
-                let (_delivery, selected, generation) =
-                    admitted.map_or((None, None, None), |(guard, credential, generation)| {
-                        (Some(guard), Some(credential), Some(generation))
-                    });
-                #[cfg(not(unix))]
-                let selected = None;
                 if dispatch_stop.is_stopped() {
                     return Err("delivery stopped".to_owned());
                 }
                 // Declared after the delivery guard: the last handle joins its
                 // private reqwest runtime before the guard can be released.
-                let (http, token) = factory(selected)?;
+                let (http, token) = factory(None)?;
                 let request = http
                     .post(request_url)
                     .bearer_auth(token.expose())
@@ -689,13 +537,6 @@ impl Client {
                         (status, response.text().unwrap_or_default(), retry)
                     });
                 drop(http);
-                #[cfg(unix)]
-                if matches!(&result, Ok((200..=299, _, _)))
-                    && let (Some(authority), Some(generation)) =
-                        (&dispatch_stop.authority, generation)
-                {
-                    authority.application_success(generation);
-                }
                 #[cfg(test)]
                 completed_transports.fetch_add(1, Ordering::SeqCst);
                 result
@@ -1743,15 +1584,6 @@ pub fn push(options: &PushOptions, watch: bool) -> Result<()> {
 /// `reqwest::blocking`, which panics inside a tokio runtime (in an async
 /// Tauri command, say; use `spawn_blocking` or `std::thread::spawn`).
 pub fn push_until(options: &PushOptions, watch: bool, stop: &Stop) -> Result<()> {
-    #[cfg(unix)]
-    let enrolled_stop;
-    #[cfg(unix)]
-    let stop = if let Credential::Enrolled { authority, .. } = &options.credential {
-        enrolled_stop = stop.clone().with_authority(authority.clone());
-        &enrolled_stop
-    } else {
-        stop
-    };
     // Declared first, so it is dropped last, after the client and the
     // facts worker have let go of their shares.
     let hold = Hold::new(StateLock::acquire(&options.state)?);
