@@ -26,6 +26,26 @@ CREATE TABLE fact_tool_result (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, call_id TEXT NOT NULL,
   ts INTEGER, PRIMARY KEY(source,pos)
 );
+-- Qualified origin observations, never a selected parent. Retained evidence is
+-- the earlier observation itself; a new snapshot does not overwrite it.
+CREATE TABLE fact_parent_observation (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, method TEXT NOT NULL,
+  parent_harness TEXT NOT NULL, parent_id TEXT NOT NULL, call_id TEXT,
+  PRIMARY KEY(source,pos,method)
+);
+CREATE TABLE fact_process_observation (
+  epoch INTEGER NOT NULL, source INTEGER NOT NULL, pid INTEGER NOT NULL,
+  start INTEGER, qualified INTEGER NOT NULL,
+  PRIMARY KEY(epoch,source)
+);
+CREATE TABLE fact_environment_observation (
+  epoch INTEGER NOT NULL, source INTEGER NOT NULL, parent_harness TEXT NOT NULL,
+  parent_id TEXT NOT NULL, call_id TEXT, PRIMARY KEY(epoch,source)
+);
+CREATE TABLE fact_ancestor_observation (
+  epoch INTEGER NOT NULL, source INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+  pid INTEGER NOT NULL, PRIMARY KEY(epoch,source,ordinal)
+);
 CREATE TABLE dim_session (
   source INTEGER PRIMARY KEY, harness TEXT NOT NULL, native_id TEXT NOT NULL,
   parent_id TEXT, nickname TEXT, agent_path TEXT,
@@ -141,8 +161,8 @@ SELECT k.id,k.owner,k.harness,p.id AS parent,t.source AS title_source,t.pos AS t
   coalesce(u.output,0) AS output,coalesce(u.shared_input,0) AS shared_input,
   coalesce(u.shared_cached,0) AS shared_cached,coalesce(u.shared_output,0) AS shared_output
 FROM keys k JOIN dim_session d ON d.source=k.owner
-LEFT JOIN dim_session native_parent ON native_parent.harness=d.harness AND native_parent.native_id=d.parent_id
-LEFT JOIN bridge_session_owner pm ON pm.source=native_parent.source
+LEFT JOIN parent_selection chosen_parent ON chosen_parent.child=d.source
+LEFT JOIN bridge_session_owner pm ON pm.source=chosen_parent.parent
 LEFT JOIN keys p ON p.owner=pm.owner
 LEFT JOIN titles t ON t.owner=k.owner AND t.n=1
 LEFT JOIN models model ON model.owner=k.owner AND model.n=1
