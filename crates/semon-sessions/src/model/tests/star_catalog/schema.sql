@@ -72,6 +72,7 @@ CREATE TABLE dim_session (
   first_ts INTEGER, last_ts INTEGER, title_pos INTEGER, model TEXT,
   prompt_pos INTEGER, continued INTEGER NOT NULL
 );
+CREATE TABLE maintenance_cursor (source INTEGER PRIMARY KEY, pos INTEGER NOT NULL);
 CREATE TABLE index_advance (source INTEGER PRIMARY KEY, complete_bytes INTEGER NOT NULL);
 
 -- Revisable answers are separate from the append-only observations.
