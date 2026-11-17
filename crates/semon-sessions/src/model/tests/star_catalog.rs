@@ -19,6 +19,7 @@ struct Warehouse {
     db: Connection,
     // Test analogue of the authorized native body reader, outside SQLite.
     titles: BTreeMap<(i64, i64), String>,
+    marker_decided: BTreeMap<i64, bool>,
     maintenance: std::time::Duration,
     appends: u64,
 }
@@ -50,6 +51,7 @@ impl Warehouse {
         Self {
             db,
             titles: BTreeMap::new(),
+            marker_decided: BTreeMap::new(),
             maintenance: std::time::Duration::ZERO,
             appends: 0,
         }
@@ -63,7 +65,7 @@ impl Warehouse {
             .map(|v| &v["payload"]);
         let attribute = |key: &str| meta.and_then(|v| v[key].as_str());
         tx.execute(
-            "INSERT INTO fact_session_observation VALUES(?1,?2,?3,?4,?5,?6)",
+            "INSERT OR IGNORE INTO fact_session_observation VALUES(?1,?2,?3,?4,?5,?6)",
             params![
                 source,
                 harness,
@@ -74,8 +76,16 @@ impl Warehouse {
             ],
         )
         .unwrap();
-        let mut bytes = 0;
-        let mut marker_decided = false;
+        let mut bytes = tx
+            .query_row(
+                "SELECT complete_bytes FROM index_advance WHERE source=?1",
+                [source],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or(0);
+        let mut marker_decided = self.marker_decided.get(&source).copied().unwrap_or(false);
         for record in records {
             let pos = bytes;
             bytes += serde_json::to_vec(record).unwrap().len() as i64 + 1;
@@ -247,10 +257,11 @@ impl Warehouse {
             }
         }
         tx.execute(
-            "INSERT INTO index_advance VALUES(?1,?2)",
+            "INSERT OR REPLACE INTO index_advance VALUES(?1,?2)",
             params![source, bytes],
         )
         .unwrap();
+        self.marker_decided.insert(source, marker_decided);
         let maintenance = Instant::now();
         Self::recompute(&tx, source);
         self.maintenance += maintenance.elapsed();
@@ -339,15 +350,36 @@ impl Warehouse {
     }
 
     fn recompute(db: &Connection, source: i64) {
-        // Every statement uses the same bound source; no dynamic SQL identifiers.
+        let after = db
+            .query_row(
+                "SELECT pos FROM maintenance_cursor WHERE source=?1",
+                [source],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or(-1);
         for sql in MAINTAIN.split(';').filter(|sql| !sql.trim().is_empty()) {
             let mut statement = db.prepare(sql).unwrap();
-            if statement.parameter_count() == 0 {
-                statement.execute([]).unwrap();
-            } else {
-                statement.execute([source]).unwrap();
+            for (name, value) in [(":source", source), (":after", after)] {
+                if let Some(index) = statement.parameter_index(name).unwrap() {
+                    statement.raw_bind_parameter(index, value).unwrap();
+                }
             }
+            statement.raw_execute().unwrap();
         }
+        db.execute(
+            "INSERT OR REPLACE INTO maintenance_cursor
+             SELECT ?1,max(pos) FROM (
+               SELECT ?2 AS pos UNION ALL
+               SELECT max(pos) FROM fact_record WHERE source=?1 UNION ALL
+               SELECT max(pos) FROM fact_relation_observation WHERE source=?1 UNION ALL
+               SELECT max(pos) FROM fact_step_observation WHERE source=?1 UNION ALL
+               SELECT max(pos) FROM fact_tool_call WHERE source=?1
+             )",
+            params![source, after],
+        )
+        .unwrap();
     }
 
     fn list(&self) -> Vec<ListRow> {
