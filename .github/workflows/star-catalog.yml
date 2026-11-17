@@ -24,7 +24,8 @@ jobs:
             target
           key: ${{ runner.os }}-star-cargo-${{ hashFiles('**/Cargo.lock') }}
       - name: Fixture parity and atomicity
-        run: cargo test --locked -p semon-sessions --lib model::tests::star_catalog:: -- --skip star_catalog_scale --nocapture
+        run: |
+          cargo test --locked -p semon-sessions --lib model::tests::star_catalog:: -- --skip star_catalog_scale --nocapture
       - name: Scale experiment (about 1 GB, 20k sessions)
         shell: bash
         run: |
