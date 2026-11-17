@@ -34,6 +34,25 @@ CREATE TABLE dim_session (
 );
 CREATE TABLE index_advance (source INTEGER PRIMARY KEY, complete_bytes INTEGER NOT NULL);
 
+-- Revisable answers are separate from the append-only observations.
+CREATE TABLE dim_lineage (
+  source INTEGER PRIMARY KEY, component INTEGER NOT NULL
+);
+CREATE INDEX lineage_component ON dim_lineage(component,source);
+CREATE TABLE bridge_session_owner (
+  source INTEGER PRIMARY KEY, owner INTEGER NOT NULL, usage_owner INTEGER NOT NULL
+);
+CREATE INDEX session_owner ON bridge_session_owner(owner,source);
+CREATE TABLE bridge_spawn_placement (
+  child TEXT PRIMARY KEY, parent_source INTEGER NOT NULL, pos INTEGER NOT NULL, ts INTEGER
+);
+CREATE INDEX spawn_parent ON bridge_spawn_placement(parent_source);
+-- These indexes also bound component discovery during ingestion.
+CREATE INDEX relation_endpoint ON fact_relation_observation(target,kind,source);
+CREATE INDEX session_native ON dim_session(harness,native_id);
+CREATE INDEX session_parent_name ON dim_session(harness,parent_id,nickname);
+CREATE INDEX spawn_call_name ON fact_tool_call(source,tool,task_name);
+
 -- Only natural-key-local facts are used in this Type 1 recompute.
 CREATE VIEW session_recompute AS
 SELECT s.*,
