@@ -21,18 +21,21 @@ WHERE s.source=:source;
 
 DELETE FROM affected_lineage;
 INSERT INTO affected_lineage
-WITH RECURSIVE reach(source) AS (
-  SELECT :source
+WITH RECURSIVE reach(node) AS (
+  SELECT native_id FROM dim_session WHERE source=:source AND harness='claude'
   UNION
-  SELECT b.source FROM reach r JOIN dim_session a ON a.source=r.source AND a.harness='claude'
-  JOIN fact_relation_observation e ON e.source=a.source AND e.kind IN ('continued-in','session_id')
-  JOIN dim_session b ON b.harness='claude' AND b.native_id=e.target
+  SELECT e.target FROM reach r
+  JOIN dim_session a ON a.harness='claude' AND a.native_id=r.node
+  JOIN fact_relation_observation e ON e.source=a.source
+    AND e.kind IN ('continued-in','session_id','bridge')
   UNION
-  SELECT a.source FROM reach r JOIN dim_session b ON b.source=r.source AND b.harness='claude'
-  JOIN fact_relation_observation e ON e.target=b.native_id AND e.kind IN ('continued-in','session_id')
+  SELECT a.native_id FROM reach r
+  JOIN fact_relation_observation e ON e.target=r.node
+    AND e.kind IN ('continued-in','session_id','bridge')
   JOIN dim_session a ON a.source=e.source AND a.harness='claude'
 )
-SELECT source FROM reach;
+SELECT :source UNION
+SELECT d.source FROM reach r JOIN dim_session d ON d.harness='claude' AND d.native_id=r.node;
 
 DELETE FROM dim_lineage WHERE source IN (SELECT source FROM affected_lineage);
 INSERT INTO dim_lineage

@@ -106,6 +106,15 @@ impl Warehouse {
                     .unwrap();
                 }
             }
+            if kind == "bridge-session"
+                && let Some(bridge) = record["bridgeSessionId"].as_str()
+            {
+                tx.execute(
+                    "INSERT INTO fact_relation_observation VALUES(?1,?2,'bridge',?3)",
+                    params![source, pos, format!("bridge:{bridge}")],
+                )
+                .unwrap();
+            }
             if kind == "assistant"
                 && let Some(usage) = message.get("usage")
             {
@@ -358,6 +367,94 @@ fn star_catalog_fixture_parity() {
         "star parity: {} rows; copy owner, parents, titles, models, status, exclusive/shared usage, unique spawn, transcript suppression",
         rows.len()
     );
+}
+
+#[test]
+fn star_catalog_placeholder_lineage_parity() {
+    let home = Home::new();
+    let inputs = [
+        (
+            1,
+            "bridge-a",
+            vec![
+                json!({"type":"bridge-session","bridgeSessionId":"remote"}),
+                uuid(human("bridge-a", ts(0, 0), "same text"), "equal"),
+            ],
+        ),
+        (
+            2,
+            "bridge-b",
+            vec![
+                json!({"type":"bridge-session","bridgeSessionId":"remote"}),
+                uuid(human("bridge-b", ts(0, 1), "same text"), "equal"),
+            ],
+        ),
+        (
+            3,
+            "alias-a",
+            vec![
+                json!({"type":"user","timestamp":ts(1,0),"session_id":"missing","message":{"role":"user","content":"one"}}),
+            ],
+        ),
+        (
+            4,
+            "alias-b",
+            vec![
+                json!({"type":"user","timestamp":ts(1,1),"session_id":"missing","message":{"role":"user","content":"two"}}),
+            ],
+        ),
+        (
+            5,
+            "missing",
+            vec![human("missing", ts(1, 2), "late source")],
+        ),
+    ];
+    let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+    // Connect through absent endpoints first, then admit the physical endpoint.
+    for (source, id, records) in &inputs {
+        home.top(id, records);
+        warehouse.source(*source, "claude", id, records);
+        let built = home.build_query();
+        let rows = warehouse.list();
+        assert_eq!(
+            rows.iter().map(|r| &r.id).collect::<Vec<_>>(),
+            built.sessions.keys().collect::<Vec<_>>()
+        );
+        for row in rows {
+            assert_eq!(row.title, built.sessions[&row.id].name, "{} title", row.id);
+            assert_eq!(
+                row.parent, built.sessions[&row.id].parent,
+                "{} parent",
+                row.id
+            );
+        }
+    }
+    let built = home.build_query();
+    assert_eq!(turns_of(&built, "bridge-a").len(), 2);
+    assert_eq!(
+        warehouse
+            .detail("bridge-a")
+            .iter()
+            .filter(|r| r.2 == "user")
+            .count(),
+        2,
+        "bridge peers must not suppress equal UUIDs"
+    );
+    assert_eq!(turns_of(&built, "alias-a").len(), 3);
+    assert_eq!(
+        warehouse
+            .detail("alias-a")
+            .iter()
+            .filter(|r| r.2 == "user")
+            .count(),
+        3
+    );
+    let mut reversed = Warehouse::new(std::path::Path::new(":memory:"));
+    for (source, id, records) in inputs.iter().rev() {
+        reversed.source(*source, "claude", id, records);
+    }
+    assert_eq!(warehouse.detail("alias-a"), reversed.detail("alias-a"));
+    assert_eq!(warehouse.detail("bridge-a"), reversed.detail("bridge-a"));
 }
 
 #[test]
