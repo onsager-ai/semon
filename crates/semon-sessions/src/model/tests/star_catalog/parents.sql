@@ -39,7 +39,7 @@ WITH RECURSIVE native AS MATERIALIZED (
   FROM offered
 ), chosen AS MATERIALIZED (SELECT * FROM ranked WHERE n=1),
 parent_chain(child,node) AS (
-  SELECT child,parent FROM chosen UNION
+  SELECT child,parent FROM chosen WHERE method<>'native' UNION
   SELECT r.child,c.parent FROM parent_chain r JOIN chosen c ON c.child=r.node
 ), cyclic AS (SELECT DISTINCT child FROM parent_chain WHERE child=node)
 SELECT c.child,c.parent,c.call_id,c.method FROM chosen c

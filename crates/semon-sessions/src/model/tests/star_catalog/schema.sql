@@ -22,6 +22,19 @@ CREATE TABLE fact_tool_call (
   tool TEXT NOT NULL, task_name TEXT, ts INTEGER,
   PRIMARY KEY(source,pos)
 );
+CREATE TABLE fact_relay_send (
+  source INTEGER NOT NULL,pos INTEGER NOT NULL,block INTEGER NOT NULL,
+  call_id TEXT NOT NULL,target TEXT NOT NULL,ts INTEGER,
+  PRIMARY KEY(source,pos,block)
+);
+CREATE TABLE fact_relay_result (
+  source INTEGER NOT NULL,pos INTEGER NOT NULL,call_id TEXT NOT NULL,
+  correlation TEXT,failed INTEGER NOT NULL,PRIMARY KEY(source,pos)
+);
+CREATE TABLE fact_relay_receipt (
+  source INTEGER NOT NULL,pos INTEGER NOT NULL,correlation TEXT,
+  name TEXT NOT NULL,pid INTEGER,start TEXT,sock TEXT,PRIMARY KEY(source,pos)
+);
 CREATE TABLE fact_tool_result (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, call_id TEXT NOT NULL,
   ts INTEGER, PRIMARY KEY(source,pos)
