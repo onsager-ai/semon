@@ -35,6 +35,17 @@ CREATE TABLE fact_relay_receipt (
   source INTEGER NOT NULL,pos INTEGER NOT NULL,correlation TEXT,
   name TEXT NOT NULL,pid INTEGER,start TEXT,sock TEXT,PRIMARY KEY(source,pos)
 );
+-- Native event qualification and body recipes are origin-local references.
+-- `event` disambiguates several agent tags at one record position; flags retain
+-- direction/finality. Result attachment revises the call observation in place.
+CREATE TABLE fact_subagent_event (
+  source INTEGER NOT NULL,event INTEGER NOT NULL,pos INTEGER NOT NULL,
+  block INTEGER NOT NULL,kind TEXT NOT NULL,ts INTEGER,id TEXT,name TEXT,
+  flags INTEGER NOT NULL,reply_pos INTEGER,reply_block INTEGER,reply_ts INTEGER,
+  reply_error INTEGER NOT NULL,reply_flags INTEGER NOT NULL,correlation TEXT,
+  peer_pid INTEGER,peer_start TEXT,peer_sock TEXT,
+  PRIMARY KEY(source,event)
+);
 CREATE TABLE fact_tool_result (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, call_id TEXT NOT NULL,
   ts INTEGER, PRIMARY KEY(source,pos)

@@ -3320,87 +3320,7 @@ impl<'a> Builder<'a> {
         finals: &[Ref],
         ends: &[Ref],
     ) -> (Vec<Run>, BTreeSet<Ref>) {
-        /// At one time, ends sort before starts: a message written with a
-        /// hand-back follows it.
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-        enum Step {
-            Final,
-            Handback,
-            End,
-            Start,
-        }
-        let mut steps: Vec<(Ref, Step)> = finals
-            .iter()
-            .map(|at| (*at, Step::Final))
-            .chain(ends.iter().map(|at| (*at, Step::End)))
-            .collect();
-        for at in child_events {
-            let found = event(self.files, *at);
-            let step = match found.k {
-                Kind::Tool if found.n.as_deref() == Some("SubagentHandback") => Step::Handback,
-                Kind::Agm if found.script & AGM_DOWN != 0 => Step::Start,
-                Kind::U if Some(*at) != first_prompt => Step::Start,
-                _ => continue,
-            };
-            steps.push((*at, step));
-        }
-        steps.sort_by_key(|(at, step)| {
-            let t = event(self.files, *at).t;
-            (t.is_none(), t, *step, *at)
-        });
-        let mut runs = vec![Run::default()];
-        let mut inline = BTreeSet::new();
-        for (at, step) in steps {
-            let last = runs.len() - 1;
-            match step {
-                Step::Start if runs[last].ended() => runs.push(Run::default()),
-                Step::Start => {
-                    if event(self.files, at).k == Kind::Agm {
-                        inline.insert(at);
-                    }
-                }
-                // The parent records a hand-back at its next turn, so it can
-                // land after the message that resumed the child: it belongs
-                // to the run the child handed back, when that one has none.
-                Step::Final => {
-                    let target = if last > 0
-                        && !runs[last].ended()
-                        && runs[last - 1].handback.is_some()
-                        && runs[last - 1].fin.is_none()
-                    {
-                        last - 1
-                    } else {
-                        last
-                    };
-                    runs[target].fin = Some(at);
-                }
-                Step::Handback => runs[last].handback = Some(at),
-                // A completed notification after a resume ends the run that
-                // handed back before it, when that one has none. A failed or
-                // killed one is about the run still open: the one before had
-                // handed back, so it didn't fail.
-                Step::End => {
-                    let completed = matches!(
-                        event(self.files, at).n.as_deref(),
-                        Some("completed" | "success" | "done")
-                    );
-                    let target = if last > 0
-                        && completed
-                        && !runs[last].ended()
-                        && runs[last - 1].handed_back()
-                        && runs[last - 1].tn.is_none()
-                    {
-                        last - 1
-                    } else {
-                        last
-                    };
-                    if runs[target].tn.is_none() {
-                        runs[target].tn = Some(at);
-                    }
-                }
-            }
-        }
-        (runs, inline)
+        relay_match::claude_runs(self.files, child_events, first_prompt, finals, ends)
     }
 
     /// Pairs each message `child`'s parent sent it while it ran or to resume
@@ -3489,51 +3409,7 @@ impl<'a> Builder<'a> {
                 })
             })
             .collect();
-        let files = self.files;
-        // Sent no later than it arrived, when both times are known.
-        let before = |send: Ref, down: Ref| {
-            event(files, send)
-                .t
-                .zip(event(files, down).t)
-                .is_none_or(|(sent, arrived)| sent <= arrived)
-        };
-        let mut claims: Vec<Option<usize>> = vec![None; downs.len()];
-        let mut used = vec![false; sends.len()];
-        let mut next = 0;
-        for (index, down) in downs.iter().enumerate() {
-            let Some(body) = bodies[index].as_deref().map(str::trim) else {
-                continue;
-            };
-            let found = (next..sends.len()).find(|send| {
-                !used[*send]
-                    && before(sends[*send], *down)
-                    && messages[*send].as_deref().map(str::trim) == Some(body)
-            });
-            if let Some(send) = found {
-                used[send] = true;
-                claims[index] = Some(send);
-                next = send + 1;
-            }
-        }
-        for (index, down) in downs.iter().enumerate() {
-            if claims[index].is_some() {
-                continue;
-            }
-            let low = claims[..index]
-                .iter()
-                .rev()
-                .find_map(|claim| *claim)
-                .map_or(0, |send| send + 1);
-            let high = claims[index + 1..]
-                .iter()
-                .find_map(|claim| *claim)
-                .unwrap_or(sends.len());
-            let found = (low..high).find(|send| !used[*send] && before(sends[*send], *down));
-            if let Some(send) = found {
-                used[send] = true;
-                claims[index] = Some(send);
-            }
-        }
+        let claims = relay_match::pair_downs(self.files, &sends, &messages, &downs, &bodies);
         for (index, down) in downs.iter().enumerate() {
             let send = claims[index].map(|claim| sends[claim]);
             let brief = match claims[index] {

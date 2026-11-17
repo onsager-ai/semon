@@ -20,6 +20,7 @@ struct Warehouse {
     // Test analogue of the authorized native body reader, outside SQLite.
     titles: BTreeMap<(i64, i64), String>,
     marker_decided: BTreeMap<i64, bool>,
+    native: BTreeMap<i64, crate::events::FileIndex>,
     maintenance: std::time::Duration,
     appends: u64,
 }
@@ -59,6 +60,7 @@ impl Warehouse {
             db,
             titles: BTreeMap::new(),
             marker_decided: BTreeMap::new(),
+            native: BTreeMap::new(),
             maintenance: std::time::Duration::ZERO,
             appends: 0,
         }
@@ -182,6 +184,7 @@ impl Warehouse {
                 .unwrap();
             }
             if harness == "claude" {
+                crate::events::claude(self.native.entry(source).or_default(), record, pos as u64);
                 if let Some(content) = message["content"].as_array() {
                     for (block, value) in content.iter().enumerate() {
                         if value["type"] == "tool_use" {
@@ -199,7 +202,12 @@ impl Warehouse {
                                     pos,
                                     block as i64,
                                     value["id"].as_str().unwrap(),
-                                    value["input"]["to"].as_str().unwrap(),
+                                    plain_name(
+                                        value["input"]["to"]
+                                            .as_str()
+                                            .or_else(|| value["input"]["recipient"].as_str())
+                                            .unwrap_or("")
+                                    ),
                                     time
                                 ],
                             )
@@ -222,14 +230,17 @@ impl Warehouse {
                     }
                 }
                 let origin = &record["origin"];
-                if origin["kind"] == "peer" {
+                if origin["kind"] == "peer"
+                    && origin["senderTaskId"].is_null()
+                    && origin["handback"] != true
+                {
                     tx.execute(
                         "INSERT INTO fact_relay_receipt VALUES(?1,?2,?3,?4,?5,?6,?7)",
                         params![
                             source,
                             pos,
                             origin["msg_id"].as_str(),
-                            origin["name"].as_str().unwrap_or(""),
+                            plain_name(origin["name"].as_str().unwrap_or("")),
                             origin["verifiedPeerPid"].as_i64(),
                             origin["verifiedPeerProcStart"].as_str(),
                             origin["from"].as_str()
@@ -259,6 +270,38 @@ impl Warehouse {
                 tx.execute(
                     "INSERT INTO fact_tool_result VALUES(?1,?2,?3,?4)",
                     params![source, pos, payload["call_id"].as_str().unwrap(), time],
+                )
+                .unwrap();
+            }
+        }
+        if let Some(native) = self.native.get(&source) {
+            for (index, event) in native.events.iter().enumerate() {
+                let reply = event.r.as_ref();
+                let peer = event.peer.as_ref();
+                tx.execute(
+                    "INSERT OR REPLACE INTO fact_subagent_event VALUES(
+                     ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+                    params![
+                        source,
+                        index as i64,
+                        i64::try_from(event.o).unwrap(),
+                        event.b,
+                        serde_json::to_value(event.k).unwrap().as_str().unwrap(),
+                        event.t,
+                        event.id,
+                        event.n,
+                        event.script,
+                        reply.map(|r| i64::try_from(r.o).unwrap()),
+                        reply.map(|r| r.b),
+                        reply.and_then(|r| r.t),
+                        reply.is_some_and(|r| r.e),
+                        reply.map_or(0, |r| r.f),
+                        reply.and_then(|r| r.m.as_deref()),
+                        peer.and_then(|p| p.pid)
+                            .map(|pid| i64::try_from(pid).unwrap()),
+                        peer.and_then(|p| p.start.as_deref()),
+                        peer.and_then(|p| p.sock.as_deref())
+                    ],
                 )
                 .unwrap();
             }
@@ -1101,6 +1144,468 @@ fn star_catalog_relay_endpoint_parity() {
     }
 }
 
+// The source reader is deliberately outside SQLite. Event facts carry the
+// source/record/block recipe, and only the authorized origin opens the body.
+fn selected_record(files: &[SourceFile], at: Ref) -> Value {
+    let line = fs::read_to_string(&files[at.0].path).unwrap();
+    serde_json::from_str(line[event(files, at).o as usize..].lines().next().unwrap()).unwrap()
+}
+
+struct SelectedRelation {
+    handoff: H,
+    positions: Vec<Ref>,
+    head: Option<usize>,
+}
+
+fn selected_claude_relations(
+    warehouse: &Warehouse,
+    files: &[SourceFile],
+    source_files: &BTreeMap<i64, usize>,
+    sessions: &BTreeMap<i64, usize>,
+    rows: &[ListRow],
+) -> (Vec<SelectedRelation>, BTreeSet<Ref>) {
+    let observations: Vec<(i64, i64, u32, String, usize)> = warehouse
+        .db
+        .prepare("SELECT source,pos,block,kind,row_number() OVER (PARTITION BY source,pos,block,kind ORDER BY event)-1 FROM fact_subagent_event ORDER BY source,event")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let selected: BTreeSet<_> = rows
+        .iter()
+        .flat_map(|row| warehouse.detail(&row.id))
+        .map(|(source, pos, _)| (source_files[&source], pos as u64))
+        .collect();
+    let refs: BTreeSet<Ref> = observations
+        .into_iter()
+        .map(|(source, pos, block, kind, ordinal)| {
+            let file = source_files[&source];
+            let index = files[file]
+                .summary
+                .events
+                .iter()
+                .enumerate()
+                .filter(|(_, e)| {
+                    e.o == pos as u64
+                        && e.b == block
+                        && serde_json::to_value(e.k).unwrap().as_str() == Some(kind.as_str())
+                })
+                .nth(ordinal)
+                .unwrap()
+                .0;
+            (file, index)
+        })
+        .filter(|at| selected.contains(&(at.0, event(files, *at).o)))
+        .collect();
+    let owner_of: BTreeMap<usize, usize> = warehouse
+        .db
+        .prepare("SELECT source,owner FROM bridge_session_owner")
+        .unwrap()
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)))
+        .unwrap()
+        .map(|r| {
+            let (source, owner) = r.unwrap();
+            (source_files[&source], sessions[&owner])
+        })
+        .collect();
+    let events_of = |session| {
+        refs.iter()
+            .copied()
+            .filter(|at| owner_of[&at.0] == session)
+            .collect::<Vec<_>>()
+    };
+    let body = |at, key: &str| {
+        let record = selected_record(files, at);
+        input_string(&record, event(files, at).b as usize, &[key])
+    };
+    let receipt_bodies = |key: &str, received: &[Ref]| {
+        received
+            .iter()
+            .enumerate()
+            .map(|(index, at)| {
+                let skip = received[..index]
+                    .iter()
+                    .filter(|other| {
+                        other.0 == at.0 && event(files, **other).o == event(files, *at).o
+                    })
+                    .count();
+                received_body(
+                    &selected_record(files, *at),
+                    "agent-message",
+                    Some(key),
+                    skip,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let parents: Vec<(i64, i64, Option<String>)> = warehouse
+        .db
+        .prepare(
+            "SELECT p.child,p.parent,p.call_id FROM parent_selection p
+         JOIN fact_agent_observation a ON a.source=p.child ORDER BY p.child",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let mut relations = Vec::new();
+    let mut handled = BTreeSet::new();
+    let mut claimed_receipts = BTreeSet::new();
+    for (child_source, parent_source, call_id) in parents {
+        let child = sessions[&child_source];
+        let parent = sessions[&parent_source];
+        let key = &rows[child].id;
+        let child_refs = events_of(child);
+        let parent_refs = events_of(parent);
+        let first_prompt = child_refs
+            .iter()
+            .copied()
+            .find(|at| event(files, *at).k == Kind::U);
+        let call = call_id.as_deref().and_then(|id| {
+            parent_refs.iter().copied().find(|at| {
+                event(files, *at).id.as_deref() == Some(id) && event(files, *at).k == Kind::Tool
+            })
+        });
+        let mut received: Vec<Ref> = parent_refs
+            .iter()
+            .copied()
+            .filter(|at| {
+                let e = event(files, *at);
+                e.k == Kind::Agm
+                    && e.script & AGM_UP != 0
+                    && [e.id.as_deref(), e.n.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|id| id == key || Some(id) == call_id.as_deref())
+            })
+            .collect();
+        received.sort_by_key(|at| {
+            let t = event(files, *at).t;
+            (t.is_none(), t, *at)
+        });
+        let (finals, received): (Vec<_>, Vec<_>) = received
+            .into_iter()
+            .partition(|at| event(files, *at).script & AGM_FINAL != 0);
+        let positions: Vec<_> = child_refs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, at)| {
+                let e = event(files, *at);
+                (e.k == Kind::Tool
+                    && e.n.as_deref() == Some("SendMessage")
+                    && !e.r.as_ref().is_some_and(|r| {
+                        r.e || r.f & (DENIED | SEND_FAILED | PIN) != 0 || r.m.is_some()
+                    })
+                    && plain_name(
+                        &body(*at, "to")
+                            .or_else(|| body(*at, "recipient"))
+                            .unwrap_or_default(),
+                    ) == PARENT_ADDRESS)
+                    .then_some(index)
+            })
+            .collect();
+        let messages = positions
+            .iter()
+            .map(|index| {
+                body(child_refs[*index], "message").or_else(|| body(child_refs[*index], "content"))
+            })
+            .collect::<Vec<_>>();
+        let bodies = receipt_bodies(key, &received);
+        let (claims, paired) = relay_match::pair_sends(
+            files,
+            &child_refs,
+            &positions,
+            &messages,
+            &received,
+            &bodies,
+        );
+        for (send, claim) in claims.iter().enumerate() {
+            let at = child_refs[positions[send]];
+            let e = event(files, at);
+            let receipt = claim.map(|index| received[index]);
+            // Pending sends can claim a receipt before the result is admitted;
+            // the native builder draws that receipt independently until then.
+            if e.r.is_none() {
+                continue;
+            }
+            claimed_receipts.extend(receipt);
+            handled.insert(at);
+            let source = receipt
+                .filter(|r| event(files, *r).script & AGM_PROGRESS != 0)
+                .map(|r| format!("relay:recv:{}:{}", files[r.0].id, event(files, r).o))
+                .unwrap_or_else(|| format!("relay:tool:{}", e.id.as_deref().unwrap()));
+            let out = Handoff::new(
+                stable_id("r", &source),
+                "relay",
+                (key.clone(), rows[parent].id.clone()),
+                e.t.unwrap(),
+                "done",
+                messages[send].as_deref().unwrap_or(""),
+            );
+            relations.push(SelectedRelation {
+                handoff: H {
+                    out,
+                    from: Some(child),
+                    to: Some(parent),
+                    previews: None,
+                    preview_owners: BTreeMap::new(),
+                    inline: false,
+                },
+                positions: std::iter::once(at).chain(receipt).collect(),
+                head: None,
+            });
+        }
+        let ends = parent_refs
+            .iter()
+            .copied()
+            .filter(|at| {
+                let e = event(files, *at);
+                e.k == Kind::Tn
+                    && e.id == call_id
+                    && !matches!(e.n.as_deref(), None | Some("running" | "started"))
+            })
+            .collect::<Vec<_>>();
+        let (runs, inline) =
+            relay_match::claude_runs(files, &child_refs, first_prompt, &finals, &ends);
+        let mut completion = None;
+        if let Some(run) = runs.iter().rev().find(|run| run.ended()) {
+            let done = [run.fin, run.tn, run.handback]
+                .into_iter()
+                .flatten()
+                .filter_map(|at| event(files, at).t)
+                .min();
+            let failed = run.tn.is_some_and(|at| {
+                !matches!(
+                    event(files, at).n.as_deref(),
+                    Some("completed" | "success" | "done")
+                )
+            });
+            let result = if let Some(at) = run.fin {
+                let index = finals.iter().position(|r| *r == at).unwrap();
+                receipt_bodies(key, &finals)[index].clone()
+            } else if let Some(at) = run.tn {
+                notification_result(
+                    &selected_record(files, at),
+                    call_id.as_deref().unwrap_or(""),
+                )
+            } else {
+                run.handback.and_then(|at| body(at, "message"))
+            };
+            completion = Some((result, done, failed));
+        }
+        if completion.is_none()
+            && let Some(index) = (0..received.len())
+                .rev()
+                .find(|i| !paired[*i] && event(files, received[*i]).script & AGM_PROGRESS == 0)
+        {
+            completion = Some((
+                bodies[index].clone(),
+                event(files, received[index]).t,
+                false,
+            ));
+        }
+        if completion.is_none()
+            && let Some(at) = call
+            && let Some(reply) = event(files, at).r.as_ref()
+            && reply.f & ASYNC == 0
+        {
+            completion = Some((
+                {
+                    let text = fs::read_to_string(&files[at.0].path).unwrap();
+                    let record =
+                        serde_json::from_str(text[reply.o as usize..].lines().next().unwrap())
+                            .unwrap();
+                    tool_result_text(&record, reply.b as usize)
+                },
+                reply.t,
+                reply.e,
+            ));
+        }
+        let mut out = Handoff::new(
+            stable_id("s", &format!("spawn:claude:{key}")),
+            "spawn",
+            (rows[parent].id.clone(), key.clone()),
+            call.and_then(|at| event(files, at).t)
+                .unwrap_or(files[source_files[&child_source]].first.unwrap()),
+            if completion.as_ref().is_some_and(|c| c.2) {
+                "err"
+            } else {
+                "done"
+            },
+            "",
+        );
+        out.done = completion.as_ref().and_then(|c| c.1);
+        out.result = completion.and_then(|c| c.0);
+        relations.push(SelectedRelation {
+            handoff: H {
+                out,
+                from: Some(parent),
+                to: Some(child),
+                previews: None,
+                preview_owners: BTreeMap::new(),
+                inline: false,
+            },
+            positions: call.into_iter().chain(first_prompt).collect(),
+            head: first_prompt.is_none().then_some(child),
+        });
+        let names = [
+            Some(key.clone()),
+            call.and_then(|at| body(at, "name")).map(|n| plain_name(&n)),
+        ];
+        let sends = parent_refs
+            .iter()
+            .copied()
+            .filter(|at| {
+                let e = event(files, *at);
+                if e.k != Kind::Tool || e.n.as_deref() != Some("SendMessage") {
+                    return false;
+                }
+                let Some(r) = e.r.as_ref() else {
+                    return false;
+                };
+                if r.e || r.f & (DENIED | SEND_FAILED) != 0 || r.m.is_some() {
+                    return false;
+                }
+                let record = if r.o == e.o {
+                    selected_record(files, *at)
+                } else {
+                    let text = fs::read_to_string(&files[at.0].path).unwrap();
+                    serde_json::from_str(text[r.o as usize..].lines().next().unwrap()).unwrap()
+                };
+                if let Some(id) = down_target(&record, r.b as usize).filter(|id| !id.is_empty()) {
+                    return id == *key;
+                }
+                let target = plain_name(
+                    &body(*at, "to")
+                        .or_else(|| body(*at, "recipient"))
+                        .unwrap_or_default(),
+                );
+                names.iter().flatten().any(|n| *n == target)
+            })
+            .collect::<Vec<_>>();
+        handled.extend(sends.iter().copied());
+        let downs = child_refs
+            .iter()
+            .copied()
+            .filter(|at| {
+                let e = event(files, *at);
+                e.k == Kind::Agm && e.script & AGM_DOWN != 0
+            })
+            .collect::<Vec<_>>();
+        let messages = sends
+            .iter()
+            .map(|at| body(*at, "message").or_else(|| body(*at, "content")))
+            .collect::<Vec<_>>();
+        let bodies = downs
+            .iter()
+            .map(|at| coordinator_body(&selected_record(files, *at)))
+            .collect::<Vec<_>>();
+        let claims = relay_match::pair_downs(files, &sends, &messages, &downs, &bodies);
+        for (index, down) in downs.into_iter().enumerate() {
+            let send = claims[index].map(|i| sends[i]);
+            let brief = claims[index]
+                .and_then(|i| messages[i].as_deref())
+                .or(bodies[index].as_deref())
+                .unwrap_or("");
+            let out = Handoff::new(
+                stable_id(
+                    "r",
+                    &format!("relay:down:{}:{}", files[down.0].id, event(files, down).o),
+                ),
+                "relay",
+                (rows[parent].id.clone(), key.clone()),
+                send.and_then(|at| event(files, at).t)
+                    .or(event(files, down).t)
+                    .unwrap(),
+                "done",
+                brief,
+            );
+            relations.push(SelectedRelation {
+                handoff: H {
+                    out,
+                    from: Some(parent),
+                    to: Some(child),
+                    previews: None,
+                    preview_owners: BTreeMap::new(),
+                    inline: inline.contains(&down),
+                },
+                positions: send.into_iter().chain(Some(down)).collect(),
+                head: None,
+            });
+        }
+    }
+    // A progress receipt stands alone until its send/result appears. The
+    // sender identity is a real subagent only when role-qualified facts say so.
+    for at in refs.iter().copied() {
+        let e = event(files, at);
+        if e.k != Kind::Agm || e.script & AGM_PROGRESS == 0 || claimed_receipts.contains(&at) {
+            continue;
+        }
+        let from = [
+            e.peer.as_ref().and_then(|p| p.sock.as_deref()),
+            e.id.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|id| rows.iter().position(|row| row.id == id))
+        .filter(|session| {
+            source_files.iter().any(|(source, file)| {
+                owner_of[file] == *session
+                    && warehouse
+                        .db
+                        .query_row(
+                            "SELECT count(*) FROM fact_agent_observation WHERE source=?1",
+                            [source],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .unwrap()
+                        > 0
+            })
+        });
+        let to = owner_of[&at.0];
+        let name = plain_name(e.n.as_deref().or(e.id.as_deref()).unwrap_or(""));
+        let identity = match e.peer.as_ref() {
+            Some(peer) if peer.pid.is_some() => format!(
+                "pid:{}:{}",
+                peer.pid.unwrap(),
+                peer.start.as_deref().unwrap_or("")
+            ),
+            Some(peer) if peer.sock.is_some() => format!("sock:{}", peer.sock.as_deref().unwrap()),
+            _ => format!("name:{name}"),
+        };
+        let mut out = Handoff::new(
+            stable_id("r", &format!("relay:recv:{}:{}", files[at.0].id, e.o)),
+            "relay",
+            (
+                from.map(|i| rows[i].id.clone())
+                    .unwrap_or_else(|| stable_id("peer-", &identity)),
+                rows[to].id.clone(),
+            ),
+            e.t.unwrap(),
+            "done",
+            received_body(&selected_record(files, at), "agent-message", None, 0)
+                .as_deref()
+                .unwrap_or(""),
+        );
+        out.unmatched = from.is_none();
+        relations.push(SelectedRelation {
+            handoff: H {
+                out,
+                from,
+                to: Some(to),
+                previews: None,
+                preview_owners: BTreeMap::new(),
+                inline: false,
+            },
+            positions: vec![at],
+            head: None,
+        });
+    }
+    (relations, handled)
+}
+
 // Origin-local fixture adapter: SQL selects source positions and relationships;
 // the native reader supplies events/bodies at those positions. No Builder or
 // Builder-produced handoff, entry, session, or turn is an input to this path.
@@ -1173,6 +1678,8 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
             .unwrap();
         states.push(runtime.unwrap_or((state.into(), None)));
     }
+    let (native_relations, native_handled) =
+        selected_claude_relations(warehouse, &files, &source_files, &sessions, &rows);
     let mut handoffs = Vec::new();
     let mut placed = HashMap::<Ref, Vec<usize>>::new();
     let mut heads = BTreeMap::new();
@@ -1305,6 +1812,9 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
                 .iter()
                 .position(|e| e.o == pos as u64 && e.id.as_deref() == Some(call.as_str()))
                 .unwrap();
+            if native_handled.contains(&(file, i)) {
+                continue;
+            }
             let mut positions = vec![(file, i)];
             if let Some(correlation) = &correlation {
                 let receipt: Option<(i64, i64)> = warehouse
@@ -1389,6 +1899,48 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
             add(out, None, Some(to), vec![(file, i)]);
         }
     }
+    let expected = home.build_query();
+    for relation in &native_relations {
+        if relation.handoff.out.kind != "relay" {
+            continue;
+        }
+        let actual = &relation.handoff.out;
+        let expected = expected
+            .handoffs
+            .iter()
+            .find(|h| h.id == actual.id)
+            .unwrap_or_else(|| panic!("unexpected native relay {}", actual.id));
+        assert_eq!(
+            (
+                &actual.from,
+                &actual.to,
+                actual.at,
+                actual.status,
+                &actual.brief,
+                actual.unmatched
+            ),
+            (
+                &expected.from,
+                &expected.to,
+                expected.at,
+                expected.status,
+                &expected.brief,
+                expected.unmatched
+            ),
+            "native relay {}",
+            actual.id
+        );
+    }
+    for relation in native_relations {
+        let h = handoffs.len();
+        handoffs.push(relation.handoff);
+        for at in relation.positions {
+            placed.entry(at).or_default().push(h);
+        }
+        if let Some(child) = relation.head {
+            heads.insert(child, h);
+        }
+    }
     let mut actual = BTreeMap::new();
     for (session, row) in rows.iter().enumerate() {
         let mut members: Vec<_> = selected[session]
@@ -1424,7 +1976,9 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
                         Kind::U => Some(EntryKind::U),
                         Kind::A => Some(EntryKind::A),
                         Kind::Gap => Some(EntryKind::Gap),
-                        Kind::Tool => Some(EntryKind::Tool(tool_state(found))),
+                        Kind::Tool if found.n.as_deref() != Some("SubagentHandback") => {
+                            Some(EntryKind::Tool(tool_state(found)))
+                        }
                         _ => None,
                     }
                     .into_iter()
@@ -1500,6 +2054,188 @@ fn assert_selected_turns(warehouse: &Warehouse, home: &Home) {
             serde_json::to_value(turns_of(&expected, &id)).unwrap(),
             "{id} complete causal turns"
         );
+    }
+}
+
+#[test]
+fn star_catalog_subagent_body_time_and_turn_arrival_parity() {
+    for reverse in [false, true] {
+        for legacy in [false, true] {
+            let home = Home::new();
+            let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+            let mut parent = vec![
+                human("lead", ts(20, 0), "work"),
+                assistant(
+                    "lead",
+                    ts(20, 1),
+                    vec![tool(
+                        "spawn",
+                        "Agent",
+                        json!({"prompt":"work","name":"worker"}),
+                    )],
+                ),
+                result(
+                    "lead",
+                    ts(20, 1),
+                    "spawn",
+                    "launched",
+                    false,
+                    json!({"status":"async_launched","agentId":"child"}),
+                ),
+            ];
+            // Body pass skips a wrong receipt, then the time pass claims it
+            // between neighbouring exact claims. Same-position tags exercise
+            // receipt body indexing without storing any body in SQL.
+            if legacy {
+                parent.push(agm_line(
+                    3,
+                    &[("other", "not this child"), ("child", "first")],
+                ));
+                parent.push(agm_line(5, &[("child", "escaped second")]));
+                parent.push(agm_line(7, &[("child", "third")]));
+                parent.push(agm_line(9, &[("child", "final answer")]));
+            } else {
+                parent.push(agent_send("lead", ts(20, 3), "child", "first"));
+                parent.push(agent_send("lead", ts(20, 5), "child", "escaped second"));
+                parent.push(agent_send("lead", ts(20, 7), "child", "third"));
+                parent.push(hand_back("lead", ts(20, 9), "child", "final answer"));
+            }
+            parent.push(notification(
+                "lead",
+                ts(20, 10),
+                "spawn",
+                "completed",
+                "final answer",
+            ));
+            let mut child = vec![user("lead", ts(20, 1), "work")];
+            child.extend(send_to_main("first", 2, "first", queued_reply()));
+            child.extend(send_to_main("second", 4, "second", queued_reply()));
+            child.push(child_says(5, "still working"));
+            child.extend(send_to_main("third", 6, "third", queued_reply()));
+            child.push(child_says(8, "final answer"));
+            for source in if reverse { [2, 1] } else { [1, 2] } {
+                if source == 1 {
+                    home.top("lead", &parent);
+                    warehouse.source(1, "claude", "lead", &parent);
+                } else {
+                    home.agent("lead", "child", "spawn", &child);
+                    warehouse.source(2, "claude", "child", &child);
+                    warehouse
+                        .db
+                        .execute(
+                            "INSERT INTO fact_agent_observation VALUES(2,'lead','spawn')",
+                            [],
+                        )
+                        .unwrap();
+                }
+                assert_selected_turns(&warehouse, &home);
+            }
+            let built = home.build_query();
+            assert_eq!(
+                built
+                    .handoffs
+                    .iter()
+                    .filter(|h| h.kind == "relay" && h.from == "child")
+                    .count(),
+                3
+            );
+            assert_eq!(
+                only(&built, "spawn", "lead", "child").result.as_deref(),
+                Some("final answer")
+            );
+        }
+    }
+}
+
+#[test]
+fn star_catalog_subagent_inline_pin_resume_turn_arrival_parity() {
+    for reverse in [false, true] {
+        let home = Home::new();
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        let mut parent = vec![
+            human("lead", ts(20, 0), "work"),
+            assistant(
+                "lead",
+                ts(20, 1),
+                vec![tool(
+                    "spawn",
+                    "Agent",
+                    json!({"prompt":"work","name":"worker"}),
+                )],
+            ),
+            result(
+                "lead",
+                ts(20, 1),
+                "spawn",
+                "launched",
+                false,
+                json!({"status":"async_launched","agentId":"child"}),
+            ),
+        ];
+        parent.extend(send_to_agent(
+            "inline",
+            2,
+            "worker [native label]",
+            "also this",
+            json!({"success":true,"pin":{"id":"child"}}),
+        ));
+        parent.push(hand_back("lead", ts(20, 4), "child", "first result"));
+        parent.push(notification(
+            "lead",
+            ts(20, 5),
+            "spawn",
+            "completed",
+            "first result",
+        ));
+        parent.extend(send_to_agent(
+            "resume",
+            6,
+            "child",
+            "again",
+            resumed("child"),
+        ));
+        parent.push(hand_back("lead", ts(20, 9), "child", "second result"));
+        let child = vec![
+            user("lead", ts(20, 1), "work"),
+            coordinator("lead", ts(20, 3), "also this"),
+            assistant(
+                "lead",
+                ts(20, 4),
+                vec![tool(
+                    "back",
+                    "SubagentHandback",
+                    json!({"message":"first result"}),
+                )],
+            ),
+            coordinator("lead", ts(20, 7), "again"),
+            assistant(
+                "lead",
+                ts(20, 8),
+                vec![tool(
+                    "back2",
+                    "SubagentHandback",
+                    json!({"message":"second result"}),
+                )],
+            ),
+        ];
+        for source in if reverse { [2, 1] } else { [1, 2] } {
+            if source == 1 {
+                home.top("lead", &parent);
+                warehouse.source(1, "claude", "lead", &parent);
+            } else {
+                home.agent("lead", "child", "spawn", &child);
+                warehouse.source(2, "claude", "child", &child);
+                warehouse
+                    .db
+                    .execute(
+                        "INSERT INTO fact_agent_observation VALUES(2,'lead','spawn')",
+                        [],
+                    )
+                    .unwrap();
+            }
+            assert_selected_turns(&warehouse, &home);
+        }
+        assert_eq!(turns_of(&home.build_query(), "child").len(), 2);
     }
 }
 
@@ -1674,14 +2410,14 @@ fn star_catalog_gap_turn_parity() {
         .db
         .execute(
             "INSERT INTO fact_record VALUES(1,?1,'gap',NULL,NULL,NULL)",
-            [pos],
+            [i64::try_from(pos).unwrap()],
         )
         .unwrap();
     warehouse
         .db
         .execute(
             "UPDATE index_advance SET complete_bytes=?1 WHERE source=1",
-            [pos + gap.len() as u64],
+            [i64::try_from(pos + gap.len() as u64).unwrap()],
         )
         .unwrap();
     assert_selected_turns(&warehouse, &home);
