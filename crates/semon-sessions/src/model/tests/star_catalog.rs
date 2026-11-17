@@ -2693,9 +2693,133 @@ fn star_catalog_family_usage_parity() {
     }
 }
 
+// Fold the builder's per-owner evidence in its actual leaf-queue order. The
+// family activity cost below independently checks that these token observations
+// select the same native step as the production analytics fold.
+fn assert_shared_family_parity(home: &Home, warehouse: &Warehouse) {
+    use sha2::{Digest, Sha256};
+    let built = home.build_query();
+    let rows = warehouse.list();
+    let mut pending: BTreeMap<_, usize> = built.sessions.keys().map(|id| (id, 0)).collect();
+    let mut folds = BTreeMap::new();
+    for (id, session) in &built.sessions {
+        if let Some(count) = session.parent.as_ref().and_then(|id| pending.get_mut(id)) {
+            *count += 1;
+        }
+        folds.insert(
+            id,
+            session
+                .claude_usage
+                .as_ref()
+                .map_or_else(BTreeMap::new, |e| {
+                    e.shared
+                        .iter()
+                        .map(|(key, tokens)| {
+                            (
+                                key.clone(),
+                                [tokens.input, tokens.cached_input, tokens.output],
+                            )
+                        })
+                        .collect()
+                }),
+        );
+    }
+    let mut ready: std::collections::VecDeque<_> = pending
+        .iter()
+        .filter_map(|(id, count)| (*count == 0).then_some(*id))
+        .collect();
+    while let Some(id) = ready.pop_front() {
+        let expected = folds.remove(id).unwrap();
+        let owner = rows.iter().find(|row| &row.id == id).unwrap().owner;
+        let mut actual = BTreeMap::new();
+        let mut cost = 0.0;
+        let mut unknown = 0;
+        let mut statement = warehouse.db.prepare(
+            "SELECT message_id,evidence_uuid,source,pos,input,cached,output FROM family_shared_usage WHERE root=?1",
+        ).unwrap();
+        let observations = statement
+            .query_map([owner], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    [
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
+                    ],
+                ))
+            })
+            .unwrap();
+        for observation in observations {
+            let (message, uuid, source, pos, tokens) = observation.unwrap();
+            let key = format!(
+                "{:x}",
+                Sha256::digest(serde_json::to_vec(&(message.clone(), uuid)).unwrap())
+            );
+            actual.insert(key, tokens.map(|n| u64::try_from(n).unwrap()));
+            // Resolve the SQL-selected native position through the builder's
+            // parsed source usage; no rates or billing rules are duplicated.
+            let native: String = warehouse
+                .db
+                .query_row(
+                    "SELECT native_id FROM dim_session WHERE source=?1",
+                    [source],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let path = home
+                .options
+                .claude_home
+                .join(format!("projects/-work-proj/{native}.jsonl"));
+            let mut cache = EventCache::open(&home.options.cache).unwrap();
+            let index = events::scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            let used = &index.usage()[&message];
+            assert_eq!(used.offset, u64::try_from(pos).unwrap());
+            let mut priced = crate::pricing::CostBuild::with_table(crate::pricing::snapshot());
+            priced.message(used);
+            if let Some(value) = priced.finish_step().list {
+                cost += value;
+            } else {
+                unknown += 1;
+            }
+        }
+        assert_eq!(actual, expected, "{id} shared tokens");
+        if let Some(family) = built.sessions[id]
+            .activity_analytics
+            .as_ref()
+            .and_then(|a| a.family.as_ref())
+        {
+            let measured = &family.counts.totals.shared.list_cost_usd;
+            assert!(
+                (cost - measured.known).abs() < 1e-12,
+                "{id} shared cost: {cost} vs {}",
+                measured.known
+            );
+            assert_eq!(unknown, measured.unknown_steps, "{id} shared cost coverage");
+        }
+        // Retain the parent's own evidence before merging the child fold.
+        if let Some(parent) = built.sessions[id]
+            .parent
+            .as_ref()
+            .filter(|p| built.sessions.contains_key(*p))
+        {
+            let target = folds.get_mut(parent).unwrap();
+            for (key, values) in expected {
+                target.entry(key).or_insert(values);
+            }
+            let count = pending.get_mut(parent).unwrap();
+            *count -= 1;
+            if *count == 0 {
+                ready.push_back(parent);
+            }
+        }
+    }
+}
+
 #[test]
 fn star_catalog_shared_family_parity() {
-    use sha2::{Digest, Sha256};
     for reverse in [false, true] {
         let home = Home::new();
         let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
@@ -2723,26 +2847,7 @@ fn star_catalog_shared_family_parity() {
             }
             home.top(id, &records);
             warehouse.source(*source, "claude", id, &records);
-            let built = home.build_query();
-            let mut expected = BTreeMap::<String, [u64; 3]>::new();
-            for session in built.sessions.values() {
-                if let Some(evidence) = &session.claude_usage {
-                    for (key, tokens) in &evidence.shared {
-                        expected.entry(key.clone()).or_insert([
-                            tokens.input,
-                            tokens.cached_input,
-                            tokens.output,
-                        ]);
-                    }
-                }
-            }
-            let actual=warehouse.db.prepare("SELECT message_id,evidence_uuid,input,cached,output FROM family_shared_usage WHERE root=1").unwrap()
-                .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,[r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?]))).unwrap()
-                .map(|row| {let (message,uuid,tokens)=row.unwrap();
-                    (format!("{:x}",Sha256::digest(serde_json::to_vec(&(message,uuid)).unwrap())),tokens.map(|v|u64::try_from(v).unwrap()))}).collect::<BTreeMap<_,_>>();
-            if built.sessions.contains_key("root") {
-                assert_eq!(actual, expected, "reverse={reverse} source={source}");
-            }
+            assert_shared_family_parity(&home, &warehouse);
         }
         assert_eq!(
             warehouse
@@ -2765,6 +2870,173 @@ fn star_catalog_shared_family_parity() {
                 )
                 .unwrap(),
             10
+        );
+    }
+}
+
+#[test]
+fn star_catalog_divergent_shared_family_parity() {
+    for reverse in [false, true] {
+        let home = Home::new();
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        // Root has no shared observation initially. a wins before a-tail
+        // arrives; that late child delays a's fold, so leaf z then wins.
+        // Source numbers deliberately disagree with both keys and tree order.
+        let inputs = [
+            (4, "root", None, None),
+            (3, "a", Some("root"), Some((11, 2, 3))),
+            (1, "z", Some("root"), Some((23, 5, 7))),
+            (2, "a-tail", Some("a"), Some((79, 13, 19))),
+        ];
+        let observation = |id: &str, input, cached, output| {
+            uuid(
+                assistant_usage(
+                    id,
+                    ts(0, 20),
+                    "divergent",
+                    "claude-sonnet-4-6",
+                    json!({"input_tokens":input,"cache_read_input_tokens":cached,"output_tokens":output}),
+                ),
+                "same-uuid",
+            )
+        };
+        for index in if reverse { [3, 2, 1, 0] } else { [0, 1, 2, 3] } {
+            let (source, id, parent, tokens) = inputs[index];
+            let prompt =
+                parent.map_or("Work".into(), |p| format!("Semon-Parent: claude:{p}\nWork"));
+            let mut records = vec![human(id, ts(0, source), &prompt)];
+            if let Some((input, cached, output)) = tokens {
+                records.push(observation(id, input, cached, output));
+            }
+            home.top(id, &records);
+            warehouse.source(source, "claude", id, &records);
+            assert_shared_family_parity(&home, &warehouse);
+            if !reverse && index == 2 {
+                assert_eq!(
+                    warehouse
+                        .db
+                        .query_row(
+                            "SELECT input FROM family_shared_usage WHERE root=4",
+                            [],
+                            |r| r.get::<_, i64>(0),
+                        )
+                        .unwrap(),
+                    13
+                );
+            }
+        }
+        assert_eq!(
+            warehouse
+                .db
+                .query_row(
+                    "SELECT input FROM family_shared_usage WHERE root=4",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+            28
+        );
+        // The winning owner's later native report replaces all categories
+        // together, including cost. The other owner's larger values cannot win.
+        for (source, id, input, cached, output) in [
+            (1, "z", 31, 7, 11),
+            (3, "a", 101, 17, 23),
+            (4, "root", 43, 11, 13),
+        ] {
+            let records = [observation(id, input, cached, output)];
+            append_records(&home, id, &records);
+            warehouse.source(source, "claude", id, &records);
+            assert_shared_family_parity(&home, &warehouse);
+        }
+        // A late parent observation takes precedence over every descendant,
+        // even though a has the first native ID and z the first source ID.
+        assert_eq!(
+            warehouse
+                .db
+                .query_row(
+                    "SELECT input,cached,output FROM family_shared_usage WHERE root=4",
+                    [],
+                    |r| Ok([
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?
+                    ]),
+                )
+                .unwrap(),
+            [54, 11, 13]
+        );
+        let mut unpriced = observation("root", 43, 11, 13);
+        unpriced["message"]["model"] = json!("unknown-fixture-model");
+        append_records(&home, "root", &[unpriced.clone()]);
+        warehouse.source(4, "claude", "root", &[unpriced]);
+        assert_shared_family_parity(&home, &warehouse);
+        assert_eq!(
+            home.build_query().sessions["root"]
+                .activity_analytics
+                .as_ref()
+                .unwrap()
+                .family
+                .as_ref()
+                .unwrap()
+                .counts
+                .totals
+                .shared
+                .list_cost_usd
+                .unknown_steps,
+            1
+        );
+    }
+}
+
+#[test]
+fn star_catalog_shared_family_queue_tie_parity() {
+    for reverse in [false, true] {
+        let home = Home::new();
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        // Both subtrees have height one. b is ready before a because its
+        // deepest leaf x precedes y, despite a preceding b in catalog order.
+        let inputs = [
+            (1, "root", None, None),
+            (2, "a", Some("root"), Some(11)),
+            (3, "b", Some("root"), Some(23)),
+            (4, "y", Some("a"), Some(37)),
+            (5, "x", Some("b"), Some(51)),
+        ];
+        for index in if reverse {
+            [4, 3, 2, 1, 0]
+        } else {
+            [0, 1, 2, 3, 4]
+        } {
+            let (source, id, parent, tokens) = inputs[index];
+            let prompt =
+                parent.map_or("Work".into(), |p| format!("Semon-Parent: claude:{p}\nWork"));
+            let mut records = vec![human(id, ts(0, source), &prompt)];
+            if let Some(tokens) = tokens {
+                records.push(uuid(
+                    assistant_usage(
+                        id,
+                        ts(0, 20),
+                        "shared-message",
+                        "claude-sonnet-4-6",
+                        json!({"input_tokens":tokens,"output_tokens":tokens/2}),
+                    ),
+                    "same-uuid",
+                ));
+            }
+            home.top(id, &records);
+            warehouse.source(source, "claude", id, &records);
+            assert_shared_family_parity(&home, &warehouse);
+        }
+        assert_eq!(
+            warehouse
+                .db
+                .query_row(
+                    "SELECT input FROM family_shared_usage WHERE root=1",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap(),
+            23
         );
     }
 }
