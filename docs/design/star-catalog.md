@@ -272,10 +272,12 @@ and atomic Index advancement remain useful independently.
   do not persist its chosen parent or invent a body hash analytics column. Full
   list parent parity needs a measured bounded candidate strategy before rollout.
 * Two-pass body/time relay pairing: independent nearest-neighbor joins do not
-  preserve the global greedy matching order. Proposal: read candidates in current
-  deterministic order and run the existing two-pass matcher for the selected
-  component. Expose exact-ID metadata joins directly. No claim that a single
-  window function is equivalent. Keep this out of list fields where unused.
+  preserve the global greedy matching order. `model/relay_match.rs` now exposes
+  the existing up body/time matcher, down body/order matcher and native run/inline
+  qualification without a Builder. The fixture adapter selects event/body
+  references through facts and detail reads, then runs these helpers at the
+  origin in native order. Exact-ID metadata joins remain SQL reads. No pairing
+  state is persisted; keep this out of list fields where unused.
 * Turn partitioning: merged turns depend on chosen relationships and late events.
   Proposal: native-boundary SQL views for analytics input, with existing causal
   partitioning run over selected transcript pages plus required boundary context.
@@ -382,15 +384,26 @@ parity fixtures. The synthetic loader admits parsed records; it does not impleme
 production byte-proof/custody acquisition. Further ambiguous-call, multi-incarnation
 and all process-qualification combinations remain production conformance gates.
 
-Exact relay-ID joins and name stubs now have executable builder assertions,
+Exact relay-ID joins and name stubs have executable builder assertions,
 including receipt-first arrival, a late receipt removing a stub and deterministic
-selection among duplicate receipts. Full relay parity stops at parent/subagent
-body/time matching, pinned/down sends, orphan sender identities and all native
-failure/name-normalization flags. The existing two-pass greedy matcher requires
-role-qualified subagent events and body references, not independent nearest-row
-joins. Smallest proposal: expose those existing event fields as facts and run that
-matcher at the origin over the selected parent/child sources. Do not persist
-pairing or turn repair state. This extension is not implemented.
+selection among duplicate receipts. The role-qualified `fact_subagent_event`
+projection now retains native kind/direction/finality, sender IDs and aliases,
+call/result failure and pin flags, correlation IDs, peer identity, and source,
+record/block/result positions. Bodies remain in the authorized origin reader;
+there is no message text or body hash in analytics columns. The fixture loader
+uses the native parser and revises attached result observations on late arrival.
+
+`model/relay_match.rs` exposes the existing two-pass up and down greedy matchers
+and native run/inline qualification; Builder delegates to these helpers. The
+warehouse adapter selects parent/child references through facts and current
+parent/detail SQL and calls the same code without Builder input or persisted
+pairing state. Added assertions compare placed relay endpoints, IDs, timestamps,
+status, bodies and unmatched flags against the full Builder. Arrival fixtures
+cover body and bounded time pairing, legacy batched tags, progress/final receipts,
+pinned inline sends, resumed down sends, orphan process/subagent identities,
+denied/error/unsuccessful sends and native name suffix normalization. These
+fixtures are committed for Rust CI; production producer wiring and broader
+ambiguous, missing-time and cross-lineage candidate combinations remain gates.
 
 Causal state/turn parity now calls the production `model/turns.rs` read helper
 without constructing a `Builder`. The extraction moves `groups`, `split`, `end`
@@ -412,16 +425,18 @@ runtime inputs are fixture-local observations; production process acquisition an
 expiry remain a producer gate. Native parser reuse supplies current supported
 result attachment and lifecycle semantics, independently of the Builder oracle.
 
-Relay-dependent turn cases still require the role-qualified/body-reference fact
-extension above: inline parent-to-child messages during an open run, non-inline
-parent messages starting a new child turn, child progress sends interrupting a
-parent turn, handback/final notifications continuing their spawning turn, pinned
-or resumed down sends, and ambiguous/out-of-order candidates resolved by the
-existing two-pass body/time matcher. Their effects on inferred human replies,
-parent/child completion and result attribution are not claimed here. Code-mode
-operation placement, yielded-command and full native runtime qualification remain
-production conformance gates beyond these reduced warehouse fixtures. No turn
-repair or dependency state is stored.
+Relay-dependent turn fixtures now feed the placed subagent relays and spawn
+completion into `TurnContext` and compare every serialized turn field and latest
+state after each source arrival in both orders. They cover inline parent messages
+within an open run, resumed messages starting a child turn, progress receipts
+interrupting the parent, final/notification completion, and pinned/resumed down
+sends, including handback completion across multiple runs. Native body/time
+pairing uses the same production helper. Inferred human reply/result attribution
+still lives in Builder and is not reproduced by this fixture adapter; its full
+interaction with relays remains a production conformance gate. Code-mode operation
+placement, yielded commands, live resumed runtime and full native runtime
+qualification also remain outside these reduced fixtures. No turn repair or
+dependency state is stored.
 
 Family-exclusive usage now uses a set-based parent visited-set traversal and
 sums exact current-owner totals once. Builder-fact assertions run after every

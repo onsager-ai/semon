@@ -278,6 +278,20 @@ impl Warehouse {
             for (index, event) in native.events.iter().enumerate() {
                 let reply = event.r.as_ref();
                 let peer = event.peer.as_ref();
+                if event.k == Kind::Tool
+                    && event.n.as_deref() == Some("SendMessage")
+                    && let Some(reply) = reply
+                {
+                    tx.execute(
+                        "UPDATE fact_relay_result SET failed=?3 WHERE source=?1 AND call_id=?2",
+                        params![
+                            source,
+                            event.id,
+                            reply.e || reply.f & (DENIED | SEND_FAILED) != 0
+                        ],
+                    )
+                    .unwrap();
+                }
                 tx.execute(
                     "INSERT OR REPLACE INTO fact_subagent_event VALUES(
                      ?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
@@ -1812,8 +1826,23 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
                 .iter()
                 .position(|e| e.o == pos as u64 && e.id.as_deref() == Some(call.as_str()))
                 .unwrap();
-            if native_handled.contains(&(file, i)) {
+            if native_handled.contains(&(file, i))
+                || event(&files, (file, i))
+                    .r
+                    .as_ref()
+                    .is_some_and(|r| r.f & PIN != 0)
+            {
                 continue;
+            }
+            if correlation.is_none()
+                && let Some(reply) = event(&files, (file, i)).r.as_ref()
+            {
+                let text = fs::read_to_string(&files[file].path).unwrap();
+                let record =
+                    serde_json::from_str(text[reply.o as usize..].lines().next().unwrap()).unwrap();
+                if down_target(&record, reply.b as usize).is_some() {
+                    continue;
+                }
             }
             let mut positions = vec![(file, i)];
             if let Some(correlation) = &correlation {
@@ -2236,6 +2265,108 @@ fn star_catalog_subagent_inline_pin_resume_turn_arrival_parity() {
             assert_selected_turns(&warehouse, &home);
         }
         assert_eq!(turns_of(&home.build_query(), "child").len(), 2);
+    }
+}
+
+#[test]
+fn star_catalog_native_send_flags_and_normalized_names() {
+    for reverse in [false, true] {
+        for (outcome, error, flag) in [
+            (json!("permission denied"), false, DENIED),
+            (json!({"success":false}), false, SEND_FAILED),
+            (json!({}), true, 0),
+            (json!({"success":true}), false, 0),
+        ] {
+            let home = Home::new();
+            let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+            let sender = vec![
+                human("sender", ts(0, 0), "send"),
+                assistant(
+                    "sender",
+                    ts(0, 1),
+                    vec![tool(
+                        "send",
+                        "SendMessage",
+                        json!({"recipient":" worker [native] ","content":"message"}),
+                    )],
+                ),
+                result("sender", ts(0, 2), "send", "result", error, outcome),
+            ];
+            let receiver = vec![peer(
+                "receiver",
+                ts(0, 3),
+                "unclaimed",
+                "remote [native]",
+                42,
+                "orphan",
+            )];
+            for source in if reverse { [2, 1] } else { [1, 2] } {
+                let (id, records) = if source == 1 {
+                    ("sender", &sender)
+                } else {
+                    ("receiver", &receiver)
+                };
+                home.top(id, records);
+                warehouse.source(source, "claude", id, records);
+                assert_selected_turns(&warehouse, &home);
+                let expected = home.build_query();
+                if source == 1 || !reverse {
+                    let (flags, failed, target): (u8, bool, String) = warehouse
+                        .db
+                        .query_row(
+                            "SELECT e.reply_flags,r.failed,s.target FROM fact_subagent_event e
+                         JOIN fact_relay_send s ON s.source=e.source AND s.call_id=e.id
+                         JOIN fact_relay_result r ON r.source=s.source AND r.call_id=s.call_id",
+                            [],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        )
+                        .unwrap();
+                    assert_eq!(flags, flag);
+                    assert_eq!(failed, error || flag != 0);
+                    assert_eq!(target, "worker");
+                    let relay = expected
+                        .handoffs
+                        .iter()
+                        .find(|h| h.kind == "relay" && h.from == "sender")
+                        .unwrap();
+                    let (receiver, stub, failed): (Option<i64>, Option<String>, bool) = warehouse
+                        .db
+                        .query_row(
+                            "SELECT receiver,stub,failed FROM relay_endpoints",
+                            [],
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                        )
+                        .unwrap();
+                    assert_eq!(receiver, None);
+                    assert_eq!(stub.as_deref(), (!failed).then_some("name:worker"));
+                    assert_eq!(relay.status, if failed { "err" } else { "done" });
+                    if !failed {
+                        assert_eq!(
+                            relay.to.as_deref(),
+                            Some(stable_id("peer-", "name:worker").as_str())
+                        );
+                    }
+                }
+                if source == 2 || reverse {
+                    let orphan = expected
+                        .handoffs
+                        .iter()
+                        .find(|h| h.kind == "relay" && h.to.as_deref() == Some("receiver"))
+                        .unwrap();
+                    let (pid,start,sock):(Option<i64>,Option<String>,Option<String>)=warehouse.db.query_row(
+                        "SELECT peer_pid,peer_start,peer_sock FROM fact_subagent_event WHERE kind='xsm'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
+                    let identity = if let Some(pid) = pid {
+                        format!("pid:{pid}:{}", start.unwrap_or_default())
+                    } else if let Some(sock) = sock {
+                        format!("sock:{sock}")
+                    } else {
+                        "name:remote".into()
+                    };
+                    assert_eq!(orphan.from, stable_id("peer-", &identity));
+                    assert!(orphan.unmatched);
+                }
+            }
+        }
     }
 }
 
