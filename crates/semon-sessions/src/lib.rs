@@ -1,5 +1,7 @@
 mod native_prefix;
 pub use native_prefix::codex_native_id_prefix;
+mod native_homes;
+pub(crate) use native_homes::state_dir;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
@@ -248,51 +250,13 @@ pub struct Options {
     pub scan_window: bool,
 }
 
-/// Semon's own state directory: `$XDG_STATE_HOME/semon`, or
-/// `~/.local/state/semon`.
-fn default_state_dir(home: &Path) -> PathBuf {
-    env::var_os("XDG_STATE_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state"))
-        .join("semon")
-}
-
-/// [`default_state_dir`] for this process's `$HOME`.
-pub(crate) fn state_dir() -> PathBuf {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    default_state_dir(&home)
-}
-
-fn native_homes(
-    home: &Path,
-    claude_config: Option<&std::ffi::OsStr>,
-    codex_config: Option<&std::ffi::OsStr>,
-) -> (PathBuf, PathBuf, PathBuf) {
-    let claude_config = claude_config.filter(|root| !root.is_empty());
-    let (claude, settings) = match claude_config {
-        Some(root) => (
-            PathBuf::from(root),
-            PathBuf::from(root).join(".claude.json"),
-        ),
-        None => (home.join(".claude"), home.join(".claude.json")),
-    };
-    let codex = codex_config
-        .filter(|root| !root.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".codex"));
-    (claude, settings, codex)
-}
-
 impl Default for Options {
     fn default() -> Self {
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("."));
-        let cache = default_state_dir(&home).join("sessions-index.json");
-        let (claude_home, claude_json, codex_home) = native_homes(
+        let cache = native_homes::default_state_dir(&home).join("sessions-index.json");
+        let (claude_home, claude_json, codex_home) = native_homes::native_homes(
             &home,
             env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
             env::var_os("CODEX_HOME").as_deref(),
@@ -1544,7 +1508,7 @@ mod native_home_tests {
         std::fs::create_dir(&root).unwrap();
         let claude_config = root.join("claude-config");
         let codex_config = root.join("codex-config");
-        let (claude_home, claude_json, codex_home) = native_homes(
+        let (claude_home, claude_json, codex_home) = native_homes::native_homes(
             &root.join("unused-fallback"),
             Some(claude_config.as_os_str()),
             Some(codex_config.as_os_str()),
@@ -1607,7 +1571,7 @@ mod native_home_tests {
     fn configured_homes_use_the_observed_native_settings_layout() {
         let home = Path::new("/fixture/fallback");
         assert_eq!(
-            native_homes(
+            native_homes::native_homes(
                 home,
                 Some(OsStr::new("/fixture/claude-config")),
                 Some(OsStr::new("/fixture/codex-config"))
@@ -1619,7 +1583,7 @@ mod native_home_tests {
             )
         );
         assert_eq!(
-            native_homes(home, None, None),
+            native_homes::native_homes(home, None, None),
             (
                 home.join(".claude"),
                 home.join(".claude.json"),
@@ -1627,8 +1591,8 @@ mod native_home_tests {
             )
         );
         assert_eq!(
-            native_homes(home, Some(OsStr::new("")), Some(OsStr::new(""))),
-            native_homes(home, None, None)
+            native_homes::native_homes(home, Some(OsStr::new("")), Some(OsStr::new(""))),
+            native_homes::native_homes(home, None, None)
         );
     }
 }
