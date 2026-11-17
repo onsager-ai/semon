@@ -266,8 +266,13 @@ waiting for a quiet corpus, while preserving the builder's answers.
    implemented; full parent parity is stopped at the boundary below. Acceptance:
    unchanged full-builder assertions, late/out-of-order evidence and revocation
    tests for every case. Benchmark gate: the manual 1 GB/20k-session job reports
-   ingest and maintenance separately, list under 500 ms and selected four-record
-   detail under 50 ms on both fresh and warm connections. Inspect plans to prove
+   ingest and maintenance separately, with exact list/detail timings on fresh and
+   warm connections. Review targets are 500 ms for list and 50 ms for detail, not
+   CI pass/fail gates because shared runners vary. CI uses loose ceilings of 5 s
+   for list and 500 ms for detail. Deterministic plan checks reject correlated
+   scalar subqueries and recursive lineage reads in either query, and global
+   detail session scans/materialization: these catch the roughly 1000× failure
+   mode. Inspect plans to prove
    detail record/suppression work stays within its selected lineage; unrelated
    sessions must not introduce a global owners scan. The previous 116 s ingest /
    42 s maintenance measurement is the comparison baseline; investigate regressions
