@@ -392,21 +392,36 @@ joins. Smallest proposal: expose those existing event fields as facts and run th
 matcher at the origin over the selected parent/child sources. Do not persist
 pairing or turn repair state. This extension is not implemented.
 
-Causal state/turn parity is stopped rather than approximated with user-record
-counts. `Builder::groups/split` consumes placed incoming ask/relay/spawn entries,
-inline/gap rules and late results; state also qualifies live runtime and parent
-completion. The missing relay placement above changes both grouping and result
-attribution. Smallest proposal: factor the existing selected-source causal
-partitioner into a pure read helper accepting fact-selected events plus placed
-relationships, and compare complete turns/state to the builder. The owner accepted
-reuse of a pure helper, but inspection found no such callable boundary: `split`
-invokes `groups` and `end`, which read Builder sessions, runtime/completion state,
-placed handoffs and merged native event references. A wrapper calling these methods
-would still require the old Builder, not independently prove the warehouse. The
-smallest required production refactor extracts that complete read context and
-end-state logic together; it exceeds a pure call and is stopped for review under
-the continuation brief. No production code changed and no causal-turn parity is
-claimed.
+Causal state/turn parity now calls the production `model/turns.rs` read helper
+without constructing a `Builder`. The extraction moves `groups`, `split`, `end`
+and live-yield qualification together. Its borrowed context contains selected
+native files, placed handoffs, session identity and already-qualified current
+state/wait reason; it has no mutable cache, body reader or persisted turn state.
+The Builder delegates to the same helper without changing its behavior.
+
+The warehouse fixture adapter selects record positions through the detail SQL,
+reads native events at those positions, and constructs ask, exact-ID relay and
+spawn placements from fact/bridge reads. It compares every serialized turn field
+and latest session state to the full Builder after each source arrival in both
+orders. Fixtures cover continuation copy suppression and owner changes, late
+failed results after a newer prompt with an earlier clock, receipt-first exact
+relays and late send completion, completed Codex child turns and duplicate-call
+spawn revocation, malformed-record gaps, and independently qualified working,
+permission-wait, input-wait, idle and exited process observations. Qualified
+runtime inputs are fixture-local observations; production process acquisition and
+expiry remain a producer gate. Native parser reuse supplies current supported
+result attachment and lifecycle semantics, independently of the Builder oracle.
+
+Relay-dependent turn cases still require the role-qualified/body-reference fact
+extension above: inline parent-to-child messages during an open run, non-inline
+parent messages starting a new child turn, child progress sends interrupting a
+parent turn, handback/final notifications continuing their spawning turn, pinned
+or resumed down sends, and ambiguous/out-of-order candidates resolved by the
+existing two-pass body/time matcher. Their effects on inferred human replies,
+parent/child completion and result attribution are not claimed here. Code-mode
+operation placement, yielded-command and full native runtime qualification remain
+production conformance gates beyond these reduced warehouse fixtures. No turn
+repair or dependency state is stored.
 
 Family-exclusive usage now uses a set-based parent visited-set traversal and
 sums exact current-owner totals once. Builder-fact assertions run after every

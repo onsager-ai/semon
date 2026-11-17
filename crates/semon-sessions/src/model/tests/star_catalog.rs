@@ -40,6 +40,13 @@ impl Warehouse {
     fn new(path: &std::path::Path) -> Self {
         let db = Connection::open(path).unwrap();
         db.execute_batch(SCHEMA).unwrap();
+        // Fixture snapshots have already qualified process identity/expiry. These
+        // origin-local inputs are separate from log progress and chosen turns.
+        db.execute_batch(
+            "CREATE TEMP TABLE qualified_turn_runtime (
+            owner INTEGER PRIMARY KEY,state TEXT NOT NULL,waiting_for TEXT)",
+        )
+        .unwrap();
         db.execute_batch(include_str!("star_catalog/parents.sql"))
             .unwrap();
         db.execute_batch(include_str!("star_catalog/relays.sql"))
@@ -1092,6 +1099,656 @@ fn star_catalog_relay_endpoint_parity() {
         );
         assert_eq!(only(&late, "relay", "sender", "receiver").id, relay.id);
     }
+}
+
+// Origin-local fixture adapter: SQL selects source positions and relationships;
+// the native reader supplies events/bodies at those positions. No Builder or
+// Builder-produced handoff, entry, session, or turn is an input to this path.
+fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (String, Vec<Turn>)> {
+    let mut cache = EventCache::open(&home.options.cache).unwrap();
+    let (files, _, _) = scan(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut Texts::default(),
+        None,
+        &MachineFacts::Local,
+        None,
+    )
+    .unwrap();
+    let rows = warehouse.list();
+    let source_files: BTreeMap<i64, usize> = warehouse
+        .db
+        .prepare("SELECT source,harness,native_id FROM dim_session")
+        .unwrap()
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .unwrap()
+        .map(|r| {
+            let (source, harness, id) = r.unwrap();
+            let file = files
+                .iter()
+                .position(|f| f.id == id && f.harness() == harness)
+                .unwrap();
+            (source, file)
+        })
+        .collect();
+    let sessions: BTreeMap<i64, usize> =
+        rows.iter().enumerate().map(|(i, r)| (r.owner, i)).collect();
+    let selected: Vec<BTreeSet<(usize, u64)>> = rows
+        .iter()
+        .map(|row| {
+            warehouse
+                .detail(&row.id)
+                .into_iter()
+                .map(|(source, pos, _)| (source_files[&source], u64::try_from(pos).unwrap()))
+                .collect()
+        })
+        .collect();
+    let mut states = Vec::new();
+    for row in &rows {
+        let file = &files[source_files[&row.owner]];
+        let state = if file.harness() == "codex" {
+            file.summary
+                .tree_summary
+                .as_ref()
+                .and_then(|s| s.codex_turn.owned(&file.id))
+                .map_or("off", |turn| turn.state(false))
+        } else {
+            "done"
+        };
+        let runtime: Option<(String, Option<String>)> = warehouse
+            .db
+            .query_row(
+                "SELECT state,waiting_for FROM qualified_turn_runtime WHERE owner=?1",
+                [row.owner],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap();
+        states.push(runtime.unwrap_or((state.into(), None)));
+    }
+    let mut handoffs = Vec::new();
+    let mut placed = HashMap::<Ref, Vec<usize>>::new();
+    let mut heads = BTreeMap::new();
+    {
+        let mut add = |out: Handoff, from, to, positions: Vec<Ref>| {
+            let h = handoffs.len();
+            handoffs.push(H {
+                out,
+                from,
+                to,
+                previews: None,
+                preview_owners: BTreeMap::new(),
+                inline: false,
+            });
+            for position in positions {
+                placed.entry(position).or_default().push(h);
+            }
+            h
+        };
+        for (session, row) in rows.iter().enumerate() {
+            for (file, source) in files.iter().enumerate() {
+                for (i, found) in source.summary.events.iter().enumerate() {
+                    if found.k == Kind::Ask && selected[session].contains(&(file, found.o)) {
+                        let out = Handoff::new(
+                            stable_id(ASK_PREFIX, &format!("ask:{}:{}", source.id, found.o)),
+                            "ask",
+                            ("you".into(), row.id.clone()),
+                            found.t.unwrap(),
+                            "done",
+                            "",
+                        );
+                        add(out, None, Some(session), vec![(file, i)]);
+                    }
+                }
+            }
+        }
+        // Parent selection and the revisable unique name/call placement are SQL
+        // answers. An ambiguous spawn still starts the child but replaces no call.
+        let spawns: Vec<(i64, i64, Option<i64>, Option<i64>)> = warehouse
+            .db
+            .prepare(
+                "SELECT p.child,p.parent,b.pos,b.ts FROM parent_selection p
+         JOIN dim_session d ON d.source=p.child AND d.harness='codex'
+         LEFT JOIN bridge_spawn_placement b ON b.child=d.native_id",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        for (child_source, parent_source, call, time) in spawns {
+            let child = sessions[&child_source];
+            let parent = sessions[&parent_source];
+            let file = source_files[&child_source];
+            let prompt = files[file]
+                .summary
+                .events
+                .iter()
+                .enumerate()
+                .find(|(_, e)| e.k == Kind::U);
+            let mut positions = Vec::new();
+            if let Some(pos) = call {
+                let parent_file = source_files[&parent_source];
+                let i = files[parent_file]
+                    .summary
+                    .events
+                    .iter()
+                    .position(|e| e.o == pos as u64 && e.k == Kind::Tool)
+                    .unwrap();
+                positions.push((parent_file, i));
+            }
+            if let Some((i, _)) = prompt {
+                positions.push((file, i));
+            }
+            let mut out = Handoff::new(
+                stable_id("s", &format!("spawn:codex:{}", rows[child].id)),
+                "spawn",
+                (rows[parent].id.clone(), rows[child].id.clone()),
+                time.unwrap_or(files[file].first.unwrap()),
+                match states[child].0.as_str() {
+                    "done" => "done",
+                    "err" => "err",
+                    "work" => "work",
+                    _ => "off",
+                },
+                "",
+            );
+            out.ambiguous = call.is_none();
+            let h = add(out, Some(parent), Some(child), positions);
+            if prompt.is_none() {
+                heads.insert(child, h);
+            }
+        }
+        struct RelayRow {
+            source: i64,
+            pos: i64,
+            call: String,
+            sender: i64,
+            receiver: Option<i64>,
+            stub: Option<String>,
+            failed: bool,
+            correlation: Option<String>,
+            time: i64,
+        }
+        let relays = warehouse.db.prepare(
+        "SELECT source,pos,call_id,sender,receiver,stub,failed,correlation,ts FROM relay_endpoints"
+    ).unwrap().query_map([], |r| Ok(RelayRow {
+        source:r.get(0)?,pos:r.get(1)?,call:r.get(2)?,sender:r.get(3)?,receiver:r.get(4)?,
+        stub:r.get(5)?,failed:r.get(6)?,correlation:r.get(7)?,time:r.get(8)?,
+    })).unwrap().map(Result::unwrap).collect::<Vec<_>>();
+        let mut joined = BTreeSet::new();
+        for RelayRow {
+            source,
+            pos,
+            call,
+            sender,
+            receiver,
+            stub,
+            failed,
+            correlation,
+            time,
+        } in relays
+        {
+            let from = sessions[&sender];
+            let to = receiver.map(|r| sessions[&r]);
+            let file = source_files[&source];
+            let i = files[file]
+                .summary
+                .events
+                .iter()
+                .position(|e| e.o == pos as u64 && e.id.as_deref() == Some(call.as_str()))
+                .unwrap();
+            let mut positions = vec![(file, i)];
+            if let Some(correlation) = &correlation {
+                let receipt: Option<(i64, i64)> = warehouse
+                    .db
+                    .query_row(
+                        "SELECT r.source,r.pos FROM fact_relay_receipt r
+                 JOIN bridge_session_owner m USING(source) JOIN dim_session d ON d.source=m.owner
+                 WHERE r.correlation=?1 ORDER BY d.native_id,r.pos LIMIT 1",
+                        [correlation],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()
+                    .unwrap();
+                if let Some((source, pos)) = receipt {
+                    joined.insert(correlation.clone());
+                    let file = source_files[&source];
+                    let i = files[file]
+                        .summary
+                        .events
+                        .iter()
+                        .position(|e| e.o == pos as u64 && e.k == Kind::Xsm)
+                        .unwrap();
+                    positions.push((file, i));
+                }
+            }
+            let id_source =
+                correlation.map_or_else(|| format!("relay:tool:{call}"), |c| format!("relay:{c}"));
+            let out = Handoff::new(
+                stable_id("r", &id_source),
+                "relay",
+                (
+                    rows[from].id.clone(),
+                    to.map(|i| rows[i].id.clone())
+                        .or_else(|| stub.map(|s| stable_id("peer-", &s)))
+                        .unwrap_or_default(),
+                ),
+                time,
+                if failed { "err" } else { "done" },
+                "",
+            );
+            add(out, Some(from), to, positions);
+        }
+        // Receipt-first evidence is an incoming relay even before a send is admitted.
+        let receipts: Vec<(i64, i64, String)> = warehouse
+        .db
+        .prepare(
+            "SELECT source,pos,correlation FROM fact_relay_receipt ORDER BY correlation,source,pos",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+        for (source, pos, correlation) in receipts {
+            if !joined.insert(correlation.clone()) {
+                continue;
+            }
+            let file = source_files[&source];
+            let to: i64 = warehouse
+                .db
+                .query_row(
+                    "SELECT owner FROM bridge_session_owner WHERE source=?1",
+                    [source],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let to = sessions[&to];
+            let i = files[file]
+                .summary
+                .events
+                .iter()
+                .position(|e| e.o == pos as u64 && e.k == Kind::Xsm)
+                .unwrap();
+            let out = Handoff::new(
+                stable_id("r", &format!("relay:{correlation}")),
+                "relay",
+                ("fixture-sender-stub".into(), rows[to].id.clone()),
+                files[file].summary.events[i].t.unwrap(),
+                "done",
+                "",
+            );
+            add(out, None, Some(to), vec![(file, i)]);
+        }
+    }
+    let mut actual = BTreeMap::new();
+    for (session, row) in rows.iter().enumerate() {
+        let mut members: Vec<_> = selected[session]
+            .iter()
+            .map(|(file, _)| *file)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        members.sort_by_key(|file| {
+            (
+                files[*file].first.unwrap_or(i64::MAX),
+                files[*file].summary.links.continued_in.is_empty(),
+                files[*file].id.clone(),
+            )
+        });
+        let mut keyed = Vec::new();
+        for (rank, file) in members.iter().copied().enumerate() {
+            let mut time = files[file]
+                .summary
+                .events
+                .iter()
+                .find_map(|e| e.t)
+                .unwrap_or(i64::MIN);
+            for (i, found) in files[file].summary.events.iter().enumerate() {
+                time = found.t.unwrap_or(time);
+                if !selected[session].contains(&(file, found.o)) {
+                    continue;
+                }
+                let kinds = if let Some(h) = placed.get(&(file, i)) {
+                    h.iter().map(|h| EntryKind::H(*h)).collect::<Vec<_>>()
+                } else {
+                    match found.k {
+                        Kind::U => Some(EntryKind::U),
+                        Kind::A => Some(EntryKind::A),
+                        Kind::Gap => Some(EntryKind::Gap),
+                        Kind::Tool => Some(EntryKind::Tool(tool_state(found))),
+                        _ => None,
+                    }
+                    .into_iter()
+                    .collect()
+                };
+                for kind in kinds {
+                    keyed.push((
+                        (
+                            if members.len() > 1 { time } else { 0 },
+                            rank,
+                            found.o,
+                            found.b,
+                        ),
+                        Entry {
+                            kind,
+                            file,
+                            offset: found.o,
+                            pos: (found.o, found.b),
+                            t: found.t,
+                            at: Some((file, i)),
+                        },
+                    ));
+                }
+            }
+        }
+        keyed.sort_by_key(|(key, _)| *key);
+        let mut entries: Vec<_> = keyed.into_iter().map(|(_, entry)| entry).collect();
+        if let Some(h) = heads.get(&session) {
+            entries.insert(
+                0,
+                Entry {
+                    kind: EntryKind::H(*h),
+                    file: members[0],
+                    offset: 0,
+                    pos: (0, 0),
+                    t: None,
+                    at: None,
+                },
+            );
+        }
+        let context = turns::TurnContext {
+            files: &files,
+            handoffs: &handoffs,
+            session,
+            key: &row.id,
+            state: &states[session].0,
+            waiting_for: states[session].1.as_deref(),
+        };
+        let (mut turns, _, prompts) = context.split(&entries);
+        for (turn, at) in prompts {
+            let line = fs::read_to_string(&files[at.0].path).unwrap();
+            let record: Value = serde_json::from_str(
+                line[files[at.0].summary.events[at.1].o as usize..]
+                    .lines()
+                    .next()
+                    .unwrap(),
+            )
+            .unwrap();
+            turns[turn].text = prompt_text(&record).map(|s| cap(&s, MSG_MAX));
+        }
+        actual.insert(row.id.clone(), (states[session].0.clone(), turns));
+    }
+    actual
+}
+
+fn assert_selected_turns(warehouse: &Warehouse, home: &Home) {
+    let actual = selected_turns(warehouse, home);
+    let expected = home.build_query();
+    for (id, (state, turns)) in actual {
+        assert_eq!(state, expected.sessions[&id].state, "{id} latest state");
+        assert_eq!(
+            serde_json::to_value(&turns).unwrap(),
+            serde_json::to_value(turns_of(&expected, &id)).unwrap(),
+            "{id} complete causal turns"
+        );
+    }
+}
+
+#[test]
+fn star_catalog_causal_turn_arrival_parity() {
+    for reverse in [false, true] {
+        let home = Home::new();
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        let old = vec![
+            uuid(human("old", ts(1, 0), "first"), "prompt"),
+            uuid(assistant("old", ts(1, 1), vec![text("answer")]), "answer"),
+            json!({"type":"continued-in","continuedInSessionId":"new"}),
+        ];
+        let new = vec![
+            old[0].clone(),
+            old[1].clone(),
+            human("new", ts(2, 0), "second"),
+            assistant(
+                "new",
+                ts(2, 1),
+                vec![tool("late", "Read", json!({"file_path":"/x"}))],
+            ),
+            human("new", ts(3, 0), "third"),
+        ];
+        let mut records = BTreeMap::from([(1, old), (2, new)]);
+        for source in if reverse { [2, 1] } else { [1, 2] } {
+            let id = if source == 1 { "old" } else { "new" };
+            home.top(id, &records[&source]);
+            warehouse.source(source, "claude", id, &records[&source]);
+            assert_selected_turns(&warehouse, &home);
+        }
+        // A late result attaches to the earlier call after a newer prompt;
+        // its recorded clock is earlier than the most recently admitted record.
+        let late = result("new", ts(2, 2), "late", "failed", true, json!({}));
+        records.get_mut(&2).unwrap().push(late.clone());
+        home.top("new", &records[&2]);
+        warehouse.source(2, "claude", "new", &[late]);
+        assert_selected_turns(&warehouse, &home);
+        assert_eq!(
+            turns_of(&home.build_query(), "old")[1].end.why,
+            "failed_step"
+        );
+    }
+}
+
+#[test]
+fn star_catalog_exact_relay_turn_arrival_parity() {
+    for reverse in [false, true] {
+        let home = Home::new();
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        let sender = vec![
+            human("sender", ts(0, 0), "send"),
+            assistant(
+                "sender",
+                ts(0, 1),
+                vec![tool(
+                    "send",
+                    "SendMessage",
+                    json!({"to":"worker","message":"hello"}),
+                )],
+            ),
+        ];
+        let receiver = vec![
+            peer("receiver", ts(0, 3), "message", "sender", 111, "hello"),
+            assistant("receiver", ts(0, 4), vec![text("received")]),
+        ];
+        let mut records = BTreeMap::from([(1, sender), (2, receiver)]);
+        for source in if reverse { [2, 1] } else { [1, 2] } {
+            let id = if source == 1 { "sender" } else { "receiver" };
+            home.top(id, &records[&source]);
+            warehouse.source(source, "claude", id, &records[&source]);
+            assert_selected_turns(&warehouse, &home);
+        }
+        let late = result(
+            "sender",
+            ts(0, 2),
+            "send",
+            "sent",
+            false,
+            json!({"success":true,"msg_id":"message"}),
+        );
+        records.get_mut(&1).unwrap().push(late.clone());
+        home.top("sender", &records[&1]);
+        warehouse.source(1, "claude", "sender", &[late]);
+        assert_selected_turns(&warehouse, &home);
+        assert_eq!(
+            turns_of(&home.build_query(), "sender")[0].end.why,
+            "no_reply"
+        );
+    }
+}
+
+#[test]
+fn star_catalog_spawn_turn_arrival_and_revocation_parity() {
+    for reverse in [false, true] {
+        let home = Home::new();
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        let call = |id: &str| {
+            codex_line(
+                ts(1, 1),
+                "response_item",
+                json!({"type":"function_call","name":"spawn_agent","call_id":id,"arguments":"{\"task_name\":\"solo\"}"}),
+            )
+        };
+        let parent = codex_records(
+            "root",
+            None,
+            None,
+            &[codex_user(ts(1, 0), "coordinate"), call("spawn")],
+        );
+        let child = codex_records(
+            "child",
+            Some("root"),
+            Some("solo"),
+            &[
+                codex_line(
+                    ts(1, 2),
+                    "event_msg",
+                    json!({"type":"task_started","turn_id":"t"}),
+                ),
+                codex_user(ts(1, 2), "work"),
+                codex_reply(ts(1, 3), "done"),
+                codex_line(
+                    ts(1, 4),
+                    "event_msg",
+                    json!({"type":"task_complete","turn_id":"t"}),
+                ),
+            ],
+        );
+        let mut records = BTreeMap::from([(1, parent), (2, child)]);
+        for source in if reverse { [2, 1] } else { [1, 2] } {
+            let id = if source == 1 { "root" } else { "child" };
+            home.lines(
+                &format!("codex/sessions/rollout-{id}.jsonl"),
+                &records[&source],
+            );
+            warehouse.source(source, "codex", id, &records[&source]);
+            assert_selected_turns(&warehouse, &home);
+        }
+        assert_eq!(
+            turns_of(&home.build_query(), "child")[0].end.why,
+            "returned"
+        );
+        let duplicate = call("duplicate");
+        records.get_mut(&1).unwrap().push(duplicate.clone());
+        home.lines("codex/sessions/rollout-root.jsonl", &records[&1]);
+        warehouse.source(1, "codex", "root", &[duplicate]);
+        assert_selected_turns(&warehouse, &home);
+        assert!(turns_of(&home.build_query(), "root")[0].sent.is_empty());
+    }
+}
+
+#[test]
+fn star_catalog_gap_turn_parity() {
+    let home = Home::new();
+    let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+    let first = vec![
+        human("gap", ts(1, 0), "first"),
+        assistant("gap", ts(1, 1), vec![text("answer")]),
+    ];
+    let path = home.top("gap", &first);
+    warehouse.source(1, "claude", "gap", &first);
+    assert_selected_turns(&warehouse, &home);
+    // The native parser records a gap for a malformed complete line. Keep its
+    // source locator in the fact selection without treating it as a JSON body.
+    let pos = fs::metadata(&path).unwrap().len();
+    let gap = "{not json\n";
+    let mut body = fs::read_to_string(&path).unwrap();
+    body.push_str(gap);
+    fs::write(&path, &body).unwrap();
+    warehouse
+        .db
+        .execute(
+            "INSERT INTO fact_record VALUES(1,?1,'gap',NULL,NULL,NULL)",
+            [pos],
+        )
+        .unwrap();
+    warehouse
+        .db
+        .execute(
+            "UPDATE index_advance SET complete_bytes=?1 WHERE source=1",
+            [pos + gap.len() as u64],
+        )
+        .unwrap();
+    assert_selected_turns(&warehouse, &home);
+    let after = assistant(
+        "gap",
+        ts(1, 2),
+        vec![tool("never", "Read", json!({"file_path":"/x"}))],
+    );
+    body.push_str(&after.to_string());
+    body.push('\n');
+    fs::write(&path, body).unwrap();
+    warehouse.source(1, "claude", "gap", &[after]);
+    assert_selected_turns(&warehouse, &home);
+    let built = home.build_query();
+    let turns = turns_of(&built, "gap");
+    assert_eq!(turns.len(), 2);
+    assert_eq!(turns[1].end.why, "unfinished_step");
+}
+
+#[test]
+fn star_catalog_qualified_runtime_turn_state_parity() {
+    let home = Home::new();
+    let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+    let records = vec![
+        human("live", ts(1, 0), "work"),
+        assistant(
+            "live",
+            ts(1, 1),
+            vec![tool("read", "Read", json!({"file_path":"/x"}))],
+        ),
+    ];
+    home.top("live", &records);
+    warehouse.source(1, "claude", "live", &records);
+    // These are independently qualified observations, analogous to the process
+    // fixtures above. Acquisition/expiry is a production producer gate.
+    for (status, extra, state, waiting) in [
+        ("busy", json!({}), "work", None),
+        (
+            "waiting",
+            json!({"waitingFor":"permission prompt"}),
+            "wait",
+            Some("permission prompt"),
+        ),
+        (
+            "waiting",
+            json!({"waitingFor":"input needed"}),
+            "wait",
+            Some("input needed"),
+        ),
+        ("idle", json!({}), "idle", None),
+    ] {
+        home.live(101, "live", status, extra);
+        warehouse
+            .db
+            .execute(
+                "INSERT OR REPLACE INTO qualified_turn_runtime VALUES(1,?1,?2)",
+                params![state, waiting],
+            )
+            .unwrap();
+        assert_selected_turns(&warehouse, &home);
+    }
+    fs::remove_file(home.root.join("claude/sessions/101.json")).unwrap();
+    warehouse
+        .db
+        .execute("DELETE FROM qualified_turn_runtime", [])
+        .unwrap();
+    assert_selected_turns(&warehouse, &home);
 }
 
 #[test]
