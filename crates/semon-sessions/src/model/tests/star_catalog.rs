@@ -834,8 +834,15 @@ fn star_catalog_family_usage_parity() {
                     .query_row(
                         "SELECT input,cached,output FROM family_usage WHERE root=?1",
                         [row.owner],
-                        |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?]),
+                        |r| {
+                            Ok([
+                                r.get::<_, i64>(0)?,
+                                r.get::<_, i64>(1)?,
+                                r.get::<_, i64>(2)?,
+                            ])
+                        },
                     )
+                    .map(|v| v.map(|n| u64::try_from(n).unwrap()))
                     .unwrap();
                 assert_eq!(actual, totals, "{} reverse={reverse}", row.id);
             }
@@ -844,7 +851,7 @@ fn star_catalog_family_usage_parity() {
             warehouse
                 .db
                 .query_row("SELECT input FROM family_usage WHERE root=1", [], |r| r
-                    .get::<_, u64>(0))
+                    .get::<_, i64>(0))
                 .unwrap(),
             66
         );
