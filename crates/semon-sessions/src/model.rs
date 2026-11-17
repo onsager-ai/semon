@@ -25,6 +25,7 @@ use std::os::unix::fs::MetadataExt;
 use serde::{Deserialize, Serialize};
 
 mod native_text;
+mod turns;
 pub(crate) use native_text::{
     assistant_text, content_text, prompt_text, tool_input, tool_result_text,
 };
@@ -6138,309 +6139,32 @@ impl<'a> Builder<'a> {
         keyed.into_iter().map(|(_, entry)| entry).collect()
     }
 
-    /// The mockup's turn rule: a turn starts at each incoming entry (your
-    /// message, a relay, a brief, or a user prompt) and a gap ends one.
-    fn groups(&self, index: usize, entries: &[Entry]) -> Vec<Group> {
-        let mut started = BTreeSet::new();
-        let mut open: Vec<Group> = Vec::new();
-        let mut current: Option<usize> = None;
-        for (position, entry) in entries.iter().enumerate() {
-            if matches!(entry.kind, EntryKind::Gap) {
-                current = None;
-                continue;
-            }
-            let incoming = match entry.kind {
-                EntryKind::H(handoff) => {
-                    let found = &self.handoffs[handoff];
-                    found.to == Some(index)
-                        && matches!(found.out.kind, "ask" | "relay" | "spawn")
-                        && !found.inline
-                        && !started.contains(&handoff)
-                }
-                EntryKind::U => true,
-                _ => false,
-            };
-            if incoming || current.is_none() {
-                let start = match entry.kind {
-                    EntryKind::H(handoff) if incoming => {
-                        started.insert(handoff);
-                        Some(handoff)
-                    }
-                    _ => None,
-                };
-                open.push(Group {
-                    start,
-                    u: incoming && start.is_none(),
-                    file: entry.file,
-                    offset: entry.offset,
-                    at: start
-                        .map(|handoff| self.handoffs[handoff].out.at)
-                        .or(entry.t),
-                    entries: Vec::new(),
-                });
-                current = Some(open.len() - 1);
-            }
-            open[current.expect("open turn")].entries.push(position);
+    fn turn_context(&self, index: usize) -> turns::TurnContext<'_> {
+        turns::TurnContext {
+            files: self.files,
+            handoffs: &self.handoffs,
+            session: index,
+            key: &self.sessions[index].key,
+            state: self.sessions[index].out.state,
+            waiting_for: self.sessions[index].out.waiting_for.as_deref(),
         }
-        open
     }
 
-    /// Returns the turns, each entry's turn (by position in the returned
-    /// list; `None` for entries of a turn with nothing in it), and the prompt
-    /// event of each `u` turn.
+    fn groups(&self, index: usize, entries: &[Entry]) -> Vec<Group> {
+        self.turn_context(index).groups(entries)
+    }
+
     #[allow(clippy::type_complexity)]
     fn split(
         &self,
         index: usize,
         entries: &[Entry],
     ) -> (Vec<Turn>, Vec<Option<usize>>, Vec<(usize, Ref)>) {
-        let sid = &self.sessions[index].key;
-        let open = self.groups(index, entries);
-        let count = open.len();
-        let mut turns = Vec::new();
-        let mut owners = vec![None; entries.len()];
-        let mut prompts = Vec::new();
-        for (number, turn) in open.into_iter().enumerate() {
-            let last = number + 1 == count;
-            let sent: Vec<usize> = turn
-                .entries
-                .iter()
-                .filter_map(|position| match entries[*position].kind {
-                    EntryKind::H(handoff)
-                        if Some(handoff) != turn.start
-                            && self.handoffs[handoff].from == Some(index) =>
-                    {
-                        Some(handoff)
-                    }
-                    _ => None,
-                })
-                .collect();
-            let Some(mut end) = self.end(
-                index,
-                &turn.entries,
-                entries,
-                turn.start,
-                turn.u,
-                &sent,
-                last,
-            ) else {
-                continue;
-            };
-            if !matches!(end.st, "work" | "wait")
-                && !matches!(end.why, "unfinished_step" | "no_reply")
-            {
-                end.at = turn
-                    .entries
-                    .iter()
-                    .filter_map(|position| {
-                        let entry = &entries[*position];
-                        let at = entry.at?;
-                        let found = event(self.files, at);
-                        match entry.kind {
-                            EntryKind::A => found.t,
-                            EntryKind::Tool(_) => found.r.as_ref().and_then(|reply| reply.t),
-                            EntryKind::Operation(_) => found.t,
-                            _ => None,
-                        }
-                    })
-                    .max();
-            }
-            for position in &turn.entries {
-                owners[*position] = Some(turns.len());
-            }
-            if turn.u
-                && let Some(at) = turn
-                    .entries
-                    .first()
-                    .and_then(|position| entries[*position].at)
-            {
-                prompts.push((turns.len(), at));
-            }
-            turns.push(Turn {
-                id: match turn.start {
-                    Some(handoff) => self.handoffs[handoff].out.id.clone(),
-                    None => format!("{sid}:{}:{}", self.files[turn.file].id, turn.offset),
-                },
-                sid: sid.clone(),
-                start: turn
-                    .start
-                    .map(|handoff| self.handoffs[handoff].out.id.clone()),
-                u: turn.u,
-                text: None,
-                at: turn.at,
-                end,
-                sent: sent
-                    .iter()
-                    .map(|handoff| self.handoffs[*handoff].out.id.clone())
-                    .collect(),
-                file: self.files[turn.file].id.clone(),
-                offset: turn.offset,
-                last,
-            });
-        }
-        (turns, owners, prompts)
+        self.turn_context(index).split(entries)
     }
 
-    /// How a turn ended, as the mockup's `turnEnd`. `None` for a turn with
-    /// nothing in it.
-    #[allow(clippy::too_many_arguments)]
-    fn end(
-        &self,
-        index: usize,
-        members: &[usize],
-        entries: &[Entry],
-        start: Option<usize>,
-        u: bool,
-        sent: &[usize],
-        last: bool,
-    ) -> Option<End> {
-        let content: Vec<&Entry> = members
-            .iter()
-            .map(|position| &entries[*position])
-            .filter(|entry| match entry.kind {
-                EntryKind::A | EntryKind::Tool(_) | EntryKind::Operation(_) => true,
-                EntryKind::H(handoff) => sent.contains(&handoff),
-                _ => false,
-            })
-            .collect();
-        let has_h = members
-            .iter()
-            .any(|position| matches!(entries[*position].kind, EntryKind::H(_)));
-        if start.is_none() && !u && content.is_empty() && !has_h {
-            return None;
-        }
-        if last && self.sessions[index].out.waiting_for.is_some() {
-            return Some(End {
-                at: None,
-                st: "wait",
-                why: if self.sessions[index].out.waiting_for.as_deref() == Some("permission prompt")
-                {
-                    "permission"
-                } else {
-                    "input"
-                },
-                h: None,
-            });
-        }
-        if last && self.sessions[index].out.state == "work" {
-            return Some(End {
-                at: None,
-                st: "work",
-                why: "working",
-                h: None,
-            });
-        }
-        if let Some(handoff) = sent
-            .iter()
-            .rev()
-            .find(|handoff| self.handoffs[**handoff].out.kind == "toyou")
-        {
-            let found = &self.handoffs[*handoff].out;
-            return Some(End {
-                at: None,
-                st: if found.status == "wait" {
-                    "wait"
-                } else {
-                    "done"
-                },
-                why: "toyou",
-                h: Some(found.id.clone()),
-            });
-        }
-        let start = start.map(|handoff| &self.handoffs[handoff].out);
-        if start.is_some_and(|start| start.status == "err") {
-            return Some(End {
-                at: None,
-                st: "err",
-                why: "failed",
-                h: None,
-            });
-        }
-        let last_content = content.last();
-        match last_content.map(|entry| entry.kind) {
-            Some(EntryKind::Operation(ToolState::Err)) => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "failed_step",
-                    h: None,
-                });
-            }
-            Some(EntryKind::Tool(ToolState::Err)) => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "failed_step",
-                    h: None,
-                });
-            }
-            // Reached only outside the running last turn of a working
-            // session, or for a yielded command still running there.
-            Some(EntryKind::Tool(ToolState::Pending))
-                if !last_content
-                    .and_then(|entry| entry.at)
-                    .is_some_and(|at| self.live_yield(index, at)) =>
-            {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "unfinished_step",
-                    h: None,
-                });
-            }
-            Some(EntryKind::H(handoff)) if self.handoffs[handoff].out.status == "err" => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "handoff_failed",
-                    h: Some(self.handoffs[handoff].out.id.clone()),
-                });
-            }
-            _ => {}
-        }
-        if start.is_some_and(|start| start.kind == "spawn" && start.status == "done") {
-            return Some(End {
-                at: None,
-                st: "done",
-                why: "returned",
-                h: None,
-            });
-        }
-        if content
-            .iter()
-            .any(|entry| matches!(entry.kind, EntryKind::A))
-        {
-            return Some(End {
-                at: None,
-                st: "done",
-                why: "replied",
-                h: None,
-            });
-        }
-        Some(End {
-            at: None,
-            st: "idle",
-            why: "no_reply",
-            h: None,
-        })
-    }
-}
-
-impl Builder<'_> {
-    /// A yielded command still running: no completion yet, its session id
-    /// still open in its file, and its session working.
     fn live_yield(&self, index: usize, at: Ref) -> bool {
-        let found = event(self.files, at);
-        self.sessions[index].out.state == "work"
-            && found
-                .y
-                .as_ref()
-                .is_some_and(|yielded| yielded.done.is_none())
-            && self.files[at.0]
-                .summary
-                .yields
-                .values()
-                .any(|start| *start == at.1)
+        self.turn_context(index).live_yield(at)
     }
 }
 
