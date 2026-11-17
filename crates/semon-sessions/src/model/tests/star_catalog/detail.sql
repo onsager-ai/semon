@@ -23,11 +23,11 @@ WITH RECURSIVE probes(native_id) AS (
   JOIN dim_session d ON d.native_id=c.candidate
   WHERE c.candidate<>c.native_id
 ), selected AS MATERIALIZED (
-  SELECT l.component FROM candidates c JOIN dim_lineage l ON l.source=c.owner
+  SELECT l.component FROM candidates c JOIN lineage_member l ON l.source=c.owner
   LEFT JOIN dim_session reserved ON reserved.native_id=c.candidate
   WHERE c.candidate=?1 AND (c.candidate=c.native_id OR reserved.source IS NULL)
 ), members AS MATERIALIZED (
-  SELECT l.source FROM selected s CROSS JOIN dim_lineage l USING(component)
+  SELECT l.source FROM selected s CROSS JOIN lineage_member l USING(component)
 ), suppressed AS MATERIALIZED (
   SELECT DISTINCT target.source,old.uuid FROM members member
   CROSS JOIN fact_relation_observation e ON e.source=member.source AND e.kind='continued-in'

@@ -31,55 +31,35 @@ ON CONFLICT(source) DO UPDATE SET
   model=coalesce(excluded.model,dim_session.model),
   continued=dim_session.continued OR excluded.continued;
 
-DELETE FROM affected_lineage;
-INSERT INTO affected_lineage
-WITH RECURSIVE reach(node) AS (
-  SELECT native_id FROM dim_session WHERE source=:source AND harness='claude'
-  UNION
-  SELECT e.target FROM reach r
-  JOIN dim_session a ON a.harness='claude' AND a.native_id=r.node
-  JOIN fact_relation_observation e ON e.source=a.source
-    AND e.kind IN ('continued-in','session_id','bridge')
-  UNION
-  SELECT a.native_id FROM reach r
-  JOIN fact_relation_observation e ON e.target=r.node
-    AND e.kind IN ('continued-in','session_id','bridge')
-  JOIN dim_session a ON a.source=e.source AND a.harness='claude'
-)
-SELECT :source UNION
-SELECT d.source FROM reach r JOIN dim_session d ON d.harness='claude' AND d.native_id=r.node;
-
-DELETE FROM dim_lineage WHERE source IN (SELECT source FROM affected_lineage);
-INSERT INTO dim_lineage
-SELECT source,min(source) OVER () FROM affected_lineage;
-DELETE FROM bridge_session_owner WHERE source IN (SELECT source FROM affected_lineage);
-INSERT INTO bridge_session_owner
-SELECT source,owner,owner FROM (
-  SELECT d.source,first_value(d.source) OVER (
-    ORDER BY d.first_ts IS NULL,d.first_ts,d.continued DESC,d.native_id
-  ) AS owner
-  FROM affected_lineage a JOIN dim_session d USING(source)
-);
-
--- Spawn uniqueness is scoped to a parent's immediate children, not its ancestry.
--- A newly arrived child refreshes its parent group even if the parent is late.
-DELETE FROM affected_spawn_parent;
-INSERT INTO affected_spawn_parent SELECT :source
-UNION SELECT p.source FROM dim_session child
+-- Only appended call names and newly admitted child names can alter uniqueness.
+DELETE FROM affected_spawn_key;
+INSERT OR IGNORE INTO affected_spawn_key
+SELECT source,task_name FROM fact_tool_call
+WHERE source=:source AND pos>:after AND tool='spawn_agent' AND task_name IS NOT NULL;
+INSERT OR IGNORE INTO affected_spawn_key
+SELECT p.source,child.nickname FROM dim_session child
 JOIN dim_session p ON p.harness='codex' AND p.native_id=child.parent_id
-WHERE child.source=:source AND child.harness='codex';
-DELETE FROM bridge_spawn_placement
-WHERE parent_source IN (SELECT source FROM affected_spawn_parent);
-INSERT INTO bridge_spawn_placement
+WHERE child.source=:source AND child.harness='codex' AND child.nickname IS NOT NULL
+  AND :after=-1;
+-- A late parent admits only names that occur in its newly inserted calls above.
+DELETE FROM bridge_spawn_placement WHERE child IN (
+  SELECT child.native_id FROM affected_spawn_key k
+  CROSS JOIN dim_session p ON p.source=k.parent
+  CROSS JOIN dim_session child ON child.harness='codex'
+    AND child.parent_id=p.native_id AND child.nickname=k.name
+);
+INSERT OR REPLACE INTO bridge_spawn_placement
 WITH calls AS (
   SELECT c.source,c.task_name,min(c.pos) AS pos,min(c.ts) AS ts
-  FROM affected_spawn_parent a JOIN fact_tool_call c USING(source)
-  WHERE c.tool='spawn_agent' GROUP BY c.source,c.task_name HAVING count(*)=1
+  FROM affected_spawn_key k CROSS JOIN fact_tool_call c
+    ON c.source=k.parent AND c.tool='spawn_agent' AND c.task_name=k.name
+  GROUP BY c.source,c.task_name HAVING count(*)=1
 ), children AS (
-  SELECT p.source AS parent_source,child.nickname,min(child.native_id) AS child
-  FROM affected_spawn_parent a JOIN dim_session p USING(source)
-  JOIN dim_session child ON child.harness='codex' AND child.parent_id=p.native_id
-  WHERE p.harness='codex' GROUP BY p.source,child.nickname HAVING count(*)=1
+  SELECT k.parent,k.name,min(child.native_id) AS child
+  FROM affected_spawn_key k CROSS JOIN dim_session p ON p.source=k.parent
+  CROSS JOIN dim_session child ON child.harness='codex'
+    AND child.parent_id=p.native_id AND child.nickname=k.name
+  WHERE p.harness='codex' GROUP BY k.parent,k.name HAVING count(*)=1
 )
 SELECT child,c.source,c.pos,c.ts FROM children siblings JOIN calls c
-ON c.source=siblings.parent_source AND c.task_name=siblings.nickname;
+ON c.source=siblings.parent AND c.task_name=siblings.name;
