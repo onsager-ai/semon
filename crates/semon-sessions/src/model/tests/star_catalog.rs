@@ -282,6 +282,13 @@ fn star_catalog_fixture_parity() {
         assert_eq!(row.title, expected.name, "{} title", row.id);
         assert_eq!(row.model, expected.model, "{} model", row.id);
         assert_eq!(row.status, expected.state, "{} status", row.id);
+        let exact = built.facts[&row.id].tokens.as_ref().unwrap();
+        assert_eq!(
+            row.tokens,
+            [exact.input, exact.cached_input, exact.output],
+            "{} exact usage",
+            row.id
+        );
         let million = |v: u64| (v as f64 / 1e6 * 1000.0).round() / 1000.0;
         assert_eq!(
             [
