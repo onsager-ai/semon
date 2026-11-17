@@ -76,14 +76,21 @@ CREATE TABLE maintenance_cursor (source INTEGER PRIMARY KEY, pos INTEGER NOT NUL
 CREATE TABLE index_advance (source INTEGER PRIMARY KEY, complete_bytes INTEGER NOT NULL);
 
 -- Revisable answers are separate from the append-only observations.
-CREATE TABLE dim_lineage (
-  source INTEGER PRIMARY KEY, component INTEGER NOT NULL
+-- Internal IDs follow union-by-size; the public component remains min(source).
+CREATE TABLE lineage_group (
+  id INTEGER PRIMARY KEY, weight INTEGER NOT NULL, minimum INTEGER NOT NULL UNIQUE,
+  owner INTEGER NOT NULL
 );
-CREATE INDEX lineage_component ON dim_lineage(component,source);
-CREATE TABLE bridge_session_owner (
-  source INTEGER PRIMARY KEY, owner INTEGER NOT NULL, usage_owner INTEGER NOT NULL
-);
-CREATE INDEX session_owner ON bridge_session_owner(owner,source);
+CREATE TABLE lineage_member (source INTEGER PRIMARY KEY, component INTEGER NOT NULL);
+CREATE INDEX lineage_component ON lineage_member(component,source);
+CREATE TABLE lineage_node (node TEXT PRIMARY KEY, component INTEGER NOT NULL);
+CREATE INDEX lineage_node_component ON lineage_node(component,node);
+CREATE VIEW dim_lineage AS
+SELECT m.source,g.minimum AS component FROM lineage_member m
+JOIN lineage_group g ON g.id=m.component;
+CREATE VIEW bridge_session_owner AS
+SELECT m.source,g.owner,g.owner AS usage_owner FROM lineage_member m
+JOIN lineage_group g ON g.id=m.component;
 CREATE TABLE bridge_spawn_placement (
   child TEXT PRIMARY KEY, parent_source INTEGER NOT NULL, pos INTEGER NOT NULL, ts INTEGER
 );
@@ -99,8 +106,7 @@ CREATE INDEX usage_message ON fact_step_observation(message_id,uuid,source);
 CREATE INDEX tool_result_identity ON fact_tool_result(source,call_id);
 
 -- Connection-local work sets, emptied before every bounded maintenance pass.
-CREATE TEMP TABLE affected_lineage (source INTEGER PRIMARY KEY);
-CREATE TEMP TABLE affected_spawn_parent (source INTEGER PRIMARY KEY);
+CREATE TEMP TABLE affected_spawn_key (parent INTEGER NOT NULL, name TEXT NOT NULL, PRIMARY KEY(parent,name));
 
 CREATE VIEW membership AS SELECT source,owner FROM bridge_session_owner;
 

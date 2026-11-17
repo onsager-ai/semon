@@ -359,6 +359,16 @@ impl Warehouse {
             .optional()
             .unwrap()
             .unwrap_or(-1);
+        let rank = || {
+            db.query_row(
+                "SELECT first_ts,continued FROM dim_session WHERE source=?1",
+                [source],
+                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .unwrap()
+        };
+        let old_rank = rank();
         for sql in MAINTAIN.split(';').filter(|sql| !sql.trim().is_empty()) {
             let mut statement = db.prepare(sql).unwrap();
             for (name, value) in [(":source", source), (":after", after)] {
@@ -367,6 +377,17 @@ impl Warehouse {
                 }
             }
             statement.raw_execute().unwrap();
+        }
+        let new_relations: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM fact_relation_observation
+             WHERE source=?1 AND pos>?2 AND kind IN ('continued-in','session_id','bridge'))",
+                params![source, after],
+                |r| r.get(0),
+            )
+            .unwrap();
+        if old_rank.is_none() || new_relations || old_rank != rank() {
+            Self::maintain_lineage(db, source, after);
         }
         db.execute(
             "INSERT OR REPLACE INTO maintenance_cursor
@@ -380,6 +401,149 @@ impl Warehouse {
             params![source, after],
         )
         .unwrap();
+    }
+
+    fn preferred_owner(db: &Connection, left: i64, right: i64) -> i64 {
+        db.query_row(
+            "SELECT source FROM dim_session WHERE source IN (?1,?2)
+             ORDER BY first_ts IS NULL,first_ts,continued DESC,native_id,source LIMIT 1",
+            params![left, right],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn merge_groups(db: &Connection, left: i64, right: i64) {
+        if left == right {
+            return;
+        }
+        let group = |id| {
+            db.query_row(
+                "SELECT weight,minimum,owner FROM lineage_group WHERE id=?1",
+                [id],
+                |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .unwrap()
+        };
+        let (left_weight, left_min, left_owner) = group(left);
+        let (right_weight, right_min, right_owner) = group(right);
+        let owner = Self::preferred_owner(db, left_owner, right_owner);
+        let (large, small) = if left_weight >= right_weight {
+            (left, right)
+        } else {
+            (right, left)
+        };
+        db.execute(
+            "UPDATE lineage_member SET component=?1 WHERE component=?2",
+            params![large, small],
+        )
+        .unwrap();
+        db.execute(
+            "UPDATE lineage_node SET component=?1 WHERE component=?2",
+            params![large, small],
+        )
+        .unwrap();
+        // Remove the old unique minimum before assigning it to the surviving group.
+        db.execute("DELETE FROM lineage_group WHERE id=?1", [small])
+            .unwrap();
+        db.execute(
+            "UPDATE lineage_group SET weight=?2,minimum=?3,owner=?4 WHERE id=?1",
+            params![
+                large,
+                left_weight + right_weight,
+                left_min.min(right_min),
+                owner
+            ],
+        )
+        .unwrap();
+    }
+
+    fn maintain_lineage(db: &Connection, source: i64, after: i64) {
+        let fresh = db
+            .execute(
+                "INSERT OR IGNORE INTO lineage_member VALUES(?1,?1)",
+                [source],
+            )
+            .unwrap()
+            != 0;
+        if fresh {
+            db.execute("INSERT INTO lineage_group VALUES(?1,1,?1,?1)", [source])
+                .unwrap();
+        }
+        let (harness, native): (String, String) = db
+            .query_row(
+                "SELECT harness,native_id FROM dim_session WHERE source=?1",
+                [source],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let mut nodes = Vec::new();
+        if harness == "claude" {
+            if fresh {
+                nodes.push(native);
+            }
+            nodes.extend(
+                db.prepare(
+                    "SELECT DISTINCT target FROM fact_relation_observation
+                 WHERE source=?1 AND pos>?2 AND kind IN ('continued-in','session_id','bridge')",
+                )
+                .unwrap()
+                .query_map(params![source, after], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(Result::unwrap),
+            );
+        }
+        for node in nodes {
+            let component: i64 = db
+                .query_row(
+                    "SELECT component FROM lineage_member WHERE source=?1",
+                    [source],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let inserted = db
+                .execute(
+                    "INSERT OR IGNORE INTO lineage_node VALUES(?1,?2)",
+                    params![node, component],
+                )
+                .unwrap();
+            if inserted != 0 {
+                db.execute(
+                    "UPDATE lineage_group SET weight=weight+1 WHERE id=?1",
+                    [component],
+                )
+                .unwrap();
+            } else {
+                let other = db
+                    .query_row(
+                        "SELECT component FROM lineage_node WHERE node=?1",
+                        [node],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                Self::merge_groups(db, component, other);
+            }
+        }
+        // Ranking inputs only improve on append: first_ts decreases (NULL last),
+        // continued changes false -> true. Comparing this member is sufficient.
+        let (component,owner): (i64,i64) = db.query_row(
+            "SELECT g.id,g.owner FROM lineage_member m JOIN lineage_group g ON g.id=m.component WHERE m.source=?1",
+            [source], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        let chosen = Self::preferred_owner(db, source, owner);
+        if chosen != owner {
+            db.execute(
+                "UPDATE lineage_group SET owner=?2 WHERE id=?1",
+                params![component, chosen],
+            )
+            .unwrap();
+        }
     }
 
     fn list(&self) -> Vec<ListRow> {
@@ -1380,12 +1544,317 @@ fn star_catalog_transaction_and_late_result() {
     assert_eq!(unchanged, original);
 }
 
+// Rebuild every derived answer from all facts independently of incremental state.
+fn assert_full_recompute(warehouse: &Warehouse) {
+    let snapshot = |sql: &str| {
+        let mut statement = warehouse.db.prepare(sql).unwrap();
+        let columns = statement.column_count();
+        statement
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect::<Vec<_>>()
+    };
+    let oracle = include_str!("star_catalog/full_recompute.sql")
+        .split(';')
+        .filter(|sql| !sql.trim().is_empty());
+    for (expected, actual) in oracle.zip([
+        "SELECT * FROM dim_session ORDER BY source",
+        "SELECT * FROM dim_lineage ORDER BY source",
+        "SELECT * FROM bridge_session_owner ORDER BY source",
+        "SELECT * FROM bridge_spawn_placement ORDER BY child",
+    ]) {
+        assert_eq!(snapshot(actual), snapshot(expected), "{actual}");
+    }
+}
+
+#[test]
+fn star_catalog_incremental_maintenance_plans() {
+    let warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+    for sql in MAINTAIN.split(';').filter(|sql| !sql.trim().is_empty()) {
+        let mut statement = warehouse
+            .db
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        for name in [":source", ":after"] {
+            if let Some(index) = statement.parameter_index(name).unwrap() {
+                statement.raw_bind_parameter(index, 1_i64).unwrap();
+            }
+        }
+        let mut rows = statement.raw_query();
+        while let Some(row) = rows.next().unwrap() {
+            let step: String = row.get(3).unwrap();
+            assert!(!step.contains("SCAN fact_"), "{step}");
+            assert!(
+                !step.starts_with("SCAN c USING INDEX spawn_call_name")
+                    && !step.starts_with("SCAN child "),
+                "{step}"
+            );
+            if step.contains("SEARCH fact_record")
+                || step.contains("SEARCH fact_step_observation")
+                || step.contains("SEARCH fact_relation_observation")
+                || step.contains("SEARCH fact_tool_call")
+            {
+                assert!(step.contains("pos>?"), "suffix scan lost: {step}");
+            }
+        }
+    }
+}
+
+#[test]
+fn star_catalog_incremental_random_splits_and_order() {
+    let inputs = [
+        (
+            1,
+            "claude",
+            "a",
+            vec![
+                human("a", ts(0, 5), "start"),
+                json!({"type":"bridge-session","bridgeSessionId":"pending"}),
+                json!({"type":"custom-title","customTitle":"first"}),
+                assistant_usage("a", ts(0, 6), "msg", "model-one", json!({"input_tokens":1})),
+                json!({"type":"compact_boundary"}),
+                json!({"type":"continued-in","continuedInSessionId":"b"}),
+                // Late observation with an earlier timestamp changes the owner.
+                human("a", ts(0, 0), "late first"),
+                json!({"type":"custom-title","customTitle":"latest"}),
+            ],
+        ),
+        (
+            2,
+            "claude",
+            "b",
+            vec![
+                human("b", ts(0, 2), "b"),
+                json!({"type":"continued-in","continuedInSessionId":"c"}),
+            ],
+        ),
+        (
+            3,
+            "claude",
+            "c",
+            vec![
+                human("c", ts(0, 3), "c"),
+                json!({"type":"bridge-session","bridgeSessionId":"other"}),
+            ],
+        ),
+        (
+            4,
+            "claude",
+            "d",
+            vec![
+                human("d", ts(0, 1), "d"),
+                json!({"type":"bridge-session","bridgeSessionId":"other"}),
+                // Join two already populated groups, whose owners differ.
+                json!({"type":"bridge-session","bridgeSessionId":"pending"}),
+            ],
+        ),
+        (
+            5,
+            "codex",
+            "parent",
+            codex_records(
+                "parent",
+                None,
+                None,
+                &[
+                    codex_line(
+                        ts(0, 1),
+                        "response_item",
+                        json!({"type":"function_call","name":"spawn_agent",
+                "call_id":"spawn","arguments":"{\"task_name\":\"solo\"}"}),
+                    ),
+                    codex_line(
+                        ts(0, 2),
+                        "response_item",
+                        json!({"type":"function_call","name":"spawn_agent",
+                "call_id":"spawn-again","arguments":"{\"task_name\":\"solo\"}"}),
+                    ),
+                ],
+            ),
+        ),
+        (
+            6,
+            "codex",
+            "child",
+            codex_records(
+                "child",
+                Some("parent"),
+                Some("solo"),
+                &[
+                    codex_user(ts(0, 3), "first prompt"),
+                    codex_user(ts(0, 4), "second prompt"),
+                ],
+            ),
+        ),
+        (
+            7,
+            "claude",
+            "pending",
+            vec![human("pending", ts(0, 4), "physical pending target")],
+        ),
+    ];
+    for seed in 1..=32_u64 {
+        let mut random = seed;
+        let mut next = || {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (random >> 32) as usize
+        };
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        let mut offsets = [0; 7];
+        while offsets
+            .iter()
+            .zip(&inputs)
+            .any(|(offset, input)| *offset < input.3.len())
+        {
+            let i = next() % inputs.len();
+            let (source, harness, id, records) = &inputs[i];
+            let start = offsets[i];
+            if start == records.len() {
+                continue;
+            }
+            let end = (start + 1 + next() % 3).min(records.len());
+            warehouse.source(*source, harness, id, &records[start..end]);
+            offsets[i] = end;
+            assert_full_recompute(&warehouse);
+        }
+        // Replaying maintenance is idempotent, without replaying native facts.
+        for source in 1..=7 {
+            Warehouse::recompute(&warehouse.db, source);
+        }
+        assert_full_recompute(&warehouse);
+    }
+}
+
+fn append_distribution(name: &str, warehouse: &mut Warehouse, sources: usize, home: &Home) {
+    let mut files = (1..=sources)
+        .map(|source| {
+            std::io::BufWriter::new(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(home.root.join(format!("{name}-{source}.jsonl")))
+                    .unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let started = Instant::now();
+    let mut samples = Vec::with_capacity(10_000);
+    for i in 0..10_000 {
+        let source = 1 + (i % sources) as i64;
+        let records = (0..1 + i % 5)
+            .map(|_| json!({"type":"compact_boundary"}))
+            .collect::<Vec<_>>();
+        let append = Instant::now();
+        let file = &mut files[(source - 1) as usize];
+        for record in &records {
+            writeln!(file, "{record}").unwrap();
+        }
+        file.flush().unwrap();
+        warehouse.source(source, "claude", &format!("append-{source}"), &records);
+        samples.push(append.elapsed().as_nanos());
+    }
+    let total = started.elapsed();
+    let mut first = samples[..1000].to_vec();
+    let mut last = samples[9000..].to_vec();
+    first.sort_unstable();
+    last.sort_unstable();
+    println!(
+        "scale append_case={name} count={} total_ms={} first_1000_p50_us={:.3} first_1000_p99_us={:.3} last_1000_p50_us={:.3} last_1000_p99_us={:.3}",
+        samples.len(),
+        total.as_millis(),
+        first[500] as f64 / 1000.0,
+        first[990] as f64 / 1000.0,
+        last[500] as f64 / 1000.0,
+        last[990] as f64 / 1000.0
+    );
+    assert!(
+        last[500] <= 3 * first[500],
+        "{name}: last p50 {} ns > 3x first p50 {} ns",
+        last[500],
+        first[500]
+    );
+}
+
+fn star_catalog_append_scale(home: &Home) {
+    // A: generate/admit one million native records in bounded 1,000-row chunks.
+    // The file is evidence of the physical JSONL shape; no million-Value buffer.
+    let generation = Instant::now();
+    let mut long = Warehouse::new(&home.root.join("long-session.sqlite3"));
+    let mut file = std::io::BufWriter::new(File::create(home.root.join("A-1.jsonl")).unwrap());
+    for chunk in 0..1000 {
+        let records = (0..1000).map(|j| {
+            let i = chunk*1000+j;
+            if i%10_000 == 9999 { json!({"type":"compact_boundary"}) }
+            else { json!({"type":"user","uuid":format!("record-{i}"),"message":{"role":"user","content":"synthetic"}}) }
+        }).collect::<Vec<_>>();
+        for record in &records {
+            writeln!(file, "{record}").unwrap();
+        }
+        long.source(1, "claude", "append-1", &records);
+    }
+    file.flush().unwrap();
+    let count: i64 = long
+        .db
+        .query_row("SELECT count(*) FROM fact_record", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1_000_000);
+    println!(
+        "scale append_case=A generation_ms={} records={count}",
+        generation.elapsed().as_millis()
+    );
+    drop(file);
+    append_distribution("A", &mut long, 1, home);
+    drop(long);
+    // B: a 50-file continuation chain, append only to the newest file (source 1).
+    let mut chain = Warehouse::new(&home.root.join("long-chain.sqlite3"));
+    for source in (1..=50).rev() {
+        let mut records = vec![human(&format!("append-{source}"), ts(0, 1), "chain")];
+        if source > 1 {
+            records.push(
+                json!({"type":"continued-in","continuedInSessionId":format!("append-{}",source-1)}),
+            );
+        }
+        let mut file = std::io::BufWriter::new(
+            File::create(home.root.join(format!("B-{source}.jsonl"))).unwrap(),
+        );
+        for record in &records {
+            writeln!(file, "{record}").unwrap();
+        }
+        file.flush().unwrap();
+        chain.source(source, "claude", &format!("append-{source}"), &records);
+    }
+    append_distribution("B", &mut chain, 1, home);
+    // C: 300 physical files in one bridge group; spread appends across all files.
+    let mut wide = Warehouse::new(&home.root.join("wide-group.sqlite3"));
+    for source in 1..=300 {
+        let records = [
+            human(&format!("append-{source}"), ts(0, 1), "wide"),
+            json!({"type":"bridge-session","bridgeSessionId":"wide-group"}),
+        ];
+        let mut file = std::io::BufWriter::new(
+            File::create(home.root.join(format!("C-{source}.jsonl"))).unwrap(),
+        );
+        for record in &records {
+            writeln!(file, "{record}").unwrap();
+        }
+        file.flush().unwrap();
+        wide.source(source, "claude", &format!("append-{source}"), &records);
+    }
+    append_distribution("C", &mut wide, 300, home);
+}
+
 /// CI only: writes real synthetic JSONL, extracts it through the same loader,
 /// then times actual list and detail SQL. No full builder over the scale corpus.
 #[test]
 #[ignore = "manual 1 GB / 20k session warehouse scale experiment"]
 fn star_catalog_scale() {
     let home = Home::new();
+    star_catalog_append_scale(&home);
     let path = home.root.join("scale.sqlite3");
     let corpus = home.root.join("corpus.jsonl");
     let mut file = std::io::BufWriter::new(File::create(&corpus).unwrap());

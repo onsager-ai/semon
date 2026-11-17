@@ -18,8 +18,8 @@ essential: replacing a source is not appending to the same source.
 
 Type 1 dimensions and bridges hold revisable answers separately from facts.
 Natural-key maintenance selects latest model, first prompt position and timestamp
-extrema. Component-local maintenance selects lineage membership and canonical
-and usage owners. These answers are replaced atomically when new evidence arrives;
+extrema. Incremental maintenance selects lineage membership and canonical
+and usage owners. These answers are updated atomically when new evidence arrives;
 they are never written back into facts. SCD2 is reserved for machine names and
 prices. Neither arbitrary arrival order nor a guessed original copy owner becomes
 truth. Cross-owner shared usage remains a set-based read over current membership.
@@ -60,26 +60,59 @@ It does not prove all parser extraction, custody or runtime integration.
 
 | Dimension | Kind and recomputation |
 | --- | --- |
-| `dim_session` | Type 1, natural key `(machine,harness,native ID,source incarnation)`. Re-read only this key's observations: first/last time, latest model, title/prompt source reference, native role/nickname/path and outbound-continuation presence used in deterministic ordering. A title body may be served locally from its reference; it is not exported to analytics. |
-| `dim_lineage` | Type 1, source → component ID (minimum physical source key). Traverse only the arriving source's undirected continuation/session-ID/bridge edges with a visited set, including absent native IDs and `bridge:` pseudo-nodes, then replace rows for the component's actual sources. Pseudo-nodes never win ownership. |
-| `bridge_session_owner` | Type 1, source → canonical owner and usage owner. Rank the affected component's sources by the builder's timestamp/continuation/native-ID order, replacing all member rows in the append transaction. Both owner columns currently agree; shared-copy original attribution stays unknown. |
-| `bridge_spawn_placement` | Type 1, child → parent source/call position/time. Recompute grouped unique call/name and child/name matches for the appended parent and, when a child arrives, its native parent. This immediate family group is bounded independently of ancestor depth. A second name candidate revokes placement; a late parent fills it. |
+| `dim_session` | Type 1, natural key `(machine,harness,native ID,source incarnation)`. Aggregate only the appended position suffix through `(source,pos)` indexes: min/max timestamps, latest title/model, first prompt, OR continuation presence. Source references retain local body custody. |
+| `dim_lineage` | Type 1 public source → minimum physical source key. Internal `lineage_member`/`lineage_node` tables reference a group with weight, minimum and owner. Indexed node lookup includes missing IDs and `bridge:` pseudo-nodes. Union by size relabels only the smaller side; no recursive reach on append. |
+| `bridge_session_owner` | Read-only view joining members to one current owner per group. Rank physical sources by timestamp/continuation/native ID; pseudo-nodes never own. Compare a joining member or two merging owners. Owner changes update one group row. |
+| `bridge_spawn_placement` | Type 1, child → parent source/call position/time. Recompute only parent/name keys in new calls or a newly admitted child. Duplicate call or child revokes placement; late parents fill it. |
 | `dim_machine` | SCD2 names, with observed/effective times and an explicit source authority; new name closes the previous effective interval. Identity does not change with name. |
 | `dim_harness`, `dim_tool`, `dim_date` | Type 1 lookup values from their own natural key. Date is a deterministic UTC calendar projection. |
 | `dim_repo` | Type 1 sanitized repository identity/display name, using current ASI sanitization. Local path remains origin scoped. |
 | `dim_model` | Type 1 immutable provider/model identity; no fabricated history. |
 | `dim_price` | Existing SCD2 price/version contract and conflict refusal, unchanged. |
 
-Recompute local dimensions from all facts for the appended key, in the ingestion
-transaction. Discover the affected lineage component once through indexed edges,
-then replace its dimension/bridge rows in that same transaction. The prototype's
-`maintain.sql` uses connection-local work tables to share this visited set between
-statements. Component merges include both previously separate components. A child
-arriving before its parent is repaired when the parent arrives; the test compares
-all persisted derived columns and the final read rows against in-order ingestion.
-Repeating maintenance produces identical rows. The prototype stores title source
-positions and reads bodies from its fixture reader only after SQL chooses that
-position. It stores no title text in SQLite.
+The append transaction binds the previous maintained maximum position and reads
+only `pos > previous_max`; a `maintenance_cursor` advances atomically with facts,
+Index progress and derived rows. A source append retains marker-stop state and
+uses the previous complete-byte offset. Timestamp extrema ignore NULL, latest
+custom title replaces the old position, first prompt remains, the latest new
+non-NULL step model replaces the old model, and continuation is ORed.
+
+Ordinary appends skip lineage, owner and related bridge maintenance entirely
+unless first timestamp or continuation rank changes. New continuation/session-ID/
+bridge facts probe their endpoint nodes. Admitting a Claude physical source also
+probes its native node, so existing pending edges join it immediately. Each node
+and physical source belongs to an internal group. Merge weights count both;
+relabel the smaller side's indexed member/node rows, sum weights, retain the
+minimum physical source for public `dim_lineage`, and compare the two owners.
+This keeps absent-endpoint/bridge connections without traversing their edges.
+An individual merge can cost the smaller group size; over repeated unions each
+row moves at most logarithmically. This is the explicit exception to constant
+append work, not a promise that joining two large groups is constant time.
+
+Owner rank is `(first_ts IS NULL, first_ts, continued DESC, native_id)` on physical
+sources only. First timestamp can only decrease (NULL becomes known), and
+continuation can only change false → true. If the current owner improves it
+remains best. If another member improves, compare it to the current owner; all
+other ranks are unchanged. No full owner recompute is needed for late first
+records. Native IDs and source metadata are immutable on this append contract.
+
+Spawn maintenance touches only changed `(parent,name)` keys, using indexed call
+and child matches. It never scans the whole lineage. Parent selection, reused
+call/result matching and shared-usage `(message_id,uuid)` grouping are read-time
+views, so no persisted parent/shared bridge needs append-time recomputation.
+Read-time family/cycle/shared closures retain their selected-query cost. The
+prototype stores title positions and fetches bodies from its fixture reader only
+after SQL chooses a position; title text is never stored in SQLite.
+
+**Remaining broad maintenance:** no append shape re-walks a whole lineage or
+recomputes all its owners. A new edge or physical pending target joining two
+populated groups relabels only the smaller side, including its pseudo-nodes.
+These structural arrivals occur on new continuation/bridge evidence, rather than
+ordinary message, usage or within-file `compact_boundary` appends. A duplicate
+spawn name re-reads that indexed parent/name candidate set, not siblings with
+other names. Source replacement/retraction and mutable rank metadata are outside
+this append-only spike; production must define them before claiming this proof
+for those operations. The independent full-recompute SQL is a test oracle only.
 
 Catalog key collision qualification remains a set-based read because reserved IDs
 can be in unrelated components. Title/model selection, native-parent lookup,
@@ -99,14 +132,14 @@ These retain the C inventory's numbering. SQL is illustrative except for the
 executable views under the prototype's test support directory.
 
 1. **Canonical merges and suppression.** Undirected continuation/session_id/bridge
-   edges define components, scoped to one machine and Claude harness. A recursive
-   CTE with `UNION` (visited set) terminates cycles during append maintenance. Rank actual sources by first
+   edges define components, scoped to one machine and Claude harness. Indexed
+   node membership and union by size handle cycles without append-time traversal. Rank actual sources by first
    timestamp, presence of outbound continuation first on a tie, then native ID,
    exactly as `model.rs:1757`. Missing IDs/bridge pseudo-nodes must connect components
    but can never win ownership. The spike now tests bridge peers, two files sharing
    an absent native ID, arrival of that ID's physical source, reverse arrival order,
    and equal bridge UUIDs that must not be copy-suppressed.
-   Persist rank 1 in the Type 1 owner bridge during component maintenance. Suppress a target
+   Persist rank 1 once per group and expose it through the owner bridge view. Suppress a target
    record only with explicit source→target continuation and matching UUID, else
    the supported tool/message identity (`model.rs:2251`). Do not suppress bridge
    records merely because they have equal text.
@@ -205,19 +238,16 @@ semantic authority.
 
 ## Atomicity and progress
 
-The parser inserts all facts and recomputes affected local dimensions and lineage/
-spawn bridges in the same SQLite transaction as Index complete-record advancement
-and source proof. There is no global semantic stage, generation fence, dependency
-graph or restart-until-quiescent loop. A visited set bounds the traversal by the
-finite affected lineage component; grouped spawn maintenance reads the affected
-immediate family. One transaction completes against that admitted snapshot even
-when other sources keep appending. Thus continuous appends cannot starve this
-append by invalidating its generation. Very large components can still increase
-write latency; this is a size bound, not a constant-time claim. A
-crash before commit exposes neither; a crash after commit exposes both. Unique
-source-position keys make replay idempotent; a conflicting payload for an existing
-key is an integrity error. A result arriving later is a new position/fact.
-The prototype explicitly tests rollback and repeated dimension recomputation.
+The parser inserts facts and incrementally maintains local dimensions and groups
+in the same SQLite transaction as Index complete-record advancement and source
+proof. There is no global semantic stage, generation fence, dependency graph or
+restart-until-quiescent loop. Ordinary append work depends on admitted rows, not
+source length or lineage size; structural merges relabel only the smaller group.
+One transaction completes against its admitted snapshot even when other sources
+keep appending. A crash before commit exposes neither facts nor advancement; a
+crash after commit exposes both. Unique source-position keys make replay
+idempotent; a conflicting payload is an integrity error. A late result is a new
+position/fact. Tests cover rollback and repeated dimension maintenance.
 
 A source replacement appends a new incarnation and updates its current-source
 selector transactionally, retaining native history according to existing custody
@@ -285,7 +315,17 @@ waiting for a quiet corpus, while preserving the builder's answers.
    (run 44036381853): list 319 ms, detail 4 ms, ingest 177 s including 81 s of
    dimension maintenance (4.1 ms per append, up from 2.1 ms before the parent and
    shared-family reads). Investigate that growth before accepting any production
-   ingest budget.
+   ingest budget. Per-append cost must be independent of existing session and
+   lineage-group size for ordinary appends. The same manual workflow/test retains
+   the 1 GB/20k case and adds A: one Claude file with 1M records and periodic
+   `compact_boundary`, B: 50 continuation-linked files with appends to the newest,
+   and C: one 300-file bridge group with appends spread across members. Each runs
+   10,000 appends of 1–5 records and reports count, total milliseconds, and p50/p99
+   append microseconds for the first and last 1,000. Acceptance: last-window p50
+   ≤ 3 × first-window p50 in each case. Existing list/detail ceilings and plan
+   assertions remain. Random append splits/interleavings compare all dimensions,
+   lineage, owners and spawn placements with independent full recomputation after
+   each append, including group merges, owner changes and late first timestamps.
 2. **Write facts with Index advancement.** Add the current warehouse schema,
    parser observation producers and component-local dimensions in the existing
    source-admission transaction. This prevents half-published identity/usage after
