@@ -1,7 +1,7 @@
 CREATE VIEW relay_endpoints AS
 WITH receipts AS MATERIALIZED (
   SELECT r.*,m.owner,row_number() OVER(PARTITION BY r.correlation
-    ORDER BY d.first_ts,d.continued DESC,d.native_id,r.pos) AS n
+    ORDER BY d.native_id,r.pos) AS n
   FROM fact_relay_receipt r JOIN bridge_session_owner m USING(source)
   JOIN dim_session d ON d.source=m.owner
 ), sends AS MATERIALIZED (
