@@ -45,6 +45,8 @@ impl Warehouse {
             .unwrap();
         db.execute_batch(include_str!("star_catalog/family.sql"))
             .unwrap();
+        db.execute_batch(include_str!("star_catalog/shared_family.sql"))
+            .unwrap();
         Self {
             db,
             titles: BTreeMap::new(),
@@ -967,6 +969,82 @@ fn star_catalog_family_usage_parity() {
                     .get::<_, i64>(0))
                 .unwrap(),
             66
+        );
+    }
+}
+
+#[test]
+fn star_catalog_shared_family_parity() {
+    use sha2::{Digest, Sha256};
+    for reverse in [false, true] {
+        let home = Home::new();
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        let inputs = [
+            (1, "root", None, vec!["u1"]),
+            (2, "middle", Some("root"), vec!["u1", "u2"]),
+            (3, "leaf", Some("middle"), vec!["u2"]),
+        ];
+        for index in if reverse { [2, 1, 0] } else { [0, 1, 2] } {
+            let (source, id, parent, uuids) = &inputs[index];
+            let prompt =
+                parent.map_or("Work".into(), |p| format!("Semon-Parent: claude:{p}\nWork"));
+            let mut records = vec![human(id, ts(0, *source), &prompt)];
+            for (n, uuid_id) in uuids.iter().enumerate() {
+                records.push(uuid(
+                    assistant_usage(
+                        id,
+                        ts(0, 10 + n as i64),
+                        "shared-message",
+                        "claude-sonnet-4-6",
+                        json!({"input_tokens":10,"output_tokens":5}),
+                    ),
+                    uuid_id,
+                ));
+            }
+            home.top(id, &records);
+            warehouse.source(*source, "claude", id, &records);
+            let built = home.build_query();
+            let mut expected = BTreeMap::<String, [u64; 3]>::new();
+            for session in built.sessions.values() {
+                if let Some(evidence) = &session.claude_usage {
+                    for (key, tokens) in &evidence.shared {
+                        expected.entry(key.clone()).or_insert([
+                            tokens.input,
+                            tokens.cached_input,
+                            tokens.output,
+                        ]);
+                    }
+                }
+            }
+            let actual=warehouse.db.prepare("SELECT message_id,evidence_uuid,input,cached,output FROM family_shared_usage WHERE root=1").unwrap()
+                .query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,[r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?]))).unwrap()
+                .map(|row| {let (message,uuid,tokens)=row.unwrap();
+                    (format!("{:x}",Sha256::digest(serde_json::to_vec(&(message,uuid)).unwrap())),tokens.map(|v|u64::try_from(v).unwrap()))}).collect::<BTreeMap<_,_>>();
+            if built.sessions.contains_key("root") {
+                assert_eq!(actual, expected, "reverse={reverse} source={source}");
+            }
+        }
+        assert_eq!(
+            warehouse
+                .db
+                .query_row(
+                    "SELECT count(*) FROM family_shared_usage WHERE root=1",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            warehouse
+                .db
+                .query_row(
+                    "SELECT input FROM family_shared_usage WHERE root=1",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            10
         );
     }
 }
