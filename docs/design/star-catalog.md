@@ -264,7 +264,13 @@ waiting for a quiet corpus, while preserving the builder's answers.
    relay endpoints/stubs, latest state/causal turns and family usage parity against
    the current builder before production wiring. Bridge/absent-endpoint parity is
    implemented; parent, exact relay/stub and family-exclusive subsets now have
-   executable parity fixtures, with remaining boundaries below. Acceptance:
+   executable parity fixtures, with remaining boundaries below. The owner decided
+   on 2026-11-17 that phase 1 includes the two production changes the spike could
+   not make: extract the causal turn partitioner's read context and end-state logic
+   from `Builder` into a helper the warehouse can call, and expose the relay
+   matcher's role-qualified event fields as facts so the existing greedy matcher
+   runs at the origin over selected sources. Phase 1 also fixes the aggregate
+   contract for divergent shared-usage observations. Acceptance:
    unchanged full-builder assertions, late/out-of-order evidence and revocation
    tests for every case. Benchmark gate: the manual 1 GB/20k-session job reports
    ingest and maintenance separately, with exact list/detail timings on fresh and
@@ -275,9 +281,11 @@ waiting for a quiet corpus, while preserving the builder's answers.
    detail session scans/materialization: these catch the roughly 1000× failure
    mode. Inspect plans to prove
    detail record/suppression work stays within its selected lineage; unrelated
-   sessions must not introduce a global owners scan. The previous 116 s ingest /
-   42 s maintenance measurement is the comparison baseline; investigate regressions
-   before accepting any production ingest budget.
+   sessions must not introduce a global owners scan. Latest spike measurement
+   (run 44036381853): list 319 ms, detail 4 ms, ingest 177 s including 81 s of
+   dimension maintenance (4.1 ms per append, up from 2.1 ms before the parent and
+   shared-family reads). Investigate that growth before accepting any production
+   ingest budget.
 2. **Write facts with Index advancement.** Add the current warehouse schema,
    parser observation producers and component-local dimensions in the existing
    source-admission transaction. This prevents half-published identity/usage after
