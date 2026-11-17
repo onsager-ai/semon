@@ -263,7 +263,8 @@ waiting for a quiet corpus, while preserving the builder's answers.
 1. **Finish the executable contract.** Complete full parent precedence/markers,
    relay endpoints/stubs, latest state/causal turns and family usage parity against
    the current builder before production wiring. Bridge/absent-endpoint parity is
-   implemented; full parent parity is stopped at the boundary below. Acceptance:
+   implemented; parent, exact relay/stub and family-exclusive subsets now have
+   executable parity fixtures, with remaining boundaries below. Acceptance:
    unchanged full-builder assertions, late/out-of-order evidence and revocation
    tests for every case. Benchmark gate: the manual 1 GB/20k-session job reports
    ingest and maintenance separately, with exact list/detail timings on fresh and
@@ -316,23 +317,53 @@ waiting for a quiet corpus, while preserving the builder's answers.
    pass with the old stage absent. Update the ASI contract and operator rebuild
    guidance in the same PR. No merge, deployment or live cleanup is implied.
 
-**Stopped parity case and smallest proposal.** Full parent precedence is not a
-lineage-local recompute: `parent_links::resolve` qualifies process identity,
-selects unique ancestor ownership across sessions, retains previously observed
-links and rejects cycles across native and observed parent chains. Parent sources
-can be in different harnesses and lineage components. Marker handoff placement
-also invokes the origin-local prompt/cwd/time matcher. The reduced JSONL extractor
-has neither qualified process observations nor those body-reader inputs. A
-component-local priority window would silently change these semantics.
+**Stopped parity cases and implemented scope.** The owner accepted the parent
+proposal on 2026-11-17: qualified process/environment observations and retained
+parent evidence are facts; precedence and cross-lineage cycle qualification are
+set-based reads; prompt/cwd/time handoff matching stays origin-local over selected
+parent source references. Lineage membership is unchanged, no guessed parent is
+persisted and no global stage is added. The spike now implements these reads and
+fixtures for marker/environment/native precedence, ancestry fallback, retained
+process observations, late/reversed sources, marker cycles, first-agent-output
+termination and a source-backed handoff match. The process fixture supplies already
+qualified observations; actual process-start acquisition remains a production
+producer gate. Marker EOF prefix proofs and the full Claude storage-parent/exact
+call/global fallback matrix are still not represented by the reduced extractor;
+this is partial full-parent parity, not a completed production contract.
 
-Proposal for owner review: admit those observed inputs as facts, select precedence
-and cross-lineage cycle qualification as a set-based read, and retain the existing
-origin-local matcher over selected parent source references for handoff placement.
-Do not widen lineage membership to mean parent-family membership, persist a guessed
-parent, or add a global recomputation stage. This proposal is not implemented.
-Relay/stub, causal-state/turn and family-total parity remain unimplemented; their
-existing sketches above are not proof. Resolve and test these boundaries in phase
-1 before treating the remaining plan as production-ready.
+Exact relay-ID joins and name stubs now have executable builder assertions,
+including receipt-first arrival, a late receipt removing a stub and deterministic
+selection among duplicate receipts. Full relay parity stops at parent/subagent
+body/time matching, pinned/down sends, orphan sender identities and all native
+failure/name-normalization flags. The existing two-pass greedy matcher requires
+role-qualified subagent events and body references, not independent nearest-row
+joins. Smallest proposal: expose those existing event fields as facts and run that
+matcher at the origin over the selected parent/child sources. Do not persist
+pairing or turn repair state. This extension is not implemented.
+
+Causal state/turn parity is stopped rather than approximated with user-record
+counts. `Builder::groups/split` consumes placed incoming ask/relay/spawn entries,
+inline/gap rules and late results; state also qualifies live runtime and parent
+completion. The missing relay placement above changes both grouping and result
+attribution. Smallest proposal: factor the existing selected-source causal
+partitioner into a pure read helper accepting fact-selected events plus placed
+relationships, and compare complete turns/state to the builder. This needs a
+production helper refactor outside this spike-only assignment; no production code
+was changed and no causal-turn parity is claimed.
+
+Family-exclusive usage now uses a set-based parent visited-set traversal and
+sums exact current-owner totals once. Builder-fact assertions run after every
+source arrival in both parent-first and child-first orders. Full shared-family
+usage remains stopped: grouping shared messages into transitive owner components,
+choosing the builder's shared evidence keys and folding them once across families
+are not proven by the existing per-owner shared/exclusive fixture. Smallest option
+is a read-time shared-message component relation matching `claude_usage::shared`,
+with exact shared-key/family assertions before adding shared family totals. The
+current family view exposes only exclusive input/cached/output, with no claim of
+shared attribution or cost/causal-activity family parity.
+
+Resolve these remaining boundaries in phase 1 before treating the plan as
+production-ready. The sketches earlier in this document do not establish parity.
 
 Principal risks are large lineage write transactions, cross-lineage parent/cycle
 cost, body-dependent greedy relay/turn behavior, incomplete qualified runtime
