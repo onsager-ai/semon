@@ -788,10 +788,17 @@ fn star_catalog_scale() {
                     count += 1;
                 }
                 assert_eq!(count, if selected { 4 } else { 19_900 });
+                let elapsed = start.elapsed();
                 println!(
                     "scale indexed={indexed} query={name} cache={temperature} rows={count} elapsed_ms={}",
-                    start.elapsed().as_millis()
+                    elapsed.as_millis()
                 );
+                if selected {
+                    assert!(
+                        elapsed.as_millis() < 50,
+                        "detail exceeds 50 ms: {elapsed:?}"
+                    );
+                }
             }
             let mut plan = db.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
             for row in plan

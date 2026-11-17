@@ -12,13 +12,13 @@ WITH RECURSIVE probes(native_id) AS (
   JOIN bridge_session_owner m ON m.source=d.source AND m.owner=d.source
 ), collisions AS (
   SELECT DISTINCT o.native_id FROM owners o
-  JOIN dim_session d ON d.native_id=o.native_id AND d.harness<>o.harness
-  JOIN bridge_session_owner m ON m.source=d.source AND m.owner=d.source
+  CROSS JOIN dim_session d ON d.native_id=o.native_id AND d.harness<>o.harness
+  CROSS JOIN bridge_session_owner m ON m.source=d.source AND m.owner=d.source
 ), candidates(owner,native_id,candidate) AS (
   SELECT o.owner,o.native_id,
     CASE WHEN c.native_id IS NULL THEN o.native_id ELSE o.harness||':'||o.native_id END
   FROM owners o LEFT JOIN collisions c USING(native_id)
-  UNION ALL
+  UNION
   SELECT c.owner,c.native_id,':'||c.candidate FROM candidates c
   JOIN dim_session d ON d.native_id=c.candidate
   WHERE c.candidate<>c.native_id
@@ -27,13 +27,13 @@ WITH RECURSIVE probes(native_id) AS (
   LEFT JOIN dim_session reserved ON reserved.native_id=c.candidate
   WHERE c.candidate=?1 AND (c.candidate=c.native_id OR reserved.source IS NULL)
 ), members AS MATERIALIZED (
-  SELECT l.source FROM selected s JOIN dim_lineage l USING(component)
+  SELECT l.source FROM selected s CROSS JOIN dim_lineage l USING(component)
 ), suppressed AS MATERIALIZED (
   SELECT DISTINCT target.source,old.uuid FROM members member
-  JOIN fact_relation_observation e ON e.source=member.source AND e.kind='continued-in'
-  JOIN fact_record old ON old.source=e.source AND old.uuid IS NOT NULL
-  JOIN dim_session target ON target.harness='claude' AND target.native_id=e.target
+  CROSS JOIN fact_relation_observation e ON e.source=member.source AND e.kind='continued-in'
+  CROSS JOIN fact_record old ON old.source=e.source AND old.uuid IS NOT NULL
+  CROSS JOIN dim_session target ON target.harness='claude' AND target.native_id=e.target
 )
-SELECT r.source,r.pos,r.kind FROM members m JOIN fact_record r USING(source)
+SELECT r.source,r.pos,r.kind FROM members m CROSS JOIN fact_record r USING(source)
 LEFT JOIN suppressed s ON s.source=r.source AND s.uuid=r.uuid
 WHERE s.source IS NULL ORDER BY r.ts,r.source,r.pos;

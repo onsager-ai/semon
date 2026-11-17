@@ -61,7 +61,7 @@ It does not prove all parser extraction, custody or runtime integration.
 | Dimension | Kind and recomputation |
 | --- | --- |
 | `dim_session` | Type 1, natural key `(machine,harness,native ID,source incarnation)`. Re-read only this key's observations: first/last time, latest model, title/prompt source reference, native role/nickname/path and outbound-continuation presence used in deterministic ordering. A title body may be served locally from its reference; it is not exported to analytics. |
-| `dim_lineage` | Type 1, source → component ID (minimum physical source key). Traverse only the arriving source's undirected continuation/session-ID edges with a visited set, then replace rows for that component. The executable spike covers actual sources; bridge pseudo-nodes remain a fidelity gap. |
+| `dim_lineage` | Type 1, source → component ID (minimum physical source key). Traverse only the arriving source's undirected continuation/session-ID/bridge edges with a visited set, including absent native IDs and `bridge:` pseudo-nodes, then replace rows for the component's actual sources. Pseudo-nodes never win ownership. |
 | `bridge_session_owner` | Type 1, source → canonical owner and usage owner. Rank the affected component's sources by the builder's timestamp/continuation/native-ID order, replacing all member rows in the append transaction. Both owner columns currently agree; shared-copy original attribution stays unknown. |
 | `bridge_spawn_placement` | Type 1, child → parent source/call position/time. Recompute grouped unique call/name and child/name matches for the appended parent and, when a child arrives, its native parent. This immediate family group is bounded independently of ancestor depth. A second name candidate revokes placement; a late parent fills it. |
 | `dim_machine` | SCD2 names, with observed/effective times and an explicit source authority; new name closes the previous effective interval. Identity does not change with name. |
@@ -86,8 +86,12 @@ can be in unrelated components. Title/model selection, native-parent lookup,
 current usage and shared/exclusive sums use joins, grouped sets and window
 functions. Copy suppression is a distinct UUID set anti-join; tool result matching
 joins a grouped unique-call set. No list/detail view contains a correlated scalar
-subquery or recursive lineage closure. Collision prefix escaping is the only
-remaining recursive read and its owner/reserved sets are materialized once.
+subquery or recursive lineage closure. List key qualification materializes its
+owner/reserved sets once. Detail resolves candidate native IDs from colon-delimited
+suffixes of the requested key, probes indexed collision/reservation rows, then
+selects `dim_lineage.component` before reading records or suppression evidence.
+It never materializes the global owner set. Prefix escaping and requested-key
+suffix enumeration are bounded recursive key operations, not lineage traversal.
 
 ## Eight non-monotonic cases
 
@@ -99,7 +103,9 @@ executable views under the prototype's test support directory.
    CTE with `UNION` (visited set) terminates cycles during append maintenance. Rank actual sources by first
    timestamp, presence of outbound continuation first on a tie, then native ID,
    exactly as `model.rs:1757`. Missing IDs/bridge pseudo-nodes must connect components
-   but can never win ownership (not yet covered by this reduced extractor).
+   but can never win ownership. The spike now tests bridge peers, two files sharing
+   an absent native ID, arrival of that ID's physical source, reverse arrival order,
+   and equal bridge UUIDs that must not be copy-suppressed.
    Persist rank 1 in the Type 1 owner bridge during component maintenance. Suppress a target
    record only with explicit source→target continuation and matching UUID, else
    the supported tool/message identity (`model.rs:2251`). Do not suppress bridge
@@ -246,27 +252,89 @@ and atomic Index advancement remain useful independently.
   Full causal analytics parity is a separate gate; replacing it with native turns
   silently would change the product. No stored turn repair/dependency system.
 
-## Mergeable phases and staging
+## Production plan
 
-1. **This spike:** executable reduced SQLite model, independent full-builder
-   oracle, explicitly manual scale job; no production behavior. Measure list
-   closure cost and identify fidelity gaps before choosing indexes.
-2. **Parser facts:** append observations in the Index transaction, local-key
-   dimensions and source-incarnation selector. Fixture parity and crash tests;
-   still read the old Catalog during this short implementation phase. This is a
-   validation step, not a permanent dual writer compatibility contract.
-3. **Query Catalog list and identity:** complete all list fields, parent selection,
-   runtime qualification and union ownership; compare full corpus fixtures,
-   continuous-append availability, query cost and pagination. **Earliest staging
-   unblock**, provided single-session reads have a fact-backed position resolver
-   and can construct their selected model without requiring old publication.
-   A list-only switch that opens an empty/stale detail view is not sufficient.
-4. **Selected transcript/relationships:** finish body/time heuristics, results,
-   causal turns and proof-backed cursor pagination, remove old semantic stage,
-   epochs/fences/recipes. Remove temporary comparison producers with their users.
-5. **ASI views/export:** replace activity-generation dependency with the same
-   warehouse views, align classifications/costs/labels, remove obsolete projections
-   and update asi-store.md. Benchmark broader analytic workloads separately.
+Owner review precedes production edits. Each numbered phase is one reviewable PR;
+none is accepted by this reduced prototype alone. The immediate failure is
+continuous appends invalidating semantic publication until session lists return
+`503 catalog_unavailable`. The replacement must serve committed snapshots without
+waiting for a quiet corpus, while preserving the builder's answers.
+
+1. **Finish the executable contract.** Complete full parent precedence/markers,
+   relay endpoints/stubs, latest state/causal turns and family usage parity against
+   the current builder before production wiring. Bridge/absent-endpoint parity is
+   implemented; full parent parity is stopped at the boundary below. Acceptance:
+   unchanged full-builder assertions, late/out-of-order evidence and revocation
+   tests for every case. Benchmark gate: the manual 1 GB/20k-session job reports
+   ingest and maintenance separately, list under 500 ms and selected four-record
+   detail under 50 ms on both fresh and warm connections. Inspect plans to prove
+   detail record/suppression work stays within its selected lineage; unrelated
+   sessions must not introduce a global owners scan. The previous 116 s ingest /
+   42 s maintenance measurement is the comparison baseline; investigate regressions
+   before accepting any production ingest budget.
+2. **Write facts with Index advancement.** Add the current warehouse schema,
+   parser observation producers and component-local dimensions in the existing
+   source-admission transaction. This prevents half-published identity/usage after
+   a crash; it does not add a second publication stage. Acceptance: supported
+   harness fixtures, idempotent replay, rollback, source replacement/incarnation,
+   late endpoint/parent and custody refusal tests. During development the old
+   reader remains the comparison oracle; this is temporary validation, not an
+   old-version compatibility path. Reject unsupported old index schemas explicitly
+   and rebuild derived state only from available authorized native sources into
+   a separate current index. Missing sources must produce a recovery error, never
+   a valid empty history. No migration layer, deletion of native data, or automatic
+   erasure of the refused index or non-rebuildable evidence.
+3. **Switch the Catalog and Viewer reads.** Replace Catalog identity/list/detail
+   adapters with snapshot queries and component fact-position resolution; preserve
+   source union ordering and use existing authorized native readers for bodies.
+   Viewer list/navigation, selected transcripts and evidence links switch together;
+   a detail path that still needs semantic publication cannot unblock staging.
+   Acceptance: full row/relationship/turn parity, runtime qualification, collision
+   keys, pagination, append/replacement cursor proofs and source groups over 64
+   members. Run the benchmark gate from phase 1. A concurrent writer must keep
+   committing complete native records throughout repeated real `/api/sessions`
+   requests: every request returns 200 with a coherent committed snapshot, never
+   `catalog_unavailable`; committed additions become visible without stopping the
+   writer. Assert writer progress during reads so a stalled writer cannot make
+   this test pass. Preserve explicit coverage/pending reporting for unadmitted
+   sources. Review Viewer screenshots under its existing verification workflow.
+4. **Switch ASI and MCP, remove semantic publication.** Route ASI SQL, materialized
+   analytics inputs, CLI/MCP list/search/focused reads and metadata export to the
+   same warehouse and source resolver. Validate causal turns, shared/exclusive and
+   family totals, costs and label provenance; body/FTS access remains origin-local.
+   Remove the superseded activity projection, multi-phase relation/semantic stage,
+   phase cursors, exact-generation restart fences, publication epochs, row recipes,
+   derived session journals and temporary comparison writers/readers with their
+   final consumers. Preserve Index source proofs/CAS, authorization and snapshot
+   isolation. Acceptance: no active Viewer/ASI/MCP caller requires semantic-ready
+   state; fixture/CLI/MCP tests, continuous-append availability and benchmark gates
+   pass with the old stage absent. Update the ASI contract and operator rebuild
+   guidance in the same PR. No merge, deployment or live cleanup is implied.
+
+**Stopped parity case and smallest proposal.** Full parent precedence is not a
+lineage-local recompute: `parent_links::resolve` qualifies process identity,
+selects unique ancestor ownership across sessions, retains previously observed
+links and rejects cycles across native and observed parent chains. Parent sources
+can be in different harnesses and lineage components. Marker handoff placement
+also invokes the origin-local prompt/cwd/time matcher. The reduced JSONL extractor
+has neither qualified process observations nor those body-reader inputs. A
+component-local priority window would silently change these semantics.
+
+Proposal for owner review: admit those observed inputs as facts, select precedence
+and cross-lineage cycle qualification as a set-based read, and retain the existing
+origin-local matcher over selected parent source references for handoff placement.
+Do not widen lineage membership to mean parent-family membership, persist a guessed
+parent, or add a global recomputation stage. This proposal is not implemented.
+Relay/stub, causal-state/turn and family-total parity remain unimplemented; their
+existing sketches above are not proof. Resolve and test these boundaries in phase
+1 before treating the remaining plan as production-ready.
+
+Principal risks are large lineage write transactions, cross-lineage parent/cycle
+cost, body-dependent greedy relay/turn behavior, incomplete qualified runtime
+inputs, shared-usage double counting in families, and unrebuildable native evidence.
+The component benchmark, exact parity fixtures, source-integrity tests and explicit
+rebuild refusal above correspond to these risks; no new retry/fence mechanism is
+proposed to mask them.
 
 The prototype's benchmark uses roughly 1 GB of generated native JSONL and 20,000
 sessions, a deep parent chain, continuation components and common task names.
