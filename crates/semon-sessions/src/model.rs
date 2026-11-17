@@ -40,7 +40,7 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 use crate::{
-    Marker, Options, attachments, events,
+    Marker, Options, events,
     events::{
         ACK, AGM_DOWN, AGM_FINAL, AGM_PROGRESS, AGM_SIDE, AGM_UP, ANSWERED, ASYNC, DENIED, Event,
         EventCache, FileIndex, Kind, PIN, SEND_FAILED, UNKNOWN,
