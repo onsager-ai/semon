@@ -41,6 +41,13 @@ CREATE TABLE fact_tool_result (
 );
 -- Qualified origin observations, never a selected parent. Retained evidence is
 -- the earlier observation itself; a new snapshot does not overwrite it.
+CREATE TABLE fact_claude_call (
+  source INTEGER NOT NULL,pos INTEGER NOT NULL,block INTEGER NOT NULL,
+  call_id TEXT NOT NULL,PRIMARY KEY(source,pos,block)
+);
+CREATE TABLE fact_agent_observation (
+  source INTEGER PRIMARY KEY,storage_parent TEXT NOT NULL,call_id TEXT
+);
 CREATE TABLE fact_parent_observation (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, method TEXT NOT NULL,
   parent_harness TEXT NOT NULL, parent_id TEXT NOT NULL, call_id TEXT,

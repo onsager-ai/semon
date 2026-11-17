@@ -165,6 +165,13 @@ impl Warehouse {
             if harness == "claude" {
                 if let Some(content) = message["content"].as_array() {
                     for (block, value) in content.iter().enumerate() {
+                        if value["type"] == "tool_use" {
+                            tx.execute(
+                                "INSERT INTO fact_claude_call VALUES(?1,?2,?3,?4)",
+                                params![source, pos, block as i64, value["id"].as_str().unwrap()],
+                            )
+                            .unwrap();
+                        }
                         if value["type"] == "tool_use" && value["name"] == "SendMessage" {
                             tx.execute(
                                 "INSERT INTO fact_relay_send VALUES(?1,?2,?3,?4,?5,?6)",
@@ -641,6 +648,111 @@ fn star_catalog_parent_precedence_parity() {
             "{} cycle/first output",
             row.id
         );
+    }
+}
+
+#[test]
+fn star_catalog_storage_parent_parity() {
+    for (storage_call, other_call, expected_parent) in [
+        (true, true, "storage"),
+        (false, true, "other"),
+        (false, false, "storage"),
+    ] {
+        for reverse in [false, true] {
+            let home = Home::new();
+            let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+            let records = |id: &str, has_call: bool| {
+                let mut out = vec![human(id, ts(0, 0), "work")];
+                if has_call {
+                    out.push(assistant(
+                        id,
+                        ts(0, 1),
+                        vec![tool("call", "Agent", json!({"prompt":"work"}))],
+                    ));
+                }
+                out
+            };
+            let inputs = [
+                (1, "storage", records("storage", storage_call)),
+                (2, "other", records("other", other_call)),
+                (
+                    3,
+                    "agent-child",
+                    vec![human("agent-child", ts(0, 2), "work")],
+                ),
+            ];
+            for index in if reverse { [2, 1, 0] } else { [0, 1, 2] } {
+                let (source, id, body) = &inputs[index];
+                if *source == 3 {
+                    home.agent("storage", "agent-child", "call", body);
+                } else {
+                    home.top(id, body);
+                }
+                warehouse.source(*source, "claude", id, body);
+                if *source == 3 {
+                    warehouse
+                        .db
+                        .execute(
+                            "INSERT INTO fact_agent_observation VALUES(3,'storage','call')",
+                            [],
+                        )
+                        .unwrap();
+                }
+            }
+            let built = home.build_query();
+            let actual: String = warehouse.db.query_row("SELECT d.native_id FROM parent_selection p JOIN dim_session d ON d.source=p.parent WHERE child=3",[],|r|r.get(0)).unwrap();
+            assert_eq!(actual, expected_parent);
+            assert_eq!(
+                built.sessions["agent-child"].parent.as_deref(),
+                Some(actual.as_str())
+            );
+        }
+    }
+}
+
+#[test]
+fn star_catalog_marker_eof_parity() {
+    for newline in [false, true] {
+        let home = Home::new();
+        let parent = vec![human("parent", ts(0, 0), "parent")];
+        home.top("parent", &parent);
+        home.codex("child", json!({}), &[]);
+        let path = home
+            .options
+            .codex_home
+            .join("sessions/2026/09/24/rollout-child.jsonl");
+        let marker = codex_user(ts(0, 1), "Semon-Parent: claude:parent\nWork");
+        let bytes = marker.to_string();
+        let split = bytes.len() / 2;
+        let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        write!(file, "{}", &bytes[..split]).unwrap();
+        assert!(
+            native_marker_query(&home).sessions["child"]
+                .parent
+                .is_none()
+        );
+        assert!(serde_json::from_slice::<Value>(bytes[..split].as_bytes()).is_err());
+        write!(file, "{}", &bytes[split..]).unwrap();
+        if newline {
+            writeln!(file).unwrap();
+        }
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        warehouse.source(1, "claude", "parent", &parent);
+        warehouse.source(
+            2,
+            "codex",
+            "child",
+            &codex_records("child", None, None, &[marker]),
+        );
+        let built = native_marker_query(&home);
+        let parent = warehouse
+            .list()
+            .into_iter()
+            .find(|r| r.id == "child")
+            .unwrap()
+            .parent;
+        assert_eq!(parent, built.sessions["child"].parent);
+        assert_eq!(parent.as_deref(), Some("parent"));
     }
 }
 

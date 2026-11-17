@@ -1,10 +1,26 @@
 -- Precedence and cycle qualification cross lineage boundaries at read time.
 CREATE VIEW parent_selection AS
-WITH RECURSIVE native AS MATERIALIZED (
+WITH RECURSIVE calls AS MATERIALIZED (
+  SELECT m.owner,c.call_id,min(c.pos) AS pos FROM fact_claude_call c
+  JOIN bridge_session_owner m USING(source) JOIN dim_session d ON d.source=m.owner
+  WHERE d.harness='claude' GROUP BY m.owner,c.call_id
+), global_calls AS (
+  SELECT call_id,min(owner) AS owner FROM calls GROUP BY call_id HAVING count(*)=1
+), agent_parent AS (
+  SELECT a.source AS child,coalesce(exact.owner,fallback.owner,storage.owner) AS parent,
+    CASE WHEN exact.owner IS NOT NULL OR fallback.owner IS NOT NULL THEN a.call_id END AS call_id
+  FROM fact_agent_observation a
+  LEFT JOIN dim_session p ON p.harness='claude' AND p.native_id=a.storage_parent
+  LEFT JOIN bridge_session_owner storage ON storage.source=p.source
+  LEFT JOIN calls exact ON exact.owner=storage.owner AND exact.call_id=a.call_id
+  LEFT JOIN global_calls fallback ON fallback.call_id=a.call_id
+), native AS MATERIALIZED (
   SELECT d.source AS child,p.source AS parent,NULL AS call_id,'native' AS method,
     0 AS priority,0 AS ordinal
   FROM dim_session d JOIN dim_session p
     ON p.harness=d.harness AND p.native_id=d.parent_id
+  UNION ALL
+  SELECT child,parent,call_id,'native',0,0 FROM agent_parent WHERE parent IS NOT NULL
 ), evidence AS (
   SELECT e.source AS child,p.source AS parent,e.call_id,e.method,
     CASE e.method WHEN 'marker' THEN 3 WHEN 'environment' THEN 2 ELSE 1 END AS priority,
