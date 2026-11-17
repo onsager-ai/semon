@@ -1182,7 +1182,15 @@ fn selected_claude_relations(
         .db
         .prepare("SELECT source,pos,block,kind,row_number() OVER (PARTITION BY source,pos,block,kind ORDER BY event)-1 FROM fact_subagent_event ORDER BY source,event")
         .unwrap()
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                usize::try_from(r.get::<_, i64>(4)?).unwrap(),
+            ))
+        })
         .unwrap()
         .map(Result::unwrap)
         .collect();
