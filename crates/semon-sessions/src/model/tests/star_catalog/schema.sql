@@ -50,6 +50,7 @@ CREATE INDEX spawn_parent ON bridge_spawn_placement(parent_source);
 -- These indexes also bound component discovery during ingestion.
 CREATE INDEX relation_endpoint ON fact_relation_observation(target,kind,source);
 CREATE INDEX session_native ON dim_session(harness,native_id);
+CREATE INDEX session_native_key ON dim_session(native_id,harness,source);
 CREATE INDEX session_parent_name ON dim_session(harness,parent_id,nickname);
 CREATE INDEX spawn_call_name ON fact_tool_call(source,tool,task_name);
 CREATE INDEX record_uuid ON fact_record(source,uuid);

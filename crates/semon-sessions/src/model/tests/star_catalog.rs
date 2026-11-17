@@ -13,8 +13,7 @@ CREATE INDEX relation_target ON fact_relation_observation(kind,target,source);";
 const LIST: &str = "SELECT id,owner,harness,parent,title_source,title_pos,fallback_title,
  model,status,input,cached,output,shared_input,shared_cached,shared_output
  FROM session_list ORDER BY id";
-const DETAIL: &str = "SELECT r.source,r.pos,r.kind FROM session_records r
- JOIN catalog_keys k ON k.owner=r.owner WHERE k.id=?1 ORDER BY r.ts,r.source,r.pos";
+const DETAIL: &str = include_str!("star_catalog/detail.sql");
 
 struct Warehouse {
     db: Connection,
@@ -359,6 +358,36 @@ fn star_catalog_fixture_parity() {
         "star parity: {} rows; copy owner, parents, titles, models, status, exclusive/shared usage, unique spawn, transcript suppression",
         rows.len()
     );
+}
+
+#[test]
+fn star_catalog_detail_key_resolution() {
+    let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+    for (source, harness, id) in [
+        (1, "claude", "same"),
+        (2, "codex", "same"),
+        (3, "claude", "claude:same"),
+        (4, "claude", ":claude:same"),
+        (5, "codex", "with:colon"),
+    ] {
+        warehouse.source(source, harness, id, &[human(id, ts(0, 0), "hello")]);
+    }
+    let mut statement = warehouse.db.prepare("SELECT id FROM catalog_keys").unwrap();
+    let keys = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    for id in keys {
+        let expected = warehouse.db
+            .prepare("SELECT r.source,r.pos,r.kind FROM session_records r JOIN catalog_keys k ON k.owner=r.owner WHERE k.id=?1 ORDER BY r.ts,r.source,r.pos")
+            .unwrap()
+            .query_map([&id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap().map(Result::unwrap).collect::<Vec<(i64,i64,String)>>();
+        assert_eq!(warehouse.detail(&id), expected, "{id}");
+        assert_eq!(expected.len(), 1);
+    }
+    assert!(warehouse.detail("missing").is_empty());
 }
 
 #[test]
