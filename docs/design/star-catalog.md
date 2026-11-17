@@ -327,9 +327,12 @@ fixtures for marker/environment/native precedence, ancestry fallback, retained
 process observations, late/reversed sources, marker cycles, first-agent-output
 termination and a source-backed handoff match. The process fixture supplies already
 qualified observations; actual process-start acquisition remains a production
-producer gate. Marker EOF prefix proofs and the full Claude storage-parent/exact
-call/global fallback matrix are still not represented by the reduced extractor;
-this is partial full-parent parity, not a completed production contract.
+producer gate. Claude storage-parent exact-call precedence, unique global-call
+fallback and storage fallback now have builder assertions in both arrival orders.
+Valid JSON at EOF and incomplete-then-completed marker records have native-reader
+parity fixtures. The synthetic loader admits parsed records; it does not implement
+production byte-proof/custody acquisition. Further ambiguous-call, multi-incarnation
+and all process-qualification combinations remain production conformance gates.
 
 Exact relay-ID joins and name stubs now have executable builder assertions,
 including receipt-first arrival, a late receipt removing a stub and deterministic
@@ -347,20 +350,28 @@ inline/gap rules and late results; state also qualifies live runtime and parent
 completion. The missing relay placement above changes both grouping and result
 attribution. Smallest proposal: factor the existing selected-source causal
 partitioner into a pure read helper accepting fact-selected events plus placed
-relationships, and compare complete turns/state to the builder. This needs a
-production helper refactor outside this spike-only assignment; no production code
-was changed and no causal-turn parity is claimed.
+relationships, and compare complete turns/state to the builder. The owner accepted
+reuse of a pure helper, but inspection found no such callable boundary: `split`
+invokes `groups` and `end`, which read Builder sessions, runtime/completion state,
+placed handoffs and merged native event references. A wrapper calling these methods
+would still require the old Builder, not independently prove the warehouse. The
+smallest required production refactor extracts that complete read context and
+end-state logic together; it exceeds a pure call and is stopped for review under
+the continuation brief. No production code changed and no causal-turn parity is
+claimed.
 
 Family-exclusive usage now uses a set-based parent visited-set traversal and
 sums exact current-owner totals once. Builder-fact assertions run after every
-source arrival in both parent-first and child-first orders. Full shared-family
-usage remains stopped: grouping shared messages into transitive owner components,
-choosing the builder's shared evidence keys and folding them once across families
-are not proven by the existing per-owner shared/exclusive fixture. Smallest option
-is a read-time shared-message component relation matching `claude_usage::shared`,
-with exact shared-key/family assertions before adding shared family totals. The
-current family view exposes only exclusive input/cached/output, with no claim of
-shared attribution or cost/causal-activity family parity.
+source arrival in both parent-first and child-first orders. A recursive read now
+connects shared-message owners transitively through all UUID observations, chooses
+the minimum shared UUID evidence key exactly as `claude_usage::shared`, and folds
+each evidence key once per family. A three-owner/two-UUID fixture compares the
+hashed evidence keys and exact tokens to the builder after each arrival in both
+orders. Shared and exclusive totals remain separate; no original owner is inferred.
+Divergent token observations within one shared evidence group still require an
+explicit aggregate contract: the current view deterministically chooses the first
+native owner, and the parity fixture only establishes equal-observation behavior.
+Cost/causal-activity family parity is not claimed.
 
 Resolve these remaining boundaries in phase 1 before treating the plan as
 production-ready. The sketches earlier in this document do not establish parity.
