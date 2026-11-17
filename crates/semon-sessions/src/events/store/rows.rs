@@ -1,6 +1,5 @@
 use rusqlite::{Row, Statement, params, types::Type};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
 
 use super::{BillingUsage, Event, MessageUsage, ModelTokens, Peer, Reply, Yield};
 use super::{from_json, int, json, seq_int, seq_of, tag, uint, untag};
@@ -17,12 +16,12 @@ struct EventState {
     poll_target: Option<String>,
     #[serde(default)]
     result_source: bool,
-    #[serde(default, skip_serializing_if = "super::is_false")]
+    #[serde(default, skip_serializing_if = "crate::events::is_false")]
     native_direct_call: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    activity_observation: Option<super::session_activity::classify::Observation>,
+    activity_observation: Option<crate::events::session_activity::classify::Observation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    activity_tool: Option<super::session_activity::classify::ToolCallEvidence>,
+    activity_tool: Option<crate::events::session_activity::classify::ToolCallEvidence>,
 }
 
 fn event_state(column: usize, text: &str) -> rusqlite::Result<EventState> {
