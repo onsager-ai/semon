@@ -733,7 +733,7 @@ fn star_catalog_marker_eof_parity() {
                 .parent
                 .is_none()
         );
-        assert!(serde_json::from_slice::<Value>(bytes[..split].as_bytes()).is_err());
+        assert!(serde_json::from_slice::<Value>(&bytes.as_bytes()[..split]).is_err());
         write!(file, "{}", &bytes[split..]).unwrap();
         if newline {
             writeln!(file).unwrap();
