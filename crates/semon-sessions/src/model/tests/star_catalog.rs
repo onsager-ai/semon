@@ -174,6 +174,10 @@ impl Warehouse {
                     .map(|position| self.titles[&position].clone())
                     .unwrap_or_else(|| fallback.rsplit('/').next().unwrap().to_owned());
                 let raw_model: String = row.get(7)?;
+                let tokens = |column: usize| -> rusqlite::Result<u64> {
+                    let value: i64 = row.get(column)?;
+                    Ok(u64::try_from(value).expect("fixture token totals are nonnegative"))
+                };
                 Ok(ListRow {
                     id: row.get(0)?,
                     owner: row.get(1)?,
@@ -181,8 +185,8 @@ impl Warehouse {
                     title,
                     model: pretty_model(&raw_model).unwrap(),
                     status: row.get(8)?,
-                    tokens: [row.get(9)?, row.get(10)?, row.get(11)?],
-                    shared: [row.get(12)?, row.get(13)?, row.get(14)?],
+                    tokens: [tokens(9)?, tokens(10)?, tokens(11)?],
+                    shared: [tokens(12)?, tokens(13)?, tokens(14)?],
                 })
             })
             .unwrap()
