@@ -43,6 +43,8 @@ impl Warehouse {
             .unwrap();
         db.execute_batch(include_str!("star_catalog/relays.sql"))
             .unwrap();
+        db.execute_batch(include_str!("star_catalog/family.sql"))
+            .unwrap();
         Self {
             db,
             titles: BTreeMap::new(),
@@ -778,6 +780,74 @@ fn star_catalog_relay_endpoint_parity() {
             2
         );
         assert_eq!(only(&late, "relay", "sender", "receiver").id, relay.id);
+    }
+}
+
+#[test]
+fn star_catalog_family_usage_parity() {
+    for reverse in [false, true] {
+        let home = Home::new();
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        let inputs = [
+            (1, "root", None, 10),
+            (2, "child", Some("root"), 20),
+            (3, "grandchild", Some("child"), 30),
+        ];
+        let order = if reverse { [2, 1, 0] } else { [0, 1, 2] };
+        for index in order {
+            let (source, id, parent, tokens) = inputs[index];
+            let mut body = vec![human(id, ts(0, source), "Work")];
+            if let Some(parent) = parent {
+                body[0] = human(
+                    id,
+                    ts(0, source),
+                    &format!("Semon-Parent: claude:{parent}\nWork"),
+                );
+            }
+            body.push(uuid(assistant_usage(id,ts(0,10+source),&format!("m-{id}"),"claude-sonnet-4-6",
+                json!({"input_tokens":tokens,"cache_read_input_tokens":2,"output_tokens":tokens/2})),&format!("u-{id}")));
+            home.top(id, &body);
+            warehouse.source(source, "claude", id, &body);
+            let expected = home.build_query();
+            for row in warehouse.list() {
+                let mut pending = vec![row.id.clone()];
+                let mut visited = std::collections::BTreeSet::new();
+                let mut totals = [0_u64; 3];
+                while let Some(id) = pending.pop() {
+                    if !visited.insert(id.clone()) {
+                        continue;
+                    }
+                    let usage = expected.facts[&id].tokens.as_ref().unwrap();
+                    totals[0] += usage.input;
+                    totals[1] += usage.cached_input;
+                    totals[2] += usage.output;
+                    pending.extend(
+                        expected
+                            .sessions
+                            .iter()
+                            .filter(|(_, s)| s.parent.as_deref() == Some(&id))
+                            .map(|(id, _)| id.clone()),
+                    );
+                }
+                let actual: [u64; 3] = warehouse
+                    .db
+                    .query_row(
+                        "SELECT input,cached,output FROM family_usage WHERE root=?1",
+                        [row.owner],
+                        |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?]),
+                    )
+                    .unwrap();
+                assert_eq!(actual, totals, "{} reverse={reverse}", row.id);
+            }
+        }
+        assert_eq!(
+            warehouse
+                .db
+                .query_row("SELECT input FROM family_usage WHERE root=1", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            66
+        );
     }
 }
 
