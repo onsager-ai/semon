@@ -7,13 +7,9 @@ use rusqlite::{Connection, params};
 use super::*;
 
 const SCHEMA: &str = include_str!("star_catalog/schema.sql");
+const MAINTAIN: &str = include_str!("star_catalog/maintain.sql");
 const INDEXES: &str = "
-CREATE INDEX relation_target ON fact_relation_observation(kind,target,source);
-CREATE INDEX usage_identity ON fact_step_observation(message_id,uuid,source);
-CREATE INDEX native_identity ON dim_session(harness,native_id);
-CREATE INDEX child_name ON dim_session(parent_id,nickname);
-CREATE INDEX call_name ON fact_tool_call(source,tool,task_name);
-CREATE INDEX result_id ON fact_tool_result(source,call_id);";
+CREATE INDEX relation_target ON fact_relation_observation(kind,target,source);";
 const LIST: &str = "SELECT id,owner,harness,parent,title_source,title_pos,fallback_title,
  model,status,input,cached,output,shared_input,shared_cached,shared_output
  FROM session_list ORDER BY id";
@@ -24,6 +20,8 @@ struct Warehouse {
     db: Connection,
     // Test analogue of the authorized native body reader, outside SQLite.
     titles: BTreeMap<(i64, i64), String>,
+    maintenance: std::time::Duration,
+    appends: u64,
 }
 
 #[derive(Debug)]
@@ -45,6 +43,8 @@ impl Warehouse {
         Self {
             db,
             titles: BTreeMap::new(),
+            maintenance: std::time::Duration::ZERO,
+            appends: 0,
         }
     }
 
@@ -158,16 +158,23 @@ impl Warehouse {
             params![source, bytes],
         )
         .unwrap();
+        let maintenance = Instant::now();
         Self::recompute(&tx, source);
+        self.maintenance += maintenance.elapsed();
+        self.appends += 1;
         tx.commit().unwrap();
     }
 
     fn recompute(db: &Connection, source: i64) {
-        db.execute(
-            "INSERT OR REPLACE INTO dim_session SELECT * FROM session_recompute WHERE source=?1",
-            [source],
-        )
-        .unwrap();
+        // Every statement uses the same bound source; no dynamic SQL identifiers.
+        for sql in MAINTAIN.split(';').filter(|sql| !sql.trim().is_empty()) {
+            let mut statement = db.prepare(sql).unwrap();
+            if statement.parameter_count() == 0 {
+                statement.execute([]).unwrap();
+            } else {
+                statement.execute([source]).unwrap();
+            }
+        }
     }
 
     fn list(&self) -> Vec<ListRow> {
@@ -344,7 +351,7 @@ fn star_catalog_fixture_parity() {
         .unwrap();
     assert_eq!(placement, only(&built, "spawn", "root", "child").at);
     assert_eq!(placement, at(6, 1));
-    // Re-derive a local dimension twice. No cross-key parent/owner is stored.
+    // Replacing the affected component twice must be idempotent.
     Warehouse::recompute(&warehouse.db, 1);
     Warehouse::recompute(&warehouse.db, 1);
     assert_eq!(warehouse.list().len(), rows.len());
@@ -352,6 +359,122 @@ fn star_catalog_fixture_parity() {
         "star parity: {} rows; copy owner, parents, titles, models, status, exclusive/shared usage, unique spawn, transcript suppression",
         rows.len()
     );
+}
+
+#[test]
+fn star_catalog_out_of_order_dimensions() {
+    let parent = codex_records(
+        "parent",
+        None,
+        None,
+        &[codex_line(
+            ts(0, 1),
+            "response_item",
+            json!({"type":"function_call","name":"spawn_agent","call_id":"spawn","arguments":"{\"task_name\":\"solo\"}"}),
+        )],
+    );
+    let child = codex_records(
+        "child",
+        Some("parent"),
+        Some("solo"),
+        &[codex_user(ts(0, 2), "work")],
+    );
+    let old = vec![
+        uuid(human("old", ts(0, 0), "before"), "before"),
+        json!({"type":"continued-in","continuedInSessionId":"new"}),
+    ];
+    let new = vec![uuid(human("new", ts(0, 3), "after"), "after")];
+    let inputs = [
+        (1, "codex", "parent", parent),
+        (2, "codex", "child", child),
+        (3, "claude", "old", old),
+        (4, "claude", "new", new),
+    ];
+    let load = |order: &[usize]| {
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        for &index in order {
+            let (source, harness, id, records) = &inputs[index];
+            warehouse.source(*source, harness, id, records);
+        }
+        warehouse
+    };
+    let ordered = load(&[0, 1, 2, 3]);
+    let late_parent = load(&[1, 3, 0, 2]);
+    // Compare every persisted derived column, not only the final list shape.
+    for sql in [
+        "SELECT * FROM dim_session ORDER BY source",
+        "SELECT * FROM dim_lineage ORDER BY source",
+        "SELECT * FROM bridge_session_owner ORDER BY source",
+        "SELECT * FROM bridge_spawn_placement ORDER BY child",
+        LIST,
+    ] {
+        let snapshot = |warehouse: &Warehouse| {
+            let mut statement = warehouse.db.prepare(sql).unwrap();
+            let columns = statement.column_count();
+            statement
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|column| row.get::<_, rusqlite::types::Value>(column))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(snapshot(&ordered), snapshot(&late_parent), "{sql}");
+    }
+    assert_eq!(ordered.detail("old"), late_parent.detail("old"));
+    assert_eq!(
+        late_parent
+            .list()
+            .iter()
+            .find(|row| row.id == "child")
+            .unwrap()
+            .parent,
+        Some("parent".to_owned())
+    );
+    let placement: i64 = late_parent
+        .db
+        .query_row("SELECT count(*) FROM spawn_placement", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(placement, 1);
+    let mut late_parent = late_parent;
+    let sibling = codex_records("sibling", Some("parent"), Some("solo"), &[]);
+    late_parent.source(5, "codex", "sibling", &sibling);
+    let placements: i64 = late_parent
+        .db
+        .query_row("SELECT count(*) FROM spawn_placement", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(placements, 0, "ambiguous child name revokes placement");
+
+    late_parent.source(6, "claude", "other", &[]);
+    // An appended edge merges existing components; rollback restores both bridges.
+    {
+        let tx = late_parent.db.transaction().unwrap();
+        tx.execute(
+            "INSERT INTO fact_relation_observation VALUES(4,999,'session_id','other')",
+            [],
+        )
+        .unwrap();
+        Warehouse::recompute(&tx, 4);
+        let members: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM bridge_session_owner WHERE owner=3",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(members, 3);
+    }
+    let members: i64 = late_parent
+        .db
+        .query_row(
+            "SELECT count(*) FROM bridge_session_owner WHERE owner=3",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(members, 2);
 }
 
 #[test]
@@ -504,6 +627,12 @@ fn star_catalog_scale() {
         ingest.elapsed().as_millis(),
         fs::metadata(&path).unwrap().len()
     );
+    println!(
+        "scale dimension_maintenance_ms={} appends={} mean_append_us={}",
+        warehouse.maintenance.as_millis(),
+        warehouse.appends,
+        warehouse.maintenance.as_micros() / u128::from(warehouse.appends)
+    );
     drop(warehouse);
     // Production always has these indexes; an unindexed run with automatic
     // indexes disabled is a nested-scan worst case that never finished in CI.
@@ -517,8 +646,9 @@ fn star_catalog_scale() {
         drop(db);
         for (name, sql, selected) in [("list", LIST, false), ("detail", DETAIL, true)] {
             let db = Connection::open(&path).unwrap();
-            // Keep primary-key indexes but disable automatic transient indexes.
-            db.execute_batch("PRAGMA automatic_index=OFF").unwrap();
+            // Keep SQLite's default automatic indexes for materialized grouped
+            // sets (for example catalog keys). Persistent fact/dimension indexes
+            // are still explicit; the plans report both kinds.
             for temperature in ["fresh_connection", "warm"] {
                 let start = Instant::now();
                 let mut statement = db.prepare(sql).unwrap();

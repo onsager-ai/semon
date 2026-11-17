@@ -16,12 +16,13 @@ observation kind)`; native IDs remain scoped by harness and source authority.
 They also carry an ordinal for deterministic native ordering. Incarnation is
 essential: replacing a source is not appending to the same source.
 
-Type 1 dimension maintenance is deterministic per natural key. It can select
-latest model, first prompt position or timestamp extrema from that key's facts.
-It cannot select another session's owner, parent, root or shared usage. Those
-are views. SCD2 is reserved for attributes whose history is used, such as machine
-names and prices. Neither an arbitrary arrival order nor a guessed original
-copy owner becomes durable truth.
+Type 1 dimensions and bridges hold revisable answers separately from facts.
+Natural-key maintenance selects latest model, first prompt position and timestamp
+extrema. Component-local maintenance selects lineage membership and canonical
+and usage owners. These answers are replaced atomically when new evidence arrives;
+they are never written back into facts. SCD2 is reserved for machine names and
+prices. Neither arbitrary arrival order nor a guessed original copy owner becomes
+truth. Cross-owner shared usage remains a set-based read over current membership.
 
 This deliberately revises the downstream ASI contract: `usage_owner`, selected
 turn, exclusive totals, classified activity and outcome are view columns. The
@@ -59,17 +60,34 @@ It does not prove all parser extraction, custody or runtime integration.
 
 | Dimension | Kind and recomputation |
 | --- | --- |
-| `dim_session` | Type 1, natural key `(machine,harness,native ID,source incarnation)`. Re-read only this key's observations: first/last time, latest model, first title source reference, native role/nickname/path. Parent/root/status/owner remain view fields. A title body may be served locally from its reference; it is not exported to analytics. |
+| `dim_session` | Type 1, natural key `(machine,harness,native ID,source incarnation)`. Re-read only this key's observations: first/last time, latest model, title/prompt source reference, native role/nickname/path and outbound-continuation presence used in deterministic ordering. A title body may be served locally from its reference; it is not exported to analytics. |
+| `dim_lineage` | Type 1, source → component ID (minimum physical source key). Traverse only the arriving source's undirected continuation/session-ID edges with a visited set, then replace rows for that component. The executable spike covers actual sources; bridge pseudo-nodes remain a fidelity gap. |
+| `bridge_session_owner` | Type 1, source → canonical owner and usage owner. Rank the affected component's sources by the builder's timestamp/continuation/native-ID order, replacing all member rows in the append transaction. Both owner columns currently agree; shared-copy original attribution stays unknown. |
+| `bridge_spawn_placement` | Type 1, child → parent source/call position/time. Recompute grouped unique call/name and child/name matches for the appended parent and, when a child arrives, its native parent. This immediate family group is bounded independently of ancestor depth. A second name candidate revokes placement; a late parent fills it. |
 | `dim_machine` | SCD2 names, with observed/effective times and an explicit source authority; new name closes the previous effective interval. Identity does not change with name. |
 | `dim_harness`, `dim_tool`, `dim_date` | Type 1 lookup values from their own natural key. Date is a deterministic UTC calendar projection. |
 | `dim_repo` | Type 1 sanitized repository identity/display name, using current ASI sanitization. Local path remains origin scoped. |
 | `dim_model` | Type 1 immutable provider/model identity; no fabricated history. |
 | `dim_price` | Existing SCD2 price/version contract and conflict refusal, unchanged. |
 
-Recompute a dimension with `INSERT ... ON CONFLICT DO UPDATE` from all facts for
-its key, in the ingestion transaction. Repeating this produces identical rows.
-The prototype stores title source positions and reads bodies from its fixture
-reader only after SQL chooses that position. It stores no title text in SQLite.
+Recompute local dimensions from all facts for the appended key, in the ingestion
+transaction. Discover the affected lineage component once through indexed edges,
+then replace its dimension/bridge rows in that same transaction. The prototype's
+`maintain.sql` uses connection-local work tables to share this visited set between
+statements. Component merges include both previously separate components. A child
+arriving before its parent is repaired when the parent arrives; the test compares
+all persisted derived columns and the final read rows against in-order ingestion.
+Repeating maintenance produces identical rows. The prototype stores title source
+positions and reads bodies from its fixture reader only after SQL chooses that
+position. It stores no title text in SQLite.
+
+Catalog key collision qualification remains a set-based read because reserved IDs
+can be in unrelated components. Title/model selection, native-parent lookup,
+current usage and shared/exclusive sums use joins, grouped sets and window
+functions. Copy suppression is a distinct UUID set anti-join; tool result matching
+joins a grouped unique-call set. No list/detail view contains a correlated scalar
+subquery or recursive lineage closure. Collision prefix escaping is the only
+remaining recursive read and its owner/reserved sets are materialized once.
 
 ## Eight non-monotonic cases
 
@@ -78,10 +96,11 @@ executable views under the prototype's test support directory.
 
 1. **Canonical merges and suppression.** Undirected continuation/session_id/bridge
    edges define components, scoped to one machine and Claude harness. A recursive
-   CTE with `UNION` (visited set) terminates cycles. Rank actual sources by first
+   CTE with `UNION` (visited set) terminates cycles during append maintenance. Rank actual sources by first
    timestamp, presence of outbound continuation first on a tie, then native ID,
-   exactly as `model.rs:1757`. Missing IDs/bridge pseudo-nodes connect components
-   but can never win ownership. Select rank 1 at read time. Suppress a target
+   exactly as `model.rs:1757`. Missing IDs/bridge pseudo-nodes must connect components
+   but can never win ownership (not yet covered by this reduced extractor).
+   Persist rank 1 in the Type 1 owner bridge during component maintenance. Suppress a target
    record only with explicit source→target continuation and matching UUID, else
    the supported tool/message identity (`model.rs:2251`). Do not suppress bridge
    records merely because they have equal text.
@@ -105,8 +124,8 @@ executable views under the prototype's test support directory.
    prototype covers cross-harness collisions, not the cross-machine union.
 
 3. **Unique parent/spawn placement.** Native parent assertions join the current
-   owner view. For name-based placement use grouped candidates, never persist the
-   winner: `GROUP BY parent,name HAVING count(DISTINCT call_position)=1` joined
+   owner bridge. For name-based placement recompute the revisable bridge from
+   grouped candidates: `GROUP BY parent,name HAVING count(DISTINCT call_position)=1` joined
    to `GROUP BY parent,name HAVING count(DISTINCT child)=1`. A second candidate
    revokes placement immediately. Claude storage-parent exact call outranks
    global unique-ID fallback. Parent graph cycle handling preserves the current
@@ -180,8 +199,15 @@ semantic authority.
 
 ## Atomicity and progress
 
-The parser inserts all facts and recomputes affected local dimensions in the same
-SQLite transaction as Index complete-record advancement and source proof. A
+The parser inserts all facts and recomputes affected local dimensions and lineage/
+spawn bridges in the same SQLite transaction as Index complete-record advancement
+and source proof. There is no global semantic stage, generation fence, dependency
+graph or restart-until-quiescent loop. A visited set bounds the traversal by the
+finite affected lineage component; grouped spawn maintenance reads the affected
+immediate family. One transaction completes against that admitted snapshot even
+when other sources keep appending. Thus continuous appends cannot starve this
+append by invalidating its generation. Very large components can still increase
+write latency; this is a size bound, not a constant-time claim. A
 crash before commit exposes neither; a crash after commit exposes both. Unique
 source-position keys make replay idempotent; a conflicting payload for an existing
 key is an integrity error. A result arriving later is a new position/fact.
@@ -244,8 +270,12 @@ and atomic Index advancement remain useful independently.
 
 The prototype's benchmark uses roughly 1 GB of generated native JSONL and 20,000
 sessions, a deep parent chain, continuation components and common task names.
-It reports ingestion separately, then fresh-connection and repeated list/detail
-queries with explicit secondary indexes disabled/enabled. Fresh connection is a
+It reports ingestion including dimension maintenance, aggregate maintenance time
+and mean microseconds per append, then fresh-connection and repeated list/detail
+queries with explicit secondary indexes enabled. SQLite automatic indexes remain
+at their default enabled setting for joins against materialized grouped sets;
+this differs from the initial 154 s list / 36 s detail run, which disabled them.
+The preexisting ingestion/query timing line formats are retained. Fresh connection is a
 SQLite page-cache cold measurement; it is **not** a claim of cold OS disk cache.
 The fixture corpus lives in a separate file and never becomes a SQLite body
 column. The test asserts the corpus size and row count and prints actual query
