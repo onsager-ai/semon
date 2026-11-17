@@ -41,6 +41,8 @@ impl Warehouse {
         db.execute_batch(SCHEMA).unwrap();
         db.execute_batch(include_str!("star_catalog/parents.sql"))
             .unwrap();
+        db.execute_batch(include_str!("star_catalog/relays.sql"))
+            .unwrap();
         Self {
             db,
             titles: BTreeMap::new(),
@@ -157,6 +159,56 @@ impl Warehouse {
                     ],
                 )
                 .unwrap();
+            }
+            if harness == "claude" {
+                if let Some(content) = message["content"].as_array() {
+                    for (block, value) in content.iter().enumerate() {
+                        if value["type"] == "tool_use" && value["name"] == "SendMessage" {
+                            tx.execute(
+                                "INSERT INTO fact_relay_send VALUES(?1,?2,?3,?4,?5,?6)",
+                                params![
+                                    source,
+                                    pos,
+                                    block as i64,
+                                    value["id"].as_str().unwrap(),
+                                    value["input"]["to"].as_str().unwrap(),
+                                    time
+                                ],
+                            )
+                            .unwrap();
+                        }
+                        if value["type"] == "tool_result" {
+                            let result = &record["toolUseResult"];
+                            tx.execute(
+                                "INSERT INTO fact_relay_result VALUES(?1,?2,?3,?4,?5)",
+                                params![
+                                    source,
+                                    pos,
+                                    value["tool_use_id"].as_str().unwrap(),
+                                    result["msg_id"].as_str(),
+                                    value["is_error"] == true || result["success"] == false
+                                ],
+                            )
+                            .unwrap();
+                        }
+                    }
+                }
+                let origin = &record["origin"];
+                if origin["kind"] == "peer" {
+                    tx.execute(
+                        "INSERT INTO fact_relay_receipt VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                        params![
+                            source,
+                            pos,
+                            origin["msg_id"].as_str(),
+                            origin["name"].as_str().unwrap_or(""),
+                            origin["verifiedPeerPid"].as_i64(),
+                            origin["verifiedPeerProcStart"].as_str(),
+                            origin["from"].as_str()
+                        ],
+                    )
+                    .unwrap();
+                }
             }
             let payload = &record["payload"];
             if payload["type"] == "function_call" {
@@ -632,6 +684,101 @@ fn star_catalog_marker_handoff_parity() {
     let calls = BTreeMap::from([(1, parent), (2, child)]);
     assert_eq!(warehouse.marker_handoff(2, &calls), Some("launch".into()));
     assert_eq!(only(&expected, "spawn", "parent", "child").at, at(0, 1));
+}
+
+#[test]
+fn star_catalog_relay_endpoint_parity() {
+    for reverse in [false, true] {
+        let home = Home::new();
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        let sender = vec![
+            human("sender", ts(0, 0), "send"),
+            assistant(
+                "sender",
+                ts(0, 1),
+                vec![tool(
+                    "send",
+                    "SendMessage",
+                    json!({"to":"worker","message":"hello","type":"message"}),
+                )],
+            ),
+            result(
+                "sender",
+                ts(0, 2),
+                "send",
+                "sent",
+                false,
+                json!({"success":true,"msg_id":"message"}),
+            ),
+        ];
+        let receiver = vec![peer(
+            "receiver",
+            ts(0, 3),
+            "message",
+            "sender",
+            111,
+            "hello",
+        )];
+        let inputs = [(1, "sender", sender), (2, "receiver", receiver)];
+        let order = if reverse { [1, 0] } else { [0, 1] };
+        for index in order {
+            let (source, id, records) = &inputs[index];
+            home.top(id, records);
+            warehouse.source(*source, "claude", id, records);
+            let expected = home.build_query();
+            if index == 0 {
+                let actual: (i64, Option<i64>, Option<String>, bool) = warehouse
+                    .db
+                    .query_row(
+                        "SELECT sender,receiver,stub,failed FROM relay_endpoints",
+                        [],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )
+                    .unwrap();
+                let relay = expected
+                    .handoffs
+                    .iter()
+                    .find(|h| h.kind == "relay")
+                    .unwrap();
+                assert_eq!(relay.from, "sender");
+                assert!(!actual.3);
+                if reverse {
+                    assert_eq!(actual.1, Some(2));
+                    assert_eq!(relay.to.as_deref(), Some("receiver"));
+                } else {
+                    assert_eq!(actual.2.as_deref(), Some("name:worker"));
+                    assert_eq!(
+                        relay.to.as_deref(),
+                        Some(stable_id("peer-", "name:worker").as_str())
+                    );
+                    assert!(relay.unmatched);
+                }
+            }
+        }
+        let expected = home.build_query();
+        let relay = only(&expected, "relay", "sender", "receiver");
+        let receiver: i64 = warehouse
+            .db
+            .query_row("SELECT receiver FROM relay_endpoints", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(receiver, 2);
+        assert_eq!(relay.at, at(0, 1));
+        assert!(!relay.unmatched);
+        // A late duplicate receipt must not steal the first deterministic endpoint.
+        let duplicate = vec![peer("later", ts(0, 4), "message", "sender", 111, "hello")];
+        home.top("later", &duplicate);
+        warehouse.source(3, "claude", "later", &duplicate);
+        let late = home.build_query();
+        assert_eq!(
+            warehouse
+                .db
+                .query_row("SELECT receiver FROM relay_endpoints", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(only(&late, "relay", "sender", "receiver").id, relay.id);
+    }
 }
 
 #[test]
