@@ -767,9 +767,10 @@ fn star_catalog_relay_endpoint_parity() {
         assert_eq!(relay.at, at(0, 1));
         assert!(!relay.unmatched);
         // A late duplicate receipt must not steal the first deterministic endpoint.
-        let duplicate = vec![peer("later", ts(0, 4), "message", "sender", 111, "hello")];
-        home.top("later", &duplicate);
-        warehouse.source(3, "claude", "later", &duplicate);
+        // Native source order breaks duplicate receipt ties, not timestamp.
+        let duplicate = vec![peer("z-later", ts(0, 4), "message", "sender", 111, "hello")];
+        home.top("z-later", &duplicate);
+        warehouse.source(3, "claude", "z-later", &duplicate);
         let late = home.build_query();
         assert_eq!(
             warehouse
