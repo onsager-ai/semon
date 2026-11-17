@@ -17,18 +17,12 @@ JOIN edges e ON e.message_id=c.message_id AND e.owner=c.member
 GROUP BY c.message_id,c.owner;
 
 CREATE VIEW family_shared_usage AS
-WITH RECURSIVE edges AS MATERIALIZED (
- SELECT DISTINCT child.owner AS child,parent.owner AS parent
- FROM parent_selection p JOIN bridge_session_owner child ON child.source=p.child
- JOIN bridge_session_owner parent ON parent.source=p.parent WHERE child.owner<>parent.owner
-), family(root,member) AS (
- SELECT owner,owner FROM bridge_session_owner GROUP BY owner UNION
- SELECT f.root,e.child FROM family f JOIN edges e ON e.parent=f.member
-), evidence AS (
- SELECT f.root,s.message_id,s.evidence_uuid,u.input,u.cached,u.output,
- row_number() OVER(PARTITION BY f.root,s.message_id,s.evidence_uuid ORDER BY d.native_id) AS n
- FROM family f JOIN shared_components s ON s.owner=f.member
+WITH evidence AS (
+ SELECT f.root,s.message_id,s.evidence_uuid,u.source,u.pos,u.input,u.cached,u.output,
+ row_number() OVER(PARTITION BY f.root,s.message_id,s.evidence_uuid ORDER BY f.priority) AS n
+ FROM family_fold_order f JOIN shared_components s ON s.owner=f.member
  JOIN current_usage u ON u.owner=s.owner AND u.message_id=s.message_id
- JOIN dim_session d ON d.source=s.owner
 )
-SELECT root,message_id,evidence_uuid,input,cached,output FROM evidence WHERE n=1;
+-- Source/position selects the same native pricing input as the winning step;
+-- token categories and cost must never be combined from different observations.
+SELECT root,message_id,evidence_uuid,source,pos,input,cached,output FROM evidence WHERE n=1;

@@ -416,10 +416,24 @@ the minimum shared UUID evidence key exactly as `claude_usage::shared`, and fold
 each evidence key once per family. A three-owner/two-UUID fixture compares the
 hashed evidence keys and exact tokens to the builder after each arrival in both
 orders. Shared and exclusive totals remain separate; no original owner is inferred.
-Divergent token observations within one shared evidence group still require an
-explicit aggregate contract: the current view deterministically chooses the first
-native owner, and the parity fixture only establishes equal-observation behavior.
-Cost/causal-activity family parity is not claimed.
+Divergent observations follow the builder's activity-family fold, not a global
+minimum owner or per-category maximum. Within an owner, the last usage report for
+an API message wins in selected-source/file order (all observed UUIDs still
+establish shared identity). Across a family, the parent's own observation wins;
+otherwise the first merged child subtree containing the key wins recursively.
+The builder seeds its bottom-up queue with leaves in catalog-key order and adds a
+parent after its last child. SQL derives that same order from subtree height and
+the greatest catalog key among deepest leaves, then ranks each evidence key by
+its sibling-rank path from the family root. This is deterministic over the current
+set, independent of source arrival order; a late descendant can delay one subtree
+and change the winner. Cyclic families have no builder activity fold and no shared
+winner in this view. Divergent fixtures compare every arrived family to builder
+per-owner tokens folded in that queue order in both arrival orders, including a
+late descendant, a later report and a late parent observation. The winning native
+source/position also prices the shared step and is compared to the builder's
+family shared list cost, including unknown coverage. This does not claim complete
+causal-activity parity or parity for `family_usd`, which separately sums session
+costs rather than using the shared-step fold.
 
 Resolve these remaining boundaries in phase 1 before treating the plan as
 production-ready. The sketches earlier in this document do not establish parity.
