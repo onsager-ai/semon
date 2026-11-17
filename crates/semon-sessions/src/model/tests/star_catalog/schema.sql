@@ -29,7 +29,8 @@ CREATE TABLE fact_tool_result (
 CREATE TABLE dim_session (
   source INTEGER PRIMARY KEY, harness TEXT NOT NULL, native_id TEXT NOT NULL,
   parent_id TEXT, nickname TEXT, agent_path TEXT,
-  first_ts INTEGER, last_ts INTEGER, title_pos INTEGER, model TEXT
+  first_ts INTEGER, last_ts INTEGER, title_pos INTEGER, model TEXT,
+  prompt_pos INTEGER
 );
 CREATE TABLE index_advance (source INTEGER PRIMARY KEY, complete_bytes INTEGER NOT NULL);
 
@@ -40,7 +41,8 @@ SELECT s.*,
   (SELECT max(ts) FROM fact_record r WHERE r.source=s.source) AS last_ts,
   (SELECT max(pos) FROM fact_record r WHERE r.source=s.source AND kind='custom-title') AS title_pos,
   (SELECT model FROM fact_step_observation u WHERE u.source=s.source
-     AND model IS NOT NULL ORDER BY pos DESC LIMIT 1) AS model
+     AND model IS NOT NULL ORDER BY pos DESC LIMIT 1) AS model,
+  (SELECT min(pos) FROM fact_record r WHERE r.source=s.source AND kind='prompt') AS prompt_pos
 FROM fact_session_observation s;
 
 CREATE VIEW lineage_edges AS
@@ -119,18 +121,21 @@ SELECT k.id,k.owner,k.harness,
     JOIN catalog_keys p ON p.owner=pm.owner
     WHERE native_parent.harness=d.harness AND native_parent.native_id=d.parent_id) AS parent,
   (SELECT x.source FROM membership m JOIN dim_session x USING(source)
-    WHERE m.owner=k.owner AND x.title_pos IS NOT NULL
+    WHERE m.owner=k.owner AND (x.title_pos IS NOT NULL OR
+      (k.harness='codex' AND d.parent_id IS NOT NULL AND nullif(d.agent_path,'') IS NULL AND x.prompt_pos IS NOT NULL))
     ORDER BY x.first_ts DESC,
       EXISTS(SELECT 1 FROM fact_relation_observation e WHERE e.source=x.source AND e.kind='continued-in'),
       x.native_id DESC LIMIT 1) AS title_source,
-  (SELECT x.title_pos FROM membership m JOIN dim_session x USING(source)
-    WHERE m.owner=k.owner AND x.title_pos IS NOT NULL
+  (SELECT coalesce(x.title_pos,x.prompt_pos) FROM membership m JOIN dim_session x USING(source)
+    WHERE m.owner=k.owner AND (x.title_pos IS NOT NULL OR
+      (k.harness='codex' AND d.parent_id IS NOT NULL AND nullif(d.agent_path,'') IS NULL AND x.prompt_pos IS NOT NULL))
     ORDER BY x.first_ts DESC,
       EXISTS(SELECT 1 FROM fact_relation_observation e WHERE e.source=x.source AND e.kind='continued-in'),
       x.native_id DESC LIMIT 1) AS title_pos,
-  CASE WHEN d.parent_id IS NOT NULL THEN
-    coalesce(d.agent_path,d.nickname,'Codex subagent')
-    ELSE coalesce(d.nickname,'proj') END AS fallback_title,
+  CASE WHEN k.harness='codex' AND d.parent_id IS NOT NULL THEN
+    coalesce(nullif(d.agent_path,''),'Codex subagent')
+    WHEN k.harness='codex' THEN coalesce(nullif(d.nickname,''),'Codex run')
+    ELSE 'proj' END AS fallback_title,
   coalesce((SELECT x.model FROM membership m JOIN dim_session x USING(source)
     WHERE m.owner=k.owner AND x.model IS NOT NULL
     ORDER BY x.first_ts DESC,

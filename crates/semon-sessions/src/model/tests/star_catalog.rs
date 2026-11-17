@@ -75,9 +75,18 @@ impl Warehouse {
             let uuid = record["uuid"].as_str();
             let message = &record["message"];
             let time = crate::events::record_time(record);
+            let prompt = if harness == "codex" && record["payload"]["role"] == "user" {
+                prompt_text(record).filter(|text| !text.trim().is_empty())
+            } else {
+                None
+            };
+            let record_kind = if prompt.is_some() { "prompt" } else { kind };
+            if let Some(prompt) = prompt {
+                self.titles.insert((source, pos), one_line(&prompt, 80));
+            }
             tx.execute(
                 "INSERT INTO fact_record VALUES(?1,?2,?3,?4,?5,?6)",
-                params![source, pos, kind, uuid, message["id"].as_str(), time],
+                params![source, pos, record_kind, uuid, message["id"].as_str(), time],
             )
             .unwrap();
             if kind == "custom-title" {
