@@ -67,6 +67,15 @@ impl Warehouse {
     }
 
     fn source(&mut self, source: i64, harness: &str, id: &str, records: &[Value]) {
+        // Use the native parser's append journal, including revisions to old
+        // calls when their results arrive. Never re-project the whole session.
+        let before_events = if harness == "claude" {
+            let native = self.native.entry(source).or_default();
+            native.dirty_rows = Some(crate::events::DirtyRows::default());
+            native.events.len()
+        } else {
+            0
+        };
         let tx = self.db.transaction().unwrap();
         let meta = records
             .iter()
@@ -274,8 +283,16 @@ impl Warehouse {
                 .unwrap();
             }
         }
-        if let Some(native) = self.native.get(&source) {
-            for (index, event) in native.events.iter().enumerate() {
+        if let Some(native) = self.native.get_mut(&source) {
+            let changed = native.dirty_rows.take().unwrap().events;
+            // New events need not pass through event_mut. Old revised events
+            // do; exclude the new suffix from that set to write each row once.
+            for index in changed
+                .into_iter()
+                .filter(|index| *index < before_events)
+                .chain(before_events..native.events.len())
+            {
+                let event = &native.events[index];
                 let reply = event.r.as_ref();
                 let peer = event.peer.as_ref();
                 if event.k == Kind::Tool
@@ -2277,6 +2294,101 @@ fn star_catalog_subagent_inline_pin_resume_turn_arrival_parity() {
 }
 
 #[test]
+fn star_catalog_native_event_append_writes() {
+    let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+    warehouse
+        .db
+        .execute_batch(
+            "CREATE TEMP TABLE projected_event(event INTEGER);
+         CREATE TEMP TRIGGER record_projection AFTER INSERT ON fact_subagent_event
+         BEGIN INSERT INTO projected_event VALUES(new.event); END;",
+        )
+        .unwrap();
+    let mut records = (0..1000)
+        .map(|i| human("sender", ts(0, 0), &format!("prompt {i}")))
+        .collect::<Vec<_>>();
+    records.push(assistant(
+        "sender",
+        ts(0, 1),
+        vec![tool(
+            "send",
+            "SendMessage",
+            json!({"recipient":"worker","content":"hello"}),
+        )],
+    ));
+    warehouse.source(1, "claude", "sender", &records);
+    let call: i64 = warehouse
+        .db
+        .query_row(
+            "SELECT event FROM fact_subagent_event WHERE id='send'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    warehouse
+        .db
+        .execute("DELETE FROM projected_event", [])
+        .unwrap();
+    warehouse.source(
+        1,
+        "claude",
+        "sender",
+        &[result(
+            "sender",
+            ts(0, 2),
+            "send",
+            "result",
+            false,
+            json!("permission denied"),
+        )],
+    );
+    let projected: Vec<i64> = warehouse
+        .db
+        .prepare("SELECT event FROM projected_event ORDER BY event")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    // A result revises its old call; unrelated historical prompts stay untouched.
+    assert_eq!(projected, vec![call]);
+    let (flags, failed): (u8, bool) = warehouse
+        .db
+        .query_row(
+            "SELECT e.reply_flags,r.failed FROM fact_subagent_event e
+         JOIN fact_relay_result r ON r.source=e.source AND r.call_id=e.id WHERE e.id='send'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(flags, DENIED);
+    assert!(failed);
+    warehouse
+        .db
+        .execute("DELETE FROM projected_event", [])
+        .unwrap();
+    warehouse.source(
+        1,
+        "claude",
+        "sender",
+        &[human("sender", ts(0, 3), "next prompt")],
+    );
+    let projected: i64 = warehouse
+        .db
+        .query_row("SELECT count(*) FROM projected_event", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(projected, 1);
+    let plan: String = warehouse.db.query_row(
+        "EXPLAIN QUERY PLAN UPDATE fact_relay_result SET failed=?3 WHERE source=?1 AND call_id=?2",
+        params![1, "send", true], |r| r.get(3),
+    ).unwrap();
+    assert!(
+        plan.contains("relay_result_call (source=? AND call_id=?)"),
+        "{plan}"
+    );
+}
+
+#[test]
 fn star_catalog_native_send_flags_and_normalized_names() {
     for reverse in [false, true] {
         for (outcome, error, flag) in [
@@ -3548,6 +3660,7 @@ fn append_distribution(name: &str, warehouse: &mut Warehouse, sources: usize, ho
         .collect::<Vec<_>>();
     let started = Instant::now();
     let mut samples = Vec::with_capacity(10_000);
+    println!("scale progress phase=append_{name} elapsed_ms=0 rows=0");
     for i in 0..10_000 {
         let source = 1 + (i % sources) as i64;
         let records = (0..1 + i % 5)
@@ -3561,6 +3674,13 @@ fn append_distribution(name: &str, warehouse: &mut Warehouse, sources: usize, ho
         file.flush().unwrap();
         warehouse.source(source, "claude", &format!("append-{source}"), &records);
         samples.push(append.elapsed().as_nanos());
+        if (i + 1) % 1000 == 0 {
+            println!(
+                "scale progress phase=append_{name} elapsed_ms={} rows={}",
+                started.elapsed().as_millis(),
+                i + 1
+            );
+        }
     }
     let total = started.elapsed();
     let mut first = samples[..1000].to_vec();
@@ -3590,6 +3710,7 @@ fn star_catalog_append_scale(home: &Home) {
     let generation = Instant::now();
     let mut long = Warehouse::new(&home.root.join("long-session.sqlite3"));
     let mut file = std::io::BufWriter::new(File::create(home.root.join("A-1.jsonl")).unwrap());
+    println!("scale progress phase=generate_A elapsed_ms=0 rows=0");
     for chunk in 0..1000 {
         let records = (0..1000).map(|j| {
             let i = chunk*1000+j;
@@ -3600,6 +3721,13 @@ fn star_catalog_append_scale(home: &Home) {
             writeln!(file, "{record}").unwrap();
         }
         long.source(1, "claude", "append-1", &records);
+        if (chunk + 1) % 100 == 0 {
+            println!(
+                "scale progress phase=generate_A elapsed_ms={} rows={}",
+                generation.elapsed().as_millis(),
+                (chunk + 1) * 1000
+            );
+        }
     }
     file.flush().unwrap();
     let count: i64 = long
@@ -3615,6 +3743,8 @@ fn star_catalog_append_scale(home: &Home) {
     append_distribution("A", &mut long, 1, home);
     drop(long);
     // B: a 50-file continuation chain, append only to the newest file (source 1).
+    let generation = Instant::now();
+    println!("scale progress phase=generate_B elapsed_ms=0 rows=0");
     let mut chain = Warehouse::new(&home.root.join("long-chain.sqlite3"));
     for source in (1..=50).rev() {
         let mut records = vec![human(&format!("append-{source}"), ts(0, 1), "chain")];
@@ -3632,8 +3762,14 @@ fn star_catalog_append_scale(home: &Home) {
         file.flush().unwrap();
         chain.source(source, "claude", &format!("append-{source}"), &records);
     }
+    println!(
+        "scale progress phase=generate_B elapsed_ms={} rows=50",
+        generation.elapsed().as_millis()
+    );
     append_distribution("B", &mut chain, 1, home);
     // C: 300 physical files in one bridge group; spread appends across all files.
+    let generation = Instant::now();
+    println!("scale progress phase=generate_C elapsed_ms=0 rows=0");
     let mut wide = Warehouse::new(&home.root.join("wide-group.sqlite3"));
     for source in 1..=300 {
         let records = [
@@ -3649,6 +3785,10 @@ fn star_catalog_append_scale(home: &Home) {
         file.flush().unwrap();
         wide.source(source, "claude", &format!("append-{source}"), &records);
     }
+    println!(
+        "scale progress phase=generate_C elapsed_ms={} rows=300",
+        generation.elapsed().as_millis()
+    );
     append_distribution("C", &mut wide, 300, home);
 }
 
@@ -3664,6 +3804,7 @@ fn star_catalog_scale() {
     let mut file = std::io::BufWriter::new(File::create(&corpus).unwrap());
     let padding = "s".repeat(50_000);
     let generation = Instant::now();
+    println!("scale progress phase=corpus elapsed_ms=0 rows=0");
     for i in 0..20_000 {
         let id = format!("session-{i:05}");
         let parent = (i > 0 && i < 1000).then(|| format!("session-{:05}", i - 1));
@@ -3718,8 +3859,12 @@ fn star_catalog_scale() {
     );
     let mut warehouse = Warehouse::new(&path);
     let ingest = Instant::now();
+    println!("scale progress phase=ingest elapsed_ms=0 rows=0");
     // One bounded native-session envelope at a time, never a 1 GB in-memory Value.
-    for line in std::io::BufReader::new(File::open(&corpus).unwrap()).lines() {
+    for (i, line) in std::io::BufReader::new(File::open(&corpus).unwrap())
+        .lines()
+        .enumerate()
+    {
         let envelope: Value = serde_json::from_str(&line.unwrap()).unwrap();
         warehouse.source(
             envelope["source"].as_i64().unwrap(),
@@ -3727,6 +3872,13 @@ fn star_catalog_scale() {
             envelope["id"].as_str().unwrap(),
             envelope["records"].as_array().unwrap(),
         );
+        if (i + 1) % 1000 == 0 {
+            println!(
+                "scale progress phase=ingest elapsed_ms={} rows={}",
+                ingest.elapsed().as_millis(),
+                i + 1
+            );
+        }
     }
     let count: i64 = warehouse
         .db
@@ -3751,8 +3903,14 @@ fn star_catalog_scale() {
         let indexed = true;
         let db = Connection::open(&path).unwrap();
         if indexed {
+            let start = Instant::now();
+            println!("scale progress phase=index elapsed_ms=0 rows=20000");
             db.execute_batch(INDEXES).unwrap();
             db.execute_batch("ANALYZE").unwrap();
+            println!(
+                "scale progress phase=index elapsed_ms={} rows=20000",
+                start.elapsed().as_millis()
+            );
         }
         drop(db);
         for (name, sql, selected) in [("list", LIST, false), ("detail", DETAIL, true)] {
@@ -3761,6 +3919,7 @@ fn star_catalog_scale() {
             // sets (for example catalog keys). Persistent fact/dimension indexes
             // are still explicit; the plans report both kinds.
             for temperature in ["fresh_connection", "warm"] {
+                println!("scale progress phase={name}_{temperature} elapsed_ms=0 rows=0");
                 let start = Instant::now();
                 let mut statement = db.prepare(sql).unwrap();
                 let mut query = statement

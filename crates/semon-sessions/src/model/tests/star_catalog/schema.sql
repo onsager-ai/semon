@@ -31,6 +31,7 @@ CREATE TABLE fact_relay_result (
   source INTEGER NOT NULL,pos INTEGER NOT NULL,call_id TEXT NOT NULL,
   correlation TEXT,failed INTEGER NOT NULL,PRIMARY KEY(source,pos)
 );
+CREATE INDEX relay_result_call ON fact_relay_result(source,call_id);
 CREATE TABLE fact_relay_receipt (
   source INTEGER NOT NULL,pos INTEGER NOT NULL,correlation TEXT,
   name TEXT NOT NULL,pid INTEGER,start TEXT,sock TEXT,PRIMARY KEY(source,pos)
