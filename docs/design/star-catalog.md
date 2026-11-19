@@ -431,12 +431,25 @@ state after each source arrival in both orders. They cover inline parent message
 within an open run, resumed messages starting a child turn, progress receipts
 interrupting the parent, final/notification completion, and pinned/resumed down
 sends, including handback completion across multiple runs. Native body/time
-pairing uses the same production helper. Inferred human reply/result attribution
-still lives in Builder and is not reproduced by this fixture adapter; its full
-interaction with relays remains a production conformance gate. Code-mode operation
-placement, yielded commands, live resumed runtime and full native runtime
-qualification also remain outside these reduced fixtures. No turn repair or
-dependency state is stored.
+pairing uses the same production helper. Human reply/result attribution now also
+lives in `TurnContext`: Builder delegates the human-started-turn predicate, passing
+selected native refs and qualification of non-interrupting relay/spawn events.
+The warehouse adapter calls it from fact-selected events, compares every inferred
+result handoff field and places Claude results before comparing complete turns.
+Both arrival orders cover own-child final/progress/notification evidence, late
+failed tool results with earlier clocks, and continued-source owner changes.
+
+Qualified runtime observations are source-scoped inputs joined through the current
+owner bridge. The adapter qualifies open resumed child runs against the current
+root's live observation, retaining the previous run's result. Both arrival orders
+cover busy, permission-wait and idle live roots, root exit, a new process resuming
+the same source, late tool completion and a second handback. A resumed Codex run
+also exercises live-yield qualification of an earlier turn's command, lock release
+and reacquisition, and completion by a later poll. These are fixture-qualified
+observations; process identity/start acquisition, expiry and the full native runtime
+qualification matrix remain production producer gates. General code-mode operation
+placement remains outside these reduced fixtures. No turn repair or dependency
+state is stored.
 
 Family-exclusive usage now uses a set-based parent visited-set traversal and
 sums exact current-owner totals once. Builder-fact assertions run after every
