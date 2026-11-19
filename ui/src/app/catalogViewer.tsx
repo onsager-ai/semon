@@ -75,6 +75,7 @@ import {
   selectedSessionLabels,
   selectedSessionMenu,
   selectedSessionState,
+  selectedSessionStateLabel,
   selectedSessionStatusTip,
   selectedSessionFooter,
   catalogSessionRow,
@@ -1414,7 +1415,7 @@ export function createCatalogViewer(
                 name,
                 session: active.key,
                 state: selectedSessionState(session),
-                stateLabel: STATE[selectedSessionState(session)] ?? 'Recorded history',
+                stateLabel: selectedSessionStateLabel(session),
                 stateTip: selectedSessionStatusTip(session),
                 showState: !(phone && ancestors.length),
                 ancestors: (phone ? [] : ancestors).map((row) => ({
