@@ -4,6 +4,22 @@
 
 `semon receive` is the reference receiver (`semon_push::receiver::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<machine-id>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and **507 Insufficient Storage** when the machine's copy would pass its size cap or the receiver's filesystem runs out of space (ENOSPC). A 507 body keeps the human-readable `error` string and includes a stable `code`: `machine_storage_full` for the per-machine cap, or `receiver_storage_full` for a full receiver volume. Other storage failures remain 500. Failed writes preserve the existing rollback and accounting behavior.
 
+In watch mode, 507 responses use the existing storage restriction episode: retry
+appends/facts after 1, 2, 4, 8, then at most every 10 minutes, reset after an
+acknowledged successful pass. The reason is printed once when the episode starts;
+repeated refusals stay quiet. Status heartbeats that themselves receive 507 also
+back off on this schedule; successful heartbeats do not clear append restrictions.
+Other response statuses retain their existing retry behavior.
+
+The receiver's authenticated Viewer exposes `GET /api/viewer/receiver-storage`:
+`{"refusals":[{"machine_id":"machine-12345678abcdef01","time":1234567890,"reason":"receiver_storage_full"}]}`.
+`time` is the last refusal in Unix seconds; `reason` is one of the 507 codes above.
+The Machines screen shows the storage reason and affected machines. The receiver
+keeps only the latest refusal per machine in memory, with no bodies or paths. An
+accepted append or facts write clears that machine's refusal; a status heartbeat
+does not. Restarting the receiver clears these observations. The endpoint uses
+the existing Viewer read authority and `Cache-Control: no-store`.
+
 Registry format 9 stores the origin-generated canonical machine ID
 (`machine-<8 lowercase hex Unix seconds><8 secure random hex digits>`), matching
 directory locator, optional display name, pending code hash, pairing gate, hashed

@@ -905,6 +905,14 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
         Err(_) => return Next::Close,
     };
     let reply = shared.receiver.handle(&machine, endpoint, &body);
+    if let Some(viewer) = &shared.viewer {
+        viewer.record_push_storage(
+            &machine,
+            reply.status,
+            reply.body["code"].as_str(),
+            matches!(endpoint, Endpoint::Append | Endpoint::Facts),
+        );
+    }
     if reply.status >= 500 {
         eprintln!("semon receive: {machine}: {}", reply.body);
     } else if reply.status >= 400 {
