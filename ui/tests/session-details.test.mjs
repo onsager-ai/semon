@@ -4,7 +4,7 @@ import { build } from 'esbuild';
 const { outputFiles } = await build({
   stdin: {
     contents:
-      "export {parseSessionDetails} from './src/domain/sessionDetails'; export {selectedSessionMenu, selectedSessionLabels, selectedSessionState, catalogSessionRow, catalogSessionGroups} from './src/app/sessionPresentation';",
+      "export {parseSessionDetails} from './src/domain/sessionDetails'; export {selectedSessionMenu, selectedSessionLabels, selectedSessionState, selectedSessionStateLabel, catalogSessionRow, catalogSessionGroups} from './src/app/sessionPresentation';",
     resolveDir: new URL('../', import.meta.url).pathname,
   },
   bundle: true,
@@ -17,6 +17,7 @@ const {
   selectedSessionMenu,
   selectedSessionLabels,
   selectedSessionState,
+  selectedSessionStateLabel,
   catalogSessionRow,
   catalogSessionGroups,
 } = await import(
@@ -101,6 +102,25 @@ test('Codex turn outcomes stay separate from current writer and remote observati
       'Unknown',
     );
   }
+  session.details = parseSessionDetails({
+    ...details(),
+    state: 'off',
+    turn_lifecycle: { phase: 'active' },
+  });
+  assert.equal(selectedSessionState(session), 'off');
+  assert.equal(selectedSessionStateLabel(session), 'Last turn active · writer gone');
+  session.details = parseSessionDetails({
+    ...details(),
+    state: 'off',
+    turn_lifecycle: { phase: 'unknown' },
+  });
+  assert.equal(selectedSessionStateLabel(session), 'Recorded history');
+  session.details = parseSessionDetails({
+    ...details(),
+    state: 'off',
+    turn_lifecycle: { phase: 'completed' },
+  });
+  assert.equal(selectedSessionStateLabel(session), 'Recorded history');
   // A later producer-qualified start reactivates only with a live observation.
   session.details = parseSessionDetails({
     ...details(),
