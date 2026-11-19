@@ -40,12 +40,21 @@ function turnOutcome(session: CatalogSession): string | undefined {
     unknown: 'Unknown',
   }[phase];
 }
+export function selectedSessionStateLabel(session: CatalogSession): string {
+  const details = session.details;
+  if (
+    session.harness === 'codex' &&
+    details?.state === 'off' &&
+    details.turn_lifecycle?.phase === 'active'
+  )
+    return 'Last turn active · writer gone';
+  const state = selectedSessionState(session);
+  return STATE[state] ?? 'Recorded history';
+}
 export function selectedSessionStatusTip(session: CatalogSession): string {
   const outcome = turnOutcome(session);
   return (
-    'Status: ' +
-    (STATE[selectedSessionState(session)] ?? 'Recorded history') +
-    (outcome ? ' · Last turn: ' + outcome : '')
+    'Status: ' + selectedSessionStateLabel(session) + (outcome ? ' · Last turn: ' + outcome : '')
   );
 }
 function recordedCostTip(cost: Cost): string {
@@ -333,7 +342,7 @@ export function selectedSessionLabels(session: CatalogSession, machine?: string)
   const rows: BarLabel[] = [
     {
       key: 'state',
-      text: STATE[state] ?? 'Recorded history',
+      text: selectedSessionStateLabel(session),
       tip:
         'Recorded status · ' +
         (details?.turns ?? 0) +
@@ -342,7 +351,7 @@ export function selectedSessionLabels(session: CatalogSession, machine?: string)
       drop: 0,
       className: 'state ' + state,
       state,
-      stateLabel: STATE[state] ?? 'Recorded history',
+      stateLabel: selectedSessionStateLabel(session),
     },
     {
       key: 'harness',
