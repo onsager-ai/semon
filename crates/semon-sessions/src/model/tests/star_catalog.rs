@@ -2294,6 +2294,123 @@ fn star_catalog_subagent_inline_pin_resume_turn_arrival_parity() {
 }
 
 #[test]
+fn star_catalog_ambiguous_missing_time_cross_lineage_relay_parity() {
+    for reverse in [false, true] {
+        for missing_time in [false, true] {
+            let home = Home::new();
+            let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+            let mut parent = vec![
+                human("lead", ts(20, 0), "work"),
+                assistant(
+                    "lead",
+                    ts(20, 1),
+                    vec![tool(
+                        "spawn",
+                        "Agent",
+                        json!({"prompt":"work","name":"worker"}),
+                    )],
+                ),
+                result(
+                    "lead",
+                    ts(20, 1),
+                    "spawn",
+                    "launched",
+                    false,
+                    json!({"status":"async_launched","agentId":"child"}),
+                ),
+                agent_send("lead", ts(20, 3), "child", "same up"),
+                agent_send("lead", ts(20, 5), "child", "same up"),
+                agent_send("lead", ts(20, 7), "child", "escaped up"),
+            ];
+            // Repeated bodies must consume successive native occurrences. An
+            // unmatched body between them uses the bounded second pass.
+            let mut child = vec![user("lead", ts(20, 1), "work")];
+            child.extend(send_to_main("up-1", 2, "same up", queued_reply()));
+            child.extend(send_to_main("up-2", 4, "same up", queued_reply()));
+            child.extend(send_to_main("up-3", 6, "different up", queued_reply()));
+            child.push(child_says(8, "still working"));
+            for (id, minute, message) in [
+                ("down-1", 9, "same down"),
+                ("down-2", 11, "same down"),
+                ("down-3", 13, "different down"),
+            ] {
+                parent.extend(send_to_agent(
+                    id,
+                    minute,
+                    "worker",
+                    message,
+                    json!({"success":true,"pin":{"id":"child"}}),
+                ));
+            }
+            child.extend([
+                coordinator("lead", ts(20, 10), "same down"),
+                coordinator("lead", ts(20, 12), "same down"),
+                coordinator("lead", ts(20, 14), "escaped down"),
+            ]);
+            if missing_time {
+                // Body equality can pair an untimed receipt; the time pass
+                // cannot. Down pairing permits a send with unknown time.
+                parent[3].as_object_mut().unwrap().remove("timestamp");
+                parent[5].as_object_mut().unwrap().remove("timestamp");
+                parent[6].as_object_mut().unwrap().remove("timestamp");
+            }
+            // The same sender's progress received outside its parent lineage
+            // must remain a separate relay, never consume the parent's send.
+            let other = vec![
+                human("other", ts(20, 0), "unrelated work"),
+                agent_send("other", ts(20, 3), "child", "same up"),
+                agent_send("other", ts(20, 7), "child", "escaped up"),
+            ];
+            for source in if reverse { [3, 2, 1] } else { [1, 2, 3] } {
+                match source {
+                    1 => {
+                        home.top("lead", &parent);
+                        warehouse.source(1, "claude", "lead", &parent);
+                    }
+                    2 => {
+                        home.agent("lead", "child", "spawn", &child);
+                        warehouse.source(2, "claude", "child", &child);
+                        warehouse
+                            .db
+                            .execute(
+                                "INSERT INTO fact_agent_observation VALUES(2,'lead','spawn')",
+                                [],
+                            )
+                            .unwrap();
+                    }
+                    _ => {
+                        home.top("other", &other);
+                        warehouse.source(3, "claude", "other", &other);
+                    }
+                }
+                assert_selected_turns(&warehouse, &home);
+            }
+            let built = home.build_query();
+            assert_eq!(
+                built
+                    .handoffs
+                    .iter()
+                    .filter(|h| h.kind == "relay"
+                        && h.from == "child"
+                        && h.to.as_deref() == Some("other"))
+                    .count(),
+                2
+            );
+            assert_eq!(
+                built
+                    .handoffs
+                    .iter()
+                    .filter(|h| h.kind == "relay"
+                        && h.from == "lead"
+                        && h.to.as_deref() == Some("child"))
+                    .count(),
+                3
+            );
+        }
+    }
+}
+
+#[test]
 fn star_catalog_native_event_append_writes() {
     let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
     warehouse
