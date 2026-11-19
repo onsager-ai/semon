@@ -4605,6 +4605,69 @@ fn star_catalog_append_scale(home: &Home) {
     append_distribution("C", &mut wide, 300, home);
 }
 
+// Run after the measured reads so diagnostics do not warm their connections.
+// VM steps separate changes in query work from CI runner speed differences.
+fn list_scale_diagnostics(db: &Connection) {
+    let tables = db
+        .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for table in tables {
+        let count: i64 = db
+            .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        println!("scale diagnostic table={table} rows={count}");
+    }
+    for pragma in ["page_count", "freelist_count", "page_size", "cache_size"] {
+        let value: i64 = db
+            .query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0))
+            .unwrap();
+        println!("scale diagnostic pragma={pragma} value={value}");
+    }
+    // Reuse the actual title/model CTE definitions, rather than approximations.
+    let list_ctes = SCHEMA
+        .split("CREATE VIEW session_list AS")
+        .nth(1)
+        .unwrap()
+        .split("SELECT k.id")
+        .next()
+        .unwrap();
+    for stage in [
+        "catalog_keys",
+        "parent_selection",
+        "titles",
+        "models",
+        "current_usage",
+        "shared_messages",
+        "usage_totals",
+        "session_list",
+    ] {
+        let sql = if matches!(stage, "titles" | "models") {
+            format!("{list_ctes} SELECT * FROM {stage}")
+        } else {
+            format!("SELECT * FROM {stage}")
+        };
+        let start = Instant::now();
+        let mut statement = db.prepare(&sql).unwrap();
+        let mut query = statement.query([]).unwrap();
+        let mut count = 0;
+        while query.next().unwrap().is_some() {
+            count += 1;
+        }
+        drop(query);
+        println!(
+            "scale diagnostic stage={stage} rows={count} elapsed_us={} vm_steps={}",
+            start.elapsed().as_micros(),
+            statement.get_status(rusqlite::StatementStatus::VmStep)
+        );
+    }
+}
+
 /// CI only: writes real synthetic JSONL, extracts it through the same loader,
 /// then times actual list and detail SQL. No full builder over the scale corpus.
 #[test]
@@ -4750,6 +4813,11 @@ fn star_catalog_scale() {
                     "scale indexed={indexed} query={name} cache={temperature} rows={count} elapsed_ms={}",
                     elapsed.as_millis()
                 );
+                drop(query);
+                println!(
+                    "scale diagnostic query={name} cache={temperature} vm_steps={}",
+                    statement.get_status(rusqlite::StatementStatus::VmStep)
+                );
                 let ceiling_ms = if selected { 500 } else { 5_000 };
                 assert!(
                     elapsed.as_millis() < ceiling_ms,
@@ -4788,5 +4856,6 @@ fn star_catalog_scale() {
                 }
             }
         }
+        list_scale_diagnostics(&Connection::open(&path).unwrap());
     }
 }
