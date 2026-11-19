@@ -41,6 +41,32 @@ impl Warehouse {
     fn new(path: &std::path::Path) -> Self {
         let db = Connection::open(path).unwrap();
         db.execute_batch(SCHEMA).unwrap();
+        // Bind one effective price snapshot to this read adapter. The SQL fold
+        // selects native billing observations; production pricing owns rates,
+        // cache-write splits, service tiers and unknown-price semantics.
+        let prices = crate::pricing::snapshot();
+        db.create_scalar_function(
+            "semon_step_usd",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            move |context| {
+                let model = context.get::<Option<String>>(0)?;
+                let Some(billing) = context.get::<Option<String>>(1)? else {
+                    return Ok(None);
+                };
+                let billing = serde_json::from_str(&billing)
+                    .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+                let mut cost = crate::pricing::CostBuild::with_table(prices.clone());
+                cost.message(&events::MessageUsage {
+                    model,
+                    billing,
+                    ..Default::default()
+                });
+                Ok(cost.finish().usd)
+            },
+        )
+        .unwrap();
         // Fixture snapshots have already qualified process identity/expiry. These
         // origin-local inputs are separate from log progress and chosen turns.
         db.execute_batch(
@@ -194,6 +220,21 @@ impl Warehouse {
             }
             if harness == "claude" {
                 crate::events::claude(self.native.entry(source).or_default(), record, pos as u64);
+                if kind == "assistant"
+                    && message.get("usage").is_some()
+                    && let Some(used) = message["id"]
+                        .as_str()
+                        .and_then(|id| self.native[&source].usage().get(id))
+                {
+                    tx.prepare_cached("INSERT INTO fact_step_billing VALUES(?1,?2,?3)")
+                        .unwrap()
+                        .execute(params![
+                            source,
+                            pos,
+                            serde_json::to_string(&used.billing).unwrap()
+                        ])
+                        .unwrap();
+                }
                 if let Some(content) = message["content"].as_array() {
                     for (block, value) in content.iter().enumerate() {
                         if value["type"] == "tool_use" {
@@ -432,26 +473,27 @@ impl Warehouse {
 
     fn recompute(db: &Connection, source: i64) {
         let after = db
-            .query_row(
-                "SELECT pos FROM maintenance_cursor WHERE source=?1",
-                [source],
-                |r| r.get::<_, i64>(0),
-            )
+            .prepare_cached("SELECT pos FROM maintenance_cursor WHERE source=?1")
+            .unwrap()
+            .query_row([source], |r| r.get::<_, i64>(0))
             .optional()
             .unwrap()
             .unwrap_or(-1);
         let rank = || {
-            db.query_row(
-                "SELECT first_ts,continued FROM dim_session WHERE source=?1",
-                [source],
-                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, i64>(1)?)),
-            )
-            .optional()
-            .unwrap()
+            db.prepare_cached("SELECT first_ts,continued FROM dim_session WHERE source=?1")
+                .unwrap()
+                .query_row([source], |r| {
+                    Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, i64>(1)?))
+                })
+                .optional()
+                .unwrap()
         };
         let old_rank = rank();
+        // Reuse the suffix-maintenance programs across append transactions.
+        // Preparing the joins and upserts for every record costs more than
+        // executing their indexed probes on small suffixes.
         for sql in MAINTAIN.split(';').filter(|sql| !sql.trim().is_empty()) {
-            let mut statement = db.prepare(sql).unwrap();
+            let mut statement = db.prepare_cached(sql).unwrap();
             for (name, value) in [(":source", source), (":after", after)] {
                 if let Some(index) = statement.parameter_index(name).unwrap() {
                     statement.raw_bind_parameter(index, value).unwrap();
@@ -1254,6 +1296,22 @@ fn selected_claude_relations(
             .filter(|at| owner_of[&at.0] == session)
             .collect::<Vec<_>>()
     };
+    let session_start = |session| {
+        owner_of
+            .iter()
+            .filter(|(_, owner)| **owner == session)
+            .filter_map(|(file, _)| files[*file].first)
+            .min()
+            .unwrap_or(0)
+    };
+    let session_last = |session| {
+        owner_of
+            .iter()
+            .filter(|(_, owner)| **owner == session)
+            .filter_map(|(file, _)| files[*file].last)
+            .max()
+            .unwrap_or(0)
+    };
     let body = |at, key: &str| {
         let record = selected_record(files, at);
         input_string(&record, event(files, at).b as usize, &[key])
@@ -1379,7 +1437,7 @@ fn selected_claude_relations(
                 stable_id("r", &source),
                 "relay",
                 (key.clone(), rows[parent].id.clone()),
-                e.t.unwrap(),
+                e.t.unwrap_or_else(|| session_last(child)),
                 "done",
                 messages[send].as_deref().unwrap_or(""),
             );
@@ -1585,7 +1643,7 @@ fn selected_claude_relations(
                 (rows[parent].id.clone(), key.clone()),
                 send.and_then(|at| event(files, at).t)
                     .or(event(files, down).t)
-                    .unwrap(),
+                    .unwrap_or_else(|| session_start(child)),
                 "done",
                 brief,
             );
@@ -1650,7 +1708,7 @@ fn selected_claude_relations(
                     .unwrap_or_else(|| stable_id("peer-", &identity)),
                 rows[to].id.clone(),
             ),
-            e.t.unwrap(),
+            e.t.unwrap_or_else(|| session_start(to)),
             "done",
             received_body(&selected_record(files, at), "agent-message", None, 0)
                 .as_deref()
@@ -1855,7 +1913,7 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
             stub: Option<String>,
             failed: bool,
             correlation: Option<String>,
-            time: i64,
+            time: Option<i64>,
         }
         let relays = warehouse.db.prepare(
         "SELECT source,pos,call_id,sender,receiver,stub,failed,correlation,ts FROM relay_endpoints"
@@ -1939,7 +1997,15 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
                         .or_else(|| stub.map(|s| stable_id("peer-", &s)))
                         .unwrap_or_default(),
                 ),
-                time,
+                time.unwrap_or_else(|| {
+                    files
+                        .iter()
+                        .enumerate()
+                        .filter(|(file, _)| selected[from].iter().any(|(member, _)| member == file))
+                        .filter_map(|(_, file)| file.last)
+                        .max()
+                        .unwrap_or(0)
+                }),
                 if failed { "err" } else { "done" },
                 "",
             );
@@ -2445,6 +2511,128 @@ fn star_catalog_subagent_inline_pin_resume_turn_arrival_parity() {
             assert_selected_turns(&warehouse, &home);
         }
         assert_eq!(turns_of(&home.build_query(), "child").len(), 2);
+    }
+}
+
+#[test]
+fn star_catalog_ambiguous_missing_time_cross_lineage_relay_parity() {
+    for reverse in [false, true] {
+        for missing_time in [false, true] {
+            let home = Home::new();
+            let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+            let mut parent = vec![
+                human("lead", ts(20, 0), "work"),
+                assistant(
+                    "lead",
+                    ts(20, 1),
+                    vec![tool(
+                        "spawn",
+                        "Agent",
+                        json!({"prompt":"work","name":"worker"}),
+                    )],
+                ),
+                result(
+                    "lead",
+                    ts(20, 1),
+                    "spawn",
+                    "launched",
+                    false,
+                    json!({"status":"async_launched","agentId":"child"}),
+                ),
+                agent_send("lead", ts(20, 3), "child", "same up"),
+                agent_send("lead", ts(20, 5), "child", "same up"),
+                agent_send("lead", ts(20, 7), "child", "escaped up"),
+            ];
+            // Repeated bodies must consume successive native occurrences. An
+            // unmatched body between them uses the bounded second pass.
+            let mut child = vec![user("lead", ts(20, 1), "work")];
+            child.extend(send_to_main("up-1", 2, "same up", queued_reply()));
+            child.extend(send_to_main("up-2", 4, "same up", queued_reply()));
+            child.extend(send_to_main("up-3", 6, "different up", queued_reply()));
+            child.push(child_says(8, "still working"));
+            for (id, minute, message) in [
+                ("down-1", 9, "same down"),
+                ("down-2", 11, "same down"),
+                ("down-3", 13, "different down"),
+            ] {
+                parent.extend(send_to_agent(
+                    id,
+                    minute,
+                    "worker",
+                    message,
+                    json!({"success":true,"pin":{"id":"child"}}),
+                ));
+            }
+            child.extend([
+                coordinator("lead", ts(20, 10), "same down"),
+                coordinator("lead", ts(20, 12), "same down"),
+                coordinator("lead", ts(20, 14), "escaped down"),
+            ]);
+            if missing_time {
+                // Body equality can pair an untimed receipt; the time pass
+                // cannot. Down pairing permits a send with unknown time.
+                parent[3].as_object_mut().unwrap().remove("timestamp");
+                parent[5].as_object_mut().unwrap().remove("timestamp");
+                parent[6].as_object_mut().unwrap().remove("timestamp");
+                child[1].as_object_mut().unwrap().remove("timestamp");
+                // Both the second down send and its receipt are untimed;
+                // the rendered relay uses the child's start as its fallback.
+                parent[8].as_object_mut().unwrap().remove("timestamp");
+                child[9].as_object_mut().unwrap().remove("timestamp");
+            }
+            // The same sender's progress received outside its parent lineage
+            // must remain a separate relay, never consume the parent's send.
+            let other = vec![
+                human("other", ts(20, 0), "unrelated work"),
+                agent_send("other", ts(20, 3), "child", "same up"),
+                agent_send("other", ts(20, 7), "child", "escaped up"),
+            ];
+            for source in if reverse { [3, 2, 1] } else { [1, 2, 3] } {
+                match source {
+                    1 => {
+                        home.top("lead", &parent);
+                        warehouse.source(1, "claude", "lead", &parent);
+                    }
+                    2 => {
+                        home.agent("lead", "child", "spawn", &child);
+                        warehouse.source(2, "claude", "child", &child);
+                        warehouse
+                            .db
+                            .execute(
+                                "INSERT INTO fact_agent_observation VALUES(2,'lead','spawn')",
+                                [],
+                            )
+                            .unwrap();
+                    }
+                    _ => {
+                        home.top("other", &other);
+                        warehouse.source(3, "claude", "other", &other);
+                    }
+                }
+                assert_selected_turns(&warehouse, &home);
+            }
+            let built = home.build_query();
+            assert_eq!(
+                built
+                    .handoffs
+                    .iter()
+                    .filter(|h| h.kind == "relay"
+                        && h.from == "child"
+                        && h.to.as_deref() == Some("other"))
+                    .count(),
+                2
+            );
+            assert_eq!(
+                built
+                    .handoffs
+                    .iter()
+                    .filter(|h| h.kind == "relay"
+                        && h.from == "lead"
+                        && h.to.as_deref() == Some("child"))
+                    .count(),
+                3
+            );
+        }
     }
 }
 
@@ -3293,7 +3481,37 @@ fn star_catalog_family_usage_parity() {
 // Fold the builder's per-owner evidence in its actual leaf-queue order. The
 // family activity cost below independently checks that these token observations
 // select the same native step as the production analytics fold.
+fn assert_family_cost_parity(home: &Home, warehouse: &Warehouse) {
+    let built = home.build_query();
+    let costs = crate::causal_trace::family_costs(
+        built
+            .sessions
+            .iter()
+            .map(|(id, session)| (id.as_str(), session.parent.as_deref(), session.cost.usd)),
+    );
+    for row in warehouse.list() {
+        let (own, family): (Option<f64>, Option<f64>) = warehouse.db.query_row(
+            "SELECT s.usd,f.family_usd FROM session_cost s JOIN family_cost f ON f.root=s.owner WHERE s.owner=?1",
+            [row.owner], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        for (label, actual, expected) in [
+            ("session", own, built.sessions[&row.id].cost.usd),
+            ("family", family, costs[row.id.as_str()]),
+        ] {
+            match (actual, expected) {
+                (Some(actual), Some(expected)) => assert!(
+                    (actual - expected).abs() < 1e-12,
+                    "{} {label} USD: {actual} vs {expected}",
+                    row.id,
+                ),
+                _ => assert_eq!(actual, expected, "{} {label} USD", row.id),
+            }
+        }
+    }
+}
+
 fn assert_shared_family_parity(home: &Home, warehouse: &Warehouse) {
+    assert_family_cost_parity(home, warehouse);
     use sha2::{Digest, Sha256};
     let built = home.build_query();
     let rows = warehouse.list();
@@ -3383,6 +3601,22 @@ fn assert_shared_family_parity(home: &Home, warehouse: &Warehouse) {
             }
         }
         assert_eq!(actual, expected, "{id} shared tokens");
+        let (sql_cost, sql_unknown): (f64, i64) = warehouse
+            .db
+            .query_row(
+                "SELECT known,unknown_steps FROM family_shared_cost WHERE root=?1",
+                [owner],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or((0.0, 0));
+        assert!((sql_cost - cost).abs() < 1e-12, "{id} SQL shared price");
+        assert_eq!(
+            u64::try_from(sql_unknown).unwrap(),
+            unknown,
+            "{id} SQL shared coverage"
+        );
         if let Some(family) = built.sessions[id]
             .activity_analytics
             .as_ref()
@@ -3412,6 +3646,67 @@ fn assert_shared_family_parity(home: &Home, warehouse: &Warehouse) {
                 ready.push_back(parent);
             }
         }
+    }
+}
+
+#[test]
+fn star_catalog_family_dollar_arrival_parity() {
+    for reverse in [false, true] {
+        let home = Home::new();
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        let inputs = [
+            (1, "root", None),
+            (2, "child", Some("root")),
+            (3, "late-leaf", Some("child")),
+            (4, "empty", Some("root")),
+        ];
+        for index in if reverse { [3, 2, 1, 0] } else { [0, 1, 2, 3] } {
+            let (source, id, parent) = inputs[index];
+            let prompt =
+                parent.map_or("Work".into(), |p| format!("Semon-Parent: claude:{p}\nWork"));
+            let mut records = vec![human(id, ts(0, source), &prompt)];
+            if id != "empty" {
+                records.push(assistant_usage(
+                    id, ts(0, 10), &format!("message-{id}"), "claude-sonnet-4-6",
+                    json!({"input_tokens":100,"cache_read_input_tokens":30,
+                        "cache_creation_input_tokens":40,
+                        "cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":30},
+                        "output_tokens":20}),
+                ));
+            }
+            home.top(id, &records);
+            warehouse.source(source, "claude", id, &records);
+            assert_family_cost_parity(&home, &warehouse);
+        }
+        let total: f64 = warehouse
+            .db
+            .query_row("SELECT family_usd FROM family_cost WHERE root=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(total > 0.0);
+        // A later native report replaces the invocation price, rather than
+        // adding a second charge. Unknown rates then poison every ancestor.
+        for model in ["claude-sonnet-4-6", "unknown-fixture-model"] {
+            let records = [assistant_usage(
+                "late-leaf",
+                ts(0, 15),
+                "message-late-leaf",
+                model,
+                json!({"input_tokens":250,"output_tokens":50}),
+            )];
+            append_records(&home, "late-leaf", &records);
+            warehouse.source(3, "claude", "late-leaf", &records);
+            assert_family_cost_parity(&home, &warehouse);
+        }
+        assert_eq!(
+            warehouse
+                .db
+                .query_row("SELECT family_usd FROM family_cost WHERE root=1", [], |r| r
+                    .get::<_, Option<f64>>(0),)
+                .unwrap(),
+            None
+        );
     }
 }
 
@@ -3966,6 +4261,47 @@ fn assert_full_recompute(warehouse: &Warehouse) {
 }
 
 #[test]
+fn star_catalog_list_does_not_price_or_rewrite_billing() {
+    let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+    warehouse.source(
+        1,
+        "claude",
+        "priced",
+        &[assistant_usage(
+            "priced",
+            ts(0, 1),
+            "message",
+            "claude-sonnet-4-5",
+            json!({"input_tokens":1000,"output_tokens":100}),
+        )],
+    );
+    warehouse
+        .db
+        .execute_batch(
+            "CREATE TEMP TRIGGER billing_insert BEFORE INSERT ON fact_step_billing
+         BEGIN SELECT RAISE(ABORT,'non-usage append inserted billing'); END;
+         CREATE TEMP TRIGGER billing_update BEFORE UPDATE ON fact_step_billing
+         BEGIN SELECT RAISE(ABORT,'non-usage append updated billing'); END;
+         CREATE TEMP TRIGGER billing_delete BEFORE DELETE ON fact_step_billing
+         BEGIN SELECT RAISE(ABORT,'non-usage append deleted billing'); END;",
+        )
+        .unwrap();
+    warehouse.source(1, "claude", "priced", &[json!({"type":"compact_boundary"})]);
+    warehouse
+        .db
+        .create_scalar_function(
+            "semon_step_usd",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| -> rusqlite::Result<Option<f64>> { panic!("list must not invoke dollar pricing") },
+        )
+        .unwrap();
+    let rows = warehouse.list();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tokens, [1000, 0, 100]);
+}
+
+#[test]
 fn star_catalog_incremental_maintenance_plans() {
     let warehouse = Warehouse::new(std::path::Path::new(":memory:"));
     for sql in MAINTAIN.split(';').filter(|sql| !sql.trim().is_empty()) {
@@ -4269,6 +4605,69 @@ fn star_catalog_append_scale(home: &Home) {
     append_distribution("C", &mut wide, 300, home);
 }
 
+// Run after the measured reads so diagnostics do not warm their connections.
+// VM steps separate changes in query work from CI runner speed differences.
+fn list_scale_diagnostics(db: &Connection) {
+    let tables = db
+        .prepare("SELECT name FROM sqlite_schema WHERE type='table' ORDER BY name")
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    for table in tables {
+        let count: i64 = db
+            .query_row(&format!("SELECT count(*) FROM \"{table}\""), [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        println!("scale diagnostic table={table} rows={count}");
+    }
+    for pragma in ["page_count", "freelist_count", "page_size", "cache_size"] {
+        let value: i64 = db
+            .query_row(&format!("PRAGMA {pragma}"), [], |r| r.get(0))
+            .unwrap();
+        println!("scale diagnostic pragma={pragma} value={value}");
+    }
+    // Reuse the actual title/model CTE definitions, rather than approximations.
+    let list_ctes = SCHEMA
+        .split("CREATE VIEW session_list AS")
+        .nth(1)
+        .unwrap()
+        .split("SELECT k.id")
+        .next()
+        .unwrap();
+    for stage in [
+        "catalog_keys",
+        "parent_selection",
+        "titles",
+        "models",
+        "current_usage",
+        "shared_messages",
+        "usage_totals",
+        "session_list",
+    ] {
+        let sql = if matches!(stage, "titles" | "models") {
+            format!("{list_ctes} SELECT * FROM {stage}")
+        } else {
+            format!("SELECT * FROM {stage}")
+        };
+        let start = Instant::now();
+        let mut statement = db.prepare(&sql).unwrap();
+        let mut query = statement.query([]).unwrap();
+        let mut count = 0;
+        while query.next().unwrap().is_some() {
+            count += 1;
+        }
+        drop(query);
+        println!(
+            "scale diagnostic stage={stage} rows={count} elapsed_us={} vm_steps={}",
+            start.elapsed().as_micros(),
+            statement.get_status(rusqlite::StatementStatus::VmStep)
+        );
+    }
+}
+
 /// CI only: writes real synthetic JSONL, extracts it through the same loader,
 /// then times actual list and detail SQL. No full builder over the scale corpus.
 #[test]
@@ -4414,6 +4813,11 @@ fn star_catalog_scale() {
                     "scale indexed={indexed} query={name} cache={temperature} rows={count} elapsed_ms={}",
                     elapsed.as_millis()
                 );
+                drop(query);
+                println!(
+                    "scale diagnostic query={name} cache={temperature} vm_steps={}",
+                    statement.get_status(rusqlite::StatementStatus::VmStep)
+                );
                 let ceiling_ms = if selected { 500 } else { 5_000 };
                 assert!(
                     elapsed.as_millis() < ceiling_ms,
@@ -4452,5 +4856,6 @@ fn star_catalog_scale() {
                 }
             }
         }
+        list_scale_diagnostics(&Connection::open(&path).unwrap());
     }
 }

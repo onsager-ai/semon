@@ -402,8 +402,13 @@ status, bodies and unmatched flags against the full Builder. Arrival fixtures
 cover body and bounded time pairing, legacy batched tags, progress/final receipts,
 pinned inline sends, resumed down sends, orphan process/subagent identities,
 denied/error/unsuccessful sends and native name suffix normalization. These
-fixtures are committed for Rust CI; production producer wiring and broader
-ambiguous, missing-time and cross-lineage candidate combinations remain gates.
+fixtures now also compare repeated-body ambiguous up/down matches, bounded
+up-time and down-order fallbacks, missing receipt/send timestamps, and the same
+sender's progress receipts in an unrelated lineage after every source arrival in
+both orders. Untimed unpaired progress uses the receiver's start time, matching
+Builder. Existing role-qualified facts carry these inputs; no additional body
+columns or pairing state are needed. Production producer wiring and the full
+supported native-format candidate matrix remain conformance gates.
 
 Causal state/turn parity now calls the production `model/turns.rs` read helper
 without constructing a `Builder`. The extraction moves `groups`, `split`, `end`
@@ -474,9 +479,25 @@ winner in this view. Divergent fixtures compare every arrived family to builder
 per-owner tokens folded in that queue order in both arrival orders, including a
 late descendant, a later report and a late parent observation. The winning native
 source/position also prices the shared step and is compared to the builder's
-family shared list cost, including unknown coverage. This does not claim complete
-causal-activity parity or parity for `family_usd`, which separately sums session
-costs rather than using the shared-step fold.
+family shared list cost, including unknown coverage. Native billing metadata is
+now a separate source/position fact in the test warehouse; a query-bound effective
+price snapshot calls production pricing for the SQL-selected step. The set-based
+`family_shared_cost` view prices the winning shared observation and preserves
+unknown-step coverage. No amount or body text is persisted in facts.
+
+`session_cost` and `family_cost` now reproduce Claude `family_usd` separately from
+the activity shared-step fold. Builder's `causal_trace::family_costs` sums session
+`cost.usd`: any shared-usage evidence or unpriced session makes its family total
+unknown, an empty Claude session contributes zero, and a cycle or ancestor of a
+cycle remains unknown. SQL joins current usage/billing observations, groups session
+prices, and sums each family member once with NULL propagation. Fixtures compare
+per-session prices and every family total after each arrival in both orders,
+including divergent shared observations, late descendants, late reports, cache
+write duration pricing, empty sessions and unknown rates. Pricing refresh remains
+disabled in CI (`SEMON_PRICING_REFRESH=off`). These reads do not enter list/detail
+SQL or add append-time family maintenance. This does not claim complete causal
+activity parity, Codex/Copilot dollar-total parity, production price dimension or
+billing producer wiring, or the full native billing qualification matrix.
 
 Resolve these remaining boundaries in phase 1 before treating the plan as
 production-ready. The sketches earlier in this document do not establish parity.

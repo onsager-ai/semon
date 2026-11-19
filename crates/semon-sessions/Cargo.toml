@@ -31,6 +31,7 @@ test-ui-account-server = []
 test-hooks = []
 
 [dev-dependencies]
+rusqlite = { workspace = true, features = ["functions"] }
 arrow = { version = "=58.4.1", default-features = false }
 parquet = { version = "=58.4.1", default-features = false, features = ["arrow", "zstd"] }
 
