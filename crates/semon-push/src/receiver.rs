@@ -156,7 +156,17 @@ impl Refusal {
         match self {
             Self::Invalid(message) => Reply::error(400, message),
             Self::TooLarge(message) => Reply::error(413, message),
-            Self::Full(message) => Reply::error(507, message),
+            Self::Full(message) => Reply::new(
+                507,
+                json!({"error": message, "code": "machine_storage_full"}),
+            ),
+            Self::Storage(error) if error.kind() == io::ErrorKind::StorageFull => Reply::new(
+                507,
+                json!({
+                    "error": format!("the receiver's storage is full: {error}"),
+                    "code": "receiver_storage_full",
+                }),
+            ),
             Self::Storage(error) => Reply::error(500, format!("the receiver's storage: {error}")),
         }
     }
@@ -1042,6 +1052,8 @@ fn append_durably(
 enum Fault {
     /// A write stops after this many bytes and fails.
     WriteAfter(usize),
+    /// A write runs out of receiver storage.
+    StorageFull,
     /// An append's data sync fails.
     SyncData,
     /// A directory sync fails.
@@ -1066,6 +1078,9 @@ fn take_fault(matches: impl Fn(Fault) -> bool) -> Option<Fault> {
 fn write_bytes(file: &mut File, bytes: &[u8]) -> io::Result<()> {
     #[cfg(test)]
     {
+        if take_fault(|fault| fault == Fault::StorageFull).is_some() {
+            return Err(io::Error::from_raw_os_error(28));
+        }
         if let Some(Fault::WriteAfter(limit)) =
             take_fault(|fault| matches!(fault, Fault::WriteAfter(_)))
         {
@@ -1659,6 +1674,36 @@ mod tests {
         let reply = receiver.append("laptop", &append(LOG, b"one\n", 4, b"two\n", false));
         assert_eq!(reply, Reply::new(200, json!({"length": 8})));
         assert_eq!(copy(&receiver, "laptop", &path), b"one\ntwo\n");
+    }
+
+    #[test]
+    fn an_enospc_write_gets_507_without_changing_the_copy() {
+        let (_dir, receiver) = receiver();
+        let path = format!("claude/{LOG}");
+        assert_eq!(
+            receiver
+                .append("laptop", &append(LOG, b"", 0, b"one\n", false))
+                .status,
+            200
+        );
+        FAULT.with(|fault| fault.set(Some(Fault::StorageFull)));
+        let reply = receiver.append("laptop", &append(LOG, b"one\n", 4, b"two\n", false));
+        assert_eq!(reply.status, 507, "{reply:?}");
+        assert_eq!(reply.body["code"], "receiver_storage_full");
+        assert!(
+            reply.body["error"]
+                .as_str()
+                .unwrap()
+                .contains("storage is full")
+        );
+        assert_eq!(copy(&receiver, "laptop", &path), b"one\n");
+        assert_eq!(receiver.used_bytes("laptop"), 4);
+        assert_eq!(
+            receiver
+                .append("laptop", &append(LOG, b"one\n", 4, b"two\n", false))
+                .status,
+            200
+        );
     }
 
     #[test]

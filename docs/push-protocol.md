@@ -2,7 +2,7 @@
 
 `semon push` keeps a copy of this machine's session logs on another server, a *receiver*, and sends it the machine's facts, so `semon-sessions` can discover, index and query those native sources using the recorded facts (`Options::facts`). This document is the whole contract: any server that implements it can receive a push.
 
-`semon receive` is the reference receiver (`semon_push::receiver::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<machine-id>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and 507 (the machine's copy would pass its size cap); a client treats either as a failure.
+`semon receive` is the reference receiver (`semon_push::receiver::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<machine-id>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and **507 Insufficient Storage** when the machine's copy would pass its size cap or the receiver's filesystem runs out of space (ENOSPC). A 507 body keeps the human-readable `error` string and includes a stable `code`: `machine_storage_full` for the per-machine cap, or `receiver_storage_full` for a full receiver volume. Other storage failures remain 500. Failed writes preserve the existing rollback and accounting behavior.
 
 Registry format 9 stores the origin-generated canonical machine ID
 (`machine-<8 lowercase hex Unix seconds><8 secure random hex digits>`), matching
