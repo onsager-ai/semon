@@ -45,7 +45,7 @@ impl Warehouse {
         // origin-local inputs are separate from log progress and chosen turns.
         db.execute_batch(
             "CREATE TEMP TABLE qualified_turn_runtime (
-            owner INTEGER PRIMARY KEY,state TEXT NOT NULL,waiting_for TEXT)",
+            source INTEGER PRIMARY KEY,state TEXT NOT NULL,waiting_for TEXT)",
         )
         .unwrap();
         db.execute_batch(include_str!("star_catalog/parents.sql"))
@@ -1462,13 +1462,41 @@ fn selected_claude_relations(
                 reply.e,
             ));
         }
+        // Runtime observations name physical sources. Select the current root
+        // through the parent/owner reads before qualifying a resumed native run.
+        let mut root = parent;
+        let mut visited = BTreeSet::new();
+        while visited.insert(root) {
+            let Some(next) = rows[root]
+                .parent
+                .as_ref()
+                .and_then(|key| rows.iter().position(|row| &row.id == key))
+            else {
+                break;
+            };
+            root = next;
+        }
+        let running: bool = warehouse
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM qualified_turn_runtime r
+             JOIN bridge_session_owner b ON b.source=r.source WHERE b.owner=?1)",
+                [rows[root].owner],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let resumed = runs.len() > 1 && runs.last().is_some_and(|run| !run.ended());
         let mut out = Handoff::new(
             stable_id("s", &format!("spawn:claude:{key}")),
             "spawn",
             (rows[parent].id.clone(), key.clone()),
             call.and_then(|at| event(files, at).t)
                 .unwrap_or(files[source_files[&child_source]].first.unwrap()),
-            if completion.as_ref().is_some_and(|c| c.2) {
+            if running && (resumed || completion.is_none()) {
+                "work"
+            } else if resumed {
+                "done"
+            } else if completion.as_ref().is_some_and(|c| c.2) {
                 "err"
             } else {
                 "done"
@@ -1709,7 +1737,8 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
         let runtime: Option<(String, Option<String>)> = warehouse
             .db
             .query_row(
-                "SELECT state,waiting_for FROM qualified_turn_runtime WHERE owner=?1",
+                "SELECT r.state,r.waiting_for FROM qualified_turn_runtime r
+                 JOIN bridge_session_owner b ON b.source=r.source WHERE b.owner=?1",
                 [row.owner],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
@@ -1719,6 +1748,11 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
     }
     let (native_relations, native_handled) =
         selected_claude_relations(warehouse, &files, &source_files, &sessions, &rows);
+    for relation in &native_relations {
+        if relation.handoff.out.kind == "spawn" {
+            states[relation.handoff.to.unwrap()].0 = relation.handoff.out.status.into();
+        }
+    }
     let mut handoffs = Vec::new();
     let mut placed = HashMap::<Ref, Vec<usize>>::new();
     let mut heads = BTreeMap::new();
@@ -2011,6 +2045,7 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
             )
         });
         let mut keyed = Vec::new();
+        let mut native_refs = Vec::new();
         for (rank, file) in members.iter().copied().enumerate() {
             let mut time = files[file]
                 .summary
@@ -2023,6 +2058,10 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
                 if !selected[session].contains(&(file, found.o)) {
                     continue;
                 }
+                native_refs.push((
+                    (if members.len() > 1 { time } else { 0 }, rank, i),
+                    (file, i),
+                ));
                 let kinds = if let Some(h) = placed.get(&(file, i)) {
                     h.iter().map(|h| EntryKind::H(*h)).collect::<Vec<_>>()
                 } else {
@@ -2030,6 +2069,9 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
                         Kind::U => Some(EntryKind::U),
                         Kind::A => Some(EntryKind::A),
                         Kind::Gap => Some(EntryKind::Gap),
+                        Kind::Tool if found.poll.is_some() && found.script & events::SENDS == 0 => {
+                            None
+                        }
                         Kind::Tool if found.n.as_deref() != Some("SubagentHandback") => {
                             Some(EntryKind::Tool(tool_state(found)))
                         }
@@ -2072,6 +2114,119 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
                     at: None,
                 },
             );
+        }
+        native_refs.sort_by_key(|(key, _)| *key);
+        let refs: Vec<Ref> = native_refs.into_iter().map(|(_, at)| at).collect();
+        let context = turns::TurnContext {
+            files: &files,
+            handoffs: &handoffs,
+            session,
+            key: &row.id,
+            state: &states[session].0,
+            waiting_for: states[session].1.as_deref(),
+        };
+        let latest_reply = refs
+            .iter()
+            .copied()
+            .rev()
+            .find(|at| event(&files, *at).k == Kind::A);
+        let latest_ask = refs
+            .iter()
+            .rposition(|at| event(&files, *at).k == Kind::Ask);
+        let result = latest_reply.filter(|reply| {
+            let eligible = if files[source_files[&row.owner]].harness() == "codex" {
+                states[session].0 != "work" && row.parent.is_none()
+                    && members.iter().all(|file| files[*file].marker.is_none()
+                        && matches!(&files[*file].role, Role::Codex(meta) if meta.parent_thread.is_none()))
+            } else {
+                states[session].0 == "idle"
+                    && latest_ask.is_none_or(|ask| ask < refs.iter().position(|at| at == reply).unwrap())
+            };
+            eligible && context.reply_started_by_you(&entries, &refs, *reply,
+                files[source_files[&row.owner]].harness() == "codex" && row.parent.is_none(), |at| {
+                    let found = event(&files, at);
+                    let spawned_here = |id: &str| {
+                        refs.iter().any(|call| {
+                            let call = event(&files, *call);
+                            call.k == Kind::Tool && call.id.as_deref() == Some(id)
+                                && matches!(call.n.as_deref(), Some("Agent" | "Task"))
+                        }) || rows.iter().any(|child| child.id == id
+                            && child.parent.as_deref() == Some(row.id.as_str()))
+                    };
+                    match found.k {
+                        Kind::Agm if found.script & AGM_DOWN != 0 => placed.get(&at)
+                            .is_some_and(|hs| hs.iter().all(|h| handoffs[*h].inline)),
+                        Kind::Tn => found.id.as_deref().is_some_and(spawned_here),
+                        Kind::Agm if found.script & AGM_FINAL != 0 =>
+                            [found.id.as_deref(), found.n.as_deref()].into_iter().flatten().any(spawned_here),
+                        _ => false,
+                    }
+                })
+        });
+        let inferred = result.map(|at| {
+            let found = event(&files, at);
+            Handoff {
+                ask: Some("result"),
+                ..Handoff::new(
+                    stable_id(
+                        "q",
+                        &format!("toyou:result:{}:{}:{}", files[at.0].id, found.o, found.b),
+                    ),
+                    "toyou",
+                    (row.id.clone(), "you".into()),
+                    found.t.unwrap_or_else(|| {
+                        refs.iter()
+                            .filter_map(|at| event(&files, *at).t)
+                            .max()
+                            .unwrap()
+                    }),
+                    "new",
+                    &assistant_text(&selected_record(&files, at), found.b as usize)
+                        .unwrap_or_default(),
+                )
+            }
+        });
+        let expected_results: Vec<_> = expected
+            .handoffs
+            .iter()
+            .filter(|h| h.from == row.id && h.kind == "toyou" && h.ask == Some("result"))
+            .collect();
+        assert_eq!(
+            serde_json::to_value(inferred.iter().collect::<Vec<_>>()).unwrap(),
+            serde_json::to_value(expected_results).unwrap(),
+            "{} inferred human result",
+            row.id
+        );
+        // Claude draws the inferred result immediately after its assistant entry;
+        // root Codex results are catalog handoffs without a transcript placement.
+        if files[source_files[&row.owner]].harness() == "claude"
+            && let Some(out) = inferred
+        {
+            let at = result.unwrap();
+            let position = entries
+                .iter()
+                .rposition(|entry| entry.at == Some(at))
+                .unwrap()
+                + 1;
+            let h = handoffs.len();
+            handoffs.push(H {
+                out,
+                from: Some(session),
+                to: None,
+                previews: None,
+                preview_owners: BTreeMap::new(),
+                inline: false,
+            });
+            let previous = &entries[position - 1];
+            let entry = Entry {
+                kind: EntryKind::H(h),
+                file: previous.file,
+                offset: previous.offset,
+                pos: previous.pos,
+                t: previous.t,
+                at: None,
+            };
+            entries.insert(position, entry);
         }
         let context = turns::TurnContext {
             files: &files,
@@ -2686,6 +2841,328 @@ fn star_catalog_gap_turn_parity() {
     let turns = turns_of(&built, "gap");
     assert_eq!(turns.len(), 2);
     assert_eq!(turns[1].end.why, "unfinished_step");
+}
+
+#[test]
+fn star_catalog_human_result_relay_arrival_parity() {
+    for reverse in [false, true] {
+        for progress in [false, true] {
+            for notification_only in [false, true] {
+                let home = Home::new();
+                let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+                let mut parent = vec![
+                    human("lead", ts(20, 0), "delegate"),
+                    assistant(
+                        "lead",
+                        ts(20, 1),
+                        vec![tool("spawn", "Agent", json!({"prompt":"work"}))],
+                    ),
+                    result(
+                        "lead",
+                        ts(20, 1),
+                        "spawn",
+                        "launched",
+                        false,
+                        json!({"status":"async_launched","agentId":"child"}),
+                    ),
+                ];
+                parent.push(if notification_only {
+                    notification("lead", ts(20, 3), "spawn", "completed", "done")
+                } else if progress {
+                    agent_send("lead", ts(20, 3), "child", "update")
+                } else {
+                    hand_back("lead", ts(20, 3), "child", "done")
+                });
+                parent.push(assistant(
+                    "lead",
+                    ts(20, 4),
+                    vec![text("Here is the answer.")],
+                ));
+                let mut child = vec![user("lead", ts(20, 1), "work")];
+                if progress {
+                    child.extend(send_to_main("up", 2, "update", queued_reply()));
+                } else {
+                    child.push(child_says(2, "done"));
+                }
+                home.live(101, "lead", "idle", json!({"startedAt":at(20, 2)}));
+                // The observation is source-scoped even if the source has not arrived.
+                warehouse
+                    .db
+                    .execute(
+                        "INSERT INTO qualified_turn_runtime VALUES(1,'idle',NULL)",
+                        [],
+                    )
+                    .unwrap();
+                for source in if reverse { [2, 1] } else { [1, 2] } {
+                    if source == 1 {
+                        home.top("lead", &parent);
+                        warehouse.source(1, "claude", "lead", &parent);
+                    } else {
+                        home.agent("lead", "child", "spawn", &child);
+                        warehouse.source(2, "claude", "child", &child);
+                        warehouse
+                            .db
+                            .execute(
+                                "INSERT INTO fact_agent_observation VALUES(2,'lead','spawn')",
+                                [],
+                            )
+                            .unwrap();
+                    }
+                    assert_selected_turns(&warehouse, &home);
+                }
+                let expected = home.build_query();
+                assert_eq!(
+                    expected
+                        .handoffs
+                        .iter()
+                        .filter(|h| h.from == "lead" && h.ask == Some("result"))
+                        .count(),
+                    usize::from(!progress || notification_only)
+                );
+                // Appending a tool completion after the reply, with an earlier
+                // native clock, must preserve the current attribution decision.
+                parent.push(assistant(
+                    "lead",
+                    ts(20, 5),
+                    vec![tool("late", "Read", json!({"file_path":"/x"}))],
+                ));
+                let call = parent.last().unwrap().clone();
+                home.top("lead", &parent);
+                warehouse.source(1, "claude", "lead", &[call]);
+                assert_selected_turns(&warehouse, &home);
+                let late = result("lead", ts(20, 2), "late", "failed", true, json!({}));
+                parent.push(late.clone());
+                home.top("lead", &parent);
+                warehouse.source(1, "claude", "lead", &[late]);
+                assert_selected_turns(&warehouse, &home);
+            }
+        }
+    }
+}
+
+#[test]
+fn star_catalog_resumed_live_runtime_arrival_parity() {
+    for reverse in [false, true] {
+        for status in ["busy", "waiting", "idle"] {
+            let home = Home::new();
+            let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+            let mut parent = vec![
+                human("lead", ts(20, 0), "work"),
+                assistant(
+                    "lead",
+                    ts(20, 1),
+                    vec![tool("spawn", "Agent", json!({"prompt":"work"}))],
+                ),
+                result(
+                    "lead",
+                    ts(20, 1),
+                    "spawn",
+                    "launched",
+                    false,
+                    json!({"status":"async_launched","agentId":"child"}),
+                ),
+                hand_back("lead", ts(20, 4), "child", "first result"),
+            ];
+            parent.extend(send_to_agent(
+                "resume",
+                6,
+                "child",
+                "again",
+                resumed("child"),
+            ));
+            let mut child = vec![
+                user("lead", ts(20, 1), "work"),
+                assistant(
+                    "lead",
+                    ts(20, 4),
+                    vec![tool(
+                        "back",
+                        "SubagentHandback",
+                        json!({"message":"first result"}),
+                    )],
+                ),
+                coordinator("lead", ts(20, 7), "again"),
+                assistant(
+                    "lead",
+                    ts(20, 8),
+                    vec![tool("read", "Read", json!({"file_path":"/x"}))],
+                ),
+            ];
+            let waiting = (status == "waiting").then_some("permission prompt");
+            let state = match status {
+                "busy" => "work",
+                "waiting" => "wait",
+                _ => "idle",
+            };
+            home.live(
+                101,
+                "lead",
+                status,
+                if let Some(waiting) = waiting {
+                    json!({"startedAt":at(20, 5),"waitingFor":waiting})
+                } else {
+                    json!({"startedAt":at(20, 5)})
+                },
+            );
+            warehouse
+                .db
+                .execute(
+                    "INSERT INTO qualified_turn_runtime VALUES(1,?1,?2)",
+                    params![state, waiting],
+                )
+                .unwrap();
+            for source in if reverse { [2, 1] } else { [1, 2] } {
+                if source == 1 {
+                    home.top("lead", &parent);
+                    warehouse.source(1, "claude", "lead", &parent);
+                } else {
+                    home.agent("lead", "child", "spawn", &child);
+                    warehouse.source(2, "claude", "child", &child);
+                    warehouse
+                        .db
+                        .execute(
+                            "INSERT INTO fact_agent_observation VALUES(2,'lead','spawn')",
+                            [],
+                        )
+                        .unwrap();
+                }
+                assert_selected_turns(&warehouse, &home);
+            }
+            assert_eq!(home.build_query().sessions["child"].state, "work");
+            // The resumed process exits with the native run still open.
+            fs::remove_file(home.root.join("claude/sessions/101.json")).unwrap();
+            warehouse
+                .db
+                .execute("DELETE FROM qualified_turn_runtime", [])
+                .unwrap();
+            assert_selected_turns(&warehouse, &home);
+            assert_eq!(home.build_query().sessions["child"].state, "done");
+            // A new qualified process resumes that same source before a late,
+            // earlier-clock completion of the pending tool is admitted.
+            home.live(102, "lead", "busy", json!({"startedAt":at(20, 9)}));
+            warehouse
+                .db
+                .execute(
+                    "INSERT INTO qualified_turn_runtime VALUES(1,'work',NULL)",
+                    [],
+                )
+                .unwrap();
+            assert_selected_turns(&warehouse, &home);
+            let late = result("lead", ts(20, 8), "read", "done", false, json!({}));
+            child.push(late.clone());
+            home.agent("lead", "child", "spawn", &child);
+            warehouse.source(2, "claude", "child", &[late]);
+            assert_selected_turns(&warehouse, &home);
+            let back = assistant(
+                "lead",
+                ts(20, 10),
+                vec![tool(
+                    "back2",
+                    "SubagentHandback",
+                    json!({"message":"second result"}),
+                )],
+            );
+            child.push(back.clone());
+            home.agent("lead", "child", "spawn", &child);
+            warehouse.source(2, "claude", "child", &[back]);
+            assert_selected_turns(&warehouse, &home);
+            assert_eq!(home.build_query().sessions["child"].state, "done");
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn star_catalog_resumed_live_yield_turn_parity() {
+    let home = Home::new();
+    let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+    let lifecycle = |minute, kind: &str, id: &str| {
+        codex_line(
+            ts(minute, 0),
+            "event_msg",
+            json!({"type":kind,"turn_id":id}),
+        )
+    };
+    let output = |minute, id: &str, done| {
+        codex_line(
+            ts(minute, 2),
+            "response_item",
+            json!({"type":"custom_tool_call_output","call_id":id,"output":[
+                {"type":"input_text","text":"Script completed\nWall time 1.0 seconds\nOutput:\n"},
+                {"type":"input_text","text":json!({"wall_time_seconds":1.0,"session_id":4242,
+                    "exit_code":if done {Some(0)} else {None},"output":"listening\n"}).to_string()},
+            ]}),
+        )
+    };
+    let mut records = codex_records(
+        "serving",
+        None,
+        None,
+        &[
+            lifecycle(1, "task_started", "first"),
+            codex_user(ts(1, 0), "start"),
+            codex_line(
+                ts(1, 1),
+                "response_item",
+                json!({"type":"custom_tool_call","call_id":"start","name":"exec",
+            "input":"const r = await tools.exec_command({cmd:\"serve\",yield_time_ms:1000});\ntext(JSON.stringify(r));"}),
+            ),
+            output(1, "start", false),
+            lifecycle(2, "task_complete", "first"),
+            lifecycle(3, "task_started", "second"),
+            codex_user(ts(3, 0), "check on it"),
+        ],
+    );
+    home.lines("codex/sessions/rollout-serving.jsonl", &records);
+    warehouse.source(1, "codex", "serving", &records);
+    hold_lock(&home, "serving");
+    warehouse
+        .db
+        .execute(
+            "INSERT INTO qualified_turn_runtime VALUES(1,'work',NULL)",
+            [],
+        )
+        .unwrap();
+    assert_selected_turns(&warehouse, &home);
+    assert_eq!(
+        turns_of(&home.build_query(), "serving")[0].end.why,
+        "no_reply"
+    );
+    home.write("proc/locks", "");
+    warehouse
+        .db
+        .execute("DELETE FROM qualified_turn_runtime", [])
+        .unwrap();
+    assert_selected_turns(&warehouse, &home);
+    assert_eq!(
+        turns_of(&home.build_query(), "serving")[0].end.why,
+        "unfinished_step"
+    );
+    hold_lock(&home, "serving");
+    warehouse
+        .db
+        .execute(
+            "INSERT INTO qualified_turn_runtime VALUES(1,'work',NULL)",
+            [],
+        )
+        .unwrap();
+    assert_selected_turns(&warehouse, &home);
+    // A later run completes the earlier yielded command at read time.
+    let poll = codex_line(
+        ts(3, 1),
+        "response_item",
+        json!({"type":"custom_tool_call","call_id":"poll","name":"exec",
+        "input":"const r = await tools.write_stdin({session_id:4242,chars:\"\",yield_time_ms:30000});\ntext(JSON.stringify(r));"}),
+    );
+    let completion = output(3, "poll", true);
+    records.extend([poll.clone(), completion.clone()]);
+    home.lines("codex/sessions/rollout-serving.jsonl", &records);
+    warehouse.source(1, "codex", "serving", &[poll, completion]);
+    assert_selected_turns(&warehouse, &home);
+    assert_ne!(
+        turns_of(&home.build_query(), "serving")[0].end.why,
+        "unfinished_step"
+    );
 }
 
 #[test]
