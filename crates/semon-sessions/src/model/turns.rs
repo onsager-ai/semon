@@ -2,6 +2,7 @@
 //! relationships. Runtime and parent completion are qualified by the caller;
 //! this helper neither acquires evidence nor persists a chosen turn or state.
 
+use super::Kind;
 use super::{BTreeSet, End, Entry, EntryKind, Group, H, Ref, SourceFile, ToolState, Turn, event};
 
 /// Complete read context for a selected session. No Builder, caches, body reader,
@@ -62,6 +63,63 @@ impl TurnContext<'_> {
             open[current.expect("open turn")].entries.push(position);
         }
         open
+    }
+
+    /// Attribute a reply to a human-started causal turn. The caller qualifies
+    /// incoming native events against its selected relay/spawn relationships.
+    pub(super) fn reply_started_by_you(
+        &self,
+        entries: &[Entry],
+        refs: &[Ref],
+        reply: Ref,
+        root_codex: bool,
+        continues_turn: impl Fn(Ref) -> bool,
+    ) -> bool {
+        let Some(reply_entry) = entries
+            .iter()
+            .position(|entry| entry.at == Some(reply) && entry.kind == EntryKind::A)
+        else {
+            return false;
+        };
+        let groups = self.groups(entries);
+        let Some(group) = groups
+            .iter()
+            .find(|group| group.entries.contains(&reply_entry))
+        else {
+            return false;
+        };
+        let start = group
+            .start
+            .filter(|start| self.handoffs[*start].out.kind == "ask");
+        let codex_prompt = root_codex
+            && group
+                .entries
+                .first()
+                .is_some_and(|position| entries[*position].kind == EntryKind::U);
+        if start.is_none() && !codex_prompt {
+            return false;
+        }
+        let Some(start_at) = group
+            .entries
+            .iter()
+            .find_map(|position| entries[*position].at)
+        else {
+            return false;
+        };
+        let Some(start_position) = refs.iter().position(|at| *at == start_at) else {
+            return false;
+        };
+        let Some(reply_position) = refs.iter().position(|at| *at == reply) else {
+            return false;
+        };
+        if start_position > reply_position {
+            return false;
+        }
+        !refs[start_position..=reply_position].iter().any(|at| {
+            let event = event(self.files, *at);
+            matches!(event.k, Kind::Xsm | Kind::Agm | Kind::Tn) && !continues_turn(*at)
+                || event.k == Kind::Tool && event.n.as_deref() == Some("SubagentHandback")
+        }) && start.is_none_or(|start| self.handoffs[start].out.from == "you")
     }
 
     /// Returns the turns, each entry's turn (by position in the returned

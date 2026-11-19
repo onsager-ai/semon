@@ -4708,54 +4708,13 @@ impl<'a> Builder<'a> {
     /// entries; if one falls between that message and the reply, its turn
     /// start is ambiguous and no result is inferred.
     fn reply_started_by_you(&self, index: usize, reply: Ref) -> bool {
-        let entries = self.entries(index);
-        let Some(reply_entry) = entries
-            .iter()
-            .position(|entry| entry.at == Some(reply) && entry.kind == EntryKind::A)
-        else {
-            return false;
-        };
-        let groups = self.groups(index, &entries);
-        let Some(group) = groups
-            .iter()
-            .find(|group| group.entries.contains(&reply_entry))
-        else {
-            return false;
-        };
-        let start = group
-            .start
-            .filter(|start| self.handoffs[*start].out.kind == "ask");
-        let codex_prompt = self.sessions[index].kind == SessKind::Codex
-            && self.sessions[index].parent.is_none()
-            && group
-                .entries
-                .first()
-                .is_some_and(|position| entries[*position].kind == EntryKind::U);
-        if start.is_none() && !codex_prompt {
-            return false;
-        }
-        let Some(start_at) = group
-            .entries
-            .iter()
-            .find_map(|position| entries[*position].at)
-        else {
-            return false;
-        };
-        let refs = &self.sessions[index].refs;
-        let Some(start_position) = refs.iter().position(|at| *at == start_at) else {
-            return false;
-        };
-        let Some(reply_position) = refs.iter().position(|at| *at == reply) else {
-            return false;
-        };
-        if start_position > reply_position {
-            return false;
-        }
-        !refs[start_position..=reply_position].iter().any(|at| {
-            let event = event(self.files, *at);
-            matches!(event.k, Kind::Xsm | Kind::Agm | Kind::Tn) && !self.continues_turn(*at)
-                || event.k == Kind::Tool && event.n.as_deref() == Some("SubagentHandback")
-        }) && start.is_none_or(|start| self.handoffs[start].out.from == "you")
+        self.turn_context(index).reply_started_by_you(
+            &self.entries(index),
+            &self.sessions[index].refs,
+            reply,
+            self.sessions[index].kind == SessKind::Codex && self.sessions[index].parent.is_none(),
+            |at| self.continues_turn(at),
+        )
     }
 
     /// An incoming event that doesn't interrupt the turn it falls in: a
