@@ -1630,7 +1630,7 @@ fn present_page(
         "unavailable"
     };
     let annotations = crate::annotations::Annotations::read(&options.annotations)?;
-    let native_names = crate::facts::MachineFacts::of(options).native_names(options);
+    let mut native_names = None;
     let mut items = Vec::with_capacity(selected.len());
     for row in selected {
         let mut retired_native = false;
@@ -1754,11 +1754,24 @@ fn present_page(
             .cloned();
         let mut item = serde_json::to_value(&row)?;
         if let Some(annotation) = annotation {
-            let codex_name = row.owner_native_id().and_then(|id| {
-                native_names
-                    .iter()
-                    .find(|name| name.valid() && name.native_id == id)
-            });
+            let codex_names = if row.harness == "codex" && facts_known {
+                if native_names.is_none() {
+                    if let Some(snapshot) = &recorded {
+                        snapshot.validate()?;
+                    }
+                    native_names =
+                        Some(crate::facts::MachineFacts::native_names_read_only(options)?);
+                    if let Some(snapshot) = &recorded {
+                        snapshot.validate()?;
+                    }
+                }
+                native_names.as_deref().unwrap_or_default()
+            } else {
+                &[]
+            };
+            let codex_name = row
+                .owner_native_id()
+                .and_then(|id| codex_names.iter().find(|name| name.native_id == id));
             let native_name =
                 codex_name.is_some() || row.kind == "subagent" || native_titles.contains(&row.key);
             if !native_name && let Some(title) = &annotation.title {

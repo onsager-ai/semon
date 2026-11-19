@@ -13,7 +13,8 @@ export function parseSessionAnnotation(value: unknown): SessionAnnotation {
   const system = text(row.system),
     repository = text(row.repository),
     ticket = text(row.ticket);
-  const title = row.title === null ? null : text(row.title);
+  const { title: rawTitle } = row;
+  const title = rawTitle === null ? null : text(rawTitle);
   if (
     !system ||
     !ticket ||
