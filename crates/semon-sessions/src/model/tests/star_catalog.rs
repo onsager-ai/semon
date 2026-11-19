@@ -1292,6 +1292,22 @@ fn selected_claude_relations(
             .filter(|at| owner_of[&at.0] == session)
             .collect::<Vec<_>>()
     };
+    let session_start = |session| {
+        owner_of
+            .iter()
+            .filter(|(_, owner)| **owner == session)
+            .filter_map(|(file, _)| files[*file].first)
+            .min()
+            .unwrap_or(0)
+    };
+    let session_last = |session| {
+        owner_of
+            .iter()
+            .filter(|(_, owner)| **owner == session)
+            .filter_map(|(file, _)| files[*file].last)
+            .max()
+            .unwrap_or(0)
+    };
     let body = |at, key: &str| {
         let record = selected_record(files, at);
         input_string(&record, event(files, at).b as usize, &[key])
@@ -1417,7 +1433,7 @@ fn selected_claude_relations(
                 stable_id("r", &source),
                 "relay",
                 (key.clone(), rows[parent].id.clone()),
-                e.t.unwrap(),
+                e.t.unwrap_or_else(|| session_last(child)),
                 "done",
                 messages[send].as_deref().unwrap_or(""),
             );
@@ -1595,7 +1611,7 @@ fn selected_claude_relations(
                 (rows[parent].id.clone(), key.clone()),
                 send.and_then(|at| event(files, at).t)
                     .or(event(files, down).t)
-                    .unwrap(),
+                    .unwrap_or_else(|| session_start(child)),
                 "done",
                 brief,
             );
@@ -1660,14 +1676,7 @@ fn selected_claude_relations(
                     .unwrap_or_else(|| stable_id("peer-", &identity)),
                 rows[to].id.clone(),
             ),
-            e.t.unwrap_or_else(|| {
-                owner_of
-                    .iter()
-                    .filter(|(_, owner)| **owner == to)
-                    .filter_map(|(file, _)| files[*file].first)
-                    .min()
-                    .unwrap_or(0)
-            }),
+            e.t.unwrap_or_else(|| session_start(to)),
             "done",
             received_body(&selected_record(files, at), "agent-message", None, 0)
                 .as_deref()
@@ -1866,7 +1875,7 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
             stub: Option<String>,
             failed: bool,
             correlation: Option<String>,
-            time: i64,
+            time: Option<i64>,
         }
         let relays = warehouse.db.prepare(
         "SELECT source,pos,call_id,sender,receiver,stub,failed,correlation,ts FROM relay_endpoints"
@@ -1950,7 +1959,15 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
                         .or_else(|| stub.map(|s| stable_id("peer-", &s)))
                         .unwrap_or_default(),
                 ),
-                time,
+                time.unwrap_or_else(|| {
+                    files
+                        .iter()
+                        .enumerate()
+                        .filter(|(file, _)| selected[from].iter().any(|(member, _)| member == file))
+                        .filter_map(|(_, file)| file.last)
+                        .max()
+                        .unwrap_or(0)
+                }),
                 if failed { "err" } else { "done" },
                 "",
             );
@@ -2398,6 +2415,11 @@ fn star_catalog_ambiguous_missing_time_cross_lineage_relay_parity() {
                 parent[3].as_object_mut().unwrap().remove("timestamp");
                 parent[5].as_object_mut().unwrap().remove("timestamp");
                 parent[6].as_object_mut().unwrap().remove("timestamp");
+                child[1].as_object_mut().unwrap().remove("timestamp");
+                // Both the second down send and its receipt are untimed;
+                // the rendered relay uses the child's start as its fallback.
+                parent[8].as_object_mut().unwrap().remove("timestamp");
+                child[9].as_object_mut().unwrap().remove("timestamp");
             }
             // The same sender's progress received outside its parent lineage
             // must remain a separate relay, never consume the parent's send.
