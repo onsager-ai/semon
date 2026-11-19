@@ -226,11 +226,14 @@ impl Warehouse {
                         .as_str()
                         .and_then(|id| self.native[&source].usage().get(id))
                 {
-                    tx.execute(
-                        "INSERT INTO fact_step_billing VALUES(?1,?2,?3)",
-                        params![source, pos, serde_json::to_string(&used.billing).unwrap()],
-                    )
-                    .unwrap();
+                    tx.prepare_cached("INSERT INTO fact_step_billing VALUES(?1,?2,?3)")
+                        .unwrap()
+                        .execute(params![
+                            source,
+                            pos,
+                            serde_json::to_string(&used.billing).unwrap()
+                        ])
+                        .unwrap();
                 }
                 if let Some(content) = message["content"].as_array() {
                     for (block, value) in content.iter().enumerate() {
@@ -470,26 +473,27 @@ impl Warehouse {
 
     fn recompute(db: &Connection, source: i64) {
         let after = db
-            .query_row(
-                "SELECT pos FROM maintenance_cursor WHERE source=?1",
-                [source],
-                |r| r.get::<_, i64>(0),
-            )
+            .prepare_cached("SELECT pos FROM maintenance_cursor WHERE source=?1")
+            .unwrap()
+            .query_row([source], |r| r.get::<_, i64>(0))
             .optional()
             .unwrap()
             .unwrap_or(-1);
         let rank = || {
-            db.query_row(
-                "SELECT first_ts,continued FROM dim_session WHERE source=?1",
-                [source],
-                |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, i64>(1)?)),
-            )
-            .optional()
-            .unwrap()
+            db.prepare_cached("SELECT first_ts,continued FROM dim_session WHERE source=?1")
+                .unwrap()
+                .query_row([source], |r| {
+                    Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, i64>(1)?))
+                })
+                .optional()
+                .unwrap()
         };
         let old_rank = rank();
+        // Reuse the suffix-maintenance programs across append transactions.
+        // Preparing the joins and upserts for every record costs more than
+        // executing their indexed probes on small suffixes.
         for sql in MAINTAIN.split(';').filter(|sql| !sql.trim().is_empty()) {
-            let mut statement = db.prepare(sql).unwrap();
+            let mut statement = db.prepare_cached(sql).unwrap();
             for (name, value) in [(":source", source), (":after", after)] {
                 if let Some(index) = statement.parameter_index(name).unwrap() {
                     statement.raw_bind_parameter(index, value).unwrap();
@@ -4254,6 +4258,47 @@ fn assert_full_recompute(warehouse: &Warehouse) {
     ]) {
         assert_eq!(snapshot(actual), snapshot(expected), "{actual}");
     }
+}
+
+#[test]
+fn star_catalog_list_does_not_price_or_rewrite_billing() {
+    let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+    warehouse.source(
+        1,
+        "claude",
+        "priced",
+        &[assistant_usage(
+            "priced",
+            ts(0, 1),
+            "message",
+            "claude-sonnet-4-5",
+            json!({"input_tokens":1000,"output_tokens":100}),
+        )],
+    );
+    warehouse
+        .db
+        .execute_batch(
+            "CREATE TEMP TRIGGER billing_insert BEFORE INSERT ON fact_step_billing
+         BEGIN SELECT RAISE(ABORT,'non-usage append inserted billing'); END;
+         CREATE TEMP TRIGGER billing_update BEFORE UPDATE ON fact_step_billing
+         BEGIN SELECT RAISE(ABORT,'non-usage append updated billing'); END;
+         CREATE TEMP TRIGGER billing_delete BEFORE DELETE ON fact_step_billing
+         BEGIN SELECT RAISE(ABORT,'non-usage append deleted billing'); END;",
+        )
+        .unwrap();
+    warehouse.source(1, "claude", "priced", &[json!({"type":"compact_boundary"})]);
+    warehouse
+        .db
+        .create_scalar_function(
+            "semon_step_usd",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            |_| -> rusqlite::Result<Option<f64>> { panic!("list must not invoke dollar pricing") },
+        )
+        .unwrap();
+    let rows = warehouse.list();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].tokens, [1000, 0, 100]);
 }
 
 #[test]

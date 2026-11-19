@@ -18,10 +18,11 @@ CREATE TABLE fact_step_observation (
   output INTEGER NOT NULL, PRIMARY KEY(source,pos)
 );
 -- Native billing metadata only; effective prices are bound by the read.
+-- One keyed B-tree: billing has no rowid consumer or secondary index.
 CREATE TABLE fact_step_billing (
   source INTEGER NOT NULL,pos INTEGER NOT NULL,billing TEXT NOT NULL,
   PRIMARY KEY(source,pos)
-);
+) WITHOUT ROWID;
 CREATE TABLE fact_tool_call (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, call_id TEXT NOT NULL,
   tool TEXT NOT NULL, task_name TEXT, ts INTEGER,
