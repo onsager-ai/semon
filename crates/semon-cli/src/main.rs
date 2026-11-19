@@ -541,6 +541,7 @@ fn parse_sessions_args(
             "--all" => options.all = true,
             "--since" => options.since = semon_sessions::parse_duration(&value()?)?,
             "--session" => options.session = Some(value()?),
+            "--annotations" => options.annotations = value()?.into(),
             "--facts" => options.facts = Some(value()?.into()),
             "--machine" => machines.push(PathBuf::from(value()?)),
             "--json" => json = true,
@@ -1763,12 +1764,22 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
     let sources =
         semon_sessions::SessionSources::with_machines(vec![("".into(), args.options.clone())]);
     loop {
-        let nodes = semon_sessions::collect_in(&sources, "").map_err(|error| error.to_string())?;
+        let mut nodes =
+            semon_sessions::collect_in(&sources, "").map_err(|error| error.to_string())?;
+        let annotations = semon_sessions::annotations::Annotations::read(&args.options.annotations)
+            .map_err(|error| format!("annotations: {error}"))?;
+        annotations.apply(&mut nodes);
         if args.watch {
             print!("\x1b[2J\x1b[H");
         }
         if args.json {
-            println!("{}", semon_sessions::render_json(&nodes));
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "schema_version": 1, "roots": nodes, "annotations": annotations.status,
+                }))
+                .expect("serializable annotated nodes")
+            );
         } else {
             print!("{}", semon_sessions::render_text(&nodes));
         }
@@ -2309,7 +2320,7 @@ fn usage() -> String {
          Pair with one receiver and start background sync as a user service.\n\
          HTTPS proxies may forward to a plain HTTP receiver. Tokens work until revoked.\n\
          \n\
-         Usage: semon sessions [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
+         Usage: semon sessions [--claude-home PATH] [--claude-json PATH] [--codex-home PATH] [--proc-root PATH] [--cache PATH] [--all | --since DURATION] [--session ID] [--facts FILE] [--annotations PATH] [--json] [--watch] [--serve [--listen 127.0.0.1:PORT]] [--machines DIR [--no-local]]\n\
          Shows a read-only tree of native Claude Code, Codex and Copilot sessions.\n\
          --facts takes the machine's side (hostname, live processes, repositories) from FILE instead of this machine.\n\
          --machine DIR (repeated, with --json or --serve): one view over several machines' homes, DIR/{claude,codex,proc}.\n\

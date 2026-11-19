@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 const MAX_LINE: usize = 4096;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Annotation {
     pub system: String,
     pub repository: String,
@@ -19,7 +19,7 @@ pub struct Annotation {
     pub issue: Option<u64>,
     pub pr: Option<u64>,
     pub title: Option<String>,
-    pub source: &'static str,
+    pub source: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -89,7 +89,7 @@ impl Record {
                 issue: number(self.issue)?,
                 pr: number(self.pr)?,
                 title,
-                source: "annotation",
+                source: "annotation".into(),
             },
         ))
     }
@@ -112,6 +112,19 @@ impl Annotations {
                 Self::from_reader(path, io::empty())
             }
             Err(error) => Err(error),
+        }
+    }
+
+    /// Add presentation metadata to exact native keys, without changing lineage.
+    pub fn apply(&self, nodes: &mut [crate::Node]) {
+        for node in nodes {
+            if let Some(annotation) = self.get(&node.harness, &node.id) {
+                if node.label.as_ref().is_none_or(|label| label.is_empty()) {
+                    node.label.clone_from(&annotation.title);
+                }
+                node.annotation = Some(annotation.clone());
+            }
+            self.apply(&mut node.children);
         }
     }
 

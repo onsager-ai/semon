@@ -241,6 +241,8 @@ pub struct Options {
     /// working directories on this disk. For logs copied from another
     /// machine.
     pub facts: Option<PathBuf>,
+    /// Read-only producer-owned session annotation JSONL file.
+    pub annotations: PathBuf,
     /// Index only the log files modified within the window (`since`, unless
     /// `all`), instead of every file. A cold build on a large home then
     /// reads weeks, not years, of logs; but a link whose other end is in an
@@ -276,6 +278,7 @@ impl Default for Options {
             since: Duration::from_secs(24 * 60 * 60),
             session: None,
             facts: None,
+            annotations: annotations::default_path(&home, env::var_os("XDG_STATE_HOME").as_deref()),
             scan_window: false,
         }
     }
@@ -306,6 +309,8 @@ pub struct Node {
     pub harness: String,
     pub kind: String,
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<annotations::Annotation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
     pub state: String,
@@ -341,6 +346,7 @@ impl Node {
             harness: harness.into(),
             kind: kind.into(),
             label: None,
+            annotation: None,
             agent_type: None,
             state: "ended".into(),
             turn_lifecycle: None,
@@ -703,6 +709,9 @@ fn apply_summary(node: &mut Node, summary: &Summary, now: u64) {
             _ => "unknown",
         }
         .into();
+    }
+    if let Some(title) = &summary.title {
+        node.label = Some(title.clone());
     }
     node.models = summary.models.iter().cloned().collect();
     node.cwd = summary.cwd.clone().or_else(|| node.cwd.take());
@@ -1261,6 +1270,15 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
     }
     apply_claude_usage(&mut flat, &mut summaries)?;
     evidence.finish(options)?;
+    for name in machine
+        .native_names(options)
+        .into_iter()
+        .filter(|name| name.valid())
+    {
+        if let Some(node) = flat.get_mut(&format!("{}:{}", name.harness, name.native_id)) {
+            node.label = Some(name.name);
+        }
+    }
     if let Some(id) = &options.session {
         let key = if id.starts_with("claude:")
             || id.starts_with("codex:")
