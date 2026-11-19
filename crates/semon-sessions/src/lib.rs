@@ -710,9 +710,6 @@ fn apply_summary(node: &mut Node, summary: &Summary, now: u64) {
         }
         .into();
     }
-    if let Some(title) = &summary.title {
-        node.label = Some(title.clone());
-    }
     node.models = summary.models.iter().cloned().collect();
     node.cwd = summary.cwd.clone().or_else(|| node.cwd.take());
     node.branch = summary.branch.clone().or_else(|| node.branch.take());
@@ -1270,6 +1267,25 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
     }
     apply_claude_usage(&mut flat, &mut summaries)?;
     evidence.finish(options)?;
+    {
+        use rusqlite::{Connection, OpenFlags, OptionalExtension};
+        let connection = Connection::open_with_flags(
+            events::EventCache::path(&options.cache),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(io::Error::other)?;
+        for (id, path) in &claude_paths {
+            let title: Option<String> = connection.query_row(
+                "SELECT CASE WHEN length(CAST(title AS BLOB))<=4096 THEN title ELSE NULL END FROM files WHERE path=?1",
+                [path.to_string_lossy().as_ref()], |row| row.get(0),
+            ).optional().map_err(io::Error::other)?.flatten();
+            if let Some(title) = title
+                && let Some(node) = flat.get_mut(&format!("claude:{id}"))
+            {
+                node.label = Some(title);
+            }
+        }
+    }
     for name in machine
         .native_names(options)
         .into_iter()

@@ -1,3 +1,4 @@
+import { annotationProducer, annotationLink, type SessionAnnotation } from './sessionAnnotation';
 import { catalogSessionKey } from './catalogIdentity';
 export interface CatalogSourceCandidate {
   candidate_key: string;
@@ -8,6 +9,7 @@ export interface CatalogSourceCandidate {
 }
 import { render } from 'preact';
 export interface CatalogListItem {
+  annotation?: SessionAnnotation;
   machine?: { key: string; label: string };
   key: string;
   name: string;
@@ -32,6 +34,7 @@ export interface CatalogListSnapshot {
     working: number;
     waiting: number;
     groups: readonly { title: string; items: readonly CatalogListItem[] }[];
+    annotations?: boolean;
   };
   items: readonly CatalogListItem[];
   completeCount?: boolean;
@@ -415,7 +418,7 @@ export function renderCatalogList(
         </button>
       )}
       {!snapshot.browser && resultHeader}
-      {snapshot.browser ? (
+      {snapshot.browser && !snapshot.browser.annotations ? (
         <div class="sess session-groups session-list" aria-label="Recorded sessions">
           {snapshot.browser.groups.map((group) => (
             <div key={group.title} class="session-group">
@@ -468,7 +471,52 @@ export function renderCatalogList(
             );
             return (
               <div class={group.children.length ? 'kids-wrap' : ''} key={group.root.key}>
+                {group.root.annotation && (
+                  <div class="sec-h">
+                    {screenText(group.root.annotation.system)} →{' '}
+                    {screenText(group.root.annotation.repository)} →{' '}
+                    {screenText(group.root.annotation.ticket)}
+                    {' · from ' + annotationProducer(group.root.annotation)}
+                  </div>
+                )}
                 {row(group.root)}
+                {group.root.annotation && (
+                  <div class="catalog-note">
+                    {'from ' + annotationProducer(group.root.annotation)}
+                    {group.root.annotation.issue !== null && (
+                      <>
+                        {' · '}
+                        <a
+                          href={annotationLink(
+                            group.root.annotation,
+                            'issues',
+                            group.root.annotation.issue,
+                          )}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          Issue #{group.root.annotation.issue}
+                        </a>
+                      </>
+                    )}
+                    {group.root.annotation.pr !== null && (
+                      <>
+                        {' · '}
+                        <a
+                          href={annotationLink(
+                            group.root.annotation,
+                            'pull',
+                            group.root.annotation.pr,
+                          )}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >
+                          PR #{group.root.annotation.pr}
+                        </a>
+                      </>
+                    )}
+                  </div>
+                )}
                 {!!group.children.length && (
                   <div class="kids">
                     {group.children.slice(0, shown).map((item) => row(item, true))}

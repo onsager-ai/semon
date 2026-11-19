@@ -300,6 +300,25 @@ mod tests {
         assert_eq!(read(format!("{value}\n").as_bytes()).status.valid, 1);
     }
     #[test]
+    fn metadata_preserves_lineage_state_and_native_names() {
+        let records = read(format!("{}\n", record()).as_bytes());
+        let mut root = crate::Node::new("native".into(), "codex", "codex-run");
+        root.label = Some("Native name".into());
+        root.state = "running".into();
+        root.parent_source = Some("native-parent".into());
+        root.children
+            .push(crate::Node::new("child".into(), "codex", "subagent"));
+        let mut nodes = vec![root];
+        let before = serde_json::to_value(&nodes).unwrap();
+        records.apply(&mut nodes);
+        assert_eq!(nodes[0].label.as_deref(), Some("Native name"));
+        assert!(nodes[0].children[0].annotation.is_none());
+        let mut after = serde_json::to_value(&nodes).unwrap();
+        after[0].as_object_mut().unwrap().remove("annotation");
+        assert_eq!(before, after);
+    }
+
+    #[test]
     fn default_requires_absolute_xdg_state() {
         let home = Path::new("/home/test");
         for state in [None, Some(std::ffi::OsStr::new("relative"))] {

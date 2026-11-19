@@ -177,21 +177,26 @@ function mark(harness: string): HarnessMark | undefined {
     : undefined;
 }
 /** Group only loaded canonical parents; absent parents remain selectable roots. */
-export function catalogSessionGroups<T extends { key: string; parent: string | null }>(
-  items: readonly T[],
-): { root: T; children: T[] }[] {
-  const byKey = new Map(items.map((item) => [item.key, item])),
+export function catalogSessionGroups<
+  T extends { key: string; parent: string | null; machine?: { key: string; label: string } },
+>(items: readonly T[]): { root: T; children: T[] }[] {
+  const keyOf = (item: T) => catalogSessionKey(item);
+  const parentOf = (item: T) =>
+    item.parent ? catalogSessionKey({ key: item.parent, machine: item.machine }) : null;
+  const byKey = new Map(items.map((item) => [keyOf(item), item])),
     parents = new Map(
       items.map((item) => [
-        item.key,
-        item.parent && item.parent !== item.key && byKey.has(item.parent) ? item.parent : null,
+        keyOf(item),
+        parentOf(item) && parentOf(item) !== keyOf(item) && byKey.has(parentOf(item)!)
+          ? parentOf(item)
+          : null,
       ]),
     ),
     resolved = new Set<string>();
   for (const item of items) {
     const chain: string[] = [],
       positions = new Map<string, number>();
-    let key: string | null = item.key;
+    let key: string | null = keyOf(item);
     while (key && !resolved.has(key)) {
       const repeat = positions.get(key);
       if (repeat !== undefined) {
@@ -207,7 +212,7 @@ export function catalogSessionGroups<T extends { key: string; parent: string | n
   }
   const children = new Map<string, T[]>();
   for (const item of items) {
-    const parent = parents.get(item.key);
+    const parent = parents.get(keyOf(item));
     if (parent) {
       const values = children.get(parent) ?? [];
       values.push(item);
@@ -215,14 +220,14 @@ export function catalogSessionGroups<T extends { key: string; parent: string | n
     }
   }
   return items
-    .filter((item) => !parents.get(item.key))
+    .filter((item) => !parents.get(keyOf(item)))
     .map((root) => {
       const descendants: T[] = [],
-        pending = [...(children.get(root.key) ?? [])].reverse();
+        pending = [...(children.get(keyOf(root)) ?? [])].reverse();
       while (pending.length) {
         const child = pending.pop()!;
         descendants.push(child);
-        pending.push(...[...(children.get(child.key) ?? [])].reverse());
+        pending.push(...[...(children.get(keyOf(child)) ?? [])].reverse());
       }
       return { root, children: descendants };
     });
