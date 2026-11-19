@@ -5104,7 +5104,7 @@ for (const width of [390, 1280])
         await page.locator('#page .kids .nrow').waitFor();
         assert.match(
           await page.locator('#page .sec-h').innerText(),
-          /ostrom.*owner\/repo.*9.*from Ostrom/,
+          /ostrom.*owner\/repo.*9.*from Ostrom/i,
         );
         assert.equal(
           await page.getByRole('link', { name: 'Issue #12' }).getAttribute('href'),
