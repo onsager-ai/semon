@@ -247,3 +247,22 @@ test('focused pages reject another machine identity', () => {
   value.items = [{ ...session(), machine: { key: 'another-source', label: 'Other' } }];
   assert.throws(() => parseCatalogPage(value));
 });
+
+test('producer annotations retain declared metadata and reject malformed values', () => {
+  const input = page();
+  input.items[0].annotation = {
+    system: 'ostrom',
+    repository: 'owner/repo',
+    ticket: '9',
+    issue: null,
+    pr: 34,
+    title: 'Fix ranking',
+    source: 'annotation',
+  };
+  assert.deepEqual(parseCatalogPage(input).items[0].annotation, input.items[0].annotation);
+  for (const field of ['system', 'repository', 'ticket', 'issue', 'pr', 'title', 'source']) {
+    const invalid = structuredClone(input);
+    invalid.items[0].annotation[field] = [];
+    assert.throws(() => parseCatalogPage(invalid));
+  }
+});

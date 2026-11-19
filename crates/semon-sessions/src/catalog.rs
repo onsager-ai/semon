@@ -1367,11 +1367,26 @@ fn read_page_snapshot(
     } else {
         None
     };
+    let mut native_titles = std::collections::BTreeSet::new();
+    for row in &selected {
+        if row.harness == "claude" {
+            for source in &row.sources {
+                let named = transaction.query_row(
+                    "SELECT title IS NOT NULL OR agent_name IS NOT NULL FROM files WHERE path=?1",
+                    [source.path.to_string_lossy().as_ref()], |row| row.get::<_, bool>(0),
+                ).optional()?.unwrap_or(false);
+                if named {
+                    native_titles.insert(row.key.clone());
+                }
+            }
+        }
+    }
     present_page(
         options,
         machine,
         request,
         PresentedPage {
+            native_titles,
             generation,
             observed_at,
             completeness,
@@ -1526,11 +1541,25 @@ pub(crate) async fn postgres_page(
         .facts
         .as_ref()
         .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
+    let mut native_titles = std::collections::BTreeSet::new();
+    for row in &selected {
+        if row.harness == "claude" {
+            for source in &row.sources {
+                if tx
+                    .has_native_title(namespace, source.path.to_string_lossy().as_ref())
+                    .await?
+                {
+                    native_titles.insert(row.key.clone());
+                }
+            }
+        }
+    }
     present_page(
         options,
         machine,
         request,
         PresentedPage {
+            native_titles,
             generation,
             observed_at: None,
             // Explicit cohorts do not establish complete machine membership or
@@ -1550,6 +1579,7 @@ pub(crate) async fn postgres_page(
 }
 
 pub(crate) struct PresentedPage {
+    pub(crate) native_titles: std::collections::BTreeSet<String>,
     pub(crate) generation: String,
     pub(crate) observed_at: Option<i64>,
     pub(crate) completeness: String,
@@ -1571,6 +1601,7 @@ fn present_page(
     recorded: Option<crate::facts::source_authority::CurrentSources>,
 ) -> Result<ViewerReply, Box<dyn std::error::Error>> {
     let PresentedPage {
+        native_titles,
         generation,
         observed_at,
         completeness,
@@ -1598,6 +1629,8 @@ fn present_page(
     } else {
         "unavailable"
     };
+    let annotations = crate::annotations::Annotations::read(&options.annotations)?;
+    let mut native_names = None;
     let mut items = Vec::with_capacity(selected.len());
     for row in selected {
         let mut retired_native = false;
@@ -1715,7 +1748,37 @@ fn present_page(
             facts_known,
             retired_native,
         )?;
-        let mut item = serde_json::to_value(row)?;
+        let annotation = row
+            .owner_native_id()
+            .and_then(|id| annotations.get(&row.harness, id))
+            .cloned();
+        let mut item = serde_json::to_value(&row)?;
+        if let Some(annotation) = annotation {
+            let codex_names = if row.harness == "codex" && facts_known {
+                if native_names.is_none() {
+                    if let Some(snapshot) = &recorded {
+                        snapshot.validate()?;
+                    }
+                    native_names =
+                        Some(crate::facts::MachineFacts::native_names_read_only(options)?);
+                    if let Some(snapshot) = &recorded {
+                        snapshot.validate()?;
+                    }
+                }
+                native_names.as_deref().unwrap_or_default()
+            } else {
+                &[]
+            };
+            let codex_name = row
+                .owner_native_id()
+                .and_then(|id| codex_names.iter().find(|name| name.native_id == id));
+            let native_name =
+                codex_name.is_some() || row.kind == "subagent" || native_titles.contains(&row.key);
+            if !native_name && let Some(title) = &annotation.title {
+                item["name"] = json!(title);
+            }
+            item["annotation"] = json!(annotation);
+        }
         item["status"] = observation;
         // Exact Query facts and runtime fences are internal publication data.
         // The Catalog transport retains its stable description allowlist.
@@ -1811,7 +1874,7 @@ fn present_page(
         "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
         "capabilities":{"pagination":true,"metadata_search":true,"filters":["harness","repo","no_repo","model","q"],"order":"last_desc_key_asc",
             "full_text_search":false,"selected_session_lookup":true,"runtime_status":true,"global_union":false},
-        "completeness":{"state":completeness},"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next,"search":search_report.map(|report|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":report.partial,"candidates":report.candidates,"index_complete":report.index_complete,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":crate::catalog_search::MAX_SCAN_BYTES}))}),
+        "annotations":{"files":[annotations.status]},"completeness":{"state":completeness},"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next,"search":search_report.map(|report|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":report.partial,"candidates":report.candidates,"index_complete":report.index_complete,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":crate::catalog_search::MAX_SCAN_BYTES}))}),
     ))
 }
 
@@ -1850,6 +1913,7 @@ mod tests {
                 since: Duration::from_secs(86400),
                 session: None,
                 facts: Some(root.join("facts.json")),
+                annotations: root.join("annotations.jsonl"),
                 scan_window: false,
             };
             crate::write_facts(
@@ -2753,6 +2817,71 @@ mod tests {
         );
         let many: Vec<_> = (0..65).map(|_| sources[0].clone()).collect();
         assert_eq!(session_catalog_union(&many, "workspace-a", "").status, 503);
+    }
+
+    #[test]
+    fn producer_annotations_project_without_republishing_or_changing_native_rows() {
+        let fixture = Fixture::new();
+        fixture.publish(2);
+        let (status, before) = fixture.body("limit=100");
+        assert_eq!(status, 200);
+        let record = |id: &str, title: &str| {
+            json!({
+                "v":1,"harness":"claude","native_id":id,"system":"ostrom",
+                "repository":"owner/repo","ticket":"9","issue":12,"pr":34,
+                "title":title,"updated_at":"2026-11-19T04:52:01Z"
+            })
+        };
+        fs::write(
+            &fixture.options.annotations,
+            format!(
+                "{}\n{}\ninvalid\n",
+                record("session-00000", "Annotated title"),
+                record("unseen", "No session")
+            ),
+        )
+        .unwrap();
+        let (status, after) = fixture.body("limit=100");
+        assert_eq!(status, 200);
+        assert_eq!(after["generation"], before["generation"]);
+        assert_eq!(after["annotations"]["files"][0]["valid"], 2);
+        assert_eq!(after["annotations"]["files"][0]["rejected"], 1);
+        let mut items = after["items"].clone();
+        for item in items.as_array_mut().unwrap() {
+            if item["key"] == "session-00000" {
+                assert_eq!(item["name"], "Annotated title");
+                assert_eq!(item["annotation"]["source"], "annotation");
+                let original = before["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|row| row["key"] == item["key"])
+                    .unwrap();
+                item["name"] = original["name"].clone();
+                item.as_object_mut().unwrap().remove("annotation");
+            }
+        }
+        assert_eq!(items, before["items"]);
+        use std::io::Write;
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(fixture.source("session-00000"))
+                .unwrap(),
+            "{}",
+            json!({"type":"custom-title","sessionId":"session-00000","customTitle":"Native title"})
+        )
+        .unwrap();
+        fixture.publish_existing();
+        let (status, named) = fixture.body("limit=100");
+        assert_eq!(status, 200);
+        let item = named["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["key"] == "session-00000")
+            .unwrap();
+        assert_eq!(item["name"], "Native title");
     }
 
     fn cursor_query(cursor: &Value) -> String {

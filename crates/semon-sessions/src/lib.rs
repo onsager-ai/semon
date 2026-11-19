@@ -19,6 +19,7 @@ use serde_json::Value;
 pub mod analytics;
 mod analytics_namespace;
 pub mod analytics_writer;
+pub mod annotations;
 pub mod body_query;
 pub use semon_asi::InputBudget;
 mod causal_trace;
@@ -240,6 +241,8 @@ pub struct Options {
     /// working directories on this disk. For logs copied from another
     /// machine.
     pub facts: Option<PathBuf>,
+    /// Read-only producer-owned session annotation JSONL file.
+    pub annotations: PathBuf,
     /// Index only the log files modified within the window (`since`, unless
     /// `all`), instead of every file. A cold build on a large home then
     /// reads weeks, not years, of logs; but a link whose other end is in an
@@ -275,6 +278,7 @@ impl Default for Options {
             since: Duration::from_secs(24 * 60 * 60),
             session: None,
             facts: None,
+            annotations: annotations::default_path(&home, env::var_os("XDG_STATE_HOME").as_deref()),
             scan_window: false,
         }
     }
@@ -305,6 +309,8 @@ pub struct Node {
     pub harness: String,
     pub kind: String,
     pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<annotations::Annotation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<String>,
     pub state: String,
@@ -340,6 +346,7 @@ impl Node {
             harness: harness.into(),
             kind: kind.into(),
             label: None,
+            annotation: None,
             agent_type: None,
             state: "ended".into(),
             turn_lifecycle: None,
@@ -1260,6 +1267,34 @@ fn collect_native_tree(options: &Options, index: &mut events::EventCache) -> io:
     }
     apply_claude_usage(&mut flat, &mut summaries)?;
     evidence.finish(options)?;
+    {
+        use rusqlite::{Connection, OpenFlags, OptionalExtension};
+        let connection = Connection::open_with_flags(
+            events::EventCache::path(&options.cache),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(io::Error::other)?;
+        for (id, path) in &claude_paths {
+            let title: Option<String> = connection.query_row(
+                "SELECT CASE WHEN length(CAST(title AS BLOB))<=4096 THEN title ELSE NULL END FROM files WHERE path=?1",
+                [path.to_string_lossy().as_ref()], |row| row.get(0),
+            ).optional().map_err(io::Error::other)?.flatten();
+            if let Some(title) = title
+                && let Some(node) = flat.get_mut(&format!("claude:{id}"))
+            {
+                node.label = Some(title);
+            }
+        }
+    }
+    for name in machine
+        .native_names(options)
+        .into_iter()
+        .filter(|name| name.valid())
+    {
+        if let Some(node) = flat.get_mut(&format!("{}:{}", name.harness, name.native_id)) {
+            node.label = Some(name.name);
+        }
+    }
     if let Some(id) = &options.session {
         let key = if id.starts_with("claude:")
             || id.starts_with("codex:")

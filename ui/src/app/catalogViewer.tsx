@@ -2288,6 +2288,7 @@ export function createCatalogViewer(
         }),
         browser: {
           facets: catalogBrowser.element,
+          annotations: ordered.some((item) => !item.parent && item.annotation),
           groupBy,
           working: ordered.filter((item) => item.status?.state === 'work').length,
           waiting: ordered.filter((item) => item.status?.state === 'wait').length,
@@ -2296,10 +2297,21 @@ export function createCatalogViewer(
             items: ordered.filter((item) => groupKey(item) === title),
           })),
         },
-        groups: catalogSessionGroups(ordered).map((group) => ({
-          ...group,
-          expanded: listExpanded.has(cacheKey(group.root.key)),
-        })),
+        groups: catalogSessionGroups(ordered)
+          .sort((a, b) => {
+            const left = a.root.annotation,
+              right = b.root.annotation;
+            if (!left || !right) return Number(!!right) - Number(!!left);
+            return (
+              left.system.localeCompare(right.system) ||
+              left.repository.localeCompare(right.repository) ||
+              left.ticket.localeCompare(right.ticket)
+            );
+          })
+          .map((group) => ({
+            ...group,
+            expanded: listExpanded.has(cacheKey(group.root.key)),
+          })),
         reviews: showApprovalReviews,
         hasReviews:
           showApprovalReviews || items.some((item) => item.presentation_kind === 'Approval review'),

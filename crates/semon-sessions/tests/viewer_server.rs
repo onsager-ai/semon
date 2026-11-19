@@ -42,6 +42,7 @@ fn options(root: &Path) -> Options {
         since: Duration::from_secs(86400),
         session: None,
         facts: None,
+        annotations: root.join("annotations.jsonl"),
         scan_window: false,
     };
     fs::create_dir_all(&options.proc_root).unwrap();

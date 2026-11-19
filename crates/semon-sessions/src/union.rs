@@ -1875,9 +1875,19 @@ impl ViewerCore {
         let droppable = self.droppable();
         let mut roots = Vec::new();
         let mut seen = BTreeSet::new();
+        let mut statuses = Vec::new();
         for (index, (_, view)) in views.iter().enumerate() {
+            let annotations = crate::annotations::Annotations::read(&view.options().annotations)?;
+            let mut annotated = view.tree_roots()?;
+            annotations.apply(&mut annotated);
+            if !statuses
+                .iter()
+                .any(|status: &crate::annotations::Status| status.path == annotations.status.path)
+            {
+                statuses.push(annotations.status);
+            }
             let machine = machine_ids.get(index).cloned().unwrap_or_default();
-            for root in view.tree_roots()? {
+            for root in annotated {
                 // A received machine's copy of a root an earlier machine
                 // has is left out using the existing received-copy policy.
                 if !seen.insert((root.harness.clone(), root.id.clone())) && index >= droppable {
@@ -1888,8 +1898,11 @@ impl ViewerCore {
                 roots.push(root);
             }
         }
-        let body = serde_json::to_string_pretty(&json!({"schema_version": 1, "roots": roots}))
-            .map_err(io::Error::other)?;
+        let annotations = json!({"files": statuses});
+        let body = serde_json::to_string_pretty(
+            &json!({"schema_version": 1, "roots": roots,"annotations":annotations}),
+        )
+        .map_err(io::Error::other)?;
         Ok(ViewerReply {
             status: 200,
             content_type: "application/json; charset=utf-8",
@@ -1954,6 +1967,7 @@ mod tests {
                 since: std::time::Duration::from_secs(86400),
                 session: None,
                 facts: None,
+                annotations: home.join("annotations.jsonl"),
                 scan_window: false,
             }
         };
@@ -2095,6 +2109,7 @@ mod tests {
                 session: None,
                 facts: None,
                 scan_window: false,
+                annotations: home.join("annotations.jsonl"),
             }
         };
         let core = ViewerCore::with_machines(vec![
@@ -2234,6 +2249,7 @@ mod tests {
             since: std::time::Duration::from_secs(86400),
             session: None,
             facts: None,
+            annotations: root.join("annotations.jsonl"),
             scan_window: false,
         };
         let mut core = ViewerCore::new(options);

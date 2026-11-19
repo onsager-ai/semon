@@ -230,6 +230,7 @@ impl Home {
             since: Duration::from_secs(86400),
             session: None,
             facts: None,
+            annotations: root.join("annotations.jsonl"),
             scan_window: false,
         };
         let home = Self { root, options };
@@ -3495,6 +3496,7 @@ fn print_sample_tx() {
         since: Duration::from_secs(86400),
         session: None,
         facts: None,
+        annotations: root.join("annotations.jsonl"),
         scan_window: false,
     };
     let mut cache = EventCache::default();

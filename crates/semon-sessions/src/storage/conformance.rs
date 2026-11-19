@@ -58,6 +58,7 @@ fn source(root: &Path, name: &str) -> Options {
         since: Duration::from_secs(86400),
         session: None,
         facts: Some(root.join(name).join("facts.json")),
+        annotations: root.join("annotations.jsonl"),
         scan_window: false,
     };
     crate::write_facts(

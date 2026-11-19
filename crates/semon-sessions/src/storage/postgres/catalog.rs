@@ -21,6 +21,19 @@ pub(crate) struct CatalogPage {
 }
 
 impl PgProjectionTransaction<'_> {
+    pub(crate) async fn has_native_title(
+        &self,
+        namespace: &Namespace,
+        path: &str,
+    ) -> Result<bool, StorageError> {
+        ensure(&self.namespace, namespace)?;
+        let row = self.tx.query_opt(
+            "SELECT (metadata::jsonb->>'title') IS NOT NULL OR (metadata::jsonb->>'agent_name') IS NOT NULL FROM semon_projection.files WHERE namespace=$1 AND path=$2",
+            &[&namespace.binding(), &path],
+        ).await.map_err(backend)?;
+        Ok(row.is_some_and(|row| row.get(0)))
+    }
+
     pub(crate) async fn catalog_generation(
         &self,
         namespace: &Namespace,

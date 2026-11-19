@@ -400,6 +400,24 @@ pub(crate) enum Lock {
 }
 
 impl MachineFacts {
+    /// Presentation reads must not repair the facts source-authority projection.
+    pub(crate) fn native_names_read_only(options: &Options) -> io::Result<Vec<NativeName>> {
+        match &options.facts {
+            None => Ok(native_names::read(&options.codex_home)),
+            Some(path) => {
+                let file = fs::File::open(path)?;
+                let facts: Facts = serde_json::from_reader(io::BufReader::new(file))
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                Ok(facts
+                    .native_names
+                    .into_iter()
+                    .filter(NativeName::valid)
+                    .take(4096)
+                    .collect())
+            }
+        }
+    }
+
     pub(crate) fn native_names(&self, options: &Options) -> Vec<NativeName> {
         match self {
             Self::Local => native_names::read(&options.codex_home),
@@ -756,6 +774,7 @@ mod tests {
             since: Duration::from_secs(86_400),
             session: None,
             facts: None,
+            annotations: root.join("annotations.jsonl"),
             scan_window: false,
         };
         fs::create_dir_all(options.proc_root.join("sys/kernel")).unwrap();
@@ -791,6 +810,7 @@ mod tests {
             since: Duration::from_secs(86_400),
             session: None,
             facts: None,
+            annotations: root.join("annotations.jsonl"),
             scan_window: false,
         };
         fs::create_dir_all(options.proc_root.join("sys/kernel")).unwrap();
@@ -853,6 +873,7 @@ mod tests {
             since: Duration::from_secs(86_400),
             session: None,
             facts: None,
+            annotations: root.join("annotations.jsonl"),
             scan_window: false,
         };
         fs::create_dir_all(options.proc_root.join("sys/kernel")).unwrap();

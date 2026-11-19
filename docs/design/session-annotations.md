@@ -1,7 +1,7 @@
 # Session annotations
 
-Status: format approved by the owner on 2026-11-19 (via Ostrom PM). Semon's
-reader is not implemented yet; producers may build against this note.
+Status: format approved by the owner on 2026-11-19 (via Ostrom PM). Semon reads
+this format through `semon sessions`, including its Viewer.
 
 An orchestrator that starts harness sessions (first user: Ostrom's `ostromd`)
 knows facts about them that the native logs do not carry: which system started
@@ -24,8 +24,9 @@ A native name always wins over an annotation `title`.
 ## File
 
 * Path: `$XDG_STATE_HOME/ostrom/semon-annotations.jsonl` (`~/.local/state` when
-  `XDG_STATE_HOME` is unset or not absolute). Semon reads it from a configured
-  path; it never discovers files elsewhere.
+  `XDG_STATE_HOME` is unset or not absolute). This is the default configured
+  path. `semon sessions --annotations PATH` overrides it, including with
+  `--serve`; Semon never discovers files elsewhere.
 * Owner: the producer. It appends lines. Semon never writes, locks, truncates,
   rotates or deletes the file. Compaction, if any, is the producer's job and
   must be an atomic replace (write a new file, then rename).
@@ -60,7 +61,12 @@ cannot silently depend on fields Semon ignores. Lines above 4 KiB are rejected.
   `updated_at` wins. On an equal timestamp the later line in the file wins.
 * Invalid lines (bad JSON, unknown `v`, missing or mistyped fields, oversize)
   are skipped and counted. `semon sessions --json` reports the counts of valid
-  and rejected lines and the file path; it never echoes rejected content.
+  and rejected lines and the file path in
+  `annotations: {files: [{path, valid, rejected}, ...]}`, one entry per distinct
+  configured file (one entry for a single machine);
+  matched rows expose `annotation: {system, repository, ticket, issue, pr, title,
+  source: "annotation"}`. It never echoes rejected content. A missing file has
+  zero counts; other read errors fail the read.
 * An annotation for a session Semon has not seen is kept and applies when the
   session appears. An annotation never creates a session.
 * Annotations are metadata only. They carry no message or tool text, and

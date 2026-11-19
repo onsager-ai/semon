@@ -260,6 +260,7 @@ mod tests {
             since: Duration::from_secs(86400),
             session: None,
             facts: None,
+            annotations: root.join("annotations.jsonl"),
             scan_window: false,
         };
         (Query::new(options), root)

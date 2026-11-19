@@ -1,3 +1,4 @@
+import { parseSessionAnnotation, type SessionAnnotation } from '../domain/sessionAnnotation';
 import { catalogSessionKey } from '../lib/catalogIdentity';
 export { catalogSessionKey } from '../lib/catalogIdentity';
 import { array, boolean, number, object, text } from '../domain/validate';
@@ -24,6 +25,7 @@ export type {
 
 /** Metadata and fenced recorded status are partial observations, never control authority. */
 export interface CatalogSession {
+  annotation?: SessionAnnotation;
   machine?: { key: string; label: string };
   lifecycle: 'current' | 'retained';
   transcript?: { generation: string; errorsGeneration: string; total: number };
@@ -180,6 +182,7 @@ export function parseCatalogSession(value: unknown): CatalogSession {
               throw Error('Invalid selected transcript observation');
             return { generation, errorsGeneration, total };
           })(),
+    annotation: row.annotation == null ? undefined : parseSessionAnnotation(row.annotation),
     key: text(row.key),
     name: text(row.name),
     harness: text(row.harness),

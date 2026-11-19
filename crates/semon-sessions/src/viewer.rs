@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 #[cfg(test)]
@@ -416,7 +416,6 @@ impl ViewerReply {
 
 struct TreeCache {
     roots: Vec<Node>,
-    json: String,
     snapshot: Snapshot,
 }
 /// The viewer's page: every screen's URL serves it.
@@ -1130,13 +1129,8 @@ impl MachineView {
         }
         let index = work.events.as_mut().expect("native index loaded");
         let roots = collect_with_index(&self.evidence.options, index)?;
-        let json = crate::render_json(&roots);
         let snapshot = Snapshot::capture(&self.evidence.options, &roots, index);
-        let tree = Arc::new(TreeCache {
-            roots,
-            json,
-            snapshot,
-        });
+        let tree = Arc::new(TreeCache { roots, snapshot });
         write_lock(&self.shown).tree = Some(tree.clone());
         Ok(tree)
     }
@@ -1666,7 +1660,13 @@ impl MachineView {
     }
 
     fn tree_json(&self) -> io::Result<String> {
-        Ok(self.served_tree()?.json.clone())
+        let annotations = crate::annotations::Annotations::read(&self.options().annotations)?;
+        let mut roots = self.served_tree()?.roots.clone();
+        annotations.apply(&mut roots);
+        serde_json::to_string_pretty(
+            &json!({"schema_version":1,"roots":roots,"annotations":{"files":[annotations.status]}}),
+        )
+        .map_err(io::Error::other)
     }
 
     /// Answers one request: `path` and `query` split at the `?`, still
@@ -1911,6 +1911,7 @@ mod tests {
                 since: Duration::from_secs(86400),
                 session: None,
                 facts: None,
+                annotations: root.join("annotations.jsonl"),
                 scan_window: false,
             };
             fs::create_dir_all(&options.proc_root).unwrap();

@@ -27,6 +27,7 @@ fn print_sample_query() {
         since: Duration::from_secs(24 * 60 * 60),
         session: None,
         facts: None,
+        annotations: root.join("annotations.jsonl"),
         scan_window: false,
     };
     let mut query = Query::new(options);

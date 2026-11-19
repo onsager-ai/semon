@@ -5052,3 +5052,86 @@ for (const width of [390, 1280])
       await browser.close();
     }
   });
+
+for (const width of [390, 1280])
+  for (const colorScheme of ['light', 'dark'])
+    test(`producer annotation groups preserve native children ${width} ${colorScheme}`, async () => {
+      const browser = await chromium.launch();
+      const page = await browser.newPage({ viewport: { width, height: 860 }, colorScheme });
+      const errors = [];
+      page.on('pageerror', (error) => errors.push(String(error)));
+      const annotation = {
+        system: 'ostrom',
+        repository: 'owner/repo',
+        ticket: '9',
+        issue: 12,
+        pr: 34,
+        title: 'Fix ranking',
+        source: 'annotation',
+      };
+      const root = { ...meta('one'), name: 'Fix ranking', annotation };
+      const child = { ...meta('two'), parent: 'one', kind: 'subagent' };
+      try {
+        await page.route('http://catalog.test/**', (route) => {
+          const url = new URL(route.request().url());
+          if (url.pathname === '/api/session-sources')
+            return route.fulfill({ json: singleSourceInventory });
+          if (url.pathname === '/api/session-capabilities')
+            return route.fulfill({ json: capabilities(false) });
+          if (url.pathname === '/api/sessions') return route.fulfill({ json: list([child, root]) });
+          if (url.pathname === '/api/viewer/home')
+            return route.fulfill({
+              json: {
+                api: 1,
+                version: 'a'.repeat(64),
+                now: 10000,
+                next: { inbox: null, working: null, answered: null },
+                totals: { waiting: 0, working: 0, answered: 0 },
+                machines: [],
+                recent: [],
+                inbox: [],
+                working: [],
+                answered: [],
+                observations: [],
+              },
+            });
+          if (url.pathname.startsWith('/api/')) return route.fulfill({ status: 404, body: '' });
+          return fulfillCatalogStatic(route, url);
+        });
+        await page.goto('http://catalog.test/?machine=source');
+        await page.addScriptTag({ content: outputFiles[0].text });
+        await page.evaluate(() => (window.app = CatalogViewer.mountViewerApplication()));
+        await page.locator('#page .kids .nrow').waitFor();
+        assert.match(
+          await page.locator('#page .sec-h').innerText(),
+          /ostrom.*owner\/repo.*9.*from Ostrom/i,
+        );
+        assert.equal(
+          await page.getByRole('link', { name: 'Issue #12' }).getAttribute('href'),
+          'https://github.com/owner/repo/issues/12',
+        );
+        assert.equal(
+          await page.getByRole('link', { name: 'PR #34' }).getAttribute('href'),
+          'https://github.com/owner/repo/pull/34',
+        );
+        assert.match(
+          await page.locator('#page .kids-wrap').innerText(),
+          /Fix ranking[\s\S]*Session two/,
+        );
+        assert.equal(
+          await page.evaluate(() => document.documentElement.scrollWidth > innerWidth),
+          false,
+        );
+        assert.deepEqual(errors, []);
+        if (process.env.SEMON_UI_OUT) {
+          await mkdir(process.env.SEMON_UI_OUT, { recursive: true });
+          await page.screenshot({
+            path: `${process.env.SEMON_UI_OUT}/annotations-${width}-${colorScheme}.png`,
+            fullPage: true,
+          });
+        }
+        await page.evaluate(() => app.destroy());
+      } finally {
+        await browser.close();
+      }
+    });
