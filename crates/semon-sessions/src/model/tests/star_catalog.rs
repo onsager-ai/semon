@@ -41,6 +41,32 @@ impl Warehouse {
     fn new(path: &std::path::Path) -> Self {
         let db = Connection::open(path).unwrap();
         db.execute_batch(SCHEMA).unwrap();
+        // Bind one effective price snapshot to this read adapter. The SQL fold
+        // selects native billing observations; production pricing owns rates,
+        // cache-write splits, service tiers and unknown-price semantics.
+        let prices = crate::pricing::snapshot();
+        db.create_scalar_function(
+            "semon_step_usd",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            move |context| {
+                let model = context.get::<Option<String>>(0)?;
+                let Some(billing) = context.get::<Option<String>>(1)? else {
+                    return Ok(None);
+                };
+                let billing = serde_json::from_str(&billing)
+                    .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+                let mut cost = crate::pricing::CostBuild::with_table(prices.clone());
+                cost.message(&events::MessageUsage {
+                    model,
+                    billing,
+                    ..Default::default()
+                });
+                Ok(cost.finish().usd)
+            },
+        )
+        .unwrap();
         // Fixture snapshots have already qualified process identity/expiry. These
         // origin-local inputs are separate from log progress and chosen turns.
         db.execute_batch(
@@ -194,6 +220,18 @@ impl Warehouse {
             }
             if harness == "claude" {
                 crate::events::claude(self.native.entry(source).or_default(), record, pos as u64);
+                if kind == "assistant"
+                    && message.get("usage").is_some()
+                    && let Some(used) = message["id"]
+                        .as_str()
+                        .and_then(|id| self.native[&source].usage().get(id))
+                {
+                    tx.execute(
+                        "INSERT INTO fact_step_billing VALUES(?1,?2,?3)",
+                        params![source, pos, serde_json::to_string(&used.billing).unwrap()],
+                    )
+                    .unwrap();
+                }
                 if let Some(content) = message["content"].as_array() {
                     for (block, value) in content.iter().enumerate() {
                         if value["type"] == "tool_use" {
@@ -1622,7 +1660,14 @@ fn selected_claude_relations(
                     .unwrap_or_else(|| stable_id("peer-", &identity)),
                 rows[to].id.clone(),
             ),
-            e.t.unwrap(),
+            e.t.unwrap_or_else(|| {
+                owner_of
+                    .iter()
+                    .filter(|(_, owner)| **owner == to)
+                    .filter_map(|(file, _)| files[*file].first)
+                    .min()
+                    .unwrap_or(0)
+            }),
             "done",
             received_body(&selected_record(files, at), "agent-message", None, 0)
                 .as_deref()
@@ -2933,7 +2978,37 @@ fn star_catalog_family_usage_parity() {
 // Fold the builder's per-owner evidence in its actual leaf-queue order. The
 // family activity cost below independently checks that these token observations
 // select the same native step as the production analytics fold.
+fn assert_family_cost_parity(home: &Home, warehouse: &Warehouse) {
+    let built = home.build_query();
+    let costs = crate::causal_trace::family_costs(
+        built
+            .sessions
+            .iter()
+            .map(|(id, session)| (id.as_str(), session.parent.as_deref(), session.cost.usd)),
+    );
+    for row in warehouse.list() {
+        let (own, family): (Option<f64>, Option<f64>) = warehouse.db.query_row(
+            "SELECT s.usd,f.family_usd FROM session_cost s JOIN family_cost f ON f.root=s.owner WHERE s.owner=?1",
+            [row.owner], |r| Ok((r.get(0)?, r.get(1)?)),
+        ).unwrap();
+        for (label, actual, expected) in [
+            ("session", own, built.sessions[&row.id].cost.usd),
+            ("family", family, costs[row.id.as_str()]),
+        ] {
+            match (actual, expected) {
+                (Some(actual), Some(expected)) => assert!(
+                    (actual - expected).abs() < 1e-12,
+                    "{} {label} USD: {actual} vs {expected}",
+                    row.id,
+                ),
+                _ => assert_eq!(actual, expected, "{} {label} USD", row.id),
+            }
+        }
+    }
+}
+
 fn assert_shared_family_parity(home: &Home, warehouse: &Warehouse) {
+    assert_family_cost_parity(home, warehouse);
     use sha2::{Digest, Sha256};
     let built = home.build_query();
     let rows = warehouse.list();
@@ -3023,6 +3098,22 @@ fn assert_shared_family_parity(home: &Home, warehouse: &Warehouse) {
             }
         }
         assert_eq!(actual, expected, "{id} shared tokens");
+        let (sql_cost, sql_unknown): (f64, i64) = warehouse
+            .db
+            .query_row(
+                "SELECT known,unknown_steps FROM family_shared_cost WHERE root=?1",
+                [owner],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or((0.0, 0));
+        assert!((sql_cost - cost).abs() < 1e-12, "{id} SQL shared price");
+        assert_eq!(
+            u64::try_from(sql_unknown).unwrap(),
+            unknown,
+            "{id} SQL shared coverage"
+        );
         if let Some(family) = built.sessions[id]
             .activity_analytics
             .as_ref()
@@ -3052,6 +3143,67 @@ fn assert_shared_family_parity(home: &Home, warehouse: &Warehouse) {
                 ready.push_back(parent);
             }
         }
+    }
+}
+
+#[test]
+fn star_catalog_family_dollar_arrival_parity() {
+    for reverse in [false, true] {
+        let home = Home::new();
+        let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+        let inputs = [
+            (1, "root", None),
+            (2, "child", Some("root")),
+            (3, "late-leaf", Some("child")),
+            (4, "empty", Some("root")),
+        ];
+        for index in if reverse { [3, 2, 1, 0] } else { [0, 1, 2, 3] } {
+            let (source, id, parent) = inputs[index];
+            let prompt =
+                parent.map_or("Work".into(), |p| format!("Semon-Parent: claude:{p}\nWork"));
+            let mut records = vec![human(id, ts(0, source), &prompt)];
+            if id != "empty" {
+                records.push(assistant_usage(
+                    id, ts(0, 10), &format!("message-{id}"), "claude-sonnet-4-6",
+                    json!({"input_tokens":100,"cache_read_input_tokens":30,
+                        "cache_creation_input_tokens":40,
+                        "cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":30},
+                        "output_tokens":20}),
+                ));
+            }
+            home.top(id, &records);
+            warehouse.source(source, "claude", id, &records);
+            assert_family_cost_parity(&home, &warehouse);
+        }
+        let total: f64 = warehouse
+            .db
+            .query_row("SELECT family_usd FROM family_cost WHERE root=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(total > 0.0);
+        // A later native report replaces the invocation price, rather than
+        // adding a second charge. Unknown rates then poison every ancestor.
+        for model in ["claude-sonnet-4-6", "unknown-fixture-model"] {
+            let records = [assistant_usage(
+                "late-leaf",
+                ts(0, 15),
+                "message-late-leaf",
+                model,
+                json!({"input_tokens":250,"output_tokens":50}),
+            )];
+            append_records(&home, "late-leaf", &records);
+            warehouse.source(3, "claude", "late-leaf", &records);
+            assert_family_cost_parity(&home, &warehouse);
+        }
+        assert_eq!(
+            warehouse
+                .db
+                .query_row("SELECT family_usd FROM family_cost WHERE root=1", [], |r| r
+                    .get::<_, Option<f64>>(0),)
+                .unwrap(),
+            None
+        );
     }
 }
 

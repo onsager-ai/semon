@@ -26,3 +26,14 @@ WITH evidence AS (
 -- Source/position selects the same native pricing input as the winning step;
 -- token categories and cost must never be combined from different observations.
 SELECT root,message_id,evidence_uuid,source,pos,input,cached,output FROM evidence WHERE n=1;
+
+-- Price exactly the winning observation. This activity cost may be known even
+-- when family_cost.family_usd is NULL because native ownership is shared.
+CREATE VIEW family_shared_cost AS
+WITH priced AS (
+ SELECT f.root,semon_step_usd(u.model,b.billing) AS usd
+ FROM family_shared_usage f JOIN fact_step_observation u USING(source,pos)
+ LEFT JOIN fact_step_billing b USING(source,pos)
+)
+SELECT root,coalesce(sum(usd),0.0) AS known,
+ count(*)-count(usd) AS unknown_steps FROM priced GROUP BY root;

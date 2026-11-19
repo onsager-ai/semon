@@ -17,6 +17,11 @@ CREATE TABLE fact_step_observation (
   uuid TEXT, model TEXT, input INTEGER NOT NULL, cached INTEGER NOT NULL,
   output INTEGER NOT NULL, PRIMARY KEY(source,pos)
 );
+-- Native billing metadata only; effective prices are bound by the read.
+CREATE TABLE fact_step_billing (
+  source INTEGER NOT NULL,pos INTEGER NOT NULL,billing TEXT NOT NULL,
+  PRIMARY KEY(source,pos)
+);
 CREATE TABLE fact_tool_call (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, call_id TEXT NOT NULL,
   tool TEXT NOT NULL, task_name TEXT, ts INTEGER,
