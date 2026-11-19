@@ -25,6 +25,8 @@ use std::os::unix::fs::MetadataExt;
 use serde::{Deserialize, Serialize};
 
 mod native_text;
+mod relay_match;
+mod turns;
 pub(crate) use native_text::{
     assistant_text, content_text, prompt_text, tool_input, tool_result_text,
 };
@@ -3318,87 +3320,7 @@ impl<'a> Builder<'a> {
         finals: &[Ref],
         ends: &[Ref],
     ) -> (Vec<Run>, BTreeSet<Ref>) {
-        /// At one time, ends sort before starts: a message written with a
-        /// hand-back follows it.
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-        enum Step {
-            Final,
-            Handback,
-            End,
-            Start,
-        }
-        let mut steps: Vec<(Ref, Step)> = finals
-            .iter()
-            .map(|at| (*at, Step::Final))
-            .chain(ends.iter().map(|at| (*at, Step::End)))
-            .collect();
-        for at in child_events {
-            let found = event(self.files, *at);
-            let step = match found.k {
-                Kind::Tool if found.n.as_deref() == Some("SubagentHandback") => Step::Handback,
-                Kind::Agm if found.script & AGM_DOWN != 0 => Step::Start,
-                Kind::U if Some(*at) != first_prompt => Step::Start,
-                _ => continue,
-            };
-            steps.push((*at, step));
-        }
-        steps.sort_by_key(|(at, step)| {
-            let t = event(self.files, *at).t;
-            (t.is_none(), t, *step, *at)
-        });
-        let mut runs = vec![Run::default()];
-        let mut inline = BTreeSet::new();
-        for (at, step) in steps {
-            let last = runs.len() - 1;
-            match step {
-                Step::Start if runs[last].ended() => runs.push(Run::default()),
-                Step::Start => {
-                    if event(self.files, at).k == Kind::Agm {
-                        inline.insert(at);
-                    }
-                }
-                // The parent records a hand-back at its next turn, so it can
-                // land after the message that resumed the child: it belongs
-                // to the run the child handed back, when that one has none.
-                Step::Final => {
-                    let target = if last > 0
-                        && !runs[last].ended()
-                        && runs[last - 1].handback.is_some()
-                        && runs[last - 1].fin.is_none()
-                    {
-                        last - 1
-                    } else {
-                        last
-                    };
-                    runs[target].fin = Some(at);
-                }
-                Step::Handback => runs[last].handback = Some(at),
-                // A completed notification after a resume ends the run that
-                // handed back before it, when that one has none. A failed or
-                // killed one is about the run still open: the one before had
-                // handed back, so it didn't fail.
-                Step::End => {
-                    let completed = matches!(
-                        event(self.files, at).n.as_deref(),
-                        Some("completed" | "success" | "done")
-                    );
-                    let target = if last > 0
-                        && completed
-                        && !runs[last].ended()
-                        && runs[last - 1].handed_back()
-                        && runs[last - 1].tn.is_none()
-                    {
-                        last - 1
-                    } else {
-                        last
-                    };
-                    if runs[target].tn.is_none() {
-                        runs[target].tn = Some(at);
-                    }
-                }
-            }
-        }
-        (runs, inline)
+        relay_match::claude_runs(self.files, child_events, first_prompt, finals, ends)
     }
 
     /// Pairs each message `child`'s parent sent it while it ran or to resume
@@ -3487,51 +3409,7 @@ impl<'a> Builder<'a> {
                 })
             })
             .collect();
-        let files = self.files;
-        // Sent no later than it arrived, when both times are known.
-        let before = |send: Ref, down: Ref| {
-            event(files, send)
-                .t
-                .zip(event(files, down).t)
-                .is_none_or(|(sent, arrived)| sent <= arrived)
-        };
-        let mut claims: Vec<Option<usize>> = vec![None; downs.len()];
-        let mut used = vec![false; sends.len()];
-        let mut next = 0;
-        for (index, down) in downs.iter().enumerate() {
-            let Some(body) = bodies[index].as_deref().map(str::trim) else {
-                continue;
-            };
-            let found = (next..sends.len()).find(|send| {
-                !used[*send]
-                    && before(sends[*send], *down)
-                    && messages[*send].as_deref().map(str::trim) == Some(body)
-            });
-            if let Some(send) = found {
-                used[send] = true;
-                claims[index] = Some(send);
-                next = send + 1;
-            }
-        }
-        for (index, down) in downs.iter().enumerate() {
-            if claims[index].is_some() {
-                continue;
-            }
-            let low = claims[..index]
-                .iter()
-                .rev()
-                .find_map(|claim| *claim)
-                .map_or(0, |send| send + 1);
-            let high = claims[index + 1..]
-                .iter()
-                .find_map(|claim| *claim)
-                .unwrap_or(sends.len());
-            let found = (low..high).find(|send| !used[*send] && before(sends[*send], *down));
-            if let Some(send) = found {
-                used[send] = true;
-                claims[index] = Some(send);
-            }
-        }
+        let claims = relay_match::pair_downs(self.files, &sends, &messages, &downs, &bodies);
         for (index, down) in downs.iter().enumerate() {
             let send = claims[index].map(|claim| sends[claim]);
             let brief = match claims[index] {
@@ -4240,84 +4118,26 @@ impl<'a> Builder<'a> {
     /// that last event, so it is never claimed. A send whose receipt isn't in
     /// these logs claims none. Returns which receipts were claimed.
     fn pair_sends(&mut self, child: usize, key: &str, received: &[Ref]) -> Vec<bool> {
-        let mut paired = vec![false; received.len()];
         let refs = self.events_of(child);
         let positions: Vec<usize> = (0..refs.len())
             .filter(|position| self.parent_addressed(child, refs[*position]).is_some())
             .collect();
         if positions.is_empty() {
-            return paired;
+            return vec![false; received.len()];
         }
         let bodies: Vec<Option<String>> = (0..received.len())
             .map(|index| self.receipt_body(key, received, index))
             .collect();
-        let files = self.files;
-        let written = move |at: Ref| event(files, at).t;
-        let mut claims: Vec<Option<usize>> = vec![None; positions.len()];
-        let mut next = 0;
-        for (send, position) in positions.iter().enumerate() {
-            let at = refs[*position];
-            let Some(message) = self.text(at, "message", |record, block| {
-                input_string(record, block, &["message", "content"])
-            }) else {
-                continue;
-            };
-            let sent = written(at);
-            let found = (next..received.len()).find(|index| {
-                !paired[*index]
-                    && sent
-                        .zip(written(received[*index]))
-                        .is_none_or(|(sent, written)| written >= sent)
-                    && bodies[*index].as_deref().map(str::trim) == Some(message.trim())
-            });
-            if let Some(index) = found {
-                paired[index] = true;
-                claims[send] = Some(index);
-                next = index + 1;
-            }
-        }
-        for (send, &position) in positions.iter().enumerate() {
-            if claims[send].is_some() {
-                continue;
-            }
-            let Some(sent) = written(refs[position]) else {
-                continue;
-            };
-            // The child's last event before its next send or prompt, with
-            // the send's own result.
-            let boundary = (position + 1..refs.len())
-                .find(|later| {
-                    positions.contains(later) || event(self.files, refs[*later]).k == Kind::U
+        let messages: Vec<Option<String>> = positions
+            .iter()
+            .map(|position| {
+                self.text(refs[*position], "message", |record, block| {
+                    input_string(record, block, &["message", "content"])
                 })
-                .unwrap_or(refs.len());
-            let last = refs[position..boundary]
-                .iter()
-                .flat_map(|at| {
-                    let found = event(self.files, *at);
-                    [found.t, found.r.as_ref().and_then(|reply| reply.t)]
-                })
-                .flatten()
-                .max()
-                .unwrap_or(sent);
-            let low = claims[..send]
-                .iter()
-                .rev()
-                .find_map(|claim| *claim)
-                .map_or(0, |index| index + 1);
-            let high = claims[send + 1..]
-                .iter()
-                .find_map(|claim| *claim)
-                .unwrap_or(received.len());
-            let found = (low..high).find(|index| {
-                !paired[*index]
-                    && written(received[*index])
-                        .is_some_and(|written| (sent..=last).contains(&written))
-            });
-            if let Some(index) = found {
-                paired[index] = true;
-                claims[send] = Some(index);
-            }
-        }
+            })
+            .collect();
+        let (claims, paired) =
+            relay_match::pair_sends(self.files, &refs, &positions, &messages, received, &bodies);
         for (send, claim) in claims.into_iter().enumerate() {
             if let Some(index) = claim {
                 self.progress.insert(refs[positions[send]], received[index]);
@@ -6138,309 +5958,32 @@ impl<'a> Builder<'a> {
         keyed.into_iter().map(|(_, entry)| entry).collect()
     }
 
-    /// The mockup's turn rule: a turn starts at each incoming entry (your
-    /// message, a relay, a brief, or a user prompt) and a gap ends one.
-    fn groups(&self, index: usize, entries: &[Entry]) -> Vec<Group> {
-        let mut started = BTreeSet::new();
-        let mut open: Vec<Group> = Vec::new();
-        let mut current: Option<usize> = None;
-        for (position, entry) in entries.iter().enumerate() {
-            if matches!(entry.kind, EntryKind::Gap) {
-                current = None;
-                continue;
-            }
-            let incoming = match entry.kind {
-                EntryKind::H(handoff) => {
-                    let found = &self.handoffs[handoff];
-                    found.to == Some(index)
-                        && matches!(found.out.kind, "ask" | "relay" | "spawn")
-                        && !found.inline
-                        && !started.contains(&handoff)
-                }
-                EntryKind::U => true,
-                _ => false,
-            };
-            if incoming || current.is_none() {
-                let start = match entry.kind {
-                    EntryKind::H(handoff) if incoming => {
-                        started.insert(handoff);
-                        Some(handoff)
-                    }
-                    _ => None,
-                };
-                open.push(Group {
-                    start,
-                    u: incoming && start.is_none(),
-                    file: entry.file,
-                    offset: entry.offset,
-                    at: start
-                        .map(|handoff| self.handoffs[handoff].out.at)
-                        .or(entry.t),
-                    entries: Vec::new(),
-                });
-                current = Some(open.len() - 1);
-            }
-            open[current.expect("open turn")].entries.push(position);
+    fn turn_context(&self, index: usize) -> turns::TurnContext<'_> {
+        turns::TurnContext {
+            files: self.files,
+            handoffs: &self.handoffs,
+            session: index,
+            key: &self.sessions[index].key,
+            state: self.sessions[index].out.state,
+            waiting_for: self.sessions[index].out.waiting_for.as_deref(),
         }
-        open
     }
 
-    /// Returns the turns, each entry's turn (by position in the returned
-    /// list; `None` for entries of a turn with nothing in it), and the prompt
-    /// event of each `u` turn.
+    fn groups(&self, index: usize, entries: &[Entry]) -> Vec<Group> {
+        self.turn_context(index).groups(entries)
+    }
+
     #[allow(clippy::type_complexity)]
     fn split(
         &self,
         index: usize,
         entries: &[Entry],
     ) -> (Vec<Turn>, Vec<Option<usize>>, Vec<(usize, Ref)>) {
-        let sid = &self.sessions[index].key;
-        let open = self.groups(index, entries);
-        let count = open.len();
-        let mut turns = Vec::new();
-        let mut owners = vec![None; entries.len()];
-        let mut prompts = Vec::new();
-        for (number, turn) in open.into_iter().enumerate() {
-            let last = number + 1 == count;
-            let sent: Vec<usize> = turn
-                .entries
-                .iter()
-                .filter_map(|position| match entries[*position].kind {
-                    EntryKind::H(handoff)
-                        if Some(handoff) != turn.start
-                            && self.handoffs[handoff].from == Some(index) =>
-                    {
-                        Some(handoff)
-                    }
-                    _ => None,
-                })
-                .collect();
-            let Some(mut end) = self.end(
-                index,
-                &turn.entries,
-                entries,
-                turn.start,
-                turn.u,
-                &sent,
-                last,
-            ) else {
-                continue;
-            };
-            if !matches!(end.st, "work" | "wait")
-                && !matches!(end.why, "unfinished_step" | "no_reply")
-            {
-                end.at = turn
-                    .entries
-                    .iter()
-                    .filter_map(|position| {
-                        let entry = &entries[*position];
-                        let at = entry.at?;
-                        let found = event(self.files, at);
-                        match entry.kind {
-                            EntryKind::A => found.t,
-                            EntryKind::Tool(_) => found.r.as_ref().and_then(|reply| reply.t),
-                            EntryKind::Operation(_) => found.t,
-                            _ => None,
-                        }
-                    })
-                    .max();
-            }
-            for position in &turn.entries {
-                owners[*position] = Some(turns.len());
-            }
-            if turn.u
-                && let Some(at) = turn
-                    .entries
-                    .first()
-                    .and_then(|position| entries[*position].at)
-            {
-                prompts.push((turns.len(), at));
-            }
-            turns.push(Turn {
-                id: match turn.start {
-                    Some(handoff) => self.handoffs[handoff].out.id.clone(),
-                    None => format!("{sid}:{}:{}", self.files[turn.file].id, turn.offset),
-                },
-                sid: sid.clone(),
-                start: turn
-                    .start
-                    .map(|handoff| self.handoffs[handoff].out.id.clone()),
-                u: turn.u,
-                text: None,
-                at: turn.at,
-                end,
-                sent: sent
-                    .iter()
-                    .map(|handoff| self.handoffs[*handoff].out.id.clone())
-                    .collect(),
-                file: self.files[turn.file].id.clone(),
-                offset: turn.offset,
-                last,
-            });
-        }
-        (turns, owners, prompts)
+        self.turn_context(index).split(entries)
     }
 
-    /// How a turn ended, as the mockup's `turnEnd`. `None` for a turn with
-    /// nothing in it.
-    #[allow(clippy::too_many_arguments)]
-    fn end(
-        &self,
-        index: usize,
-        members: &[usize],
-        entries: &[Entry],
-        start: Option<usize>,
-        u: bool,
-        sent: &[usize],
-        last: bool,
-    ) -> Option<End> {
-        let content: Vec<&Entry> = members
-            .iter()
-            .map(|position| &entries[*position])
-            .filter(|entry| match entry.kind {
-                EntryKind::A | EntryKind::Tool(_) | EntryKind::Operation(_) => true,
-                EntryKind::H(handoff) => sent.contains(&handoff),
-                _ => false,
-            })
-            .collect();
-        let has_h = members
-            .iter()
-            .any(|position| matches!(entries[*position].kind, EntryKind::H(_)));
-        if start.is_none() && !u && content.is_empty() && !has_h {
-            return None;
-        }
-        if last && self.sessions[index].out.waiting_for.is_some() {
-            return Some(End {
-                at: None,
-                st: "wait",
-                why: if self.sessions[index].out.waiting_for.as_deref() == Some("permission prompt")
-                {
-                    "permission"
-                } else {
-                    "input"
-                },
-                h: None,
-            });
-        }
-        if last && self.sessions[index].out.state == "work" {
-            return Some(End {
-                at: None,
-                st: "work",
-                why: "working",
-                h: None,
-            });
-        }
-        if let Some(handoff) = sent
-            .iter()
-            .rev()
-            .find(|handoff| self.handoffs[**handoff].out.kind == "toyou")
-        {
-            let found = &self.handoffs[*handoff].out;
-            return Some(End {
-                at: None,
-                st: if found.status == "wait" {
-                    "wait"
-                } else {
-                    "done"
-                },
-                why: "toyou",
-                h: Some(found.id.clone()),
-            });
-        }
-        let start = start.map(|handoff| &self.handoffs[handoff].out);
-        if start.is_some_and(|start| start.status == "err") {
-            return Some(End {
-                at: None,
-                st: "err",
-                why: "failed",
-                h: None,
-            });
-        }
-        let last_content = content.last();
-        match last_content.map(|entry| entry.kind) {
-            Some(EntryKind::Operation(ToolState::Err)) => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "failed_step",
-                    h: None,
-                });
-            }
-            Some(EntryKind::Tool(ToolState::Err)) => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "failed_step",
-                    h: None,
-                });
-            }
-            // Reached only outside the running last turn of a working
-            // session, or for a yielded command still running there.
-            Some(EntryKind::Tool(ToolState::Pending))
-                if !last_content
-                    .and_then(|entry| entry.at)
-                    .is_some_and(|at| self.live_yield(index, at)) =>
-            {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "unfinished_step",
-                    h: None,
-                });
-            }
-            Some(EntryKind::H(handoff)) if self.handoffs[handoff].out.status == "err" => {
-                return Some(End {
-                    at: None,
-                    st: "err",
-                    why: "handoff_failed",
-                    h: Some(self.handoffs[handoff].out.id.clone()),
-                });
-            }
-            _ => {}
-        }
-        if start.is_some_and(|start| start.kind == "spawn" && start.status == "done") {
-            return Some(End {
-                at: None,
-                st: "done",
-                why: "returned",
-                h: None,
-            });
-        }
-        if content
-            .iter()
-            .any(|entry| matches!(entry.kind, EntryKind::A))
-        {
-            return Some(End {
-                at: None,
-                st: "done",
-                why: "replied",
-                h: None,
-            });
-        }
-        Some(End {
-            at: None,
-            st: "idle",
-            why: "no_reply",
-            h: None,
-        })
-    }
-}
-
-impl Builder<'_> {
-    /// A yielded command still running: no completion yet, its session id
-    /// still open in its file, and its session working.
     fn live_yield(&self, index: usize, at: Ref) -> bool {
-        let found = event(self.files, at);
-        self.sessions[index].out.state == "work"
-            && found
-                .y
-                .as_ref()
-                .is_some_and(|yielded| yielded.done.is_none())
-            && self.files[at.0]
-                .summary
-                .yields
-                .values()
-                .any(|start| *start == at.1)
+        self.turn_context(index).live_yield(at)
     }
 }
 

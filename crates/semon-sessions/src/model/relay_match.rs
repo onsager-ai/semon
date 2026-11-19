@@ -1,0 +1,228 @@
+//! Origin-local, read-time two-pass relay pairing. Callers qualify the child,
+//! parent-addressed sends and non-final receipts, and read bodies from selected
+//! native references. No Builder or persisted pairing state is involved.
+use super::{Kind, Ref, SourceFile, event};
+
+/// Returns one receipt index per send and the receipt claim bitmap. `refs` is
+/// the child's native event order; `positions` selects its qualified sends.
+pub(super) fn pair_sends(
+    files: &[SourceFile],
+    refs: &[Ref],
+    positions: &[usize],
+    messages: &[Option<String>],
+    received: &[Ref],
+    bodies: &[Option<String>],
+) -> (Vec<Option<usize>>, Vec<bool>) {
+    let written = move |at: Ref| event(files, at).t;
+    let mut paired = vec![false; received.len()];
+    let mut claims: Vec<Option<usize>> = vec![None; positions.len()];
+    let mut next = 0;
+    for (send, position) in positions.iter().enumerate() {
+        let at = refs[*position];
+        let Some(message) = messages[send].as_deref() else {
+            continue;
+        };
+        let sent = written(at);
+        let found = (next..received.len()).find(|index| {
+            !paired[*index]
+                && sent
+                    .zip(written(received[*index]))
+                    .is_none_or(|(sent, written)| written >= sent)
+                && bodies[*index].as_deref().map(str::trim) == Some(message.trim())
+        });
+        if let Some(index) = found {
+            paired[index] = true;
+            claims[send] = Some(index);
+            next = index + 1;
+        }
+    }
+    for (send, &position) in positions.iter().enumerate() {
+        if claims[send].is_some() {
+            continue;
+        }
+        let Some(sent) = written(refs[position]) else {
+            continue;
+        };
+        // The child's last event before its next send or prompt, with
+        // the send's own result.
+        let boundary = (position + 1..refs.len())
+            .find(|later| positions.contains(later) || event(files, refs[*later]).k == Kind::U)
+            .unwrap_or(refs.len());
+        let last = refs[position..boundary]
+            .iter()
+            .flat_map(|at| {
+                let found = event(files, *at);
+                [found.t, found.r.as_ref().and_then(|reply| reply.t)]
+            })
+            .flatten()
+            .max()
+            .unwrap_or(sent);
+        let low = claims[..send]
+            .iter()
+            .rev()
+            .find_map(|claim| *claim)
+            .map_or(0, |index| index + 1);
+        let high = claims[send + 1..]
+            .iter()
+            .find_map(|claim| *claim)
+            .unwrap_or(received.len());
+        let found = (low..high).find(|index| {
+            !paired[*index]
+                && written(received[*index]).is_some_and(|written| (sent..=last).contains(&written))
+        });
+        if let Some(index) = found {
+            paired[index] = true;
+            claims[send] = Some(index);
+        }
+    }
+    (claims, paired)
+}
+
+/// Pairs parent sends with down receipts: body first, then order between the
+/// neighbouring claims. This differs from up receipts' bounded time fallback.
+pub(super) fn pair_downs(
+    files: &[SourceFile],
+    sends: &[Ref],
+    messages: &[Option<String>],
+    downs: &[Ref],
+    bodies: &[Option<String>],
+) -> Vec<Option<usize>> {
+    // Sent no later than it arrived, when both times are known.
+    let before = |send: Ref, down: Ref| {
+        event(files, send)
+            .t
+            .zip(event(files, down).t)
+            .is_none_or(|(sent, arrived)| sent <= arrived)
+    };
+    let mut claims: Vec<Option<usize>> = vec![None; downs.len()];
+    let mut used = vec![false; sends.len()];
+    let mut next = 0;
+    for (index, down) in downs.iter().enumerate() {
+        let Some(body) = bodies[index].as_deref().map(str::trim) else {
+            continue;
+        };
+        let found = (next..sends.len()).find(|send| {
+            !used[*send]
+                && before(sends[*send], *down)
+                && messages[*send].as_deref().map(str::trim) == Some(body)
+        });
+        if let Some(send) = found {
+            used[send] = true;
+            claims[index] = Some(send);
+            next = send + 1;
+        }
+    }
+    for (index, down) in downs.iter().enumerate() {
+        if claims[index].is_some() {
+            continue;
+        }
+        let low = claims[..index]
+            .iter()
+            .rev()
+            .find_map(|claim| *claim)
+            .map_or(0, |send| send + 1);
+        let high = claims[index + 1..]
+            .iter()
+            .find_map(|claim| *claim)
+            .unwrap_or(sends.len());
+        let found = (low..high).find(|send| !used[*send] && before(sends[*send], *down));
+        if let Some(send) = found {
+            used[send] = true;
+            claims[index] = Some(send);
+        }
+    }
+    claims
+}
+
+/// Qualifies inline messages and completed/resumed native runs over the selected
+/// child events and its parent's final receipts and task notifications.
+pub(super) fn claude_runs(
+    files: &[SourceFile],
+    child_events: &[Ref],
+    first_prompt: Option<Ref>,
+    finals: &[Ref],
+    ends: &[Ref],
+) -> (Vec<super::Run>, super::BTreeSet<Ref>) {
+    use super::{AGM_DOWN, BTreeSet, Run};
+    /// At one time, ends sort before starts: a message written with a
+    /// hand-back follows it.
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Step {
+        Final,
+        Handback,
+        End,
+        Start,
+    }
+    let mut steps: Vec<(Ref, Step)> = finals
+        .iter()
+        .map(|at| (*at, Step::Final))
+        .chain(ends.iter().map(|at| (*at, Step::End)))
+        .collect();
+    for at in child_events {
+        let found = event(files, *at);
+        let step = match found.k {
+            Kind::Tool if found.n.as_deref() == Some("SubagentHandback") => Step::Handback,
+            Kind::Agm if found.script & AGM_DOWN != 0 => Step::Start,
+            Kind::U if Some(*at) != first_prompt => Step::Start,
+            _ => continue,
+        };
+        steps.push((*at, step));
+    }
+    steps.sort_by_key(|(at, step)| {
+        let t = event(files, *at).t;
+        (t.is_none(), t, *step, *at)
+    });
+    let mut runs = vec![Run::default()];
+    let mut inline = BTreeSet::new();
+    for (at, step) in steps {
+        let last = runs.len() - 1;
+        match step {
+            Step::Start if runs[last].ended() => runs.push(Run::default()),
+            Step::Start => {
+                if event(files, at).k == Kind::Agm {
+                    inline.insert(at);
+                }
+            }
+            // The parent records a hand-back at its next turn, so it can
+            // land after the message that resumed the child: it belongs
+            // to the run the child handed back, when that one has none.
+            Step::Final => {
+                let target = if last > 0
+                    && !runs[last].ended()
+                    && runs[last - 1].handback.is_some()
+                    && runs[last - 1].fin.is_none()
+                {
+                    last - 1
+                } else {
+                    last
+                };
+                runs[target].fin = Some(at);
+            }
+            Step::Handback => runs[last].handback = Some(at),
+            // A completed notification after a resume ends the run that
+            // handed back before it, when that one has none. A failed or
+            // killed one is about the run still open: the one before had
+            // handed back, so it didn't fail.
+            Step::End => {
+                let completed = matches!(
+                    event(files, at).n.as_deref(),
+                    Some("completed" | "success" | "done")
+                );
+                let target = if last > 0
+                    && completed
+                    && !runs[last].ended()
+                    && runs[last - 1].handed_back()
+                    && runs[last - 1].tn.is_none()
+                {
+                    last - 1
+                } else {
+                    last
+                };
+                if runs[target].tn.is_none() {
+                    runs[target].tn = Some(at);
+                }
+            }
+        }
+    }
+    (runs, inline)
+}

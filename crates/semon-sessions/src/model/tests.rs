@@ -1,6 +1,7 @@
 //! One test per rule in the design's table, on synthetic homes only.
 
 mod activity;
+mod star_catalog;
 
 use std::{
     io::Write,
