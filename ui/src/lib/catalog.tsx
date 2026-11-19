@@ -480,12 +480,10 @@ export function renderCatalogList(
                   </div>
                 )}
                 {row(group.root)}
-                {group.root.annotation && (
-                  <div class="catalog-note">
-                    {'from ' + annotationProducer(group.root.annotation)}
-                    {group.root.annotation.issue !== null && (
-                      <>
-                        {' · '}
+                {group.root.annotation &&
+                  (group.root.annotation.issue !== null || group.root.annotation.pr !== null) && (
+                    <div class="catalog-note">
+                      {group.root.annotation.issue !== null && (
                         <a
                           href={annotationLink(
                             group.root.annotation,
@@ -497,11 +495,11 @@ export function renderCatalogList(
                         >
                           Issue #{group.root.annotation.issue}
                         </a>
-                      </>
-                    )}
-                    {group.root.annotation.pr !== null && (
-                      <>
-                        {' · '}
+                      )}
+                      {group.root.annotation.issue !== null &&
+                        group.root.annotation.pr !== null &&
+                        ' · '}
+                      {group.root.annotation.pr !== null && (
                         <a
                           href={annotationLink(
                             group.root.annotation,
@@ -513,10 +511,9 @@ export function renderCatalogList(
                         >
                           PR #{group.root.annotation.pr}
                         </a>
-                      </>
-                    )}
-                  </div>
-                )}
+                      )}
+                    </div>
+                  )}
                 {!!group.children.length && (
                   <div class="kids">
                     {group.children.slice(0, shown).map((item) => row(item, true))}
