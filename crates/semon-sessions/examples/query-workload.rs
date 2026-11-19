@@ -103,6 +103,7 @@ fn main() -> io::Result<()> {
                 session: None,
                 facts: None,
                 scan_window: false,
+                annotations: home.join("annotations.jsonl"),
             },
         ));
     }

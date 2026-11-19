@@ -2113,6 +2113,7 @@ mod tests {
                 session: None,
                 facts: None,
                 scan_window: false,
+                annotations: home.join("annotations.jsonl"),
             }
         };
         let core = ViewerCore::with_machines(vec![
