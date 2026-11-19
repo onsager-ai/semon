@@ -2011,6 +2011,7 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
             )
         });
         let mut keyed = Vec::new();
+        let mut native_refs = Vec::new();
         for (rank, file) in members.iter().copied().enumerate() {
             let mut time = files[file]
                 .summary
@@ -2023,6 +2024,10 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
                 if !selected[session].contains(&(file, found.o)) {
                     continue;
                 }
+                native_refs.push((
+                    (if members.len() > 1 { time } else { 0 }, rank, i),
+                    (file, i),
+                ));
                 let kinds = if let Some(h) = placed.get(&(file, i)) {
                     h.iter().map(|h| EntryKind::H(*h)).collect::<Vec<_>>()
                 } else {
@@ -2072,6 +2077,119 @@ fn selected_turns(warehouse: &Warehouse, home: &Home) -> BTreeMap<String, (Strin
                     at: None,
                 },
             );
+        }
+        native_refs.sort_by_key(|(key, _)| *key);
+        let refs: Vec<Ref> = native_refs.into_iter().map(|(_, at)| at).collect();
+        let context = turns::TurnContext {
+            files: &files,
+            handoffs: &handoffs,
+            session,
+            key: &row.id,
+            state: &states[session].0,
+            waiting_for: states[session].1.as_deref(),
+        };
+        let latest_reply = refs
+            .iter()
+            .copied()
+            .rev()
+            .find(|at| event(&files, *at).k == Kind::A);
+        let latest_ask = refs
+            .iter()
+            .rposition(|at| event(&files, *at).k == Kind::Ask);
+        let result = latest_reply.filter(|reply| {
+            let eligible = if row.harness == "codex" {
+                states[session].0 != "work" && row.parent.is_none()
+                    && members.iter().all(|file| files[*file].marker.is_none()
+                        && matches!(&files[*file].role, Role::Codex(meta) if meta.parent_thread.is_none()))
+            } else {
+                states[session].0 == "idle"
+                    && latest_ask.is_none_or(|ask| ask < refs.iter().position(|at| at == reply).unwrap())
+            };
+            eligible && context.reply_started_by_you(&entries, &refs, *reply,
+                row.harness == "codex" && row.parent.is_none(), |at| {
+                    let found = event(&files, at);
+                    let spawned_here = |id: &str| {
+                        refs.iter().any(|call| {
+                            let call = event(&files, *call);
+                            call.k == Kind::Tool && call.id.as_deref() == Some(id)
+                                && matches!(call.n.as_deref(), Some("Agent" | "Task"))
+                        }) || rows.iter().any(|child| child.id == id
+                            && child.parent.as_deref() == Some(row.id.as_str()))
+                    };
+                    match found.k {
+                        Kind::Agm if found.script & AGM_DOWN != 0 => placed.get(&at)
+                            .is_some_and(|hs| hs.iter().all(|h| handoffs[*h].inline)),
+                        Kind::Tn => found.id.as_deref().is_some_and(spawned_here),
+                        Kind::Agm if found.script & AGM_FINAL != 0 =>
+                            [found.id.as_deref(), found.n.as_deref()].into_iter().flatten().any(spawned_here),
+                        _ => false,
+                    }
+                })
+        });
+        let inferred = result.map(|at| {
+            let found = event(&files, at);
+            Handoff {
+                ask: Some("result"),
+                ..Handoff::new(
+                    stable_id(
+                        "q",
+                        &format!("toyou:result:{}:{}:{}", files[at.0].id, found.o, found.b),
+                    ),
+                    "toyou",
+                    (row.id.clone(), "you".into()),
+                    found.t.unwrap_or_else(|| {
+                        refs.iter()
+                            .filter_map(|at| event(&files, *at).t)
+                            .max()
+                            .unwrap()
+                    }),
+                    "new",
+                    &assistant_text(&selected_record(&files, at), found.b as usize)
+                        .unwrap_or_default(),
+                )
+            }
+        });
+        let expected_results: Vec<_> = expected
+            .handoffs
+            .iter()
+            .filter(|h| h.from == row.id && h.kind == "toyou" && h.ask == Some("result"))
+            .collect();
+        assert_eq!(
+            serde_json::to_value(inferred.iter().collect::<Vec<_>>()).unwrap(),
+            serde_json::to_value(expected_results).unwrap(),
+            "{} inferred human result",
+            row.id
+        );
+        // Claude draws the inferred result immediately after its assistant entry;
+        // root Codex results are catalog handoffs without a transcript placement.
+        if row.harness == "claude"
+            && let Some(out) = inferred
+        {
+            let at = result.unwrap();
+            let position = entries
+                .iter()
+                .rposition(|entry| entry.at == Some(at))
+                .unwrap()
+                + 1;
+            let h = handoffs.len();
+            handoffs.push(H {
+                out,
+                from: Some(session),
+                to: None,
+                previews: None,
+                preview_owners: BTreeMap::new(),
+                inline: false,
+            });
+            let previous = &entries[position - 1];
+            let entry = Entry {
+                kind: EntryKind::H(h),
+                file: previous.file,
+                offset: previous.offset,
+                pos: previous.pos,
+                t: previous.t,
+                at: None,
+            };
+            entries.insert(position, entry);
         }
         let context = turns::TurnContext {
             files: &files,
@@ -2686,6 +2804,103 @@ fn star_catalog_gap_turn_parity() {
     let turns = turns_of(&built, "gap");
     assert_eq!(turns.len(), 2);
     assert_eq!(turns[1].end.why, "unfinished_step");
+}
+
+#[test]
+fn star_catalog_human_result_relay_arrival_parity() {
+    for reverse in [false, true] {
+        for progress in [false, true] {
+            for notification_only in [false, true] {
+                let home = Home::new();
+                let mut warehouse = Warehouse::new(std::path::Path::new(":memory:"));
+                let mut parent = vec![
+                    human("lead", ts(20, 0), "delegate"),
+                    assistant(
+                        "lead",
+                        ts(20, 1),
+                        vec![tool("spawn", "Agent", json!({"prompt":"work"}))],
+                    ),
+                    result(
+                        "lead",
+                        ts(20, 1),
+                        "spawn",
+                        "launched",
+                        false,
+                        json!({"status":"async_launched","agentId":"child"}),
+                    ),
+                ];
+                parent.push(if notification_only {
+                    notification("lead", ts(20, 3), "spawn", "completed", "done")
+                } else if progress {
+                    agent_send("lead", ts(20, 3), "child", "update")
+                } else {
+                    hand_back("lead", ts(20, 3), "child", "done")
+                });
+                parent.push(assistant(
+                    "lead",
+                    ts(20, 4),
+                    vec![text("Here is the answer.")],
+                ));
+                let mut child = vec![user("lead", ts(20, 1), "work")];
+                if progress {
+                    child.extend(send_to_main("up", 2, "update", queued_reply()));
+                } else {
+                    child.push(child_says(2, "done"));
+                }
+                home.live(101, "lead", "idle", json!({"startedAt":at(20, 2)}));
+                // The observation is source-scoped even if the source has not arrived.
+                warehouse
+                    .db
+                    .execute(
+                        "INSERT INTO qualified_turn_runtime VALUES(1,'idle',NULL)",
+                        [],
+                    )
+                    .unwrap();
+                for source in if reverse { [2, 1] } else { [1, 2] } {
+                    if source == 1 {
+                        home.top("lead", &parent);
+                        warehouse.source(1, "claude", "lead", &parent);
+                    } else {
+                        home.agent("lead", "child", "spawn", &child);
+                        warehouse.source(2, "claude", "child", &child);
+                        warehouse
+                            .db
+                            .execute(
+                                "INSERT INTO fact_agent_observation VALUES(2,'lead','spawn')",
+                                [],
+                            )
+                            .unwrap();
+                    }
+                    assert_selected_turns(&warehouse, &home);
+                }
+                let expected = home.build_query();
+                assert_eq!(
+                    expected
+                        .handoffs
+                        .iter()
+                        .filter(|h| h.from == "lead" && h.ask == Some("result"))
+                        .count(),
+                    usize::from(!progress || notification_only)
+                );
+                // Appending a send completion after the reply, with an earlier
+                // native clock, must preserve the current attribution decision.
+                parent.push(assistant(
+                    "lead",
+                    ts(20, 5),
+                    vec![tool("late", "Read", json!({"file_path":"/x"}))],
+                ));
+                let call = parent.last().unwrap().clone();
+                home.top("lead", &parent);
+                warehouse.source(1, "claude", "lead", &[call]);
+                assert_selected_turns(&warehouse, &home);
+                let late = result("lead", ts(20, 2), "late", "failed", true, json!({}));
+                parent.push(late.clone());
+                home.top("lead", &parent);
+                warehouse.source(1, "claude", "lead", &[late]);
+                assert_selected_turns(&warehouse, &home);
+            }
+        }
+    }
 }
 
 #[test]
