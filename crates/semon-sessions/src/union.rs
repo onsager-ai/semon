@@ -1898,11 +1898,7 @@ impl ViewerCore {
                 roots.push(root);
             }
         }
-        let annotations = if statuses.len() == 1 {
-            json!(statuses[0])
-        } else {
-            json!({"files":statuses})
-        };
+        let annotations = json!({"files": statuses});
         let body = serde_json::to_string_pretty(
             &json!({"schema_version": 1, "roots": roots,"annotations":annotations}),
         )

@@ -1776,7 +1776,7 @@ fn run_sessions(args: SessionsArgs) -> Result<(), String> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&serde_json::json!({
-                    "schema_version": 1, "roots": nodes, "annotations": annotations.status,
+                    "schema_version": 1, "roots": nodes, "annotations": {"files": [annotations.status]},
                 }))
                 .expect("serializable annotated nodes")
             );

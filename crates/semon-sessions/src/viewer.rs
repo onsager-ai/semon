@@ -1664,7 +1664,7 @@ impl MachineView {
         let mut roots = self.served_tree()?.roots.clone();
         annotations.apply(&mut roots);
         serde_json::to_string_pretty(
-            &json!({"schema_version":1,"roots":roots,"annotations":annotations.status}),
+            &json!({"schema_version":1,"roots":roots,"annotations":{"files":[annotations.status]}}),
         )
         .map_err(io::Error::other)
     }

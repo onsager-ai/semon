@@ -61,11 +61,12 @@ cannot silently depend on fields Semon ignores. Lines above 4 KiB are rejected.
   `updated_at` wins. On an equal timestamp the later line in the file wins.
 * Invalid lines (bad JSON, unknown `v`, missing or mistyped fields, oversize)
   are skipped and counted. `semon sessions --json` reports the counts of valid
-  and rejected lines and the file path in `annotations: {path, valid, rejected}`;
+  and rejected lines and the file path in
+  `annotations: {files: [{path, valid, rejected}, ...]}`, one entry per distinct
+  configured file (one entry for a single machine);
   matched rows expose `annotation: {system, repository, ticket, issue, pr, title,
   source: "annotation"}`. It never echoes rejected content. A missing file has
-  zero counts; other read errors fail the read. Multi-machine trees with
-  distinct configured files report `annotations: {files: [{path, valid, rejected}, ...]}`.
+  zero counts; other read errors fail the read.
 * An annotation for a session Semon has not seen is kept and applies when the
   session appears. An annotation never creates a session.
 * Annotations are metadata only. They carry no message or tool text, and

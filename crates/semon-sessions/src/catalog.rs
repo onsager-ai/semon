@@ -1874,7 +1874,7 @@ fn present_page(
         "machine_info":{"key":machine,"label":machine_label,"freshness":if facts_known { "cached" } else { "unavailable" }},
         "capabilities":{"pagination":true,"metadata_search":true,"filters":["harness","repo","no_repo","model","q"],"order":"last_desc_key_asc",
             "full_text_search":false,"selected_session_lookup":true,"runtime_status":true,"global_union":false},
-        "annotations":annotations.status,"completeness":{"state":completeness},"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next,"search":search_report.map(|report|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":report.partial,"candidates":report.candidates,"index_complete":report.index_complete,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":crate::catalog_search::MAX_SCAN_BYTES}))}),
+        "annotations":{"files":[annotations.status]},"completeness":{"state":completeness},"freshness":if completeness == "partial" { "updating" } else { page_state },"items":items,"next_cursor":next,"search":search_report.map(|report|json!({"semantics":"unicode_lowercase_substring","fields":["name","key","repo","branch","model","harness"],"partial":report.partial,"candidates":report.candidates,"index_complete":report.index_complete,"candidate_budget":crate::catalog_search::MAX_CANDIDATES,"byte_budget":crate::catalog_search::MAX_SCAN_BYTES}))}),
     ))
 }
 
@@ -2844,8 +2844,8 @@ mod tests {
         let (status, after) = fixture.body("limit=100");
         assert_eq!(status, 200);
         assert_eq!(after["generation"], before["generation"]);
-        assert_eq!(after["annotations"]["valid"], 2);
-        assert_eq!(after["annotations"]["rejected"], 1);
+        assert_eq!(after["annotations"]["files"][0]["valid"], 2);
+        assert_eq!(after["annotations"]["files"][0]["rejected"], 1);
         let mut items = after["items"].clone();
         for item in items.as_array_mut().unwrap() {
             if item["key"] == "session-00000" {

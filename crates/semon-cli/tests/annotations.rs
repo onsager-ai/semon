@@ -35,7 +35,7 @@ fn cli_annotation_metadata_preserves_native_tree_and_input() {
     let after = run(&fixture, &path);
     assert_eq!(
         after["annotations"],
-        json!({"path":path,"valid":1,"rejected":1})
+        json!({"files":[{"path":path,"valid":1,"rejected":1}]})
     );
     assert!(!after.to_string().contains("rejected private content"));
     assert_eq!(std::fs::read(&path).unwrap(), bytes.as_bytes());
