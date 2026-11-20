@@ -203,7 +203,17 @@ fn assert_claude_facts(database: &Connection, observations: &[Observation]) {
         .into_iter()
         .map(|row| row.into_iter().skip(start).collect())
         .collect::<Vec<Vec<Sql>>>();
-        assert_eq!(facts.remove(table).unwrap_or_default(), expected, "{table}");
+        // Rows are a set per key: the parser's emission order within one
+        // position need not match the SQL ORDER BY tie-break.
+        let sorted = |mut rows: Vec<Vec<Sql>>| {
+            rows.sort_by_cached_key(|row| format!("{row:?}"));
+            rows
+        };
+        assert_eq!(
+            sorted(facts.remove(table).unwrap_or_default()),
+            sorted(expected),
+            "{table}"
+        );
     }
 }
 
