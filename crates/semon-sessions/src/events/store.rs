@@ -694,6 +694,68 @@ struct SqliteStore {
     traversal_observation: Option<crate::native_timing::CatalogTraversalProbe>,
 }
 
+/// Qualify the checkpointed contract without opening the shared WAL index.
+/// The host uses the ordinary SQLite snapshot once this contract is current.
+pub(crate) fn rebuild_probe(path: &Path) -> io::Result<bool> {
+    let mut uri = String::from("file:");
+    use fmt::Write as _;
+    for &byte in path.as_os_str().as_encoded_bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-_.~".contains(&byte) {
+            uri.push(char::from(byte));
+        } else {
+            write!(uri, "%{byte:02X}").expect("write SQLite URI");
+        }
+    }
+    uri.push_str("?immutable=1");
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW
+        | OpenFlags::SQLITE_OPEN_URI;
+    let connection = Connection::open_with_flags(uri, flags).map_err(io::Error::other)?;
+    qualifies_for_rebuild(&connection)
+}
+
+/// A checkpoint already refused by the contract may have a later WAL
+/// transaction. SQLite's private WAL index avoids the refused SHM entirely.
+#[cfg(unix)]
+pub(crate) fn rebuild_probe_wal(path: &Path) -> io::Result<bool> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    let connection =
+        Connection::open_with_flags_and_vfs(path, flags, "unix-none").map_err(io::Error::other)?;
+    connection
+        .pragma_update(None, "locking_mode", "EXCLUSIVE")
+        .map_err(io::Error::other)?;
+    qualifies_for_rebuild(&connection)
+}
+
+fn qualifies_for_rebuild(connection: &Connection) -> io::Result<bool> {
+    let read = connection
+        .unchecked_transaction()
+        .map_err(io::Error::other)?;
+    match qualify_producer(&read) {
+        Ok(result) => Ok(matches!(result, Init::Unsupported(_))),
+        // Keep existing physical-corruption handling distinct from version refusal.
+        Err(error) if is_corrupt(&error) => Ok(false),
+        Err(error) => Err(io::Error::other(error)),
+    }
+}
+
+pub(crate) fn checkpoint_rebuilt_index(path: &Path) -> io::Result<()> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(io::Error::other)?;
+    let (busy, pages, written): (i64, i64, i64) = connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(io::Error::other)?;
+    if busy != 0 || pages != written {
+        return Err(io::Error::other("rebuild Index checkpoint did not finish"));
+    }
+    Ok(())
+}
+
 /// Opens (creating when missing) the store at `path` and reads all of it.
 /// A file that isn't a database, or a damaged one, is renamed aside to
 /// `<path>.corrupt` and a new store is made in its place. Operational failures
@@ -2035,6 +2097,40 @@ fn failure(error: rusqlite::Error) -> StoreError {
 }
 
 impl IndexStore for SqliteStore {
+    fn runtime_binding(
+        &self,
+        source: &super::warehouse::RuntimeSource<'_>,
+    ) -> Result<Option<super::warehouse::RuntimeBinding>, StoreError> {
+        let tx = self.connection.unchecked_transaction().map_err(failure)?;
+        require_current_sql(&tx).map_err(failure)?;
+        let binding = warehouse::runtime_binding(&tx, source).map_err(failure)?;
+        tx.commit().map_err(failure)?;
+        Ok(binding)
+    }
+
+    fn write_runtime_capture(
+        &mut self,
+        source: &super::warehouse::RuntimeSource<'_>,
+        expected: &super::warehouse::RuntimeBinding,
+        capture: &super::warehouse::RuntimeCapture,
+    ) -> Result<bool, StoreError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        require_current_sql(&tx).map_err(failure)?;
+        if warehouse::runtime_binding(&tx, source)
+            .map_err(failure)?
+            .as_ref()
+            != Some(expected)
+            || !warehouse::write_runtime(&tx, expected.source, capture).map_err(failure)?
+        {
+            return Ok(false);
+        }
+        tx.commit().map_err(failure)?;
+        Ok(true)
+    }
+
     fn record_chain_admission(
         &mut self,
         path: &str,
@@ -4736,18 +4832,8 @@ pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connecti
     }
 }
 
-fn unsupported_message(connection: &Connection, reason: &str) -> String {
-    if reason != "unsupported session index: older schema" {
-        return reason.to_owned();
-    }
-    let Some(path) = connection.path() else {
-        return reason.to_owned();
-    };
-    format!(
-        "{reason}; this index is a derived cache rebuilt from native logs. Move (rename, never delete) {path:?}, {wal:?} and {shm:?} aside, then run the command again. Native logs must remain available to rebuild the index.",
-        wal = format!("{path}-wal"),
-        shm = format!("{path}-shm"),
-    )
+fn unsupported_message(_connection: &Connection, reason: &str) -> String {
+    reason.to_owned()
 }
 
 /// Classify in a read snapshot, before journal, schema or recovery writes.
@@ -4802,6 +4888,7 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
                 "unsupported session index: missing metadata",
             ));
         }
+        Err(error @ rusqlite::Error::SqliteFailure(..)) => return malformed_schema(error),
         Err(_) => {
             return Ok(Init::Unsupported(
                 "unsupported session index: malformed metadata",
@@ -4985,8 +5072,8 @@ fn qualify_producer(connection: &Connection) -> rusqlite::Result<Init> {
 }
 
 /// Initialize a fresh index under SQLite's writer lock. Unsupported persistent
-/// state is left untouched; an operator may only recover it after separately
-/// establishing source availability and custody.
+/// state is left untouched. The host rebuilds separately from authorized
+/// original sources.
 fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.set_prepared_statement_cache_capacity(32);
@@ -7029,6 +7116,7 @@ mod tests {
             all: true,
             since: Duration::from_secs(86400),
             session: None,
+            index_recovery: Default::default(),
             facts: None,
             annotations: root.join("annotations.jsonl"),
             scan_window: false,
@@ -9202,6 +9290,7 @@ mod tests {
             all: true,
             since: Duration::from_secs(86400),
             session: None,
+            index_recovery: Default::default(),
             facts: Some(root.join("facts.json")),
             annotations: root.join("annotations.jsonl"),
             scan_window: false,
@@ -10874,6 +10963,91 @@ mod tests {
     }
 
     #[test]
+    fn runtime_capture_commits_together_and_refuses_changed_binding() {
+        use crate::events::{
+            EventCache,
+            warehouse::{RuntimeCapture, RuntimeSource},
+        };
+        let root = scratch("runtime-capture");
+        let options = crate::Options {
+            cache: root.join("index.json"),
+            ..Default::default()
+        };
+        let path = root.join("claude.jsonl");
+        fs::write(&path, b"{\"type\":\"user\",\"sessionId\":\"claude\"}\n").unwrap();
+        let namespace = crate::storage::Namespace::new("local").unwrap();
+        let mut cache = crate::storage::sqlite::open_index(&options, &namespace).unwrap();
+        crate::events::scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        let source = RuntimeSource {
+            path: path.to_str().unwrap(),
+            harness: "claude",
+            native_id: "claude",
+            revision: cache.revision(&path).unwrap(),
+        };
+        let index = EventCache::path(&options.cache);
+        let mut writer =
+            SqliteStore::attempt_selected(&index).unwrap_or_else(|error| panic!("{error}"));
+        let binding = writer.runtime_binding(&source).unwrap().unwrap();
+        let capture = RuntimeCapture {
+            pid: 100,
+            start: 777,
+            clock: 1_000,
+            environment: Some(("codex".into(), "parent".into(), Some("call".into()))),
+            ancestors: vec![50, 1],
+        };
+        assert!(
+            writer
+                .write_runtime_capture(&source, &binding, &capture)
+                .unwrap()
+        );
+        assert!(
+            !writer
+                .write_runtime_capture(&source, &binding, &capture)
+                .unwrap()
+        );
+        let replaced = root.join("replacement.jsonl");
+        fs::write(
+            &replaced,
+            b"{\"type\":\"assistant\",\"sessionId\":\"claude\"}\n",
+        )
+        .unwrap();
+        fs::rename(replaced, &path).unwrap();
+        crate::events::scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        let changed = RuntimeCapture {
+            clock: 2_000,
+            ..capture
+        };
+        assert!(
+            !writer
+                .write_runtime_capture(&source, &binding, &changed)
+                .unwrap()
+        );
+        for (table, count) in [("process", 1), ("environment", 1), ("ancestor", 2)] {
+            let sql = format!(
+                "SELECT count(*) FROM fact_{table}_observation WHERE capture=1000 AND pid=100 AND start=777"
+            );
+            assert_eq!(
+                writer
+                    .connection
+                    .query_row(&sql, [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                count
+            );
+            let sql = format!("SELECT count(*) FROM fact_{table}_observation WHERE capture=2000");
+            assert_eq!(
+                writer
+                    .connection
+                    .query_row(&sql, [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        drop(writer);
+        drop(cache);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn obsolete_producer_contracts_are_refused_without_mutation() {
         for schema in [44, 45, 46, 47, 48] {
             let root = scratch("obsolete-contract");
@@ -10896,15 +11070,7 @@ mod tests {
                 Err(Unopened::Unsupported(error)) => error,
                 _ => panic!("older schema must be refused"),
             };
-            assert_eq!(
-                error,
-                format!(
-                    "unsupported session index: older schema; this index is a derived cache rebuilt from native logs. Move (rename, never delete) {path:?}, {wal:?} and {shm:?} aside, then run the command again. Native logs must remain available to rebuild the index.",
-                    path = path.to_str().unwrap(),
-                    wal = format!("{}-wal", path.display()),
-                    shm = format!("{}-shm", path.display()),
-                )
-            );
+            assert_eq!(error, "unsupported session index: older schema");
             let focused = focused_connection(&path).err().unwrap();
             assert_eq!(focused.to_string(), error);
             assert_eq!(fs::read(&path).unwrap(), original);

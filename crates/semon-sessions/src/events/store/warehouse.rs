@@ -495,6 +495,98 @@ fn write_fact(
     }
 }
 
+pub(super) fn runtime_binding(
+    tx: &Transaction<'_>,
+    wanted: &crate::events::warehouse::RuntimeSource<'_>,
+) -> rusqlite::Result<Option<crate::events::warehouse::RuntimeBinding>> {
+    use crate::events::warehouse::RuntimeBinding;
+    let namespace = super::origin_namespace(tx)?;
+    let found = tx.prepare_cached(
+        "SELECT s.source,s.ledger,(SELECT value FROM meta WHERE key='incarnation')
+           FROM warehouse_current c JOIN warehouse_source s USING(source)
+          WHERE c.path=?1 AND s.origin=?2 AND s.harness=?3
+            AND EXISTS(SELECT 1 FROM fact_session_observation f
+                        WHERE f.source=s.source AND f.kind IN ('physical','header') AND f.native_id=?4)",
+    )?.query_row(params![wanted.path, namespace, wanted.harness, wanted.native_id], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+    }).optional()?;
+    let Some((source, ledger, index)) = found else {
+        return Ok(None);
+    };
+    let ledger: Ledger =
+        serde_json::from_str(&ledger).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let revision = (
+        ledger.stat.dev,
+        ledger.stat.ino,
+        ledger.offset,
+        ledger.prefix,
+        ledger.tail,
+        ledger.stat.changed_ns,
+    );
+    Ok((revision == wanted.revision).then_some(RuntimeBinding {
+        index,
+        namespace,
+        source,
+    }))
+}
+
+pub(super) fn write_runtime(
+    tx: &Transaction<'_>,
+    source: i64,
+    capture: &crate::events::warehouse::RuntimeCapture,
+) -> rusqlite::Result<bool> {
+    let pid = capture.pid;
+    let start = i64::try_from(capture.start).map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let last: Option<(i64, i64)> = tx
+        .prepare_cached(
+            "SELECT capture,start FROM fact_process_observation
+          WHERE source=?1 AND pid=?2 ORDER BY capture DESC LIMIT 1",
+        )?
+        .query_row(params![source, pid], |row| Ok((row.get(0)?, row.get(1)?)))
+        .optional()?;
+    let clock = match last {
+        Some((clock, previous_start)) => {
+            if previous_start == start {
+                let environment = tx
+                    .prepare_cached(
+                        "SELECT parent_harness,parent_id,call_id FROM fact_environment_observation
+                      WHERE source=?1 AND capture=?2 AND pid=?3 AND start=?4",
+                    )?
+                    .query_row(params![source, clock, pid, start], |row| {
+                        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                    })
+                    .optional()?;
+                let mut query = tx.prepare_cached(
+                    "SELECT ancestor_pid FROM fact_ancestor_observation
+                      WHERE source=?1 AND capture=?2 AND pid=?3 AND start=?4 ORDER BY ordinal",
+                )?;
+                let ancestors = query
+                    .query_map(params![source, clock, pid, start], |row| {
+                        row.get::<_, u32>(0)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                if environment == capture.environment && ancestors == capture.ancestors {
+                    return Ok(false);
+                }
+            }
+            capture
+                .clock
+                .max(clock.checked_add(1).ok_or(rusqlite::Error::InvalidQuery)?)
+        }
+        None => capture.clock,
+    };
+    fact!(tx, fact_process_observation, [source=>source,capture=>clock,pid=>pid,start=>start])?;
+    if let Some((harness, id, call)) = &capture.environment {
+        fact!(tx, fact_environment_observation, [source=>source,capture=>clock,pid=>pid,start=>start,
+            parent_harness=>harness,parent_id=>id,call_id=>call])?;
+    }
+    for (ordinal, ancestor) in capture.ancestors.iter().enumerate() {
+        fact!(tx, fact_ancestor_observation, [source=>source,capture=>clock,pid=>pid,start=>start,
+            ordinal=>ordinal as i64,ancestor_pid=>ancestor])?;
+    }
+    Ok(true)
+}
+
 pub(super) fn withdraw(tx: &Transaction<'_>, path: &str) -> rusqlite::Result<()> {
     let removed = tx
         .prepare_cached("DELETE FROM warehouse_current WHERE path=?1 RETURNING source")?

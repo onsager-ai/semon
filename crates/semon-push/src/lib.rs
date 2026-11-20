@@ -1945,6 +1945,7 @@ mod tests {
                 all: true,
                 since: Duration::from_secs(86_400),
                 session: None,
+                index_recovery: Default::default(),
                 facts: None,
                 annotations: root.join("annotations.jsonl"),
                 scan_window: false,

@@ -1,3 +1,4 @@
+mod index_rebuild;
 mod native_prefix;
 pub use native_prefix::codex_native_id_prefix;
 mod native_homes;
@@ -32,13 +33,14 @@ pub use analytics_writer::{
 };
 
 /// Refresh the complete local Catalog and activity through the native producer.
-/// Strict producer mode propagates index failures without recovery or reset.
+/// The producer propagates Index and recovery failures.
 /// The caller owns the analytics writer lock before invoking this operation.
 pub fn refresh_analytics_catalog(
     options: &Options,
     cancelled: impl Fn() -> bool,
 ) -> io::Result<()> {
     let options = Options {
+        index_recovery: IndexRecovery::Refuse,
         scan_window: false,
         ..options.clone()
     };
@@ -221,6 +223,28 @@ pub use viewer::{
     serve_listener, serve_with_asi,
 };
 
+/// Which native custody the calling host may use to recover an Index.
+#[derive(Clone, Debug, Default)]
+pub enum IndexRecovery {
+    #[default]
+    Refuse,
+    Local,
+    Received(PathBuf),
+}
+
+impl IndexRecovery {
+    pub(crate) fn allowed(&self) -> bool {
+        !matches!(self, Self::Refuse)
+    }
+
+    pub(crate) fn receiver_custody(&self) -> Option<&Path> {
+        match self {
+            Self::Received(root) => Some(root),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Options {
     pub claude_home: PathBuf,
@@ -241,6 +265,8 @@ pub struct Options {
     /// working directories on this disk. For logs copied from another
     /// machine.
     pub facts: Option<PathBuf>,
+    /// Recovery requires an explicit grant from the source-owning host.
+    pub index_recovery: IndexRecovery,
     /// Read-only producer-owned session annotation JSONL file.
     pub annotations: PathBuf,
     /// Index only the log files modified within the window (`since`, unless
@@ -278,6 +304,7 @@ impl Default for Options {
             since: Duration::from_secs(24 * 60 * 60),
             session: None,
             facts: None,
+            index_recovery: Default::default(),
             annotations: annotations::default_path(&home, env::var_os("XDG_STATE_HOME").as_deref()),
             scan_window: false,
         }

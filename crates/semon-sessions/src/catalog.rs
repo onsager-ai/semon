@@ -493,7 +493,8 @@ pub(crate) fn selection_from_reply(
 /// remain explicit. The query contract matches GET /api/sessions.
 pub fn session_catalog_page(options: &Options, machine: &str, query: &str) -> ViewerReply {
     match Request::parse(query) {
-        Ok(request) => page(options, machine, request),
+        Ok(request) => crate::index_rebuild::history_reply(options)
+            .unwrap_or_else(|| page(options, machine, request)),
         Err(reply) => reply,
     }
 }
@@ -999,6 +1000,9 @@ pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
 }
 
 pub(crate) fn sqlite_page_ready(options: &Options) -> io::Result<bool> {
+    if crate::index_rebuild::status(&options.cache).is_some() {
+        return Ok(false);
+    }
     let path = EventCache::path(&options.cache);
     match std::fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() && metadata.len() == 0 => return Ok(false),
@@ -1913,6 +1917,7 @@ mod tests {
                 all: true,
                 since: Duration::from_secs(86400),
                 session: None,
+                index_recovery: Default::default(),
                 facts: Some(root.join("facts.json")),
                 annotations: root.join("annotations.jsonl"),
                 scan_window: false,

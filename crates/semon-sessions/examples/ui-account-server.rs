@@ -247,6 +247,7 @@ fn main() {
         all: true,
         since: Duration::from_secs(24 * 60 * 60),
         session: None,
+        index_recovery: Default::default(),
         facts: None,
         annotations: PathBuf::from(&args[5]).with_file_name("annotations.jsonl"),
         scan_window: false,

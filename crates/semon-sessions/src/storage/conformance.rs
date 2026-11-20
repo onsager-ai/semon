@@ -57,6 +57,7 @@ fn source(root: &Path, name: &str) -> Options {
         all: true,
         since: Duration::from_secs(86400),
         session: None,
+        index_recovery: Default::default(),
         facts: Some(root.join(name).join("facts.json")),
         annotations: root.join("annotations.jsonl"),
         scan_window: false,

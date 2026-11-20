@@ -1348,11 +1348,67 @@ fn scan(
     if options.facts.is_none() {
         cache.archive_consumed(options, &seen);
     }
+    capture_runtime(options, machine, &files, cache)?;
     cache.end_scan();
     texts
         .prompt_caches
         .retain(|path, _| seen.contains(path.to_string_lossy().as_ref()));
     Ok((files, skipped, cache.index_clone_duration()))
+}
+
+fn capture_runtime(
+    options: &Options,
+    machine: &MachineFacts,
+    files: &[SourceFile],
+    cache: &mut EventCache,
+) -> io::Result<()> {
+    use events::warehouse::{RuntimeCapture, RuntimeSource};
+    if files.is_empty() || !cache.persistent() {
+        return Ok(());
+    }
+    let claude = pid_files(options, machine);
+    let codex = machine.codex_lock_pids(options).unwrap_or_default();
+    for file in files.iter().filter(|file| !file.archived) {
+        let Some(path) = file.path.to_str() else {
+            continue;
+        };
+        let source = RuntimeSource {
+            path,
+            harness: file.harness(),
+            native_id: &file.id,
+            revision: file.revision,
+        };
+        match &file.role {
+            Role::Codex(_) => {
+                let Some(&pid) = codex.get(&file.id) else {
+                    continue;
+                };
+                let Some(start) = machine.proc_start(options, pid) else {
+                    continue;
+                };
+                cache.capture_runtime(&source, || {
+                    let capture = RuntimeCapture::read(options, machine, pid, start)?;
+                    let owner = machine.codex_lock_pids(options)?.get(&file.id).copied();
+                    (owner == Some(pid) && machine.proc_start(options, pid) == Some(start))
+                        .then_some(capture)
+                })?;
+            }
+            Role::Top { .. } => {
+                for pid in claude
+                    .iter()
+                    .filter(|pid| pid.alive && pid.session == file.id)
+                {
+                    if let Some(start) = pid.start {
+                        cache.capture_runtime(&source, || {
+                            RuntimeCapture::read(options, machine, pid.pid, start)
+                        })?;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn verify_sidecars(files: &[SourceFile], options: &Options) -> io::Result<()> {

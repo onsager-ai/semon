@@ -962,6 +962,18 @@ pub(crate) struct CatalogPendingBatch {
 /// ledger row it was based on, so two processes sharing one store never
 /// apply the same lines twice.
 pub(crate) trait IndexStore: Send {
+    fn runtime_binding(
+        &self,
+        source: &warehouse::RuntimeSource<'_>,
+    ) -> Result<Option<warehouse::RuntimeBinding>, StoreError>;
+
+    fn write_runtime_capture(
+        &mut self,
+        source: &warehouse::RuntimeSource<'_>,
+        expected: &warehouse::RuntimeBinding,
+        capture: &warehouse::RuntimeCapture,
+    ) -> Result<bool, StoreError>;
+
     /// Archive results from this scan, held until source publication.
     fn record_chain_admission(
         &mut self,
@@ -1448,7 +1460,7 @@ impl EventCache {
     /// `sessions-index.json` gives `sessions-index.sqlite3`. The retired tree
     /// JSON file is left untouched; tree and focused reads use this store.
     pub(crate) fn path(v1_cache: &Path) -> PathBuf {
-        let path = v1_cache.with_extension("sqlite3");
+        let path = crate::index_rebuild::active_path(v1_cache);
         crate::pricing::runtime::register_index(path.clone());
         path
     }
@@ -1483,12 +1495,48 @@ impl EventCache {
     /// Writable producer cache with lazy, exact-path FileIndex loads. Never falls
     /// back to a full restore or an in-memory producer after an open failure.
     pub(crate) fn open_scoped(v1_cache: &Path) -> Result<Self, String> {
-        let (store, loaded) = store::open_scoped(&Self::path(v1_cache))?;
+        Self::open_scoped_at(&Self::path(v1_cache), v1_cache)
+    }
+
+    pub(crate) fn open_scoped_at(path: &Path, lock_cache: &Path) -> Result<Self, String> {
+        let (store, loaded) = store::open_scoped(path)?;
         let mut cache = Self::from_loaded(loaded);
         cache.store = Some(store);
         cache.scoped = true;
-        cache.lock_cache = Some(v1_cache.to_owned());
+        cache.lock_cache = Some(lock_cache.to_owned());
         Ok(cache)
+    }
+
+    pub(crate) fn capture_runtime(
+        &mut self,
+        source: &warehouse::RuntimeSource<'_>,
+        observe: impl FnOnce() -> Option<warehouse::RuntimeCapture>,
+    ) -> io::Result<()> {
+        if let Some(store) = self.store.as_mut()
+            && let Some(binding) = store
+                .runtime_binding(source)
+                .map_err(|error| io::Error::other(error.to_string()))?
+            && let Some(capture) = observe()
+        {
+            store
+                .write_runtime_capture(source, &binding, &capture)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn committed_rebuild_ledger(&self, path: &Path) -> io::Result<Ledger> {
+        let key = path
+            .to_str()
+            .ok_or_else(|| io::Error::other("invalid source path"))?;
+        let store = self
+            .store
+            .as_ref()
+            .ok_or_else(|| io::Error::other("rebuild Index unavailable"))?;
+        store
+            .ledger(key)
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .ok_or_else(|| io::Error::other("source boundary was not committed"))
     }
 
     /// Only the complete native background scan owns disappearance
@@ -2975,63 +3023,26 @@ pub(crate) fn scan_archive(
                 "archive source differs from committed index generation",
             ));
         }
-        let harness = native.root.as_str();
-        let mut index = FileIndex {
-            warehouse_observations: cache.warehouse_batch(harness),
-            ..FileIndex::default()
-        };
-        index.bodies.begin(&path, harness);
-        if harness == "codex" {
-            index.native_usage_observations = Some(Vec::new());
-            let mut line = Vec::new();
-            BufReader::new(&mut *file).read_until(b'\n', &mut line)?;
-            index.codex_header = Some(
-                serde_json::from_slice::<Value>(&line)
-                    .ok()
-                    .as_ref()
-                    .map(crate::native_header::CodexHeader::from_record)
-                    .unwrap_or_default(),
-            );
-            index.warehouse_header(&path, line.ends_with(b"\n"));
-            if index
+        let (mut index, offset, captured) =
+            parse_archived_original(file, &path, &native.root, native.sidecar.clone(), cache)?;
+        if native.root == "codex"
+            && index
                 .codex_header
                 .as_ref()
                 .and_then(|header| header.native_id(&path))
                 .as_deref()
                 != Some(native.native_id.as_str())
-            {
-                return Err(io::Error::other("archive native identity mismatch"));
-            }
+        {
+            return Err(io::Error::other("archive native identity mismatch"));
         }
-        index.claude_sidecar = native.sidecar.clone();
-        index.warehouse_sidecar();
-        if harness != "copilot" {
-            index.tree_summary = Some(crate::native_tree::Summary::repair(file, 0, harness)?.0);
-            index.marker_index = Some(crate::native_marker::Index::repair(file, 0)?);
-        }
-        index.handoff_index = Some(crate::native_handoff::Index::repair(file, 0)?);
-        index.dirty_rows = Some(DirtyRows::begin(&index));
-        let (offset, parsed, _) = parse(file, 0, harness, &mut index, None, None)?;
-        index.dirty_rows = None;
-        let captured = crate::source_chunks::capture(file, offset, 0)?;
         if offset != native.ledger.offset
             || captured.prefix != native.ledger.prefix
             || captured.tail != native.ledger.tail
-            || captured.parsed != parsed
         {
             return Err(io::Error::other("archive consumed-prefix proof mismatch"));
         }
+        verify_archive_metadata(&index, &native.ledger, file)?;
         index.source_chunks = Some(Arc::new(captured.chunks));
-        if index
-            .marker_index
-            .as_ref()
-            .is_some_and(|markers| !markers.valid(&native.ledger) || markers.verify(file).is_err())
-            || index.handoff_index.as_ref().is_some_and(|handoffs| {
-                !handoffs.valid(&native.ledger) || handoffs.verify(file).is_err()
-            })
-        {
-            return Err(io::Error::other("archive native metadata proof mismatch"));
-        }
         if cache.commit(&key, recorded.as_ref(), None, &native.ledger, &index) {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -3064,6 +3075,153 @@ pub(crate) fn scan_archive(
         *dirty = true;
         Ok(index)
     })
+}
+
+fn parse_archived_original(
+    file: &mut fs::File,
+    path: &Path,
+    harness: &str,
+    sidecar: Option<crate::native_sidecar::ClaudeSidecar>,
+    cache: &EventCache,
+) -> io::Result<(FileIndex, u64, crate::source_chunks::Captured)> {
+    let mut index = FileIndex {
+        warehouse_observations: cache.warehouse_batch(harness),
+        ..FileIndex::default()
+    };
+    index.bodies.begin(path, harness);
+    if harness == "codex" {
+        index.native_usage_observations = Some(Vec::new());
+        let mut line = Vec::new();
+        BufReader::new(&mut *file).read_until(b'\n', &mut line)?;
+        index.codex_header = Some(
+            serde_json::from_slice::<Value>(&line)
+                .ok()
+                .as_ref()
+                .map(crate::native_header::CodexHeader::from_record)
+                .unwrap_or_default(),
+        );
+        index.warehouse_header(path, line.ends_with(b"\n"));
+    }
+    index.claude_sidecar = sidecar;
+    index.warehouse_sidecar();
+    if harness != "copilot" {
+        index.tree_summary = Some(crate::native_tree::Summary::repair(file, 0, harness)?.0);
+        index.marker_index = Some(crate::native_marker::Index::repair(file, 0)?);
+    }
+    index.handoff_index = Some(crate::native_handoff::Index::repair(file, 0)?);
+    index.dirty_rows = Some(DirtyRows::begin(&index));
+    let (offset, parsed, _) = parse(file, 0, harness, &mut index, None, None)?;
+    index.dirty_rows = None;
+    let captured = crate::source_chunks::capture(file, offset, 0)?;
+    if captured.parsed != parsed {
+        return Err(io::Error::other("archive parsed-prefix proof mismatch"));
+    }
+    Ok((index, offset, captured))
+}
+
+fn verify_archive_metadata(
+    index: &FileIndex,
+    ledger: &Ledger,
+    file: &mut fs::File,
+) -> io::Result<()> {
+    if index
+        .marker_index
+        .as_ref()
+        .is_some_and(|markers| !markers.valid(ledger) || markers.verify(file).is_err())
+        || index
+            .handoff_index
+            .as_ref()
+            .is_some_and(|handoffs| !handoffs.valid(ledger) || handoffs.verify(file).is_err())
+    {
+        return Err(io::Error::other("archive native metadata proof mismatch"));
+    }
+    Ok(())
+}
+
+/// Re-admit a verified archive generation without claiming that its bytes
+/// still live at the logical path. Withdrawal keeps its warehouse facts and
+/// removes the live selector and temporary legacy body/Index rows.
+pub(crate) fn replay_archive_history(
+    cache: &mut EventCache,
+    stage: &Path,
+    path: &Path,
+    harness: &str,
+    chain: &crate::archive::Chain,
+    bytes: &mut dyn Read,
+    live: Option<Stat>,
+) -> io::Result<()> {
+    if let Some(stat) = live.filter(|stat| stat.size >= chain.length) {
+        let mut log = LogFile::open(path)?;
+        if Stat::from_metadata(&log.metadata()?)? != stat {
+            return Err(io::Error::other("original changed during archive replay"));
+        }
+        let (prefix, _) = consumed_hashes(&mut log, chain.length)?;
+        if crate::sealed::hex(&prefix) == chain.sha256 {
+            return Ok(()); // The current original covers this archived prefix.
+        }
+    }
+    let scratch = stage.join("archive-replay.raw");
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&scratch)?;
+    let result = (|| {
+        let copied = io::copy(bytes, &mut file)?;
+        file.seek(SeekFrom::Start(0))?;
+        let whole = crate::source_chunks::capture(&mut file, copied, 0)?;
+        if copied != chain.length || crate::sealed::hex(&whole.prefix) != chain.sha256 {
+            return Err(io::Error::other("archive chain changed during replay"));
+        }
+        file.seek(SeekFrom::Start(0))?;
+        let (mut index, offset, captured) =
+            parse_archived_original(&mut file, path, harness, None, cache)?;
+        let ledger = Ledger {
+            // The carrier is the immutable archived generation, not the live
+            // path. The chain id supplies its stable synthetic file identity.
+            stat: Stat {
+                dev: 0,
+                ino: u64::from_str_radix(&chain.chain_id[..15], 16)
+                    .map_err(|error| io::Error::other(error.to_string()))?,
+                size: chain.length,
+                modified_ns: u128::from(chain.admitted_at) * 1_000_000_000,
+                changed_ns: None,
+            },
+            offset,
+            prefix: captured.prefix,
+            tail: captured.tail,
+        };
+        verify_archive_metadata(&index, &ledger, &mut file)?;
+        index.source_chunks = Some(Arc::new(captured.chunks));
+        let key = path
+            .to_str()
+            .ok_or_else(|| io::Error::other("invalid archive source path"))?;
+        let store = cache
+            .store
+            .as_mut()
+            .ok_or_else(|| io::Error::other("rebuild Index unavailable"))?;
+        if store
+            .commit_file(key, None, None, &ledger, &index)
+            .map_err(|error| io::Error::other(error.to_string()))?
+            != Outcome::Written
+            || store
+                .remove_files(&[(key.to_owned(), Some(ledger))])
+                .map_err(|error| io::Error::other(error.to_string()))?
+                != Outcome::Written
+            || store
+                .ledger(key)
+                .map_err(|error| io::Error::other(error.to_string()))?
+                .is_some()
+        {
+            return Err(io::Error::other(
+                "historical archive boundary was not committed",
+            ));
+        }
+        Ok(())
+    })();
+    drop(file);
+    fs::remove_file(&scratch)?;
+    result
 }
 
 pub(crate) fn scan_file(

@@ -978,6 +978,48 @@ fn read_custody(dir: &Path) -> io::Result<Option<Custody>> {
     Ok(serde_json::from_slice(&bytes).ok())
 }
 
+/// Verify an independently discovered receiver seal without changing it.
+pub(crate) fn verify_recovery_custody(
+    log: &Path,
+    source: &str,
+    archive: &crate::archive::Archive,
+    has_original: bool,
+) -> io::Result<Option<crate::archive::Chain>> {
+    let dir = seal_dir(log);
+    let manifest = read_manifest(&dir)?;
+    let path = dir.join(CUSTODY);
+    let file = match crate::open_input(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if manifest.is_some() && !has_original {
+                return Err(invalid("seal manifest has no original or archive custody"));
+            }
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(4097).read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        return Err(invalid("oversized seal custody record"));
+    }
+    let held: Custody = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let manifest = manifest.ok_or_else(|| invalid("seal custody has no manifest"))?;
+    if held.generation != manifest.generation
+        || held.source != source
+        || held.archive != archive.directory()?
+        || held.chain.length < manifest.end()
+    {
+        return Err(invalid(
+            "seal custody does not cover its original generation",
+        ));
+    }
+    archive.with_verified_chain(source, &held.chain, |bytes| {
+        compare_segments(&dir, &manifest, bytes)
+    })?;
+    Ok(Some(held.chain))
+}
+
 /// Records, durably, that an archive chain holds the first `covered` bytes
 /// of `log` as it reads through [`LogFile`]: the whole log, which must be
 /// `covered` bytes long still. Until then a seal's segments are never

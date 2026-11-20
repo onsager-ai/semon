@@ -431,7 +431,7 @@ fn usage_lists_materialize() {
 
 #[test]
 fn materialize_refuses_old_and_new_sqlite_schemas_unchanged() {
-    for schema in [1, 2_147_483_647] {
+    for schema in [1, 49, 2_147_483_647] {
         let home = fixture::Fixture::new();
         let index = home.root.join("state/index.sqlite3");
         fs::create_dir_all(index.parent().unwrap()).unwrap();
@@ -452,7 +452,34 @@ fn materialize_refuses_old_and_new_sqlite_schemas_unchanged() {
         assert_eq!(fs::read(index).unwrap(), before);
         assert!(!home.root.join("state/analytics-namespace").exists());
         assert!(!home.root.join("state/analytics-store").exists());
+        assert_eq!(fs::read_dir(home.root.join("state")).unwrap().count(), 1);
     }
+}
+
+#[test]
+fn native_query_with_a_borrowed_cache_refuses_without_rebuilding() {
+    let home = fixture::Fixture::new();
+    let state = home.root.join("state");
+    fs::create_dir(&state).unwrap();
+    let index = state.join("index.sqlite3");
+    let connection = rusqlite::Connection::open(&index).unwrap();
+    connection
+        .execute_batch("CREATE TABLE sentinel(value TEXT); PRAGMA user_version=49;")
+        .unwrap();
+    drop(connection);
+    let before = fs::read(&index).unwrap();
+    let output = home
+        .command(env!("CARGO_BIN_EXE_semon"))
+        .args(["query", "list_sessions", "--all", "--cache"])
+        .arg(state.join("index.json"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unsupported session index: older schema")
+    );
+    assert_eq!(fs::read(index).unwrap(), before);
+    assert_eq!(fs::read_dir(state).unwrap().count(), 1);
 }
 
 #[test]
@@ -594,6 +621,7 @@ fn materialize_refuses_a_symlinked_index_without_publishing() {
     );
     assert!(!state.join("analytics-namespace").exists());
     assert!(!state.join("analytics-store").exists());
+    assert_eq!(fs::read_dir(state).unwrap().count(), 1);
 }
 
 #[test]

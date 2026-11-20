@@ -23,6 +23,7 @@ fn options(root: &Path, machine: usize) -> Options {
         all: true,
         since: Duration::from_secs(86400),
         session: None,
+        index_recovery: Default::default(),
         facts: None,
         annotations: home.join("annotations.jsonl"),
         scan_window: false,

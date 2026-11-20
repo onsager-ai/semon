@@ -366,27 +366,39 @@ retention markers, together with the existing scheduling, activity, body and pro
 projections. The origin warehouse commits Claude and Codex metadata observations,
 source membership and the maintenance cursor with that source's Index advancement. See [cohort-bound index evidence](retained-native-projections.md#cohort-bound-index-evidence).
 
-Normal writable producer opens (complete and scoped/background) refuse older
-indexes with `unsupported session index: older schema`, without mutation or an
-automatic rebuild. Schema 49 uses the same refusal path as earlier schemas.
-Older/future parser and storage contracts, malformed
-metadata, nonempty schema zero and foreign stores also remain unavailable.
-Selected/focused readers retain read-only qualification and never initialize,
-convert or repair an unsupported index.
+Writable and focused Index opens refuse unsupported storage before mutation.
+When the source-owning host encounters a refused Index, it inventories its configured Claude
+and Codex roots, verified standalone archive manifests, and, for received
+machines, receiver generations, Facts and archive custody. A missing or changed
+referenced original or incomplete custody inventory stops recovery. Rebuild
+never uses the refused Index as an inventory or copies rows from it. Analytics
+materialization, ASI and callers supplying an Index without native custody
+retain the existing refusal behavior.
 
-Explicit operator recovery is separate from normal opening and must first
-establish supported original source availability and custody. Old versions may
-hold the sole retained history, recipes, reported facts or proof metadata; a
-schema number never proves that discarding them is safe. No migration, dual
-reader or automatic reset is provided. Native logs, archive objects, credentials,
-retained history and unrelated files remain untouched. Physical corruption
-retains its existing set-aside/recovery behavior.
+The host admits verified originals through the normal native parser and Index
+write transactions in a private `.index-rebuild-<id>/` staging directory beside
+the cache. After all inventoried source boundaries are committed and rechecked,
+it checkpoints and publishes `sessions-index.rebuilt-50-41.sqlite3` atomically
+(`50` is the storage schema and `41` is the parser version). The original
+`sessions-index.sqlite3` remains at its original path with its `-wal` and `-shm`.
+Temporary stages abandoned by a crash are never selected. Until publication the
+host returns HTTP 503 `history_rebuilding` with progress and `Retry-After`.
+An inventory or replay error leaves history unavailable and reports
+`history_recovery_failed`.
 
-Reindexing cannot recover history, retained recipes or reported facts whose
-original supported native source bytes are gone or inaccessible. Archive bytes
-are preserved but old derived archive markers are not converted into new read
-authority; an authorized source/provider must supply supported original bytes.
-Unsupported stores propagate errors rather than empty in-memory history.
+Verified archive-only standalone sources retain their native receipts. Older
+archive generations without a current carrier can contribute metadata facts;
+they grant no current source selection or body access. The original custody
+records and archive bytes remain authoritative. Data available only inside the
+refused Index, including old projections or reported runtime snapshots, stays
+preserved there. No migration, dual reader or automatic reset is provided.
+
+Runtime capture writes process start, allowlisted `SEMON_PARENT` identifiers
+and ancestor PIDs in a separate transaction after source admission. It compares
+the Index namespace and the source incarnation before committing. The capture
+clock orders changes to a process's evidence. Stored observations grant no live
+runtime or body authority. The existing Catalog and transcript readers remain
+in use through phase 2.
 
 Current native usage writes persist the normalized source facts and dimensions
 with the ledger. Tree writes maintain copied-usage identities through the current

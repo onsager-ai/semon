@@ -77,6 +77,12 @@ fn wait_for_catalog_read(
     deadline: Instant,
     allow_wait: bool,
 ) -> Result<Option<io::Error>, ViewerReply> {
+    if !view.evidence.storage.is_postgres()
+        && let Some(reply) = crate::index_rebuild::history_reply(view.options())
+    {
+        let _ = view.note_catalog_read();
+        return Err(reply);
+    }
     if allow_wait {
         view.wait_until_initial_catalog(deadline)
             .map_err(|_| catalog_unavailable())?;
@@ -854,17 +860,17 @@ impl ViewerCore {
                 continue;
             };
             let options = machines.options(name, seen);
-            let view = match old.remove(&seen.machine.id) {
+            let (view, added) = match old.remove(&seen.machine.id) {
                 Some(view)
                     if view.options().claude_home == options.claude_home
                         && view.options().codex_home == options.codex_home
                         && view.options().copilot_home == options.copilot_home =>
                 {
-                    view
+                    (view, false)
                 }
                 replaced => {
                     gone.extend(replaced);
-                    self.view(&seen.machine.id, options)
+                    (self.view(&seen.machine.id, options), true)
                 }
             };
             if previous
@@ -879,6 +885,9 @@ impl ViewerCore {
                 machines.copy_facts(name, seen, hosts, warned, &sources);
             }
             *write_lock(&view.evidence.received_machine) = Some(seen.machine.clone());
+            if added && crate::index_rebuild::queue(view.options()) {
+                let _ = view.note_catalog_read();
+            }
             next.push((seen.machine.id.clone(), view));
         }
         next[fixed..].sort_by(|(a, av), (b, bv)| {
@@ -914,6 +923,23 @@ impl ViewerCore {
         self.refresh = refresh;
         for (_, view) in self.views().iter() {
             view.set_refresh(refresh);
+        }
+    }
+
+    /// Start host recovery for configured SQLite placements before first read.
+    pub(crate) fn start_history_recovery(&self) {
+        if let Err(error) = self.follow() {
+            eprintln!("semon: cannot discover received history: {error}");
+        }
+        let views = self.views();
+        let fixed = self
+            .received
+            .as_ref()
+            .map_or(views.len(), |received| received.fixed);
+        for (_, view) in &views[..fixed] {
+            if !view.evidence.storage.is_postgres() && crate::index_rebuild::queue(view.options()) {
+                let _ = view.note_catalog_read();
+            }
         }
     }
 
@@ -1629,6 +1655,13 @@ impl ViewerCore {
         } else {
             key.as_str()
         };
+        if path != "/api/session-capabilities"
+            && !view.evidence.storage.is_postgres()
+            && let Some(reply) = crate::index_rebuild::history_reply(view.options())
+        {
+            let _ = view.note_catalog_read();
+            return reply;
+        }
         #[cfg(feature = "postgres")]
         if view.evidence.storage.is_postgres() {
             if let Err(reply) = wait_for_catalog_read(view, deadline, allow_catalog_wait) {
@@ -2100,6 +2133,7 @@ mod tests {
                 all: true,
                 since: std::time::Duration::from_secs(86400),
                 session: None,
+                index_recovery: Default::default(),
                 facts: None,
                 annotations: home.join("annotations.jsonl"),
                 scan_window: false,
@@ -2166,6 +2200,7 @@ mod tests {
                 all: true,
                 since: std::time::Duration::from_secs(86400),
                 session: None,
+                index_recovery: Default::default(),
                 facts: None,
                 annotations: home.join("annotations.jsonl"),
                 scan_window: false,
@@ -2307,6 +2342,7 @@ mod tests {
                 all: false,
                 since: std::time::Duration::from_secs(86400),
                 session: None,
+                index_recovery: Default::default(),
                 facts: None,
                 scan_window: false,
                 annotations: home.join("annotations.jsonl"),
@@ -2448,6 +2484,7 @@ mod tests {
             all: false,
             since: std::time::Duration::from_secs(86400),
             session: None,
+            index_recovery: Default::default(),
             facts: None,
             annotations: root.join("annotations.jsonl"),
             scan_window: false,

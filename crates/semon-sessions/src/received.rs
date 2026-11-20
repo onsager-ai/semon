@@ -222,6 +222,12 @@ impl ReceivedMachines {
             proc_root: nowhere,
             cache: state.join("sessions-index.json"),
             facts: Some(state.join("facts.json")),
+            index_recovery: match &self.options.index_recovery {
+                crate::IndexRecovery::Received(dir) if dir == &self.dir => {
+                    crate::IndexRecovery::Received(root)
+                }
+                _ => crate::IndexRecovery::Refuse,
+            },
             ..self.options.clone()
         }
     }
@@ -307,6 +313,16 @@ impl ReceivedMachines {
         // acquire that mutex. Serialize publication under the same facts fence
         // as hosted receivers, and retain dirty work if publication fails.
         let publish = || -> io::Result<()> {
+            let owner = sources.custody_source(&seen.machine.id)?;
+            if !owner.storage.is_postgres() && crate::index_rebuild::needed(&owner.options)? {
+                // A rebuilt Index has no previous Facts dependency to invalidate.
+                // Fence this independently authorized reader copy against replay.
+                let _lock =
+                    crate::source_change::SourceLock::acquire(&owner.options, "facts", true)?;
+                if crate::index_rebuild::needed(&owner.options)? {
+                    return crate::write_facts(&copy, &facts);
+                }
+            }
             let intent =
                 crate::SessionFactsWrite::begin_observed_in(sources, &seen.machine.id, &facts)?;
             crate::write_facts(&copy, &facts)?;
@@ -347,7 +363,7 @@ fn identity(_: &fs::Metadata) -> (u64, u64) {
 /// regular file its path names (checked on the opened file). A file
 /// replaced between the check and the open is read again, up to three
 /// times.
-fn read_facts(path: &Path) -> io::Result<Facts> {
+pub(crate) fn read_facts(path: &Path) -> io::Result<Facts> {
     let mut attempts = 0;
     let bytes = loop {
         attempts += 1;

@@ -145,6 +145,15 @@ impl NativeSource {
     }
 }
 
+/// Durable archive inventory, independent of the Event Index.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RecoveryRecord {
+    pub(crate) source: String,
+    pub(crate) native: Option<NativeSource>,
+    pub(crate) chains: Vec<Chain>,
+    files: Vec<crate::events::Stat>,
+}
+
 /// One line of `sources.log`.
 #[derive(Serialize, Deserialize)]
 struct Record {
@@ -535,6 +544,66 @@ impl Archive {
             self.remember(&dir, &chain)?;
         }
         Ok(begun.then(|| evidence(manifest.chains.last().unwrap())))
+    }
+
+    pub(crate) fn recovery_inventory(&self) -> io::Result<Vec<RecoveryRecord>> {
+        match fs::symlink_metadata(&self.dir) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+            Ok(meta) if !meta.is_dir() => return Err(invalid("archive directory is not regular")),
+            Ok(_) => {}
+        }
+        if !self.dir.join(SOURCES).try_exists()? {
+            // The journal is synced before any source directory is published.
+            // A surviving manifest without the journal leaves coverage unknown.
+            for entry in fs::read_dir(&self.dir)? {
+                if is_id(&entry?.file_name().to_string_lossy()) {
+                    return Err(invalid("archive source journal is missing"));
+                }
+            }
+            return Ok(Vec::new());
+        }
+        let _guard = self.lock(false)?;
+        let mut known = self.known();
+        self.refresh(&mut known)?;
+        let mut inventory = Vec::new();
+        let mut ids = std::collections::BTreeSet::new();
+        for (source, id) in &known.sources {
+            if !ids.insert(id.as_str()) {
+                return Err(invalid("ambiguous archive source journal"));
+            }
+            let dir = self.dir.join(id);
+            let manifest = read_manifest(&dir)?;
+            if &manifest.source != source {
+                return Err(invalid(
+                    "archive source manifest is missing or differs from its journal",
+                ));
+            }
+            let files = manifest
+                .chains
+                .iter()
+                .map(|chain| {
+                    let path = dir.join(format!("{}.zst", chain.chain_id));
+                    crate::events::Stat::from_metadata(&crate::open_input(&path)?.metadata()?)
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            inventory.push(RecoveryRecord {
+                source: source.clone(),
+                native: manifest.native,
+                chains: manifest.chains,
+                files,
+            });
+        }
+        for entry in fs::read_dir(&self.dir)? {
+            let name = entry?.file_name();
+            if let Some(name) = name.to_str()
+                && is_id(name)
+                && !ids.contains(name)
+            {
+                return Err(invalid("archive manifest has no source journal record"));
+            }
+        }
+        Ok(inventory)
     }
 
     /// Discover only sources admitted under these exact configured native roots.
@@ -960,7 +1029,17 @@ impl Archive {
             if !is_id(&record.id) {
                 return Err(invalid("an archive source id that is not an id"));
             }
-            known.sources.entry(record.source).or_insert(record.id);
+            match known.sources.entry(record.source) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(record.id);
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if entry.get() != &record.id =>
+                {
+                    return Err(invalid("ambiguous archive source journal"));
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
         }
         known.read += whole as u64;
         known.journal = Some(observed);
