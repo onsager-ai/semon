@@ -37,5 +37,6 @@ pub fn session_catalog_capabilities(
             "large_native_records":false,"attachment":endpoints.selected_entry,"global_union":false,"full_text_search":false,
             "metadata_search":true,"filters":["harness","repo","no_repo","model","q"],"order":"last_desc_key_asc"}).to_string().into_bytes(),
         etag:None,
+        extra_headers: Vec::new(),
     }
 }

@@ -129,5 +129,6 @@ fn reply(matches: Vec<Value>, unavailable: usize) -> ViewerReply {
             .to_string()
             .into_bytes(),
         etag: None,
+        extra_headers: Vec::new(),
     }
 }

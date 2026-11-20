@@ -20,6 +20,7 @@ The disjoint `/session/` prefix is available in the standalone tiny_http shell a
 Hub's authenticated fallback router:
 
 * Transcript: `/session/<source_key>/<catalog_key>`.
+* Native-ID redirect: `/session/by-native/<harness>/<native-id>`, resolving a unique current native ID across configured sources before redirecting to its source-qualified transcript URL.
 * Transcript anchor: `/session/<source_key>/<catalog_key>#<encoded turn>`.
 * Trace: `/session/<source_key>/<catalog_key>/trace/<turn>`.
   The turn is mandatory. There is no turnless trace destination.

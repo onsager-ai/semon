@@ -1100,6 +1100,7 @@ pub(crate) fn session_causal_trace_with_gate(
             content_type: "application/json; charset=utf-8",
             body: value.to_string().into_bytes(),
             etag: None,
+            extra_headers: Vec::new(),
         },
         Err(status) => crate::catalog::error(
             status,

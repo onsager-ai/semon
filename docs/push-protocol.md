@@ -16,6 +16,15 @@ Its hash and ten-minute expiry commit under the registry lock. Three wrong guess
 consume it; three burns within an hour persist a thirty-minute pairing pause.
 The running receiver reads this state per request, without IPC.
 
+### Viewer session routes
+
+`GET /session/by-native/<harness>/<native-id>` requires ordinary Viewer read
+authority and accepts `claude`, `codex` or `copilot` as the harness. A unique
+current native ID redirects with **303** to `/session/<source>/<catalog-key>`;
+a missing ID returns **404**, an ID owned by more than one source returns
+**409** with only `ambiguous`, and a pending or unavailable index returns
+retryable **503** with `Retry-After`. The route takes no token in its path.
+
 ### Viewer pairing codes
 
 `GET /api/viewer/pairing` returns `{"available":true}` on the receiver under
@@ -27,7 +36,10 @@ and pause rules above. Paused/unavailable issuance returns generic **503**;
 other methods return **405**. Responses use `Cache-Control: no-store`; plaintext
 codes are neither logged nor retained by the Viewer.
 
-Cookie-authenticated POSTs require an exact admitted `Origin`, as other Viewer
+The receiver sets its read session cookie as `HttpOnly; SameSite=Lax; Path=/`
+(and `Secure` for HTTPS public URLs), allowing externally linked GET pages to
+open on the first tap. Lax cookies are withheld on cross-site POSTs. Cookie-
+authenticated POSTs still require an exact admitted `Origin`, as other Viewer
 POSTs do. Missing or invalid read authority and cross-origin requests receive the
 Viewer's **403** refusal. A push token grants no Viewer access. The Viewer builds
 `semon pair <receiver URL> <CODE>` from the browser's public origin, shows expiry,

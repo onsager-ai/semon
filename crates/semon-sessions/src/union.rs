@@ -641,7 +641,13 @@ fn text(status: u16, body: &str) -> ViewerReply {
         content_type: "text/plain; charset=utf-8",
         body: body.as_bytes().to_vec(),
         etag: None,
+        extra_headers: Vec::new(),
     }
+}
+
+fn retryable(mut reply: ViewerReply) -> ViewerReply {
+    reply.extra_headers.push(("Retry-After", "1".to_owned()));
+    reply
 }
 
 fn failed(error: &io::Error) -> ViewerReply {
@@ -1119,7 +1125,11 @@ impl ViewerCore {
                     "navigation": {"paths": {"machines": extras.nav_machines.as_deref().unwrap_or("/machines")}}
                 }).to_string().into_bytes(),
                 etag: None,
+                extra_headers: Vec::new(),
             };
+        }
+        if path.starts_with("/session/by-native/") {
+            return self.native_session_redirect(path, deadline, allow_catalog_wait);
         }
         if path.starts_with("/session/") {
             return self.session_page(path, query);
@@ -1150,6 +1160,7 @@ impl ViewerCore {
                     content_type: "application/json; charset=utf-8",
                     body: br#"{"available":false,"reason":"unsupported_storage"}"#.to_vec(),
                     etag: None,
+                    extra_headers: Vec::new(),
                 };
             }
             return crate::catalog::error(
@@ -1236,6 +1247,7 @@ impl ViewerCore {
                 content_type,
                 body,
                 etag: None,
+                extra_headers: Vec::new(),
             };
         }
         if views.is_empty() {
@@ -1248,6 +1260,108 @@ impl ViewerCore {
             return self.tree(&views).unwrap_or_else(|error| failed(&error));
         }
         views[0].1.respond(method, path, query, if_none_match)
+    }
+
+    fn native_session_redirect(
+        &self,
+        path: &str,
+        deadline: Instant,
+        allow_catalog_wait: bool,
+    ) -> ViewerReply {
+        use crate::native_resolution::{
+            CatalogNativeResolutionState as State, valid_resolution_arguments,
+        };
+        let parts = match path.strip_prefix("/session/by-native/") {
+            Some(path) if path.len() <= 12290 => path
+                .split('/')
+                .map(crate::session_route::decode)
+                .collect::<Result<Vec<_>, _>>(),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid native session address",
+            )),
+        };
+        let Ok(parts) = parts else {
+            return text(400, "Invalid native session address");
+        };
+        let [harness, native_id] = parts.as_slice() else {
+            return text(400, "Invalid native session address");
+        };
+        if *harness != "claude" && *harness != "codex" && *harness != "copilot" {
+            return text(400, "Invalid native session address");
+        }
+        if !valid_resolution_arguments("local", harness, native_id) {
+            return text(400, "Invalid native session address");
+        }
+        if let Err(error) = self.follow() {
+            return retryable(text(503, &error.to_string()));
+        }
+        let views = self.views();
+        if views.is_empty() {
+            return text(404, "Not found");
+        }
+        let inventory = self.source_inventory(&views);
+        if !inventory.valid() {
+            return retryable(text(503, "Session sources are unavailable"));
+        }
+        let mut matches = Vec::new();
+        let mut pending = false;
+        for (internal, view) in views.iter() {
+            let source = if internal.is_empty() {
+                "local"
+            } else {
+                internal.as_str()
+            };
+            if inventory.index(source).is_none() {
+                continue;
+            }
+            if let Err(reply) = wait_for_catalog_read(view, deadline, allow_catalog_wait) {
+                return retryable(reply);
+            }
+            let resolution = match crate::session_catalog_resolve_native(
+                view.options(),
+                source,
+                harness,
+                native_id,
+                crate::CatalogReadScope::Current,
+            ) {
+                Ok(resolution) => resolution,
+                Err(crate::CatalogIdentityError::InvalidArguments) => {
+                    return text(400, "Invalid native session address");
+                }
+                Err(_) => {
+                    return retryable(text(503, "Session catalog is unavailable"));
+                }
+            };
+            match resolution.state {
+                State::Resolved | State::Provisional => {
+                    if let Some(key) = resolution.catalog_key {
+                        matches.push(crate::session_route::session_path(source, &key));
+                    }
+                }
+                State::Pending | State::Unavailable => pending = true,
+                State::Ambiguous => return text(409, "ambiguous"),
+            }
+        }
+        if matches.len() > 1 {
+            return text(409, "ambiguous");
+        }
+        if pending {
+            return retryable(text(503, "Session catalog is not ready"));
+        }
+        let Some(location) = matches.pop() else {
+            return text(404, "Not found");
+        };
+        ViewerReply {
+            status: 303,
+            content_type: "text/plain; charset=utf-8",
+            body: Vec::new(),
+            etag: None,
+            extra_headers: vec![
+                ("Location", location),
+                ("Cache-Control", "no-store".to_owned()),
+            ],
+        }
     }
 
     fn session_page(&self, path: &str, query: &str) -> ViewerReply {
@@ -1449,6 +1563,7 @@ impl ViewerCore {
                     .to_string()
                     .into_bytes(),
                 etag: None,
+                extra_headers: Vec::new(),
             };
         }
         let request = if path == "/api/sessions" {
@@ -1637,6 +1752,7 @@ impl ViewerCore {
                             .to_string()
                             .into_bytes(),
                         etag: None,
+                        extra_headers: Vec::new(),
                     },
                     Ok(None) => crate::catalog::error(
                         404,
@@ -1908,6 +2024,7 @@ impl ViewerCore {
             content_type: "application/json; charset=utf-8",
             body: body.into_bytes(),
             etag: None,
+            extra_headers: Vec::new(),
         })
     }
 
@@ -1943,6 +2060,86 @@ impl ViewerCore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_id_redirect_resolves_missing_and_cross_machine_ambiguity() {
+        let root = std::env::temp_dir().join(format!(
+            "semon-native-redirect-{}-{}",
+            std::process::id(),
+            model::now_ms()
+        ));
+        let options = |machine: &str| {
+            let home = root.join(machine);
+            let claude_home = home.join("claude");
+            let proc_root = home.join("proc");
+            std::fs::create_dir_all(claude_home.join("projects/project")).unwrap();
+            std::fs::create_dir_all(&proc_root).unwrap();
+            std::fs::write(proc_root.join("locks"), "").unwrap();
+            std::fs::write(
+                claude_home.join("projects/project/native.jsonl"),
+                format!(
+                    "{}\n",
+                    json!({
+                        "type":"user", "sessionId":"native", "uuid":"u", "parentUuid":null,
+                        "timestamp":"2026-10-01T00:00:00Z", "cwd":"/synthetic/project",
+                        "message":{"role":"user","content":"fixture"}
+                    })
+                ),
+            )
+            .unwrap();
+            Options {
+                claude_home,
+                claude_json: home.join(".claude.json"),
+                codex_home: home.join("codex"),
+                copilot_home: home.join("copilot"),
+                proc_root,
+                cache: home.join("index.json"),
+                all: true,
+                since: std::time::Duration::from_secs(86400),
+                session: None,
+                facts: None,
+                annotations: home.join("annotations.jsonl"),
+                scan_window: false,
+            }
+        };
+        let mut core = ViewerCore::with_machines(vec![("one".into(), options("one"))]);
+        let redirect = core.respond("GET", "/session/by-native/claude/native", "", None);
+        assert_eq!(redirect.status, 303);
+        assert!(redirect.body.is_empty());
+        assert!(
+            redirect
+                .extra_headers
+                .iter()
+                .any(|(name, value)| { *name == "Location" && value == "/session/one/native" })
+        );
+        assert!(
+            redirect
+                .extra_headers
+                .iter()
+                .any(|(name, value)| { *name == "Cache-Control" && value == "no-store" })
+        );
+        assert_eq!(
+            core.respond("GET", "/session/by-native/claude/missing", "", None)
+                .status,
+            404
+        );
+        assert_eq!(
+            core.respond("GET", "/session/by-native/claude/%6eative", "", None)
+                .status,
+            303,
+            "path segments are percent-decoded exactly once"
+        );
+        core.close();
+        let mut ambiguous = ViewerCore::with_machines(vec![
+            ("one".into(), options("one")),
+            ("two".into(), options("two")),
+        ]);
+        let reply = ambiguous.respond("GET", "/session/by-native/claude/native", "", None);
+        assert_eq!(reply.status, 409);
+        assert_eq!(reply.body, b"ambiguous");
+        ambiguous.close();
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn native_ownership_tracks_configuration_rewrites_and_removal() {

@@ -788,6 +788,7 @@ fn reply(value: Value) -> ViewerReply {
         content_type: "application/json; charset=utf-8",
         body: value.to_string().into_bytes(),
         etag: None,
+        extra_headers: Vec::new(),
     }
 }
 

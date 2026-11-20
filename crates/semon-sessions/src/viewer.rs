@@ -396,6 +396,7 @@ pub struct ViewerReply {
     pub content_type: &'static str,
     pub body: Vec<u8>,
     pub etag: Option<String>,
+    pub extra_headers: Vec<(&'static str, String)>,
 }
 
 impl ViewerReply {
@@ -564,12 +565,19 @@ fn header(name: &str, value: &str) -> Header {
 
 fn respond(request: Request, reply: ViewerReply, cookie: Option<&str>) {
     let headers = reply.headers();
-    let mut response = Response::from_data(reply.body).with_status_code(StatusCode(reply.status));
+    let mut response = if reply.status == 303 {
+        Response::empty(StatusCode(reply.status))
+    } else {
+        Response::from_data(reply.body).with_status_code(StatusCode(reply.status))
+    };
     if let Some(etag) = reply.etag.as_deref() {
         response.add_header(header("ETag", etag));
     }
     response.add_header(header("Content-Type", reply.content_type));
     for (name, value) in headers {
+        response.add_header(header(name, value));
+    }
+    for (name, value) in &reply.extra_headers {
         response.add_header(header(name, value));
     }
     if let Some(token) = cookie {
@@ -653,6 +661,7 @@ fn json_reply(status: u16, value: Value) -> ViewerReply {
         content_type: "application/json; charset=utf-8",
         body: value.to_string().into_bytes(),
         etag: None,
+        extra_headers: Vec::new(),
     }
 }
 fn post_authorized(request: &Request, token: &str, port: u16) -> bool {
@@ -847,6 +856,7 @@ impl Viewer {
     fn handle(&self, mut request: Request) {
         let url = request.url().to_owned();
         let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+        let native_redirect = path.starts_with("/session/by-native/");
         if self.receive.is_some() {
             match self.receive_auth(&request, query) {
                 None => {
@@ -874,7 +884,7 @@ impl Viewer {
                     response.add_header(header(
                         "Set-Cookie",
                         &format!(
-                            "semon_session={session}; HttpOnly; SameSite=Strict; Path=/{}",
+                            "semon_session={session}; HttpOnly; SameSite=Lax; Path=/{}",
                             if secure { "; Secure" } else { "" }
                         ),
                     ));
@@ -958,6 +968,7 @@ impl Viewer {
                 content_type: "text/plain; charset=utf-8",
                 body: b"Forbidden".to_vec(),
                 etag: None,
+                extra_headers: Vec::new(),
             };
             respond(request, forbidden, None);
             return;
@@ -969,6 +980,21 @@ impl Viewer {
             .join("&");
         let query = routing_query.as_str();
         let if_none_match = request_header(&request, "If-None-Match").map(str::to_owned);
+        if native_redirect {
+            if request.method() != &Method::Get {
+                respond(
+                    request,
+                    json_reply(405, json!({"error":"Method not allowed"})),
+                    None,
+                );
+                return;
+            }
+            let route = self
+                .core
+                .respond("GET", path, query, if_none_match.as_deref());
+            respond(request, route, None);
+            return;
+        }
         let reply = if path == "/api/viewer/home" && request.method() == &Method::Post {
             let mut bytes = Vec::new();
             let body = request
@@ -1686,6 +1712,7 @@ impl MachineView {
             content_type: text,
             body: body.to_vec(),
             etag: None,
+            extra_headers: Vec::new(),
         };
         if method != "GET" {
             return reply(405, b"Method not allowed");
@@ -1940,6 +1967,23 @@ mod tests {
             self.write(&format!("claude/projects/project/{id}.jsonl"), &content)
         }
 
+        fn machines(&self, names: &[&str]) -> ViewerCore {
+            let mut machines = Vec::new();
+            for name in names {
+                let home = self.root.join(name);
+                let mut options = self.options.clone();
+                options.claude_home = home.join("claude");
+                options.codex_home = home.join("codex");
+                options.copilot_home = home.join("copilot");
+                options.proc_root = home.join("proc");
+                options.cache = home.join("index.json");
+                fs::create_dir_all(&options.proc_root).unwrap();
+                fs::write(options.proc_root.join("locks"), "").unwrap();
+                machines.push(((*name).to_owned(), options));
+            }
+            ViewerCore::with_machines(machines)
+        }
+
         fn codex(&self, id: &str, records: &[Value]) -> PathBuf {
             let mut lines = vec![
                 json!({"type":"session_meta","timestamp":"2026-09-24T00:00:00Z","payload":{"id":id,"cwd":"/tmp/project"}}),
@@ -1978,6 +2022,41 @@ mod tests {
 
     fn http(fixture: &Fixture, request: &str) -> String {
         http_with_publication(fixture, request, None, false)
+    }
+
+    struct TestAccess;
+    impl ViewerAccess for TestAccess {
+        fn resolve(&self, secret: &str) -> Option<String> {
+            (secret == "0123456789abcdef0123456789abcdef").then(|| "test-id".to_owned())
+        }
+        fn issue_pairing_code(&self) -> Result<Value, String> {
+            Ok(json!({"code":"test","expires":1}))
+        }
+    }
+
+    fn http_with_core(core: ViewerCore, request: &str) -> String {
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let viewer = Viewer {
+            core,
+            token: "0123456789abcdef0123456789abcdef".into(),
+            port,
+            receive: Some(Arc::new(TestAccess)),
+            public_origin: None,
+            asi: None,
+        };
+        let request = request.replace("PORT", &port.to_string());
+        let worker = thread::spawn(move || {
+            viewer.handle(server.recv().unwrap());
+            viewer.core.close();
+        });
+        let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        stream.write_all(request.as_bytes()).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        stream.read_to_end(&mut response).unwrap();
+        worker.join().unwrap();
+        String::from_utf8_lossy(&response).into_owned()
     }
 
     fn http_with_publication(
@@ -2046,6 +2125,17 @@ mod tests {
     }
 
     #[test]
+    fn receiver_native_redirect_requires_authentication() {
+        let fixture = Fixture::new();
+        let core = ViewerCore::new(fixture.options.clone());
+        let response = http_with_core(
+            core,
+            "GET /session/by-native/claude/private HTTP/1.1\r\nHost: 127.0.0.1:PORT\r\nConnection: close\r\n\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    }
+
+    #[test]
     fn http_session_bootstrap_is_consumed_before_routing() {
         let fixture = Fixture::new();
         fixture.claude("bootstrap-session", &[
@@ -2069,6 +2159,10 @@ mod tests {
             .find(|line| line.starts_with("Set-Cookie:"))
             .unwrap();
         assert!(cookie.contains(token), "{cookie}");
+        assert!(
+            cookie.contains("HttpOnly; SameSite=Lax; Path=/"),
+            "{cookie}"
+        );
         for header in cold_headers.lines().skip(1) {
             if !header.starts_with("Set-Cookie:") {
                 assert!(
@@ -2195,7 +2289,7 @@ mod tests {
             "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'",
             "X-Frame-Options: DENY",
             "Referrer-Policy: no-referrer",
-            "HttpOnly; SameSite=Strict",
+            "HttpOnly; SameSite=Lax; Path=/",
         ] {
             assert!(good.contains(header), "missing {header}");
         }

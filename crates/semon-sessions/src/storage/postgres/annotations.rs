@@ -137,6 +137,6 @@ impl PgProjectionStore {
             .collect();
         let end = after + entries.len();
         tx.commit(namespace).await?;
-        Ok(ViewerReply { status: 200, content_type: "application/json; charset=utf-8", body: json!({"api":1,"source_key":namespace.as_str(),"catalog_key":key,"scope":"retained_history","kind":kind,"generation":generation,"total":total,"first":after,"entries":entries,"next_cursor":if (end as u64)<total as u64 {Some(end)} else {None}}).to_string().into_bytes(), etag: None })
+        Ok(ViewerReply { status: 200, content_type: "application/json; charset=utf-8", body: json!({"api":1,"source_key":namespace.as_str(),"catalog_key":key,"scope":"retained_history","kind":kind,"generation":generation,"total":total,"first":after,"entries":entries,"next_cursor":if (end as u64)<total as u64 {Some(end)} else {None}}).to_string().into_bytes(), etag: None, extra_headers: Vec::new() })
     }
 }

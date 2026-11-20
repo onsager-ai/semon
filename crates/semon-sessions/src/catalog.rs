@@ -552,6 +552,7 @@ fn reply(status: u16, body: Value) -> ViewerReply {
         content_type: "application/json; charset=utf-8",
         body: body.to_string().into_bytes(),
         etag: None,
+        extra_headers: Vec::new(),
     }
 }
 
