@@ -157,9 +157,8 @@ impl Fixture {
             .arg(self.path("state/index.json"))
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", self.path("config"))
-            .env("XDG_STATE_HOME", self.path("state"))
-            .output()
-            .unwrap()
+            .env("XDG_STATE_HOME", self.path("state"));
+        command
     }
 
     /// `semon sessions --json --all --machines DIR --no-local`, with
