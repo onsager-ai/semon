@@ -228,3 +228,6 @@ Decided by the owner on 2026-11-20:
   reads.
 - **Replacement cost.** Recompute only the affected components, synchronously
   in the admission transaction, until measurements justify a separate design.
+- **Copilot.** Deferred. Phase 2 covers Claude and Codex only. The Copilot
+  producer row above is kept as the plan for a later PR, which must land before
+  phase 3 switches Catalog reads, so Copilot sessions do not drop out.
