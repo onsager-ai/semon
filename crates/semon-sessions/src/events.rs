@@ -2188,6 +2188,11 @@ impl EventCache {
         self.index_clone
     }
 
+    #[cfg(test)]
+    pub(crate) fn enable_warehouse_scale_timing(&mut self) {
+        self.scan_timing = true;
+    }
+
     pub(crate) fn scan_durations(&self) -> (Duration, Duration) {
         (self.parse_duration, self.index_write_duration)
     }

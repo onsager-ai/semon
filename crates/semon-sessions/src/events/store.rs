@@ -30,7 +30,7 @@ pub(crate) mod reprice;
 mod semantic_stage;
 pub(crate) mod session_activity;
 pub(crate) mod tree_state;
-mod warehouse;
+pub(crate) mod warehouse;
 
 use std::{
     collections::BTreeMap,

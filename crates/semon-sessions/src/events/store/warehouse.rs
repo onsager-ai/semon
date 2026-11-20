@@ -7,32 +7,37 @@ use std::sync::OnceLock;
 
 use rusqlite::{Connection, OptionalExtension};
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SCALE_TIMING: std::cell::Cell<Option<(u128, u128, u64)>> = const { std::cell::Cell::new(None) };
+}
+
 pub(super) const SCHEMA: &str = include_str!("warehouse.sql");
 
 /// Check the authored DDL, including keys and indexes, on every qualified open.
 /// The SQL text in sqlite_schema omits the statement terminator.
 pub(super) fn qualify(connection: &Connection) -> rusqlite::Result<bool> {
-    static OBJECTS: OnceLock<Vec<(&str, &str)>> = OnceLock::new();
-    let objects = OBJECTS.get_or_init(|| {
-        SCHEMA
+    static CONTRACT: OnceLock<(String, Vec<&str>)> = OnceLock::new();
+    let (sql, expected) = CONTRACT.get_or_init(|| {
+        let expected: Vec<_> = SCHEMA
             .split(';')
             .filter_map(|statement| {
                 let sql = statement.get(statement.find("CREATE ")?..)?.trim_end();
                 let name = sql.split_ascii_whitespace().nth(2)?.split('(').next()?;
-                Some((name, sql))
+                Some([name, sql])
             })
-            .collect()
+            .flatten()
+            .collect();
+        let values = vec!["(?,?)"; expected.len() / 2].join(",");
+        (
+            format!("SELECT count(*) FROM sqlite_schema WHERE (name,sql) IN (VALUES {values})"),
+            expected,
+        )
     });
-    let mut query = connection.prepare_cached("SELECT sql FROM sqlite_schema WHERE name=?1")?;
-    for &(name, expected) in objects {
-        let sql = query
-            .query_row([name], |row| row.get::<_, String>(0))
-            .optional()?;
-        if sql.as_deref() != Some(expected) {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+    let matches: usize = connection
+        .prepare_cached(sql)?
+        .query_row(rusqlite::params_from_iter(expected), |row| row.get(0))?;
+    Ok(matches == expected.len() / 2)
 }
 
 use std::path::Path;
@@ -120,6 +125,8 @@ pub(super) fn write(
         return Ok(());
     };
     let started = measurements.start();
+    #[cfg(test)]
+    let fact_started = SCALE_TIMING.with(|timing| timing.get().map(|_| std::time::Instant::now()));
     let (source, retired) = source(tx, path, batch.harness, &json(ledger)?, append)?;
     let (old_offset, sidecar_revision): (i64, i64) = tx
         .prepare_cached("SELECT pos,sidecar_revision FROM maintenance_cursor WHERE source=?1")?
@@ -184,6 +191,10 @@ pub(super) fn write(
     };
     measurements.record("warehouse_facts", started, batch.observations.len());
     let started = measurements.start();
+    #[cfg(test)]
+    let (fact_ns, maintenance_started) = fact_started
+        .map(|start| (start.elapsed().as_nanos(), std::time::Instant::now()))
+        .unzip();
     maintenance::maintain(
         tx,
         source,
@@ -200,6 +211,17 @@ pub(super) fn write(
          WHERE maintenance_cursor.pos<>excluded.pos OR maintenance_cursor.sidecar_revision<>excluded.sidecar_revision",
     )?.execute(params![source,int(ledger.offset),sidecar_revision])?;
     measurements.record("warehouse_maintenance", started, 1);
+    #[cfg(test)]
+    if let Some((fact_ns, maintenance_started)) = fact_ns.zip(maintenance_started) {
+        SCALE_TIMING.with(|timing| {
+            let (facts, maintenance, admissions) = timing.get().unwrap();
+            timing.set(Some((
+                facts + fact_ns,
+                maintenance + maintenance_started.elapsed().as_nanos(),
+                admissions + 1,
+            )));
+        });
+    }
     Ok(())
 }
 

@@ -16,6 +16,67 @@ fn rows(db: &Connection, sql: &str) -> Vec<Vec<Sql>> {
         .collect()
 }
 
+// Compare committed rows with the independent prototype projections. Native
+// kinds, malformed positions and additional metadata stay in production rows.
+fn assert_committed_facts(home: &Home, expected: &Connection, harness: &str) {
+    let db = Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let sorted = |mut values: Vec<Vec<Sql>>| {
+        values.sort_by_cached_key(|row| format!("{row:?}"));
+        values
+    };
+    let queries: &[(&str, &str, &str)] = match harness {
+        "claude" => &[
+            ("record", "pos,kind,uuid,message_id,ts", "WHERE gap=0"),
+            ("relation_observation", "pos,kind,target", ""),
+            (
+                "parent_observation",
+                "pos,method,parent_harness,parent_id,call_id",
+                "",
+            ),
+            (
+                "step_observation",
+                "pos,message_id,uuid,model,input,cached,output",
+                "",
+            ),
+            ("step_billing", "pos,billing", ""),
+            ("claude_call", "DISTINCT pos,block,call_id", ""),
+            ("relay_send", "pos,block,call_id,target,ts", ""),
+            ("relay_result", "pos,call_id,correlation,failed", ""),
+            ("relay_receipt", "pos,correlation,name,pid,start,sock", ""),
+        ],
+        "codex" => &[
+            ("record", "pos,kind,uuid,message_id,ts", "WHERE gap=0"),
+            (
+                "tool_call",
+                "pos,call_id,tool,task_name,ts",
+                "WHERE call_id IS NOT NULL",
+            ),
+            (
+                "tool_result",
+                "pos,call_id,ts",
+                "WHERE kind='response_output'",
+            ),
+        ],
+        _ => unreachable!(),
+    };
+    for &(table, projection, filter) in queries {
+        let production = if harness == "codex" && table == "record" {
+            "SELECT r.pos,CASE WHEN EXISTS(SELECT 1 FROM fact_prompt p WHERE p.source=r.source AND p.pos=r.pos) THEN 'prompt' ELSE r.kind END,r.uuid,r.message_id,r.ts FROM fact_record r WHERE gap=0".to_owned()
+        } else {
+            format!("SELECT {projection} FROM fact_{table} {filter}")
+        };
+        let prototype_projection = projection.strip_prefix("DISTINCT ").unwrap_or(projection);
+        assert_eq!(
+            sorted(rows(&db, &production)),
+            sorted(rows(
+                expected,
+                &format!("SELECT {prototype_projection} FROM fact_{table}")
+            )),
+            "{harness} {table}"
+        );
+    }
+}
+
 fn string(value: &Option<String>) -> Sql {
     value
         .as_ref()
@@ -296,6 +357,7 @@ fn claude_observations_match_prototype_at_admission() {
         }
         observations.extend(admitted);
         assert_claude_facts(&expected.db, &observations);
+        assert_committed_facts(&home, &expected.db, "claude");
     }
     let before = std::fs::metadata(&path).unwrap().len();
     append(&path, late.to_string().as_bytes());
@@ -333,6 +395,7 @@ fn claude_observations_match_prototype_at_admission() {
     observations.extend(suffix);
     expected.source(1, "claude", "sender", &[late]);
     assert_claude_facts(&expected.db, &observations);
+    assert_committed_facts(&home, &expected.db, "claude");
     let compactions = observations
         .iter()
         .filter_map(|o| match &o.fact {
@@ -515,6 +578,7 @@ fn codex_observations_match_prototype_at_admission() {
             batch = Some(new);
         }
         assert_codex_facts(&expected.db, batch.as_ref().unwrap());
+        assert_committed_facts(&home, &expected.db, "codex");
     }
     let mut batch = batch.unwrap();
     let result_offset = std::fs::metadata(&path).unwrap().len();
@@ -548,6 +612,7 @@ fn codex_observations_match_prototype_at_admission() {
     batch.observations.extend(suffix);
     expected.source(1, "codex", "root", &[late, native_usage, terminal]);
     assert_codex_facts(&expected.db, &batch);
+    assert_committed_facts(&home, &expected.db, "codex");
     let accepted = batch
         .observations
         .iter()
@@ -738,4 +803,297 @@ fn a_provisional_codex_header_is_independent_of_complete_record_admission() {
     );
     assert_eq!(complete.observations.len(), 1);
     assert_eq!(complete.observations[0].ordinal, Some(0));
+}
+
+// Deliberately rescans all active edges. The writer never uses this oracle.
+fn assert_current_lineages(db: &Connection) {
+    let expected = rows(db, "
+        WITH RECURSIVE edges(a,b) AS (
+            SELECT d.native_id,e.target FROM dim_session d JOIN fact_relation_observation e USING(source)
+            WHERE d.lineage AND e.kind IN ('continued-in','session_id','bridge')
+        ), reach(origin,node) AS (
+            SELECT source,native_id FROM dim_session WHERE lineage
+            UNION SELECT r.origin,e.b FROM reach r JOIN edges e ON e.a=r.node
+            UNION SELECT r.origin,e.a FROM reach r JOIN edges e ON e.b=r.node
+        ), member(origin,source) AS (
+            SELECT r.origin,d.source FROM reach r JOIN dim_session d ON d.lineage AND d.native_id=r.node
+            UNION SELECT source,source FROM dim_session
+        ), ranked AS (
+            SELECT m.origin,min(m.source) OVER(PARTITION BY m.origin) AS component,m.source,
+                row_number() OVER(PARTITION BY m.origin ORDER BY d.first_ts IS NULL,d.first_ts,d.continued DESC,d.native_id,d.source) AS rank
+            FROM member m JOIN dim_session d USING(source)
+        ) SELECT origin,component,source FROM ranked WHERE rank=1 ORDER BY origin");
+    assert_eq!(
+        rows(
+            db,
+            "SELECT source,component,owner FROM dim_lineage JOIN membership USING(source) ORDER BY source"
+        ),
+        expected
+    );
+    assert_eq!(
+        rows(
+            db,
+            "SELECT source FROM dim_session WHERE source NOT IN (SELECT source FROM warehouse_current)"
+        ),
+        Vec::<Vec<Sql>>::new()
+    );
+}
+
+#[test]
+fn warehouse_random_append_splits_and_replacement_agree_with_full_recompute() {
+    for mut random in [19_u64, 352, 12981] {
+        let home = Home::new();
+        let inputs = [
+            (
+                "one",
+                vec![
+                    human("one", ts(4, 0), "a"),
+                    json!({"type":"continued-in","continuedInSessionId":"two"}),
+                ],
+            ),
+            (
+                "two",
+                vec![
+                    human("two", ts(3, 0), "b"),
+                    json!({"type":"bridge-session","bridgeSessionId":"bridge"}),
+                ],
+            ),
+            (
+                "three",
+                vec![
+                    human("three", ts(2, 0), "c"),
+                    json!({"type":"bridge-session","bridgeSessionId":"bridge"}),
+                    human("three", ts(0, 0), "out of order"),
+                ],
+            ),
+            ("four", vec![human("four", ts(1, 0), "unrelated")]),
+        ];
+        let paths = inputs.each_ref().map(|(id, _)| home.top(id, &[]));
+        let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+        let db = Connection::open(EventCache::path(&home.options.cache)).unwrap();
+        let mut offsets = [0; 4];
+        let next = |random: &mut u64| {
+            *random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (*random >> 32) as usize
+        };
+        while offsets
+            .iter()
+            .zip(&inputs)
+            .any(|(i, (_, records))| *i < records.len())
+        {
+            let i = next(&mut random) % inputs.len();
+            let start = offsets[i];
+            let records = &inputs[i].1;
+            if start == records.len() {
+                continue;
+            }
+            let end = (start + 1 + next(&mut random) % 2).min(records.len());
+            for record in &records[start..end] {
+                append(&paths[i], format!("{record}\n").as_bytes());
+            }
+            scan_file(&paths[i], "claude", &mut cache, &mut false).unwrap();
+            offsets[i] = end;
+            assert_current_lineages(&db);
+        }
+        assert_eq!(
+            rows(&db, "SELECT count(*) FROM lineage_group"),
+            vec![vec![Sql::Integer(2)]]
+        );
+        db.execute_batch("CREATE TRIGGER keep_unrelated BEFORE DELETE ON lineage_member WHEN OLD.source=(SELECT source FROM dim_session WHERE native_id='four') BEGIN SELECT RAISE(ABORT,'unrelated lineage changed'); END").unwrap();
+        std::fs::write(&paths[1], format!("{}\n", inputs[1].1[0])).unwrap();
+        scan_file(&paths[1], "claude", &mut cache, &mut false).unwrap();
+        assert_current_lineages(&db);
+        assert_eq!(
+            rows(&db, "SELECT count(*) FROM lineage_group"),
+            vec![vec![Sql::Integer(3)]]
+        );
+        assert_eq!(
+            rows(
+                &db,
+                "SELECT incarnation FROM warehouse_source WHERE carrier LIKE '%/two.jsonl' ORDER BY incarnation"
+            ),
+            vec![vec![Sql::Integer(1)], vec![Sql::Integer(2)]]
+        );
+    }
+}
+
+#[test]
+fn warehouse_spawn_placement_follows_late_parent_and_revokes_duplicate_calls() {
+    let home = Home::new();
+    let child = home.lines(
+        "codex/sessions/rollout-child.jsonl",
+        &codex_records("child", Some("parent"), Some("worker"), &[]),
+    );
+    let spawn = |id: &str| {
+        codex_line(
+            ts(0, 1),
+            "response_item",
+            json!({"type":"function_call","call_id":id,"name":"spawn_agent","arguments":"{\"task_name\":\"worker\"}"}),
+        )
+    };
+    let parent = home.lines(
+        "codex/sessions/rollout-parent.jsonl",
+        &codex_records("parent", None, None, &[spawn("one")]),
+    );
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    let db = Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    scan_file(&child, "codex", &mut cache, &mut false).unwrap();
+    assert!(rows(&db, "SELECT child FROM spawn_placement").is_empty());
+    scan_file(&parent, "codex", &mut cache, &mut false).unwrap();
+    assert_eq!(
+        rows(&db, "SELECT child FROM spawn_placement"),
+        vec![vec![text("child")]]
+    );
+    append(&parent, format!("{}\n", spawn("two")).as_bytes());
+    scan_file(&parent, "codex", &mut cache, &mut false).unwrap();
+    assert!(rows(&db, "SELECT child FROM spawn_placement").is_empty());
+}
+
+pub(super) struct ProductionScale {
+    dir: std::path::PathBuf,
+    cache: EventCache,
+}
+
+impl ProductionScale {
+    pub(super) fn new(dir: std::path::PathBuf) -> Self {
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cache = EventCache::open_scoped(&dir.join("cache.json")).unwrap();
+        cache.enable_warehouse_scale_timing();
+        cache.scan_byte_budget = Some(8 * 1024 * 1024);
+        Self { dir, cache }
+    }
+
+    pub(super) fn admit(&mut self, name: &str, harness: &str, records: &[Value]) {
+        let path = self.dir.join(format!("{name}.jsonl"));
+        let mut file = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        for record in records {
+            writeln!(file, "{record}").unwrap();
+        }
+        file.flush().unwrap();
+        self.scan(&path, harness);
+    }
+
+    pub(super) fn flush(&mut self) {
+        self.cache.flush_cold_writes().unwrap();
+    }
+
+    // Benchmark a receiver-qualified append. The synthetic writer owns the
+    // files and records both stats around its exclusive append, as Raw does.
+    fn scan(&mut self, path: &std::path::Path, harness: &str) {
+        let size = std::fs::metadata(path).unwrap().len();
+        loop {
+            scan_file(path, harness, &mut self.cache, &mut false).unwrap();
+            assert!(self.cache.persistent());
+            if self.cache.revision(path).unwrap().2 == size {
+                break;
+            }
+        }
+    }
+
+    pub(super) fn measure_appends(&mut self, case: &str, sources: usize) {
+        use crate::events::{Stat, store::warehouse::SCALE_TIMING};
+        use crate::source_change::AppendEvidence;
+        self.flush();
+        self.cache.scan_byte_budget = None;
+        let db = Connection::open(EventCache::path(&self.dir.join("cache.json"))).unwrap();
+        let paths = (1..=sources)
+            .map(|source| self.dir.join(format!("append-{source}.jsonl")))
+            .collect::<Vec<_>>();
+        let before = self.cache.scan_durations();
+        SCALE_TIMING.with(|timing| timing.set(Some((0, 0, 0))));
+        let started = Instant::now();
+        let mut samples = Vec::with_capacity(10_000);
+        for i in 0..10_000 {
+            let path = &paths[i % sources];
+            let append_start = Instant::now();
+            let stat = Stat::of(path).unwrap();
+            for _ in 0..1 + i % 5 {
+                append(path, b"{\"type\":\"compact_boundary\"}\n");
+            }
+            let evidence = AppendEvidence {
+                generation: format!("{i:032x}"),
+                before: stat,
+                after: Stat::of(path).unwrap(),
+            };
+            db.execute(
+                "INSERT INTO session_source_mutations VALUES(?1,?2)",
+                params![path.to_str(), serde_json::to_string(&evidence).unwrap()],
+            )
+            .unwrap();
+            self.scan(path, "claude");
+            samples.push(append_start.elapsed().as_nanos());
+        }
+        let total = started.elapsed();
+        let after = self.cache.scan_durations();
+        let (fact_ns, maintenance_ns, admissions) =
+            SCALE_TIMING.with(|timing| timing.take().unwrap());
+        assert_eq!(admissions, 10_000);
+        let first = &mut samples[..1000];
+        first.sort_unstable();
+        let (first_p50, first_p99) = (first[500], first[990]);
+        let last = &mut samples[9000..];
+        last.sort_unstable();
+        let (last_p50, last_p99) = (last[500], last[990]);
+        println!(
+            "production append_case={case} count={admissions} total_ms={} parse_ms={} index_ms={} fact_write_ms={} maintenance_ms={} maintenance_mean_us={:.3} first_1000_p50_us={:.3} first_1000_p99_us={:.3} last_1000_p50_us={:.3} last_1000_p99_us={:.3}",
+            total.as_millis(),
+            (after.0 - before.0).as_millis(),
+            (after.1 - before.1).as_millis(),
+            fact_ns / 1_000_000,
+            maintenance_ns / 1_000_000,
+            maintenance_ns as f64 / admissions as f64 / 1000.0,
+            first_p50 as f64 / 1000.0,
+            first_p99 as f64 / 1000.0,
+            last_p50 as f64 / 1000.0,
+            last_p99 as f64 / 1000.0
+        );
+        assert!(
+            last_p50 <= 3 * first_p50,
+            "production {case}: last p50 {last_p50} ns > 3x first p50 {first_p50} ns"
+        );
+    }
+
+    pub(super) fn ingest_corpus(home: &Home, corpus: &std::path::Path) {
+        use crate::events::store::warehouse::SCALE_TIMING;
+        let mut production = Self::new(home.root.join("production-corpus"));
+        let started = Instant::now();
+        SCALE_TIMING.with(|timing| timing.set(Some((0, 0, 0))));
+        for (i, line) in std::io::BufReader::new(File::open(corpus).unwrap())
+            .lines()
+            .enumerate()
+        {
+            let envelope: Value = serde_json::from_str(&line.unwrap()).unwrap();
+            production.admit(
+                envelope["id"].as_str().unwrap(),
+                envelope["harness"].as_str().unwrap(),
+                envelope["records"].as_array().unwrap(),
+            );
+            if (i + 1) % 64 == 0 {
+                production.flush();
+            }
+        }
+        production.flush();
+        let (parse, index) = production.cache.scan_durations();
+        let (facts, maintenance, admissions) = SCALE_TIMING.with(|timing| timing.take().unwrap());
+        assert_eq!(admissions, 20_000);
+        println!(
+            "production ingestion_ms={} sessions={admissions} parse_ms={} index_ms={} fact_write_ms={} maintenance_ms={} maintenance_mean_us={:.3}",
+            started.elapsed().as_millis(),
+            parse.as_millis(),
+            index.as_millis(),
+            facts / 1_000_000,
+            maintenance / 1_000_000,
+            maintenance as f64 / admissions as f64 / 1000.0
+        );
+        let db = Connection::open(EventCache::path(&production.dir.join("cache.json"))).unwrap();
+        assert_eq!(
+            rows(&db, "SELECT count(*) FROM dim_session"),
+            vec![vec![Sql::Integer(20_000)]]
+        );
+    }
+
+    pub(super) fn seed_long(&mut self, path: &std::path::Path) {
+        std::fs::copy(path, self.dir.join("append-1.jsonl")).unwrap();
+        self.scan(&self.dir.join("append-1.jsonl"), "claude");
+    }
 }

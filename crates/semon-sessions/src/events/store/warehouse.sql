@@ -166,3 +166,9 @@ SELECT m.source,g.owner,g.owner AS usage_owner FROM lineage_member m
 JOIN lineage_group g ON g.id=m.component;
 CREATE VIEW membership AS SELECT source,owner FROM bridge_session_owner;
 CREATE VIEW spawn_placement AS SELECT child,pos,ts FROM bridge_spawn_placement;
+-- Reuse native tree labels, fenced by the tree header's committed receipt.
+CREATE VIEW fact_label AS
+SELECT c.source,l.label,l.value FROM warehouse_current c
+JOIN native_tree_headers h ON h.source_path=c.path
+JOIN native_tree_labels l USING(projection_id)
+WHERE l.label IN ('first','last','cwd','branch');
