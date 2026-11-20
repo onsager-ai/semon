@@ -949,6 +949,65 @@ fn warehouse_spawn_placement_follows_late_parent_and_revokes_duplicate_calls() {
     assert!(rows(&db, "SELECT child FROM spawn_placement").is_empty());
 }
 
+#[test]
+fn warehouse_verified_codex_relocation_keeps_fact_keys_through_append() {
+    let home = Home::new();
+    home.codex(
+        "codex-move",
+        json!({}),
+        &[codex_user(ts(0, 1), "before move")],
+    );
+    let old = home
+        .options
+        .codex_home
+        .join("sessions/2026/09/24/rollout-codex-move.jsonl");
+    let new = home
+        .options
+        .codex_home
+        .join("archived_sessions/rollout-codex-move.jsonl");
+    let mut cache = EventCache::open(&home.options.cache).unwrap();
+    crate::model::observe_catalog(
+        &home.options,
+        &mut cache,
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let db = Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let current = |path: &std::path::Path| {
+        db.query_row(
+        "SELECT s.source,s.incarnation,s.logical_source FROM warehouse_current c JOIN warehouse_source s USING(source) WHERE c.path=?1",
+        [path.to_str().unwrap()], |row| Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?)),
+    ).unwrap()
+    };
+    let original = current(&old);
+    let count = || rows(&db, "SELECT count(*) FROM fact_record");
+    assert_eq!(count(), vec![vec![Sql::Integer(2)]]);
+    std::fs::create_dir_all(new.parent().unwrap()).unwrap();
+    std::fs::rename(&old, &new).unwrap();
+    append(
+        &new,
+        format!("{}\n", codex_user(ts(0, 2), "after move")).as_bytes(),
+    );
+    scan_file(&new, "codex", &mut cache, &mut false).unwrap();
+    assert_eq!(current(&new), original);
+    assert_eq!(count(), vec![vec![Sql::Integer(3)]]);
+    let selected = db
+        .prepare(crate::events::store::warehouse::DETAIL)
+        .unwrap()
+        .query_map(["codex-move"], |r| r.get::<_, i64>(0))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(selected, vec![original.0; 3]);
+    cache.retain(&BTreeSet::new(), &mut false);
+    assert!(rows(&db, "SELECT * FROM warehouse_current").is_empty());
+    assert!(rows(&db, "SELECT * FROM lineage_member").is_empty());
+    assert!(rows(&db, "SELECT * FROM files").is_empty());
+    assert_eq!(count(), vec![vec![Sql::Integer(3)]]);
+}
+
 pub(super) struct ProductionScale {
     dir: std::path::PathBuf,
     cache: EventCache,

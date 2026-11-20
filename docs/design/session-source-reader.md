@@ -359,16 +359,17 @@ pruning cannot retire any registered chain or current native source binding.
 
 ## Current Semon storage contract
 
-The Event Index initializes schema 49 in one transaction with the current
+The Event Index initializes schema 50 in one transaction with the current
 parser/cache version, pricing fingerprints and native usage readiness default 0.
 It includes dedicated publication-bound archive chain evidence, separate from
 retention markers, together with the existing scheduling, activity, body and proof
-projections. See [cohort-bound index evidence](retained-native-projections.md#cohort-bound-index-evidence).
+projections. The origin warehouse commits Claude and Codex metadata observations,
+source membership and the maintenance cursor with that source's Index advancement. See [cohort-bound index evidence](retained-native-projections.md#cohort-bound-index-evidence).
 
 Normal writable producer opens (complete and scoped/background) refuse older
 indexes with `unsupported session index: older schema`, without mutation or an
-automatic rebuild. Schema 49 follows the same refusal path used by schema 48;
-it adds no operator step. Older/future parser and storage contracts, malformed
+automatic rebuild. Schema 49 uses the same refusal path as earlier schemas.
+Older/future parser and storage contracts, malformed
 metadata, nonempty schema zero and foreign stores also remain unavailable.
 Selected/focused readers retain read-only qualification and never initialize,
 convert or repair an unsupported index.

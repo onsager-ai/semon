@@ -102,6 +102,12 @@ CREATE TABLE fact_agent_observation (
   storage_parent TEXT, call_id TEXT, model TEXT, cwd TEXT, branch TEXT,
   PRIMARY KEY(source,revision)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE fact_eof_observation (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
+  kind TEXT NOT NULL, occurrence INTEGER NOT NULL, witness TEXT NOT NULL,
+  parent_harness TEXT, parent_id TEXT, call_id TEXT, tool TEXT,
+  PRIMARY KEY(source,witness,pos,block,kind,occurrence)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE fact_parent_observation (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   method TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER,
@@ -134,7 +140,7 @@ CREATE TABLE fact_codex_turn (
   PRIMARY KEY(source,pos,block,occurrence)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE maintenance_cursor (
-  source INTEGER PRIMARY KEY, pos INTEGER NOT NULL, sidecar_revision INTEGER NOT NULL
+  source INTEGER PRIMARY KEY, pos INTEGER NOT NULL, sidecar_revision INTEGER NOT NULL, eof_witness TEXT
 ) STRICT;
 CREATE TABLE dim_session (
   source INTEGER PRIMARY KEY, harness TEXT NOT NULL, native_id TEXT NOT NULL,
@@ -318,6 +324,13 @@ WITH RECURSIVE calls AS MATERIALIZED (
     ON p.harness=e.parent_harness AND p.native_id=e.parent_id
   JOIN warehouse_current current ON current.source=e.source
   WHERE e.source<>p.source
+  UNION ALL
+  SELECT e.source,p.source,e.call_id,'marker',3,e.pos
+  FROM fact_eof_observation e JOIN dim_session p
+    ON p.harness=e.parent_harness AND p.native_id=e.parent_id
+  JOIN warehouse_current active ON active.source=e.source
+  JOIN maintenance_cursor cursor ON cursor.source=e.source AND cursor.eof_witness=e.witness
+  WHERE e.kind='marker' AND e.source<>p.source
 ), qualified AS MATERIALIZED (
   SELECT capture AS epoch,source,pid,start FROM fact_process_observation
   JOIN warehouse_current USING(source)
@@ -410,7 +423,7 @@ SELECT f.root,sum(coalesce(u.input,0)) AS input,
 FROM family_members f LEFT JOIN usage_totals u ON u.owner=f.member GROUP BY f.root;
 
 -- Session list cost is unknown when ANY current message is shared or cannot
--- be priced. An empty Claude session costs zero. Billing is native metadata;
+-- be priced. An empty Claude session costs zero. Billing is native metadata.
 -- semon_step_usd binds production pricing to the query's effective snapshot.
 CREATE VIEW session_cost AS
 WITH steps AS (
@@ -426,7 +439,7 @@ SELECT k.owner,CASE WHEN k.harness='claude'
 FROM catalog_keys k LEFT JOIN steps s ON s.owner=k.owner GROUP BY k.owner;
 
 -- family_usd sums session costs, independently of the activity shared fold.
--- NULL propagates; a cycle (or an ancestor of it) never completes the builder's
+-- NULL propagates. a cycle (or an ancestor of it) never completes the builder's
 -- leaf queue. Reuse its set-derived acyclic roots, never a stored family total.
 CREATE VIEW family_cost AS
 WITH acyclic AS (SELECT DISTINCT root FROM family_fold_order)
@@ -437,7 +450,7 @@ LEFT JOIN acyclic a ON a.root=f.root GROUP BY f.root;
 
 -- analytics::families starts with catalog-key-ordered leaves, then enqueues a
 -- parent after its last child. Thus queue order is subtree height followed by
--- the greatest key among deepest leaves. A parent retains its own observation;
+-- the greatest key among deepest leaves. A parent retains its own observation.
 -- otherwise its first child fold containing the evidence wins. Encode that
 -- recursive precedence as a sibling-rank path (the empty path wins at root).
 -- Cyclic families have no builder fold, so do not manufacture a shared winner.
@@ -492,7 +505,7 @@ WITH evidence AS (
  FROM family_fold_order f JOIN shared_components s ON s.owner=f.member
  JOIN current_usage u ON u.owner=s.owner AND u.message_id=s.message_id
 )
--- Source/position selects the same native pricing input as the winning step;
+-- Source/position selects the same native pricing input as the winning step.
 -- token categories and cost must never be combined from different observations.
 SELECT root,message_id,evidence_uuid,source,pos,block,kind,occurrence,input,cached,output FROM evidence WHERE n=1;
 

@@ -12,11 +12,15 @@ thread_local! {
     pub(crate) static SCALE_TIMING: std::cell::Cell<Option<(u128, u128, u64)>> = const { std::cell::Cell::new(None) };
 }
 
+#[cfg(test)]
+pub(crate) const DETAIL: &str = include_str!("warehouse_detail.sql");
+
 pub(super) const SCHEMA: &str = include_str!("warehouse.sql");
 
 /// Check the authored DDL, including keys and indexes, on every qualified open.
 /// The SQL text in sqlite_schema omits the statement terminator.
 pub(super) fn qualify(connection: &Connection) -> rusqlite::Result<bool> {
+    // The authored schema uses semicolons only as statement terminators.
     static CONTRACT: OnceLock<(String, Vec<&str>)> = OnceLock::new();
     let (sql, expected) = CONTRACT.get_or_init(|| {
         let expected: Vec<_> = SCHEMA
@@ -182,6 +186,39 @@ pub(super) fn write(
         }
         write_fact(tx, source, batch, observation, record_uuid)?;
     }
+    let eof_witness = if batch.eof.is_empty() {
+        None
+    } else {
+        Some(json(&ledger.stat)?)
+    };
+    if let Some(witness) = &eof_witness {
+        for observation in &batch.eof {
+            let (kind, parent_harness, parent_id, call_id, tool) = match &observation.fact {
+                Fact::Parent {
+                    harness,
+                    id,
+                    call_id,
+                } => (
+                    "marker",
+                    Some(harness.as_str()),
+                    Some(id.as_str()),
+                    call_id.as_deref(),
+                    None,
+                ),
+                Fact::LaunchCandidate { call_id, tool } => (
+                    "launch",
+                    None,
+                    None,
+                    Some(call_id.as_str()),
+                    Some(tool.as_str()),
+                ),
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            };
+            fact!(tx,fact_eof_observation,[source=>source,pos=>int(observation.position.offset),
+                block=>observation.position.block,kind=>kind,occurrence=>observation.discriminator as i64,
+                witness=>witness,parent_harness=>parent_harness,parent_id=>parent_id,call_id=>call_id,tool=>tool])?;
+        }
+    }
     let sidecar_revision = if let Some(sidecar) = &batch.sidecar
         && (sidecar_revision == 0 || previous_sidecar != index.claude_sidecar.as_ref())
     {
@@ -206,10 +243,11 @@ pub(super) fn write(
         header_kind.as_deref(),
     )?;
     tx.prepare_cached(
-        "INSERT INTO maintenance_cursor(source,pos,sidecar_revision) VALUES(?1,?2,?3)
-         ON CONFLICT(source) DO UPDATE SET pos=excluded.pos,sidecar_revision=excluded.sidecar_revision
-         WHERE maintenance_cursor.pos<>excluded.pos OR maintenance_cursor.sidecar_revision<>excluded.sidecar_revision",
-    )?.execute(params![source,int(ledger.offset),sidecar_revision])?;
+        "INSERT INTO maintenance_cursor(source,pos,sidecar_revision,eof_witness) VALUES(?1,?2,?3,?4)
+         ON CONFLICT(source) DO UPDATE SET pos=excluded.pos,sidecar_revision=excluded.sidecar_revision,eof_witness=excluded.eof_witness
+         WHERE maintenance_cursor.pos<>excluded.pos OR maintenance_cursor.sidecar_revision<>excluded.sidecar_revision
+            OR maintenance_cursor.eof_witness IS NOT excluded.eof_witness",
+    )?.execute(params![source,int(ledger.offset),sidecar_revision,eof_witness])?;
     measurements.record("warehouse_maintenance", started, 1);
     #[cfg(test)]
     if let Some((fact_ns, maintenance_started)) = fact_ns.zip(maintenance_started) {

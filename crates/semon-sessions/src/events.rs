@@ -3604,15 +3604,36 @@ fn parse(
             break;
         }
         if !line.ends_with(b"\n") {
-            if let Some(markers) = &mut index.marker_index
-                && let Ok(value) = serde_json::from_slice(&line)
-            {
-                markers.observe(&line, offset, false, &value);
-            }
-            if let Some(handoffs) = &mut index.handoff_index
-                && let Ok(value) = serde_json::from_slice(&line)
-            {
-                handoffs.observe(&line, offset, false, &value)?;
+            if let Ok(value) = serde_json::from_slice(&line) {
+                if let Some(markers) = &mut index.marker_index
+                    && let Some(marker) = markers.observe(&line, offset, false, &value)
+                    && let Some(batch) = &mut index.warehouse_observations
+                {
+                    batch.push_eof(
+                        offset,
+                        0,
+                        Fact::Parent {
+                            harness: marker.harness,
+                            id: marker.parent_id,
+                            call_id: marker.tool_id,
+                        },
+                    );
+                }
+                if let Some(handoffs) = &mut index.handoff_index {
+                    let batch = &mut index.warehouse_observations;
+                    handoffs.observe_with(&line, offset, false, &value, |block, id, tool| {
+                        if let Some(batch) = batch {
+                            batch.push_eof(
+                                offset,
+                                block,
+                                Fact::LaunchCandidate {
+                                    call_id: id.to_owned(),
+                                    tool: tool.to_owned(),
+                                },
+                            );
+                        }
+                    })?;
+                }
             }
             break;
         }
