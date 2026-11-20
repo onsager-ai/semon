@@ -120,6 +120,7 @@ impl Heartbeat {
                 if !status_advertised(&client) {
                     return;
                 }
+                let mut storage_backoff = crate::WatchBackoff::default();
                 loop {
                     if stop.is_stopped() || ended.try_recv().is_ok() {
                         break;
@@ -144,7 +145,14 @@ impl Heartbeat {
                         if let Some(body) = body {
                             match client.post("status", body) {
                                 Ok((404 | 405, _)) => break,
-                                Ok((200..=299, _)) => {}
+                                Ok((200..=299, _)) => {
+                                    storage_backoff.observe(None);
+                                }
+                                Err(Failure::Remote(error))
+                                    if error.starts_with("storage is full:") =>
+                                {
+                                    storage_backoff.observe(Some(&error));
+                                }
                                 Err(Failure::Remote(error))
                                     if error.contains("refused the token") =>
                                 {
@@ -159,7 +167,12 @@ impl Heartbeat {
                             }
                         }
                     }
-                    match ended.recv_timeout(Duration::from_secs(10)) {
+                    let delay = if storage_backoff.state.is_some() {
+                        storage_backoff.delay()
+                    } else {
+                        Duration::from_secs(10)
+                    };
+                    match ended.recv_timeout(delay) {
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                         _ => break,
                     }

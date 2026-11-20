@@ -818,6 +818,9 @@ export function createCatalogViewer(
     homeIntro: viewerHost?.initialHome?.element,
     nativeContent: !!viewerHost?.nativePage,
     enabled: viewerHost?.workspaceMetadata !== false,
+    get receiver() {
+      return pairingAvailable;
+    },
     api,
     panelOpened,
     panelClosed,
@@ -4493,6 +4496,7 @@ export function createCatalogViewer(
         if (disposed) return;
         pairingAvailable = object(value).available === true;
         chrome();
+        if (pairingAvailable && navigation.route.v === 'machines') void overview.refresh(true);
         if (sourcesOpen) drawSources();
       })
       .catch(() => {});

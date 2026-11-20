@@ -14,6 +14,7 @@ export interface MachinesSnapshot {
   working: number;
   rows: readonly MachineRow[];
   admin: { label: string; href: string } | null;
+  storageRefusals?: readonly { machine: string; reason: string; time: string }[];
 }
 export interface MachinesHost {
   machine(id: string): void;
@@ -67,6 +68,26 @@ export function MachinesView({
           </span>
         </div>
       </div>
+      {!!snapshot.storageRefusals?.length && (
+        <section class="catalog-note" role="status" aria-label="Push storage refusals">
+          <p>
+            {snapshot.storageRefusals.some((row) => row.reason === 'receiver_storage_full')
+              ? 'Receiver storage is full. Free space on the receiver to resume pushes.'
+              : 'Machine storage limit reached. Free space or increase the machine limit to resume pushes.'}
+          </p>
+          <ul>
+            {snapshot.storageRefusals.map((row) => (
+              <li key={row.machine}>
+                {row.machine} — pushes refused:{' '}
+                {row.reason === 'receiver_storage_full'
+                  ? 'receiver storage full'
+                  : 'machine storage limit'}{' '}
+                · {row.time}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <div class="list">
         {snapshot.rows.map((row) => (
           <button

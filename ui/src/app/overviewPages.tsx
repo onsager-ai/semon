@@ -204,6 +204,7 @@ interface OverviewHost {
   homeIntro?: HTMLElement;
   nativeContent?: boolean;
   enabled?: boolean;
+  receiver?: boolean;
   api(path: string, body?: unknown): Promise<unknown>;
   route(): string;
   navigationRoute(): Readonly<ViewerRoute>;
@@ -242,6 +243,7 @@ export function createOverviewPages(host: OverviewHost) {
     range = 7,
     measure = 'hours',
     allAnswered = false;
+  let storageRefusals: { machine_id: string; time: number; reason: string }[] = [];
   const filters = { repo: '', machine: '', harness: '', model: '' };
   interface AcceptedAnalytics {
     data: AnalyticsData;
@@ -1135,13 +1137,20 @@ export function createOverviewPages(host: OverviewHost) {
         );
     } else if (host.route() === 'analytics') drawAnalytics();
     else if (host.route() === 'machines') {
-      if (home && homeSource === null)
+      if ((home && homeSource === null) || storageRefusals.length)
         renderMachinesScreen(
           host.root,
           {
-            up: home.machines.filter((machine) => machine.up).length,
-            working: home.machines.reduce((sum, machine) => sum + machine.working, 0),
-            rows: [...home.machines]
+            storageRefusals: storageRefusals.map((row) => ({
+              machine:
+                home?.machines.find((machine) => machine.key === row.machine_id)?.label ??
+                row.machine_id,
+              reason: row.reason,
+              time: clock(row.time * 1000, home?.now ?? Date.now()),
+            })),
+            up: home?.machines.filter((machine) => machine.up).length ?? 0,
+            working: home?.machines.reduce((sum, machine) => sum + machine.working, 0) ?? 0,
+            rows: [...(home?.machines ?? [])]
               .sort((a, b) => Number(a.up) - Number(b.up))
               .map((machine) => ({
                 id: machine.key,
@@ -1377,6 +1386,17 @@ export function createOverviewPages(host: OverviewHost) {
       if (sidebarOnly) {
         await workspaceRead;
         return;
+      }
+      if (host.receiver && route === 'machines') {
+        const storage = object(await host.api('/api/viewer/receiver-storage'));
+        if (!current()) return;
+        storageRefusals = array(storage.refusals, (value) => {
+          const row = object(value),
+            reason = text(row.reason);
+          if (!['receiver_storage_full', 'machine_storage_full'].includes(reason))
+            throw Error('Unknown storage refusal');
+          return { machine_id: text(row.machine_id), time: number(row.time), reason };
+        });
       }
       const args = new URLSearchParams(requestedQuery);
       if (observationAfter)

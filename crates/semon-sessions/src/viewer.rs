@@ -243,6 +243,8 @@ pub struct Viewer {
     asi: Option<Arc<dyn ViewerAsi>>,
     receive: Option<Arc<dyn ViewerAccess>>,
     public_origin: Option<String>,
+    // Latest storage refusal per authenticated machine; never written to the full volume.
+    storage_refusals: Mutex<std::collections::BTreeMap<String, (u64, String)>>,
 }
 
 /// Receiver-owned read authority. Session cookies bind the read credential ID to its secret;
@@ -272,6 +274,7 @@ impl Viewer {
             asi: None,
             receive: Some(access),
             public_origin,
+            storage_refusals: Mutex::default(),
         }
     }
 
@@ -341,6 +344,36 @@ impl Viewer {
         }
         let (id, secret) = cookies[0].split_once('.')?;
         (access.resolve(secret).as_deref() == Some(id)).then_some(None)
+    }
+
+    /// Record only storage refusal metadata from an authenticated push. Status
+    /// heartbeats cannot clear a refusal: only an accepted append or facts can.
+    pub fn record_push_storage(
+        &self,
+        machine: &str,
+        status: u16,
+        code: Option<&str>,
+        writes: bool,
+    ) {
+        let mut refusals = lock(&self.storage_refusals);
+        if status == 507 {
+            if let Some(code @ ("receiver_storage_full" | "machine_storage_full")) = code {
+                let time = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                refusals.insert(machine.to_owned(), (time, code.to_owned()));
+            }
+        } else if status == 200 && writes {
+            refusals.remove(machine);
+        }
+    }
+
+    fn receiver_storage(&self) -> Value {
+        let refusals = lock(&self.storage_refusals);
+        json!({"refusals": refusals.iter().map(|(machine, (time, reason))| {
+            json!({"machine_id": machine, "time": time, "reason": reason})
+        }).collect::<Vec<_>>()})
     }
 
     /// Delegates a request admitted by the receiver's shared listener.
@@ -517,6 +550,7 @@ fn serve_server(
         asi,
         receive: None,
         public_origin: None,
+        storage_refusals: Mutex::default(),
     });
     let server = Arc::new(server);
     println!("http://127.0.0.1:{port}/?t={}", viewer.token);
@@ -886,6 +920,15 @@ impl Viewer {
                 }
                 Some(None) => {}
             }
+        }
+        if path == "/api/viewer/receiver-storage" && self.receive.is_some() {
+            let reply = if request.method() == &Method::Get {
+                json_reply(200, self.receiver_storage())
+            } else {
+                json_reply(405, json!({"error": "Method not allowed"}))
+            };
+            respond(request, reply, None);
+            return;
         }
         if path == "/api/viewer/pair"
             && let Some(access) = &self.receive
@@ -1995,6 +2038,7 @@ mod tests {
             asi: None,
             receive: None,
             public_origin: None,
+            storage_refusals: Mutex::default(),
         };
         if let Some(expected_session) = expected_session {
             // This fixture owns a known warm publication. Prepare it directly,

@@ -586,6 +586,10 @@ impl Client {
                 401 | 403 => Err(Failure::Remote(format!(
                     "{route}: the receiver refused the token ({status})"
                 ))),
+                507 => Err(Failure::Remote(format!(
+                    "storage is full: {}; retrying with up to 10 minutes between attempts",
+                    error_kind(&text).unwrap_or_else(|| "receiver refused the push (507)".into())
+                ))),
                 413 if error_kind(&text).as_deref() == Some("storage_limit") => {
                     let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
                     Err(Failure::Remote(format!(
@@ -1728,6 +1732,9 @@ fn push_running(
                         Ok(()) => {
                             client.committed_inventory = client.completed_inventory.clone();
                             client.refresh_phase();
+                            for message in backoff.observe(None) {
+                                eprintln!("semon push: {message}");
+                            }
                         }
                         Err(Failure::Stopped) => return Ok(()),
                         Err(failure) => {
@@ -1735,12 +1742,8 @@ fn push_running(
                             if error.contains("refused the token") {
                                 return Err(error);
                             }
-                            if !(backoff.state == Some("storage full")
-                                && error.starts_with("storage is full"))
-                            {
-                                for message in backoff.observe(Some(&error)) {
-                                    eprintln!("semon push: {message}");
-                                }
+                            for message in backoff.observe(Some(&error)) {
+                                eprintln!("semon push: {message}");
                             }
                             if backoff.state.is_none() {
                                 eprintln!("semon push: {error}");
@@ -2591,6 +2594,14 @@ mod tests {
             for (status, body) in [
                 (413, r#"{"error":"storage_limit","used":12,"limit":20}"#),
                 (423, r#"{"error":"paused"}"#),
+                (
+                    507,
+                    r#"{"error":"receiver volume full","code":"receiver_storage_full"}"#,
+                ),
+                (
+                    507,
+                    r#"{"error":"machine cap reached","code":"machine_storage_full"}"#,
+                ),
                 (429, r#"{"error":"rate_limited"}"#),
                 (429, r#"{"error":"rate_limited"}"#),
                 (200, "{}"),
@@ -2632,6 +2643,18 @@ mod tests {
                 .message()
                 .contains("paused by the owner")
         );
+        assert!(
+            request()
+                .unwrap_err()
+                .message()
+                .starts_with("storage is full: receiver volume full")
+        );
+        assert!(
+            request()
+                .unwrap_err()
+                .message()
+                .starts_with("storage is full: machine cap reached")
+        );
         assert_eq!(request().unwrap().0, 200);
         assert_eq!(
             request().unwrap().0,
@@ -2653,6 +2676,14 @@ mod tests {
         for (status, body) in [
             (423, r#"{"error":"paused"}"#),
             (413, r#"{"error":"storage_limit","used":12,"limit":20}"#),
+            (
+                507,
+                r#"{"error":"receiver volume full","code":"receiver_storage_full"}"#,
+            ),
+            (
+                507,
+                r#"{"error":"machine cap reached","code":"machine_storage_full"}"#,
+            ),
         ] {
             let fixture = Fixture::new();
             fixture.write("claude/projects/-work/transcript.jsonl", b"hello\n");
@@ -2736,7 +2767,7 @@ mod tests {
                 request
                     .respond(Response::from_string("{\"confirmed\":[]}"))
                     .unwrap();
-                let expected = if status == 413 {
+                let expected = if matches!(status, 413 | 507) {
                     wire::SyncPhase::StorageFull
                 } else {
                     wire::SyncPhase::Paused
@@ -2778,6 +2809,11 @@ mod tests {
         }
         assert_eq!(state.observe(None), vec!["sending again"]);
         assert_eq!(state.delay(), PASS_EVERY);
+        assert_eq!(state.observe(Some(full)), vec![full]);
+        assert_eq!(state.delay(), Duration::from_secs(60), "new episode resets");
+        assert!(state.observe(Some("append: unrelated failure")).is_empty());
+        assert_eq!(state.delay(), Duration::from_secs(120));
+        state.observe(None);
         let paused = "pushes are paused by the owner";
         assert_eq!(state.observe(Some(paused)), vec![paused]);
         assert!(state.observe(Some(paused)).is_empty());
