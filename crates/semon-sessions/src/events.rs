@@ -28,12 +28,14 @@ use crate::{Tokens, archive::Archive, attachments, field, sealed::LogFile};
 pub(crate) mod session_activity;
 pub(crate) mod store;
 mod usage;
+pub(crate) mod warehouse;
 pub(crate) use store::open_regular;
 pub(crate) use store::{archive_index_retained, retain_archive_index};
 pub use usage::ModelTokens;
 pub(crate) use usage::{
     BillingUsage, CodexNativeUsage, CodexUsageEvent, MessageUsage, RateLimitWindow, RateLimits,
 };
+use warehouse::Fact;
 
 #[cfg(test)]
 thread_local! {
@@ -165,6 +167,9 @@ pub(crate) struct FileIndex {
     /// Only this parse batch; durable facts and identities stay in the Event Index.
     #[serde(skip)]
     pub(crate) native_usage_observations: Option<Vec<store::native_usage::Observation>>,
+    /// One parse suffix, carried to the Index commit with the other parsed rows.
+    #[serde(skip)]
+    pub(crate) warehouse_observations: Option<warehouse::Batch>,
     pub(crate) tree_summary: Option<crate::native_tree::Summary>,
     #[serde(skip)]
     pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
@@ -586,6 +591,12 @@ fn claude_hook(summary: &mut FileIndex, attachment: &Value, o: u64, t: Option<i6
 }
 
 impl FileIndex {
+    fn warehouse_fact(&mut self, offset: u64, block: u32, fact: impl FnOnce() -> Fact) {
+        if let Some(batch) = &mut self.warehouse_observations {
+            batch.push(offset, block, fact());
+        }
+    }
+
     /// Attach source-record identity while the producer owns the parsed record.
     /// Callers supply its ordinal in the complete physical log, before any
     /// activity ordering or filtering, and the first newly emitted signal.
@@ -3513,6 +3524,7 @@ fn parse(
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from))?;
     let mut offset = from;
+    index.warehouse_observations = warehouse::Batch::new(harness);
     let mut line = Vec::new();
     let mut parsed = Sha256::new();
     let mut bounded = false;
@@ -3600,14 +3612,52 @@ fn parse(
             }
             summary.observe_counted(record.as_ref().ok(), harness, !known.tree);
         }
+        if let Some(batch) = &mut index.warehouse_observations {
+            batch.begin_record(record_ordinal);
+        }
         match record {
             Ok(record) if record.is_object() => {
+                let before_events = index.events.len();
+                index.warehouse_fact(line_offset, 0, || Fact::Record {
+                    kind: field(&record, "type").map(str::to_owned),
+                    uuid: field(&record, "uuid").map(str::to_owned),
+                    message_id: record
+                        .get("message")
+                        .and_then(|m| field(m, "id"))
+                        .map(str::to_owned),
+                    time: record_time(&record),
+                });
                 let before_signals = index.signals.len();
-                if let Some(markers) = &mut index.marker_index {
-                    markers.observe(&line, line_offset, true, &record);
+                if let Some(markers) = &mut index.marker_index
+                    && let Some(marker) = markers.observe(&line, line_offset, true, &record)
+                {
+                    index.warehouse_fact(line_offset, 0, || Fact::Parent {
+                        harness: marker.harness,
+                        id: marker.parent_id,
+                        call_id: marker.tool_id,
+                        handoff: marker.handoff,
+                    });
                 }
                 if let Some(handoffs) = &mut index.handoff_index {
-                    handoffs.observe(&line, line_offset, true, &record)?;
+                    let batch = &mut index.warehouse_observations;
+                    handoffs.observe_with(
+                        &line,
+                        line_offset,
+                        true,
+                        &record,
+                        |block, id, tool| {
+                            if let Some(batch) = batch {
+                                batch.push(
+                                    line_offset,
+                                    block,
+                                    Fact::LaunchCandidate {
+                                        call_id: id.to_owned(),
+                                        tool: tool.to_owned(),
+                                    },
+                                );
+                            }
+                        },
+                    )?;
                 }
                 if harness == "copilot" {
                     copilot(index, &record, line_offset);
@@ -3618,6 +3668,11 @@ fn parse(
                 } else {
                     activity(index, record_time(&record));
                 }
+                if let Some(batch) = &mut index.warehouse_observations {
+                    for event in &index.events[before_events..] {
+                        batch.push(event.o, event.b, Fact::event(event));
+                    }
+                }
                 index.bodies.capture(harness, &record, record_ordinal)?;
                 session_activity::classify::capture(index, harness, &record, line_offset, &line);
                 if let Some(ordinal) = record_ordinal {
@@ -3625,6 +3680,7 @@ fn parse(
                 }
             }
             _ => {
+                index.warehouse_fact(line_offset, 0, || Fact::Gap);
                 gap(index, line_offset);
                 if let Some(event) = index
                     .events
@@ -3965,6 +4021,13 @@ fn signal(
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b' '))
         })
         .map(str::to_owned);
+    if k == SignalKind::Compact {
+        summary.warehouse_fact(o, 0, || Fact::Compact {
+            time: t,
+            trigger: n.clone(),
+            pre_tokens: v,
+        });
+    }
     let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
     if k == SignalKind::Compact
         && let Some(index) = summary
@@ -5828,6 +5891,9 @@ fn number(value: &Value, key: &str) -> u64 {
 }
 
 pub(crate) fn claude(summary: &mut FileIndex, record: &Value, offset: u64) {
+    if let Some(id) = field(record, "sessionId") {
+        summary.warehouse_fact(offset, 0, || Fact::SessionId(id.to_owned()));
+    }
     claude_events(summary, record, offset);
     if let Some(uuid) = field(record, "uuid") {
         let indices: Vec<_> = summary
@@ -5895,59 +5961,75 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
         {
             record_ids.insert(uuid.to_owned());
         }
-        summary.usage_by_id.insert(
-            id.to_owned(),
-            MessageUsage {
-                offset,
-                record_ordinal: None,
-                record_ids,
-                model: field(message, "model").map(str::to_owned),
-                tokens: Tokens {
-                    input: input + cache_write + cache_read,
-                    cached_input: cache_read,
-                    output,
-                    reasoning_output: 0,
-                    total: input + cache_write + cache_read + output,
-                },
-                model_tokens: ModelTokens {
-                    input,
-                    output,
-                    cache_write,
-                    cache_read,
-                },
-                billing: BillingUsage {
-                    input,
-                    output,
-                    cache_read,
-                    cache_write_5m,
-                    cache_write_1h,
-                    web_search_requests,
-                    speed: field(usage, "speed").map(str::to_owned),
-                    service_tier: field(usage, "service_tier").map(str::to_owned),
-                    prompt_size: input
-                        .saturating_add(cache_read)
-                        .saturating_add(cache_write_5m)
-                        .saturating_add(cache_write_1h),
-                    timestamp,
-                    split_unknown,
-                },
+        let report = MessageUsage {
+            offset,
+            record_ordinal: None,
+            record_ids,
+            model: field(message, "model").map(str::to_owned),
+            tokens: Tokens {
+                input: input + cache_write + cache_read,
+                cached_input: cache_read,
+                output,
+                reasoning_output: 0,
+                total: input + cache_write + cache_read + output,
             },
-        );
+            model_tokens: ModelTokens {
+                input,
+                output,
+                cache_write,
+                cache_read,
+            },
+            billing: BillingUsage {
+                input,
+                output,
+                cache_read,
+                cache_write_5m,
+                cache_write_1h,
+                web_search_requests,
+                speed: field(usage, "speed").map(str::to_owned),
+                service_tier: field(usage, "service_tier").map(str::to_owned),
+                prompt_size: input
+                    .saturating_add(cache_read)
+                    .saturating_add(cache_write_5m)
+                    .saturating_add(cache_write_1h),
+                timestamp,
+                split_unknown,
+            },
+        };
+        summary.warehouse_fact(offset, 0, || Fact::ClaudeUsage {
+            message_id: id.to_owned(),
+            model: report.model.clone(),
+            tokens: report.tokens.clone(),
+            billing: report.billing.clone(),
+        });
+        summary.usage_by_id.insert(id.to_owned(), report);
     }
     if let Some(id) = field(record, "session_id")
         && Some(id) != field(record, "sessionId")
     {
+        summary.warehouse_fact(offset, 0, || Fact::Relation {
+            kind: "session_id",
+            target: id.to_owned(),
+        });
         summary.links.session_ids.insert(id.to_owned());
     }
     match field(record, "type") {
         Some("continued-in") => {
             if let Some(id) = field(record, "continuedInSessionId") {
+                summary.warehouse_fact(offset, 0, || Fact::Relation {
+                    kind: "continued-in",
+                    target: id.to_owned(),
+                });
                 summary.links.continued_in.insert(id.to_owned());
             }
             return;
         }
         Some("bridge-session") => {
             if let Some(id) = field(record, "bridgeSessionId") {
+                summary.warehouse_fact(offset, 0, || Fact::Relation {
+                    kind: "bridge",
+                    target: format!("bridge:{id}"),
+                });
                 summary.links.bridges.insert(id.to_owned());
             }
             return;
@@ -6096,9 +6178,8 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                             },
                         );
                     }
-                    Some("tool_use") if role == Some("assistant") => tool_event(
-                        summary,
-                        Event {
+                    Some("tool_use") if role == Some("assistant") => {
+                        let event = Event {
                             k: Kind::Tool,
                             o: offset,
                             b: block,
@@ -6117,16 +6198,42 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                                 0
                             },
                             ..Event::default()
-                        },
-                    ),
+                        };
+                        summary.warehouse_fact(offset, block, || {
+                            let input = item.get("input");
+                            let target = (event.n.as_deref() == Some("SendMessage"))
+                                .then(|| {
+                                    input.and_then(|v| {
+                                        field(v, "to").or_else(|| field(v, "recipient"))
+                                    })
+                                })
+                                .flatten()
+                                .map(crate::model::plain_name);
+                            let task_name = matches!(event.n.as_deref(), Some("Agent" | "Task"))
+                                .then(|| input.and_then(|v| field(v, "name")))
+                                .flatten()
+                                .map(str::to_owned);
+                            Fact::ToolCall {
+                                id: event.id.clone(),
+                                tool: event.n.clone(),
+                                flags: event.script,
+                                time,
+                                target,
+                                task_name,
+                            }
+                        });
+                        tool_event(summary, event);
+                    }
                     Some("tool_result") if role == Some("user") => {
                         if let Some(id) = field(item, "tool_use_id") {
                             let error = item.get("is_error").and_then(Value::as_bool) == Some(true);
                             let kind = field(record, "toolDenialKind");
-                            if (error || kind.is_some())
-                                && let Some(source) =
-                                    denial_source(kind, item.get("content"), tool_result)
-                            {
+                            let denial = if error || kind.is_some() {
+                                denial_source(kind, item.get("content"), tool_result)
+                            } else {
+                                None
+                            };
+                            if let Some(source) = denial {
                                 let call = call_index(summary, id);
                                 note(
                                     summary,
@@ -6137,17 +6244,49 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                                     call,
                                 );
                             }
-                            resolve(summary, id, |name| {
-                                let (flags, msg_id) = result_flags(name, tool_result);
-                                Reply {
-                                    o: offset,
-                                    b: block,
-                                    t: time,
-                                    e: error,
-                                    f: flags,
-                                    m: msg_id,
+                            let call = summary
+                                .pending
+                                .get(id)
+                                .and_then(|at| summary.events.get(*at));
+                            let (flags, msg_id) =
+                                result_flags(call.and_then(|e| e.n.as_deref()), tool_result);
+                            let reply = Reply {
+                                o: offset,
+                                b: block,
+                                t: time,
+                                e: error,
+                                f: flags,
+                                m: msg_id,
+                            };
+                            let call_position = call.map(|e| warehouse::Position {
+                                offset: e.o,
+                                block: e.b,
+                            });
+                            summary.warehouse_fact(offset, block, || {
+                                let mut reply = reply.clone();
+                                if call_position.is_none() {
+                                    // A result may have no known call in this source.
+                                    // Keep native correlation without claiming its role.
+                                    reply.m = tool_result
+                                        .and_then(|v| field(v, "msg_id"))
+                                        .map(str::to_owned);
+                                    if tool_result
+                                        .and_then(|v| v.get("success"))
+                                        .and_then(Value::as_bool)
+                                        == Some(false)
+                                    {
+                                        reply.f |= SEND_FAILED;
+                                    }
+                                }
+                                Fact::ToolResult {
+                                    id: id.to_owned(),
+                                    call: call_position,
+                                    reply,
+                                    denial: denial.map(str::to_owned),
+                                    exit_code: None,
                                 }
                             });
+                            resolve(summary, id, |_| reply);
                         }
                     }
                     _ => {}
