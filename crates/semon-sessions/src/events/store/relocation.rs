@@ -340,6 +340,7 @@ pub(super) fn reuse(
     )
     .map_err(failure)?;
     write_codex_header(&tx, path, &relocated, header.as_ref()).map_err(failure)?;
+    warehouse::relocate(&tx, old, path, &relocated).map_err(failure)?;
     let normalized_usage =
         native_usage::relocate(&tx, old, path, &prior, &relocated).map_err(failure)?;
     tx.execute(

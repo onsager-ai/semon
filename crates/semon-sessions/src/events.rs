@@ -2786,8 +2786,8 @@ impl EventCache {
         if self.warehouse_commits.is_some() {
             return warehouse::Batch::new(harness);
         }
-        let _ = harness;
-        None
+        self.store.as_ref()?;
+        warehouse::Batch::new(harness)
     }
 
     /// Parsing happens before the write reservation. Cold complete new files
@@ -2826,7 +2826,9 @@ impl EventCache {
                 .get_mut(&path)
                 .and_then(|file| file.index.as_mut())
             {
-                Arc::make_mut(index).bodies.checkpoint();
+                let index = Arc::make_mut(index);
+                index.bodies.checkpoint();
+                index.warehouse_observations = None;
             }
         }
         Ok(())
@@ -3034,6 +3036,7 @@ pub(crate) fn scan_archive(
         if cache.store.is_some() && !cache.unpersisted.contains(&key) {
             store::native_usage::checkpoint(&mut index);
             index.bodies.checkpoint();
+            index.warehouse_observations = None;
             if let Some(store) = cache.store.as_ref()
                 && let Some((stored, metadata)) = store
                     .load_tree(&key, &native.ledger.stat)
@@ -3545,7 +3548,9 @@ pub(crate) fn scan_file(
         }
         if cache.store.is_some() && !cache.unpersisted.contains(&key) {
             store::native_usage::checkpoint(Arc::make_mut(&mut index));
-            Arc::make_mut(&mut index).bodies.checkpoint();
+            let admitted = Arc::make_mut(&mut index);
+            admitted.bodies.checkpoint();
+            admitted.warehouse_observations = None;
             if let Some(store) = cache.store.as_ref()
                 && let Some((stored, metadata)) = store
                     .load_tree(&key, &ledger.stat)

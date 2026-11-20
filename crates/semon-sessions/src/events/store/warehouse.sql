@@ -4,9 +4,11 @@ CREATE TABLE warehouse_source (
   source INTEGER PRIMARY KEY,
   origin TEXT NOT NULL, harness TEXT NOT NULL CHECK(harness IN ('claude','codex')),
   logical_source TEXT NOT NULL, incarnation INTEGER NOT NULL,
+  carrier TEXT NOT NULL,
   ledger TEXT NOT NULL,
   UNIQUE(origin,harness,logical_source,incarnation)
 ) STRICT;
+CREATE INDEX warehouse_source_logical ON warehouse_source(logical_source,harness,incarnation);
 CREATE TABLE warehouse_current (
   path TEXT PRIMARY KEY, source INTEGER NOT NULL UNIQUE REFERENCES warehouse_source(source)
 ) STRICT, WITHOUT ROWID;
@@ -37,6 +39,11 @@ CREATE TABLE fact_step_observation (
 CREATE TABLE fact_step_billing (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER, billing TEXT NOT NULL,
+  PRIMARY KEY(source,pos,block,kind,occurrence)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE fact_prompt (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
+  kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER, ts INTEGER,
   PRIMARY KEY(source,pos,block,kind,occurrence)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE fact_tool_call (
@@ -127,7 +134,8 @@ CREATE TABLE dim_session (
   source INTEGER PRIMARY KEY, harness TEXT NOT NULL, native_id TEXT NOT NULL,
   parent_id TEXT, nickname TEXT, agent_path TEXT,
   first_ts INTEGER, last_ts INTEGER, title_pos INTEGER, model TEXT,
-  model_pos INTEGER, prompt_pos INTEGER, continued INTEGER NOT NULL
+  model_pos INTEGER, prompt_pos INTEGER, continued INTEGER NOT NULL,
+  lineage INTEGER NOT NULL
 ) STRICT;
 CREATE TABLE lineage_group (
   id INTEGER PRIMARY KEY, weight INTEGER NOT NULL, minimum INTEGER NOT NULL UNIQUE,

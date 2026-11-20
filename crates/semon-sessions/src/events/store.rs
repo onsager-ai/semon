@@ -2779,6 +2779,7 @@ impl IndexStore for SqliteStore {
         if !current(&transaction).map_err(failure)? {
             return Ok(Outcome::Stale);
         }
+        require_current_sql(&transaction).map_err(failure)?;
         for (path, ledger, _) in files {
             if ledger.offset != ledger.stat.size
                 || ledger_row(&transaction, path).map_err(failure)?.is_some()
@@ -4432,6 +4433,7 @@ impl SqliteStore {
                     if archived_index(&transaction, path)?
                         .is_some_and(|record| record.matches(&found))
                     {
+                        warehouse::withdraw(&transaction, path)?;
                         // Explicit archive retention does not make this source
                         // current. Complete catalog observation still retires
                         // its membership; only the existing event rows survive.
@@ -4451,6 +4453,7 @@ impl SqliteStore {
                 (Err(error), _) if is_data_error(&error) => {}
                 (Err(error), _) => return Err(error),
             }
+            warehouse::withdraw(&transaction, path)?;
             // By path, never decoding the row: an undecodable one goes too.
             for table in [
                 "events",
@@ -6122,12 +6125,17 @@ fn write_index_changes_measured(
     let started = measurements.start();
     // The source ledger fences raw bytes; the sidecar is an independent
     // interpretation dependency. Re-encoding derived proofs changes neither.
+    let previous_sidecar = if let Some(expected) = expected
+        && crate::native_sidecar::agent_path(Path::new(path))
+    {
+        let mut statement = transaction.prepare_cached(NATIVE_METADATA_VALUE)?;
+        read_claude_sidecar(&mut statement, path, expected)?
+    } else {
+        None
+    };
     let semantic_change = expected != Some(ledger)
-        || (crate::native_sidecar::agent_path(Path::new(path)) && {
-            let mut statement = transaction.prepare(NATIVE_METADATA_VALUE)?;
-            read_claude_sidecar(&mut statement, path, ledger)?.as_ref()
-                != index.claude_sidecar.as_ref()
-        });
+        || (crate::native_sidecar::agent_path(Path::new(path))
+            && previous_sidecar.as_ref() != index.claude_sidecar.as_ref());
     relocation::advance(transaction, path, expected, ledger, changes.is_some())?;
     native_usage::begin_source(transaction, path, expected, ledger, changes.is_some())?;
     measurements.record("relocation", started, 1);
@@ -6153,6 +6161,15 @@ fn write_index_changes_measured(
         advance_ledger_epoch(transaction, path)?;
     }
     native_usage::write(transaction, path, ledger, index)?;
+    warehouse::write(
+        transaction,
+        path,
+        ledger,
+        index,
+        changes.is_some(),
+        previous_sidecar.as_ref(),
+        measurements,
+    )?;
     bodies::write(transaction, path, &index.bodies, changes.is_some())?;
     let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')", [path])?;
@@ -6666,6 +6683,120 @@ mod tests {
                 .unwrap(),
             2
         );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn warehouse_admission_replay_and_rollback() {
+        use crate::events::warehouse::{Batch, Fact};
+
+        let root = scratch("warehouse-admission");
+        let db = root.join("index.sqlite3");
+        let (mut store, _) = opened(&db);
+        let mut files = Vec::new();
+        for name in ["first", "second"] {
+            let path = root.join(format!("{name}.jsonl"));
+            fs::write(&path, b"{}\n").unwrap();
+            let digest = sha2::Sha256::digest(b"{}\n").into();
+            let ledger = Ledger {
+                stat: Stat::of(&path).unwrap(),
+                offset: 3,
+                prefix: digest,
+                tail: digest,
+            };
+            let mut batch = Batch::new("claude").unwrap();
+            batch.begin_record(Some(0));
+            batch.push(
+                0,
+                0,
+                Fact::Record {
+                    kind: None,
+                    uuid: None,
+                    message_id: None,
+                    time: Some(17),
+                },
+            );
+            let index = FileIndex {
+                warehouse_observations: Some(batch),
+                ..FileIndex::default()
+            };
+            files.push((
+                path.to_string_lossy().into_owned(),
+                ledger,
+                std::sync::Arc::new(index),
+            ));
+        }
+        let counts = |store: &SqliteStore| {
+            [
+                "files",
+                "warehouse_source",
+                "warehouse_current",
+                "fact_record",
+                "dim_session",
+                "maintenance_cursor",
+            ]
+            .map(|table| {
+                store
+                    .connection
+                    .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .unwrap()
+            })
+        };
+        let (path, ledger, index) = &files[0];
+        store.connection.execute_batch("CREATE TEMP TRIGGER interrupt BEFORE INSERT ON main.session_catalog_invalidations BEGIN SELECT RAISE(ABORT,'interrupted admission'); END;").unwrap();
+        assert!(
+            store
+                .write_one_dirty(path, None, None, ledger, index)
+                .is_err()
+        );
+        assert_eq!(counts(&store), [0; 6]);
+        drop(store);
+        let (mut store, _) = opened(&db);
+        assert_eq!(counts(&store), [0; 6]);
+        let interrupt = "CREATE TEMP TRIGGER interrupt BEFORE INSERT ON main.session_catalog_invalidations WHEN NEW.source_path LIKE '%/second.jsonl' BEGIN SELECT RAISE(ABORT,'interrupted batch'); END;";
+        store.connection.execute_batch(interrupt).unwrap();
+        assert!(store.commit_initial_files(&files).is_err());
+        assert_eq!(counts(&store), [0; 6]);
+        drop(store);
+        let (mut store, _) = opened(&db);
+        assert_eq!(counts(&store), [0; 6]);
+        assert_eq!(
+            store.commit_initial_files(&files).unwrap(),
+            Outcome::Written
+        );
+        drop(store);
+        let (mut store, _) = opened(&db);
+        assert_eq!(counts(&store), [2; 6]);
+        assert_eq!(store.ledger(path).unwrap().as_ref(), Some(ledger));
+        assert_eq!(
+            store.commit_initial_files(&files).unwrap(),
+            Outcome::Conflict
+        );
+        let changes = crate::events::DirtyRows::default();
+        assert_eq!(
+            store
+                .write_one_dirty(path, Some(ledger), Some(&changes), ledger, index)
+                .unwrap(),
+            Outcome::Written
+        );
+        assert_eq!(counts(&store), [2; 6]);
+        let mut different = (**index).clone();
+        different
+            .warehouse_observations
+            .as_mut()
+            .unwrap()
+            .observations[0]
+            .fact = Fact::Gap;
+        assert!(
+            store
+                .write_one_dirty(path, Some(ledger), Some(&changes), ledger, &different)
+                .is_err()
+        );
+        assert_eq!(counts(&store), [2; 6]);
+        assert_eq!(store.ledger(path).unwrap().as_ref(), Some(ledger));
         drop(store);
         fs::remove_dir_all(root).unwrap();
     }
@@ -10276,7 +10407,13 @@ mod tests {
                 "PRAGMA user_version=0",
                 "nonempty schema zero",
             ),
+            ("schema-49", "PRAGMA user_version=49", "older schema"),
             ("newer", "PRAGMA user_version=2147483647", "newer schema"),
+            (
+                "missing-warehouse-index",
+                "DROP INDEX lineage_node_component",
+                "malformed warehouse schema",
+            ),
             (
                 "foreign",
                 "DROP TABLE events; DROP TABLE files",

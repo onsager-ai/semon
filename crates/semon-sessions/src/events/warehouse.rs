@@ -2,7 +2,6 @@
 //!
 //! Only native metadata and positions cross this boundary. The Index writer
 //! will bind the origin, logical source and incarnation when it commits.
-#![allow(dead_code)] // The consumer lands with the warehouse transaction.
 
 use super::{BillingUsage, Event, Kind, ModelTokens, Peer, Reply};
 use crate::Tokens;
