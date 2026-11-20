@@ -77,6 +77,54 @@ fn assert_committed_facts(home: &Home, expected: &Connection, harness: &str) {
     }
 }
 
+#[test]
+fn warehouse_pricing_binds_the_effective_snapshot_at_read_time() {
+    let home = Home::new();
+    let path = home.top(
+        "priced",
+        &[assistant_usage(
+            "priced",
+            ts(0, 1),
+            "message",
+            "synthetic-model",
+            json!({"input_tokens": 100, "output_tokens": 10}),
+        )],
+    );
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+    let db = Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    assert!(
+        rows(
+            &db,
+            "SELECT name FROM sqlite_schema WHERE sql LIKE '%semon_step_usd%'"
+        )
+        .is_empty()
+    );
+    let owner: i64 = db
+        .query_row("SELECT source FROM dim_session", [], |r| r.get(0))
+        .unwrap();
+    let sql = include_str!("../../../events/store/warehouse_pricing.sql");
+    for price in [0.5, 1.25] {
+        db.create_scalar_function(
+            "semon_step_usd",
+            2,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8,
+            move |_| Ok(price),
+        )
+        .unwrap();
+        let actual = db
+            .query_row(sql, [owner], |r| {
+                Ok((
+                    r.get::<_, f64>(0)?,
+                    r.get::<_, f64>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(actual, (price, 0.0, 0));
+    }
+}
+
 fn string(value: &Option<String>) -> Sql {
     value
         .as_ref()

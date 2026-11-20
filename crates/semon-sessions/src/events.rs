@@ -3038,10 +3038,12 @@ pub(crate) fn scan_archive(
                 "archive index commit conflict",
             ));
         }
+        // Retries parse from the committed ledger, so the attempted batch
+        // never belongs to the returned folded index.
+        index.warehouse_observations = None;
         if cache.store.is_some() && !cache.unpersisted.contains(&key) {
             store::native_usage::checkpoint(&mut index);
             index.bodies.checkpoint();
-            index.warehouse_observations = None;
             if let Some(store) = cache.store.as_ref()
                 && let Some((stored, metadata)) = store
                     .load_tree(&key, &native.ledger.stat)
@@ -3518,13 +3520,13 @@ pub(crate) fn scan_file(
                 hook();
             }
         }
-        if cache.scan_byte_budget.is_some()
+        let stage_cold = cache.scan_byte_budget.is_some()
             && recorded.is_none()
             && !bounded
             && ledger.offset == ledger.stat.size
             && cache.scoped
-            && cache.store.is_some()
-        {
+            && cache.store.is_some();
+        if stage_cold {
             if cache.cold_writes.len() >= 64 {
                 return Err(io::Error::other("cold index batch exceeds source budget"));
             }
@@ -3532,16 +3534,21 @@ pub(crate) fn scan_file(
             cache
                 .cold_writes
                 .push((key.clone(), ledger.clone(), Arc::clone(&index)));
-        } else if cache.commit(
-            &key,
-            recorded.as_ref(),
-            append.then_some(&changes),
-            &ledger,
-            &index,
-        ) && !last
-        {
-            trace("conflict");
-            continue;
+        } else {
+            let retry = cache.commit(
+                &key,
+                recorded.as_ref(),
+                append.then_some(&changes),
+                &ledger,
+                &index,
+            );
+            // Busy or failed writes are retried by parsing from the durable
+            // ledger. The attempted fact batch is no longer needed here.
+            Arc::make_mut(&mut index).warehouse_observations = None;
+            if retry && !last {
+                trace("conflict");
+                continue;
+            }
         }
         if bounded && !cache.unpersisted.contains(&key) {
             let stem = cache
@@ -3555,7 +3562,6 @@ pub(crate) fn scan_file(
             store::native_usage::checkpoint(Arc::make_mut(&mut index));
             let admitted = Arc::make_mut(&mut index);
             admitted.bodies.checkpoint();
-            admitted.warehouse_observations = None;
             if let Some(store) = cache.store.as_ref()
                 && let Some((stored, metadata)) = store
                     .load_tree(&key, &ledger.stat)
