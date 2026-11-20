@@ -2067,6 +2067,7 @@ mod tests {
             receive: Some(Arc::new(TestAccess)),
             public_origin: None,
             asi: None,
+            storage_refusals: Mutex::default(),
         };
         let request = request.replace("PORT", &port.to_string());
         let worker = thread::spawn(move || {
