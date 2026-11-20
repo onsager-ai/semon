@@ -29,6 +29,18 @@ impl CodexHeader {
             .clone()
             .or_else(|| crate::codex_id_from_filename(path))
     }
+
+    pub(crate) fn warehouse_observation(
+        &self,
+        path: &Path,
+        complete: bool,
+    ) -> Option<crate::events::warehouse::Header> {
+        Some(crate::events::warehouse::Header {
+            native_id: self.native_id(path)?,
+            metadata: self.metadata.clone(),
+            complete,
+        })
+    }
 }
 
 #[cfg(test)]

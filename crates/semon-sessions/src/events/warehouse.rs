@@ -4,7 +4,7 @@
 //! will bind the origin, logical source and incarnation when it commits.
 #![allow(dead_code)] // The consumer lands with the warehouse transaction.
 
-use super::{BillingUsage, Event, Kind, Peer, Reply};
+use super::{BillingUsage, Event, Kind, ModelTokens, Peer, Reply};
 use crate::Tokens;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -41,7 +41,6 @@ pub(crate) enum Fact {
         harness: String,
         id: String,
         call_id: Option<String>,
-        handoff: Option<String>,
     },
     LaunchCandidate {
         call_id: String,
@@ -52,6 +51,24 @@ pub(crate) enum Fact {
         model: Option<String>,
         tokens: Tokens,
         billing: BillingUsage,
+    },
+    CodexUsage {
+        identity: String,
+        model: Option<String>,
+        tokens: Tokens,
+        model_tokens: ModelTokens,
+        time: Option<i64>,
+        accepted: bool,
+    },
+    CodexTokenSnapshot {
+        model: Option<String>,
+        tokens: Tokens,
+        time: Option<i64>,
+    },
+    CodexTurn {
+        thread_id: String,
+        turn_id: String,
+        phase: crate::codex_lifecycle::TurnPhase,
     },
     Compact {
         time: Option<i64>,
@@ -72,6 +89,8 @@ pub(crate) enum Fact {
         reply: Reply,
         denial: Option<String>,
         exit_code: Option<i64>,
+        target: Option<String>,
+        kind: &'static str,
     },
     Event {
         kind: Kind,
@@ -80,6 +99,7 @@ pub(crate) enum Fact {
         flags: u8,
         time: Option<i64>,
         peer: Option<Peer>,
+        target: Option<String>,
     },
 }
 
@@ -92,14 +112,34 @@ impl Fact {
             flags: event.script,
             time: event.t,
             peer: event.peer.clone(),
+            target: None,
         }
     }
+}
+
+/// Independent first-line witness. A provisional header is verified against
+/// the source but does not own a complete-record ordinal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Header {
+    pub(crate) native_id: String,
+    pub(crate) metadata: crate::model::CodexMeta,
+    pub(crate) complete: bool,
+}
+
+/// The sidecar owns its own revision. The batch carries only the projected
+/// metadata, while the enclosing FileIndex supplies the verified witness.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Sidecar {
+    Absent,
+    Present(crate::native_sidecar::AgentMetadata),
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Batch {
     pub(crate) harness: &'static str,
     pub(crate) observations: Vec<Observation>,
+    pub(crate) header: Option<Header>,
+    pub(crate) sidecar: Option<Sidecar>,
     ordinal: Option<u64>,
     record_start: usize,
 }
@@ -108,11 +148,14 @@ impl Batch {
     pub(super) fn new(harness: &str) -> Option<Self> {
         let harness = match harness {
             "claude" => "claude",
+            "codex" => "codex",
             _ => return None,
         };
         Some(Self {
             harness,
             observations: Vec::new(),
+            header: None,
+            sidecar: None,
             ordinal: None,
             record_start: 0,
         })

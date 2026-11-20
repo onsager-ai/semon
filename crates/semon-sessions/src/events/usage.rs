@@ -97,13 +97,13 @@ impl CodexNativeUsage {
         payload: &Value,
         model: String,
         time: Option<i64>,
-    ) {
+    ) -> bool {
         let Some((key, tokens, counts)) = Self::decode(payload) else {
-            return;
+            return false;
         };
         let native = slot.get_or_insert_with(Default::default);
         if !native.seen.insert(key) {
-            return;
+            return false;
         }
         native.tokens.input += tokens.input;
         native.tokens.cached_input += tokens.cached_input;
@@ -125,6 +125,7 @@ impl CodexNativeUsage {
         } else {
             native.events.push(event);
         }
+        true
     }
 
     /// Shared validation for indexing and receipt-checked representation migration.

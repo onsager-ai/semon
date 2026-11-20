@@ -145,7 +145,7 @@ pub(crate) struct Session {
 
 /// Native ancestry and inherited storage are independent observations. Neither
 /// creates a spawn edge or merges a fork's owned turns into its parent's work.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) struct CodexHistory {
     #[serde(skip_serializing_if = "Option::is_none")]
     native_root_session_id: Option<String>,
@@ -157,7 +157,7 @@ pub(crate) struct CodexHistory {
     history_base: Option<CodexHistoryBase>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct CodexHistoryBase {
     thread_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -757,7 +757,7 @@ struct AgentMeta {
     branch: Option<String>,
 }
 
-#[derive(Clone, Default, Debug, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CodexMeta {
     history: Option<CodexHistory>,
@@ -7287,7 +7287,9 @@ fn prepare_history_inner(
                             }
                             match row.harness.as_str() {
                                 "claude" => events::claude(&mut summary, &value, offset),
-                                "codex" => events::codex(&mut summary, &value, offset),
+                                "codex" => {
+                                    events::codex(&mut summary, &value, offset);
+                                }
                                 "copilot" => events::copilot(&mut summary, &value, offset),
                                 _ => {
                                     return Err(io::Error::new(

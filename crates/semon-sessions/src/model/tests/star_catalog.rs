@@ -729,6 +729,17 @@ fn codex_records(
     out
 }
 
+fn codex_spawn_fixture() -> Vec<Value> {
+    vec![
+        codex_user(ts(6, 0), "coordinate"),
+        codex_line(
+            ts(6, 1),
+            "response_item",
+            json!({"type":"function_call","name":"spawn_agent","call_id":"only","arguments":"{\"task_name\":\"solo\"}"}),
+        ),
+    ]
+}
+
 #[test]
 fn star_catalog_fixture_parity() {
     let home = Home::new();
@@ -756,20 +767,7 @@ fn star_catalog_fixture_parity() {
     warehouse.source(4, "claude", "same", &collision);
     for (source, id, parent, name, body) in [
         (5, "same", None, None, vec![codex_user(ts(5, 0), "hi")]),
-        (
-            6,
-            "root",
-            None,
-            None,
-            vec![
-                codex_user(ts(6, 0), "coordinate"),
-                codex_line(
-                    ts(6, 1),
-                    "response_item",
-                    json!({"type":"function_call","name":"spawn_agent","call_id":"only","arguments":"{\"task_name\":\"solo\"}"}),
-                ),
-            ],
-        ),
+        (6, "root", None, None, codex_spawn_fixture()),
         (
             7,
             "child",
