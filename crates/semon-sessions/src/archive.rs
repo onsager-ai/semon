@@ -145,6 +145,14 @@ impl NativeSource {
     }
 }
 
+/// Durable archive inventory, independent of the Event Index.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RecoveryRecord {
+    pub(crate) source: String,
+    pub(crate) native: Option<NativeSource>,
+    pub(crate) chains: Vec<Chain>,
+}
+
 /// One line of `sources.log`.
 #[derive(Serialize, Deserialize)]
 struct Record {
@@ -535,6 +543,43 @@ impl Archive {
             self.remember(&dir, &chain)?;
         }
         Ok(begun.then(|| evidence(manifest.chains.last().unwrap())))
+    }
+
+    pub(crate) fn recovery_inventory(&self) -> io::Result<Vec<RecoveryRecord>> {
+        match fs::symlink_metadata(&self.dir) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+            Ok(meta) if !meta.is_dir() => return Err(invalid("archive directory is not regular")),
+            Ok(_) => {}
+        }
+        if !self.dir.join(SOURCES).try_exists()? {
+            // The journal is synced before any source directory is published.
+            // A surviving manifest without the journal leaves coverage unknown.
+            for entry in fs::read_dir(&self.dir)? {
+                if is_id(&entry?.file_name().to_string_lossy()) {
+                    return Err(invalid("archive source journal is missing"));
+                }
+            }
+            return Ok(Vec::new());
+        }
+        let _guard = self.lock(false)?;
+        let mut known = self.known();
+        self.refresh(&mut known)?;
+        let mut inventory = Vec::new();
+        for (source, id) in &known.sources {
+            let manifest = read_manifest(&self.dir.join(id))?;
+            if &manifest.source != source {
+                return Err(invalid(
+                    "archive source manifest is missing or differs from its journal",
+                ));
+            }
+            inventory.push(RecoveryRecord {
+                source: source.clone(),
+                native: manifest.native,
+                chains: manifest.chains,
+            });
+        }
+        Ok(inventory)
     }
 
     /// Discover only sources admitted under these exact configured native roots.

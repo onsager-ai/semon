@@ -1,3 +1,4 @@
+mod index_rebuild;
 mod native_prefix;
 pub use native_prefix::codex_native_id_prefix;
 mod native_homes;
@@ -241,6 +242,8 @@ pub struct Options {
     /// working directories on this disk. For logs copied from another
     /// machine.
     pub facts: Option<PathBuf>,
+    /// Receiver-owned Raw and custody records for this machine.
+    pub receiver_custody: Option<PathBuf>,
     /// Read-only producer-owned session annotation JSONL file.
     pub annotations: PathBuf,
     /// Index only the log files modified within the window (`since`, unless
@@ -278,6 +281,7 @@ impl Default for Options {
             since: Duration::from_secs(24 * 60 * 60),
             session: None,
             facts: None,
+            receiver_custody: None,
             annotations: annotations::default_path(&home, env::var_os("XDG_STATE_HOME").as_deref()),
             scan_window: false,
         }

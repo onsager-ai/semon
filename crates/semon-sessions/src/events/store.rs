@@ -694,6 +694,76 @@ struct SqliteStore {
     traversal_observation: Option<crate::native_timing::CatalogTraversalProbe>,
 }
 
+/// Recovery detects unsupported contracts without touching their SQLite sidecars.
+pub(crate) fn rebuild_needed(path: &Path) -> io::Result<bool> {
+    fn observe(path: &Path) -> io::Result<Option<super::Stat>> {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+            Ok(meta) if !meta.is_file() => {
+                Err(io::Error::other("Index component is not a regular file"))
+            }
+            Ok(meta) => super::Stat::from_metadata(&meta).map(Some),
+        }
+    }
+    let Some(database) = observe(path)? else {
+        return Ok(false);
+    };
+    let wal_path = sibling(path, "-wal");
+    let wal = observe(&wal_path)?;
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    // SQLite immutable reads omit uncheckpointed WAL pages. The Unix VFS
+    // with exclusive locking mode uses a private WAL index, never the SHM.
+    // No lock is claimed against old Semon versions, so reject a changing
+    // database/WAL observation before acting on the qualification result.
+    #[cfg(unix)]
+    let connection = Connection::open_with_flags_and_vfs(path, flags, "unix-none");
+    #[cfg(not(unix))]
+    let connection = Connection::open_with_flags(path, flags);
+    let connection = connection.map_err(io::Error::other)?;
+    #[cfg(unix)]
+    connection
+        .pragma_update(None, "locking_mode", "EXCLUSIVE")
+        .map_err(io::Error::other)?;
+    let result = qualify_producer(&connection);
+    if observe(path)? != Some(database) || observe(&wal_path)? != wal {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "Index changed during qualification",
+        ));
+    }
+    match result {
+        Ok(Init::Ready) => {
+            let mode: String = connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .map_err(io::Error::other)?;
+            Ok(!mode.eq_ignore_ascii_case("wal"))
+        }
+        Ok(result) => Ok(matches!(result, Init::Unsupported(_))),
+        // Keep existing physical-corruption handling distinct from version refusal.
+        Err(error) if is_corrupt(&error) => Ok(false),
+        Err(error) if is_unavailable(&error) => Err(io::Error::other(error)),
+        Err(_) => Ok(true),
+    }
+}
+
+pub(crate) fn checkpoint_rebuilt_index(path: &Path) -> io::Result<()> {
+    let connection = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(io::Error::other)?;
+    let (busy, pages, written): (i64, i64, i64) = connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .map_err(io::Error::other)?;
+    if busy != 0 || pages != written {
+        return Err(io::Error::other("rebuild Index checkpoint did not finish"));
+    }
+    Ok(())
+}
+
 /// Opens (creating when missing) the store at `path` and reads all of it.
 /// A file that isn't a database, or a damaged one, is renamed aside to
 /// `<path>.corrupt` and a new store is made in its place. Operational failures
@@ -4736,18 +4806,8 @@ pub(crate) fn catalog_probe_connection(path: &Path) -> rusqlite::Result<Connecti
     }
 }
 
-fn unsupported_message(connection: &Connection, reason: &str) -> String {
-    if reason != "unsupported session index: older schema" {
-        return reason.to_owned();
-    }
-    let Some(path) = connection.path() else {
-        return reason.to_owned();
-    };
-    format!(
-        "{reason}; this index is a derived cache rebuilt from native logs. Move (rename, never delete) {path:?}, {wal:?} and {shm:?} aside, then run the command again. Native logs must remain available to rebuild the index.",
-        wal = format!("{path}-wal"),
-        shm = format!("{path}-shm"),
-    )
+fn unsupported_message(_connection: &Connection, reason: &str) -> String {
+    reason.to_owned()
 }
 
 /// Classify in a read snapshot, before journal, schema or recovery writes.

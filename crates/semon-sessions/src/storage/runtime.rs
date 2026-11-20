@@ -156,7 +156,13 @@ impl RuntimeStore {
             Some(namespace) => {
                 super::sqlite::open_index(&self.options, namespace).map_err(io::Error::other)
             }
-            None => EventCache::open_scoped(&self.options.cache).map_err(io::Error::other),
+            None => {
+                crate::index_rebuild::ensure(
+                    &self.options,
+                    &Namespace::new("local").map_err(io::Error::other)?,
+                )?;
+                EventCache::open_scoped(&self.options.cache).map_err(io::Error::other)
+            }
         }
     }
 
@@ -165,6 +171,8 @@ impl RuntimeStore {
         if self.is_postgres() {
             return Err(io::Error::other("PostgreSQL has no SQLite index writer"));
         }
+        let local = Namespace::new("local").map_err(io::Error::other)?;
+        crate::index_rebuild::ensure(&self.options, self.namespace.as_ref().unwrap_or(&local))?;
         let mut cache = EventCache::open(&self.options.cache).map_err(io::Error::other)?;
         if let Some(namespace) = &self.namespace
             && cache.persistent()

@@ -132,6 +132,7 @@ pub(crate) fn open_index(
     options: &crate::Options,
     namespace: &Namespace,
 ) -> Result<EventCache, StorageError> {
+    crate::index_rebuild::ensure(options, namespace).map_err(backend)?;
     let mut cache = EventCache::open_scoped(&options.cache).map_err(StorageError::Backend)?;
     bind(&mut cache, namespace)?;
     Ok(cache)

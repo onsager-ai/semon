@@ -222,6 +222,7 @@ impl ReceivedMachines {
             proc_root: nowhere,
             cache: state.join("sessions-index.json"),
             facts: Some(state.join("facts.json")),
+            receiver_custody: Some(root),
             ..self.options.clone()
         }
     }
