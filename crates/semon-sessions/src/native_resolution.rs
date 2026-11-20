@@ -245,6 +245,7 @@ pub(crate) fn page_with_reader(
                 .to_string()
                 .into_bytes(),
             etag: None,
+            extra_headers: Vec::new(),
         },
         Err(CatalogIdentityError::InvalidArguments) => crate::catalog::error(
             400,

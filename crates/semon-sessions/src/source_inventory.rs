@@ -141,6 +141,7 @@ impl SessionSourceInventory {
                 .to_string()
                 .into_bytes(),
             etag: None,
+            extra_headers: Vec::new(),
         }
     }
 }

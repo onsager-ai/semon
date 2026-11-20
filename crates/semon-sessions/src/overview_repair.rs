@@ -266,6 +266,7 @@ pub(crate) fn session_overview_observe_with_gate(
             content_type: "application/json; charset=utf-8",
             body: serde_json::json!({"api":1,"source_key":source_key,"catalog_key":key,"state":"ready"}).to_string().into_bytes(),
             etag: None,
+            extra_headers: Vec::new(),
         },
         Err(error) => selected_observation_error(error),
     }
