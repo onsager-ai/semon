@@ -33,7 +33,7 @@ pub use analytics_writer::{
 };
 
 /// Refresh the complete local Catalog and activity through the native producer.
-/// Strict producer mode propagates index failures without recovery or reset.
+/// The producer propagates Index and recovery failures.
 /// The caller owns the analytics writer lock before invoking this operation.
 pub fn refresh_analytics_catalog(
     options: &Options,
@@ -72,6 +72,12 @@ pub fn refresh_analytics_catalog(
             return Ok(());
         }
     }
+}
+
+/// Prepare the Index for a host that opens analytics or body readers directly.
+pub fn prepare_local_session_index(options: &Options) -> io::Result<()> {
+    let namespace = storage::Namespace::new("local").map_err(io::Error::other)?;
+    index_rebuild::ensure(options, &namespace)
 }
 
 /// The SQLite Event Index path for a configured cache stem.

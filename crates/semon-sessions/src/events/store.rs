@@ -2105,6 +2105,40 @@ fn failure(error: rusqlite::Error) -> StoreError {
 }
 
 impl IndexStore for SqliteStore {
+    fn runtime_binding(
+        &self,
+        source: &super::warehouse::RuntimeSource<'_>,
+    ) -> Result<Option<super::warehouse::RuntimeBinding>, StoreError> {
+        let tx = self.connection.unchecked_transaction().map_err(failure)?;
+        require_current_sql(&tx).map_err(failure)?;
+        let binding = warehouse::runtime_binding(&tx, source).map_err(failure)?;
+        tx.commit().map_err(failure)?;
+        Ok(binding)
+    }
+
+    fn write_runtime_capture(
+        &mut self,
+        source: &super::warehouse::RuntimeSource<'_>,
+        expected: &super::warehouse::RuntimeBinding,
+        capture: &super::warehouse::RuntimeCapture,
+    ) -> Result<bool, StoreError> {
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(failure)?;
+        require_current_sql(&tx).map_err(failure)?;
+        if warehouse::runtime_binding(&tx, source)
+            .map_err(failure)?
+            .as_ref()
+            != Some(expected)
+            || !warehouse::write_runtime(&tx, expected.source, capture).map_err(failure)?
+        {
+            return Ok(false);
+        }
+        tx.commit().map_err(failure)?;
+        Ok(true)
+    }
+
     fn record_chain_admission(
         &mut self,
         path: &str,
@@ -5045,8 +5079,8 @@ fn qualify_producer(connection: &Connection) -> rusqlite::Result<Init> {
 }
 
 /// Initialize a fresh index under SQLite's writer lock. Unsupported persistent
-/// state is left untouched; an operator may only recover it after separately
-/// establishing source availability and custody.
+/// state is left untouched. The host rebuilds separately from authorized
+/// original sources.
 fn init(connection: &mut Connection) -> rusqlite::Result<Init> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     connection.set_prepared_statement_cache_capacity(32);
@@ -7089,6 +7123,7 @@ mod tests {
             all: true,
             since: Duration::from_secs(86400),
             session: None,
+            receiver_custody: None,
             facts: None,
             annotations: root.join("annotations.jsonl"),
             scan_window: false,
@@ -9262,6 +9297,7 @@ mod tests {
             all: true,
             since: Duration::from_secs(86400),
             session: None,
+            receiver_custody: None,
             facts: Some(root.join("facts.json")),
             annotations: root.join("annotations.jsonl"),
             scan_window: false,
@@ -10934,6 +10970,91 @@ mod tests {
     }
 
     #[test]
+    fn runtime_capture_commits_together_and_refuses_changed_binding() {
+        use crate::events::{
+            EventCache,
+            warehouse::{RuntimeCapture, RuntimeSource},
+        };
+        let root = scratch("runtime-capture");
+        let options = crate::Options {
+            cache: root.join("index.json"),
+            ..Default::default()
+        };
+        let path = root.join("claude.jsonl");
+        fs::write(&path, b"{\"type\":\"user\",\"sessionId\":\"claude\"}\n").unwrap();
+        let namespace = crate::storage::Namespace::new("local").unwrap();
+        let mut cache = crate::storage::sqlite::open_index(&options, &namespace).unwrap();
+        crate::events::scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        let source = RuntimeSource {
+            path: path.to_str().unwrap(),
+            harness: "claude",
+            native_id: "claude",
+            revision: cache.revision(&path).unwrap(),
+        };
+        let index = EventCache::path(&options.cache);
+        let mut writer =
+            SqliteStore::attempt_selected(&index).unwrap_or_else(|error| panic!("{error}"));
+        let binding = writer.runtime_binding(&source).unwrap().unwrap();
+        let capture = RuntimeCapture {
+            pid: 100,
+            start: 777,
+            clock: 1_000,
+            environment: Some(("codex".into(), "parent".into(), Some("call".into()))),
+            ancestors: vec![50, 1],
+        };
+        assert!(
+            writer
+                .write_runtime_capture(&source, &binding, &capture)
+                .unwrap()
+        );
+        assert!(
+            !writer
+                .write_runtime_capture(&source, &binding, &capture)
+                .unwrap()
+        );
+        let replaced = root.join("replacement.jsonl");
+        fs::write(
+            &replaced,
+            b"{\"type\":\"assistant\",\"sessionId\":\"claude\"}\n",
+        )
+        .unwrap();
+        fs::rename(replaced, &path).unwrap();
+        crate::events::scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+        let changed = RuntimeCapture {
+            clock: 2_000,
+            ..capture
+        };
+        assert!(
+            !writer
+                .write_runtime_capture(&source, &binding, &changed)
+                .unwrap()
+        );
+        for (table, count) in [("process", 1), ("environment", 1), ("ancestor", 2)] {
+            let sql = format!(
+                "SELECT count(*) FROM fact_{table}_observation WHERE capture=1000 AND pid=100 AND start=777"
+            );
+            assert_eq!(
+                writer
+                    .connection
+                    .query_row(&sql, [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                count
+            );
+            let sql = format!("SELECT count(*) FROM fact_{table}_observation WHERE capture=2000");
+            assert_eq!(
+                writer
+                    .connection
+                    .query_row(&sql, [], |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        drop(writer);
+        drop(cache);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn obsolete_producer_contracts_are_refused_without_mutation() {
         for schema in [44, 45, 46, 47, 48] {
             let root = scratch("obsolete-contract");
@@ -10956,15 +11077,7 @@ mod tests {
                 Err(Unopened::Unsupported(error)) => error,
                 _ => panic!("older schema must be refused"),
             };
-            assert_eq!(
-                error,
-                format!(
-                    "unsupported session index: older schema; this index is a derived cache rebuilt from native logs. Move (rename, never delete) {path:?}, {wal:?} and {shm:?} aside, then run the command again. Native logs must remain available to rebuild the index.",
-                    path = path.to_str().unwrap(),
-                    wal = format!("{}-wal", path.display()),
-                    shm = format!("{}-shm", path.display()),
-                )
-            );
+            assert_eq!(error, "unsupported session index: older schema");
             let focused = focused_connection(&path).err().unwrap();
             assert_eq!(focused.to_string(), error);
             assert_eq!(fs::read(&path).unwrap(), original);

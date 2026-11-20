@@ -93,6 +93,9 @@ pub fn session_transcript_range_with_mode(
     reader: Option<&dyn SessionSourceReader>,
     mode: SessionSourceReadMode,
 ) -> ViewerReply {
+    if let Some(reply) = crate::index_rebuild::history_reply(options, false) {
+        return reply;
+    }
     session_transcript_range_with_gate(options, source_key, query, reader, mode, || Ok(()))
 }
 

@@ -151,6 +151,7 @@ pub(crate) struct RecoveryRecord {
     pub(crate) source: String,
     pub(crate) native: Option<NativeSource>,
     pub(crate) chains: Vec<Chain>,
+    files: Vec<crate::events::Stat>,
 }
 
 /// One line of `sources.log`.
@@ -566,18 +567,41 @@ impl Archive {
         let mut known = self.known();
         self.refresh(&mut known)?;
         let mut inventory = Vec::new();
+        let mut ids = std::collections::BTreeSet::new();
         for (source, id) in &known.sources {
-            let manifest = read_manifest(&self.dir.join(id))?;
+            if !ids.insert(id.as_str()) {
+                return Err(invalid("ambiguous archive source journal"));
+            }
+            let dir = self.dir.join(id);
+            let manifest = read_manifest(&dir)?;
             if &manifest.source != source {
                 return Err(invalid(
                     "archive source manifest is missing or differs from its journal",
                 ));
             }
+            let files = manifest
+                .chains
+                .iter()
+                .map(|chain| {
+                    let path = dir.join(format!("{}.zst", chain.chain_id));
+                    crate::events::Stat::from_metadata(&crate::open_input(&path)?.metadata()?)
+                })
+                .collect::<io::Result<Vec<_>>>()?;
             inventory.push(RecoveryRecord {
                 source: source.clone(),
                 native: manifest.native,
                 chains: manifest.chains,
+                files,
             });
+        }
+        for entry in fs::read_dir(&self.dir)? {
+            let name = entry?.file_name();
+            if let Some(name) = name.to_str()
+                && is_id(name)
+                && !ids.contains(name)
+            {
+                return Err(invalid("archive manifest has no source journal record"));
+            }
         }
         Ok(inventory)
     }
@@ -1005,7 +1029,17 @@ impl Archive {
             if !is_id(&record.id) {
                 return Err(invalid("an archive source id that is not an id"));
             }
-            known.sources.entry(record.source).or_insert(record.id);
+            match known.sources.entry(record.source) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(record.id);
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if entry.get() != &record.id =>
+                {
+                    return Err(invalid("ambiguous archive source journal"));
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
         }
         known.read += whole as u64;
         known.journal = Some(observed);

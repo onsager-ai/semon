@@ -267,6 +267,7 @@ impl Viewer {
             options.received.expect("received machines"),
         );
         core.set_refresh(Refresh::Background);
+        core.start_history_recovery();
         Self {
             core,
             token: String::new(),
@@ -543,6 +544,7 @@ fn serve_server(
     };
     // Reads answer from the last built model; a rebuild never holds one up.
     core.set_refresh(Refresh::Background);
+    core.start_history_recovery();
     let token = random_token()?;
     let viewer = Arc::new(Viewer {
         core,
@@ -1977,6 +1979,7 @@ mod tests {
                 all: true,
                 since: Duration::from_secs(86400),
                 session: None,
+                receiver_custody: None,
                 facts: None,
                 annotations: root.join("annotations.jsonl"),
                 scan_window: false,
@@ -6663,6 +6666,7 @@ mod tests {
             ("b".into(), bravo.options.clone()),
         ]);
         core.set_refresh(Refresh::Background);
+        core.start_history_recovery();
         let core = Arc::new(core);
         publish_core_native(&core);
         let writing = Arc::new(AtomicBool::new(true));

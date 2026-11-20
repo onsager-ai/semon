@@ -31,7 +31,7 @@ fn rebuilt_path(cache: &Path) -> PathBuf {
 
 pub(crate) fn active_path(cache: &Path) -> PathBuf {
     let rebuilt = rebuilt_path(cache);
-    if rebuilt.is_file() {
+    if fs::symlink_metadata(&rebuilt).is_ok_and(|meta| meta.is_file()) {
         rebuilt
     } else {
         cache.with_extension("sqlite3")
@@ -53,13 +53,41 @@ pub(crate) fn status(cache: &Path) -> Option<Status> {
     crate::viewer::lock(statuses()).get(cache).cloned()
 }
 
+pub(crate) fn history_reply(options: &Options, probe: bool) -> Option<crate::ViewerReply> {
+    use serde_json::json;
+    let state = status(&options.cache).or_else(|| {
+        (probe && needed(options).unwrap_or(false))
+            .then_some(Status::Rebuilding { done: 0, total: 0 })
+    })?;
+    let (code, message, progress) = match state {
+        Status::Rebuilding { done, total } => (
+            "history_rebuilding",
+            format!("Rebuilding history ({done} of {total} sources)"),
+            Some(json!({"done": done, "total": total})),
+        ),
+        Status::Failed(message) => ("history_recovery_failed", message, None),
+    };
+    let retryable = progress.is_some();
+    Some(crate::ViewerReply {
+        status: 503,
+        content_type: "application/json; charset=utf-8",
+        body: json!({"error": {"code": code, "message": message, "retryable": retryable, "progress": progress}}).to_string().into_bytes(),
+        etag: None,
+        extra_headers: if retryable { vec![("Retry-After", "1".into())] } else { Vec::new() },
+    })
+}
+
+pub(crate) fn needed(options: &Options) -> io::Result<bool> {
+    store::rebuild_needed(&active_path(&options.cache))
+}
+
 pub(crate) fn ensure(options: &Options, namespace: &Namespace) -> io::Result<()> {
     let final_path = rebuilt_path(&options.cache);
-    if !store::rebuild_needed(&active_path(&options.cache))? {
+    if !needed(options)? {
         return Ok(());
     }
     let _lock = SourceLock::acquire(options, "\0index-rebuild", true)?;
-    if !store::rebuild_needed(&active_path(&options.cache))? {
+    if !needed(options)? {
         return Ok(());
     }
     let progress = |status| {
@@ -76,6 +104,7 @@ pub(crate) fn ensure(options: &Options, namespace: &Namespace) -> io::Result<()>
         }
         Err(error) => {
             let message = format!("history recovery failed: {error}");
+            eprintln!("semon: {}: {message}", options.cache.display());
             progress(Status::Failed(message.clone()));
             Err(io::Error::other(message))
         }
@@ -220,16 +249,20 @@ fn verify_receiver(
         let marker: ReceiverGeneration =
             serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         let path = input.full_path(options);
-        let log = LogFile::open(&path)?;
-        let metadata = log.metadata()?;
+        let file = crate::open_input(&path)?;
+        let metadata = file.metadata()?;
         let stat = Stat::from_metadata(&metadata)?;
         let mut head = Vec::new();
-        log.take(4096).read_to_end(&mut head)?;
+        file.take(4096).read_to_end(&mut head)?;
         let signed_mtime = match metadata.modified()?.duration_since(std::time::UNIX_EPOCH) {
             Ok(time) => time.as_nanos() as i128,
             Err(error) => -(error.duration().as_nanos() as i128),
         };
-        if marker.generation.is_empty()
+        if marker.generation.len() != 32
+            || !marker
+                .generation
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
             || marker.length != stat.size
             || marker.identity.len != stat.size
             || marker.identity.dev != stat.dev
@@ -251,7 +284,10 @@ fn verify_receiver(
     match fs::symlink_metadata(&facts_path) {
         Ok(_) => {
             let facts = crate::read_facts(&facts_path)?;
-            if let Some(rollouts) = &facts.codex_rollouts {
+            for rollouts in [&facts.codex_rollouts, &facts.codex_provisional_rollouts]
+                .into_iter()
+                .flatten()
+            {
                 for path in rollouts {
                     let input = Input {
                         root: InputRoot::Codex,
@@ -290,6 +326,7 @@ fn replay_original(
     use std::io::BufRead;
     let tail = remainder.skip_until(b'\n')? as u64;
     if ledger.stat != expected
+        || Stat::from_metadata(&remainder.get_ref().metadata()?)? != expected
         || ledger.offset.checked_add(tail) != Some(expected.size)
         || (tail != 0 && {
             let mut log = remainder.into_inner();
@@ -424,4 +461,208 @@ fn rebuild(
     fs::hard_link(&index, final_path)?;
     fs::File::open(parent)?.sync_all()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::Ledger;
+
+    fn fixture() -> (Stage, Options) {
+        let stage = Stage::new(&std::env::temp_dir()).unwrap();
+        let options = Options {
+            cache: stage.0.join("sessions-index.json"),
+            claude_home: stage.0.join("claude"),
+            codex_home: stage.0.join("codex"),
+            copilot_home: stage.0.join("copilot"),
+            ..Options::default()
+        };
+        (stage, options)
+    }
+
+    fn source(options: &Options, id: &str) -> (PathBuf, Vec<u8>) {
+        let path = options
+            .claude_home
+            .join(format!("projects/project/{id}.jsonl"));
+        let bytes = format!("{{\"type\":\"user\",\"sessionId\":\"{id}\",\"uuid\":\"message\",\"message\":{{\"role\":\"user\",\"content\":\"fixture\"}}}}\n").into_bytes();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        (path, bytes)
+    }
+
+    fn archive(options: &Options, id: &str) -> PathBuf {
+        let (path, bytes) = source(options, id);
+        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        let native = NativeSource {
+            home: options.claude_home.clone(),
+            root: "claude".into(),
+            path: format!("projects/project/{id}.jsonl"),
+            native_id: id.into(),
+            ledger: Ledger {
+                stat: Stat::of(&path).unwrap(),
+                offset: bytes.len() as u64,
+                prefix: digest,
+                tail: digest,
+            },
+            sidecar: None,
+            chain_id: String::new(),
+        };
+        let archive = Archive::new(crate::archive::standalone_dir(&options.cache));
+        archive
+            .admit_native(&mut LogFile::open(&path).unwrap(), &native)
+            .unwrap()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        path
+    }
+
+    #[test]
+    fn catalog_and_transcript_report_rebuild_progress() {
+        let (_stage, options) = fixture();
+        refused(&options, 49);
+        let core = crate::ViewerCore::new(options.clone());
+        let reader = || {
+            for (endpoint, query) in [
+                ("/api/sessions", "machine=local"),
+                ("/api/session-transcript", "machine=local&sid=fixture"),
+            ] {
+                let reply = core.respond("GET", endpoint, query, None);
+                assert_eq!(reply.status, 503);
+                assert!(reply.extra_headers.contains(&("Retry-After", "1".into())));
+                let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+                assert_eq!(body["error"]["code"], "history_rebuilding");
+                assert_eq!(
+                    body["error"]["progress"],
+                    serde_json::json!({ "done": 1, "total": 3 })
+                );
+            }
+        };
+        // Hold the rebuild reservation while exercising the HTTP core. The
+        // queued producer cannot change this deterministic progress fixture.
+        let lock = SourceLock::acquire(&options, "\0index-rebuild", true).unwrap();
+        crate::viewer::lock(statuses()).insert(
+            options.cache.clone(),
+            Status::Rebuilding { done: 1, total: 3 },
+        );
+        reader();
+        crate::viewer::lock(statuses()).remove(&options.cache);
+        drop(lock);
+        core.close();
+    }
+
+    fn refused(options: &Options, version: i64) -> PathBuf {
+        let old = active_path(&options.cache);
+        let db = rusqlite::Connection::open(&old).unwrap();
+        db.execute_batch(
+            "CREATE TABLE unrelated (content TEXT); INSERT INTO unrelated VALUES('old only');",
+        )
+        .unwrap();
+        db.pragma_update(None, "user_version", version).unwrap();
+        drop(db);
+        old
+    }
+
+    #[test]
+    fn host_rebuilds_unsupported_stores_from_native_and_archive_custody() {
+        for version in [0, 49, store::SCHEMA_VERSION + 1] {
+            let (_stage, options) = fixture();
+            let (live, bytes) = source(&options, "live");
+            let archived = archive(&options, "archive-only");
+            let old = refused(&options, version);
+            let original = fs::read(&old).unwrap();
+            assert!(EventCache::open_scoped(&options.cache).is_err());
+            assert_eq!(fs::read(&old).unwrap(), original);
+            let namespace = Namespace::new("local").unwrap();
+            let cache = sqlite::open_index(&options, &namespace).unwrap();
+            assert_eq!(active_path(&options.cache), rebuilt_path(&options.cache));
+            assert_eq!(fs::read(&old).unwrap(), original);
+            assert_eq!(fs::read(&live).unwrap(), bytes);
+            assert_eq!(
+                cache.committed_rebuild_ledger(&live).unwrap().offset,
+                bytes.len() as u64
+            );
+            assert!(cache.committed_rebuild_ledger(&archived).is_ok());
+            assert!(!archived.exists());
+            assert_eq!(status(&options.cache), None);
+        }
+    }
+
+    #[test]
+    fn missing_custody_chain_or_archive_journal_leaves_no_active_rebuild() {
+        for missing_journal in [false, true] {
+            let (_stage, options) = fixture();
+            let archived = archive(&options, "archive-only");
+            let old = refused(&options, 49);
+            let original = fs::read(&old).unwrap();
+            let archive_root = crate::archive::standalone_dir(&options.cache);
+            let journal = archive_root.join("sources.log");
+            if missing_journal {
+                fs::remove_file(journal).unwrap();
+            } else {
+                let record: serde_json::Value =
+                    serde_json::from_slice(&fs::read(journal).unwrap()).unwrap();
+                let archive = Archive::new(&archive_root);
+                let chains = archive.chains(&archived.to_string_lossy()).unwrap();
+                fs::remove_file(
+                    archive_root
+                        .join(record["id"].as_str().unwrap())
+                        .join(format!("{}.zst", chains[0].chain_id)),
+                )
+                .unwrap();
+            }
+            let namespace = Namespace::new("local").unwrap();
+            let result = ensure(&options, &namespace);
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("history recovery failed")
+            );
+            assert_eq!(active_path(&options.cache), old);
+            assert_eq!(fs::read(&old).unwrap(), original);
+            assert!(!rebuilt_path(&options.cache).exists());
+        }
+    }
+
+    #[test]
+    fn unmatched_receiver_generation_stops_recovery() {
+        let (stage, mut options) = fixture();
+        options.receiver_custody = Some(stage.0.clone());
+        let (path, _) = source(&options, "removed");
+        fs::remove_file(path).unwrap();
+        let markers = stage.0.join("sync-generations");
+        fs::create_dir(&markers).unwrap();
+        let key = Sha256::digest(b"claude/projects/project/removed.jsonl");
+        fs::write(markers.join(format!("{key:x}.json")), b"{}").unwrap();
+        let old = refused(&options, 49);
+        let namespace = Namespace::new("machine").unwrap();
+        assert!(
+            ensure(&options, &namespace)
+                .unwrap_err()
+                .to_string()
+                .contains("has no authorized original")
+        );
+        assert_eq!(active_path(&options.cache), old);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rebuild_preserves_old_wal_and_shm_with_uncheckpointed_version() {
+        let (_stage, options) = fixture();
+        let old = refused(&options, 0);
+        let db = rusqlite::Connection::open(&old).unwrap();
+        db.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+            .unwrap();
+        db.pragma_update(None, "user_version", 49).unwrap();
+        let wal = old.with_extension("sqlite3-wal");
+        let shm = old.with_extension("sqlite3-shm");
+        let snapshot = [&old, &wal, &shm].map(|path| fs::read(path).unwrap());
+        let namespace = Namespace::new("local").unwrap();
+        ensure(&options, &namespace).unwrap();
+        assert_eq!(active_path(&options.cache), rebuilt_path(&options.cache));
+        assert_eq!(
+            [&old, &wal, &shm].map(|path| fs::read(path).unwrap()),
+            snapshot
+        );
+    }
 }

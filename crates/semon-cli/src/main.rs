@@ -1392,6 +1392,7 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
         since: args.home.window.unwrap_or(semon_sessions::DEFAULT_WINDOW),
         ..args.home.options
     };
+    semon_sessions::prepare_local_session_index(&options).map_err(|error| error.to_string())?;
     let index_path = semon_sessions::analytics_index_path(&options.cache);
     let store_root = semon_sessions::analytics_store_root(&index_path).ok_or_else(|| {
         format!(
@@ -2143,6 +2144,10 @@ fn asi_store_root(home: &HomeArgs) -> Option<PathBuf> {
 
 #[cfg(feature = "asi-query")]
 fn run_asi_query(args: AsiQueryArgs) -> Result<(), String> {
+    if args.home.machines.is_empty() {
+        semon_sessions::prepare_local_session_index(&args.home.options)
+            .map_err(|error| error.to_string())?;
+    }
     let extension = AsiMcp {
         executable: env::current_exe().map_err(|error| error.to_string())?,
         store_root: if matches!(args.tool.as_str(), "search" | "view")
@@ -2226,6 +2231,10 @@ fn run_mcp(home: &HomeArgs) -> Result<(), String> {
     let mut query = home.query();
     #[cfg(feature = "asi-query")]
     {
+        if home.machines.is_empty() {
+            semon_sessions::prepare_local_session_index(&home.options)
+                .map_err(|error| error.to_string())?;
+        }
         let mut extension = AsiMcp {
             executable: env::current_exe().map_err(|error| error.to_string())?,
             store_root: if home.machines.is_empty() {

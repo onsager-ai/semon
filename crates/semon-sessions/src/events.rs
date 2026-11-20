@@ -962,6 +962,18 @@ pub(crate) struct CatalogPendingBatch {
 /// ledger row it was based on, so two processes sharing one store never
 /// apply the same lines twice.
 pub(crate) trait IndexStore: Send {
+    fn runtime_binding(
+        &self,
+        source: &warehouse::RuntimeSource<'_>,
+    ) -> Result<Option<warehouse::RuntimeBinding>, StoreError>;
+
+    fn write_runtime_capture(
+        &mut self,
+        source: &warehouse::RuntimeSource<'_>,
+        expected: &warehouse::RuntimeBinding,
+        capture: &warehouse::RuntimeCapture,
+    ) -> Result<bool, StoreError>;
+
     /// Archive results from this scan, held until source publication.
     fn record_chain_admission(
         &mut self,
@@ -1495,6 +1507,24 @@ impl EventCache {
         Ok(cache)
     }
 
+    pub(crate) fn capture_runtime(
+        &mut self,
+        source: &warehouse::RuntimeSource<'_>,
+        observe: impl FnOnce() -> Option<warehouse::RuntimeCapture>,
+    ) -> io::Result<()> {
+        if let Some(store) = self.store.as_mut()
+            && let Some(binding) = store
+                .runtime_binding(source)
+                .map_err(|error| io::Error::other(error.to_string()))?
+            && let Some(capture) = observe()
+        {
+            store
+                .write_runtime_capture(source, &binding, &capture)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn committed_rebuild_ledger(&self, path: &Path) -> io::Result<Ledger> {
         let key = path
             .to_str()
@@ -1505,7 +1535,7 @@ impl EventCache {
             .ok_or_else(|| io::Error::other("rebuild Index unavailable"))?;
         store
             .ledger(key)
-            .map_err(io::Error::other)?
+            .map_err(|error| io::Error::other(error.to_string()))?
             .ok_or_else(|| io::Error::other("source boundary was not committed"))
     }
 
@@ -3151,7 +3181,8 @@ pub(crate) fn replay_archive_history(
             // path. The chain id supplies its stable synthetic file identity.
             stat: Stat {
                 dev: 0,
-                ino: u64::from_str_radix(&chain.chain_id[..15], 16).map_err(io::Error::other)?,
+                ino: u64::from_str_radix(&chain.chain_id[..15], 16)
+                    .map_err(|error| io::Error::other(error.to_string()))?,
                 size: chain.length,
                 modified_ns: u128::from(chain.admitted_at) * 1_000_000_000,
                 changed_ns: None,
@@ -3171,13 +3202,16 @@ pub(crate) fn replay_archive_history(
             .ok_or_else(|| io::Error::other("rebuild Index unavailable"))?;
         if store
             .commit_file(key, None, None, &ledger, &index)
-            .map_err(io::Error::other)?
+            .map_err(|error| io::Error::other(error.to_string()))?
             != Outcome::Written
             || store
                 .remove_files(&[(key.to_owned(), Some(ledger))])
-                .map_err(io::Error::other)?
+                .map_err(|error| io::Error::other(error.to_string()))?
                 != Outcome::Written
-            || store.ledger(key).map_err(io::Error::other)?.is_some()
+            || store
+                .ledger(key)
+                .map_err(|error| io::Error::other(error.to_string()))?
+                .is_some()
         {
             return Err(io::Error::other(
                 "historical archive boundary was not committed",

@@ -259,6 +259,7 @@ mod tests {
             all: true,
             since: Duration::from_secs(86400),
             session: None,
+            receiver_custody: None,
             facts: None,
             annotations: root.join("annotations.jsonl"),
             scan_window: false,

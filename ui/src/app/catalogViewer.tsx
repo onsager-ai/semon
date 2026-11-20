@@ -54,7 +54,7 @@ import {
   updateSessionJump,
 } from '../lib/transcript';
 import { releaseScreen, Glyph, screenText } from '../lib/screens';
-import { requestJson } from '../lib/api';
+import { ApiError, requestJson } from '../lib/api';
 import { parseAccount } from '../lib/account';
 import {
   setGeometry,
@@ -2411,11 +2411,11 @@ export function createCatalogViewer(
     if (query && capabilities.metadata_search) p.set('q', query);
     if (append && cursor !== null) p.set('cursor', cursor);
     updating = true;
-    note = '';
     drawList();
     try {
       const next = parseCatalogPage(await api('/api/sessions?' + p));
       if (disposed || epoch !== listEpoch) return;
+      note = '';
       if (
         (query && capabilities.metadata_search && next.search === null) ||
         next.machine !== capabilities.source_key ||
@@ -2479,7 +2479,11 @@ export function createCatalogViewer(
       note = readError(error);
       drawList();
       if (retryable(error)) {
-        listRetry = scope.timeout(() => void loadList(append), listRetryDelay);
+        const history = error instanceof ApiError ? error.history : undefined;
+        listRetry = scope.timeout(
+          () => void loadList(append),
+          typeof history === 'object' ? history.retryMs : listRetryDelay,
+        );
         listRetryDelay = Math.min(8000, listRetryDelay * 2);
       }
     }
@@ -2599,6 +2603,12 @@ export function createCatalogViewer(
     await poll();
   }
   function readError(error: unknown): string {
+    if (error instanceof ApiError) {
+      if (error.history === 'recovery_failed')
+        return 'History recovery failed. Check the host log for the recovery error.';
+      if (error.history)
+        return `Rebuilding history (${error.history.done} of ${error.history.total} sources)`;
+    }
     if (
       !(error && typeof error === 'object' && 'status' in error) &&
       !(error instanceof Error && error.name === 'AbortError')
@@ -2615,6 +2625,7 @@ export function createCatalogViewer(
     return 'History could not be read. Retry after checking your connection.';
   }
   function retryable(error: unknown) {
+    if (error instanceof ApiError && error.history === 'recovery_failed') return false;
     if (!(error && typeof error === 'object' && 'status' in error))
       return error instanceof Error && error.name === 'AbortError';
     const status = error && typeof error === 'object' && 'status' in error ? error.status : 0;
@@ -3316,7 +3327,8 @@ export function createCatalogViewer(
         retryable(error) ||
         !!(error && typeof error === 'object' && 'status' in error && error.status === 409);
       if (view.transientNote) {
-        const delay = view.recovery.fail();
+        const history = error instanceof ApiError ? error.history : undefined;
+        const delay = typeof history === 'object' ? history.retryMs : view.recovery.fail();
         if (delay === null) {
           view.transientNote = false;
           view.note = 'Recorded history could not be loaded. Retry to try again.';

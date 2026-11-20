@@ -6,6 +6,39 @@ import { closePage, overflow } from '../lib.mjs';
 export default async function liveCatalog(browser) {
   const fixture = await nativeFixture();
   try {
+    const rebuilding = await fixture.open(browser, { size: 'phone', dark: false });
+    try {
+      let done = 0;
+      const routePattern = '**/api/sessions?*';
+      await rebuilding.route(routePattern, (route) =>
+        route.fulfill({
+          status: 503,
+          headers: { 'Retry-After': '1' },
+          json: { error: { code: 'history_rebuilding', progress: { done, total: 3 } } },
+        }),
+      );
+      await rebuilding.goto(fixture.base + '/sessions');
+      await rebuilding
+        .getByRole('status')
+        .filter({ hasText: 'Rebuilding history (0 of 3 sources)' })
+        .first()
+        .waitFor();
+      done = 2;
+      await rebuilding
+        .getByRole('status')
+        .filter({ hasText: 'Rebuilding history (2 of 3 sources)' })
+        .first()
+        .waitFor();
+      await rebuilding.unroute(routePattern);
+      await rebuilding
+        .getByRole('status')
+        .filter({ hasText: 'Rebuilding history (2 of 3 sources)' })
+        .first()
+        .waitFor({ state: 'hidden' });
+      assert.deepEqual(rebuilding.errors, []);
+    } finally {
+      await closePage(rebuilding);
+    }
     for (const width of [390, 820, 1280])
       for (const dark of [false, true]) {
         const page = await fixture.open(browser, {

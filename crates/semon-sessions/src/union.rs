@@ -77,6 +77,12 @@ fn wait_for_catalog_read(
     deadline: Instant,
     allow_wait: bool,
 ) -> Result<Option<io::Error>, ViewerReply> {
+    if !view.evidence.storage.is_postgres()
+        && let Some(reply) = crate::index_rebuild::history_reply(view.options(), true)
+    {
+        let _ = view.note_catalog_read();
+        return Err(reply);
+    }
     if allow_wait {
         view.wait_until_initial_catalog(deadline)
             .map_err(|_| catalog_unavailable())?;
@@ -879,6 +885,9 @@ impl ViewerCore {
                 machines.copy_facts(name, seen, hosts, warned, &sources);
             }
             *write_lock(&view.evidence.received_machine) = Some(seen.machine.clone());
+            if crate::index_rebuild::needed(view.options()).unwrap_or(false) {
+                let _ = view.note_catalog_read();
+            }
             next.push((seen.machine.id.clone(), view));
         }
         next[fixed..].sort_by(|(a, av), (b, bv)| {
@@ -914,6 +923,20 @@ impl ViewerCore {
         self.refresh = refresh;
         for (_, view) in self.views().iter() {
             view.set_refresh(refresh);
+        }
+    }
+
+    /// Start host recovery for configured SQLite placements before first read.
+    pub(crate) fn start_history_recovery(&self) {
+        if let Err(error) = self.follow() {
+            eprintln!("semon: cannot discover received history: {error}");
+        }
+        for (_, view) in self.views().iter() {
+            if !view.evidence.storage.is_postgres()
+                && crate::index_rebuild::needed(view.options()).unwrap_or(false)
+            {
+                let _ = view.note_catalog_read();
+            }
         }
     }
 
@@ -1629,6 +1652,13 @@ impl ViewerCore {
         } else {
             key.as_str()
         };
+        if path != "/api/session-capabilities"
+            && !view.evidence.storage.is_postgres()
+            && let Some(reply) = crate::index_rebuild::history_reply(view.options(), true)
+        {
+            let _ = view.note_catalog_read();
+            return reply;
+        }
         #[cfg(feature = "postgres")]
         if view.evidence.storage.is_postgres() {
             if let Err(reply) = wait_for_catalog_read(view, deadline, allow_catalog_wait) {
@@ -2100,6 +2130,7 @@ mod tests {
                 all: true,
                 since: std::time::Duration::from_secs(86400),
                 session: None,
+                receiver_custody: None,
                 facts: None,
                 annotations: home.join("annotations.jsonl"),
                 scan_window: false,
@@ -2166,6 +2197,7 @@ mod tests {
                 all: true,
                 since: std::time::Duration::from_secs(86400),
                 session: None,
+                receiver_custody: None,
                 facts: None,
                 annotations: home.join("annotations.jsonl"),
                 scan_window: false,
@@ -2307,6 +2339,7 @@ mod tests {
                 all: false,
                 since: std::time::Duration::from_secs(86400),
                 session: None,
+                receiver_custody: None,
                 facts: None,
                 scan_window: false,
                 annotations: home.join("annotations.jsonl"),
@@ -2448,6 +2481,7 @@ mod tests {
             all: false,
             since: std::time::Duration::from_secs(86400),
             session: None,
+            receiver_custody: None,
             facts: None,
             annotations: root.join("annotations.jsonl"),
             scan_window: false,

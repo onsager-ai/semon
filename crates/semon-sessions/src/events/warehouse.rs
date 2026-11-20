@@ -5,6 +5,76 @@
 
 use super::{BillingUsage, Event, Kind, ModelTokens, Peer, Reply};
 use crate::Tokens;
+type RuntimeParent = (String, String, Option<String>);
+
+pub(crate) struct RuntimeSource<'a> {
+    pub(crate) path: &'a str,
+    pub(crate) harness: &'a str,
+    pub(crate) native_id: &'a str,
+    pub(crate) revision: super::FileRevision,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeBinding {
+    pub(crate) index: String,
+    pub(crate) namespace: String,
+    pub(crate) source: i64,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct RuntimeCapture {
+    pub(crate) pid: u32,
+    pub(crate) start: u64,
+    pub(crate) clock: i64,
+    pub(crate) environment: Option<RuntimeParent>,
+    pub(crate) ancestors: Vec<u32>,
+}
+
+impl RuntimeCapture {
+    pub(crate) fn read(
+        options: &crate::Options,
+        facts: &crate::facts::MachineFacts,
+        pid: u32,
+        start: u64,
+    ) -> Option<Self> {
+        Self::acquire(
+            pid,
+            start,
+            || facts.proc_start(options, pid),
+            || {
+                let environment = facts
+                    .run(options, pid, Some(start))
+                    .and_then(|run| crate::parent_links::parse(run.get("SEMON_PARENT")?))
+                    .and_then(|(parent, call)| {
+                        let (harness, id) = parent.split_once(':')?;
+                        Some((harness.to_owned(), id.to_owned(), call))
+                    });
+                let ancestors = facts.ancestors(options, pid).unwrap_or_default();
+                (environment, ancestors)
+            },
+        )
+    }
+
+    fn acquire(
+        pid: u32,
+        start: u64,
+        process_start: impl Fn() -> Option<u64>,
+        observe: impl FnOnce() -> (Option<RuntimeParent>, Vec<u32>),
+    ) -> Option<Self> {
+        if process_start() != Some(start) || pid == 0 || i64::try_from(start).is_err() {
+            return None;
+        }
+        let (environment, mut ancestors) = observe();
+        ancestors.truncate(64);
+        (process_start() == Some(start)).then(|| Self {
+            pid,
+            start,
+            clock: crate::model::now_ms(),
+            environment,
+            ancestors,
+        })
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Position {
@@ -187,5 +257,41 @@ impl Batch {
             discriminator: self.observations.len() - self.record_start,
             fact,
         });
+    }
+}
+
+#[cfg(test)]
+mod runtime_tests {
+    use std::cell::Cell;
+
+    use super::RuntimeCapture;
+
+    #[test]
+    fn reused_pid_cannot_supply_environment_or_ancestry() {
+        let process_start = Cell::new(Some(10));
+        assert!(
+            RuntimeCapture::acquire(
+                100,
+                10,
+                || process_start.get(),
+                || {
+                    process_start.set(Some(11));
+                    (Some(("claude".into(), "parent".into(), None)), vec![1])
+                }
+            )
+            .is_none()
+        );
+        assert!(
+            RuntimeCapture::acquire(
+                100,
+                10,
+                || process_start.get(),
+                || { panic!("a reused PID must be rejected before reading its environment") }
+            )
+            .is_none()
+        );
+        let capture =
+            RuntimeCapture::acquire(100, 11, || process_start.get(), || (None, vec![1])).unwrap();
+        assert_eq!(capture.start, 11);
     }
 }
