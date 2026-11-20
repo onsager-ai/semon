@@ -1979,7 +1979,7 @@ mod tests {
                 all: true,
                 since: Duration::from_secs(86400),
                 session: None,
-                receiver_custody: None,
+                index_recovery: Default::default(),
                 facts: None,
                 annotations: root.join("annotations.jsonl"),
                 scan_window: false,
@@ -6666,7 +6666,6 @@ mod tests {
             ("b".into(), bravo.options.clone()),
         ]);
         core.set_refresh(Refresh::Background);
-        core.start_history_recovery();
         let core = Arc::new(core);
         publish_core_native(&core);
         let writing = Arc::new(AtomicBool::new(true));

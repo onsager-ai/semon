@@ -135,7 +135,10 @@ pub(crate) fn open_index(
     crate::index_rebuild::ensure(options, namespace).map_err(backend)?;
     let first = EventCache::open_scoped(&options.cache);
     let mut cache = match first {
-        Err(error) if error.starts_with("unsupported session index:") => {
+        Err(error)
+            if options.index_recovery.allowed()
+                && error.starts_with("unsupported session index:") =>
+        {
             crate::index_rebuild::recover(options, namespace, true).map_err(backend)?;
             EventCache::open_scoped(&options.cache).map_err(StorageError::Backend)?
         }

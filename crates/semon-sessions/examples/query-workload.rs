@@ -101,7 +101,7 @@ fn main() -> io::Result<()> {
                 all: true,
                 since: Duration::from_secs(86400),
                 session: None,
-                receiver_custody: None,
+                index_recovery: Default::default(),
                 facts: None,
                 scan_window: false,
                 annotations: home.join("annotations.jsonl"),

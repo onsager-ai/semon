@@ -1804,7 +1804,7 @@ mod tests {
             all: true,
             since: std::time::Duration::from_secs(86400),
             session: None,
-            receiver_custody: None,
+            index_recovery: Default::default(),
             facts: None,
             annotations: fixture.root.join("annotations.jsonl"),
             scan_window: false,

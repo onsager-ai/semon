@@ -26,7 +26,7 @@ fn print_sample_query() {
         all: false,
         since: Duration::from_secs(24 * 60 * 60),
         session: None,
-        receiver_custody: None,
+        index_recovery: Default::default(),
         facts: None,
         annotations: root.join("annotations.jsonl"),
         scan_window: false,

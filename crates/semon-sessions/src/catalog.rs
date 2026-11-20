@@ -1919,7 +1919,7 @@ mod tests {
                 all: true,
                 since: Duration::from_secs(86400),
                 session: None,
-                receiver_custody: None,
+                index_recovery: Default::default(),
                 facts: Some(root.join("facts.json")),
                 annotations: root.join("annotations.jsonl"),
                 scan_window: false,

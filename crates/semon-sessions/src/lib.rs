@@ -40,6 +40,7 @@ pub fn refresh_analytics_catalog(
     cancelled: impl Fn() -> bool,
 ) -> io::Result<()> {
     let options = Options {
+        index_recovery: IndexRecovery::Refuse,
         scan_window: false,
         ..options.clone()
     };
@@ -72,12 +73,6 @@ pub fn refresh_analytics_catalog(
             return Ok(());
         }
     }
-}
-
-/// Prepare the Index for a host that opens analytics or body readers directly.
-pub fn prepare_local_session_index(options: &Options) -> io::Result<()> {
-    let namespace = storage::Namespace::new("local").map_err(io::Error::other)?;
-    index_rebuild::ensure(options, &namespace)
 }
 
 /// The SQLite Event Index path for a configured cache stem.
@@ -228,6 +223,28 @@ pub use viewer::{
     serve_listener, serve_with_asi,
 };
 
+/// Which native custody the calling host may use to recover an Index.
+#[derive(Clone, Debug, Default)]
+pub enum IndexRecovery {
+    #[default]
+    Refuse,
+    Local,
+    Received(PathBuf),
+}
+
+impl IndexRecovery {
+    pub(crate) fn allowed(&self) -> bool {
+        !matches!(self, Self::Refuse)
+    }
+
+    pub(crate) fn receiver_custody(&self) -> Option<&Path> {
+        match self {
+            Self::Received(root) => Some(root),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Options {
     pub claude_home: PathBuf,
@@ -248,8 +265,8 @@ pub struct Options {
     /// working directories on this disk. For logs copied from another
     /// machine.
     pub facts: Option<PathBuf>,
-    /// Receiver-owned Raw and custody records for this machine.
-    pub receiver_custody: Option<PathBuf>,
+    /// Recovery requires an explicit grant from the source-owning host.
+    pub index_recovery: IndexRecovery,
     /// Read-only producer-owned session annotation JSONL file.
     pub annotations: PathBuf,
     /// Index only the log files modified within the window (`since`, unless
@@ -287,7 +304,7 @@ impl Default for Options {
             since: Duration::from_secs(24 * 60 * 60),
             session: None,
             facts: None,
-            receiver_custody: None,
+            index_recovery: Default::default(),
             annotations: annotations::default_path(&home, env::var_os("XDG_STATE_HOME").as_deref()),
             scan_window: false,
         }

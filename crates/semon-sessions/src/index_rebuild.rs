@@ -83,6 +83,9 @@ pub(crate) fn history_reply(options: &Options, probe: bool) -> Option<crate::Vie
 }
 
 pub(crate) fn needed(options: &Options) -> io::Result<bool> {
+    if !options.index_recovery.allowed() {
+        return Ok(false);
+    }
     let path = active_path(&options.cache);
     match fs::symlink_metadata(&path) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
@@ -439,16 +442,16 @@ fn rebuild(
     let archive = Archive::new(crate::archive::standalone_dir(&options.cache));
     let native_archive = read_native_archive(options, &archive)?;
     let received_archive = options
-        .receiver_custody
-        .as_ref()
+        .index_recovery
+        .receiver_custody()
         .map(|root| Archive::new(root.join(crate::archive::DIR)));
     let received = match &received_archive {
         Some(archive) => archive.recovery_inventory()?,
         None => Vec::new(),
     };
     let receiver = options
-        .receiver_custody
-        .as_ref()
+        .index_recovery
+        .receiver_custody()
         .map(|root| verify_receiver(options, root, &originals))
         .transpose()?;
     let mut archives = BTreeMap::<Input, Vec<(&Archive, &RecoveryRecord)>>::new();
@@ -481,10 +484,10 @@ fn rebuild(
         let mut native: Option<&NativeSource> = None;
         if let Some(records) = archives.get(input) {
             for (archive, record) in records {
-                if let Some(admitted) = record.native.as_ref() {
-                    if !admitted.allowed(options) || native.replace(admitted).is_some() {
-                        return Err(io::Error::other("ambiguous native archive binding"));
-                    }
+                if let Some(admitted) = record.native.as_ref()
+                    && (!admitted.allowed(options) || native.replace(admitted).is_some())
+                {
+                    return Err(io::Error::other("ambiguous native archive binding"));
                 }
                 for chain in &record.chains {
                     archive.with_verified_chain(&record.source, chain, |bytes| {
@@ -527,8 +530,8 @@ fn rebuild(
             .unwrap_or_default()
             != received
         || options
-            .receiver_custody
-            .as_ref()
+            .index_recovery
+            .receiver_custody()
             .map(|root| verify_receiver(options, root, &originals))
             .transpose()?
             != receiver
@@ -555,6 +558,7 @@ mod tests {
             claude_home: stage.0.join("claude"),
             codex_home: stage.0.join("codex"),
             copilot_home: stage.0.join("copilot"),
+            index_recovery: crate::IndexRecovery::Local,
             ..Options::default()
         };
         (stage, options)
@@ -707,7 +711,7 @@ mod tests {
     #[test]
     fn unmatched_receiver_generation_stops_recovery() {
         let (stage, mut options) = fixture();
-        options.receiver_custody = Some(stage.0.clone());
+        options.index_recovery = crate::IndexRecovery::Received(stage.0.clone());
         let (path, _) = source(&options, "removed");
         fs::remove_file(path).unwrap();
         let markers = stage.0.join("sync-generations");
@@ -729,7 +733,7 @@ mod tests {
     fn receiver_replays_verified_archived_generations_without_live_authority() {
         let (stage, mut options) = fixture();
         let receiver = stage.0.join("machine");
-        options.receiver_custody = Some(receiver.clone());
+        options.index_recovery = crate::IndexRecovery::Received(receiver.clone());
         options.claude_home = receiver.join("claude");
         let archive = Archive::new(receiver.join(crate::archive::DIR));
         let (path, bytes) = source(&options, "raw-only");
@@ -754,7 +758,7 @@ mod tests {
     #[test]
     fn receiver_seal_custody_must_have_its_referenced_manifest() {
         let (stage, mut options) = fixture();
-        options.receiver_custody = Some(stage.0.clone());
+        options.index_recovery = crate::IndexRecovery::Received(stage.0.clone());
         let (path, _) = source(&options, "lost-seal");
         let dir = crate::sealed::seal_dir(&path);
         fs::create_dir(&dir).unwrap();

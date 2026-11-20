@@ -367,11 +367,13 @@ projections. The origin warehouse commits Claude and Codex metadata observations
 source membership and the maintenance cursor with that source's Index advancement. See [cohort-bound index evidence](retained-native-projections.md#cohort-bound-index-evidence).
 
 Writable and focused Index opens refuse unsupported storage before mutation.
-When a host encounters a refused Index, it inventories its configured Claude
+When the source-owning host encounters a refused Index, it inventories its configured Claude
 and Codex roots, verified standalone archive manifests, and, for received
 machines, receiver generations, Facts and archive custody. A missing or changed
 referenced original or incomplete custody inventory stops recovery. Rebuild
-never uses the refused Index as an inventory or copies rows from it.
+never uses the refused Index as an inventory or copies rows from it. Analytics
+materialization, ASI and callers supplying an Index without native custody
+retain the existing refusal behavior.
 
 The host admits verified originals through the normal native parser and Index
 write transactions in a private `.index-rebuild-<id>/` staging directory beside

@@ -77,6 +77,8 @@ struct HomeArgs {
     options: semon_sessions::Options,
     /// `--machine DIR`, repeated: several machines' native session homes.
     machines: Vec<PathBuf>,
+    explicit_cache: bool,
+    explicit_native_home: bool,
     /// `--since DURATION`: how far back the model reads (the window).
     /// `--all` (in `options`) reads everything.
     window: Option<std::time::Duration>,
@@ -91,12 +93,21 @@ impl HomeArgs {
         value: &mut dyn FnMut() -> Result<String, String>,
     ) -> Result<bool, String> {
         match argument {
-            "--claude-home" => self.options.claude_home = value()?.into(),
+            "--claude-home" => {
+                self.explicit_native_home = true;
+                self.options.claude_home = value()?.into();
+            }
             "--claude-json" => self.options.claude_json = value()?.into(),
-            "--codex-home" => self.options.codex_home = value()?.into(),
+            "--codex-home" => {
+                self.explicit_native_home = true;
+                self.options.codex_home = value()?.into();
+            }
             "--copilot-home" => self.options.copilot_home = value()?.into(),
             "--proc-root" => self.options.proc_root = value()?.into(),
-            "--cache" => self.options.cache = value()?.into(),
+            "--cache" => {
+                self.explicit_cache = true;
+                self.options.cache = value()?.into();
+            }
             "--facts" => self.options.facts = Some(value()?.into()),
             "--machine" => self.machines.push(PathBuf::from(value()?)),
             "--since" => self.window = Some(semon_sessions::parse_duration(&value()?)?),
@@ -117,6 +128,11 @@ impl HomeArgs {
     /// 30 days by default, or everything with `--all`.
     fn query(&self) -> semon_sessions::Query {
         let options = semon_sessions::Options {
+            index_recovery: local_index_recovery(
+                &self.options,
+                self.explicit_cache,
+                self.explicit_native_home,
+            ),
             since: self.window.unwrap_or(semon_sessions::DEFAULT_WINDOW),
             ..self.options.clone()
         };
@@ -125,6 +141,18 @@ impl HomeArgs {
         } else {
             semon_sessions::Query::with_machines(machine_options(&options, &self.machines))
         }
+    }
+}
+
+fn local_index_recovery(
+    options: &semon_sessions::Options,
+    explicit_cache: bool,
+    explicit_native_home: bool,
+) -> semon_sessions::IndexRecovery {
+    if options.facts.is_none() && (!explicit_cache || explicit_native_home) {
+        semon_sessions::IndexRecovery::Local
+    } else {
+        semon_sessions::IndexRecovery::Refuse
     }
 }
 
@@ -523,6 +551,8 @@ fn parse_sessions_args(
     let mut machines = Vec::new();
     let mut received = None;
     let mut local = true;
+    let mut explicit_cache = false;
+    let mut explicit_native_home = false;
     while let Some(argument) = arguments.next() {
         let mut value = || {
             arguments
@@ -532,12 +562,21 @@ fn parse_sessions_args(
         match argument.as_str() {
             "--machines" => received = Some(PathBuf::from(value()?)),
             "--no-local" => local = false,
-            "--claude-home" => options.claude_home = value()?.into(),
+            "--claude-home" => {
+                explicit_native_home = true;
+                options.claude_home = value()?.into();
+            }
             "--claude-json" => options.claude_json = value()?.into(),
-            "--codex-home" => options.codex_home = value()?.into(),
+            "--codex-home" => {
+                explicit_native_home = true;
+                options.codex_home = value()?.into();
+            }
             "--copilot-home" => options.copilot_home = value()?.into(),
             "--proc-root" => options.proc_root = value()?.into(),
-            "--cache" => options.cache = value()?.into(),
+            "--cache" => {
+                explicit_cache = true;
+                options.cache = value()?.into();
+            }
             "--all" => options.all = true,
             "--since" => options.since = semon_sessions::parse_duration(&value()?)?,
             "--session" => options.session = Some(value()?),
@@ -573,6 +612,10 @@ fn parse_sessions_args(
         }
     } else if !local {
         return Err("--no-local requires --machines".into());
+    }
+    if received.is_none() && machines.is_empty() {
+        options.index_recovery =
+            local_index_recovery(&options, explicit_cache, explicit_native_home);
     }
     Ok(SessionsArgs {
         options,
@@ -1017,7 +1060,11 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
             let server = semon_push::serve::Server::bind(&options)?;
             semon_push::read_token::configure(&options.dir, public_url.as_deref())
                 .map_err(|e| e.to_string())?;
-            let sessions = semon_sessions::Options::default();
+            // The receiver owns Raw and custody under this configured root.
+            let sessions = semon_sessions::Options {
+                index_recovery: semon_sessions::IndexRecovery::Received(options.dir.clone()),
+                ..Default::default()
+            };
             let viewer = semon_sessions::Viewer::received(
                 semon_sessions::ServeOptions {
                     sessions: sessions.clone(),
@@ -1392,7 +1439,6 @@ fn run_materialize(args: MaterializeArgs) -> Result<(), String> {
         since: args.home.window.unwrap_or(semon_sessions::DEFAULT_WINDOW),
         ..args.home.options
     };
-    semon_sessions::prepare_local_session_index(&options).map_err(|error| error.to_string())?;
     let index_path = semon_sessions::analytics_index_path(&options.cache);
     let store_root = semon_sessions::analytics_store_root(&index_path).ok_or_else(|| {
         format!(
@@ -1702,6 +1748,7 @@ fn machine_options(
                 proc_root: dir.join("proc"),
                 cache: dir.join(".semon").join("sessions-index.json"),
                 facts: facts.is_file().then_some(facts),
+                index_recovery: semon_sessions::IndexRecovery::Refuse,
                 ..options.clone()
             };
             (dir.display().to_string(), options)
@@ -2144,10 +2191,6 @@ fn asi_store_root(home: &HomeArgs) -> Option<PathBuf> {
 
 #[cfg(feature = "asi-query")]
 fn run_asi_query(args: AsiQueryArgs) -> Result<(), String> {
-    if args.home.machines.is_empty() {
-        semon_sessions::prepare_local_session_index(&args.home.options)
-            .map_err(|error| error.to_string())?;
-    }
     let extension = AsiMcp {
         executable: env::current_exe().map_err(|error| error.to_string())?,
         store_root: if matches!(args.tool.as_str(), "search" | "view")
@@ -2231,10 +2274,6 @@ fn run_mcp(home: &HomeArgs) -> Result<(), String> {
     let mut query = home.query();
     #[cfg(feature = "asi-query")]
     {
-        if home.machines.is_empty() {
-            semon_sessions::prepare_local_session_index(&home.options)
-                .map_err(|error| error.to_string())?;
-        }
         let mut extension = AsiMcp {
             executable: env::current_exe().map_err(|error| error.to_string())?,
             store_root: if home.machines.is_empty() {
