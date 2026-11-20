@@ -98,6 +98,7 @@ pub(crate) enum Fact {
         kind: Option<String>,
         uuid: Option<String>,
         message_id: Option<String>,
+        parent_id: Option<String>,
         time: Option<i64>,
     },
     Gap,
@@ -137,6 +138,11 @@ pub(crate) enum Fact {
         model: Option<String>,
         tokens: Tokens,
         time: Option<i64>,
+    },
+    CopilotShutdown {
+        event_id: String,
+        time: Option<i64>,
+        usage: Option<crate::copilot::CopilotUsage>,
     },
     CodexTurn {
         thread_id: String,
@@ -223,6 +229,7 @@ impl Batch {
         let harness = match harness {
             "claude" => "claude",
             "codex" => "codex",
+            "copilot" => "copilot",
             _ => return None,
         };
         Some(Self {

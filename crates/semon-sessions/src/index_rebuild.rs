@@ -268,10 +268,6 @@ impl Drop for Stage {
     }
 }
 
-fn supported(root: InputRoot) -> bool {
-    matches!(root, InputRoot::Claude | InputRoot::Codex)
-}
-
 /// Serialize the receiver's marker update with its short recovery observation.
 /// Only the receiver process grants this custody; native replay never holds
 /// this lock while hashing or parsing a log.
@@ -301,7 +297,7 @@ struct Original {
 }
 
 fn is_original(input: &Input) -> bool {
-    supported(input.root) && input.path.ends_with(".jsonl")
+    input.path.ends_with(".jsonl")
 }
 
 fn local_inventory(options: &Options) -> io::Result<BTreeMap<Input, Original>> {
@@ -331,7 +327,7 @@ fn read_native_archive(options: &Options, archive: &Archive) -> io::Result<Vec<R
 }
 
 fn standalone_input(options: &Options, path: &str) -> Option<Input> {
-    [InputRoot::Claude, InputRoot::Codex]
+    [InputRoot::Claude, InputRoot::Codex, InputRoot::Copilot]
         .into_iter()
         .find_map(|root| {
             let path = Path::new(path)
@@ -348,12 +344,10 @@ fn standalone_input(options: &Options, path: &str) -> Option<Input> {
 fn received_input(path: &str) -> Option<Input> {
     let (harness, path) = path.split_once('/')?;
     let root = InputRoot::parse(harness)?;
-    (supported(root) && path.ends_with(".jsonl") && crate::is_input_path(harness, path)).then(
-        || Input {
-            root,
-            path: path.to_owned(),
-        },
-    )
+    (path.ends_with(".jsonl") && crate::is_input_path(harness, path)).then(|| Input {
+        root,
+        path: path.to_owned(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -442,7 +436,6 @@ fn receiver_inventory(options: &Options, root: &Path) -> io::Result<(Originals, 
     let archive = Archive::new(root.join(crate::archive::DIR));
     let seals = crate::inputs::receiver_seal_inputs(options)?
         .into_iter()
-        .filter(|input| supported(input.root))
         .map(|input| {
             let path = input.full_path(options);
             let source = format!("{}/{}", input.root.as_str(), input.path);
@@ -770,14 +763,20 @@ mod tests {
 
     fn archive(options: &Options, id: &str) -> PathBuf {
         let (path, bytes) = source(options, id);
-        let digest: [u8; 32] = Sha256::digest(&bytes).into();
+        archive_source(options, InputRoot::Claude, &path, id, &bytes);
+        path
+    }
+
+    fn archive_source(options: &Options, root: InputRoot, path: &Path, id: &str, bytes: &[u8]) {
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        let home = root.home(options);
         let native = NativeSource {
-            home: options.claude_home.clone(),
-            root: "claude".into(),
-            path: format!("projects/project/{id}.jsonl"),
+            home: home.clone(),
+            root: root.as_str().into(),
+            path: path.strip_prefix(home).unwrap().to_str().unwrap().into(),
             native_id: id.into(),
             ledger: Ledger {
-                stat: Stat::of(&path).unwrap(),
+                stat: Stat::of(path).unwrap(),
                 offset: bytes.len() as u64,
                 prefix: digest,
                 tail: digest,
@@ -787,11 +786,10 @@ mod tests {
         };
         let archive = Archive::new(crate::archive::standalone_dir(&options.cache));
         archive
-            .admit_native(&mut LogFile::open(&path).unwrap(), &native)
+            .admit_native(&mut LogFile::open(path).unwrap(), &native)
             .unwrap()
             .unwrap();
-        fs::remove_file(&path).unwrap();
-        path
+        fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -842,10 +840,29 @@ mod tests {
 
     #[test]
     fn host_rebuilds_unsupported_stores_from_native_and_archive_custody() {
-        for version in [0, 49, store::SCHEMA_VERSION + 1] {
+        for version in [0, store::SCHEMA_VERSION - 1, store::SCHEMA_VERSION + 1] {
             let (_stage, options) = fixture();
             let (live, bytes) = source(&options, "live");
             let archived = archive(&options, "archive-only");
+            let copilot = options
+                .copilot_home
+                .join("session-state/copilot-fixture/events.jsonl");
+            let copilot_text = include_str!("../tests/fixtures/star-catalog/copilot.jsonl");
+            fs::create_dir_all(copilot.parent().unwrap()).unwrap();
+            fs::write(&copilot, copilot_text).unwrap();
+            let archived_copilot = options
+                .copilot_home
+                .join("session-state/copilot-archive/events.jsonl");
+            let archived_text = copilot_text.replace("copilot-fixture", "copilot-archive");
+            fs::create_dir_all(archived_copilot.parent().unwrap()).unwrap();
+            fs::write(&archived_copilot, &archived_text).unwrap();
+            archive_source(
+                &options,
+                InputRoot::Copilot,
+                &archived_copilot,
+                "copilot-archive",
+                archived_text.as_bytes(),
+            );
             let old = refused(&options, version);
             let original = fs::read(&old).unwrap();
             assert!(EventCache::open_scoped(&options.cache).is_err());
@@ -860,6 +877,30 @@ mod tests {
                 bytes.len() as u64
             );
             assert!(cache.committed_rebuild_ledger(&archived).is_ok());
+            assert_eq!(
+                cache.committed_rebuild_ledger(&copilot).unwrap().offset,
+                copilot_text.len() as u64
+            );
+            assert_eq!(
+                cache
+                    .committed_rebuild_ledger(&archived_copilot)
+                    .unwrap()
+                    .offset,
+                archived_text.len() as u64
+            );
+            let db = rusqlite::Connection::open(active_path(&options.cache)).unwrap();
+            let usage = db.prepare(
+                "SELECT d.native_id,u.input FROM dim_session d JOIN current_copilot_usage u USING(source) ORDER BY d.native_id",
+            ).unwrap().query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+            assert_eq!(
+                usage,
+                [
+                    ("copilot-archive".to_owned(), 12000),
+                    ("copilot-fixture".to_owned(), 12000)
+                ]
+            );
+            assert!(!archived_copilot.exists());
             assert!(!archived.exists());
             assert_eq!(status(&options.cache), None);
         }

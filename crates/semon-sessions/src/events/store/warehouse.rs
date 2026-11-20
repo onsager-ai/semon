@@ -130,6 +130,15 @@ pub(super) fn write(
     let Some(batch) = &index.warehouse_observations else {
         return Ok(());
     };
+    if batch.harness == "copilot"
+        && index
+            .copilot
+            .as_ref()
+            .and_then(|index| index.next_ordinal)
+            .is_none()
+    {
+        return withdraw(tx, path);
+    }
     let started = measurements.start();
     #[cfg(test)]
     let fact_started = SCALE_TIMING.with(|timing| timing.get().map(|_| std::time::Instant::now()));
@@ -340,11 +349,12 @@ fn write_fact(
             kind,
             uuid,
             message_id,
+            parent_id,
             time,
         } => at!(fact_record, kind=>kind,
-            uuid=>uuid,message_id=>message_id,ts=>time,gap=>false),
+            uuid=>uuid,message_id=>message_id,parent_id=>parent_id,ts=>time,gap=>false),
         Fact::Gap => at!(fact_record, kind=>Option::<&str>::None, uuid=>Option::<&str>::None,
-            message_id=>Option::<&str>::None,ts=>Option::<i64>::None,gap=>true),
+            message_id=>Option::<&str>::None,parent_id=>Option::<&str>::None,ts=>Option::<i64>::None,gap=>true),
         Fact::SessionId(id) => at!(fact_session_observation, kind=>"session-id", native_id=>id,
             parent_id=>Option::<&str>::None,nickname=>Option::<&str>::None,
             agent_path=>Option::<&str>::None,metadata=>Option::<&str>::None),
@@ -396,6 +406,21 @@ fn write_fact(
             kind=>"codex-snapshot",message_id=>Option::<&str>::None,uuid=>record_uuid,
             model=>model,input=>int(tokens.input),cached=>int(tokens.cached_input),output=>int(tokens.output),
             ts=>time,accepted=>true),
+        Fact::CopilotShutdown {
+            event_id,
+            time,
+            usage,
+        } => {
+            at!(fact_copilot_shutdown,event_id=>event_id,ts=>time,complete=>usage.is_some())?;
+            if let Some(usage) = usage {
+                for (model, tokens) in &usage.by_model {
+                    at!(fact_copilot_usage,model=>model,input=>int(tokens.input),output=>int(tokens.output),
+                        cached=>int(tokens.cache_read),cache_write=>int(tokens.cache_write),
+                        reasoning=>int(usage.reasoning_by_model[model]))?;
+                }
+            }
+            Ok(())
+        }
         Fact::CodexTurn {
             thread_id,
             turn_id,
@@ -430,16 +455,18 @@ fn write_fact(
             {
                 at!(fact_claude_call,call_id=>id,tool=>tool)?;
             }
-            if matches!(
-                tool.as_deref(),
-                Some(
-                    "SendMessage"
-                        | "send_message"
-                        | "followup_task"
-                        | "collaboration.send_message"
-                        | "collaboration.followup_task"
+            if batch.harness != "copilot"
+                && matches!(
+                    tool.as_deref(),
+                    Some(
+                        "SendMessage"
+                            | "send_message"
+                            | "followup_task"
+                            | "collaboration.send_message"
+                            | "collaboration.followup_task"
+                    )
                 )
-            ) {
+            {
                 at!(fact_relay_send,call_id=>id,target=>target.as_deref().unwrap_or(""),ts=>time)?;
             }
             Ok(())
@@ -458,6 +485,9 @@ fn write_fact(
             at!(fact_tool_result,kind=>kind,call_id=>id,call_pos=>call_pos,call_block=>call_block,
                 ts=>reply.t,failed=>reply.e,flags=>reply.f,correlation=>reply.m,denial=>denial,
                 exit_code=>exit_code,target=>target)?;
+            if batch.harness == "copilot" {
+                return Ok(());
+            }
             // Keep unresolved candidates. Read-time qualification will decide
             // whether the scoped result belongs to a relay send.
             at!(fact_relay_result,kind=>kind,call_id=>id,call_pos=>call_pos,call_block=>call_block,
@@ -482,7 +512,7 @@ fn write_fact(
             let kind = match kind {
                 Kind::Agm => "agm",
                 Kind::Xsm => "xsm",
-                Kind::Tool => "tool",
+                Kind::Tool if batch.harness != "copilot" => "tool",
                 Kind::Tn => "tn",
                 Kind::Ask | Kind::U => {
                     return at!(fact_prompt,kind=>if *kind == Kind::Ask {"ask"} else {"user"},ts=>time);

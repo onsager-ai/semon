@@ -359,16 +359,18 @@ pruning cannot retire any registered chain or current native source binding.
 
 ## Current Semon storage contract
 
-The Event Index initializes schema 50 in one transaction with the current
+The Event Index initializes schema 51 in one transaction with the current
 parser/cache version, pricing fingerprints and native usage readiness default 0.
 It includes dedicated publication-bound archive chain evidence, separate from
 retention markers, together with the existing scheduling, activity, body and proof
-projections. The origin warehouse commits Claude and Codex metadata observations,
-source membership and the maintenance cursor with that source's Index advancement. See [cohort-bound index evidence](retained-native-projections.md#cohort-bound-index-evidence).
+projections. The origin warehouse commits Claude, Codex and Copilot metadata
+observations, source membership and the maintenance cursor with that source's
+Index advancement. See [cohort-bound index evidence](retained-native-projections.md#cohort-bound-index-evidence).
 
 Writable and focused Index opens refuse unsupported storage before mutation.
-When the source-owning host encounters a refused Index, it inventories its configured Claude
-and Codex roots, verified standalone archive manifests, and, for received
+When the source-owning host encounters a refused Index, it inventories its
+configured Claude, Codex and Copilot roots, verified standalone archive manifests,
+and, for received
 machines, receiver generations, Facts and archive custody. Receiver appends
 retain the transfer generation ID and update the marker's length, timestamp and
 head hash. Recovery observes the marker and file together under the per-file
@@ -393,8 +395,8 @@ admission. On the receiver, watch clients resend after the pause.
 `push --watch` uses the local custody-aware Index opener in its facts worker and
 continues shipping native files while recovery runs. After all inventoried source
 boundaries are committed and rechecked,
-it checkpoints and publishes `sessions-index.rebuilt-50-41.sqlite3` atomically
-(`50` is the storage schema and `41` is the parser version). The original
+it checkpoints and publishes `sessions-index.rebuilt-51-42.sqlite3` atomically
+(`51` is the storage schema and `42` is the parser version). The original
 `sessions-index.sqlite3` remains at its original path with its `-wal` and `-shm`.
 Temporary stages abandoned by a crash are never selected. Until publication the
 host returns HTTP 503 `history_rebuilding` with progress and `Retry-After`.

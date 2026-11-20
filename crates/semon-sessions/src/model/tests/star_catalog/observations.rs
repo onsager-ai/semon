@@ -16,14 +16,16 @@ fn rows(db: &Connection, sql: &str) -> Vec<Vec<Sql>> {
         .collect()
 }
 
+fn sorted_rows(db: &Connection, sql: &str) -> Vec<Vec<Sql>> {
+    let mut values = rows(db, sql);
+    values.sort_by_cached_key(|row| format!("{row:?}"));
+    values
+}
+
 // Compare committed rows with the independent prototype projections. Native
 // kinds, malformed positions and additional metadata stay in production rows.
 fn assert_committed_facts(home: &Home, expected: &Connection, harness: &str) {
     let db = Connection::open(EventCache::path(&home.options.cache)).unwrap();
-    let sorted = |mut values: Vec<Vec<Sql>>| {
-        values.sort_by_cached_key(|row| format!("{row:?}"));
-        values
-    };
     let queries: &[(&str, &str, &str)] = match harness {
         "claude" => &[
             ("record", "pos,kind,uuid,message_id,ts", "WHERE gap=0"),
@@ -67,11 +69,11 @@ fn assert_committed_facts(home: &Home, expected: &Connection, harness: &str) {
         };
         let prototype_projection = projection.strip_prefix("DISTINCT ").unwrap_or(projection);
         assert_eq!(
-            sorted(rows(&db, &production)),
-            sorted(rows(
+            sorted_rows(&db, &production),
+            sorted_rows(
                 expected,
                 &format!("SELECT {prototype_projection} FROM fact_{table}")
-            )),
+            ),
             "{harness} {table}"
         );
     }
@@ -157,6 +159,7 @@ fn assert_claude_facts(database: &Connection, observations: &[Observation]) {
                 uuid,
                 message_id,
                 time: ts,
+                ..
             } => facts.entry("record").or_default().push(vec![
                 pos,
                 string(kind),
@@ -493,6 +496,7 @@ fn assert_codex_facts(database: &Connection, batch: &crate::events::warehouse::B
                 uuid,
                 message_id,
                 time: ts,
+                ..
             } => {
                 let kind = if prompts.contains(&observation.position.offset) {
                     text("prompt")
@@ -715,6 +719,241 @@ fn codex_observations_match_prototype_at_admission() {
             "PRIVATE-CODEX-COMPACTION",
             "PRIVATE-CODEX-OUTPUT",
         ],
+    );
+}
+
+const COPILOT_FIXTURE: &str = include_str!("../../../../tests/fixtures/star-catalog/copilot.jsonl");
+const COPILOT_PATH: &str = "copilot/session-state/copilot-fixture/events.jsonl";
+
+fn copilot_facts(db: &Connection) -> [Vec<Vec<Sql>>; 11] {
+    [
+        "fact_session_observation",
+        "fact_record",
+        "fact_label_observation",
+        "fact_tool_call",
+        "fact_tool_result",
+        "fact_compaction",
+        "fact_copilot_shutdown",
+        "fact_copilot_usage",
+        "fact_prompt",
+        "dim_session",
+        "maintenance_cursor",
+    ]
+    .map(|table| sorted_rows(db, &format!("SELECT * FROM {table}")))
+}
+
+fn assert_copilot_catalog(db: &Connection, oracle: &Home, prefix: &str) {
+    oracle.write(COPILOT_PATH, prefix);
+    let built = oracle.build_query();
+    crate::model::observe_catalog(
+        &oracle.options,
+        &mut EventCache::open_scoped(&oracle.options.cache).unwrap(),
+        &mut false,
+        &mut Texts::default(),
+        NOW,
+    )
+    .unwrap();
+    let (_, catalog) = read_catalog(oracle);
+    let [session] = catalog.as_slice() else {
+        panic!("expected one semantic Catalog session");
+    };
+    let exact = built.facts[&session.key].tokens.as_ref();
+    let query = &built.sessions[&session.key];
+    let usage = query.copilot.as_ref().unwrap().usage.as_ref();
+    let counts = |tokens: &crate::Tokens| [tokens.input, tokens.cached_input, tokens.output];
+    assert_eq!(exact.map(counts), usage.map(|usage| counts(&usage.tokens)));
+    let totals = exact.map(counts).unwrap_or_default();
+    let million = |tokens: u64| (tokens as f64 / 1000.0).round() / 1000.0;
+    assert_eq!(
+        session.tokens,
+        [
+            million(totals[0].saturating_sub(totals[1])),
+            million(totals[1]),
+            million(totals[2])
+        ]
+    );
+    let dimension = rows(
+        db,
+        "SELECT l.id,l.harness,l.parent,l.model,l.input,l.cached,l.output,d.first_ts,d.last_ts
+                               FROM session_list l JOIN dim_session d ON d.source=l.owner",
+    );
+    assert_eq!(
+        dimension,
+        [vec![
+            text(&session.key),
+            text(&session.harness),
+            string(&session.parent),
+            text(&session.model),
+            integer(totals[0]),
+            integer(totals[1]),
+            integer(totals[2]),
+            time(session.start),
+            time(session.last),
+        ]]
+    );
+    let models: Vec<_> = usage
+        .into_iter()
+        .flat_map(|u| {
+            u.by_model.iter().map(move |(model, tokens)| {
+                vec![
+                    text(model),
+                    integer(tokens.input),
+                    integer(tokens.output),
+                    integer(tokens.cache_read),
+                    integer(tokens.cache_write),
+                    integer(u.reasoning_by_model[model]),
+                ]
+            })
+        })
+        .collect();
+    assert_eq!(
+        rows(
+            db,
+            "SELECT model,input,output,cached,cache_write,reasoning FROM current_copilot_usage ORDER BY model"
+        ),
+        models
+    );
+    let shutdown = query.copilot.as_ref().unwrap().usage_source.as_ref();
+    let expected: Vec<_> = shutdown
+        .into_iter()
+        .map(|s| {
+            vec![
+                integer(s.offset),
+                text(&s.event_id),
+                time(s.timestamp),
+                integer(u64::from(usage.is_some())),
+            ]
+        })
+        .collect();
+    assert_eq!(
+        rows(
+            db,
+            "SELECT pos,event_id,ts,complete FROM fact_copilot_shutdown ORDER BY pos DESC LIMIT 1"
+        ),
+        expected
+    );
+}
+
+#[test]
+fn copilot_observations_match_semantic_catalog_at_admission() {
+    let lines: Vec<_> = COPILOT_FIXTURE.split_inclusive('\n').collect();
+    let incremental = Home::new();
+    let incremental_path = incremental.write(COPILOT_PATH, "");
+    let bounded = Home::new();
+    let bounded_path = bounded.write(COPILOT_PATH, COPILOT_FIXTURE.trim_end_matches('\n'));
+    let mut bounded_cache = EventCache::open_scoped(&bounded.options.cache).unwrap();
+    bounded_cache.scan_byte_budget = Some(1);
+    bounded_cache.warehouse_commits = Some(Vec::new());
+    let bounded_db = Connection::open(EventCache::path(&bounded.options.cache)).unwrap();
+    let oracle = Home::new();
+    let mut prefix = String::new();
+    let mut observations = Vec::new();
+    let mut offsets = Vec::new();
+    for (ordinal, line) in lines.iter().enumerate() {
+        let mut cache = EventCache::open_scoped(&incremental.options.cache).unwrap();
+        cache.warehouse_commits = Some(Vec::new());
+        let db = Connection::open(EventCache::path(&incremental.options.cache)).unwrap();
+        offsets.push(prefix.len() as u64);
+        if ordinal + 1 == lines.len() {
+            let before = copilot_facts(&db);
+            append(&incremental_path, line.trim_end_matches('\n').as_bytes());
+            assert!(capture(&mut cache, &incremental_path, "copilot").is_empty());
+            assert!(capture(&mut bounded_cache, &bounded_path, "copilot").is_empty());
+            assert_eq!(copilot_facts(&db), before);
+            assert_eq!(copilot_facts(&bounded_db), before);
+            append(&incremental_path, b"\n");
+            append(&bounded_path, b"\n");
+        } else {
+            append(&incremental_path, line.as_bytes());
+        }
+        prefix.push_str(line);
+        let suffix = capture(&mut cache, &incremental_path, "copilot");
+        assert!(!suffix.is_empty());
+        for observation in &suffix {
+            assert_eq!(observation.position.offset, offsets[ordinal]);
+            assert_eq!(observation.ordinal, Some(ordinal as u64));
+        }
+        assert_eq!(
+            capture(&mut bounded_cache, &bounded_path, "copilot"),
+            suffix
+        );
+        observations.extend(suffix);
+        assert_eq!(copilot_facts(&db), copilot_facts(&bounded_db));
+        assert_copilot_catalog(&db, &oracle, &prefix);
+    }
+    let cold = Home::new();
+    let path = cold.write(COPILOT_PATH, COPILOT_FIXTURE);
+    let mut cache = EventCache::open_scoped(&cold.options.cache).unwrap();
+    cache.scan_byte_budget = Some(u64::MAX);
+    cache.warehouse_commits = Some(Vec::new());
+    let captured = capture(&mut cache, &path, "copilot");
+    assert_eq!(captured, observations);
+    assert_private_bodies_absent(&captured, &["PRIVATE-COPILOT", "unqualified-child"]);
+    let db = Connection::open(EventCache::path(&cold.options.cache)).unwrap();
+    assert_eq!(copilot_facts(&db), copilot_facts(&bounded_db));
+    assert_eq!(
+        rows(&db, "SELECT pos FROM fact_record WHERE gap ORDER BY pos"),
+        [2, 15, 16].map(|i| vec![integer(offsets[i])])
+    );
+    assert_eq!(
+        rows(
+            &db,
+            "SELECT pos,uuid,parent_id,message_id FROM fact_record WHERE kind='assistant.message' ORDER BY pos"
+        ),
+        [
+            vec![
+                integer(offsets[3]),
+                text("assistant"),
+                text("prompt"),
+                text("assistant-message")
+            ],
+            vec![
+                integer(offsets[10]),
+                text("second-assistant"),
+                text("switch"),
+                Sql::Null
+            ],
+        ]
+    );
+    assert_eq!(
+        rows(&db, "SELECT pos,trigger FROM fact_compaction"),
+        [vec![integer(offsets[14]), text("manual")]]
+    );
+    assert_eq!(
+        rows(
+            &db,
+            "SELECT call_id,result_pos FROM tool_answers ORDER BY call_id"
+        ),
+        [
+            vec![text("late-call"), Sql::Null],
+            vec![text("shell"), integer(offsets[4])],
+        ]
+    );
+    assert_eq!(
+        rows(
+            &db,
+            "SELECT pos,call_pos,exit_code,failed FROM fact_tool_result WHERE call_id='shell'"
+        ),
+        [vec![
+            integer(offsets[4]),
+            integer(offsets[3]),
+            integer(7),
+            integer(1)
+        ],]
+    );
+    assert!(rows(&db, "SELECT * FROM fact_parent_observation").is_empty());
+    assert!(rows(&db, "SELECT * FROM fact_subagent_event").is_empty());
+
+    // A mismatched replacement cannot leave the previously selected facts current.
+    cold.write(
+        COPILOT_PATH,
+        &COPILOT_FIXTURE.replace("copilot-fixture", "wrong-session"),
+    );
+    capture(&mut cache, &path, "copilot");
+    assert!(rows(&db, "SELECT * FROM warehouse_current").is_empty());
+    assert_eq!(
+        rows(&db, "SELECT count(*) FROM fact_record"),
+        [vec![integer(lines.len() as u64)]]
     );
 }
 

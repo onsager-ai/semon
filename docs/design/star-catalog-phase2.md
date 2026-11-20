@@ -92,10 +92,10 @@ state. The synthetic loader, its title/body map, `index_advance` (a stand-in for
 `files`), the injected `qualified_turn_runtime` table and `full_recompute.sql`
 are test-only. Persist neither chosen parent/pairing/turn nor live runtime state.
 
-Bump `events/store.rs` `SCHEMA_VERSION` from 49 to 50 on this base. Create the
-required tables and indexes with the fresh schema and qualify their shape in
-`qualify_contract` alongside the parser/cache version. Bump `CACHE_VERSION` if
-the persisted parser contract changes. Producers and focused readers refuse an
+Phase 2 introduced the warehouse at `SCHEMA_VERSION` 50. The Copilot producer
+advances it to 51 and `CACHE_VERSION` to 42 for persisted physical record
+ordinals. The fresh schema and parser/cache version are verified by
+`qualify_contract`. Producers and focused readers refuse an
 unsupported index before mutation. Update `unsupported_message` and the operator
 docs with recovery instructions that preserve the refused DB and its sidecars.
 
@@ -203,7 +203,7 @@ full-recompute checks that still exercise the current contract.
 | Rollback and restart | Inject failure after fact/dimension writes and before commit on the single-source and cold-batch paths. Check readers and reopen against the original ledger, proofs, cursor, selectors and rows. Simulate loss of acknowledgement after commit and assert all of them advance together. |
 | Replacement and incarnation | Rewrite or truncate at the same path, reuse native IDs and call IDs, and replace an assertion that splits a lineage. Verify current facts come from the new incarnation, old facts keep their witnesses, stale bodies refuse, and unrelated components do zero maintenance. Cover withdrawal with and without retained Index rows and proof-qualified Codex relocation followed by append. |
 | Late endpoint or parent | Admit continuation/bridge endpoints, spawn candidates, native markers and relay receipts before and after their counterparts. Assert component union, owner change, parent precedence/cycle handling and duplicate-spawn revocation. Exercise changed or expired process-start evidence, PID reuse and retained parent observations with no live authority. |
-| Custody and unsupported state | Exercise missing or changed sources, stale/ambiguous chain or provider bindings and unauthorized evidence. Assert withheld body access and no advancement from refused input. Refuse schema 49, future and foreign stores without mutation. Rebuild separately from verified local and archive originals, then repeat with missing or incomplete inventory and assert a recovery error with no new active Index. |
+| Custody and unsupported state | Exercise missing or changed sources, stale/ambiguous chain or provider bindings and unauthorized evidence. Assert withheld body access and no advancement from refused input. Refuse prior, future and foreign stores without mutation. Rebuild separately from verified local and archive originals, then repeat with missing or incomplete inventory and assert a recovery error with no new active Index. |
 | Bounded maintenance | Compare randomized splits and interleavings against independent full recomputation after each append. Run the scale cases and assert query plans and unrelated-component work. Use CI for builds, tests and benchmarks. |
 
 ## Suggested implementation PRs
@@ -240,6 +240,9 @@ Decided by the owner on 2026-11-20:
   with `Retry-After` and progress (sources done of total), and the Viewer shows
   "Rebuilding history (N of M sources)". Nothing is served from the refused
   Index.
-- **Copilot.** Deferred. Phase 2 covers Claude and Codex only. The Copilot
-  producer row above is kept as the plan for a later PR, which must land before
-  phase 3 switches Catalog reads, so Copilot sessions do not drop out.
+- **Copilot.** Phase 2 now admits qualified Copilot CLI session-state logs,
+  including record parents, model and lifecycle observations, scoped tool
+  executions, compaction, and cumulative shutdown usage by model. The latest
+  shutdown controls usage even when the report is incomplete. Subagent events
+  remain source-local records. Cold, bounded and incremental admission are
+  compared against the current semantic Catalog before the phase 3 read switch.
