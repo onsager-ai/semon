@@ -278,6 +278,11 @@ impl Server {
         self
     }
 
+    /// The fence shared by this receiver and its Viewer's rebuilds.
+    pub fn received_custody(&self) -> Arc<semon_sessions::ReceivedCustody> {
+        self.receiver.received_custody()
+    }
+
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.listener.local_addr()
     }
@@ -569,6 +574,7 @@ fn reason(status: u16) -> &'static str {
         413 => "Content Too Large",
         417 => "Expectation Failed",
         431 => "Request Header Fields Too Large",
+        503 => "Service Unavailable",
         505 => "HTTP Version Not Supported",
         507 => "Insufficient Storage",
         _ => "Internal Server Error",
@@ -913,12 +919,18 @@ fn answer(shared: &Shared, slot: &mut Slot, connection: &mut Connection, head: &
             matches!(endpoint, Endpoint::Append | Endpoint::Facts),
         );
     }
-    if reply.status >= 500 {
-        eprintln!("semon receive: {machine}: {}", reply.body);
-    } else if reply.status >= 400 {
-        log_refusal(head, reply.status);
-    }
-    match connection.respond(reply.status, &reply.body, head.close, &[]) {
+    let rebuilding = reply.status == 503 && reply.body["code"] == crate::wire::RECEIVER_REBUILDING;
+    let headers: &[(&str, &str)] = if rebuilding {
+        &[("Retry-After", "60")]
+    } else {
+        if reply.status >= 500 {
+            eprintln!("semon receive: {machine}: {}", reply.body);
+        } else if reply.status >= 400 {
+            log_refusal(head, reply.status);
+        }
+        &[]
+    };
+    match connection.respond(reply.status, &reply.body, head.close, headers) {
         Ok(()) => Next::Continue,
         Err(_) => Next::Close,
     }

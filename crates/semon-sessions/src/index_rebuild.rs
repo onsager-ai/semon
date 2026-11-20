@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Arc, Condvar, Mutex, OnceLock},
 };
 
 use serde::Deserialize;
@@ -21,6 +21,64 @@ use crate::{
     source_change::SourceLock,
     storage::{Namespace, sqlite},
 };
+
+/// Receiver-wide custody admission, shared with every received machine's rebuild.
+#[derive(Debug, Default)]
+pub struct ReceivedCustody {
+    state: Mutex<CustodyState>,
+    drained: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct CustodyState {
+    writes: usize,
+    rebuilds: usize,
+}
+
+impl ReceivedCustody {
+    /// Admit an append or facts write before it takes any of its write locks.
+    /// The caller keeps the guard until all of those writes have finished.
+    pub fn admit_write(&self) -> Option<ReceivedWrite<'_>> {
+        let mut state = crate::viewer::lock(&self.state);
+        if state.rebuilds != 0 {
+            return None;
+        }
+        state.writes += 1;
+        Some(ReceivedWrite(self))
+    }
+
+    fn pause(&self) -> ReceivedRebuild<'_> {
+        let mut state = crate::viewer::lock(&self.state);
+        state.rebuilds += 1;
+        drop(
+            self.drained
+                .wait_while(state, |state| state.writes != 0)
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        ReceivedRebuild(self)
+    }
+}
+
+/// Holds admission through a custody write and all of its locked updates.
+pub struct ReceivedWrite<'a>(&'a ReceivedCustody);
+
+impl Drop for ReceivedWrite<'_> {
+    fn drop(&mut self) {
+        let mut state = crate::viewer::lock(&self.0.state);
+        state.writes -= 1;
+        if state.writes == 0 {
+            self.0.drained.notify_all();
+        }
+    }
+}
+
+struct ReceivedRebuild<'a>(&'a ReceivedCustody);
+
+impl Drop for ReceivedRebuild<'_> {
+    fn drop(&mut self) {
+        crate::viewer::lock(&self.0.state).rebuilds -= 1;
+    }
+}
 
 fn rebuilt_path(cache: &Path) -> PathBuf {
     cache.with_extension(format!(
@@ -129,6 +187,10 @@ pub(crate) fn recover(options: &Options, namespace: &Namespace, refused: bool) -
         crate::viewer::lock(statuses()).insert(options.cache.clone(), status);
     };
     progress(Status::Rebuilding { done: 0, total: 0 });
+    let _pause = match &options.index_recovery {
+        crate::IndexRecovery::Received { custody, .. } => Some(custody.pause()),
+        _ => None,
+    };
     let result = (|| {
         if !verify_refusal(&path)? {
             return Ok(());
@@ -645,6 +707,44 @@ mod tests {
     use super::*;
     use crate::events::Ledger;
 
+    #[test]
+    fn receiver_rebuild_drains_writes_and_keeps_admission_closed_across_rebuilds() {
+        use std::{
+            sync::mpsc,
+            thread,
+            time::{Duration, Instant},
+        };
+
+        let custody = ReceivedCustody::default();
+        let write = custody.admit_write().unwrap();
+        let (snapshot, started) = mpsc::channel();
+        let (publish, finish) = mpsc::channel();
+        thread::scope(|scope| {
+            let custody = &custody;
+            let rebuild = scope.spawn(move || {
+                let _pause = custody.pause();
+                snapshot.send(()).unwrap();
+                let _ = finish.recv_timeout(Duration::from_secs(10));
+            });
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while custody.admit_write().is_some() && Instant::now() < deadline {
+                thread::yield_now();
+            }
+            let refused = custody.admit_write().is_none();
+            let before_drain = started.try_recv();
+            drop(write);
+            assert!(refused);
+            assert!(matches!(before_drain, Err(mpsc::TryRecvError::Empty)));
+            started.recv_timeout(Duration::from_secs(10)).unwrap();
+            let another_rebuild = custody.pause();
+            publish.send(()).unwrap();
+            rebuild.join().unwrap();
+            assert!(custody.admit_write().is_none());
+            drop(another_rebuild);
+        });
+        assert!(custody.admit_write().is_some());
+    }
+
     fn fixture() -> (Stage, Options) {
         let stage = Stage::new(&std::env::temp_dir()).unwrap();
         let options = Options {
@@ -831,7 +931,10 @@ mod tests {
         for receiver in [false, true] {
             let (stage, mut options) = fixture();
             if receiver {
-                options.index_recovery = crate::IndexRecovery::Received(stage.0.clone());
+                options.index_recovery = crate::IndexRecovery::Received {
+                    root: stage.0.clone(),
+                    custody: Default::default(),
+                };
             }
             let (path, record) = source(&options, "live");
             if receiver {
@@ -935,7 +1038,10 @@ mod tests {
     #[test]
     fn unmatched_receiver_generation_stops_recovery() {
         let (stage, mut options) = fixture();
-        options.index_recovery = crate::IndexRecovery::Received(stage.0.clone());
+        options.index_recovery = crate::IndexRecovery::Received {
+            root: stage.0.clone(),
+            custody: Default::default(),
+        };
         let (path, _) = source(&options, "removed");
         fs::remove_file(path).unwrap();
         let markers = stage.0.join("sync-generations");
@@ -957,7 +1063,10 @@ mod tests {
     fn receiver_replays_verified_archived_generations_without_live_authority() {
         let (stage, mut options) = fixture();
         let receiver = stage.0.join("machine");
-        options.index_recovery = crate::IndexRecovery::Received(receiver.clone());
+        options.index_recovery = crate::IndexRecovery::Received {
+            root: receiver.clone(),
+            custody: Default::default(),
+        };
         options.claude_home = receiver.join("claude");
         let archive = Archive::new(receiver.join(crate::archive::DIR));
         let (path, bytes) = source(&options, "raw-only");
@@ -982,7 +1091,10 @@ mod tests {
     #[test]
     fn receiver_seal_custody_must_have_its_referenced_manifest() {
         let (stage, mut options) = fixture();
-        options.index_recovery = crate::IndexRecovery::Received(stage.0.clone());
+        options.index_recovery = crate::IndexRecovery::Received {
+            root: stage.0.clone(),
+            custody: Default::default(),
+        };
         let (path, _) = source(&options, "lost-seal");
         let dir = crate::sealed::seal_dir(&path);
         fs::create_dir(&dir).unwrap();

@@ -9,6 +9,8 @@ pub const HEAD_BYTES: usize = 4096;
 /// The most file bytes one append carries.
 pub const CHUNK_BYTES: usize = 4 * 1024 * 1024;
 
+pub(crate) const RECEIVER_REBUILDING: &str = "receiver_rebuilding";
+
 /// `POST <url>/v1/push/append`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Append {

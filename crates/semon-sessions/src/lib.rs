@@ -1,5 +1,5 @@
 mod index_rebuild;
-pub use index_rebuild::with_received_file_lock;
+pub use index_rebuild::{ReceivedCustody, ReceivedWrite, with_received_file_lock};
 mod native_prefix;
 pub use native_prefix::codex_native_id_prefix;
 mod native_homes;
@@ -230,7 +230,10 @@ pub enum IndexRecovery {
     #[default]
     Refuse,
     Local,
-    Received(PathBuf),
+    Received {
+        root: PathBuf,
+        custody: std::sync::Arc<ReceivedCustody>,
+    },
 }
 
 impl IndexRecovery {
@@ -240,7 +243,7 @@ impl IndexRecovery {
 
     pub(crate) fn receiver_custody(&self) -> Option<&Path> {
         match self {
-            Self::Received(root) => Some(root),
+            Self::Received { root, .. } => Some(root),
             _ => None,
         }
     }

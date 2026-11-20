@@ -382,8 +382,8 @@ fn push_copies_a_home_into_semon_receive() {
 fn push_watch_ships_through_rebuilds_on_both_hosts_and_viewer_serves_history() {
     use std::time::Instant;
 
-    fn wait_for(description: &str, mut ready: impl FnMut() -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(60);
+    fn wait_for(seconds: u64, description: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(seconds);
         while !ready() {
             assert!(
                 Instant::now() < deadline,
@@ -472,41 +472,127 @@ fn push_watch_ships_through_rebuilds_on_both_hosts_and_viewer_serves_history() {
     let route = format!("/api/sessions?machine={MACHINE}&sid=lane");
 
     let url = fixture.start_receiver();
-    let _watch = Ended(Some(
-        fixture.push_command(&url).arg("--watch").spawn().unwrap(),
-    ));
-    wait_for("staging on both hosts", || {
+    wait_for(60, "receiver replay to take its snapshot", || {
         let _ = http(&url, &route, &headers, None);
-        staged(&origin_cache) && staged(&received_cache)
+        staged(&received_cache)
     });
-    let old_copy = fixture.copy(LOG);
-    fixture.append(&log, claude("shipped during both rebuilds").as_bytes());
-    wait_for(
-        "a new record shipped while both replays are blocked",
-        || fixture.copy(LOG).len() > old_copy.len(),
+    let progress = http(&url, &route, &headers, None);
+    assert!(progress.starts_with("HTTP/1.1 503"), "{progress}");
+    assert!(
+        progress.contains("Rebuilding history (0 of 1 sources)"),
+        "{progress}"
     );
-    assert_eq!(fixture.copy(LOG), fixture.redacted(LOG));
-    assert_eq!(
-        semon_sessions::analytics_index_path(&origin_cache),
-        origin_cache.with_extension("sqlite3")
+    let old_copy = fixture.copy(LOG);
+    fixture.append(
+        &log,
+        claude("queued during the receiver rebuild").as_bytes(),
+    );
+    let started = Instant::now();
+    let mut child = fixture
+        .push_command(&url)
+        .arg("--watch")
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let watch_stderr = child.stderr.take().unwrap();
+    let _watch = Ended(Some(child));
+    let (lines, messages) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(watch_stderr).lines() {
+            let Ok(line) = line else { break };
+            eprintln!("[push] {line}");
+            let _ = lines.send(line);
+        }
+    });
+    const REBUILD_REASON: &str = "receiver is rebuilding history";
+    wait_for(15, "the watcher to report a refused append", || {
+        messages
+            .try_iter()
+            .any(|line| line.contains(REBUILD_REASON))
+    });
+    let state: serde_json::Value =
+        serde_json::from_slice(&fs::read(fixture.path("state/push.json")).unwrap()).unwrap();
+    assert!(
+        state["files"][LOG].is_null(),
+        "the refused append has no ACK"
+    );
+    assert_eq!(fixture.copy(LOG), old_copy);
+
+    let push_headers = format!("Authorization: Bearer {token}\r\n");
+    let pending = fixture.redacted(LOG);
+    let replace = semon_push::wire::Append {
+        relocation: None,
+        generation: Some("b".repeat(32)),
+        root: "claude".into(),
+        path: LOG.strip_prefix("claude/").unwrap().into(),
+        redactor_version: semon_push::redact::VERSION,
+        offset: 0,
+        head_sha256: semon_push::wire::head_sha256(&pending),
+        bytes: semon_push::wire::base64_encode(&pending),
+        replace: true,
+    };
+    let facts = semon_sessions::Facts::default();
+    for (route, payload) in [
+        ("/v1/push/append", serde_json::to_string(&replace).unwrap()),
+        ("/v1/push/facts", serde_json::to_string(&facts).unwrap()),
+    ] {
+        let reply = http(&url, route, &push_headers, Some(&payload));
+        let (head, body) = reply.split_once("\r\n\r\n").unwrap();
+        assert!(
+            head.starts_with("HTTP/1.1 503 Service Unavailable"),
+            "{reply}"
+        );
+        assert!(head.contains("\r\nRetry-After: 60"), "{reply}");
+        let refusal: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(refusal["code"], "receiver_rebuilding");
+        assert!(refusal["error"].is_string());
+    }
+    wait_for(
+        20,
+        "the receiver to accept a heartbeat during replay",
+        || {
+            serde_json::from_slice::<serde_json::Value>(&fixture.copy("status.json"))
+                .is_ok_and(|status| status["observation"]["phase"] == "waiting_to_retry")
+        },
     );
     assert_eq!(
         semon_sessions::analytics_index_path(&received_cache),
         received_cache.with_extension("sqlite3")
     );
-    drop((received_lock, origin_lock));
+    assert_eq!(fixture.copy(LOG), old_copy, "no append after the snapshot");
+    drop(received_lock);
 
-    fixture.append(
-        &log,
-        claude("shipped after the replay locks open").as_bytes(),
+    wait_for(60, "receiver Index publication", || {
+        semon_sessions::analytics_index_path(&received_cache)
+            != received_cache.with_extension("sqlite3")
+    });
+    wait_for(90, "the same watcher to resend after the pause", || {
+        fixture.copy(LOG) == fixture.redacted(LOG)
+    });
+    assert!(started.elapsed() >= Duration::from_secs(60));
+    assert!(
+        !messages
+            .try_iter()
+            .any(|line| line.contains(REBUILD_REASON))
     );
-    wait_for("Index publication and later shipping", || {
+
+    wait_for(60, "origin replay to take its snapshot", || {
+        staged(&origin_cache)
+    });
+    fixture.append(&log, claude("shipped during the origin rebuild").as_bytes());
+    wait_for(15, "shipping while origin replay is blocked", || {
+        fixture.copy(LOG) == fixture.redacted(LOG)
+    });
+    assert_eq!(
+        semon_sessions::analytics_index_path(&origin_cache),
+        origin_cache.with_extension("sqlite3")
+    );
+    drop(origin_lock);
+    wait_for(60, "origin Index publication", || {
         semon_sessions::analytics_index_path(&origin_cache)
             != origin_cache.with_extension("sqlite3")
-            && semon_sessions::analytics_index_path(&received_cache)
-                != received_cache.with_extension("sqlite3")
-            && fixture.copy(LOG) == fixture.redacted(LOG)
     });
+    assert_eq!(fixture.copy(LOG), fixture.redacted(LOG));
     assert_eq!(
         fs::read(origin_cache.with_extension("sqlite3")).unwrap(),
         origin_before
@@ -515,7 +601,7 @@ fn push_watch_ships_through_rebuilds_on_both_hosts_and_viewer_serves_history() {
         fs::read(received_cache.with_extension("sqlite3")).unwrap(),
         received_before
     );
-    wait_for("receiver Viewer to serve the recovered session", || {
+    wait_for(60, "receiver Viewer to serve the recovered session", || {
         let reply = http(&url, &route, &headers, None);
         if !reply.starts_with("HTTP/1.1 200") {
             return false;

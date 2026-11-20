@@ -372,7 +372,13 @@ and Codex roots, verified standalone archive manifests, and, for received
 machines, receiver generations, Facts and archive custody. Receiver appends
 retain the transfer generation ID and update the marker's length, timestamp and
 head hash. Recovery observes the marker and file together under the per-file
-write lock. A missing referenced original, a rewrite or truncation of a captured
+write lock. A received Index rebuild closes append and facts admission across
+all machines on the receiver, drains admitted writes under the normal write
+locks, and keeps admission closed from before inventory through publication or
+recovery error. New writes receive `503 receiver_rebuilding` with `Retry-After`.
+Status heartbeats remain available and their proof checks only read custody.
+Recovery rechecks seals and archive inventory before publishing.
+A missing referenced original, a rewrite or truncation of a captured
 prefix, or incomplete archive custody stops recovery. Rebuild
 never uses the refused Index as an inventory or copies rows from it. Analytics
 materialization, ASI and callers supplying an Index without native custody
@@ -382,7 +388,8 @@ The host admits verified originals through the normal native parser and Index
 write transactions in a private `.index-rebuild-<id>/` staging directory beside
 the cache. Replay fixes each source's read limit at its captured length and
 verifies the complete-record receipt and captured bytes before publication.
-Appended tails and newly discovered sources enter through normal admission.
+On the origin, appended tails and newly discovered sources enter through normal
+admission. On the receiver, watch clients resend after the pause.
 `push --watch` uses the local custody-aware Index opener in its facts worker and
 continues shipping native files while recovery runs. After all inventoried source
 boundaries are committed and rechecked,
