@@ -50,7 +50,12 @@ fn statuses() -> &'static Mutex<BTreeMap<PathBuf, Status>> {
 }
 
 pub(crate) fn status(cache: &Path) -> Option<Status> {
-    crate::viewer::lock(statuses()).get(cache).cloned()
+    let state = crate::viewer::lock(statuses()).get(cache).cloned();
+    if matches!(state, Some(Status::Failed(_))) && active_path(cache) == rebuilt_path(cache) {
+        // Another host sharing this placement may have finished recovery.
+        return None;
+    }
+    state
 }
 
 pub(crate) fn history_reply(options: &Options, probe: bool) -> Option<crate::ViewerReply> {
@@ -78,25 +83,46 @@ pub(crate) fn history_reply(options: &Options, probe: bool) -> Option<crate::Vie
 }
 
 pub(crate) fn needed(options: &Options) -> io::Result<bool> {
-    store::rebuild_needed(&active_path(&options.cache))
+    let path = active_path(&options.cache);
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+        Ok(meta) if !meta.is_file() => Err(io::Error::other("Index path is not a regular file")),
+        Ok(_) => store::rebuild_probe(&path),
+    }
 }
 
 pub(crate) fn ensure(options: &Options, namespace: &Namespace) -> io::Result<()> {
-    let final_path = rebuilt_path(&options.cache);
     if !needed(options)? {
         return Ok(());
     }
+    recover(options, namespace, false)
+}
+
+/// Also called after a normal writer refuses a contract whose latest state was
+/// in the WAL. All publication paths serialize under the same reservation.
+pub(crate) fn recover(options: &Options, namespace: &Namespace, refused: bool) -> io::Result<()> {
+    let final_path = rebuilt_path(&options.cache);
     let _lock = SourceLock::acquire(options, "\0index-rebuild", true)?;
-    if !needed(options)? {
+    let path = active_path(&options.cache);
+    if path == final_path && !needed(options)? {
+        return Ok(());
+    }
+    if !refused && !needed(options)? {
         return Ok(());
     }
     let progress = |status| {
         crate::viewer::lock(statuses()).insert(options.cache.clone(), status);
     };
     progress(Status::Rebuilding { done: 0, total: 0 });
-    let result = rebuild(options, namespace, &final_path, |done, total| {
-        progress(Status::Rebuilding { done, total });
-    });
+    let result = (|| {
+        if !verify_refusal(&path)? {
+            return Ok(());
+        }
+        rebuild(options, namespace, &final_path, |done, total| {
+            progress(Status::Rebuilding { done, total });
+        })
+    })();
     match result {
         Ok(()) => {
             crate::viewer::lock(statuses()).remove(&options.cache);
@@ -109,6 +135,36 @@ pub(crate) fn ensure(options: &Options, namespace: &Namespace) -> io::Result<()>
             Err(io::Error::other(message))
         }
     }
+}
+
+fn verify_refusal(path: &Path) -> io::Result<bool> {
+    let wal = path.with_extension("sqlite3-wal");
+    let observed = match fs::symlink_metadata(&wal) {
+        Ok(metadata) if metadata.is_file() && metadata.len() > 0 => Stat::from_metadata(&metadata)?,
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(io::Error::other("Index WAL is not a regular file"));
+        }
+        Ok(_) => return store::rebuild_probe(path),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return store::rebuild_probe(path),
+        Err(error) => return Err(error),
+    };
+    let db_stat = Stat::of(path)?;
+    #[cfg(unix)]
+    let result = store::rebuild_probe_wal(path)?;
+    #[cfg(not(unix))]
+    let result = false;
+    if Stat::of(path)? != db_stat || Stat::of(&wal)? != observed {
+        return Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "refused Index changed during qualification",
+        ));
+    }
+    #[cfg(not(unix))]
+    return Err(io::Error::other(
+        "cannot qualify a refused Index with a pending WAL on this platform",
+    ));
+    #[cfg(unix)]
+    Ok(result)
 }
 
 struct Stage(PathBuf);
@@ -202,11 +258,18 @@ struct ReceiverIdentity {
     ino: u64,
 }
 
+#[derive(PartialEq, Eq)]
+struct ReceiverInventory {
+    markers: BTreeMap<String, Vec<u8>>,
+    rollouts: [Option<BTreeSet<String>>; 2],
+    seals: BTreeMap<Input, Option<crate::archive::Chain>>,
+}
+
 fn verify_receiver(
     options: &Options,
     root: &Path,
     originals: &BTreeMap<Input, Stat>,
-) -> io::Result<BTreeMap<String, Vec<u8>>> {
+) -> io::Result<ReceiverInventory> {
     let mut candidates = BTreeMap::new();
     // Receiver markers cover metadata inputs as well as native logs. Validate
     // their bindings without treating metadata files as replayable logs.
@@ -281,30 +344,47 @@ fn verify_receiver(
         records.insert(name, bytes);
     }
     let facts_path = root.join("facts.json");
-    match fs::symlink_metadata(&facts_path) {
-        Ok(_) => {
-            let facts = crate::read_facts(&facts_path)?;
-            for rollouts in [&facts.codex_rollouts, &facts.codex_provisional_rollouts]
-                .into_iter()
-                .flatten()
-            {
-                for path in rollouts {
-                    let input = Input {
-                        root: InputRoot::Codex,
-                        path: path.clone(),
-                    };
-                    if !originals.contains_key(&input) {
-                        return Err(io::Error::other(format!(
-                            "receiver Facts references missing Codex source {path}"
-                        )));
-                    }
-                }
-            }
+    let rollouts = match fs::symlink_metadata(&facts_path) {
+        Ok(metadata) if metadata.is_file() => {
+            let facts = crate::received::read_facts(&facts_path)?;
+            [facts.codex_rollouts, facts.codex_provisional_rollouts]
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Ok(_) => return Err(io::Error::other("receiver Facts is not a regular file")),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => [None, None],
         Err(error) => return Err(error),
+    };
+    for path in rollouts.iter().flatten().flatten() {
+        let input = Input {
+            root: InputRoot::Codex,
+            path: path.clone(),
+        };
+        if !originals.contains_key(&input) {
+            return Err(io::Error::other(format!(
+                "receiver Facts references missing Codex source {path}"
+            )));
+        }
     }
-    Ok(records)
+    let archive = Archive::new(root.join(crate::archive::DIR));
+    let seals = crate::inputs::receiver_seal_inputs(options)?
+        .into_iter()
+        .filter(|input| supported(input.root))
+        .map(|input| {
+            let path = input.full_path(options);
+            let source = format!("{}/{}", input.root.as_str(), input.path);
+            let custody = crate::sealed::verify_recovery_custody(
+                &path,
+                &source,
+                &archive,
+                originals.contains_key(&input),
+            )?;
+            Ok((input, custody))
+        })
+        .collect::<io::Result<_>>()?;
+    Ok(ReceiverInventory {
+        markers: records,
+        rollouts,
+        seals,
+    })
 }
 
 fn replay_original(
@@ -643,6 +723,53 @@ mod tests {
                 .contains("has no authorized original")
         );
         assert_eq!(active_path(&options.cache), old);
+    }
+
+    #[test]
+    fn receiver_replays_verified_archived_generations_without_live_authority() {
+        let (stage, mut options) = fixture();
+        let receiver = stage.0.join("machine");
+        options.receiver_custody = Some(receiver.clone());
+        options.claude_home = receiver.join("claude");
+        let archive = Archive::new(receiver.join(crate::archive::DIR));
+        let (path, bytes) = source(&options, "raw-only");
+        let key = "claude/projects/project/raw-only.jsonl";
+        archive
+            .preserve(key, &mut bytes.as_slice(), crate::archive::NATIVE_REDACTOR)
+            .unwrap()
+            .unwrap();
+        fs::remove_file(&path).unwrap();
+        refused(&options, 49);
+        let cache = sqlite::open_index(&options, &Namespace::new("machine").unwrap()).unwrap();
+        assert!(cache.committed_rebuild_ledger(&path).is_err());
+        let db = store::focused_connection(&active_path(&options.cache)).unwrap();
+        let rows: (i64, i64) = db.query_row(
+            "SELECT (SELECT count(*) FROM fact_record), (SELECT count(*) FROM warehouse_current)",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(rows, (1, 0));
+        archive.verify(key).unwrap();
+    }
+
+    #[test]
+    fn receiver_seal_custody_must_have_its_referenced_manifest() {
+        let (stage, mut options) = fixture();
+        options.receiver_custody = Some(stage.0.clone());
+        let (path, _) = source(&options, "lost-seal");
+        let dir = crate::sealed::seal_dir(&path);
+        fs::create_dir(&dir).unwrap();
+        let record = dir.join("custody.json");
+        fs::write(&record, b"{}").unwrap();
+        let old = refused(&options, 49);
+        let result = ensure(&options, &Namespace::new("machine").unwrap());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("history recovery failed")
+        );
+        assert_eq!(active_path(&options.cache), old);
+        assert_eq!(fs::read(record).unwrap(), b"{}");
     }
 
     #[cfg(unix)]

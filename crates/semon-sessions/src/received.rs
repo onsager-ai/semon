@@ -358,7 +358,7 @@ fn identity(_: &fs::Metadata) -> (u64, u64) {
 /// regular file its path names (checked on the opened file). A file
 /// replaced between the check and the open is read again, up to three
 /// times.
-fn read_facts(path: &Path) -> io::Result<Facts> {
+pub(crate) fn read_facts(path: &Path) -> io::Result<Facts> {
     let mut attempts = 0;
     let bytes = loop {
         attempts += 1;

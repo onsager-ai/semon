@@ -694,56 +694,48 @@ struct SqliteStore {
     traversal_observation: Option<crate::native_timing::CatalogTraversalProbe>,
 }
 
-/// Recovery detects unsupported contracts without touching their SQLite sidecars.
-pub(crate) fn rebuild_needed(path: &Path) -> io::Result<bool> {
-    fn observe(path: &Path) -> io::Result<Option<super::Stat>> {
-        match fs::symlink_metadata(path) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
-            Ok(meta) if !meta.is_file() => {
-                Err(io::Error::other("Index component is not a regular file"))
-            }
-            Ok(meta) => super::Stat::from_metadata(&meta).map(Some),
+/// Qualify the checkpointed contract without opening the shared WAL index.
+/// The host uses the ordinary SQLite snapshot once this contract is current.
+pub(crate) fn rebuild_probe(path: &Path) -> io::Result<bool> {
+    let mut uri = String::from("file:");
+    use fmt::Write as _;
+    for &byte in path.as_os_str().as_encoded_bytes() {
+        if byte.is_ascii_alphanumeric() || b"/-_.~".contains(&byte) {
+            uri.push(char::from(byte));
+        } else {
+            write!(uri, "%{byte:02X}").expect("write SQLite URI");
         }
     }
-    let Some(database) = observe(path)? else {
-        return Ok(false);
-    };
-    let wal_path = sibling(path, "-wal");
-    let wal = observe(&wal_path)?;
+    uri.push_str("?immutable=1");
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW
+        | OpenFlags::SQLITE_OPEN_URI;
+    let connection = Connection::open_with_flags(uri, flags).map_err(io::Error::other)?;
+    qualifies_for_rebuild(&connection)
+}
+
+/// A checkpoint already refused by the contract may have a later WAL
+/// transaction. SQLite's private WAL index avoids the refused SHM entirely.
+#[cfg(unix)]
+pub(crate) fn rebuild_probe_wal(path: &Path) -> io::Result<bool> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NOFOLLOW;
-    // SQLite immutable reads omit uncheckpointed WAL pages. The Unix VFS
-    // with exclusive locking mode uses a private WAL index, never the SHM.
-    // No lock is claimed against old Semon versions, so reject a changing
-    // database/WAL observation before acting on the qualification result.
-    #[cfg(unix)]
-    let connection = Connection::open_with_flags_and_vfs(path, flags, "unix-none");
-    #[cfg(not(unix))]
-    let connection = Connection::open_with_flags(path, flags);
-    let connection = connection.map_err(io::Error::other)?;
-    #[cfg(unix)]
+    let connection =
+        Connection::open_with_flags_and_vfs(path, flags, "unix-none").map_err(io::Error::other)?;
     connection
         .pragma_update(None, "locking_mode", "EXCLUSIVE")
         .map_err(io::Error::other)?;
-    let result = qualify_producer(&connection);
-    if observe(path)? != Some(database) || observe(&wal_path)? != wal {
-        return Err(io::Error::new(
-            io::ErrorKind::WouldBlock,
-            "Index changed during qualification",
-        ));
-    }
-    match result {
-        Ok(Init::Ready) => {
-            let mode: String = connection
-                .pragma_query_value(None, "journal_mode", |row| row.get(0))
-                .map_err(io::Error::other)?;
-            Ok(!mode.eq_ignore_ascii_case("wal"))
-        }
+    qualifies_for_rebuild(&connection)
+}
+
+fn qualifies_for_rebuild(connection: &Connection) -> io::Result<bool> {
+    let read = connection
+        .unchecked_transaction()
+        .map_err(io::Error::other)?;
+    match qualify_producer(&read) {
         Ok(result) => Ok(matches!(result, Init::Unsupported(_))),
         // Keep existing physical-corruption handling distinct from version refusal.
         Err(error) if is_corrupt(&error) => Ok(false),
-        Err(error) if is_unavailable(&error) => Err(io::Error::other(error)),
-        Err(_) => Ok(true),
+        Err(error) => Err(io::Error::other(error)),
     }
 }
 
@@ -4896,6 +4888,7 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
                 "unsupported session index: missing metadata",
             ));
         }
+        Err(error @ rusqlite::Error::SqliteFailure(..)) => return malformed_schema(error),
         Err(_) => {
             return Ok(Init::Unsupported(
                 "unsupported session index: malformed metadata",

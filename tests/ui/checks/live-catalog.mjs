@@ -39,6 +39,27 @@ export default async function liveCatalog(browser) {
     } finally {
       await closePage(rebuilding);
     }
+    const selectedRecovery = await fixture.open(browser, { size: 'phone', dark: false });
+    try {
+      const routePattern = '**/api/session-transcript?*';
+      await selectedRecovery.route(routePattern, (route) =>
+        route.fulfill({
+          status: 503,
+          headers: { 'Retry-After': '1' },
+          json: { error: { code: 'history_rebuilding', progress: { done: 2, total: 3 } } },
+        }),
+      );
+      await selectedRecovery.goto(fixture.base + '/session/local/harbor');
+      await selectedRecovery.getByText('Rebuilding history (2 of 3 sources)').first().waitFor();
+      await selectedRecovery.unroute(routePattern);
+      await selectedRecovery
+        .locator('[aria-label="Transcript"] [data-entry-key]')
+        .first()
+        .waitFor();
+      assert.deepEqual(selectedRecovery.errors, []);
+    } finally {
+      await closePage(selectedRecovery);
+    }
     for (const width of [390, 820, 1280])
       for (const dark of [false, true]) {
         const page = await fixture.open(browser, {

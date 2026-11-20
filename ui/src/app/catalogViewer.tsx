@@ -3287,13 +3287,13 @@ export function createCatalogViewer(
     if (request.errorsGeneration !== null) p.set('errors_generation', request.errorsGeneration);
     view.loading = true;
     view.root.setAttribute('aria-busy', 'true');
-    view.note = '';
-    view.transientNote = false;
     drawSelected(view);
     try {
       const value = await api('/api/session-transcript?' + p);
       if (disposed || view.store !== store) return;
       if (view.store.accept(request, value)) {
+        view.note = '';
+        view.transientNote = false;
         void hydrateContext(view);
         view.recovery.reset();
         const current = view.store.selectedPage()!;

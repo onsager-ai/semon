@@ -295,6 +295,15 @@ impl Discovery {
 /// walked without following symbolic links, and only regular files whose
 /// path passes [`is_input_path`] are listed.
 pub fn inputs(options: &Options) -> io::Result<Vec<Input>> {
+    native_inventory(options, false)
+}
+
+/// Receiver recovery also discovers seal manifests whose plain source is gone.
+pub(crate) fn receiver_seal_inputs(options: &Options) -> io::Result<Vec<Input>> {
+    native_inventory(options, true)
+}
+
+fn native_inventory(options: &Options, seals: bool) -> io::Result<Vec<Input>> {
     let mut found = Vec::new();
     for (root, top) in [
         (InputRoot::Claude, "projects"),
@@ -308,6 +317,7 @@ pub fn inputs(options: &Options) -> io::Result<Vec<Input>> {
             &root.home(options).join(top),
             top.to_owned(),
             &mut found,
+            seals,
         )?;
     }
     found.sort();
@@ -319,6 +329,7 @@ fn walk(
     dir: &std::path::Path,
     rel: String,
     found: &mut Vec<Input>,
+    seals: bool,
 ) -> io::Result<()> {
     if fs::symlink_metadata(dir).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Ok(());
@@ -336,10 +347,21 @@ fn walk(
         let path = format!("{rel}/{name}");
         let kind = entry.file_type()?;
         if kind.is_dir() {
-            if path.split('/').count() < MAX_DEPTH {
-                walk(root, &entry.path(), path, found)?;
+            if crate::sealed::is_seal_dir_name(&name) {
+                let raw = path.strip_suffix(".seal").expect("validated seal name");
+                if seals && is_input_path(root.as_str(), raw) {
+                    found.push(Input {
+                        root,
+                        path: raw.to_owned(),
+                    });
+                }
+                continue;
             }
-        } else if kind.is_file()
+            if path.split('/').count() < MAX_DEPTH {
+                walk(root, &entry.path(), path, found, seals)?;
+            }
+        } else if !seals
+            && kind.is_file()
             && (is_input_path(root.as_str(), &path) || archive_input_path(root.as_str(), &path))
         {
             found.push(Input { root, path });

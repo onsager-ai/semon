@@ -204,6 +204,8 @@ impl FactsSource {
             cache: crate::storage::Namespace::new(source_key)
                 .map_err(|error| error.to_string())
                 .and_then(|namespace| {
+                    crate::index_rebuild::ensure(options, &namespace)
+                        .map_err(|error| error.to_string())?;
                     let mut cache = EventCache::open(&options.cache)?;
                     crate::storage::sqlite::bind(&mut cache, &namespace)
                         .map_err(|error| error.to_string())?;
