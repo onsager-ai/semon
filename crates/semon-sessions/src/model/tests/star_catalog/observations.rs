@@ -757,8 +757,21 @@ fn assert_copilot_catalog(db: &Connection, oracle: &Home, prefix: &str) {
     let [session] = catalog.as_slice() else {
         panic!("expected one semantic Catalog session");
     };
-    let exact = built.facts[&session.key].tokens.as_ref().unwrap();
+    let exact = built.facts[&session.key].tokens.as_ref();
     let query = &built.sessions[&session.key];
+    let usage = query.copilot.as_ref().unwrap().usage.as_ref();
+    let counts = |tokens: &crate::Tokens| [tokens.input, tokens.cached_input, tokens.output];
+    assert_eq!(exact.map(counts), usage.map(|usage| counts(&usage.tokens)));
+    let totals = exact.map(counts).unwrap_or_default();
+    let million = |tokens: u64| (tokens as f64 / 1000.0).round() / 1000.0;
+    assert_eq!(
+        session.tokens,
+        [
+            million(totals[0].saturating_sub(totals[1])),
+            million(totals[1]),
+            million(totals[2])
+        ]
+    );
     let dimension = rows(
         db,
         "SELECT l.id,l.harness,l.parent,l.model,l.input,l.cached,l.output,d.first_ts,d.last_ts
@@ -771,14 +784,13 @@ fn assert_copilot_catalog(db: &Connection, oracle: &Home, prefix: &str) {
             text(&session.harness),
             string(&session.parent),
             text(&session.model),
-            integer(exact.input),
-            integer(exact.cached_input),
-            integer(exact.output),
+            integer(totals[0]),
+            integer(totals[1]),
+            integer(totals[2]),
             time(session.start),
             time(session.last),
         ]]
     );
-    let usage = query.copilot.as_ref().unwrap().usage.as_ref();
     let models: Vec<_> = usage
         .into_iter()
         .flat_map(|u| {
