@@ -97,6 +97,7 @@ impl Fixture {
             .arg(self.dir())
             .args(extra)
             .env("HOME", self.path("home"))
+            .env("XDG_STATE_HOME", self.path("receiver-state"))
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
@@ -133,12 +134,17 @@ impl Fixture {
         .unwrap();
     }
 
-    /// `semon push` from the synthetic home.
     fn push(&self, url: &str) -> Output {
+        self.push_command(url).output().unwrap()
+    }
+
+    /// `semon push` from the synthetic home.
+    fn push_command(&self, url: &str) -> Command {
         self.install_origin(url);
         let home = self.path("home");
-        semon()
-            .args(["push"])
+        let mut command = semon();
+        command
+            .arg("push")
             .arg("--state")
             .arg(self.path("state/push.json"))
             .arg("--claude-home")
@@ -151,9 +157,8 @@ impl Fixture {
             .arg(self.path("state/index.json"))
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", self.path("config"))
-            .env("XDG_STATE_HOME", self.path("state"))
-            .output()
-            .unwrap()
+            .env("XDG_STATE_HOME", self.path("state"));
+        command
     }
 
     /// `semon sessions --json --all --machines DIR --no-local`, with
@@ -374,6 +379,157 @@ fn push_copies_a_home_into_semon_receive() {
 
 #[cfg(unix)]
 #[test]
+fn push_watch_ships_through_rebuilds_on_both_hosts_and_viewer_serves_history() {
+    use std::time::Instant;
+
+    fn wait_for(description: &str, mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !ready() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {description}"
+            );
+            thread::sleep(Duration::from_millis(40));
+        }
+    }
+
+    fn refuse(cache: &Path) -> Vec<u8> {
+        let path = cache.with_extension("sqlite3");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE pre_rebuild(value TEXT); INSERT INTO pre_rebuild VALUES ('preserve'); PRAGMA user_version=49;").unwrap();
+        drop(db);
+        fs::read(path).unwrap()
+    }
+
+    fn hold_replay(cache: &Path, source: &Path) -> fs::File {
+        let locks = cache.with_extension("source-locks");
+        fs::create_dir_all(&locks).unwrap();
+        let key = semon_push::wire::sha256_hex(source.to_str().unwrap().as_bytes());
+        let lock = fs::File::create(locks.join(key)).unwrap();
+        lock.lock().unwrap();
+        lock
+    }
+
+    fn staged(cache: &Path) -> bool {
+        fs::read_dir(cache.parent().unwrap()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".index-rebuild-")
+        })
+    }
+
+    const MACHINE: &str = "machine-6754a9c1e83f27b4";
+    let mut fixture = Fixture::new();
+    let token = pair_fixture(&fixture.dir());
+    fixture.write("token", token.as_bytes());
+    private(&fixture.path("token"));
+    let log = format!("home/{LOG}");
+    let initial = claude("retained at startup");
+    fixture.write(&log, initial.as_bytes());
+    let receiver = fixture.dir();
+    let raw = semon_push::receiver::Receiver::new(&receiver).unwrap();
+    let seeded = raw.append(
+        MACHINE,
+        &semon_push::wire::Append {
+            relocation: None,
+            generation: Some("a".repeat(32)),
+            root: "claude".into(),
+            path: LOG.strip_prefix("claude/").unwrap().into(),
+            redactor_version: semon_push::redact::VERSION,
+            offset: 0,
+            head_sha256: semon_push::wire::head_sha256(initial.as_bytes()),
+            bytes: semon_push::wire::base64_encode(initial.as_bytes()),
+            replace: false,
+        },
+    );
+    assert_eq!(seeded.status, 200, "{seeded:?}");
+    drop(raw);
+
+    let identity = fs::canonicalize(&receiver).unwrap();
+    let route_hash = identity
+        .to_string_lossy()
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+        });
+    let received_cache = fixture.path(&format!(
+        "receiver-state/semon/received/{route_hash:016x}/{MACHINE}/sessions-index.json"
+    ));
+    let origin_cache = fixture.path("state/index.json");
+    let received_before = refuse(&received_cache);
+    let origin_before = refuse(&origin_cache);
+    let received_lock = hold_replay(
+        &received_cache,
+        &receiver.join("machines").join(MACHINE).join(LOG),
+    );
+    let origin_lock = hold_replay(&origin_cache, &fixture.path(&log));
+    let (read_token, _) =
+        semon_push::read_token::create(&receiver, semon_push::simple_pair::now().unwrap()).unwrap();
+    let headers = format!("Authorization: Bearer {}\r\n", read_token.expose());
+    let route = format!("/api/sessions?machine={MACHINE}&sid=lane");
+
+    let url = fixture.start_receiver();
+    let _watch = Ended(Some(
+        fixture.push_command(&url).arg("--watch").spawn().unwrap(),
+    ));
+    wait_for("staging on both hosts", || {
+        let _ = http(&url, &route, &headers, None);
+        staged(&origin_cache) && staged(&received_cache)
+    });
+    let old_copy = fixture.copy(LOG);
+    fixture.append(&log, claude("shipped during both rebuilds").as_bytes());
+    wait_for(
+        "a new record shipped while both replays are blocked",
+        || fixture.copy(LOG).len() > old_copy.len(),
+    );
+    assert_eq!(fixture.copy(LOG), fixture.redacted(LOG));
+    assert_eq!(
+        semon_sessions::analytics_index_path(&origin_cache),
+        origin_cache.with_extension("sqlite3")
+    );
+    assert_eq!(
+        semon_sessions::analytics_index_path(&received_cache),
+        received_cache.with_extension("sqlite3")
+    );
+    drop((received_lock, origin_lock));
+
+    fixture.append(
+        &log,
+        claude("shipped after the replay locks open").as_bytes(),
+    );
+    wait_for("Index publication and later shipping", || {
+        semon_sessions::analytics_index_path(&origin_cache)
+            != origin_cache.with_extension("sqlite3")
+            && semon_sessions::analytics_index_path(&received_cache)
+                != received_cache.with_extension("sqlite3")
+            && fixture.copy(LOG) == fixture.redacted(LOG)
+    });
+    assert_eq!(
+        fs::read(origin_cache.with_extension("sqlite3")).unwrap(),
+        origin_before
+    );
+    assert_eq!(
+        fs::read(received_cache.with_extension("sqlite3")).unwrap(),
+        received_before
+    );
+    wait_for("receiver Viewer to serve the recovered session", || {
+        let reply = http(&url, &route, &headers, None);
+        if !reply.starts_with("HTTP/1.1 200") {
+            return false;
+        }
+        let (_, body) = reply.split_once("\r\n\r\n").unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(body).unwrap();
+        catalog["items"]
+            .as_array()
+            .is_some_and(|items| items.len() == 1)
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn push_watch_stops_on_ctrl_c_and_holds_its_state_alone_until_then() {
     push_watch_stops_on("INT", 2);
 }
@@ -382,6 +538,20 @@ fn push_watch_stops_on_ctrl_c_and_holds_its_state_alone_until_then() {
 #[test]
 fn push_watch_stops_on_sigterm_and_holds_its_state_alone_until_then() {
     push_watch_stops_on("TERM", 15);
+}
+
+// Ended if the test fails before the watch does.
+#[cfg(unix)]
+struct Ended(Option<Child>);
+
+#[cfg(unix)]
+impl Drop for Ended {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 }
 
 /// `semon push --watch` ends on SIG`name` (Ctrl-C, or a service manager's
@@ -402,39 +572,15 @@ fn push_watch_stops_on(name: &str, number: i32) {
     let log = format!("home/{LOG}");
     fixture.write(&log, claude("watched").as_bytes());
 
-    let home = fixture.path("home");
-    fixture.install_origin(&url);
-    let mut watch = semon()
-        .args(["push", "--watch"])
-        .env("XDG_CONFIG_HOME", fixture.path("config"))
-        .arg("--state")
-        .arg(fixture.path("state/push.json"))
-        .arg("--claude-home")
-        .arg(home.join("claude"))
-        .arg("--codex-home")
-        .arg(home.join("codex"))
-        .arg("--proc-root")
-        .arg(home.join("proc"))
-        .arg("--cache")
-        .arg(fixture.path("state/index.json"))
-        .env("HOME", &home)
-        .env("XDG_STATE_HOME", fixture.path("state"))
+    let mut watch = fixture
+        .push_command(&url)
+        .arg("--watch")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let said_on = watch.stderr.take().unwrap();
-    // Ended if the test fails before the watch does.
-    struct Ended(Option<Child>);
-    impl Drop for Ended {
-        fn drop(&mut self) {
-            if let Some(mut child) = self.0.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
-    }
     let mut watch = Ended(Some(watch));
     let watch = watch.0.as_mut().unwrap();
     let (lines, said) = mpsc::channel();
@@ -607,22 +753,24 @@ fn pair_and_unpair_commands_store_replace_and_revoke_configuration() {
     assert!(!pair_path.exists());
 }
 
+fn http(url: &str, path: &str, headers: &str, body: Option<&str>) -> String {
+    use std::io::{Read, Write};
+    let address = url.strip_prefix("http://").unwrap();
+    let mut socket = std::net::TcpStream::connect(address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(20)))
+        .unwrap();
+    let method = if body.is_some() { "POST" } else { "GET" };
+    let body = body.unwrap_or("");
+    write!(socket, "{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
+    let mut reply = String::new();
+    socket.read_to_string(&mut reply).unwrap();
+    reply
+}
+
 #[test]
 fn receiver_viewer_read_tokens_login_revocation_and_route_separation() {
     use std::io::{Read, Write};
-    fn http(url: &str, path: &str, headers: &str, body: Option<&str>) -> String {
-        let address = url.strip_prefix("http://").unwrap();
-        let mut socket = std::net::TcpStream::connect(address).unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(20)))
-            .unwrap();
-        let method = if body.is_some() { "POST" } else { "GET" };
-        let body = body.unwrap_or("");
-        write!(socket, "{method} {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\nContent-Length: {}\r\n{headers}\r\n{body}", body.len()).unwrap();
-        let mut reply = String::new();
-        socket.read_to_string(&mut reply).unwrap();
-        reply
-    }
     fn header<'a>(response: &'a str, name: &str) -> &'a str {
         response
             .lines()

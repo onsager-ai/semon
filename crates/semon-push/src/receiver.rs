@@ -42,6 +42,7 @@ use semon_sessions::{
     archive::{self, Archive},
     is_input_path, is_machine_name,
     sealed::{LogFile, record_custody},
+    with_received_file_lock,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -358,9 +359,8 @@ impl Receiver {
             return Err(Refusal::Invalid("offset is out of range".into()));
         }
 
-        let key = format!("{machine}/{root}/{path}");
-        self.locks
-            .with(&key, || self.write_append(machine, request, &bytes))
+        let target = self.machine_dir(machine).join(root).join(path);
+        with_received_file_lock(&target, || self.write_append(machine, request, &bytes))
     }
 
     /// Applies a checked append, holding its file's lock.
@@ -667,8 +667,8 @@ impl Receiver {
                 if target.acked_bytes == 0 {
                     continue;
                 }
-                let key = format!("{machine}/{}/{}", target.root, target.path);
-                let verified = self.locks.with(&key, || -> Result<bool, Refusal> {
+                let path = self.machine_dir(machine).join(&target.root).join(&target.path);
+                let verified = with_received_file_lock(&path, || -> Result<bool, Refusal> {
                     let marker_dir =
                         self.directories(&[MACHINES_DIR, machine, "sync-generations"])?;
                     let marker_path = marker_dir.join(format!(

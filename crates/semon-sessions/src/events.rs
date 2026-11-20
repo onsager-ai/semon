@@ -738,6 +738,11 @@ impl Stat {
         Self::from_metadata(&fs::metadata(path)?)
     }
 
+    /// Physical identity and length alone are not a byte proof.
+    pub(crate) fn is_prefix_of(&self, current: &Self) -> bool {
+        self.dev == current.dev && self.ino == current.ino && self.size <= current.size
+    }
+
     pub(crate) fn from_metadata(metadata: &fs::Metadata) -> io::Result<Self> {
         let modified_ns = metadata
             .modified()?
@@ -3152,7 +3157,7 @@ pub(crate) fn replay_archive_history(
 ) -> io::Result<()> {
     if let Some(stat) = live.filter(|stat| stat.size >= chain.length) {
         let mut log = LogFile::open(path)?;
-        if Stat::from_metadata(&log.metadata()?)? != stat {
+        if !stat.is_prefix_of(&Stat::from_metadata(&log.metadata()?)?) {
             return Err(io::Error::other("original changed during archive replay"));
         }
         let (prefix, _) = consumed_hashes(&mut log, chain.length)?;
@@ -3230,6 +3235,26 @@ pub(crate) fn scan_file(
     cache: &mut EventCache,
     dirty: &mut bool,
 ) -> io::Result<Arc<FileIndex>> {
+    scan_file_inner(path, harness, cache, dirty, None)
+}
+
+pub(crate) fn scan_rebuild_file(
+    path: &Path,
+    harness: &str,
+    cache: &mut EventCache,
+    boundary: Stat,
+) -> io::Result<()> {
+    scan_file_inner(path, harness, cache, &mut false, Some(boundary))?;
+    Ok(())
+}
+
+fn scan_file_inner(
+    path: &Path,
+    harness: &str,
+    cache: &mut EventCache,
+    dirty: &mut bool,
+    rebuild_boundary: Option<Stat>,
+) -> io::Result<Arc<FileIndex>> {
     let key = path.to_string_lossy().into_owned();
     if let Some(index) = cache.files.get(&key).and_then(|entry| entry.index.as_ref()) {
         cache.require_usage_store(index)?;
@@ -3283,6 +3308,14 @@ pub(crate) fn scan_file(
         let started = cache.scan_measurements.start();
         let mut file = LogFile::open(path)?;
         let stat = Stat::from_metadata(&file.metadata()?)?;
+        let stat = match rebuild_boundary {
+            Some(boundary) if boundary.is_prefix_of(&stat) => {
+                file.limit_to(boundary.size);
+                boundary
+            }
+            Some(_) => return Err(io::Error::other("original changed before rebuild replay")),
+            None => stat,
+        };
         cache.scan_measurements.record("open_stat", started, 1);
         let started = cache.scan_measurements.start();
         if harness == "codex" {

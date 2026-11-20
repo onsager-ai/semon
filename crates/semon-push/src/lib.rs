@@ -1670,7 +1670,7 @@ fn push_running(
         };
     }
 
-    let facts = FactsWorker::start(&options.sessions, hold.share())?;
+    let mut facts = FactsWorker::start(&options.sessions, hold.share())?;
     let mut backoff = WatchBackoff::default();
     let mut pass = initial_pass;
     let mut last_facts = Instant::now() - FACTS_EVERY;
@@ -1721,11 +1721,10 @@ fn push_running(
         }
         if backoff.state != Some("paused")
             && client.completed_inventory.is_some()
-            && last_facts.elapsed() >= FACTS_EVERY
+            && let Some(result) = facts.poll(last_facts.elapsed() >= FACTS_EVERY)?
         {
-            match facts.collect(stop)? {
-                None => return Ok(()),
-                Some(Ok(mut current)) => {
+            match result {
+                Ok(mut current) => {
                     current.codex_rollouts = client.completed_inventory.clone();
                     current.codex_provisional_rollouts = None;
                     match client.post_facts(&current) {
@@ -1751,7 +1750,7 @@ fn push_running(
                         }
                     }
                 }
-                Some(Err(error)) => eprintln!("semon push: {error}"),
+                Err(error) => eprintln!("semon push: {error}"),
             }
             last_facts = Instant::now();
         }
@@ -1858,6 +1857,7 @@ fn after_pass(result: Result<Report>, stop: &Stop) -> Option<Result<()>> {
 struct FactsWorker {
     ask: mpsc::Sender<()>,
     answers: mpsc::Receiver<Result<Facts>>,
+    pending: bool,
 }
 
 impl FactsWorker {
@@ -1888,19 +1888,32 @@ impl FactsWorker {
                 }
             })
             .map_err(|error| format!("facts: {error}"))?;
-        Ok(Self { ask, answers })
+        Ok(Self {
+            ask,
+            answers,
+            pending: false,
+        })
     }
 
-    /// The machine's current facts, or `None` when stopped first. `Err`
-    /// only when the thread is gone.
-    fn collect(&self, stop: &Stop) -> Result<Option<Result<Facts>>> {
-        if stop.is_stopped() {
+    /// Keep shipping Raw while the single in-flight collection runs.
+    fn poll(&mut self, request: bool) -> Result<Option<Result<Facts>>> {
+        if !self.pending {
+            if request {
+                self.ask
+                    .send(())
+                    .map_err(|_| "facts: its thread ended".to_owned())?;
+                self.pending = true;
+            }
             return Ok(None);
         }
-        self.ask
-            .send(())
-            .map_err(|_| "facts: its thread ended".to_owned())?;
-        stop.wait("facts", &self.answers)
+        match self.answers.try_recv() {
+            Ok(facts) => {
+                self.pending = false;
+                Ok(Some(facts))
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err("facts: its thread ended".to_owned()),
+        }
     }
 }
 

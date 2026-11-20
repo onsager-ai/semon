@@ -500,6 +500,7 @@ pub struct LogFile {
     dir: PathBuf,
     birth: Birth,
     pos: u64,
+    limit: Option<u64>,
     seal: Option<Loaded>,
     /// The last frame read: segment, frame, bytes.
     frame: Option<(usize, usize, Arc<[u8]>)>,
@@ -514,6 +515,7 @@ impl LogFile {
             dir: seal_dir(path),
             birth,
             pos: 0,
+            limit: None,
             seal: None,
             frame: None,
         };
@@ -521,6 +523,11 @@ impl LogFile {
         // reads as NULs, which reads it again and fails then.
         log.install(read_manifest(&log.dir).ok().flatten());
         Ok(log)
+    }
+
+    /// Fix the logical EOF for a replay of this original's captured prefix.
+    pub(crate) fn limit_to(&mut self, length: u64) {
+        self.limit = Some(length);
     }
 
     /// The plain file's metadata: the log's length, inode and modified time.
@@ -636,6 +643,18 @@ impl LogFile {
 
 impl Read for LogFile {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let buf = match self.limit {
+            Some(limit) => {
+                let length = buf.len().min(
+                    limit
+                        .saturating_sub(self.pos)
+                        .try_into()
+                        .unwrap_or(usize::MAX),
+                );
+                &mut buf[..length]
+            }
+            None => buf,
+        };
         if buf.is_empty() {
             return Ok(0);
         }
@@ -678,7 +697,13 @@ impl Seek for LogFile {
     fn seek(&mut self, to: SeekFrom) -> io::Result<u64> {
         let next = match to {
             SeekFrom::Start(offset) => Some(offset),
-            SeekFrom::End(delta) => self.file.metadata()?.len().checked_add_signed(delta),
+            SeekFrom::End(delta) => {
+                let end = match self.limit {
+                    Some(limit) => limit,
+                    None => self.file.metadata()?.len(),
+                };
+                end.checked_add_signed(delta)
+            }
             SeekFrom::Current(delta) => self.pos.checked_add_signed(delta),
         };
         self.pos = next

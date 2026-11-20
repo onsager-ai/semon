@@ -613,7 +613,7 @@ fn parse_sessions_args(
     } else if !local {
         return Err("--no-local requires --machines".into());
     }
-    if received.is_none() && machines.is_empty() {
+    if machines.is_empty() && (received.is_none() || (serve && local)) {
         options.index_recovery =
             local_index_recovery(&options, explicit_cache, explicit_native_home);
     }
@@ -917,7 +917,11 @@ fn parse_mcp_args(mut arguments: impl Iterator<Item = String>) -> Result<HomeArg
 }
 
 fn parse_push_args(mut arguments: impl Iterator<Item = String>) -> Result<PushArgs, String> {
-    let mut sessions = semon_sessions::Options::default();
+    // A push producer owns the native homes it ships, even with a custom cache.
+    let mut sessions = semon_sessions::Options {
+        index_recovery: semon_sessions::IndexRecovery::Local,
+        ..Default::default()
+    };
     let mut receiver = None;
     let mut state = None;
     let mut watch = false;
