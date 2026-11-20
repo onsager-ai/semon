@@ -1228,6 +1228,10 @@ pub(crate) struct EventCache {
     /// Cold ingestion advances complete records by a bounded byte slice.
     pub(crate) scan_byte_budget: Option<u64>,
     cold_writes: Vec<(String, Ledger, Arc<FileIndex>)>,
+    // The writer will consume the batches in the Index transaction. Until
+    // then only parity tests opt into collection and observe successful commits.
+    #[cfg(test)]
+    pub(crate) warehouse_commits: Option<Vec<warehouse::Batch>>,
     /// The V1 cache the store sits beside, when this index has one.
     v1_cache: Option<PathBuf>,
     /// Without a store: when opening it is tried again.
@@ -2759,6 +2763,15 @@ impl EventCache {
         Ok(())
     }
 
+    fn warehouse_batch(&self, harness: &str) -> Option<warehouse::Batch> {
+        #[cfg(test)]
+        if self.warehouse_commits.is_some() {
+            return warehouse::Batch::new(harness);
+        }
+        let _ = harness;
+        None
+    }
+
     /// Parsing happens before the write reservation. Cold complete new files
     /// share one bounded commit; no offset or dirty revision can escape alone.
     pub(crate) fn flush_cold_writes(&mut self) -> io::Result<()> {
@@ -2782,7 +2795,13 @@ impl EventCache {
                 "cold index batch generation changed",
             ));
         }
-        for (path, _, _) in files {
+        for (path, _, _index) in files {
+            #[cfg(test)]
+            if let (Some(commits), Some(batch)) =
+                (&mut self.warehouse_commits, &_index.warehouse_observations)
+            {
+                commits.push(batch.clone());
+            }
             self.unpersisted.remove(&path);
             if let Some(index) = self
                 .files
@@ -2824,6 +2843,12 @@ impl EventCache {
         match committed {
             Some(Ok(Outcome::Written)) => {
                 self.unpersisted.remove(path);
+                #[cfg(test)]
+                if let (Some(commits), Some(batch)) =
+                    (&mut self.warehouse_commits, &index.warehouse_observations)
+                {
+                    commits.push(batch.clone());
+                }
             }
             Some(Ok(Outcome::Conflict | Outcome::Deferred)) => return true,
             Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
@@ -2926,7 +2951,10 @@ pub(crate) fn scan_archive(
             ));
         }
         let harness = native.root.as_str();
-        let mut index = FileIndex::default();
+        let mut index = FileIndex {
+            warehouse_observations: cache.warehouse_batch(harness),
+            ..FileIndex::default()
+        };
         index.bodies.begin(&path, harness);
         if harness == "codex" {
             index.native_usage_observations = Some(Vec::new());
@@ -3195,6 +3223,7 @@ pub(crate) fn scan_file(
         let shared = Arc::strong_count(&index) > 1;
         let writable = Arc::make_mut(&mut index);
         writable.bodies.begin(path, harness);
+        writable.warehouse_observations = cache.warehouse_batch(harness);
         if !append && harness == "codex" {
             writable.native_usage_observations = Some(Vec::new());
         }
@@ -3524,7 +3553,6 @@ fn parse(
     let mut reader = BufReader::new(file);
     reader.seek(SeekFrom::Start(from))?;
     let mut offset = from;
-    index.warehouse_observations = warehouse::Batch::new(harness);
     let mut line = Vec::new();
     let mut parsed = Sha256::new();
     let mut bounded = false;

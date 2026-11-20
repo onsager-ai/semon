@@ -5,6 +5,7 @@ use std::{collections::BTreeMap, fs::File, io::BufRead, time::Instant};
 use rusqlite::{Connection, params};
 
 use super::*;
+mod observations;
 
 const SCHEMA: &str = include_str!("star_catalog/schema.sql");
 const MAINTAIN: &str = include_str!("star_catalog/maintain.sql");
