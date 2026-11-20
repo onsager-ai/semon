@@ -1339,7 +1339,10 @@ impl ViewerCore {
                         matches.push(crate::session_route::session_path(source, &key));
                     }
                 }
-                State::Pending | State::Unavailable => pending = true,
+                // Pending means this source's published catalog has no
+                // current binding for the id: a miss, not an outage.
+                State::Pending => {}
+                State::Unavailable => pending = true,
                 State::Ambiguous => return text(409, "ambiguous"),
             }
         }
