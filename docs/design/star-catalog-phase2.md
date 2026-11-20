@@ -228,6 +228,18 @@ Decided by the owner on 2026-11-20:
   reads.
 - **Replacement cost.** Recompute only the affected components, synchronously
   in the admission transaction, until measurements justify a separate design.
+- **Rebuild inventory and Viewer state.** Decided by the Manager on 2026-11-20
+  under the owner's delegation. The host builds the expected inventory from
+  sources it can authorize today: the configured native roots (local homes, and
+  each received machine's directory on a receiver), the standalone archive
+  manifest, and receiver custody records. Nothing is read from the refused
+  Index. A source that one of those records references but that is missing or
+  fails verification is a recovery error. A source no record references is
+  not history Semon can vouch for, the same as on a fresh install. While the
+  rebuild runs, Catalog and transcript reads answer 503 `history_rebuilding`
+  with `Retry-After` and progress (sources done of total), and the Viewer shows
+  "Rebuilding history (N of M sources)". Nothing is served from the refused
+  Index.
 - **Copilot.** Deferred. Phase 2 covers Claude and Codex only. The Copilot
   producer row above is kept as the plan for a later PR, which must land before
   phase 3 switches Catalog reads, so Copilot sessions do not drop out.
