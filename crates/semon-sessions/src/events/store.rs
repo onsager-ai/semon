@@ -30,6 +30,7 @@ pub(crate) mod reprice;
 mod semantic_stage;
 pub(crate) mod session_activity;
 pub(crate) mod tree_state;
+mod warehouse;
 
 use std::{
     collections::BTreeMap,
@@ -258,7 +259,8 @@ fn emit_catalog_publish_attempt(
 // agreement with native lineage leaves it absent, including staged endpoints.
 // v48: namespace-relative origin body rows, source ownership and external FTS5.
 // v49: publication-bound native archive chain evidence, separate from retention.
-pub(crate) const SCHEMA_VERSION: i64 = 49;
+// v50: origin warehouse observations and current source membership.
+pub(crate) const SCHEMA_VERSION: i64 = 50;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -4838,6 +4840,11 @@ fn qualify_contract(connection: &Connection) -> rusqlite::Result<Init> {
             return malformed_schema(error);
         }
     }
+    if !warehouse::qualify(connection)? {
+        return Ok(Init::Unsupported(
+            "unsupported session index: malformed warehouse schema",
+        ));
+    }
     let publication: bool = connection.query_row(
         "SELECT EXISTS(SELECT 1 FROM meta WHERE key='catalog_version' AND value<>?1) OR EXISTS(SELECT 1 FROM meta WHERE key='search_version' AND value<>?2) OR EXISTS(SELECT 1 FROM meta WHERE key='catalog_semantic_recipe' AND value<>?3)",
         params![crate::model::summary::CATALOG_VERSION.to_string(), crate::catalog_search::VERSION, semantic_stage::RECIPE],
@@ -4948,7 +4955,7 @@ fn qualify(connection: &Connection) -> rusqlite::Result<Init> {
 }
 
 /// One authored DDL set for cold initialization.
-fn storage_ddl() -> [&'static str; 12] {
+fn storage_ddl() -> [&'static str; 13] {
     [
         SCHEMA,
         bodies::SCHEMA,
@@ -4962,6 +4969,7 @@ fn storage_ddl() -> [&'static str; 12] {
         crate::catalog_search::SCHEMA,
         crate::catalog_changes::SCHEMA,
         reprice::SCHEMA,
+        warehouse::SCHEMA,
     ]
 }
 
