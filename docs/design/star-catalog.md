@@ -313,11 +313,15 @@ waiting for a quiet corpus, while preserving the builder's answers.
    detail session scans/materialization: these catch the roughly 1000× failure
    mode. Inspect plans to prove
    detail record/suppression work stays within its selected lineage; unrelated
-   sessions must not introduce a global owners scan. Latest spike measurement
-   (run 44036381853): list 319 ms, detail 4 ms, ingest 177 s including 81 s of
-   dimension maintenance (4.1 ms per append, up from 2.1 ms before the parent and
-   shared-family reads). Investigate that growth before accepting any production
-   ingest budget. Per-append cost must be independent of existing session and
+   sessions must not introduce a global owners scan. The spike benchmark gate
+   is met in [run 44481621613](https://github.com/onsager-ai/semon/actions/runs/44481621613)
+   (2026-11-19, `bench/main-diag` on `main` at `4ed29ae2`, with extra test
+   diagnostics). List took 389 ms fresh and 384 ms warm. Detail took
+   3 ms fresh and 0 ms warm. Ingest took 89 s, including 15.9 s of dimension
+   maintenance (794 µs mean per append). Last-window p50 stayed within 3×
+   first-window p50 in all three cases (A 1264 → 1231 µs, B 1196 → 1195 µs,
+   C 1233 → 1263 µs). The earlier 4.1 ms per append and its growth no longer
+   reproduce. Per-append work must stay independent of existing session and
    lineage-group size for ordinary appends. The same manual workflow/test retains
    the 1 GB/20k case and adds A: one Claude file with 1M records and periodic
    `compact_boundary`, B: 50 continuation-linked files with appends to the newest,
@@ -328,9 +332,10 @@ waiting for a quiet corpus, while preserving the builder's answers.
    assertions remain. Random append splits/interleavings compare all dimensions,
    lineage, owners and spawn placements with independent full recomputation after
    each append, including group merges, owner changes and late first timestamps.
-2. **Write facts with Index advancement.** Add the current warehouse schema,
-   parser observation producers and component-local dimensions in the existing
-   source-admission transaction. This prevents half-published identity/usage after
+2. **Write facts with Index advancement.** See the
+   [phase 2 implementation plan](star-catalog-phase2.md). Add the current
+   warehouse schema, parser observation producers and component-local dimensions
+   in the existing source-admission transaction. This prevents half-published identity/usage after
    a crash; it does not add a second publication stage. Acceptance: supported
    harness fixtures, idempotent replay, rollback, source replacement/incarnation,
    late endpoint/parent and custody refusal tests. During development the old
