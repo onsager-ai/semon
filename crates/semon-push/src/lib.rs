@@ -543,7 +543,9 @@ impl Client {
             let transient = |answer: &std::result::Result<(u16, String, u64), String>| {
                 matches!(route, "append" | "facts" | "status")
                     && match answer {
-                        Ok((status, _, _)) => matches!(status, 502..=504),
+                        Ok((status, text, _)) => {
+                            matches!(status, 502..=504) && !receiver_rebuilding(*status, text)
+                        }
                         Err(_) => true,
                     }
             };
@@ -586,6 +588,10 @@ impl Client {
                 401 | 403 => Err(Failure::Remote(format!(
                     "{route}: the receiver refused the token ({status})"
                 ))),
+                503 if receiver_rebuilding(status, &text) => Err(Failure::Remote(
+                    "receiver is rebuilding history. Retrying with up to 10 minutes between attempts"
+                        .into(),
+                )),
                 507 => Err(Failure::Remote(format!(
                     "storage is full: {}; retrying with up to 10 minutes between attempts",
                     error_kind(&text).unwrap_or_else(|| "receiver refused the push (507)".into())
@@ -1699,6 +1705,7 @@ fn push_running(
             let phase = match backoff.state {
                 Some("paused") => wire::SyncPhase::Paused,
                 Some("storage full") => wire::SyncPhase::StorageFull,
+                Some("receiver rebuilding") => wire::SyncPhase::WaitingToRetry,
                 _ if pass.is_err() => wire::SyncPhase::WaitingToRetry,
                 _ => {
                     client
@@ -1773,6 +1780,12 @@ fn push_running(
     }
 }
 
+fn receiver_rebuilding(status: u16, text: &str) -> bool {
+    status == 503
+        && serde_json::from_str::<serde_json::Value>(text)
+            .is_ok_and(|body| body["code"] == wire::RECEIVER_REBUILDING)
+}
+
 fn error_kind(text: &str) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(text)
         .ok()?
@@ -1791,6 +1804,8 @@ impl WatchBackoff {
         let next = error.and_then(|error| {
             if error.starts_with("storage is full") {
                 Some("storage full")
+            } else if error.starts_with("receiver is rebuilding history") {
+                Some("receiver rebuilding")
             } else if error.starts_with("pushes are paused") {
                 Some("paused")
             } else {
@@ -2686,9 +2701,13 @@ mod tests {
     }
 
     #[test]
-    fn watch_does_not_exit_on_the_first_paused_or_storage_full_pass() {
+    fn watch_does_not_exit_on_the_first_restricted_pass() {
         for (status, body) in [
             (423, r#"{"error":"paused"}"#),
+            (
+                503,
+                r#"{"error":"pushes are paused while the receiver rebuilds history","code":"receiver_rebuilding"}"#,
+            ),
             (413, r#"{"error":"storage_limit","used":12,"limit":20}"#),
             (
                 507,
@@ -2781,10 +2800,10 @@ mod tests {
                 request
                     .respond(Response::from_string("{\"confirmed\":[]}"))
                     .unwrap();
-                let expected = if matches!(status, 413 | 507) {
-                    wire::SyncPhase::StorageFull
-                } else {
-                    wire::SyncPhase::Paused
+                let expected = match status {
+                    413 | 507 => wire::SyncPhase::StorageFull,
+                    503 => wire::SyncPhase::WaitingToRetry,
+                    _ => wire::SyncPhase::Paused,
                 };
                 if observation.phase == expected {
                     break;
@@ -2833,6 +2852,12 @@ mod tests {
         assert!(state.observe(Some(paused)).is_empty());
         assert_eq!(state.observe(None), vec!["resumed"]);
         assert!(state.observe(None).is_empty());
+        let rebuilding = "receiver is rebuilding history: pushes are paused";
+        assert_eq!(state.observe(Some(rebuilding)), vec![rebuilding]);
+        assert_eq!(state.delay(), Duration::from_secs(60));
+        assert!(state.observe(Some(rebuilding)).is_empty());
+        assert_eq!(state.delay(), Duration::from_secs(120));
+        assert_eq!(state.observe(None), vec!["sending again"]);
     }
 
     fn decode(append: &Append) -> Vec<u8> {

@@ -1066,7 +1066,10 @@ fn run_receive(args: ReceiveArgs) -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             // The receiver owns Raw and custody under this configured root.
             let sessions = semon_sessions::Options {
-                index_recovery: semon_sessions::IndexRecovery::Received(options.dir.clone()),
+                index_recovery: semon_sessions::IndexRecovery::Received {
+                    root: options.dir.clone(),
+                    custody: server.received_custody(),
+                },
                 ..Default::default()
             };
             let viewer = semon_sessions::Viewer::received(

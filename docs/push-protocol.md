@@ -4,7 +4,16 @@
 
 `semon receive` is the reference receiver (`semon_push::receiver::Receiver`, see the README's "Receive pushes from your other machines"). It keeps each machine's copy under `DIR/machines/<machine-id>/`, and caps a request body at 6 MiB: one append's 4 MiB of file bytes as base64, plus the JSON around it. Beyond the answers below, it may answer 411 (no `Content-Length`) and **507 Insufficient Storage** when the machine's copy would pass its size cap or the receiver's filesystem runs out of space (ENOSPC). A 507 body keeps the human-readable `error` string and includes a stable `code`: `machine_storage_full` for the per-machine cap, or `receiver_storage_full` for a full receiver volume. Other storage failures remain 500. Failed writes preserve the existing rollback and accounting behavior.
 
-In watch mode, 507 responses use the existing storage restriction episode: retry
+While any received machine's Index is rebuilding, the receiver pauses custody
+writes across all machines. Authenticated appends and facts receive
+**503 Service Unavailable** with `Retry-After: 60` and a JSON body containing a
+human-readable `error` and `"code":"receiver_rebuilding"`. The receiver drains
+admitted writes before taking its inventory and accepts new writes after Index
+publication or a recovery error. Status heartbeats continue during the pause.
+A refused append acknowledges no bytes, so the sender retries from its saved
+cursor using the native logs it still holds.
+
+In watch mode, 507 and `receiver_rebuilding` responses use the same backoff: retry
 appends/facts after 1, 2, 4, 8, then at most every 10 minutes, reset after an
 acknowledged successful pass. The reason is printed once when the episode starts;
 repeated refusals stay quiet. Status heartbeats that themselves receive 507 also
@@ -140,7 +149,7 @@ Request bodies currently use identity encoding. Response gzip/Brotli and sealed
 storage are independent. See [native archive transport and codec measurements](native-archive-transport.md)
 for the bounded archive reader, coexistence/restart rules and upload experiment.
 
-The client retries append, facts and status requests up to three times after HTTP 502/503/504 or a connection reset/close before a response, using fresh connections and short backoff; repeat requests are safe under the receiver's offset/head reconciliation or snapshot/sequence semantics.
+The client retries append, facts and status requests up to three times after HTTP 502/503/504 or a connection reset/close before a response, using fresh connections and short backoff. The structured 503 `receiver_rebuilding` uses the watch backoff above. Repeat requests are safe under the receiver's offset/head reconciliation or snapshot/sequence semantics.
 
 ### `POST <url>/v1/push/append`
 

@@ -223,8 +223,11 @@ impl ReceivedMachines {
             cache: state.join("sessions-index.json"),
             facts: Some(state.join("facts.json")),
             index_recovery: match &self.options.index_recovery {
-                crate::IndexRecovery::Received(dir) if dir == &self.dir => {
-                    crate::IndexRecovery::Received(root)
+                crate::IndexRecovery::Received { root: dir, custody } if dir == &self.dir => {
+                    crate::IndexRecovery::Received {
+                        root,
+                        custody: custody.clone(),
+                    }
                 }
                 _ => crate::IndexRecovery::Refuse,
             },

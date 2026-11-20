@@ -38,7 +38,7 @@ use std::{
 };
 
 use semon_sessions::{
-    Facts,
+    Facts, ReceivedCustody,
     archive::{self, Archive},
     is_input_path, is_machine_name,
     sealed::{LogFile, record_custody},
@@ -48,8 +48,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::wire::{
-    Append, CHUNK_BYTES, HEAD_BYTES, MAX_STATUS_TARGETS, Status, base64_decode, is_generation,
-    sha256_hex,
+    Append, CHUNK_BYTES, HEAD_BYTES, MAX_STATUS_TARGETS, RECEIVER_REBUILDING, Status,
+    base64_decode, is_generation, sha256_hex,
 };
 
 /// Where each machine's copy lives under the receiver's directory.
@@ -115,6 +115,8 @@ enum Refusal {
     Invalid(String),
     /// 413: more file bytes than one request may carry.
     TooLarge(String),
+    /// 503: a received Index rebuild has paused custody writes.
+    Rebuilding,
     /// 507: the machine's copy would grow past its cap.
     Full(String),
     /// 500: the receiver's own storage failed.
@@ -157,6 +159,13 @@ impl Refusal {
         match self {
             Self::Invalid(message) => Reply::error(400, message),
             Self::TooLarge(message) => Reply::error(413, message),
+            Self::Rebuilding => Reply::new(
+                503,
+                json!({
+                    "error": "pushes are paused while the receiver rebuilds history",
+                    "code": RECEIVER_REBUILDING,
+                }),
+            ),
             Self::Full(message) => Reply::new(
                 507,
                 json!({"error": message, "code": "machine_storage_full"}),
@@ -178,6 +187,7 @@ impl Refusal {
 pub struct Receiver {
     dir: PathBuf,
     locks: Locks,
+    custody: Arc<ReceivedCustody>,
     max_bytes: u64,
     usage: Mutex<HashMap<String, u64>>,
     // The open directory holds the exclusive OS lock for this receiver's lifetime.
@@ -203,6 +213,7 @@ impl Receiver {
         Ok(Self {
             dir,
             locks: Locks::default(),
+            custody: Arc::default(),
             max_bytes: DEFAULT_MAX_BYTES,
             usage: Mutex::new(usage),
             _store_lock: store_lock,
@@ -278,6 +289,10 @@ impl Receiver {
         &self.dir
     }
 
+    pub(super) fn received_custody(&self) -> Arc<ReceivedCustody> {
+        Arc::clone(&self.custody)
+    }
+
     /// `DIR/machines/<machine>`.
     pub fn machine_dir(&self, machine: &str) -> PathBuf {
         self.dir.join(MACHINES_DIR).join(machine)
@@ -325,6 +340,7 @@ impl Receiver {
     }
 
     fn try_append(&self, machine: &str, request: &Append) -> Result<Reply, Refusal> {
+        let _write = self.custody.admit_write().ok_or(Refusal::Rebuilding)?;
         check_machine(machine)?;
         let (root, path) = (request.root.as_str(), request.path.as_str());
         if !is_input_path(root, path) {
@@ -669,8 +685,9 @@ impl Receiver {
                 }
                 let path = self.machine_dir(machine).join(&target.root).join(&target.path);
                 let verified = with_received_file_lock(&path, || -> Result<bool, Refusal> {
-                    let marker_dir =
-                        self.directories(&[MACHINES_DIR, machine, "sync-generations"])?;
+                    let Some(marker_dir) = self.walk_directories(&[MACHINES_DIR, machine, "sync-generations"], false)? else {
+                        return Ok(false);
+                    };
                     let marker_path = marker_dir.join(format!(
                         "{}.json",
                         sha256_hex(format!("{}/{}", target.root, target.path).as_bytes())
@@ -685,7 +702,10 @@ impl Receiver {
                     let mut parts = vec![MACHINES_DIR, machine, target.root.as_str()];
                     parts.extend(target.path.split('/'));
                     let (name, dirs) = parts.split_last().expect("target path");
-                    let path = self.directories(dirs)?.join(name);
+                    let Some(parent) = self.walk_directories(dirs, false)? else {
+                        return Ok(false);
+                    };
+                    let path = parent.join(name);
                     let Some(file) = open_existing(&path)? else {
                         return Ok(false);
                     };
@@ -732,6 +752,7 @@ impl Receiver {
     }
 
     fn try_facts(&self, machine: &str, facts: &Facts) -> Result<Reply, Refusal> {
+        let _write = self.custody.admit_write().ok_or(Refusal::Rebuilding)?;
         check_machine(machine)?;
         if facts.codex_provisional_rollouts.is_some() {
             return Err(Refusal::Invalid(
@@ -808,12 +829,21 @@ impl Receiver {
     }
 
     fn directories(&self, parts: &[&str]) -> Result<PathBuf, Refusal> {
+        Ok(self
+            .walk_directories(parts, true)?
+            .expect("creates missing directories"))
+    }
+
+    fn walk_directories(&self, parts: &[&str], create: bool) -> Result<Option<PathBuf>, Refusal> {
         let mut dir = self.dir.clone();
         for part in parts {
             let parent = dir.clone();
             dir.push(part);
             match fs::symlink_metadata(&dir) {
                 Ok(meta) => check_directory(&meta, part)?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound && !create => {
+                    return Ok(None);
+                }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => match create_dir(&dir) {
                     Ok(()) => sync_dir(&parent)?,
                     Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -824,7 +854,7 @@ impl Receiver {
                 Err(error) => return Err(error.into()),
             }
         }
-        Ok(dir)
+        Ok(Some(dir))
     }
 }
 
