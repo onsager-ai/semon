@@ -666,7 +666,7 @@ fn receiver_viewer_read_tokens_login_revocation_and_route_separation() {
     assert!(landing.starts_with("HTTP/1.1 303"), "{landing}");
     assert_eq!(header(&landing, "Location"), "/?keep=1");
     let set_cookie = header(&landing, "Set-Cookie");
-    assert!(set_cookie.contains("HttpOnly; SameSite=Strict; Path=/"));
+    assert!(set_cookie.contains("HttpOnly; SameSite=Lax; Path=/"));
     assert!(!set_cookie.contains("Secure"));
     let cookie = set_cookie.split(';').next().unwrap().to_owned();
     // An empty receiver still serves the Viewer shell, which invites pairing.

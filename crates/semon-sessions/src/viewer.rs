@@ -1964,23 +1964,6 @@ mod tests {
             self.write(&format!("claude/projects/project/{id}.jsonl"), &content)
         }
 
-        fn machines(&self, names: &[&str]) -> ViewerCore {
-            let mut machines = Vec::new();
-            for name in names {
-                let home = self.root.join(name);
-                let mut options = self.options.clone();
-                options.claude_home = home.join("claude");
-                options.codex_home = home.join("codex");
-                options.copilot_home = home.join("copilot");
-                options.proc_root = home.join("proc");
-                options.cache = home.join("index.json");
-                fs::create_dir_all(&options.proc_root).unwrap();
-                fs::write(options.proc_root.join("locks"), "").unwrap();
-                machines.push(((*name).to_owned(), options));
-            }
-            ViewerCore::with_machines(machines)
-        }
-
         fn codex(&self, id: &str, records: &[Value]) -> PathBuf {
             let mut lines = vec![
                 json!({"type":"session_meta","timestamp":"2026-09-24T00:00:00Z","payload":{"id":id,"cwd":"/tmp/project"}}),
@@ -2157,7 +2140,7 @@ mod tests {
             .unwrap();
         assert!(cookie.contains(token), "{cookie}");
         assert!(
-            cookie.contains("HttpOnly; SameSite=Lax; Path=/"),
+            cookie.contains("HttpOnly; SameSite=Strict; Path=/"),
             "{cookie}"
         );
         for header in cold_headers.lines().skip(1) {
@@ -2286,7 +2269,7 @@ mod tests {
             "Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'",
             "X-Frame-Options: DENY",
             "Referrer-Policy: no-referrer",
-            "HttpOnly; SameSite=Lax; Path=/",
+            "HttpOnly; SameSite=Strict; Path=/",
         ] {
             assert!(good.contains(header), "missing {header}");
         }
