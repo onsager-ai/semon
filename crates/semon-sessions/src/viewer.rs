@@ -565,11 +565,7 @@ fn header(name: &str, value: &str) -> Header {
 
 fn respond(request: Request, reply: ViewerReply, cookie: Option<&str>) {
     let headers = reply.headers();
-    let mut response = if reply.status == 303 {
-        Response::empty(StatusCode(reply.status))
-    } else {
-        Response::from_data(reply.body).with_status_code(StatusCode(reply.status))
-    };
+    let mut response = Response::from_data(reply.body).with_status_code(StatusCode(reply.status));
     if let Some(etag) = reply.etag.as_deref() {
         response.add_header(header("ETag", etag));
     }
@@ -1726,6 +1722,7 @@ impl MachineView {
                 content_type,
                 body,
                 etag,
+                extra_headers: Vec::new(),
             },
             Err(error) if error.kind() == io::ErrorKind::NotFound => reply(404, b"Not found"),
             Err(error) if error.kind() == io::ErrorKind::InvalidInput => {

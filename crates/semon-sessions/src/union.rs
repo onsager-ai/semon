@@ -2102,7 +2102,7 @@ mod tests {
                 scan_window: false,
             }
         };
-        let mut core = ViewerCore::with_machines(vec![("one".into(), options("one"))]);
+        let core = ViewerCore::with_machines(vec![("one".into(), options("one"))]);
         let redirect = core.respond("GET", "/session/by-native/claude/native", "", None);
         assert_eq!(redirect.status, 303);
         assert!(redirect.body.is_empty());
@@ -2130,7 +2130,7 @@ mod tests {
             "path segments are percent-decoded exactly once"
         );
         core.close();
-        let mut ambiguous = ViewerCore::with_machines(vec![
+        let ambiguous = ViewerCore::with_machines(vec![
             ("one".into(), options("one")),
             ("two".into(), options("two")),
         ]);
