@@ -88,15 +88,16 @@ well as selecting metadata from committed facts.
   the committed view. Use the ordered view's committed revision evidence in
   place of semantic publication stamps. Keep explicit restart when changes can
   move rows across the keyset boundary. Each request uses one SQLite snapshot
-  per source for rows and relationships. The decision below concerns transcript
-  continuations, which must keep their view across verified append.
+  per source for rows and relationships. Transcript continuations use the
+  [stateless prefix cursor](#transcript-cursor-decision).
 - Resolve selected component members through `lineage_member` in keyset pages.
   Use an indexed component-local form of `session_records` suppression and
   `tool_answers` joins. Merge ordered source positions with a stable tie-break
   and bound pages by source positions and bytes. Late answers, copied Claude
   positions, relay endpoints and the context needed by the existing causal turn
-  partitioner must all come from the selected snapshot. Use the same native
-  turn/entry addresses for anchor lookup, highlighted evidence, scroll and Back.
+  partitioner must all come from the page's SQLite snapshot and respect the
+  committed-prefix bounds. Use the same native turn/entry addresses for anchor
+  lookup, highlighted evidence, scroll and Back.
 - Remove the lineage's 64-member vector from the phase 3 read path end to end.
   Today `catalog.rs` checks it for source proofs and relative status,
   `native_resolution.rs` checks it for resolution, `transcript_range.rs`
@@ -107,22 +108,23 @@ well as selecting metadata from committed facts.
   boundary context touched by the page. Keep byte/block budgets. The separate
   `catalog_union.rs` limit of 64 configured machine inputs is a workspace fan-in
   bound and stays in place.
-- Pin the selected component, positions and proof rows in the same SQLite read
-  snapshot. Bind transcript continuation and evidence addresses to selected
-  scope, source incarnation and committed-prefix witnesses, with bounded cursor
-  state independent of total membership. Reuse the authorized Index chunk proofs,
-  native source readers and archive/provider readers. See the request pin and
-  byte budgets in the [source reader contract](session-source-reader.md#published-proof-retention-and-request-snapshots).
+- Open a fresh SQLite read snapshot for each transcript page. Verify the
+  selected member-set witness and touched sources' incarnations and committed
+  prefixes from the cursor. Limit positions and evidence lookups to the
+  qualified prefixes. When a page first touches another member, resolve its
+  prefix within the continuation's committed view and apply the keyset boundary
+  before returning entries. Keep prefix state bounded by the sources a page
+  touches, including any required boundary context.
+  Reuse the authorized Index chunk proofs, native source readers and
+  archive/provider readers. See the request pin and byte budgets in the
+  [source reader contract](session-source-reader.md#published-proof-retention-and-request-snapshots).
   Its `LocalOrPinnedProvider` path can verify blocks against an older ledger
   but still rejects a later stat change within the request. Qualify verified
-  growth across block reads and the final recheck in the same reader. A covering
-  block must verify within the committed prefix before any body is returned.
-  Requalify identity and custody before
-  exposing bytes. Prove append with the evidence the carrier supports; file size
-  alone is insufficient. Refuse rewritten prefixes, truncation, replacement,
-  custody changes and invalid proofs even when timestamps or native IDs match.
-  Keep genuine stale continuations explicit when their selected view can no
-  longer be proved. A fresh read opens the latest committed snapshot.
+  growth across block reads and the final recheck in the same reader. Verify
+  covering blocks and requalify identity and custody before exposing bytes.
+  Return an explicit restart when membership, incarnation, custody or prefix
+  integrity changes. The next fresh request or refresh uses the latest
+  committed state.
 
 ## Performance and benchmark gate
 
@@ -181,7 +183,7 @@ Viewer routes have one SQLite read path, with no fallback to the oracle.
 | Full row, relationship and turn parity | Compare the complete visible list/detail fields and canonical addresses on sanitized Claude, Codex and Copilot inputs. Include aliases, retained history, usage/cost and parent/family fields, late parent and relay endpoints, marker precedence and cycles, copied positions, late results, causal boundaries and end states. Cover the result and entry expansion and following a trace link to the same highlighted turn. |
 | Runtime qualification | Cover current and expired observations, PID/start mismatch and PID reuse, received facts, process/ancestry and parent/child overrides, and unrelated runtime churn during repeated reads. |
 | Collision keys and pagination | Exercise cross-harness collisions, reserved native key forms, identical timestamps and IDs across machines, every existing filter and a bounded search frontier. Traverse small pages and assert order, scope, counts and no omissions or duplicates. Change filters, inventory or custody and assert the appropriate refusal or explicit restart. |
-| Transcript cursor and membership | Use a component with more than 64 sources, including evidence beyond member 64. Page through membership and transcript ranges, expand an entry, and navigate from an evidence link under the same pinned view. Add proof-qualified records before and during body fetch and verify committed-prefix continuation. Inject replacement, same-size rewrite, truncation, custody loss and invalid proof. Check refusal before exposing bytes and correct selection on a fresh request. |
+| Transcript cursor and membership | Use a component with more than 64 sources, including evidence beyond member 64. Follow the cursor through fresh SQLite snapshots, expand an entry and navigate from an evidence link. Assert that cursor state grows with sources touched by a page and that continuations need no server-held state. Commit proof-qualified appends before and during body fetch, including to a member first touched on a later page. Assert that each continuation stays within the committed prefixes and that a fresh request sees later commits. Check explicit restart for incarnation change, replacement, same-size rewrite, truncation, custody change and changed membership, including a late parent link. Withhold bytes on invalid proofs. |
 | `/api/sessions` with a concurrent writer | Use the real HTTP server and the supported admission path. Start with committed rows and keep appending complete native records while issuing repeated HTTP list requests. Every request returns 200 with coherent committed rows, counts and relationships. Assert no `catalog_unavailable`, no exposure of an incomplete record, and observation of newly committed additions while the writer is still active. Coordinate overlap with test barriers/hooks and assert the committed revision counter advances while a list read snapshot is open and again during the repeated request window. Count successful Index commits, not writes to the file. Bound the test so a blocked writer fails. |
 | Running transcript regression | Reproduce [#715](https://github.com/onsager-ai/semon/issues/715) with repeated `/api/session-transcript` requests during real appends, including growth during body reads. Require every fresh request and append-safe continuation to return 200 with only its committed prefix. Verify the view opens, stays readable and shows new commits on the normal refresh path. |
 | Pending coverage and refusal | Hold back admission for a configured source while another keeps committing. Verify committed rows and explicit partial/pending coverage without waiting for quiescence. Check recovery and authorization refusals separately from valid empty results. |
@@ -223,7 +225,7 @@ pinned Codex conformance in CI for changed native read semantics.
    the list and append baselines and add production-query plan checks. The
    Viewer still uses the existing reader while the comparison matures.
 2. **Selected component and proof reads.** Add the selected metadata, causal
-   rendering and position/byte adapters, member paging, snapshot continuations
+   rendering and position/byte adapters, member paging, stateless prefix cursors
    and source/refusal tests. Compare transcript, anchors and entry fields in CI
    without wiring a second production route. Land this after the shared
    identity and scope contract in PR 1.
@@ -246,14 +248,13 @@ Update the ASI contract and host rebuild guidance. Phase 3 delivers the read
 cutover and leaves operator data and retained source evidence under existing
 custody.
 
-## Decisions needed
+## Transcript cursor decision
 
-- **Transcript cursor lifetime across HTTP requests.** Options are a bounded host-held
-  SQLite snapshot with an explicit restart on expiry, or a stateless cursor
-  backed by enough retained evidence to reconstruct the exact view, including
-  membership and scope, after intervening commits. Recommend the bounded
-  host-held snapshot. It provides the required view directly without adding a
-  persisted snapshot format. Set the lifetime and resource bounds before PR 2
-  using the existing Viewer paging cadence and measured WAL retention. Verified
-  append keeps a transcript cursor usable within its lifetime. Replacement or
-  custody change still refuses it.
+On 2026-11-21, the owner chose a stateless prefix cursor. The cursor carries
+an incarnation and committed-prefix proof for each touched source, plus a
+witness of the selected member set. Each page opens a fresh SQLite snapshot
+and reads within those prefix bounds. Later commits appear on the next fresh
+request or refresh. An incarnation change, replacement, rewrite, truncation,
+custody change or membership change, including one caused by a late parent
+link, requires an explicit restart. Cursor state is bounded by the sources a
+page touches. The server holds no cursor state between requests.
