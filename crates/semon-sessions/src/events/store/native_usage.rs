@@ -89,6 +89,17 @@ impl Observation {
     pub(crate) fn identity(&self) -> &str {
         &self.identity
     }
+
+    pub(crate) fn warehouse_fact(&self, accepted: bool) -> crate::events::warehouse::Fact {
+        crate::events::warehouse::Fact::CodexUsage {
+            identity: self.identity.clone(),
+            model: self.payload.model.clone(),
+            tokens: self.payload.tokens.clone(),
+            model_tokens: self.payload.model_tokens.clone(),
+            time: self.payload.timestamp,
+            accepted,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]

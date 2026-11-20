@@ -77,6 +77,14 @@ fn sidecar_path(path: &Path) -> PathBuf {
 }
 
 impl ClaudeSidecar {
+    pub(crate) fn warehouse_observation(&self) -> crate::events::warehouse::Sidecar {
+        use crate::events::warehouse::Sidecar;
+        match self.observation {
+            Observation::Absent => Sidecar::Absent,
+            Observation::Present { .. } => Sidecar::Present(self.metadata.clone()),
+        }
+    }
+
     pub(crate) fn valid(&self) -> bool {
         let hash =
             |text: &str| text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit());

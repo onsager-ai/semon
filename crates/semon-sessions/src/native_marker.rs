@@ -41,16 +41,24 @@ impl Index {
         self.eof = None;
     }
 
-    pub(crate) fn observe(&mut self, bytes: &[u8], offset: u64, complete: bool, value: &Value) {
-        if self.complete.is_some() || !value.is_object() || decision(value).is_none() {
-            return;
+    pub(crate) fn observe(
+        &mut self,
+        bytes: &[u8],
+        offset: u64,
+        complete: bool,
+        value: &Value,
+    ) -> Option<Marker> {
+        if self.complete.is_some() || !value.is_object() {
+            return None;
         }
+        let marker = decision(value)?;
         let record = Record::capture(bytes, offset);
         if complete {
             self.complete = Some(record);
         } else {
             self.eof = Some(record);
         }
+        marker
     }
 
     /// Repair only missing metadata in an existing consumed prefix; do not

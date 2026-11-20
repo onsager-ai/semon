@@ -28,12 +28,14 @@ use crate::{Tokens, archive::Archive, attachments, field, sealed::LogFile};
 pub(crate) mod session_activity;
 pub(crate) mod store;
 mod usage;
+pub(crate) mod warehouse;
 pub(crate) use store::open_regular;
 pub(crate) use store::{archive_index_retained, retain_archive_index};
 pub use usage::ModelTokens;
 pub(crate) use usage::{
     BillingUsage, CodexNativeUsage, CodexUsageEvent, MessageUsage, RateLimitWindow, RateLimits,
 };
+use warehouse::Fact;
 
 #[cfg(test)]
 thread_local! {
@@ -165,6 +167,9 @@ pub(crate) struct FileIndex {
     /// Only this parse batch; durable facts and identities stay in the Event Index.
     #[serde(skip)]
     pub(crate) native_usage_observations: Option<Vec<store::native_usage::Observation>>,
+    /// One parse suffix, carried to the Index commit with the other parsed rows.
+    #[serde(skip)]
+    pub(crate) warehouse_observations: Option<warehouse::Batch>,
     pub(crate) tree_summary: Option<crate::native_tree::Summary>,
     #[serde(skip)]
     pub(crate) source_chunks: Option<Arc<crate::source_chunks::Chunks>>,
@@ -586,6 +591,30 @@ fn claude_hook(summary: &mut FileIndex, attachment: &Value, o: u64, t: Option<i6
 }
 
 impl FileIndex {
+    fn warehouse_fact(&mut self, offset: u64, block: u32, fact: impl FnOnce() -> Fact) {
+        if let Some(batch) = &mut self.warehouse_observations {
+            batch.push(offset, block, fact());
+        }
+    }
+
+    fn warehouse_header(&mut self, path: &Path, complete: bool) {
+        if let Some(batch) = &mut self.warehouse_observations {
+            batch.header = self
+                .codex_header
+                .as_ref()
+                .and_then(|header| header.warehouse_observation(path, complete));
+        }
+    }
+
+    fn warehouse_sidecar(&mut self) {
+        if let Some(batch) = &mut self.warehouse_observations {
+            batch.sidecar = self
+                .claude_sidecar
+                .as_ref()
+                .map(crate::native_sidecar::ClaudeSidecar::warehouse_observation);
+        }
+    }
+
     /// Attach source-record identity while the producer owns the parsed record.
     /// Callers supply its ordinal in the complete physical log, before any
     /// activity ordering or filtering, and the first newly emitted signal.
@@ -1217,6 +1246,10 @@ pub(crate) struct EventCache {
     /// Cold ingestion advances complete records by a bounded byte slice.
     pub(crate) scan_byte_budget: Option<u64>,
     cold_writes: Vec<(String, Ledger, Arc<FileIndex>)>,
+    // The writer will consume the batches in the Index transaction. Until
+    // then only parity tests opt into collection and observe successful commits.
+    #[cfg(test)]
+    pub(crate) warehouse_commits: Option<Vec<warehouse::Batch>>,
     /// The V1 cache the store sits beside, when this index has one.
     v1_cache: Option<PathBuf>,
     /// Without a store: when opening it is tried again.
@@ -2748,6 +2781,15 @@ impl EventCache {
         Ok(())
     }
 
+    fn warehouse_batch(&self, harness: &str) -> Option<warehouse::Batch> {
+        #[cfg(test)]
+        if self.warehouse_commits.is_some() {
+            return warehouse::Batch::new(harness);
+        }
+        let _ = harness;
+        None
+    }
+
     /// Parsing happens before the write reservation. Cold complete new files
     /// share one bounded commit; no offset or dirty revision can escape alone.
     pub(crate) fn flush_cold_writes(&mut self) -> io::Result<()> {
@@ -2771,7 +2813,13 @@ impl EventCache {
                 "cold index batch generation changed",
             ));
         }
-        for (path, _, _) in files {
+        for (path, _, _index) in files {
+            #[cfg(test)]
+            if let (Some(commits), Some(batch)) =
+                (&mut self.warehouse_commits, &_index.warehouse_observations)
+            {
+                commits.push(batch.clone());
+            }
             self.unpersisted.remove(&path);
             if let Some(index) = self
                 .files
@@ -2813,6 +2861,12 @@ impl EventCache {
         match committed {
             Some(Ok(Outcome::Written)) => {
                 self.unpersisted.remove(path);
+                #[cfg(test)]
+                if let (Some(commits), Some(batch)) =
+                    (&mut self.warehouse_commits, &index.warehouse_observations)
+                {
+                    commits.push(batch.clone());
+                }
             }
             Some(Ok(Outcome::Conflict | Outcome::Deferred)) => return true,
             Some(Ok(Outcome::Stale)) => self.lose_store(&"another version of semon rebuilt it"),
@@ -2915,7 +2969,10 @@ pub(crate) fn scan_archive(
             ));
         }
         let harness = native.root.as_str();
-        let mut index = FileIndex::default();
+        let mut index = FileIndex {
+            warehouse_observations: cache.warehouse_batch(harness),
+            ..FileIndex::default()
+        };
         index.bodies.begin(&path, harness);
         if harness == "codex" {
             index.native_usage_observations = Some(Vec::new());
@@ -2928,6 +2985,7 @@ pub(crate) fn scan_archive(
                     .map(crate::native_header::CodexHeader::from_record)
                     .unwrap_or_default(),
             );
+            index.warehouse_header(&path, line.ends_with(b"\n"));
             if index
                 .codex_header
                 .as_ref()
@@ -2939,6 +2997,7 @@ pub(crate) fn scan_archive(
             }
         }
         index.claude_sidecar = native.sidecar.clone();
+        index.warehouse_sidecar();
         if harness != "copilot" {
             index.tree_summary = Some(crate::native_tree::Summary::repair(file, 0, harness)?.0);
             index.marker_index = Some(crate::native_marker::Index::repair(file, 0)?);
@@ -3184,6 +3243,7 @@ pub(crate) fn scan_file(
         let shared = Arc::strong_count(&index) > 1;
         let writable = Arc::make_mut(&mut index);
         writable.bodies.begin(path, harness);
+        writable.warehouse_observations = cache.warehouse_batch(harness);
         if !append && harness == "codex" {
             writable.native_usage_observations = Some(Vec::new());
         }
@@ -3217,6 +3277,7 @@ pub(crate) fn scan_file(
             None
         };
         cache.scan_measurements.record("native_header", started, 1);
+        let sidecar_changed = writable.claude_sidecar != sidecar;
         writable.claude_sidecar = sidecar;
         #[cfg(test)]
         if agent && let Some(hook) = AFTER_CLAUDE_SIDECAR.with(|hook| hook.borrow_mut().take()) {
@@ -3362,6 +3423,9 @@ pub(crate) fn scan_file(
                 }
                 continue;
             }
+            if from == 0 {
+                writable.warehouse_header(path, header.ends_with(b"\n"));
+            }
         }
         if writable
             .claude_sidecar
@@ -3375,6 +3439,9 @@ pub(crate) fn scan_file(
             } else {
                 continue;
             }
+        }
+        if sidecar_changed {
+            writable.warehouse_sidecar();
         }
         let ledger = Ledger {
             stat: if bounded {
@@ -3583,40 +3650,103 @@ fn parse(
         } else {
             store::native_usage::Seen::default()
         };
-        if let (Some(observation), Some(observations)) =
-            (observation, &mut index.native_usage_observations)
-        {
-            observations.push(observation);
-        }
         let record_ordinal = index
             .tree_summary
             .as_ref()
             .map(|summary| summary.line_count);
+        if let Some(batch) = &mut index.warehouse_observations {
+            batch.begin_record(record_ordinal);
+        }
         if let Some(summary) = &mut index.tree_summary {
             if harness == "codex"
                 && let Ok(record) = &record
             {
                 summary.codex_turn.observe(record, line_offset);
+                if let Some(batch) = &mut index.warehouse_observations
+                    && let Some(turn) = &summary.codex_turn.last
+                    && turn.offset == line_offset
+                {
+                    batch.push(
+                        line_offset,
+                        0,
+                        Fact::CodexTurn {
+                            thread_id: turn.thread_id.clone(),
+                            turn_id: turn.turn_id.clone(),
+                            phase: turn.phase.clone(),
+                        },
+                    );
+                }
             }
             summary.observe_counted(record.as_ref().ok(), harness, !known.tree);
         }
         match record {
             Ok(record) if record.is_object() => {
+                let before_events = index.events.len();
+                index.warehouse_fact(line_offset, 0, || Fact::Record {
+                    kind: field(&record, "type").map(str::to_owned),
+                    uuid: field(&record, "uuid")
+                        .or_else(|| field(&record, "id"))
+                        .map(str::to_owned),
+                    message_id: record
+                        .get("message")
+                        .and_then(|m| field(m, "id"))
+                        .map(str::to_owned),
+                    time: record_time(&record),
+                });
                 let before_signals = index.signals.len();
-                if let Some(markers) = &mut index.marker_index {
-                    markers.observe(&line, line_offset, true, &record);
+                if let Some(markers) = &mut index.marker_index
+                    && let Some(marker) = markers.observe(&line, line_offset, true, &record)
+                {
+                    index.warehouse_fact(line_offset, 0, || Fact::Parent {
+                        harness: marker.harness,
+                        id: marker.parent_id,
+                        call_id: marker.tool_id,
+                    });
                 }
                 if let Some(handoffs) = &mut index.handoff_index {
-                    handoffs.observe(&line, line_offset, true, &record)?;
+                    let batch = &mut index.warehouse_observations;
+                    handoffs.observe_with(
+                        &line,
+                        line_offset,
+                        true,
+                        &record,
+                        |block, id, tool| {
+                            if let Some(batch) = batch {
+                                batch.push(
+                                    line_offset,
+                                    block,
+                                    Fact::LaunchCandidate {
+                                        call_id: id.to_owned(),
+                                        tool: tool.to_owned(),
+                                    },
+                                );
+                            }
+                        },
+                    )?;
                 }
-                if harness == "copilot" {
+                let usage_accepted = if harness == "copilot" {
                     copilot(index, &record, line_offset);
+                    false
                 } else if harness == "claude" {
                     claude(index, &record, line_offset);
+                    false
                 } else if !known.model {
-                    codex(index, &record, line_offset);
+                    codex(index, &record, line_offset)
                 } else {
                     activity(index, record_time(&record));
+                    false
+                };
+                if let Some(observation) = &observation {
+                    index.warehouse_fact(line_offset, 0, || {
+                        observation.warehouse_fact(usage_accepted)
+                    });
+                }
+                if let Some(batch) = &mut index.warehouse_observations {
+                    for event in &index.events[before_events..] {
+                        if harness != "codex" || event.k != Kind::Agm {
+                            batch.push(event.o, event.b, Fact::event(event));
+                        }
+                    }
                 }
                 index.bodies.capture(harness, &record, record_ordinal)?;
                 session_activity::classify::capture(index, harness, &record, line_offset, &line);
@@ -3625,6 +3755,7 @@ fn parse(
                 }
             }
             _ => {
+                index.warehouse_fact(line_offset, 0, || Fact::Gap);
                 gap(index, line_offset);
                 if let Some(event) = index
                     .events
@@ -3636,6 +3767,11 @@ fn parse(
                         Some(session_activity::classify::unknown_boundary(&line));
                 }
             }
+        }
+        if let (Some(observation), Some(observations)) =
+            (observation, &mut index.native_usage_observations)
+        {
+            observations.push(observation);
         }
     }
     Ok((offset, parsed.finalize().into(), bounded))
@@ -3965,6 +4101,13 @@ fn signal(
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b' '))
         })
         .map(str::to_owned);
+    if k == SignalKind::Compact {
+        summary.warehouse_fact(o, 0, || Fact::Compact {
+            time: t,
+            trigger: n.clone(),
+            pre_tokens: v,
+        });
+    }
     let at = u32::try_from(summary.events.len()).unwrap_or(u32::MAX);
     if k == SignalKind::Compact
         && let Some(index) = summary
@@ -5722,6 +5865,74 @@ fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Op
     }
 }
 
+impl FileIndex {
+    fn warehouse_call_index(&self, id: &str) -> Option<usize> {
+        self.pending.get(id).copied().or_else(|| {
+            let [only] = self.tool_ids.get(id)?.as_slice() else {
+                return None;
+            };
+            Some(*only)
+        })
+    }
+
+    fn codex_result_fact(
+        &mut self,
+        id: &str,
+        call_index: Option<usize>,
+        reply: &Reply,
+        kind: &'static str,
+        exit_code: Option<i64>,
+    ) {
+        if self.warehouse_observations.is_none() {
+            return;
+        }
+        let call = call_index
+            .and_then(|index| self.events.get(index))
+            .map(|event| warehouse::Position {
+                offset: event.o,
+                block: event.b,
+            });
+        self.warehouse_fact(reply.o, reply.b, || Fact::ToolResult {
+            id: id.to_owned(),
+            call,
+            reply: reply.clone(),
+            denial: (reply.f & DENIED != 0).then(|| "declined".to_owned()),
+            exit_code,
+            target: None,
+            kind,
+        });
+    }
+
+    fn codex_call_fact(&mut self, event: &Event, record: Option<&Value>) {
+        self.warehouse_fact(event.o, event.b, || {
+            let (target_key, name_key) = match event.n.as_deref() {
+                Some(
+                    "send_message"
+                    | "followup_task"
+                    | "collaboration.send_message"
+                    | "collaboration.followup_task",
+                ) => (Some("target"), None),
+                Some("spawn_agent" | "collaboration.spawn_agent") => (None, Some("task_name")),
+                _ => (None, None),
+            };
+            let input = if target_key.is_some() || name_key.is_some() {
+                record.and_then(|record| crate::model::tool_input(record, 0))
+            } else {
+                None
+            };
+            let metadata = |key| field(input.as_ref()?, key).map(str::to_owned);
+            Fact::ToolCall {
+                id: event.id.clone(),
+                tool: event.n.clone(),
+                flags: event.script,
+                time: event.t,
+                target: target_key.and_then(metadata),
+                task_name: name_key.and_then(metadata),
+            }
+        });
+    }
+}
+
 /// Links the plain call `id` to the item at `offset` that completed it.
 fn link_item(summary: &mut FileIndex, id: &str, offset: u64) {
     let Some(index) = summary.tool_ids.get(id).and_then(|indices| {
@@ -5781,14 +5992,16 @@ fn codex_connector_tool(summary: &mut FileIndex, item: &Value, offset: u64, time
         f: if known { 0 } else { UNKNOWN },
         ..Reply::default()
     };
-    if let Some(index) = summary.tool_ids.get(id).and_then(|indices| {
+    let mirror = summary.tool_ids.get(id).and_then(|indices| {
         indices.iter().rev().copied().find(|index| {
             summary
                 .events
                 .get(*index)
                 .is_some_and(|event| !event.code_mode)
         })
-    }) {
+    });
+    if let Some(index) = mirror {
+        summary.codex_result_fact(id, mirror, &reply, "connector", None);
         summary.pending.remove(id);
         if let Some(event) = summary.event_mut(index) {
             event.r = Some(reply);
@@ -5797,19 +6010,20 @@ fn codex_connector_tool(summary: &mut FileIndex, item: &Value, offset: u64, time
         return;
     }
     let parent = open_code_mode_call(summary);
-    tool_event(
-        summary,
-        Event {
-            k: Kind::Tool,
-            o: offset,
-            t: time,
-            id: Some(id.to_owned()),
-            n: Some(name),
-            parent,
-            r: Some(reply),
-            ..Event::default()
-        },
-    );
+    let event = Event {
+        k: Kind::Tool,
+        o: offset,
+        t: time,
+        id: Some(id.to_owned()),
+        n: Some(name),
+        parent,
+        r: Some(reply.clone()),
+        ..Event::default()
+    };
+    summary.codex_call_fact(&event, None);
+    let call = summary.events.len();
+    tool_event(summary, event);
+    summary.codex_result_fact(id, Some(call), &reply, "connector", None);
 }
 
 /// Claude Code lines: `offset` is the line's byte offset.
@@ -5828,6 +6042,9 @@ fn number(value: &Value, key: &str) -> u64 {
 }
 
 pub(crate) fn claude(summary: &mut FileIndex, record: &Value, offset: u64) {
+    if let Some(id) = field(record, "sessionId") {
+        summary.warehouse_fact(offset, 0, || Fact::SessionId(id.to_owned()));
+    }
     claude_events(summary, record, offset);
     if let Some(uuid) = field(record, "uuid") {
         let indices: Vec<_> = summary
@@ -5895,59 +6112,75 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
         {
             record_ids.insert(uuid.to_owned());
         }
-        summary.usage_by_id.insert(
-            id.to_owned(),
-            MessageUsage {
-                offset,
-                record_ordinal: None,
-                record_ids,
-                model: field(message, "model").map(str::to_owned),
-                tokens: Tokens {
-                    input: input + cache_write + cache_read,
-                    cached_input: cache_read,
-                    output,
-                    reasoning_output: 0,
-                    total: input + cache_write + cache_read + output,
-                },
-                model_tokens: ModelTokens {
-                    input,
-                    output,
-                    cache_write,
-                    cache_read,
-                },
-                billing: BillingUsage {
-                    input,
-                    output,
-                    cache_read,
-                    cache_write_5m,
-                    cache_write_1h,
-                    web_search_requests,
-                    speed: field(usage, "speed").map(str::to_owned),
-                    service_tier: field(usage, "service_tier").map(str::to_owned),
-                    prompt_size: input
-                        .saturating_add(cache_read)
-                        .saturating_add(cache_write_5m)
-                        .saturating_add(cache_write_1h),
-                    timestamp,
-                    split_unknown,
-                },
+        let report = MessageUsage {
+            offset,
+            record_ordinal: None,
+            record_ids,
+            model: field(message, "model").map(str::to_owned),
+            tokens: Tokens {
+                input: input + cache_write + cache_read,
+                cached_input: cache_read,
+                output,
+                reasoning_output: 0,
+                total: input + cache_write + cache_read + output,
             },
-        );
+            model_tokens: ModelTokens {
+                input,
+                output,
+                cache_write,
+                cache_read,
+            },
+            billing: BillingUsage {
+                input,
+                output,
+                cache_read,
+                cache_write_5m,
+                cache_write_1h,
+                web_search_requests,
+                speed: field(usage, "speed").map(str::to_owned),
+                service_tier: field(usage, "service_tier").map(str::to_owned),
+                prompt_size: input
+                    .saturating_add(cache_read)
+                    .saturating_add(cache_write_5m)
+                    .saturating_add(cache_write_1h),
+                timestamp,
+                split_unknown,
+            },
+        };
+        summary.warehouse_fact(offset, 0, || Fact::ClaudeUsage {
+            message_id: id.to_owned(),
+            model: report.model.clone(),
+            tokens: report.tokens.clone(),
+            billing: report.billing.clone(),
+        });
+        summary.usage_by_id.insert(id.to_owned(), report);
     }
     if let Some(id) = field(record, "session_id")
         && Some(id) != field(record, "sessionId")
     {
+        summary.warehouse_fact(offset, 0, || Fact::Relation {
+            kind: "session_id",
+            target: id.to_owned(),
+        });
         summary.links.session_ids.insert(id.to_owned());
     }
     match field(record, "type") {
         Some("continued-in") => {
             if let Some(id) = field(record, "continuedInSessionId") {
+                summary.warehouse_fact(offset, 0, || Fact::Relation {
+                    kind: "continued-in",
+                    target: id.to_owned(),
+                });
                 summary.links.continued_in.insert(id.to_owned());
             }
             return;
         }
         Some("bridge-session") => {
             if let Some(id) = field(record, "bridgeSessionId") {
+                summary.warehouse_fact(offset, 0, || Fact::Relation {
+                    kind: "bridge",
+                    target: format!("bridge:{id}"),
+                });
                 summary.links.bridges.insert(id.to_owned());
             }
             return;
@@ -6096,9 +6329,8 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                             },
                         );
                     }
-                    Some("tool_use") if role == Some("assistant") => tool_event(
-                        summary,
-                        Event {
+                    Some("tool_use") if role == Some("assistant") => {
+                        let event = Event {
                             k: Kind::Tool,
                             o: offset,
                             b: block,
@@ -6117,16 +6349,42 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                                 0
                             },
                             ..Event::default()
-                        },
-                    ),
+                        };
+                        summary.warehouse_fact(offset, block, || {
+                            let input = item.get("input");
+                            let target = (event.n.as_deref() == Some("SendMessage"))
+                                .then(|| {
+                                    input.and_then(|v| {
+                                        field(v, "to").or_else(|| field(v, "recipient"))
+                                    })
+                                })
+                                .flatten()
+                                .map(crate::model::plain_name);
+                            let task_name = matches!(event.n.as_deref(), Some("Agent" | "Task"))
+                                .then(|| input.and_then(|v| field(v, "name")))
+                                .flatten()
+                                .map(str::to_owned);
+                            Fact::ToolCall {
+                                id: event.id.clone(),
+                                tool: event.n.clone(),
+                                flags: event.script,
+                                time,
+                                target,
+                                task_name,
+                            }
+                        });
+                        tool_event(summary, event);
+                    }
                     Some("tool_result") if role == Some("user") => {
                         if let Some(id) = field(item, "tool_use_id") {
                             let error = item.get("is_error").and_then(Value::as_bool) == Some(true);
                             let kind = field(record, "toolDenialKind");
-                            if (error || kind.is_some())
-                                && let Some(source) =
-                                    denial_source(kind, item.get("content"), tool_result)
-                            {
+                            let denial = if error || kind.is_some() {
+                                denial_source(kind, item.get("content"), tool_result)
+                            } else {
+                                None
+                            };
+                            if let Some(source) = denial {
                                 let call = call_index(summary, id);
                                 note(
                                     summary,
@@ -6137,17 +6395,58 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
                                     call,
                                 );
                             }
-                            resolve(summary, id, |name| {
-                                let (flags, msg_id) = result_flags(name, tool_result);
-                                Reply {
-                                    o: offset,
-                                    b: block,
-                                    t: time,
-                                    e: error,
-                                    f: flags,
-                                    m: msg_id,
+                            let call = summary
+                                .pending
+                                .get(id)
+                                .and_then(|at| summary.events.get(*at));
+                            let (flags, msg_id) =
+                                result_flags(call.and_then(|e| e.n.as_deref()), tool_result);
+                            let reply = Reply {
+                                o: offset,
+                                b: block,
+                                t: time,
+                                e: error,
+                                f: flags,
+                                m: msg_id,
+                            };
+                            let call_position = call.map(|e| warehouse::Position {
+                                offset: e.o,
+                                block: e.b,
+                            });
+                            summary.warehouse_fact(offset, block, || {
+                                let mut reply = reply.clone();
+                                if call_position.is_none() {
+                                    // A result may have no known call in this source.
+                                    // Keep native correlation without claiming its role.
+                                    reply.m = tool_result
+                                        .and_then(|v| field(v, "msg_id"))
+                                        .map(str::to_owned);
+                                    if tool_result
+                                        .and_then(|v| v.get("success"))
+                                        .and_then(Value::as_bool)
+                                        == Some(false)
+                                    {
+                                        reply.f |= SEND_FAILED;
+                                    }
+                                }
+                                Fact::ToolResult {
+                                    id: id.to_owned(),
+                                    call: call_position,
+                                    reply,
+                                    denial: denial.map(str::to_owned),
+                                    exit_code: None,
+                                    target: tool_result
+                                        .and_then(|result| {
+                                            result
+                                                .get("pin")
+                                                .and_then(|pin| field(pin, "id"))
+                                                .or_else(|| field(result, "resumedAgentId"))
+                                        })
+                                        .map(str::to_owned),
+                                    kind: "tool_result",
                                 }
                             });
+                            resolve(summary, id, |_| reply);
                         }
                     }
                     _ => {}
@@ -6258,7 +6557,8 @@ fn harness_tag(text: &str) -> Option<&'static str> {
 }
 
 /// Codex rollout lines.
-pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
+/// Returns whether this record contributed explicit per-response model usage.
+pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> bool {
     let time = record_time(record);
     activity(summary, time);
     let payload = &record["payload"];
@@ -6311,6 +6611,18 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                             timestamp: time,
                         });
                     }
+                    let model = &summary.last_model;
+                    if let Some(batch) = &mut summary.warehouse_observations {
+                        batch.push(
+                            offset,
+                            0,
+                            Fact::CodexTokenSnapshot {
+                                model: model.clone(),
+                                tokens: current.clone(),
+                                time,
+                            },
+                        );
+                    }
                     summary.codex_tokens = current;
                 }
                 if let Some(time) = time
@@ -6326,7 +6638,12 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
         }
         Some("token_usage_record") => {
             if let Some(model) = summary.last_model.clone() {
-                CodexNativeUsage::observe(&mut summary.codex_native_usage, payload, model, time);
+                return CodexNativeUsage::observe(
+                    &mut summary.codex_native_usage,
+                    payload,
+                    model,
+                    time,
+                );
             }
         }
         Some("event_msg") if field(payload, "type") == Some("context_compacted") => {
@@ -6392,6 +6709,31 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
             } else {
                 None
             };
+            if operation && let Some(id) = field(item, "id") {
+                summary.codex_result_fact(
+                    id,
+                    yielded
+                        .or(parent)
+                        .or_else(|| summary.warehouse_call_index(id)),
+                    &Reply {
+                        o: offset,
+                        t: time,
+                        e: failed,
+                        f: if field(item, "status")
+                            .is_some_and(|status| status.eq_ignore_ascii_case("declined"))
+                        {
+                            DENIED
+                        } else if known {
+                            0
+                        } else {
+                            UNKNOWN
+                        },
+                        ..Reply::default()
+                    },
+                    "item_completed",
+                    code,
+                );
+            }
             if let Some(parent) = parent {
                 extra(
                     summary,
@@ -6452,6 +6794,32 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                 offset,
                 time,
             );
+            if let Some(id) = field(payload, "call_id") {
+                let code = payload.get("exit_code").and_then(Value::as_i64);
+                let status = field(payload, "status");
+                let denied = status.is_some_and(|status| status.eq_ignore_ascii_case("declined"));
+                let failed =
+                    denied || status == Some("failed") || code.is_some_and(|code| code != 0);
+                summary.codex_result_fact(
+                    id,
+                    summary.warehouse_call_index(id),
+                    &Reply {
+                        o: offset,
+                        t: time,
+                        e: failed,
+                        f: if denied {
+                            DENIED
+                        } else if code.is_none() && !failed {
+                            UNKNOWN
+                        } else {
+                            0
+                        },
+                        ..Reply::default()
+                    },
+                    "execution_end",
+                    code,
+                );
+            }
         }
         Some("event_msg") if field(payload, "type") == Some("task_complete") => {
             close_code_mode(summary);
@@ -6534,40 +6902,36 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                 let poll_target = script_text.and_then(script_session_target);
                 let printed_result = script_text.is_some_and(result_source);
                 let poll = open_poll(summary, script, poll_target.clone(), printed_result);
-                tool_event(
-                    summary,
-                    Event {
-                        k: Kind::Tool,
-                        o: offset,
-                        t: time,
-                        id: field(payload, "call_id")
-                            .or_else(|| field(payload, "id"))
-                            .map(str::to_owned),
-                        n: Some(
-                            field(payload, "name")
-                                .unwrap_or(if field(payload, "type") == Some("tool_search_call") {
-                                    "tool_search"
-                                } else {
-                                    "shell"
-                                })
-                                .to_owned(),
-                        ),
-                        code_mode,
-                        native_direct_call: field(payload, "type") == Some("function_call")
-                            && field(payload, "call_id").is_some()
-                            && matches!(
-                                field(payload, "name"),
-                                Some("exec_command" | "write_stdin")
-                            )
-                            && payload.get("namespace").is_none_or(Value::is_null),
-                        code_mode_open: code_mode,
-                        script,
-                        poll_target,
-                        result_source: printed_result,
-                        poll,
-                        ..Event::default()
-                    },
-                );
+                let event = Event {
+                    k: Kind::Tool,
+                    o: offset,
+                    t: time,
+                    id: field(payload, "call_id")
+                        .or_else(|| field(payload, "id"))
+                        .map(str::to_owned),
+                    n: Some(
+                        field(payload, "name")
+                            .unwrap_or(if field(payload, "type") == Some("tool_search_call") {
+                                "tool_search"
+                            } else {
+                                "shell"
+                            })
+                            .to_owned(),
+                    ),
+                    code_mode,
+                    native_direct_call: field(payload, "type") == Some("function_call")
+                        && field(payload, "call_id").is_some()
+                        && matches!(field(payload, "name"), Some("exec_command" | "write_stdin"))
+                        && payload.get("namespace").is_none_or(Value::is_null),
+                    code_mode_open: code_mode,
+                    script,
+                    poll_target,
+                    result_source: printed_result,
+                    poll,
+                    ..Event::default()
+                };
+                summary.codex_call_fact(&event, Some(record));
+                tool_event(summary, event);
             }
             Some("function_call_output" | "custom_tool_call_output" | "tool_search_output") => {
                 if let Some(id) = field(payload, "call_id") {
@@ -6590,15 +6954,23 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     });
                     let code_mode_call = code_mode_index.is_some();
                     let script_output = field(payload, "type") == Some("custom_tool_call_output");
+                    let reply = Reply {
+                        o: offset,
+                        t: time,
+                        e: code.is_some_and(|code| code != 0)
+                            || (script_output && code_mode_call && script_error(output)),
+                        f: flags,
+                        ..Reply::default()
+                    };
+                    summary.codex_result_fact(
+                        id,
+                        summary.warehouse_call_index(id),
+                        &reply,
+                        "response_output",
+                        code,
+                    );
                     if script_output || !code_mode_call {
-                        resolve(summary, id, |_| Reply {
-                            o: offset,
-                            t: time,
-                            e: code.is_some_and(|code| code != 0)
-                                || (code_mode_call && script_error(output)),
-                            f: flags,
-                            ..Reply::default()
-                        });
+                        resolve(summary, id, |_| reply);
                     }
                     if let Some(index) = code_mode_index
                         && script_output
@@ -6642,6 +7014,15 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
                     }
                     _ => 0,
                 };
+                summary.warehouse_fact(offset, 0, || Fact::Event {
+                    kind: Kind::Agm,
+                    id: author.map(str::to_owned),
+                    name: None,
+                    flags: script,
+                    time,
+                    peer: None,
+                    target: recipient.map(str::to_owned),
+                });
                 push(
                     summary,
                     Event {
@@ -6658,6 +7039,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) {
         },
         _ => {}
     }
+    false
 }
 
 /// Native Copilot records preserve exact physical event and call identities.

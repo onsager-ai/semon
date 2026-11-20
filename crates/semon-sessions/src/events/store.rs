@@ -5936,6 +5936,7 @@ fn read_file(
         dirty_rows: None,
         native_usage_observations: native_usage::normalized(readers.connection, &path, &ledger)?
             .then(Vec::new),
+        warehouse_observations: None,
         source_chunks: chunk_proofs::read(readers.connection, &path, &ledger)?,
         marker_index: read_parent_marker(&mut readers.parent_marker, &path, &ledger)?,
         tree_summary: read_tree_summary(
@@ -6251,6 +6252,7 @@ fn write_file(
         bodies: _,
         dirty_rows: _,
         native_usage_observations: _,
+        warehouse_observations: _,
         tree_summary,
         source_chunks,
         marker_index,
@@ -9704,6 +9706,7 @@ mod tests {
             bodies: bodies::Batch::default(),
             dirty_rows: None,
             native_usage_observations: None,
+            warehouse_observations: None,
             source_chunks: None,
             marker_index: Some(crate::native_marker::Index::default()),
             tree_summary: None,

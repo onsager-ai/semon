@@ -51,6 +51,17 @@ impl Index {
         complete: bool,
         value: &Value,
     ) -> io::Result<()> {
+        self.observe_with(bytes, offset, complete, value, |_, _, _| {})
+    }
+
+    pub(crate) fn observe_with(
+        &mut self,
+        bytes: &[u8],
+        offset: u64,
+        complete: bool,
+        value: &Value,
+        mut candidate: impl FnMut(u32, &str, &str),
+    ) -> io::Result<()> {
         if bytes.len() > handoff::MAX_INPUT_BYTES
             || ![b"Semon-Handoff".as_slice(), b"codex".as_slice()]
                 .iter()
@@ -79,7 +90,7 @@ impl Index {
         } else {
             &mut self.eof_bytes
         };
-        for (block, range) in blocks.iter().zip(ranges) {
+        for (index, (block, range)) in blocks.iter().zip(ranges).enumerate() {
             if crate::field(block, "type") != Some("tool_use") {
                 continue;
             }
@@ -112,6 +123,7 @@ impl Index {
                 time: crate::events::record_time(value),
                 budget,
             });
+            candidate(u32::try_from(index).unwrap_or(u32::MAX), id, name);
             *input_bytes += budget;
             cap(calls, input_bytes);
         }
