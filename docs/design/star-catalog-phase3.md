@@ -1,0 +1,259 @@
+# Star Catalog phase 3 implementation plan
+
+Switch the primary SQLite Catalog and Viewer to the committed facts written by
+[phase 2](star-catalog-phase2.md), including Copilot ([#724](https://github.com/onsager-ai/semon/pull/724)).
+The list, navigation, selected transcript and evidence links switch in one
+production PR. A source can keep appending while the Viewer serves its last
+committed prefix. This implements [Viewer and ASI reads](star-catalog.md#viewer-and-asi-reads)
+and item 3 of the [production plan](star-catalog.md#production-plan). ASI and MCP
+switch in phase 4. The paused PostgreSQL projection is outside this SQLite cutover.
+
+## Current read paths
+
+| Surface | Current path and dependency |
+| --- | --- |
+| Viewer HTTP and navigation | `ViewerCore::respond_with_deadline_mode`, `catalog`, `native_session_redirect` and `session_page` in [`union.rs`](../../crates/semon-sessions/src/union.rs) route requests and select the configured source. `wait_for_catalog_read` calls `MachineView::wait_until_initial_catalog` or tests `page_ready`, then records producer interest. [`viewer.rs`](../../crates/semon-sessions/src/viewer.rs) waits for the first readable publication through `wait_for_initial_catalog`. [`catalog.rs`](../../crates/semon-sessions/src/catalog.rs) `sqlite_page_ready` checks `catalog_version` and `catalog_generation`. |
+| Catalog lists and identity | `catalog.rs` `read_page` already opens a SQLite read transaction. `read_page_snapshot` and `rows` use published Catalog rows, a publication generation, and (for `q`) a search projection tied to that generation. `catalog_selection_read`, reached by `session_catalog_identity` and `catalog_selection_in_snapshot`, implements identity as an exact `sid` page. Exact pages also call `causal_trace::selected_details` and `transcript_range::observation`. `session_source_proof` maps paths through the published row and its source vector. |
+| Viewer transcript and evidence | [`transcript_range.rs`](../../crates/semon-sessions/src/transcript_range.rs) `read`, `session_entry_field_with_gate`, and the turn/activity anchor routes qualify a Catalog selection and its published projection. [`native_resolution.rs`](../../crates/semon-sessions/src/native_resolution.rs), [`overview.rs`](../../crates/semon-sessions/src/overview.rs) `session_home_details_with_gate` and [`causal_trace.rs`](../../crates/semon-sessions/src/causal_trace.rs) are part of the same navigation audit. Trace the host entry points for locate, resolve, identity, home, observe, trace, anchors, transcript, entry expansion and annotations through `ViewerCore::catalog`, including any calls outside that dispatcher. |
+| Query and MCP | [`query/catalog.rs`](../../crates/semon-sessions/src/query/catalog.rs) `sqlite_read` requires a complete Catalog, matching `slot_projection_catalog_generation` and no invalidations. `sqlite_recheck` fences the observation. [`query/transcript.rs`](../../crates/semon-sessions/src/query/transcript.rs) `read_inner` and `virtual_read` use selected Catalog/slot recipes and recheck their publication or observation. Keep the phase 4 callers on their existing path until their cutover. Viewer-facing calls into shared code must use the warehouse selection in phase 3. |
+
+In [#715](https://github.com/onsager-ai/semon/issues/715), pushes arrive about every
+three seconds and a running session repeatedly returns 409 `stale_projection`
+with `fence_reason: local_source_revision`, `local_revision_reason: size_grew`
+and `stage: stat_grew`. `transcript_range.rs`'s `Local::read_range` compares the
+live carrier stat with the selected ledger. Its exact-revision branch rejects
+ordinary growth. `stale` returns a resynchronize response and the retry in
+[`catalogViewer.tsx`](../../ui/src/app/catalogViewer.tsx) can encounter the same
+race on the next attempt. Removing the wait for a published row alone leaves
+this loop in place. Phase 3 qualifies a committed prefix for the body read as
+well as selecting metadata from committed facts.
+
+## List, identity and relationships
+
+- Open a short read transaction on the current, source-qualified Index. Read
+  the page, counts and coverage together. Use the admitted source selectors,
+  ledger and inventory to distinguish committed, pending and unavailable data.
+  A source awaiting admission contributes no rows and is explicitly pending
+  under the existing coverage contract. Preserve current-format refusal and the
+  host-managed rebuild response. Keep observation demand asynchronous so the
+  producer keeps advancing without the HTTP request waiting for publication.
+- In [`warehouse.sql`](../../crates/semon-sessions/src/events/store/warehouse.sql),
+  `bridge_session_owner`, `catalog_keys` and `dim_session` supply identity;
+  `session_list` shows how to join titles, models, `parent_selection` and
+  `usage_totals`. `current_usage`, `shared_messages` and `current_copilot_usage`
+  select native observations, including the latest whole Copilot shutdown.
+  Treat the shadow views as starting points. The `session_list` status literals
+  are placeholders, and its global materialized CTEs and the correlated Copilot
+  latest-shutdown expression need plan checks on the actual production queries.
+  Preserve shared/exclusive accounting and pricing for the fields the existing
+  UI presents. Use `family_edges`, `family_members`, `family_usage` and
+  `family_shared_usage` for selected family fields as needed, without
+  multiplying usage through tool or relay joins.
+- Keep canonical collision-key reservation, native aliases and current versus
+  retained-history qualification. For exact identity, start with the indexed
+  native-ID probes in [`warehouse_detail.sql`](../../crates/semon-sessions/src/events/store/warehouse_detail.sql).
+  Resolve `(scope,source_key,catalog_key)` before joining the selected component.
+  Use `parent_selection` and `relay_endpoints` for metadata and the existing
+  selected-source matchers where body/time qualification is required. Compare
+  list parent fields too. For prompt-dependent parents, measure indexed cwd/time
+  candidate selection and run prompt comparison at the origin; keep the bounded
+  parent parity requirement in the list gate.
+- Preserve list filters, including metadata search. Audit [`catalog_search.rs`](../../crates/semon-sessions/src/catalog_search.rs)
+  for reads of published metadata and generation checks. Feed required search
+  fields from qualified Index/warehouse data and preserve coverage, bounded
+  candidate work and continuation frontiers without a semantic-ready check.
+  Keep ordinary lists free of transcript or native-log scans. Resolve title
+  positions through the existing authorized metadata/field path when needed.
+- Capture runtime evidence once per source per request. Use the current
+  [`RuntimeObservations`](../../crates/semon-sessions/src/native_evidence/runtime.rs)
+  and `catalog.rs` `relative_status` rules alongside phase 2's
+  `warehouse::runtime_binding`/`write_runtime` observations. Durable observations
+  can establish historical context. Live state requires the existing process
+  start, expiry, authority and source qualification, including received-machine
+  facts and selected parent/child overrides. PID reuse or stale observations
+  cannot make a row live. Runtime churn must not restart unrelated history reads.
+
+## Pagination and committed transcript prefixes
+
+- Keep the focused list order `last DESC, catalog_key ASC` and strict keyset
+  continuation, including ties and bounded search's inclusive frontier where
+  applicable. [`catalog_union.rs`](../../crates/semon-sessions/src/catalog_union.rs)
+  `read_union` merges in `last DESC, catalog_key ASC, source_key ASC` order by
+  opening one authorized source database at a time. Keep its tie-boundary rule
+  (`source.key > cursor.after.source` includes an equal local tuple), search
+  frontier and coverage aggregation. Machine keys come from configured authority;
+  duplicate native IDs and matching display labels do not collapse across
+  machines. A union composes independently committed source snapshots.
+- Bind list continuations to scope, workspace and source set, filters, order and
+  the committed view. Use the ordered view's committed revision evidence in
+  place of semantic publication stamps. Keep explicit restart when changes can
+  move rows across the keyset boundary. Each request uses one SQLite snapshot
+  per source for rows and relationships. The decision below concerns transcript
+  continuations, which must keep their view across verified append.
+- Resolve selected component members through `lineage_member` in keyset pages.
+  Use an indexed component-local form of `session_records` suppression and
+  `tool_answers` joins. Merge ordered source positions with a stable tie-break
+  and bound pages by source positions and bytes. Late answers, copied Claude
+  positions, relay endpoints and the context needed by the existing causal turn
+  partitioner must all come from the selected snapshot. Use the same native
+  turn/entry addresses for anchor lookup, highlighted evidence, scroll and Back.
+- Remove the lineage's 64-member vector from the phase 3 read path end to end.
+  Today `catalog.rs` checks it for source proofs and relative status,
+  `native_resolution.rs` checks it for resolution, `transcript_range.rs`
+  `with_source_reader` and `query_source.rs` `Sources::capture_focused_snapshot`
+  reject oversize inputs, and `query/catalog.rs` has its own phase 4 guard.
+  Inspect history and selected relationship helpers for further vector limits.
+  Page members from indexed rows and acquire proof state only for sources and
+  boundary context touched by the page. Keep byte/block budgets. The separate
+  `catalog_union.rs` limit of 64 configured machine inputs is a workspace fan-in
+  bound and stays in place.
+- Pin the selected component, positions and proof rows in the same SQLite read
+  snapshot. Bind transcript continuation and evidence addresses to selected
+  scope, source incarnation and committed-prefix witnesses, with bounded cursor
+  state independent of total membership. Reuse the authorized Index chunk proofs,
+  native source readers and archive/provider readers. See the request pin and
+  byte budgets in the [source reader contract](session-source-reader.md#published-proof-retention-and-request-snapshots).
+  Its `LocalOrPinnedProvider` path can verify blocks against an older ledger
+  but still rejects a later stat change within the request. Qualify verified
+  growth across block reads and the final recheck in the same reader. A covering
+  block must verify within the committed prefix before any body is returned.
+  Requalify identity and custody before
+  exposing bytes. Prove append with the evidence the carrier supports; file size
+  alone is insufficient. Refuse rewritten prefixes, truncation, replacement,
+  custody changes and invalid proofs even when timestamps or native IDs match.
+  Keep genuine stale continuations explicit when their selected view can no
+  longer be proved. A fresh read opens the latest committed snapshot.
+
+## Performance and benchmark gate
+
+- **Receiver list, about 12 s at `limit=40`.** The current request can spend time
+  in readiness and producer waits before SQL. Its SQLite snapshot also reads
+  runtime and recorded authority and qualifies selected metadata, including
+  per-member title checks. These are concrete paths to time; the receiver split
+  has not been measured. In CI on a receiver-shaped, sanitized multi-source
+  fixture, take baseline and candidate HTTP timings for `/api/sessions?limit=40`
+  at idle, during appends and with pending sources, on fresh and warm connections.
+  Split wait/queue, SQL and row count, runtime/custody, title/presentation and
+  response time. Remove the publication wait, capture runtime/custody once,
+  use set-based page queries and avoid per-member metadata probes. Inspect plans
+  and rows visited if SQL still dominates. Keep HTTP measurements alongside the
+  standard query benchmarks so fast SQL alone cannot hide the original delay.
+- **Production case A, about 16 ms per append.** The phase 2 report places most
+  of the cost in the existing Index write bucket. `ProductionScale::measure_appends`
+  in [`observations.rs`](../../crates/semon-sessions/src/model/tests/star_catalog/observations.rs)
+  reports `parse_ms`, `index_ms`, `fact_write_ms` and `maintenance_ms`. The fact
+  and maintenance timers sit inside the Index transaction, so derive the
+  exclusive Index remainder or report nonoverlapping spans. Measure proof/ledger
+  work, existing Index writes and commit separately if the remainder reproduces.
+  Compare writer-alone and concurrent-reader samples on the same runner. Keep
+  cost independent of historical file length and lineage size for ordinary
+  appends. Fix an attributable regression in the phase 3 path before cutover;
+  record any existing Index bottleneck separately with its measured dominant
+  work. The 16 ms observation is a baseline, not a new pass threshold.
+- On the cutover head, manually run [Star Catalog scale](../../.github/workflows/star-catalog.yml).
+  Exercise the actual SQLite reader with the 1 GB/20k-session corpus. Report
+  fresh/warm list and selected-detail times and separate ingest and maintenance.
+  The review targets are 500 ms list and 50 ms detail. The CI ceilings are 5 s
+  and 500 ms respectively. Keep deterministic `EXPLAIN QUERY PLAN` assertions
+  against correlated scalar subqueries and recursive lineage reads in either
+  query, and global detail session/owner scans or materialization. Prove that
+  unrelated sessions do not increase selected record or suppression work.
+- Keep all three append cases at 10,000 appends of 1–5 records each. Case A uses
+  a million-record Claude file with `compact_boundary` records, B uses 50
+  continuation-linked files with appends to the newest, and C uses a 300-file
+  bridge group with appends spread over members. Report count, total time and
+  first/last 1,000 p50/p99 in microseconds. Every case must meet last-window p50
+  ≤ 3× first-window p50. Keep randomized split/interleaving comparison against
+  independent recomputation.
+
+## Comparison and acceptance
+
+Use the old reader as a temporary fixture oracle. Compare against the same
+admitted source witnesses and qualified runtime sample, with the oracle caught
+up for parity runs. Keep independent expected answers for continuous writes,
+where the oracle can be behind by design. Remove the comparison plumbing at
+cutover where it is only needed for Viewer development. Existing phase 4
+consumers retain their current implementation until they switch. Production
+Viewer routes have one SQLite read path, with no fallback to the oracle.
+
+| Acceptance | Production-path test |
+| --- | --- |
+| Full row, relationship and turn parity | Compare the complete visible list/detail fields and canonical addresses on sanitized Claude, Codex and Copilot inputs. Include aliases, retained history, usage/cost and parent/family fields, late parent and relay endpoints, marker precedence and cycles, copied positions, late results, causal boundaries and end states. Cover the result and entry expansion and following a trace link to the same highlighted turn. |
+| Runtime qualification | Cover current and expired observations, PID/start mismatch and PID reuse, received facts, process/ancestry and parent/child overrides, and unrelated runtime churn during repeated reads. |
+| Collision keys and pagination | Exercise cross-harness collisions, reserved native key forms, identical timestamps and IDs across machines, every existing filter and a bounded search frontier. Traverse small pages and assert order, scope, counts and no omissions or duplicates. Change filters, inventory or custody and assert the appropriate refusal or explicit restart. |
+| Transcript cursor and membership | Use a component with more than 64 sources, including evidence beyond member 64. Page through membership and transcript ranges, expand an entry, and navigate from an evidence link under the same pinned view. Add proof-qualified records before and during body fetch and verify committed-prefix continuation. Inject replacement, same-size rewrite, truncation, custody loss and invalid proof. Check refusal before exposing bytes and correct selection on a fresh request. |
+| `/api/sessions` with a concurrent writer | Use the real HTTP server and the supported admission path. Start with committed rows and keep appending complete native records while issuing repeated HTTP list requests. Every request returns 200 with coherent committed rows, counts and relationships. Assert no `catalog_unavailable`, no exposure of an incomplete record, and observation of newly committed additions while the writer is still active. Coordinate overlap with test barriers/hooks and assert the committed revision counter advances while a list read snapshot is open and again during the repeated request window. Count successful Index commits, not writes to the file. Bound the test so a blocked writer fails. |
+| Running transcript regression | Reproduce [#715](https://github.com/onsager-ai/semon/issues/715) with repeated `/api/session-transcript` requests during real appends, including growth during body reads. Require every fresh request and append-safe continuation to return 200 with only its committed prefix. Verify the view opens, stays readable and shows new commits on the normal refresh path. |
+| Pending coverage and refusal | Hold back admission for a configured source while another keeps committing. Verify committed rows and explicit partial/pending coverage without waiting for quiescence. Check recovery and authorization refusals separately from valid empty results. |
+
+## Viewer verification
+
+Use [viewer-verification](../../.agents/skills/viewer-verification/SKILL.md), the
+[Viewer ownership checklist](viewer-ownership.md#refactoring-review-checklist)
+and the [UI design workflow](ai-design-workflow.md#baseline-scope-and-review).
+Preserve the native Catalog/sidebar and transcript state owners, route and
+source scope, stable row/entry keys, focus and scroll. The intentional visible
+change is that a live selection opens and remains usable while data arrives.
+The existing layout, chrome and shared design contract govern the comparison.
+If wire or state handling changes, update `ui/src/` and regenerate bundles via
+[`ui/README.md`](../../ui/README.md). Verify architecture, types, source/security,
+bundle freshness and sizes in CI.
+
+Manually dispatch the full [Viewer UI workflow](../../.github/workflows/ui.yml)
+on the cutover head and check the actual `viewer browser checks` aggregate.
+Use its locked fixture tooling and synthetic native/received inputs. Cover list
+filters and pagination, single/multi-machine navigation, running and finished
+transcripts, pending/unavailable and retained sources, entry expansion, evidence
+deep links, Back and scroll restoration. Include live-update, transport,
+interaction/touch, accessibility and lifecycle coverage from the workflow. Inspect
+uploaded `viewer-ui-*` screenshots for the affected states at matching desktop
+and phone viewports in light and dark, with the affected touch states covered
+by the workflow. Compare base and head under the same fixture, route, viewport
+and theme where available. Record the inspected images, expected change and
+reference disposition in the cutover PR. Classify implementation, reference and
+fixture defects and any remaining product decisions per the workflow. CI makes
+no pixel comparison. Use [the fixture guide](../../tests/ui/README.md) for suite
+selection and artifact names and report any unrun or blocked coverage. Run
+pinned Codex conformance in CI for changed native read semantics.
+
+## Suggested implementation PRs
+
+1. **Warehouse list and identity queries.** Add the fixture-only read adapters,
+   source qualification, filters/search, coverage and union/keyset tests. Capture
+   the list and append baselines and add production-query plan checks. The
+   Viewer still uses the existing reader while the comparison matures.
+2. **Selected component and proof reads.** Add the selected metadata, causal
+   rendering and position/byte adapters, member paging, snapshot continuations
+   and source/refusal tests. Compare transcript, anchors and entry fields in CI
+   without wiring a second production route. Land this after the shared
+   identity and scope contract in PR 1.
+3. **Atomic Catalog and Viewer cutover.** Switch the list, identity, navigation,
+   selected metadata/transcript, anchors and evidence links together. Remove the
+   Viewer semantic-ready waits and dead Viewer-only code. Audit readiness through
+   the HTTP server and host entry points, including the pushed receiver. Gate on
+   the concurrent-writer and live-transcript tests, benchmark and Viewer review.
+
+## Phase 4
+
+Switch ASI SQL, analytics inputs, CLI/MCP list, search and focused reads and
+metadata export to the warehouse and source resolver. Check causal turns,
+shared/exclusive and family totals, costs and label provenance. Keep body/FTS
+access origin-local. Remove the semantic stage, activity projection, relation
+publication, generation fences, phase cursors, row recipes, derived journals
+and any remaining temporary oracle with their final consumers. Retain native
+integrity checks, authorization, custody, snapshot isolation and Index CAS.
+Update the ASI contract and host rebuild guidance. Phase 3 delivers the read
+cutover and leaves operator data and retained source evidence under existing
+custody.
+
+## Decisions needed
+
+- **Transcript cursor lifetime across HTTP requests.** Options are a bounded host-held
+  SQLite snapshot with an explicit restart on expiry, or a stateless cursor
+  backed by enough retained evidence to reconstruct the exact view, including
+  membership and scope, after intervening commits. Recommend the bounded
+  host-held snapshot. It provides the required view directly without adding a
+  persisted snapshot format. Set the lifetime and resource bounds before PR 2
+  using the existing Viewer paging cadence and measured WAL retention. Verified
+  append keeps a transcript cursor usable within its lifetime. Replacement or
+  custody change still refuses it.
