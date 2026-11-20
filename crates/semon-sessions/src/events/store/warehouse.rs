@@ -104,13 +104,15 @@ fn source(
     let source = tx
         .prepare_cached(
             "INSERT INTO warehouse_source(origin,harness,logical_source,incarnation,carrier,ledger)
-         SELECT coalesce((SELECT value FROM meta WHERE key='storage_namespace'),
-                         (SELECT value FROM meta WHERE key='incarnation')),
+         SELECT ?4,
                 ?2,?1,coalesce((SELECT max(incarnation) FROM warehouse_source
                                  WHERE logical_source=?1 AND harness=?2),0)+1,?1,?3
          RETURNING source",
         )?
-        .query_row(params![path, harness, ledger], |row| row.get(0))?;
+        .query_row(
+            params![path, harness, ledger, super::origin_namespace(tx)?],
+            |row| row.get(0),
+        )?;
     tx.prepare_cached("INSERT INTO warehouse_current(path,source) VALUES(?1,?2) ON CONFLICT(path) DO UPDATE SET source=excluded.source")?
         .execute(params![path,source])?;
     Ok((source, retired))

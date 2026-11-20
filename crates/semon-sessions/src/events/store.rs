@@ -6111,6 +6111,18 @@ fn write_index_changes(
     )
 }
 
+/// The origin namespace a warehouse source key is bound to. The storage port
+/// owns the namespace binding; before it is bound, the Index incarnation
+/// stands in, as for other namespace-relative rows.
+pub(super) fn origin_namespace(tx: &rusqlite::Transaction<'_>) -> rusqlite::Result<String> {
+    tx.query_row(
+        "SELECT coalesce((SELECT value FROM meta WHERE key='storage_namespace'),
+                         (SELECT value FROM meta WHERE key='incarnation'))",
+        [],
+        |row| row.get(0),
+    )
+}
+
 fn write_index_changes_measured(
     transaction: &Transaction<'_>,
     path: &str,
