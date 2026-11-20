@@ -3840,26 +3840,32 @@ export function createCatalogViewer(
           view.note = '';
           chrome();
           drawSelected(view);
+          // The accepted range and its highlight are one visible arrival.
+          // Layout is committed by drawSelected before locating the turn.
+          const target = [...view.root.querySelectorAll<HTMLElement>('[data-turn]')].find(
+            (node) => node.dataset.turn === turn,
+          );
+          if (target) {
+            target.classList.add('flash');
+            target.scrollIntoView({ block: 'start' });
+            syncJump(view, true);
+            scope.timeout(() => target.classList.remove('flash'), 1400);
+          }
           void hydrateContext(view);
           void loadIdentity(view);
           focusHeading();
-          if (currentAnchor())
-            scope.timeout(() => {
-              if (!currentAnchor()) return;
-              const target = [...view!.root.querySelectorAll<HTMLElement>('[data-turn]')].find(
-                (node) => node.dataset.turn === turn,
-              );
-              target?.scrollIntoView({ block: 'start' });
-              syncJump(view, true);
-              target?.classList.add('flash');
-              scope.timeout(() => target?.classList.remove('flash'), 1400);
-            }, 0);
           return;
         }
       } catch (error) {
         if (currentAnchor()) {
           view.anchorNote = readError(error);
           drawSelected(view);
+          const history = error instanceof ApiError ? error.history : undefined;
+          if (typeof history === 'object') {
+            scope.timeout(() => {
+              if (currentAnchor()) void goSession(key, undefined, false, turn);
+            }, history.retryMs);
+          }
         }
         return;
       }

@@ -58,12 +58,9 @@ pub(crate) fn status(cache: &Path) -> Option<Status> {
     state
 }
 
-pub(crate) fn history_reply(options: &Options, probe: bool) -> Option<crate::ViewerReply> {
+pub(crate) fn history_reply(options: &Options) -> Option<crate::ViewerReply> {
     use serde_json::json;
-    let state = status(&options.cache).or_else(|| {
-        (probe && needed(options).unwrap_or(false))
-            .then_some(Status::Rebuilding { done: 0, total: 0 })
-    })?;
+    let state = status(&options.cache)?;
     let (code, message, progress) = match state {
         Status::Rebuilding { done, total } => (
             "history_rebuilding",
@@ -95,8 +92,24 @@ pub(crate) fn needed(options: &Options) -> io::Result<bool> {
     }
 }
 
+/// Mark an owned placement before queuing recovery on the existing producer.
+pub(crate) fn queue(options: &Options) -> bool {
+    if !needed(options).unwrap_or(false) {
+        return false;
+    }
+    crate::viewer::lock(statuses())
+        .entry(options.cache.clone())
+        .or_insert(Status::Rebuilding { done: 0, total: 0 });
+    true
+}
+
 pub(crate) fn ensure(options: &Options, namespace: &Namespace) -> io::Result<()> {
+    if !options.index_recovery.allowed() {
+        return Ok(());
+    }
     if !needed(options)? {
+        // A different process can publish after this host queued recovery.
+        crate::viewer::lock(statuses()).remove(&options.cache);
         return Ok(());
     }
     recover(options, namespace, false)
@@ -108,10 +121,8 @@ pub(crate) fn recover(options: &Options, namespace: &Namespace, refused: bool) -
     let final_path = rebuilt_path(&options.cache);
     let _lock = SourceLock::acquire(options, "\0index-rebuild", true)?;
     let path = active_path(&options.cache);
-    if path == final_path && !needed(options)? {
-        return Ok(());
-    }
-    if !refused && !needed(options)? {
+    if (path == final_path || !refused) && !needed(options)? {
+        crate::viewer::lock(statuses()).remove(&options.cache);
         return Ok(());
     }
     let progress = |status| {

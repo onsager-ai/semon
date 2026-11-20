@@ -493,7 +493,7 @@ pub(crate) fn selection_from_reply(
 /// remain explicit. The query contract matches GET /api/sessions.
 pub fn session_catalog_page(options: &Options, machine: &str, query: &str) -> ViewerReply {
     match Request::parse(query) {
-        Ok(request) => crate::index_rebuild::history_reply(options, false)
+        Ok(request) => crate::index_rebuild::history_reply(options)
             .unwrap_or_else(|| page(options, machine, request)),
         Err(reply) => reply,
     }
@@ -1000,9 +1000,7 @@ pub fn session_catalog_page_ready(options: &Options) -> io::Result<bool> {
 }
 
 pub(crate) fn sqlite_page_ready(options: &Options) -> io::Result<bool> {
-    if crate::index_rebuild::status(&options.cache).is_some()
-        || crate::index_rebuild::needed(options)?
-    {
+    if crate::index_rebuild::status(&options.cache).is_some() {
         return Ok(false);
     }
     let path = EventCache::path(&options.cache);
