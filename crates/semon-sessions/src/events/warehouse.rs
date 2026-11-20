@@ -2,7 +2,6 @@
 //!
 //! Only native metadata and positions cross this boundary. The Index writer
 //! will bind the origin, logical source and incarnation when it commits.
-#![allow(dead_code)] // The consumer lands with the warehouse transaction.
 
 use super::{BillingUsage, Event, Kind, ModelTokens, Peer, Reply};
 use crate::Tokens;
@@ -33,6 +32,10 @@ pub(crate) enum Fact {
     },
     Gap,
     SessionId(String),
+    Title {
+        present: bool,
+    },
+    Model(String),
     Relation {
         kind: &'static str,
         target: String,
@@ -140,6 +143,7 @@ pub(crate) struct Batch {
     pub(crate) observations: Vec<Observation>,
     pub(crate) header: Option<Header>,
     pub(crate) sidecar: Option<Sidecar>,
+    pub(crate) eof: Vec<Observation>,
     ordinal: Option<u64>,
     record_start: usize,
 }
@@ -156,6 +160,7 @@ impl Batch {
             observations: Vec::new(),
             header: None,
             sidecar: None,
+            eof: Vec::new(),
             ordinal: None,
             record_start: 0,
         })
@@ -164,6 +169,15 @@ impl Batch {
     pub(super) fn begin_record(&mut self, ordinal: Option<u64>) {
         self.ordinal = ordinal;
         self.record_start = self.observations.len();
+    }
+
+    pub(super) fn push_eof(&mut self, offset: u64, block: u32, fact: Fact) {
+        self.eof.push(Observation {
+            position: Position { offset, block },
+            ordinal: None,
+            discriminator: self.eof.len(),
+            fact,
+        });
     }
 
     pub(super) fn push(&mut self, offset: u64, block: u32, fact: Fact) {

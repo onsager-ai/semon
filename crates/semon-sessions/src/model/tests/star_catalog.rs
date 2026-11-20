@@ -4465,7 +4465,7 @@ fn append_distribution(name: &str, warehouse: &mut Warehouse, sources: usize, ho
                 fs::OpenOptions::new()
                     .create(true)
                     .append(true)
-                    .open(home.root.join(format!("{name}-{source}.jsonl")))
+                    .open(home.root.join(format!("prototype-{name}-{source}.jsonl")))
                     .unwrap(),
             )
         })
@@ -4554,10 +4554,16 @@ fn star_catalog_append_scale(home: &Home) {
     drop(file);
     append_distribution("A", &mut long, 1, home);
     drop(long);
+    {
+        let mut production = observations::ProductionScale::new(home.root.join("production-A"));
+        production.seed_long(&home.root.join("A-1.jsonl"));
+        production.measure_appends("A", 1);
+    }
     // B: a 50-file continuation chain, append only to the newest file (source 1).
     let generation = Instant::now();
     println!("scale progress phase=generate_B elapsed_ms=0 rows=0");
     let mut chain = Warehouse::new(&home.root.join("long-chain.sqlite3"));
+    let mut production = observations::ProductionScale::new(home.root.join("production-B"));
     for source in (1..=50).rev() {
         let mut records = vec![human(&format!("append-{source}"), ts(0, 1), "chain")];
         if source > 1 {
@@ -4573,16 +4579,19 @@ fn star_catalog_append_scale(home: &Home) {
         }
         file.flush().unwrap();
         chain.source(source, "claude", &format!("append-{source}"), &records);
+        production.admit(&format!("append-{source}"), "claude", &records);
     }
     println!(
         "scale progress phase=generate_B elapsed_ms={} rows=50",
         generation.elapsed().as_millis()
     );
+    production.measure_appends("B", 1);
     append_distribution("B", &mut chain, 1, home);
     // C: 300 physical files in one bridge group; spread appends across all files.
     let generation = Instant::now();
     println!("scale progress phase=generate_C elapsed_ms=0 rows=0");
     let mut wide = Warehouse::new(&home.root.join("wide-group.sqlite3"));
+    let mut production = observations::ProductionScale::new(home.root.join("production-C"));
     for source in 1..=300 {
         let records = [
             human(&format!("append-{source}"), ts(0, 1), "wide"),
@@ -4596,11 +4605,16 @@ fn star_catalog_append_scale(home: &Home) {
         }
         file.flush().unwrap();
         wide.source(source, "claude", &format!("append-{source}"), &records);
+        production.admit(&format!("append-{source}"), "claude", &records);
+        if source % 64 == 0 {
+            production.flush();
+        }
     }
     println!(
         "scale progress phase=generate_C elapsed_ms={} rows=300",
         generation.elapsed().as_millis()
     );
+    production.measure_appends("C", 300);
     append_distribution("C", &mut wide, 300, home);
 }
 
@@ -4732,6 +4746,7 @@ fn star_catalog_scale() {
         "scale corpus bytes={bytes} sessions=20000 generation_ms={}",
         generation.elapsed().as_millis()
     );
+    observations::ProductionScale::ingest_corpus(&home, &corpus);
     let mut warehouse = Warehouse::new(&path);
     let ingest = Instant::now();
     println!("scale progress phase=ingest elapsed_ms=0 rows=0");

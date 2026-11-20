@@ -2188,6 +2188,11 @@ impl EventCache {
         self.index_clone
     }
 
+    #[cfg(test)]
+    pub(crate) fn enable_warehouse_scale_timing(&mut self) {
+        self.scan_timing = true;
+    }
+
     pub(crate) fn scan_durations(&self) -> (Duration, Duration) {
         (self.parse_duration, self.index_write_duration)
     }
@@ -2786,8 +2791,8 @@ impl EventCache {
         if self.warehouse_commits.is_some() {
             return warehouse::Batch::new(harness);
         }
-        let _ = harness;
-        None
+        self.store.as_ref()?;
+        warehouse::Batch::new(harness)
     }
 
     /// Parsing happens before the write reservation. Cold complete new files
@@ -2826,7 +2831,9 @@ impl EventCache {
                 .get_mut(&path)
                 .and_then(|file| file.index.as_mut())
             {
-                Arc::make_mut(index).bodies.checkpoint();
+                let index = Arc::make_mut(index);
+                index.bodies.checkpoint();
+                index.warehouse_observations = None;
             }
         }
         Ok(())
@@ -3031,6 +3038,9 @@ pub(crate) fn scan_archive(
                 "archive index commit conflict",
             ));
         }
+        // Retries parse from the committed ledger, so the attempted batch
+        // never belongs to the returned folded index.
+        index.warehouse_observations = None;
         if cache.store.is_some() && !cache.unpersisted.contains(&key) {
             store::native_usage::checkpoint(&mut index);
             index.bodies.checkpoint();
@@ -3510,13 +3520,13 @@ pub(crate) fn scan_file(
                 hook();
             }
         }
-        if cache.scan_byte_budget.is_some()
+        let stage_cold = cache.scan_byte_budget.is_some()
             && recorded.is_none()
             && !bounded
             && ledger.offset == ledger.stat.size
             && cache.scoped
-            && cache.store.is_some()
-        {
+            && cache.store.is_some();
+        if stage_cold {
             if cache.cold_writes.len() >= 64 {
                 return Err(io::Error::other("cold index batch exceeds source budget"));
             }
@@ -3524,16 +3534,21 @@ pub(crate) fn scan_file(
             cache
                 .cold_writes
                 .push((key.clone(), ledger.clone(), Arc::clone(&index)));
-        } else if cache.commit(
-            &key,
-            recorded.as_ref(),
-            append.then_some(&changes),
-            &ledger,
-            &index,
-        ) && !last
-        {
-            trace("conflict");
-            continue;
+        } else {
+            let retry = cache.commit(
+                &key,
+                recorded.as_ref(),
+                append.then_some(&changes),
+                &ledger,
+                &index,
+            );
+            // Busy or failed writes are retried by parsing from the durable
+            // ledger. The attempted fact batch is no longer needed here.
+            Arc::make_mut(&mut index).warehouse_observations = None;
+            if retry && !last {
+                trace("conflict");
+                continue;
+            }
         }
         if bounded && !cache.unpersisted.contains(&key) {
             let stem = cache
@@ -3545,7 +3560,8 @@ pub(crate) fn scan_file(
         }
         if cache.store.is_some() && !cache.unpersisted.contains(&key) {
             store::native_usage::checkpoint(Arc::make_mut(&mut index));
-            Arc::make_mut(&mut index).bodies.checkpoint();
+            let admitted = Arc::make_mut(&mut index);
+            admitted.bodies.checkpoint();
             if let Some(store) = cache.store.as_ref()
                 && let Some((stored, metadata)) = store
                     .load_tree(&key, &ledger.stat)
@@ -3594,15 +3610,36 @@ fn parse(
             break;
         }
         if !line.ends_with(b"\n") {
-            if let Some(markers) = &mut index.marker_index
-                && let Ok(value) = serde_json::from_slice(&line)
-            {
-                markers.observe(&line, offset, false, &value);
-            }
-            if let Some(handoffs) = &mut index.handoff_index
-                && let Ok(value) = serde_json::from_slice(&line)
-            {
-                handoffs.observe(&line, offset, false, &value)?;
+            if let Ok(value) = serde_json::from_slice(&line) {
+                if let Some(markers) = &mut index.marker_index
+                    && let Some(marker) = markers.observe(&line, offset, false, &value)
+                    && let Some(batch) = &mut index.warehouse_observations
+                {
+                    batch.push_eof(
+                        offset,
+                        0,
+                        Fact::Parent {
+                            harness: marker.harness,
+                            id: marker.parent_id,
+                            call_id: marker.tool_id,
+                        },
+                    );
+                }
+                if let Some(handoffs) = &mut index.handoff_index {
+                    let batch = &mut index.warehouse_observations;
+                    handoffs.observe_with(&line, offset, false, &value, |block, id, tool| {
+                        if let Some(batch) = batch {
+                            batch.push_eof(
+                                offset,
+                                block,
+                                Fact::LaunchCandidate {
+                                    call_id: id.to_owned(),
+                                    tool: tool.to_owned(),
+                                },
+                            );
+                        }
+                    })?;
+                }
             }
             break;
         }
@@ -6196,7 +6233,11 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
             return;
         }
         Some("custom-title") => {
-            summary.title = field(record, "customTitle").map(str::to_owned);
+            let title = field(record, "customTitle");
+            summary.title = title.map(str::to_owned);
+            summary.warehouse_fact(offset, 0, || Fact::Title {
+                present: title.is_some(),
+            });
             return;
         }
         Some("agent-name") => {
@@ -6274,6 +6315,7 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
         && let Some(model) = field(message, "model")
     {
         summary.last_model = Some(model.to_owned());
+        summary.warehouse_fact(offset, 0, || Fact::Model(model.to_owned()));
     }
     if role == Some("assistant") {
         setting(
@@ -6778,6 +6820,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
         Some("turn_context") => {
             if let Some(model) = field(payload, "model") {
                 summary.last_model = Some(model.to_owned());
+                summary.warehouse_fact(offset, 0, || Fact::Model(model.to_owned()));
             }
             codex_settings(summary, payload, offset, time);
         }

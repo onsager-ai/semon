@@ -12209,6 +12209,20 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
             )
             .optional()
             .unwrap();
+        let old_warehouse_path = home.options.codex_home.join(&old_relative);
+        let current_warehouse: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM warehouse_current WHERE path=?1)",
+                [old_warehouse_path.to_string_lossy().as_ref()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_warehouse, rewritten);
+        let historical_warehouse: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM warehouse_source s JOIN fact_record r USING(source) WHERE s.carrier=?1 AND s.incarnation=1)",
+            [old_warehouse_path.to_string_lossy().as_ref()], |r| r.get(0),
+        ).unwrap();
+        assert!(historical_warehouse, "withdrawal erased the original facts");
         if rewritten || retain {
             let header: Value = serde_json::from_str(&old_header.unwrap()).unwrap();
             assert_eq!(
