@@ -34,10 +34,10 @@ pub(super) fn qualify(connection: &Connection) -> rusqlite::Result<bool> {
             expected,
         )
     });
-    let matches: usize = connection
+    let matches: i64 = connection
         .prepare_cached(sql)?
         .query_row(rusqlite::params_from_iter(expected), |row| row.get(0))?;
-    Ok(matches == expected.len() / 2)
+    Ok(matches == (expected.len() / 2) as i64)
 }
 
 use std::path::Path;
@@ -308,6 +308,12 @@ fn write_fact(
         Fact::SessionId(id) => at!(fact_session_observation, kind=>"session-id", native_id=>id,
             parent_id=>Option::<&str>::None,nickname=>Option::<&str>::None,
             agent_path=>Option::<&str>::None,metadata=>Option::<&str>::None),
+        Fact::Title { present } => {
+            at!(fact_label_observation, kind=>"title",value=>Option::<&str>::None,present=>present)
+        }
+        Fact::Model(model) => {
+            at!(fact_label_observation, kind=>"model", value=>model, present=>true)
+        }
         Fact::Relation { kind, target } => at!(fact_relation_observation,kind=>kind,target=>target),
         Fact::Parent {
             harness,

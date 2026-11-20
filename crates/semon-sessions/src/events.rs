@@ -6206,7 +6206,11 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
             return;
         }
         Some("custom-title") => {
-            summary.title = field(record, "customTitle").map(str::to_owned);
+            let title = field(record, "customTitle");
+            summary.title = title.map(str::to_owned);
+            summary.warehouse_fact(offset, 0, || Fact::Title {
+                present: title.is_some(),
+            });
             return;
         }
         Some("agent-name") => {
@@ -6284,6 +6288,7 @@ fn claude_events(summary: &mut FileIndex, record: &Value, offset: u64) {
         && let Some(model) = field(message, "model")
     {
         summary.last_model = Some(model.to_owned());
+        summary.warehouse_fact(offset, 0, || Fact::Model(model.to_owned()));
     }
     if role == Some("assistant") {
         setting(
@@ -6788,6 +6793,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
         Some("turn_context") => {
             if let Some(model) = field(payload, "model") {
                 summary.last_model = Some(model.to_owned());
+                summary.warehouse_fact(offset, 0, || Fact::Model(model.to_owned()));
             }
             codex_settings(summary, payload, offset, time);
         }

@@ -32,6 +32,10 @@ pub(crate) enum Fact {
     },
     Gap,
     SessionId(String),
+    Title {
+        present: bool,
+    },
+    Model(String),
     Relation {
         kind: &'static str,
         target: String,

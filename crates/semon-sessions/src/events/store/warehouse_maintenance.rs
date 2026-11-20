@@ -83,18 +83,21 @@ pub(super) fn maintain(
     if before < after {
         put(tx,
             "WITH records AS (
-                SELECT min(ts) first_ts,max(ts) last_ts,max(CASE WHEN kind='custom-title' THEN pos END) title_pos
+                SELECT min(ts) first_ts,max(ts) last_ts
                 FROM fact_record WHERE source=?1 AND pos>=?2
-             ), usage AS (
-                SELECT pos,model FROM fact_step_observation WHERE source=?1 AND pos>=?2 AND model IS NOT NULL
-                ORDER BY pos DESC,block DESC,kind DESC,occurrence DESC LIMIT 1
+             ), title AS (
+                SELECT pos,present FROM fact_label_observation WHERE source=?1 AND pos>=?2 AND kind='title'
+                ORDER BY pos DESC,block DESC,occurrence DESC LIMIT 1
+             ), model AS (
+                SELECT pos,value FROM fact_label_observation WHERE source=?1 AND pos>=?2 AND kind='model'
+                ORDER BY pos DESC,block DESC,occurrence DESC LIMIT 1
              )
              UPDATE dim_session SET
                 first_ts=(SELECT coalesce(min(dim_session.first_ts,first_ts),dim_session.first_ts,first_ts) FROM records),
                 last_ts=(SELECT coalesce(max(dim_session.last_ts,last_ts),dim_session.last_ts,last_ts) FROM records),
-                title_pos=coalesce((SELECT title_pos FROM records),title_pos),
-                model=coalesce((SELECT model FROM usage),model),
-                model_pos=coalesce((SELECT pos FROM usage),model_pos),
+                title_pos=CASE WHEN EXISTS(SELECT 1 FROM title) THEN (SELECT pos FROM title WHERE present) ELSE title_pos END,
+                model=coalesce((SELECT value FROM model),model),
+                model_pos=coalesce((SELECT pos FROM model),model_pos),
                 prompt_pos=coalesce(prompt_pos,(SELECT min(pos) FROM fact_prompt WHERE source=?1 AND pos>=?2)),
                 continued=continued OR EXISTS(SELECT 1 FROM fact_relation_observation
                                                 WHERE source=?1 AND pos>=?2 AND kind='continued-in')
