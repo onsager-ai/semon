@@ -5866,9 +5866,19 @@ fn exit_code(summary: &mut FileIndex, id: &str, code: i64, offset: u64, time: Op
 }
 
 impl FileIndex {
+    fn warehouse_call_index(&self, id: &str) -> Option<usize> {
+        self.pending.get(id).copied().or_else(|| {
+            let [only] = self.tool_ids.get(id)?.as_slice() else {
+                return None;
+            };
+            Some(*only)
+        })
+    }
+
     fn codex_result_fact(
         &mut self,
         id: &str,
+        call_index: Option<usize>,
         reply: &Reply,
         kind: &'static str,
         exit_code: Option<i64>,
@@ -5876,14 +5886,8 @@ impl FileIndex {
         if self.warehouse_observations.is_none() {
             return;
         }
-        let call = self
-            .pending
-            .get(id)
-            .or_else(|| match self.tool_ids.get(id).map(Vec::as_slice) {
-                Some([only]) => Some(only),
-                _ => None,
-            })
-            .and_then(|index| self.events.get(*index))
+        let call = call_index
+            .and_then(|index| self.events.get(index))
             .map(|event| warehouse::Position {
                 offset: event.o,
                 block: event.b,
@@ -5988,15 +5992,16 @@ fn codex_connector_tool(summary: &mut FileIndex, item: &Value, offset: u64, time
         f: if known { 0 } else { UNKNOWN },
         ..Reply::default()
     };
-    summary.codex_result_fact(id, &reply, "connector", None);
-    if let Some(index) = summary.tool_ids.get(id).and_then(|indices| {
+    let mirror = summary.tool_ids.get(id).and_then(|indices| {
         indices.iter().rev().copied().find(|index| {
             summary
                 .events
                 .get(*index)
                 .is_some_and(|event| !event.code_mode)
         })
-    }) {
+    });
+    if let Some(index) = mirror {
+        summary.codex_result_fact(id, mirror, &reply, "connector", None);
         summary.pending.remove(id);
         if let Some(event) = summary.event_mut(index) {
             event.r = Some(reply);
@@ -6012,11 +6017,13 @@ fn codex_connector_tool(summary: &mut FileIndex, item: &Value, offset: u64, time
         id: Some(id.to_owned()),
         n: Some(name),
         parent,
-        r: Some(reply),
+        r: Some(reply.clone()),
         ..Event::default()
     };
     summary.codex_call_fact(&event, None);
+    let call = summary.events.len();
     tool_event(summary, event);
+    summary.codex_result_fact(id, Some(call), &reply, "connector", None);
 }
 
 /// Claude Code lines: `offset` is the line's byte offset.
@@ -6670,28 +6677,6 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
             let known = code.is_some()
                 || field(item, "status") == Some("failed")
                 || field(item, "type") == Some("FileChange");
-            if operation && let Some(id) = field(item, "id") {
-                summary.codex_result_fact(
-                    id,
-                    &Reply {
-                        o: offset,
-                        t: time,
-                        e: failed,
-                        f: if field(item, "status")
-                            .is_some_and(|status| status.eq_ignore_ascii_case("declined"))
-                        {
-                            DENIED
-                        } else if known {
-                            0
-                        } else {
-                            UNKNOWN
-                        },
-                        ..Reply::default()
-                    },
-                    "item_completed",
-                    code,
-                );
-            }
             // A yielded command's end: its `process_id` is the session id
             // the starting script answered with. A startup source and an open
             // exec wrapper do not identify a new native invocation: the old
@@ -6724,6 +6709,31 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
             } else {
                 None
             };
+            if operation && let Some(id) = field(item, "id") {
+                summary.codex_result_fact(
+                    id,
+                    yielded
+                        .or(parent)
+                        .or_else(|| summary.warehouse_call_index(id)),
+                    &Reply {
+                        o: offset,
+                        t: time,
+                        e: failed,
+                        f: if field(item, "status")
+                            .is_some_and(|status| status.eq_ignore_ascii_case("declined"))
+                        {
+                            DENIED
+                        } else if known {
+                            0
+                        } else {
+                            UNKNOWN
+                        },
+                        ..Reply::default()
+                    },
+                    "item_completed",
+                    code,
+                );
+            }
             if let Some(parent) = parent {
                 extra(
                     summary,
@@ -6792,6 +6802,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                     denied || status == Some("failed") || code.is_some_and(|code| code != 0);
                 summary.codex_result_fact(
                     id,
+                    summary.warehouse_call_index(id),
                     &Reply {
                         o: offset,
                         t: time,
@@ -6951,7 +6962,13 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                         f: flags,
                         ..Reply::default()
                     };
-                    summary.codex_result_fact(id, &reply, "response_output", code);
+                    summary.codex_result_fact(
+                        id,
+                        summary.warehouse_call_index(id),
+                        &reply,
+                        "response_output",
+                        code,
+                    );
                     if script_output || !code_mode_call {
                         resolve(summary, id, |_| reply);
                     }

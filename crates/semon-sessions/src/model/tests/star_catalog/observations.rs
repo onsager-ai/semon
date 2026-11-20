@@ -207,6 +207,21 @@ fn assert_claude_facts(database: &Connection, observations: &[Observation]) {
     }
 }
 
+fn assert_private_bodies_absent(observations: &impl std::fmt::Debug, bodies: &[&str]) {
+    use sha2::{Digest, Sha256};
+
+    let formatted = format!("{observations:?}");
+    assert!(!formatted.contains("PRIVATE-"), "{formatted}");
+    for body in bodies {
+        let digest = Sha256::digest(body.as_bytes());
+        assert!(!formatted.contains(&format!("{digest:x}")), "{formatted}");
+        assert!(
+            !formatted.contains(&format!("{:?}", &digest[..])),
+            "{formatted}"
+        );
+    }
+}
+
 fn capture(cache: &mut EventCache, path: &std::path::Path, harness: &str) -> Vec<Observation> {
     scan_file(path, harness, cache, &mut false).unwrap();
     cache.flush_cold_writes().unwrap();
@@ -255,14 +270,14 @@ fn claude_observations_match_prototype_at_admission() {
         json!({"success":true,"msg_id":"outgoing","pin":{"id":"child"},"message":"PRIVATE-RESULT-METADATA"}),
     );
     let mut expected = Warehouse::new(std::path::Path::new(":memory:"));
-    expected.source(1, "claude", "sender", &records);
     let home = Home::new();
     let path = home.top("sender", &records);
     let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
     cache.warehouse_commits = Some(Vec::new());
     cache.scan_byte_budget = Some(1);
     let mut observations = Vec::new();
-    for ordinal in 0..records.len() {
+    for (ordinal, record) in records.iter().enumerate() {
+        expected.source(1, "claude", "sender", std::slice::from_ref(record));
         let admitted = capture(&mut cache, &path, "claude");
         assert!(!admitted.is_empty());
         for (discriminator, observation) in admitted.iter().enumerate() {
@@ -270,8 +285,8 @@ fn claude_observations_match_prototype_at_admission() {
             assert_eq!(observation.discriminator, discriminator);
         }
         observations.extend(admitted);
+        assert_claude_facts(&expected.db, &observations);
     }
-    assert_claude_facts(&expected.db, &observations);
     let before = std::fs::metadata(&path).unwrap().len();
     append(&path, late.to_string().as_bytes());
     cache.scan_byte_budget = None;
@@ -326,9 +341,16 @@ fn claude_observations_match_prototype_at_admission() {
     cold.warehouse_commits = Some(Vec::new());
     let cold = capture(&mut cold, &cold_path, "claude");
     assert_eq!(cold, observations);
-    let formatted = format!("{cold:?}");
-    assert!(!formatted.contains("PRIVATE-"), "{formatted}");
-    assert!(!formatted.contains("sha256"), "{formatted}");
+    assert_private_bodies_absent(
+        &cold,
+        &[
+            "PRIVATE-PROMPT",
+            "PRIVATE-ASSISTANT",
+            "PRIVATE-ARGUMENT",
+            "PRIVATE-RELAY",
+            "PRIVATE-RESULT",
+        ],
+    );
 }
 
 fn assert_codex_facts(database: &Connection, batch: &crate::events::warehouse::Batch) {
@@ -465,12 +487,12 @@ fn codex_observations_match_prototype_at_admission() {
     let home = Home::new();
     let path = home.lines("codex/sessions/rollout-root.jsonl", &records);
     let mut expected = Warehouse::new(std::path::Path::new(":memory:"));
-    expected.source(1, "codex", "root", &records);
     let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
     cache.warehouse_commits = Some(Vec::new());
     cache.scan_byte_budget = Some(1);
     let mut batch = None::<Batch>;
-    for _ in &records {
+    for record in &records {
+        expected.source(1, "codex", "root", std::slice::from_ref(record));
         scan_file(&path, "codex", &mut cache, &mut false).unwrap();
         cache.flush_cold_writes().unwrap();
         let mut commits = std::mem::take(cache.warehouse_commits.as_mut().unwrap());
@@ -482,11 +504,13 @@ fn codex_observations_match_prototype_at_admission() {
         } else {
             batch = Some(new);
         }
+        assert_codex_facts(&expected.db, batch.as_ref().unwrap());
     }
     let mut batch = batch.unwrap();
-    assert_codex_facts(&expected.db, &batch);
     let result_offset = std::fs::metadata(&path).unwrap().len();
-    cache.scan_byte_budget = None;
+    drop(cache);
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    cache.warehouse_commits = Some(Vec::new());
     append(&path, late.to_string().as_bytes());
     assert!(capture(&mut cache, &path, "codex").is_empty());
     append(
@@ -561,9 +585,14 @@ fn codex_observations_match_prototype_at_admission() {
     let cold = cache.warehouse_commits.as_mut().unwrap().pop().unwrap();
     assert_eq!(cold.header, batch.header);
     assert_eq!(cold.observations, batch.observations);
-    let formatted = format!("{cold:?}");
-    assert!(!formatted.contains("PRIVATE-"), "{formatted}");
-    assert!(!formatted.contains("sha256"), "{formatted}");
+    assert_private_bodies_absent(
+        &cold,
+        &[
+            "PRIVATE-CODEX-ARGUMENT",
+            "PRIVATE-CODEX-COMPACTION",
+            "PRIVATE-CODEX-OUTPUT",
+        ],
+    );
 }
 
 #[test]
@@ -668,4 +697,35 @@ fn codex_observes_relay_and_connector_metadata() {
         if id == "command" && reply.e)
     ));
     assert!(!format!("{observations:?}").contains("PRIVATE-"));
+}
+
+#[test]
+fn a_provisional_codex_header_is_independent_of_complete_record_admission() {
+    let home = Home::new();
+    let header = codex_records("native", Some("parent"), Some("worker"), &[]);
+    let path = home.write(
+        "codex/sessions/rollout-native.jsonl",
+        &header[0].to_string(),
+    );
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    cache.warehouse_commits = Some(Vec::new());
+    scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+    let provisional = cache.warehouse_commits.as_mut().unwrap().pop().unwrap();
+    assert!(provisional.observations.is_empty());
+    assert!(
+        provisional
+            .header
+            .is_some_and(|header| !header.complete && header.native_id == "native")
+    );
+
+    append(&path, b"\n");
+    scan_file(&path, "codex", &mut cache, &mut false).unwrap();
+    let complete = cache.warehouse_commits.as_mut().unwrap().pop().unwrap();
+    assert!(
+        complete
+            .header
+            .is_some_and(|header| header.complete && header.native_id == "native")
+    );
+    assert_eq!(complete.observations.len(), 1);
+    assert_eq!(complete.observations[0].ordinal, Some(0));
 }
