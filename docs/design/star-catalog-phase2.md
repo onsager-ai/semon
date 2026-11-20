@@ -99,8 +99,11 @@ the persisted parser contract changes. Producers and focused readers refuse an
 unsupported index before mutation. Update `unsupported_message` and the operator
 docs with recovery instructions that preserve the refused DB and its sidecars.
 
-Recovery is explicit. Require an independently authorized inventory of the
-expected sources and generations, including any archive-only or retained history
+The host runs recovery itself (owner decision, 2026-11-20): when it finds an
+unsupported Index it starts the rebuild with the verification below, serves no
+history from the refused Index, and reports rebuild progress or the recovery
+error. There is no separate operator command. Require an independently
+authorized inventory of the expected sources and generations, including any archive-only or retained history
 in scope. Directory discovery alone cannot prove completeness. Qualify each
 original through existing local, standalone archive or host custody rules.
 Replay the authorized originals through the same parser and Index transactions
@@ -109,8 +112,8 @@ source and consumed boundary is accounted for. Missing, inaccessible,
 ambiguous or unverifiable originals, including unknown coverage, return a
 recovery error. Preserve the old DB, WAL and SHM, originals, archives and any
 non-rebuildable evidence. There is no old-schema reader, copy of old derived
-rows, import layer or automatic reset. An approved rebuild can select the new
-Index after validation. [Current storage contract](session-source-reader.md#current-semon-storage-contract)
+rows, import layer or automatic reset. The host switches to the new Index only
+after this validation passes. [Current storage contract](session-source-reader.md#current-semon-storage-contract)
 
 ## Observation producers
 
@@ -213,15 +216,15 @@ full-recompute checks that still exercise the current contract.
 
 ## Owner decisions
 
-- **Scope.** Primary SQLite only or include the paused PostgreSQL projection.
-  Recommend SQLite only, consistent with the primary-origin design.
-- **Recovery interface.** Explicit operator command with an expected-source
-  inventory or host-managed rebuild using the same verification. Recommend one
-  operator command for standalone and a callable host entry point only where
-  hosted custody requires it. Both keep the destination separate until complete.
+Decided by the owner on 2026-11-20:
+
+- **Scope.** Primary SQLite only. The paused PostgreSQL projection is not part
+  of phase 2.
+- **Recovery interface.** Host-managed rebuild, with the verification in
+  [Schema and recovery](#schema-and-recovery). The new Index stays separate
+  until it is complete and validated.
 - **Durable runtime evidence.** Record qualified process/environment/ancestry
-  observations on change, or periodically snapshot every process. Recommend
-  recording changes with a capture clock and qualifying live state on reads.
-- **Replacement cost.** Recompute the affected components synchronously, or
-  stage large replacements with a pending selector. Recommend synchronous
-  component-only updates until measurements justify a separate design.
+  observations when they change, with a capture clock; qualify live state on
+  reads.
+- **Replacement cost.** Recompute only the affected components, synchronously
+  in the admission transaction, until measurements justify a separate design.
