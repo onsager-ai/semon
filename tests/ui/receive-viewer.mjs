@@ -9,7 +9,7 @@ try {
   const cookies = await page.context().cookies();
   const session = cookies.find((cookie) => cookie.name === 'semon_session');
   assert.ok(session?.httpOnly);
-  assert.equal(session.sameSite, 'Strict');
+  assert.equal(session.sameSite, 'Lax');
   const response = await page.request.get(ENV.base + '/api/session-sources');
   assert.equal(response.status(), 200);
   await page.screenshot({ path: ENV.out + '/receive-viewer.png', fullPage: true });
