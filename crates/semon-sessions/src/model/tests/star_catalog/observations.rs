@@ -258,7 +258,7 @@ fn claude_observations_match_prototype_at_admission() {
     records.extend([
         json!({"type":"continued-in", "sessionId":"sender", "session_id":"previous", "continuedInSessionId":"next"}),
         json!({"type":"bridge-session", "bridgeSessionId":"bridge-id"}),
-        assistant("sender", ts(0, 1), vec![text("PRIVATE-ASSISTANT"), tool("send", "SendMessage", json!({"recipient":"worker [native]", "content":"PRIVATE-ARGUMENT"}))]),
+        assistant("sender", ts(0, 1), vec![crate::model::tests::text("PRIVATE-ASSISTANT"), tool("send", "SendMessage", json!({"recipient":"worker [native]", "content":"PRIVATE-ARGUMENT"}))]),
         peer("sender", ts(0, 2), "incoming", "peer [native]", 42, "PRIVATE-RELAY"),
     ]);
     let late = result(
