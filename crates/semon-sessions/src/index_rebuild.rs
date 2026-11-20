@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{self, Read},
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use serde::Deserialize;
@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     Input, InputRoot, Options,
     archive::{Archive, NativeSource, RecoveryRecord},
-    events::{self, CACHE_VERSION, EventCache, Stat, store},
+    events::{self, CACHE_VERSION, EventCache, Ledger, Stat, store},
     sealed::LogFile,
     source_change::SourceLock,
     storage::{Namespace, sqlite},
@@ -210,14 +210,52 @@ fn supported(root: InputRoot) -> bool {
     matches!(root, InputRoot::Claude | InputRoot::Codex)
 }
 
-fn local_inventory(options: &Options) -> io::Result<BTreeMap<Input, Stat>> {
+/// Serialize the receiver's marker update with its short recovery observation.
+/// Only the receiver process grants this custody; native replay never holds
+/// this lock while hashing or parsing a log.
+pub fn with_received_file_lock<T>(path: &Path, operation: impl FnOnce() -> T) -> T {
+    type FileLocks = Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>;
+    static LOCKS: OnceLock<FileLocks> = OnceLock::new();
+    let locks = LOCKS.get_or_init(Mutex::default);
+    let entry = Arc::clone(
+        crate::viewer::lock(locks)
+            .entry(path.to_owned())
+            .or_default(),
+    );
+    let result = {
+        let _guard = crate::viewer::lock(&entry);
+        operation()
+    };
+    let mut locks = crate::viewer::lock(locks);
+    if Arc::strong_count(&entry) == 2 {
+        locks.remove(path);
+    }
+    result
+}
+
+struct Original {
+    stat: Stat,
+    generation: Option<String>,
+}
+
+fn is_original(input: &Input) -> bool {
+    supported(input.root) && input.path.ends_with(".jsonl")
+}
+
+fn local_inventory(options: &Options) -> io::Result<BTreeMap<Input, Original>> {
     crate::inputs(options)?
         .into_iter()
-        .filter(|input| supported(input.root) && input.path.ends_with(".jsonl"))
+        .filter(is_original)
         .map(|input| {
             let path = input.full_path(options);
             let stat = Stat::from_metadata(&crate::open_input(&path)?.metadata()?)?;
-            Ok((input, stat))
+            Ok((
+                input,
+                Original {
+                    stat,
+                    generation: None,
+                },
+            ))
         })
         .collect()
 }
@@ -272,90 +310,31 @@ struct ReceiverIdentity {
     ino: u64,
 }
 
-#[derive(PartialEq, Eq)]
-struct ReceiverInventory {
-    markers: BTreeMap<String, Vec<u8>>,
-    rollouts: [Option<BTreeSet<String>>; 2],
-    seals: BTreeMap<Input, Option<crate::archive::Chain>>,
-}
+type Originals = BTreeMap<Input, Original>;
+type ReceiverSeals = BTreeMap<Input, Option<crate::archive::Chain>>;
 
-fn verify_receiver(
-    options: &Options,
-    root: &Path,
-    originals: &BTreeMap<Input, Stat>,
-) -> io::Result<ReceiverInventory> {
-    let mut candidates = BTreeMap::new();
-    // Receiver markers cover metadata inputs as well as native logs. Validate
-    // their bindings without treating metadata files as replayable logs.
-    for input in crate::inputs(options)? {
-        if crate::is_input_path(input.root.as_str(), &input.path) {
-            let key = format!("{}/{}", input.root.as_str(), input.path);
-            candidates.insert(format!("{:x}.json", Sha256::digest(key)), input);
-        }
-    }
-    let mut records = BTreeMap::new();
+fn receiver_inventory(options: &Options, root: &Path) -> io::Result<(Originals, ReceiverSeals)> {
+    // Enumerate markers first so a newly received input cannot leave a marker
+    // in this inventory without its carrier. Appends replace a marker under
+    // the same file lock that protects the binding observation below.
     let marker_root = root.join("sync-generations");
-    let entries = match fs::symlink_metadata(&marker_root) {
-        Ok(meta) if meta.is_dir() => Some(fs::read_dir(&marker_root)?),
+    let mut markers = BTreeSet::new();
+    match fs::symlink_metadata(&marker_root) {
+        Ok(meta) if meta.is_dir() => {
+            for entry in fs::read_dir(&marker_root)? {
+                let name = entry?.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".json") && !name.starts_with('.') {
+                    markers.insert(name);
+                }
+            }
+        }
         Ok(_) => {
             return Err(io::Error::other(
                 "receiver generation directory is not regular",
             ));
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
-    };
-    for entry in entries.into_iter().flatten() {
-        let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if !name.ends_with(".json") || name.starts_with('.') {
-            continue;
-        }
-        let input = candidates.get(&name).ok_or_else(|| {
-            io::Error::other(format!(
-                "receiver generation {name} has no authorized original"
-            ))
-        })?;
-        let mut bytes = Vec::new();
-        crate::open_input(&entry.path())?
-            .take(4097)
-            .read_to_end(&mut bytes)?;
-        if bytes.len() > 4096 {
-            return Err(io::Error::other("receiver generation record is oversized"));
-        }
-        let marker: ReceiverGeneration =
-            serde_json::from_slice(&bytes).map_err(io::Error::other)?;
-        let path = input.full_path(options);
-        let file = crate::open_input(&path)?;
-        let metadata = file.metadata()?;
-        let stat = Stat::from_metadata(&metadata)?;
-        let mut head = Vec::new();
-        file.take(4096).read_to_end(&mut head)?;
-        let signed_mtime = match metadata.modified()?.duration_since(std::time::UNIX_EPOCH) {
-            Ok(time) => time.as_nanos() as i128,
-            Err(error) => -(error.duration().as_nanos() as i128),
-        };
-        if marker.generation.len() != 32
-            || !marker
-                .generation
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-            || marker.length != stat.size
-            || marker.identity.len != stat.size
-            || marker.identity.dev != stat.dev
-            || marker.identity.ino != stat.ino
-            || marker.identity.mtime_ns != Some(signed_mtime)
-            || marker.head_sha256 != format!("{:x}", Sha256::digest(head))
-            || originals
-                .get(input)
-                .is_some_and(|original| original != &stat)
-        {
-            return Err(io::Error::other(format!(
-                "receiver generation changed for {}",
-                path.display()
-            )));
-        }
-        records.insert(name, bytes);
     }
     let facts_path = root.join("facts.json");
     let rollouts = match fs::symlink_metadata(&facts_path) {
@@ -367,6 +346,26 @@ fn verify_receiver(
         Err(error) if error.kind() == io::ErrorKind::NotFound => [None, None],
         Err(error) => return Err(error),
     };
+    let mut originals = BTreeMap::new();
+    for input in crate::inputs(options)? {
+        if !crate::is_input_path(input.root.as_str(), &input.path) {
+            continue;
+        }
+        let key = format!("{}/{}", input.root.as_str(), input.path);
+        let name = format!("{:x}.json", Sha256::digest(key));
+        let path = input.full_path(options);
+        let original = with_received_file_lock(&path, || {
+            observe_received(&path, &marker_root.join(&name), markers.remove(&name))
+        })?;
+        if is_original(&input) {
+            originals.insert(input, original);
+        }
+    }
+    if let Some(name) = markers.first() {
+        return Err(io::Error::other(format!(
+            "receiver generation {name} has no authorized original"
+        )));
+    }
     for path in rollouts.iter().flatten().flatten() {
         let input = Input {
             root: InputRoot::Codex,
@@ -394,48 +393,118 @@ fn verify_receiver(
             Ok((input, custody))
         })
         .collect::<io::Result<_>>()?;
-    Ok(ReceiverInventory {
-        markers: records,
-        rollouts,
-        seals,
-    })
+    Ok((originals, seals))
 }
 
-fn replay_original(
-    cache: &mut EventCache,
-    input: &Input,
-    options: &Options,
-    expected: Stat,
-) -> io::Result<()> {
-    let path = input.full_path(options);
-    let mut dirty = false;
-    events::scan_file(&path, input.root.as_str(), cache, &mut dirty)?;
-    let ledger = cache.committed_rebuild_ledger(&path)?;
-    // The parser permits an incomplete last line. A verified complete suffix
-    // after the committed boundary would mean replay failed to account for it.
-    let mut log = LogFile::open(&path)?;
-    use std::io::{Seek, SeekFrom};
-    log.seek(SeekFrom::Start(ledger.offset))?;
-    let mut remainder = io::BufReader::new(log);
-    use std::io::BufRead;
-    let tail = remainder.skip_until(b'\n')? as u64;
-    if ledger.stat != expected
-        || Stat::from_metadata(&remainder.get_ref().metadata()?)? != expected
-        || ledger.offset.checked_add(tail) != Some(expected.size)
-        || (tail != 0 && {
-            let mut log = remainder.into_inner();
-            log.seek(SeekFrom::Start(expected.size - 1))?;
-            let mut last = [0];
-            log.read_exact(&mut last)?;
-            last[0] == b'\n'
-        })
+fn observe_received(path: &Path, marker_path: &Path, had_marker: bool) -> io::Result<Original> {
+    let file = crate::open_input(path)?;
+    let metadata = file.metadata()?;
+    let stat = Stat::from_metadata(&metadata)?;
+    let marker = match crate::open_input(marker_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound && !had_marker => {
+            return Ok(Original {
+                stat,
+                generation: None,
+            });
+        }
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    marker.take(4097).read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        return Err(io::Error::other("receiver generation record is oversized"));
+    }
+    let marker: ReceiverGeneration = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+    let mut head = Vec::new();
+    file.take(4096).read_to_end(&mut head)?;
+    let signed_mtime = match metadata.modified()?.duration_since(std::time::UNIX_EPOCH) {
+        Ok(time) => time.as_nanos() as i128,
+        Err(error) => -(error.duration().as_nanos() as i128),
+    };
+    if marker.generation.len() != 32
+        || !marker
+            .generation
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || marker.length != stat.size
+        || marker.identity.len != stat.size
+        || marker.identity.dev != stat.dev
+        || marker.identity.ino != stat.ino
+        || marker.identity.mtime_ns != Some(signed_mtime)
+        || marker.head_sha256 != format!("{:x}", Sha256::digest(head))
     {
         return Err(io::Error::other(format!(
-            "original boundary changed for {}",
+            "receiver generation changed for {}",
             path.display()
         )));
     }
+    Ok(Original {
+        stat,
+        generation: Some(marker.generation),
+    })
+}
+
+fn inventory(options: &Options) -> io::Result<(Originals, ReceiverSeals)> {
+    match options.index_recovery.receiver_custody() {
+        Some(root) => receiver_inventory(options, root),
+        None => Ok((local_inventory(options)?, BTreeMap::new())),
+    }
+}
+
+fn boundary_changed(path: &Path) -> io::Error {
+    io::Error::other(format!("original boundary changed for {}", path.display()))
+}
+
+fn hash_bytes(log: &mut LogFile, length: u64, hash: &mut Sha256, path: &Path) -> io::Result<()> {
+    if io::copy(&mut log.take(length), hash)? != length {
+        return Err(boundary_changed(path));
+    }
     Ok(())
+}
+
+fn original_proof(
+    path: &Path,
+    expected: Stat,
+    observed: Stat,
+    ledger: Option<&Ledger>,
+) -> io::Result<[u8; 32]> {
+    let mut log = LogFile::open(path)?;
+    let stat = Stat::from_metadata(&log.metadata()?)?;
+    if !observed.is_prefix_of(&stat) {
+        return Err(boundary_changed(path));
+    }
+    let mut hash = Sha256::new();
+    if let Some(ledger) = ledger {
+        if ledger.stat != expected || ledger.offset > expected.size {
+            return Err(boundary_changed(path));
+        }
+        hash_bytes(&mut log, ledger.offset, &mut hash, path)?;
+        if <[u8; 32]>::from(hash.clone().finalize()) != ledger.prefix {
+            return Err(boundary_changed(path));
+        }
+        // The replay must cover every complete record in the captured range.
+        // The bytes after its receipt may only be an unfinished last line.
+        let mut remaining = expected.size - ledger.offset;
+        let mut buffer = [0; 8192];
+        while remaining != 0 {
+            let len = remaining.min(buffer.len() as u64) as usize;
+            let chunk = &mut buffer[..len];
+            log.read_exact(chunk)?;
+            if chunk.contains(&b'\n') {
+                return Err(boundary_changed(path));
+            }
+            hash.update(chunk);
+            remaining -= len as u64;
+        }
+    } else {
+        hash_bytes(&mut log, expected.size, &mut hash, path)?;
+    }
+    let current = Stat::from_metadata(&crate::open_input(path)?.metadata()?)?;
+    if !stat.is_prefix_of(&current) || (current.size == stat.size && current != stat) {
+        return Err(boundary_changed(path));
+    }
+    Ok(hash.finalize().into())
 }
 
 fn rebuild(
@@ -449,7 +518,15 @@ fn rebuild(
             "the rebuilt Index placement is already occupied",
         ));
     }
-    let originals = local_inventory(options)?;
+    let (originals, seals) = inventory(options)?;
+    let mut proofs = BTreeMap::new();
+    for (input, original) in &originals {
+        let path = input.full_path(options);
+        proofs.insert(
+            input,
+            original_proof(&path, original.stat, original.stat, None)?,
+        );
+    }
     let archive = Archive::new(crate::archive::standalone_dir(&options.cache));
     let native_archive = read_native_archive(options, &archive)?;
     let received_archive = options
@@ -460,11 +537,6 @@ fn rebuild(
         Some(archive) => archive.recovery_inventory()?,
         None => Vec::new(),
     };
-    let receiver = options
-        .index_recovery
-        .receiver_custody()
-        .map(|root| verify_receiver(options, root, &originals))
-        .transpose()?;
     let mut archives = BTreeMap::<Input, Vec<(&Archive, &RecoveryRecord)>>::new();
     for record in &native_archive {
         let input = standalone_input(options, &record.source).expect("authorized native archive");
@@ -489,9 +561,10 @@ fn rebuild(
     let index = stage.0.join("index.sqlite3");
     let mut cache = EventCache::open_scoped_at(&index, &options.cache).map_err(io::Error::other)?;
     sqlite::bind(&mut cache, namespace).map_err(io::Error::other)?;
+    let mut ledgers = BTreeMap::new();
     for (done, input) in sources.into_iter().enumerate() {
         let path = input.full_path(options);
-        let live = originals.get(input).copied();
+        let live = originals.get(input).map(|original| original.stat);
         let mut native: Option<&NativeSource> = None;
         if let Some(records) = archives.get(input) {
             for (archive, record) in records {
@@ -521,7 +594,8 @@ fn rebuild(
             }
         }
         if let Some(stat) = live {
-            replay_original(&mut cache, input, options, stat)?;
+            events::scan_rebuild_file(&path, input.root.as_str(), &mut cache, stat)?;
+            ledgers.insert(input, cache.committed_rebuild_ledger(&path)?);
         } else if let Some(native) = native {
             events::scan_archive(options, native, &mut cache, &mut false)?;
             if cache.committed_rebuild_ledger(&path)? != native.ledger {
@@ -532,7 +606,8 @@ fn rebuild(
     }
     drop(cache);
     store::checkpoint_rebuilt_index(&index)?;
-    if local_inventory(options)? != originals
+    let (current, current_seals) = inventory(options)?;
+    if current_seals != seals
         || read_native_archive(options, &archive)? != native_archive
         || received_archive
             .as_ref()
@@ -540,14 +615,22 @@ fn rebuild(
             .transpose()?
             .unwrap_or_default()
             != received
-        || options
-            .index_recovery
-            .receiver_custody()
-            .map(|root| verify_receiver(options, root, &originals))
-            .transpose()?
-            != receiver
     {
-        return Err(io::Error::other("source inventory changed during rebuild"));
+        return Err(io::Error::other("source custody changed during rebuild"));
+    }
+    for (input, original) in &originals {
+        let path = input.full_path(options);
+        let current = current.get(input).ok_or_else(|| boundary_changed(&path))?;
+        if !original.stat.is_prefix_of(&current.stat)
+            || original
+                .generation
+                .as_ref()
+                .is_some_and(|generation| current.generation.as_ref() != Some(generation))
+            || original_proof(&path, original.stat, current.stat, Some(&ledgers[input]))?
+                != proofs[input]
+        {
+            return Err(boundary_changed(&path));
+        }
     }
     // The completed database is durable before the single atomic publication.
     // A hard link refuses occupied paths without replacing a previous Index.
@@ -716,6 +799,136 @@ mod tests {
             assert_eq!(active_path(&options.cache), old);
             assert_eq!(fs::read(&old).unwrap(), original);
             assert!(!rebuilt_path(&options.cache).exists());
+        }
+    }
+
+    fn write_generation(root: &Path, path: &Path) {
+        let directory = root.join("sync-generations");
+        fs::create_dir_all(&directory).unwrap();
+        let key = path.strip_prefix(root).unwrap().to_str().unwrap();
+        let key = Sha256::digest(key.replace(std::path::MAIN_SEPARATOR, "/"));
+        let metadata = fs::metadata(path).unwrap();
+        let stat = Stat::from_metadata(&metadata).unwrap();
+        let mut head = Vec::new();
+        fs::File::open(path)
+            .unwrap()
+            .take(4096)
+            .read_to_end(&mut head)
+            .unwrap();
+        let marker = serde_json::json!({
+            "generation": "a".repeat(32),
+            "length": stat.size,
+            "identity": {"len": stat.size, "mtime_ns": stat.modified_ns, "dev": stat.dev, "ino": stat.ino},
+            "head_sha256": format!("{:x}", Sha256::digest(head)),
+        });
+        fs::write(directory.join(format!("{key:x}.json")), marker.to_string()).unwrap();
+    }
+
+    #[test]
+    fn local_and_receiver_rebuilds_cut_a_boundary_while_a_writer_appends() {
+        use std::{io::Write, sync::mpsc, thread, time::Duration};
+
+        for receiver in [false, true] {
+            let (stage, mut options) = fixture();
+            if receiver {
+                options.index_recovery = crate::IndexRecovery::Received(stage.0.clone());
+            }
+            let (path, record) = source(&options, "live");
+            if receiver {
+                write_generation(&stage.0, &path);
+            }
+            let old = refused(&options, 49);
+            let before = fs::read(&old).unwrap();
+            let namespace = Namespace::new(if receiver { "machine" } else { "local" }).unwrap();
+            let appends = thread::scope(|scope| {
+                let (append, requested) = mpsc::channel();
+                let (written, observe) = mpsc::channel();
+                let path = &path;
+                let record = &record;
+                let root = &stage.0;
+                scope.spawn(move || {
+                    for () in requested {
+                        with_received_file_lock(path, || {
+                            fs::OpenOptions::new()
+                                .append(true)
+                                .open(path)
+                                .unwrap()
+                                .write_all(record)
+                                .unwrap();
+                            if receiver {
+                                write_generation(root, path);
+                            }
+                        });
+                        written.send(fs::metadata(path).unwrap().len()).unwrap();
+                    }
+                });
+                rebuild(
+                    &options,
+                    &namespace,
+                    &rebuilt_path(&options.cache),
+                    |done, total| {
+                        assert_eq!(total, 1);
+                        assert!(done <= total);
+                        append.send(()).unwrap();
+                        let size = observe.recv_timeout(Duration::from_secs(10)).unwrap();
+                        assert_eq!(size, (done as u64 + 2) * record.len() as u64);
+                    },
+                )
+                .unwrap();
+                assert_eq!(active_path(&options.cache), rebuilt_path(&options.cache));
+                // A further record lands after publication.
+                append.send(()).unwrap();
+                observe.recv_timeout(Duration::from_secs(10)).unwrap()
+            });
+            assert_eq!(appends, 4 * record.len() as u64);
+            assert_eq!(fs::read(old).unwrap(), before);
+            let mut cache = sqlite::open_index(&options, &namespace).unwrap();
+            let ledger = cache.committed_rebuild_ledger(&path).unwrap();
+            assert_eq!(ledger.offset, record.len() as u64);
+            assert_eq!(ledger.prefix, <[u8; 32]>::from(Sha256::digest(&record)));
+            events::scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+            assert_eq!(
+                cache.committed_rebuild_ledger(&path).unwrap().offset,
+                appends
+            );
+        }
+    }
+
+    #[test]
+    fn rewritten_or_truncated_original_during_rebuild_refuses_publication() {
+        for truncate in [false, true] {
+            let (_stage, options) = fixture();
+            let (path, record) = source(&options, "live");
+            let old = refused(&options, 49);
+            let before = fs::read(&old).unwrap();
+            let rewritten = if truncate {
+                Vec::new()
+            } else {
+                // Retain the inode and grow, but alter bytes inside the prefix.
+                let changed = String::from_utf8(record.clone())
+                    .unwrap()
+                    .replace("fixture", "changed");
+                [changed.as_bytes(), &record].concat()
+            };
+            let namespace = Namespace::new("local").unwrap();
+            let error = rebuild(
+                &options,
+                &namespace,
+                &rebuilt_path(&options.cache),
+                |done, total| {
+                    if done == total {
+                        fs::write(&path, &rewritten).unwrap();
+                    }
+                },
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains("original boundary changed"),
+                "{error}"
+            );
+            assert_eq!(active_path(&options.cache), old);
+            assert_eq!(fs::read(old).unwrap(), before);
+            assert_eq!(fs::read(path).unwrap(), rewritten);
         }
     }
 

@@ -369,15 +369,23 @@ source membership and the maintenance cursor with that source's Index advancemen
 Writable and focused Index opens refuse unsupported storage before mutation.
 When the source-owning host encounters a refused Index, it inventories its configured Claude
 and Codex roots, verified standalone archive manifests, and, for received
-machines, receiver generations, Facts and archive custody. A missing or changed
-referenced original or incomplete custody inventory stops recovery. Rebuild
+machines, receiver generations, Facts and archive custody. Receiver appends
+retain the transfer generation ID and update the marker's length, timestamp and
+head hash. Recovery observes the marker and file together under the per-file
+write lock. A missing referenced original, a rewrite or truncation of a captured
+prefix, or incomplete archive custody stops recovery. Rebuild
 never uses the refused Index as an inventory or copies rows from it. Analytics
 materialization, ASI and callers supplying an Index without native custody
 retain the existing refusal behavior.
 
 The host admits verified originals through the normal native parser and Index
 write transactions in a private `.index-rebuild-<id>/` staging directory beside
-the cache. After all inventoried source boundaries are committed and rechecked,
+the cache. Replay fixes each source's read limit at its captured length and
+verifies the complete-record receipt and captured bytes before publication.
+Appended tails and newly discovered sources enter through normal admission.
+`push --watch` uses the local custody-aware Index opener in its facts worker and
+continues shipping native files while recovery runs. After all inventoried source
+boundaries are committed and rechecked,
 it checkpoints and publishes `sessions-index.rebuilt-50-41.sqlite3` atomically
 (`50` is the storage schema and `41` is the parser version). The original
 `sessions-index.sqlite3` remains at its original path with its `-wal` and `-shm`.

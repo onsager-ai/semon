@@ -176,7 +176,8 @@ pub fn local_facts_in(sources: &crate::SessionSources, source_key: &str) -> io::
 /// The index commits each file's change as it reads it.
 pub struct FactsSource {
     options: crate::Options,
-    cache: Result<EventCache, String>,
+    source_key: String,
+    cache: Option<EventCache>,
     dirty: bool,
     owner: Option<std::sync::Arc<crate::native_evidence::NativeEvidence>>,
 }
@@ -189,7 +190,8 @@ impl FactsSource {
         if owner.storage.is_postgres() {
             return Ok(Self {
                 options: owner.options.clone(),
-                cache: Err("runtime-owned facts index".into()),
+                source_key: source_key.to_owned(),
+                cache: None,
                 dirty: false,
                 owner: Some(owner),
             });
@@ -197,18 +199,12 @@ impl FactsSource {
         Ok(Self::new(&owner.options, source_key))
     }
 
-    /// Opens the event index once for repeated facts collection.
+    /// Keeps the event Index open after the first successful collection.
     pub fn new(options: &crate::Options, source_key: &str) -> Self {
         Self {
             options: options.clone(),
-            cache: crate::storage::Namespace::new(source_key)
-                .map_err(|error| error.to_string())
-                .and_then(|namespace| {
-                    let mut cache = EventCache::open(&options.cache)?;
-                    crate::storage::sqlite::bind(&mut cache, &namespace)
-                        .map_err(|error| error.to_string())?;
-                    Ok(cache)
-                }),
+            source_key: source_key.to_owned(),
+            cache: None,
             dirty: false,
             owner: None,
         }
@@ -225,10 +221,20 @@ impl FactsSource {
                 return Err(io::Error::other("PostgreSQL feature required"));
             }
         }
-        let cache = self
-            .cache
-            .as_mut()
-            .map_err(|error| io::Error::other(error.clone()))?;
+        if self.cache.is_none() {
+            let namespace =
+                crate::storage::Namespace::new(&self.source_key).map_err(io::Error::other)?;
+            let cache = if self.options.index_recovery.allowed() {
+                crate::storage::sqlite::open_index(&self.options, &namespace)
+                    .map_err(io::Error::other)?
+            } else {
+                let mut cache = EventCache::open(&self.options.cache).map_err(io::Error::other)?;
+                crate::storage::sqlite::bind(&mut cache, &namespace).map_err(io::Error::other)?;
+                cache
+            };
+            self.cache = Some(cache);
+        }
+        let cache = self.cache.as_mut().expect("opened facts Index");
         cache.refresh_reported_runs(&self.options.claude_json, model::now_ms(), &mut self.dirty);
         collect_facts(&self.options, cache, &mut self.dirty)
     }

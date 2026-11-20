@@ -1,4 +1,5 @@
 mod index_rebuild;
+pub use index_rebuild::with_received_file_lock;
 mod native_prefix;
 pub use native_prefix::codex_native_id_prefix;
 mod native_homes;
