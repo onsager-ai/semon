@@ -50,10 +50,10 @@ pub(super) fn maintain(
     }
     let old = dimension(tx, source)?;
     let lineage = harness == "claude" && !crate::native_sidecar::agent_path(path);
-    let identity = if harness == "claude" {
-        Some("physical")
-    } else {
-        header_kind
+    let (identity, identity_pos) = match harness {
+        "claude" => (Some("physical"), -1),
+        "copilot" => (Some("session-id"), 0),
+        _ => (header_kind, -1),
     };
     if harness == "codex" && before == 0 && identity.is_none() {
         // A provisional header may disappear as its first line is finished.
@@ -66,12 +66,12 @@ pub(super) fn maintain(
         put(tx,
             "INSERT INTO dim_session(source,harness,native_id,parent_id,nickname,agent_path,continued,lineage)
              SELECT source,?2,native_id,parent_id,nickname,agent_path,0,?4
-             FROM fact_session_observation WHERE source=?1 AND pos=-1 AND block=0 AND kind=?3 AND occurrence=0
+             FROM fact_session_observation WHERE source=?1 AND pos=?5 AND block=0 AND kind=?3
              ON CONFLICT(source) DO UPDATE SET native_id=excluded.native_id,parent_id=excluded.parent_id,
                nickname=excluded.nickname,agent_path=excluded.agent_path
              WHERE dim_session.native_id IS NOT excluded.native_id OR dim_session.parent_id IS NOT excluded.parent_id
                 OR dim_session.nickname IS NOT excluded.nickname OR dim_session.agent_path IS NOT excluded.agent_path",
-            params![source,harness,kind,lineage],
+            params![source,harness,kind,lineage,identity_pos],
         )?;
     }
     if old.is_none() && dimension(tx, source)?.is_none() {

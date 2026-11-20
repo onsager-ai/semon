@@ -842,10 +842,16 @@ mod tests {
 
     #[test]
     fn host_rebuilds_unsupported_stores_from_native_and_archive_custody() {
-        for version in [0, 49, store::SCHEMA_VERSION + 1] {
+        for version in [0, store::SCHEMA_VERSION - 1, store::SCHEMA_VERSION + 1] {
             let (_stage, options) = fixture();
             let (live, bytes) = source(&options, "live");
             let archived = archive(&options, "archive-only");
+            let copilot = options
+                .copilot_home
+                .join("session-state/copilot-fixture/events.jsonl");
+            let copilot_bytes = include_bytes!("../tests/fixtures/star-catalog/copilot.jsonl");
+            fs::create_dir_all(copilot.parent().unwrap()).unwrap();
+            fs::write(&copilot, copilot_bytes).unwrap();
             let old = refused(&options, version);
             let original = fs::read(&old).unwrap();
             assert!(EventCache::open_scoped(&options.cache).is_err());
@@ -860,6 +866,17 @@ mod tests {
                 bytes.len() as u64
             );
             assert!(cache.committed_rebuild_ledger(&archived).is_ok());
+            assert_eq!(
+                cache.committed_rebuild_ledger(&copilot).unwrap().offset,
+                copilot_bytes.len() as u64
+            );
+            let db = rusqlite::Connection::open(active_path(&options.cache)).unwrap();
+            let usage: (String, i64) = db.query_row(
+                "SELECT d.native_id,u.input FROM dim_session d JOIN current_copilot_usage u USING(source)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            assert_eq!(usage, ("copilot-fixture".to_owned(), 12000));
             assert!(!archived.exists());
             assert_eq!(status(&options.cache), None);
         }

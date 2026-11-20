@@ -2,7 +2,7 @@
 -- source and custody checks. Warehouse rows never authorize body access.
 CREATE TABLE warehouse_source (
   source INTEGER PRIMARY KEY,
-  origin TEXT NOT NULL, harness TEXT NOT NULL CHECK(harness IN ('claude','codex')),
+  origin TEXT NOT NULL, harness TEXT NOT NULL CHECK(harness IN ('claude','codex','copilot')),
   logical_source TEXT NOT NULL, incarnation INTEGER NOT NULL,
   carrier TEXT NOT NULL,
   ledger TEXT NOT NULL,
@@ -21,7 +21,7 @@ CREATE TABLE fact_session_observation (
 CREATE TABLE fact_record (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   occurrence INTEGER NOT NULL, ordinal INTEGER, kind TEXT, uuid TEXT, message_id TEXT,
-  ts INTEGER, gap INTEGER NOT NULL,
+  parent_id TEXT, ts INTEGER, gap INTEGER NOT NULL,
   PRIMARY KEY(source,pos,block,occurrence)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE fact_relation_observation (
@@ -40,6 +40,19 @@ CREATE TABLE fact_step_billing (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER, billing TEXT NOT NULL,
   PRIMARY KEY(source,pos,block,kind,occurrence)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE fact_copilot_shutdown (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
+  occurrence INTEGER NOT NULL, ordinal INTEGER, event_id TEXT NOT NULL,
+  ts INTEGER, complete INTEGER NOT NULL,
+  PRIMARY KEY(source,pos,block,occurrence)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE fact_copilot_usage (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
+  occurrence INTEGER NOT NULL, ordinal INTEGER, model TEXT NOT NULL,
+  input INTEGER NOT NULL, output INTEGER NOT NULL, cached INTEGER NOT NULL,
+  cache_write INTEGER NOT NULL, reasoning INTEGER NOT NULL,
+  PRIMARY KEY(source,pos,block,occurrence,model)
 ) STRICT, WITHOUT ROWID;
 CREATE TABLE fact_label_observation (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
@@ -228,6 +241,12 @@ WITH identities AS MATERIALIZED (
   SELECT message_id,uuid FROM identities GROUP BY message_id,uuid HAVING count(*)>1
 )
 SELECT DISTINCT i.owner,i.message_id FROM identities i JOIN shared s USING(message_id,uuid);
+-- Select the whole latest shutdown before selecting models. An incomplete
+-- shutdown, or a model omitted from a later snapshot, clears earlier usage.
+CREATE VIEW current_copilot_usage AS
+SELECT m.usage_owner AS owner,u.* FROM bridge_session_owner m
+JOIN fact_copilot_usage u ON u.source=m.source
+ AND u.pos=(SELECT max(s.pos) FROM fact_copilot_shutdown s WHERE s.source=m.source);
 CREATE VIEW usage_totals AS
 SELECT u.owner,
   sum(CASE WHEN s.owner IS NULL THEN u.input ELSE 0 END) AS input,
@@ -237,7 +256,10 @@ SELECT u.owner,
   sum(CASE WHEN s.owner IS NOT NULL THEN u.cached ELSE 0 END) AS shared_cached,
   sum(CASE WHEN s.owner IS NOT NULL THEN u.output ELSE 0 END) AS shared_output
 FROM current_usage u LEFT JOIN shared_messages s
-  ON s.owner=u.owner AND s.message_id=u.message_id GROUP BY u.owner;
+  ON s.owner=u.owner AND s.message_id=u.message_id GROUP BY u.owner
+UNION ALL
+SELECT owner,sum(input),sum(cached),sum(output),0,0,0
+FROM current_copilot_usage GROUP BY owner;
 
 CREATE VIEW session_list AS
 WITH keys AS MATERIALIZED (SELECT * FROM catalog_keys),
@@ -258,6 +280,7 @@ SELECT k.id,k.owner,k.harness,p.id AS parent,t.source AS title_source,t.pos AS t
   CASE WHEN k.harness='codex' AND d.parent_id IS NOT NULL THEN
     coalesce(nullif(d.agent_path,''),'Codex subagent')
     WHEN k.harness='codex' THEN coalesce(nullif(d.nickname,''),'Codex run')
+    WHEN k.harness='copilot' THEN 'Copilot CLI'
     ELSE 'proj' END AS fallback_title,
   coalesce(model.model,CASE WHEN k.harness='codex' THEN 'codex' ELSE '—' END) AS model,
   CASE WHEN k.harness='codex' THEN 'off' ELSE 'done' END AS status,
@@ -289,7 +312,8 @@ WITH unique_calls AS (
 SELECT c.source,c.pos,c.call_id,r.pos AS result_pos FROM fact_tool_call c
 JOIN unique_calls u USING(source,call_id)
 LEFT JOIN fact_tool_result r ON r.source=c.source AND r.call_id=c.call_id
-  AND (r.call_pos IS NULL OR (r.call_pos=c.pos AND r.call_block=c.block));
+  AND ((r.call_pos IS NULL AND r.kind<>'copilot-execution')
+       OR (r.call_pos=c.pos AND r.call_block=c.block));
 
 -- Precedence and cycle qualification cross lineage boundaries at read time.
 CREATE VIEW parent_selection AS

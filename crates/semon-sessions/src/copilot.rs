@@ -26,6 +26,8 @@ pub struct CopilotUsage {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Index {
+    /// Next physical record ordinal for a qualified session-state log.
+    pub(crate) next_ordinal: Option<u64>,
     pub version: String,
     pub session_id: String,
     pub seen: BTreeSet<String>,

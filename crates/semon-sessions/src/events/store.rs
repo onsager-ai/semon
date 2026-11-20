@@ -260,7 +260,7 @@ fn emit_catalog_publish_attempt(
 // v48: namespace-relative origin body rows, source ownership and external FTS5.
 // v49: publication-bound native archive chain evidence, separate from retention.
 // v50: origin warehouse observations and current source membership.
-pub(crate) const SCHEMA_VERSION: i64 = 50;
+pub(crate) const SCHEMA_VERSION: i64 = 51;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -6813,6 +6813,7 @@ mod tests {
                     kind: None,
                     uuid: None,
                     message_id: None,
+                    parent_id: None,
                     time: Some(17),
                 },
             );

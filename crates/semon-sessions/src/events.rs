@@ -101,7 +101,8 @@ pub(crate) fn set_claude_sidecar_hook(hook: impl FnOnce() + 'static) {
 /// projection stores a bounded timeline preview beside it.
 /// v39: activity steps retain exact Codex call provenance for transcript anchors.
 /// v41: usage and compaction signals retain physical record ordinals for ASI anchors.
-pub(crate) const CACHE_VERSION: u32 = 41;
+/// v42: retain the next physical record ordinal for qualified Copilot sources.
+pub(crate) const CACHE_VERSION: u32 = 42;
 
 pub(crate) type FileRevision = (u64, u64, u64, [u8; 32], [u8; 32], Option<i128>);
 
@@ -3115,7 +3116,7 @@ fn parse_archived_original(
     }
     index.handoff_index = Some(crate::native_handoff::Index::repair(file, 0)?);
     index.dirty_rows = Some(DirtyRows::begin(&index));
-    let (offset, parsed, _) = parse(file, 0, harness, &mut index, None, None)?;
+    let (offset, parsed, _) = parse(file, 0, path, harness, &mut index, None, None)?;
     index.dirty_rows = None;
     let captured = crate::source_chunks::capture(file, offset, 0)?;
     if captured.parsed != parsed {
@@ -3545,6 +3546,7 @@ fn scan_file_inner(
         let (offset, parsed, bounded) = parse(
             &mut file,
             from,
+            path,
             harness,
             writable,
             cache.scan_byte_budget,
@@ -3779,6 +3781,7 @@ fn scan_file_inner(
 fn parse(
     file: &mut (impl Read + Seek),
     from: u64,
+    path: &Path,
     harness: &str,
     index: &mut FileIndex,
     budget: Option<u64>,
@@ -3790,6 +3793,7 @@ fn parse(
     let mut line = Vec::new();
     let mut parsed = Sha256::new();
     let mut bounded = false;
+    let mut copilot_ordinal = index.copilot.as_ref().and_then(|index| index.next_ordinal);
     loop {
         if budget.is_some_and(|budget| offset.saturating_sub(from) >= budget) {
             bounded = true;
@@ -3819,7 +3823,9 @@ fn parse(
                 if let Some(handoffs) = &mut index.handoff_index {
                     let batch = &mut index.warehouse_observations;
                     handoffs.observe_with(&line, offset, false, &value, |block, id, tool| {
-                        if let Some(batch) = batch {
+                        if let Some(batch) = batch
+                            && harness != "copilot"
+                        {
                             batch.push_eof(
                                 offset,
                                 block,
@@ -3878,12 +3884,20 @@ fn parse(
         } else {
             store::native_usage::Seen::default()
         };
+        if harness == "copilot" && line_offset == 0 {
+            copilot_ordinal = record.as_ref().ok().and_then(|record| {
+                let expected = path.parent()?.file_name()?.to_str()?;
+                crate::copilot::validate_start(record, expected)
+                    .ok()
+                    .map(|_| 0)
+            });
+        }
         let record_ordinal = index
             .tree_summary
             .as_ref()
             .map(|summary| summary.line_count);
         if let Some(batch) = &mut index.warehouse_observations {
-            batch.begin_record(record_ordinal);
+            batch.begin_record(record_ordinal.or(copilot_ordinal));
         }
         if let Some(summary) = &mut index.tree_summary {
             if harness == "codex"
@@ -3910,17 +3924,20 @@ fn parse(
         match record {
             Ok(record) if record.is_object() => {
                 let before_events = index.events.len();
-                index.warehouse_fact(line_offset, 0, || Fact::Record {
-                    kind: field(&record, "type").map(str::to_owned),
-                    uuid: field(&record, "uuid")
-                        .or_else(|| field(&record, "id"))
-                        .map(str::to_owned),
-                    message_id: record
-                        .get("message")
-                        .and_then(|m| field(m, "id"))
-                        .map(str::to_owned),
-                    time: record_time(&record),
-                });
+                if harness != "copilot" {
+                    index.warehouse_fact(line_offset, 0, || Fact::Record {
+                        kind: field(&record, "type").map(str::to_owned),
+                        uuid: field(&record, "uuid")
+                            .or_else(|| field(&record, "id"))
+                            .map(str::to_owned),
+                        message_id: record
+                            .get("message")
+                            .and_then(|m| field(m, "id"))
+                            .map(str::to_owned),
+                        parent_id: None,
+                        time: record_time(&record),
+                    });
+                }
                 let before_signals = index.signals.len();
                 if let Some(markers) = &mut index.marker_index
                     && let Some(marker) = markers.observe(&line, line_offset, true, &record)
@@ -3939,7 +3956,9 @@ fn parse(
                         true,
                         &record,
                         |block, id, tool| {
-                            if let Some(batch) = batch {
+                            if let Some(batch) = batch
+                                && harness != "copilot"
+                            {
                                 batch.push(
                                     line_offset,
                                     block,
@@ -3996,11 +4015,15 @@ fn parse(
                 }
             }
         }
+        copilot_ordinal = copilot_ordinal.map(|ordinal| ordinal + 1);
         if let (Some(observation), Some(observations)) =
             (observation, &mut index.native_usage_observations)
         {
             observations.push(observation);
         }
+    }
+    if let Some(copilot) = &mut index.copilot {
+        copilot.next_ordinal = copilot_ordinal;
     }
     Ok((offset, parsed.finalize().into(), bounded))
 }
@@ -6103,7 +6126,7 @@ impl FileIndex {
         })
     }
 
-    fn codex_result_fact(
+    fn tool_result_fact(
         &mut self,
         id: &str,
         call_index: Option<usize>,
@@ -6131,7 +6154,7 @@ impl FileIndex {
         });
     }
 
-    fn codex_call_fact(&mut self, event: &Event, record: Option<&Value>) {
+    fn tool_call_fact(&mut self, event: &Event, record: Option<&Value>) {
         self.warehouse_fact(event.o, event.b, || {
             let (target_key, name_key) = match event.n.as_deref() {
                 Some(
@@ -6229,7 +6252,7 @@ fn codex_connector_tool(summary: &mut FileIndex, item: &Value, offset: u64, time
         })
     });
     if let Some(index) = mirror {
-        summary.codex_result_fact(id, mirror, &reply, "connector", None);
+        summary.tool_result_fact(id, mirror, &reply, "connector", None);
         summary.pending.remove(id);
         if let Some(event) = summary.event_mut(index) {
             event.r = Some(reply);
@@ -6248,10 +6271,10 @@ fn codex_connector_tool(summary: &mut FileIndex, item: &Value, offset: u64, time
         r: Some(reply.clone()),
         ..Event::default()
     };
-    summary.codex_call_fact(&event, None);
+    summary.tool_call_fact(&event, None);
     let call = summary.events.len();
     tool_event(summary, event);
-    summary.codex_result_fact(id, Some(call), &reply, "connector", None);
+    summary.tool_result_fact(id, Some(call), &reply, "connector", None);
 }
 
 /// Claude Code lines: `offset` is the line's byte offset.
@@ -6943,7 +6966,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                 None
             };
             if operation && let Some(id) = field(item, "id") {
-                summary.codex_result_fact(
+                summary.tool_result_fact(
                     id,
                     yielded
                         .or(parent)
@@ -7034,7 +7057,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                 let denied = status.is_some_and(|status| status.eq_ignore_ascii_case("declined"));
                 let failed =
                     denied || status == Some("failed") || code.is_some_and(|code| code != 0);
-                summary.codex_result_fact(
+                summary.tool_result_fact(
                     id,
                     summary.warehouse_call_index(id),
                     &Reply {
@@ -7164,7 +7187,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                     poll,
                     ..Event::default()
                 };
-                summary.codex_call_fact(&event, Some(record));
+                summary.tool_call_fact(&event, Some(record));
                 tool_event(summary, event);
             }
             Some("function_call_output" | "custom_tool_call_output" | "tool_search_output") => {
@@ -7196,7 +7219,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                         f: flags,
                         ..Reply::default()
                     };
-                    summary.codex_result_fact(
+                    summary.tool_result_fact(
                         id,
                         summary.warehouse_call_index(id),
                         &reply,
@@ -7279,6 +7302,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
 /// Native Copilot records preserve exact physical event and call identities.
 pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
     let Some(identity) = field(record, "id").filter(|id| !id.is_empty()) else {
+        summary.warehouse_fact(offset, 0, || Fact::Gap);
         gap(summary, offset);
         return;
     };
@@ -7300,9 +7324,17 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
         .seen
         .insert(identity.to_owned())
     {
+        summary.warehouse_fact(offset, 0, || Fact::Gap);
         return;
     }
     let time = record_time(record);
+    summary.warehouse_fact(offset, 0, || Fact::Record {
+        kind: field(record, "type").map(str::to_owned),
+        uuid: Some(identity.to_owned()),
+        message_id: field(data, "messageId").map(str::to_owned),
+        parent_id: field(record, "parentId").map(str::to_owned),
+        time,
+    });
     if let Some(timestamp) = field(record, "timestamp")
         && time.is_some()
     {
@@ -7321,12 +7353,20 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
     };
     match field(record, "type").unwrap_or("") {
         "session.start" => {
+            if offset == 0
+                && let Some(id) = field(data, "sessionId")
+            {
+                summary.warehouse_fact(offset, 0, || Fact::SessionId(id.to_owned()));
+            }
             summary.cwd = data
                 .get("context")
                 .and_then(|c| field(c, "cwd"))
                 .map(str::to_owned);
             summary.entrypoint = Some("copilot-cli".into());
             summary.last_model = field(data, "selectedModel").map(str::to_owned);
+            if let Some(model) = field(data, "selectedModel") {
+                summary.warehouse_fact(offset, 0, || Fact::Model(model.to_owned()));
+            }
             setting(
                 summary,
                 SignalKind::Model,
@@ -7351,6 +7391,7 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
             setting(summary, SignalKind::Model, offset, time, model);
             if let Some(model) = model {
                 summary.last_model = Some(model.to_owned());
+                summary.warehouse_fact(offset, 0, || Fact::Model(model.to_owned()));
             }
         }
         "user.message" => {
@@ -7365,6 +7406,7 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
         "assistant.message" => {
             if let Some(model) = field(data, "model") {
                 summary.last_model = Some(model.into());
+                summary.warehouse_fact(offset, 0, || Fact::Model(model.to_owned()));
                 setting(summary, SignalKind::Model, offset, time, Some(model));
             }
             if field(data, "content").is_some_and(|text| !text.is_empty()) {
@@ -7389,17 +7431,16 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
                         }
                     }
                 }
+                let call = Event {
+                    k: Kind::Tool,
+                    b: block as u32,
+                    id: id.map(str::to_owned),
+                    n: field(request, "name").map(str::to_owned),
+                    ..event.clone()
+                };
+                summary.tool_call_fact(&call, None);
                 // Repeated native call ids are ambiguous, never resolved by proximity.
-                tool_event(
-                    summary,
-                    Event {
-                        k: Kind::Tool,
-                        b: block as u32,
-                        id: id.map(str::to_owned),
-                        n: field(request, "name").map(str::to_owned),
-                        ..event.clone()
-                    },
-                );
+                tool_event(summary, call);
             }
         }
         "tool.execution_start" => {
@@ -7410,13 +7451,14 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
             let Some(id) = field(data, "toolCallId") else {
                 return;
             };
-            if summary
+            let call = summary
                 .tool_ids
                 .get(id)
-                .is_none_or(|indices| indices.len() != 1)
-            {
-                return;
-            }
+                .and_then(|indices| match indices.as_slice() {
+                    [only] => summary.events.get(*only),
+                    _ => None,
+                });
+            let pending = summary.pending.get(id).copied().filter(|_| call.is_some());
             let success = data.get("success").and_then(Value::as_bool);
             let exit = data
                 .get("shellExecution")
@@ -7425,17 +7467,23 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
             let denied = data.get("error").and_then(|e| field(e, "code")) == Some("denied");
             let mut flags = if denied { DENIED } else { 0 };
             if success.is_none()
-                || (summary
-                    .tool_ids
-                    .get(id)
-                    .and_then(|v| v.first())
-                    .and_then(|i| summary.events.get(*i))
-                    .and_then(|e| e.n.as_deref())
-                    == Some("bash")
+                || (call.and_then(|event| event.n.as_deref()) == Some("bash")
                     && exit.is_none()
                     && success == Some(true))
             {
                 flags |= UNKNOWN;
+            }
+            let reply = Reply {
+                o: offset,
+                t: time,
+                e: success == Some(false) || exit.is_some_and(|code| code != 0),
+                f: flags,
+                ..Default::default()
+            };
+            let unique = call.is_some();
+            summary.tool_result_fact(id, pending, &reply, "copilot-execution", exit);
+            if !unique {
+                return;
             }
             if denied {
                 note(
@@ -7447,13 +7495,7 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
                     call_index(summary, id),
                 );
             }
-            resolve(summary, id, |_| Reply {
-                o: offset,
-                t: time,
-                e: success == Some(false) || exit.is_some_and(|code| code != 0),
-                f: flags,
-                ..Default::default()
-            });
+            resolve(summary, id, |_| reply);
         }
         "abort" => {
             // No toolCallId: retain cancellation; pending calls remain unknown.
@@ -7466,6 +7508,11 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
             );
         }
         "session.compaction_complete" => {
+            summary.warehouse_fact(offset, 0, || Fact::Compact {
+                time,
+                trigger: Some("manual".into()),
+                pre_tokens: None,
+            });
             note(
                 summary,
                 SignalKind::Compact,
@@ -7489,6 +7536,17 @@ pub(crate) fn copilot(summary: &mut FileIndex, record: &Value, offset: u64) {
             // Each shutdown replaces the preceding cumulative snapshot, including
             // child usage. Never add agentMetrics or compaction metrics to it.
             index.usage = crate::copilot::snapshot(data);
+            if let Some(batch) = &mut summary.warehouse_observations {
+                batch.push(
+                    offset,
+                    0,
+                    Fact::CopilotShutdown {
+                        event_id: identity.to_owned(),
+                        time,
+                        usage: index.usage.clone(),
+                    },
+                );
+            }
             index.usage_source = Some(crate::copilot::Observation {
                 event_id: identity.into(),
                 offset,
