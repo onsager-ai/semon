@@ -1376,6 +1376,8 @@ fn warehouse_retained_identity_preserves_the_first_certified_incarnation() {
     );
     for corruption in [
         "UPDATE warehouse_identity SET complete=0 WHERE catalog_key='reused' AND retained=1",
+        "UPDATE warehouse_identity SET native_id='forged' WHERE catalog_key='reused' AND retained=1",
+        "UPDATE warehouse_identity SET recipe_generation=printf('%064d',0) WHERE catalog_key='reused' AND retained=1",
         "UPDATE warehouse_identity SET recipe_version=0 WHERE catalog_key='reused' AND retained=1",
         "UPDATE warehouse_identity SET recipe_source_generation='different' WHERE catalog_key='reused' AND retained=1",
         "UPDATE warehouse_identity_member SET receipt='{}' WHERE source=(SELECT owner FROM warehouse_identity WHERE catalog_key='reused' AND retained=1)",
@@ -1385,11 +1387,80 @@ fn warehouse_retained_identity_preserves_the_first_certified_incarnation() {
         let error = retained_identity(&tx, &namespace, "reused").unwrap_err();
         assert_eq!(error.code(), "retained_identity_unverified");
     }
+    {
+        let tx = db.transaction().unwrap();
+        tx.execute("UPDATE warehouse_identity_member SET source=?1 WHERE identity=(SELECT id FROM warehouse_identity WHERE catalog_key='reused' AND retained=1)", [withdrawn_owner.0]).unwrap();
+        tx.execute(
+            "UPDATE warehouse_identity SET owner=?1 WHERE catalog_key='reused' AND retained=1",
+            [withdrawn_owner.0],
+        )
+        .unwrap();
+        assert_eq!(
+            retained_identity(&tx, &namespace, "reused")
+                .unwrap_err()
+                .code(),
+            "retained_identity_unverified"
+        );
+    }
     let tx = db.transaction().unwrap();
     let wrong = Namespace::new("other-machine").unwrap();
     assert_eq!(
         retained_identity(&tx, &wrong, "reused").unwrap_err().code(),
         "catalog_unavailable"
+    );
+}
+
+#[test]
+fn warehouse_retained_identity_freezes_when_a_literal_key_displaces_an_owner() {
+    use crate::{
+        events::store::warehouse::retained_identity,
+        storage::{Namespace, sqlite},
+    };
+    let home = Home::new();
+    let namespace = Namespace::new("collision-source").unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    sqlite::bind(&mut cache, &namespace).unwrap();
+    let publish = |cache: &mut EventCache| {
+        crate::model::observe_catalog(&home.options, cache, &mut false, &mut Texts::default(), NOW)
+            .unwrap();
+    };
+    // The colliding names remain active; no native source has to retire for
+    // the literal ID to take over the previously qualified Catalog key.
+    home.top("x", &[user("x", ts(0, 0), "first Claude owner")]);
+    home.codex("x", json!({}), &[codex_user(ts(0, 1), "colliding Codex")]);
+    publish(&mut cache);
+    let mut db = Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let first: i64 = db
+        .query_row(
+            "SELECT owner FROM warehouse_identity WHERE catalog_key='claude:x' AND retained=0",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let later = home.top(
+        "claude:x",
+        &[user("claude:x", ts(0, 2), "literal Claude key")],
+    );
+    publish(&mut cache);
+    let current: i64 = db
+        .query_row(
+            "SELECT owner FROM catalog_keys WHERE id='claude:x'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(first, current);
+    std::fs::remove_file(later).unwrap();
+    publish(&mut cache);
+    let tx = db.transaction().unwrap();
+    let original = retained_identity(&tx, &namespace, "claude:x").unwrap();
+    assert_eq!((original.owner, original.native_id), (first, "x".into()));
+    tx.execute("UPDATE warehouse_identity SET catalog_key='forged-key' WHERE catalog_key='claude:x' AND retained=1", []).unwrap();
+    assert_eq!(
+        retained_identity(&tx, &namespace, "forged-key")
+            .unwrap_err()
+            .code(),
+        "retained_identity_unverified"
     );
 }
 

@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 
 use rusqlite::{OptionalExtension, Transaction, params};
+use sha2::{Digest, Sha256};
 
 use crate::{
     model::summary::{CatalogLifecycle, CatalogRow},
@@ -27,31 +28,6 @@ pub(in crate::events::store) fn certify(
     let (_, Some(source_key)) = crate::storage::sqlite::binding(tx)? else {
         return Ok(());
     };
-    let previous: Option<i64> = tx
-        .prepare_cached(
-            "SELECT id FROM warehouse_identity WHERE scope='retained_history' AND source_key=?1
-         AND catalog_key=?2 AND retained=0",
-        )?
-        .query_row(params![source_key, row.key], |record| record.get(0))
-        .optional()?;
-    if let Some(previous) = previous {
-        put(
-            tx,
-            "DELETE FROM warehouse_identity_member WHERE identity=?1",
-            [previous],
-        )?;
-        put(tx, "DELETE FROM warehouse_identity WHERE id=?1", [previous])?;
-    }
-    let paths: BTreeSet<_> = row.sources.iter().map(|source| &source.path).collect();
-    if paths.len() != row.sources.len()
-        || encoded_slots.iter().any(|slot| slot.len() > 1_048_576)
-        || projection
-            .slots
-            .iter()
-            .any(|slot| slot.source_paths().iter().any(|path| !paths.contains(path)))
-    {
-        return Ok(());
-    }
     let mut cohort = None;
     let mut members = Vec::with_capacity(row.sources.len());
     let mut source_query = tx.prepare_cached(
@@ -105,6 +81,30 @@ pub(in crate::events::store) fn certify(
     let Some((component, owner, native_id)) = cohort else {
         return Ok(());
     };
+    let previous: Option<(i64, i64)> = tx.prepare_cached(
+        "SELECT id,owner FROM warehouse_identity WHERE scope='retained_history' AND source_key=?1
+         AND catalog_key=?2 AND retained=0",
+    )?.query_row(params![source_key, row.key], |record| Ok((record.get(0)?, record.get(1)?))).optional()?;
+    if let Some((previous, previous_owner)) = previous
+        && previous_owner != owner
+    {
+        put(
+            tx,
+            "UPDATE OR IGNORE warehouse_identity SET retained=1 WHERE id=?1",
+            [previous],
+        )?;
+        discard_candidate(tx, previous)?;
+    }
+    let paths: BTreeSet<_> = row.sources.iter().map(|source| &source.path).collect();
+    if paths.len() != row.sources.len()
+        || encoded_slots.iter().any(|slot| slot.len() > 1_048_576)
+        || projection
+            .slots
+            .iter()
+            .any(|slot| slot.source_paths().iter().any(|path| !paths.contains(path)))
+    {
+        return Ok(());
+    }
     let member_count: i64 = tx
         .prepare_cached("SELECT count(*) FROM lineage_member WHERE component=?1")?
         .query_row([component], |record| record.get(0))?;
@@ -115,12 +115,31 @@ pub(in crate::events::store) fn certify(
     if source_generation != recipe_source_generation {
         return Ok(());
     }
+    let mut witness = binding_digest(&(
+        source_key.as_str(),
+        row.key.as_str(),
+        owner,
+        row.harness.as_str(),
+        native_id.as_str(),
+        VERSION,
+        recipe_generation,
+        source_generation.as_str(),
+    ))?;
+    for (ordinal, (source, receipt)) in members.iter().enumerate() {
+        binding_member(&mut witness, ordinal as i64, *source, receipt)?;
+    }
+    let witness = format!("{:x}", witness.finalize());
+    if let Some((previous, previous_owner)) = previous
+        && previous_owner == owner
+    {
+        discard_candidate(tx, previous)?;
+    }
     let identity: i64 = tx.prepare_cached(
         "INSERT INTO warehouse_identity(scope,source_key,catalog_key,retained,owner,harness,native_id,
-          member_count,recipe_version,recipe_generation,recipe_source_generation,source_generation,complete)
-         VALUES('retained_history',?1,?2,0,?3,?4,?5,?6,?7,?8,?9,?10,1) RETURNING id",
+          member_count,recipe_version,recipe_generation,recipe_source_generation,source_generation,complete,witness)
+         VALUES('retained_history',?1,?2,0,?3,?4,?5,?6,?7,?8,?9,?10,1,?11) RETURNING id",
     )?.query_row(params![source_key, row.key, owner, row.harness, native_id, member_count, VERSION,
-        recipe_generation, recipe_source_generation, source_generation], |record| record.get(0))?;
+        recipe_generation, recipe_source_generation, source_generation, witness], |record| record.get(0))?;
     for (ordinal, (source, receipt)) in members.into_iter().enumerate() {
         put(
             tx,
@@ -129,6 +148,36 @@ pub(in crate::events::store) fn certify(
         )?;
     }
     Ok(())
+}
+
+fn binding_digest(identity: &impl serde::Serialize) -> rusqlite::Result<Sha256> {
+    let mut digest = Sha256::new_with_prefix(b"semon-retained-history-identity-v1\0");
+    digest.update(serde_json::to_vec(identity).map_err(data)?);
+    Ok(digest)
+}
+
+fn binding_member(
+    digest: &mut Sha256,
+    ordinal: i64,
+    source: i64,
+    receipt: &str,
+) -> rusqlite::Result<()> {
+    digest.update(serde_json::to_vec(&(ordinal, source, receipt)).map_err(data)?);
+    Ok(())
+}
+
+fn discard_candidate(tx: &Transaction<'_>, identity: i64) -> rusqlite::Result<()> {
+    put(
+        tx,
+        "DELETE FROM warehouse_identity_member WHERE identity=?1 AND EXISTS
+        (SELECT 1 FROM warehouse_identity WHERE id=?1 AND retained=0)",
+        [identity],
+    )?;
+    put(
+        tx,
+        "DELETE FROM warehouse_identity WHERE id=?1 AND retained=0",
+        [identity],
+    )
 }
 
 fn data(error: serde_json::Error) -> rusqlite::Error {
@@ -217,10 +266,8 @@ fn read_retained(
     source_key: &str,
     key: &str,
 ) -> rusqlite::Result<Option<RetainedIdentity>> {
-    use sha2::{Digest, Sha256};
-
     let binding = tx.prepare_cached(
-        "SELECT i.id,i.owner,i.harness,i.native_id,i.member_count,i.source_generation
+        "SELECT i.id,i.owner,i.harness,i.native_id,i.member_count,i.source_generation,i.recipe_generation,i.witness
          FROM warehouse_identity i
          JOIN warehouse_source s ON s.source=i.owner AND s.origin=i.source_key AND s.harness=i.harness
          JOIN warehouse_identity_member m ON m.identity=i.id AND m.source=i.owner
@@ -228,14 +275,26 @@ fn read_retained(
          AND i.complete=1 AND i.recipe_version=?3 AND length(i.recipe_generation)=64
          AND i.recipe_source_generation=i.source_generation",
     )?.query_row(params![source_key, key, VERSION], |row| {
-        Ok((row.get::<_, i64>(0)?, RetainedIdentity { owner: row.get(1)?, harness: row.get(2)?, native_id: row.get(3)? }, row.get::<_,i64>(4)?, row.get::<_,String>(5)?))
+        Ok((row.get::<_, i64>(0)?, RetainedIdentity { owner: row.get(1)?, harness: row.get(2)?, native_id: row.get(3)? }, row.get::<_,i64>(4)?, row.get::<_,String>(5)?,row.get::<_,String>(6)?,row.get::<_,String>(7)?))
     }).optional()?;
-    let Some((id, identity, member_count, generation)) = binding else {
+    let Some((id, identity, member_count, generation, recipe_generation, expected_witness)) =
+        binding
+    else {
         return Ok(None);
     };
     let mut digest = Sha256::new_with_prefix(b"[");
+    let mut witness = binding_digest(&(
+        source_key,
+        key,
+        identity.owner,
+        identity.harness.as_str(),
+        identity.native_id.as_str(),
+        VERSION,
+        recipe_generation.as_str(),
+        generation.as_str(),
+    ))?;
     let mut statement = tx.prepare_cached(
-        "SELECT m.ordinal,m.receipt FROM warehouse_identity_member m
+        "SELECT m.ordinal,m.receipt,m.source FROM warehouse_identity_member m
          JOIN warehouse_source s ON s.source=m.source AND s.origin=?2 AND s.harness=?3
          WHERE m.identity=?1 ORDER BY m.ordinal",
     )?;
@@ -248,12 +307,14 @@ fn read_retained(
         if count > 0 {
             digest.update(b",");
         }
-        digest.update(member.get::<_, String>(1)?.as_bytes());
+        let receipt: String = member.get(1)?;
+        digest.update(receipt.as_bytes());
+        binding_member(&mut witness, count, member.get(2)?, &receipt)?;
         count += 1;
     }
     digest.update(b"]");
-    Ok(
-        (count == member_count && format!("{:x}", digest.finalize()) == generation)
-            .then_some(identity),
-    )
+    Ok((count == member_count
+        && format!("{:x}", digest.finalize()) == generation
+        && format!("{:x}", witness.finalize()) == expected_witness)
+        .then_some(identity))
 }
