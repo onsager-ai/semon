@@ -1478,11 +1478,14 @@ impl ProductionScale {
         let last = &mut samples[9000..];
         last.sort_unstable();
         let (last_p50, last_p99) = (last[500], last[990]);
+        let index_ns = (after.1 - before.1).as_nanos();
+        let index_remainder_ns = index_ns.saturating_sub(fact_ns + maintenance_ns);
         println!(
-            "production append_case={case} count={admissions} total_ms={} parse_ms={} index_ms={} fact_write_ms={} maintenance_ms={} maintenance_mean_us={:.3} first_1000_p50_us={:.3} first_1000_p99_us={:.3} last_1000_p50_us={:.3} last_1000_p99_us={:.3}",
+            "production append_case={case} count={admissions} total_ms={} parse_ms={} index_ms={} index_remainder_ms={} fact_write_ms={} maintenance_ms={} maintenance_mean_us={:.3} first_1000_p50_us={:.3} first_1000_p99_us={:.3} last_1000_p50_us={:.3} last_1000_p99_us={:.3}",
             total.as_millis(),
             (after.0 - before.0).as_millis(),
-            (after.1 - before.1).as_millis(),
+            index_ns / 1_000_000,
+            index_remainder_ns / 1_000_000,
             fact_ns / 1_000_000,
             maintenance_ns / 1_000_000,
             maintenance_ns as f64 / admissions as f64 / 1000.0,
