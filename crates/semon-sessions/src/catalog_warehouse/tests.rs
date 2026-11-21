@@ -1697,6 +1697,101 @@ fn warehouse_list_runtime_rejects_pid_reuse_and_tracks_wait() {
 }
 
 #[test]
+fn warehouse_list_runtime_uses_qualified_parent_and_child_run_evidence() {
+    let mut fixture = Fixture::new("child-runtime");
+    let root = fixture.claude("root", "Delegate work");
+    append_native(
+        &root,
+        json!({"type":"assistant","uuid":"launch","sessionId":"root",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"agent-call","name":"Agent","input":{"prompt":"Do the work"}}
+        ]}}),
+    );
+    let child = root.with_extension("").join("subagents/agent-worker.jsonl");
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::write(
+        child.with_extension("meta.json"),
+        json!({"agentType":"general-purpose",
+        "description":"The worker","toolUseId":"agent-call"})
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(&child, format!("{}\n", prompt("root", 2, "Do the work"))).unwrap();
+    let pids = fixture.options.claude_home.join("sessions");
+    fs::create_dir_all(&pids).unwrap();
+    let stat = fixture.options.proc_root.join("42/stat");
+    fs::create_dir_all(stat.parent().unwrap()).unwrap();
+    let write_start = |start| {
+        let mut fields = vec!["0".to_owned(); 20];
+        fields[19] = format!("{start}");
+        fs::write(&stat, format!("42 (claude) {}\n", fields.join(" "))).unwrap();
+    };
+    write_start(777);
+    fs::write(
+        pids.join("42.json"),
+        json!({"pid":42,"sessionId":"root","procStart":777,
+        "status":"idle"})
+        .to_string(),
+    )
+    .unwrap();
+
+    let read = |fixture: &mut Fixture, expected: &str| {
+        crate::model::observe_catalog(
+            &fixture.options,
+            &mut fixture.cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            crate::model::now_ms(),
+        )
+        .unwrap();
+        let page = read_list(
+            &[fixture.source(&[&root, &child])],
+            "workspace",
+            &request("limit=10"),
+            None,
+        )
+        .unwrap();
+        let row = page
+            .rows
+            .iter()
+            .find(|row| row.position.key == "worker")
+            .unwrap();
+        assert_eq!(row.parent.as_deref(), Some("root"));
+        assert_eq!(row.status, Some(expected));
+        let oracle: String = Connection::open(&fixture.db).unwrap().query_row(
+            "SELECT json_extract(metadata,'$.state') FROM session_trace_headers WHERE session_key='worker'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(row.status, Some(oracle.as_str()));
+    };
+    read(&mut fixture, "work");
+    append_native(
+        &root,
+        json!({"type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:03Z",
+        "origin":{"kind":"task-notification"},"message":{"role":"user","content":
+        "<task-notification><task-id>worker</task-id><tool-use-id>agent-call</tool-use-id><status>failed</status><result>failed</result></task-notification>"}}),
+    );
+    read(&mut fixture, "err");
+    append_native(&child, prompt("root", 4, "Try again"));
+    read(&mut fixture, "work");
+    let mut missing_parent = fixture.source(&[&root, &child]);
+    missing_parent
+        .inventory
+        .insert(root.to_str().unwrap().into(), Availability::Unavailable);
+    let page = read_list(&[missing_parent], "workspace", &request("limit=10"), None).unwrap();
+    assert_eq!(
+        page.rows
+            .iter()
+            .find(|row| row.position.key == "worker")
+            .unwrap()
+            .status,
+        None
+    );
+    write_start(778);
+    read(&mut fixture, "done");
+}
+
+#[test]
 fn warehouse_prompt_parent_matches_the_authorized_launch_address() {
     let mut fixture = Fixture::new("prompt-launch");
     let parent = fixture.claude("parent", "Launch fixture");

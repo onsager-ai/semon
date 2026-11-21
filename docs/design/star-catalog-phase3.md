@@ -335,5 +335,11 @@ native billing fact of the winner in the existing family fold order. A fixture
 compares inclusive dollars with the current reader and checks shared winner and
 unknown-price coverage.
 
-Full causal presentation, remaining anchors, relay body/time matching, and
-parent/child runtime overrides still need comparison before cutover.
+Selected Claude subagents inherit qualified graph-root process liveness and
+use native hand-backs, task notifications, resumptions and synchronous launch
+results to resolve child state. The fixture compares child state with the
+current reader and covers missing parent custody and PID reuse. Legacy
+untyped agent receipts still depend on the relay matching work.
+
+Full causal presentation, remaining anchors and relay body/time matching
+still need comparison before cutover.

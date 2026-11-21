@@ -8,7 +8,7 @@ use crate::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const LIST: &str = include_str!("events/store/warehouse_list.sql");
 const EXACT: &str = include_str!("events/store/warehouse_exact.sql");
@@ -154,6 +154,28 @@ struct Snapshot<'a> {
     paths: String,
     coverage: Coverage,
     revision: String,
+}
+
+struct ChildRuntime {
+    child: i64,
+    native_id: String,
+    parent: i64,
+    call: Option<String>,
+    root: i64,
+    qualified: bool,
+}
+
+#[derive(Default)]
+struct ChildRun {
+    final_receipt: bool,
+    handback: bool,
+    notification: Option<bool>,
+}
+
+impl ChildRun {
+    fn ended(&self) -> bool {
+        self.final_receipt || self.handback || self.notification.is_some()
+    }
 }
 
 struct Usage {
@@ -388,7 +410,7 @@ impl<'a> Snapshot<'a> {
         Ok((selected, total, examined, next))
     }
 
-    fn runtime_status(&self, owners: &str) -> Result<BTreeMap<i64, &'static str>, ReadError> {
+    fn runtime_status(&self, owners: &[i64]) -> Result<BTreeMap<i64, &'static str>, ReadError> {
         use crate::facts::source_authority::CurrentSources;
         let options = self.source.options;
         let observed = crate::native_evidence::RuntimeObservations::new(options);
@@ -399,8 +421,34 @@ impl<'a> Snapshot<'a> {
         if options.facts.is_some() && !authority.as_ref().is_some_and(CurrentSources::facts_known) {
             return Ok(BTreeMap::new());
         }
+        let mut children = self
+            .transaction
+            .prepare_cached(include_str!("events/store/warehouse_child_runtime.sql"))
+            .map_err(index)?;
+        let children = children
+            .query_map(params![encode(&owners)?, self.paths], |row| {
+                Ok(ChildRuntime {
+                    child: row.get(0)?,
+                    native_id: row.get(1)?,
+                    parent: row.get(2)?,
+                    call: row.get(3)?,
+                    root: row.get(4)?,
+                    qualified: row.get(5)?,
+                })
+            })
+            .map_err(index)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(index)?;
+        let mut dependencies: BTreeSet<i64> = owners.iter().copied().collect();
+        dependencies.extend(
+            children
+                .iter()
+                .filter(|child| child.qualified)
+                .map(|child| child.root),
+        );
+        let dependencies = encode(&dependencies)?;
         let mut statement = self.transaction.prepare_cached(STATUS).map_err(index)?;
-        let mut members = statement.query([owners]).map_err(index)?;
+        let mut members = statement.query([dependencies]).map_err(index)?;
         let mut phases = self
             .transaction
             .prepare_cached(
@@ -409,7 +457,8 @@ impl<'a> Snapshot<'a> {
             )
             .map_err(index)?;
         let mut status = BTreeMap::new();
-        let mut unqualified = std::collections::BTreeSet::new();
+        let mut unqualified = BTreeSet::new();
+        let mut alive = BTreeSet::new();
         let mut pids = BTreeMap::new();
         while let Some(row) = members.next().map_err(index)? {
             let owner: i64 = row.get(0).map_err(index)?;
@@ -430,6 +479,9 @@ impl<'a> Snapshot<'a> {
                 continue;
             }
             let process = observed.warehouse_process(&harness, &native_id);
+            if process.is_some() {
+                alive.insert(owner);
+            }
             if harness == "claude" && lineage {
                 status.entry(owner).or_insert("done");
                 if let Some((pid, state)) = process
@@ -453,6 +505,22 @@ impl<'a> Snapshot<'a> {
                         (Some("errored"), _) => "err",
                         _ => "off",
                     });
+            }
+        }
+        let mut evidence = self
+            .transaction
+            .prepare_cached(include_str!(
+                "events/store/warehouse_child_runtime_events.sql"
+            ))
+            .map_err(index)?;
+        for child in children {
+            if child.qualified
+                && !unqualified.contains(&child.root)
+                && !unqualified.contains(&child.child)
+            {
+                let state =
+                    child_runtime_state(&mut evidence, &child, alive.contains(&child.root))?;
+                status.insert(child.child, state);
             }
         }
         status.retain(|owner, _| !unqualified.contains(owner));
@@ -487,8 +555,9 @@ impl<'a> Snapshot<'a> {
         if rows.is_empty() {
             return Ok(());
         }
-        let owners = encode(&rows.iter().map(|row| row.owner).collect::<Vec<_>>())?;
+        let owners: Vec<_> = rows.iter().map(|row| row.owner).collect();
         let status = self.runtime_status(&owners)?;
+        let owners = encode(&owners)?;
         let table = crate::pricing::snapshot();
         let mut priced = self.priced_usage(&owners, &table)?;
         let mut parents = self.transaction.prepare_cached(PARENTS).map_err(index)?;
@@ -524,6 +593,69 @@ impl<'a> Snapshot<'a> {
         }
         Ok(())
     }
+}
+
+fn child_runtime_state(
+    evidence: &mut rusqlite::Statement<'_>,
+    child: &ChildRuntime,
+    running: bool,
+) -> Result<&'static str, ReadError> {
+    use crate::events::{AGM_DOWN, AGM_FINAL, ASYNC};
+    let mut events = evidence
+        .query(params![
+            child.child,
+            child.parent,
+            child.native_id,
+            child.call,
+            AGM_FINAL,
+            AGM_DOWN,
+            ASYNC,
+        ])
+        .map_err(index)?;
+    let mut prior = ChildRun::default();
+    let mut run = ChildRun::default();
+    let mut resumed = false;
+    let mut synchronous = None;
+    while let Some(row) = events.next().map_err(index)? {
+        let kind: i64 = row.get(0).map_err(index)?;
+        let failed: bool = row.get(1).map_err(index)?;
+        match kind {
+            0 if resumed && !run.ended() && prior.handback && !prior.final_receipt => {
+                prior.final_receipt = true;
+            }
+            0 => run.final_receipt = true,
+            1 => run.handback = true,
+            2 if resumed
+                && !failed
+                && !run.ended()
+                && (prior.handback || prior.final_receipt)
+                && prior.notification.is_none() =>
+            {
+                prior.notification = Some(false)
+            }
+            2 => {
+                run.notification.get_or_insert(failed);
+            }
+            3 if run.ended() => {
+                prior = std::mem::take(&mut run);
+                resumed = true;
+            }
+            3 => {}
+            4 => synchronous = Some(failed),
+            _ => return Err(index("Unknown warehouse child runtime event")),
+        }
+    }
+    let working = if running { "work" } else { "done" };
+    let finished = if run.ended() {
+        Some(run.notification.unwrap_or(false))
+    } else {
+        synchronous
+    };
+    Ok(match (resumed && !run.ended(), finished) {
+        (true, _) | (_, None) => working,
+        (_, Some(true)) => "err",
+        (_, Some(false)) => "done",
+    })
 }
 
 fn list_functions(db: &Connection) -> rusqlite::Result<()> {
