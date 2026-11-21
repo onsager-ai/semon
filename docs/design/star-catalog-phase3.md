@@ -279,10 +279,12 @@ page touches. The server holds no cursor state between requests.
 Schema 53 writes one `warehouse_prefix` receipt when an admitted source
 first commits or advances its consumed offset. The receipt records the source
 incarnation ID, committed offset and ledger at that boundary. It contains no
-source text. Receipts commit with the facts and native proof pages and remain
-available for the life of this Index incarnation. Receipt storage grows with
-the number of admitted prefix advances. Cursor expiry and receipt collection
-need a policy before the Viewer cutover.
+source text. Receipts commit with the facts and native proof pages. Keep receipts
+from the last 24 hours plus the newest receipt per source incarnation. Normal
+ingest collects expired superseded receipts in bounded batches and records
+the highest removed revision. The reader explicitly restarts a cursor older
+than 24 hours or at or below that revision. Collection can invalidate a
+recent cursor when a long-idle source advances and loses its old receipt.
 
 A first page records the highest receipt revision in its snapshot. A later page
 can use that revision to recover the same bound for a member it has not read

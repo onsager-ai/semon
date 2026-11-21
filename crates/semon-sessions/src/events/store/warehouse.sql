@@ -17,9 +17,13 @@ CREATE TABLE warehouse_prefix (
   source INTEGER NOT NULL REFERENCES warehouse_source(source),
   pos INTEGER NOT NULL,
   ledger TEXT NOT NULL,
+  committed_at INTEGER NOT NULL,
+  superseded INTEGER NOT NULL CHECK(superseded IN (0,1)),
   UNIQUE(source,pos)
 ) STRICT;
 CREATE INDEX warehouse_prefix_revision ON warehouse_prefix(source,revision);
+CREATE INDEX warehouse_prefix_expiry ON warehouse_prefix(committed_at,revision) WHERE superseded=1;
+CREATE INDEX warehouse_prefix_latest ON warehouse_prefix(source) WHERE superseded=0;
 CREATE TABLE warehouse_current (
   path TEXT PRIMARY KEY, source INTEGER NOT NULL UNIQUE REFERENCES warehouse_source(source)
 ) STRICT, WITHOUT ROWID;
@@ -217,6 +221,7 @@ CREATE INDEX record_uuid ON fact_record(source,uuid);
 CREATE INDEX record_position ON fact_record(source,coalesce(ts,-9223372036854775808),pos,block,occurrence)
   WHERE pos>=0 AND NOT gap;
 CREATE INDEX usage_message ON fact_step_observation(message_id,uuid,source);
+CREATE INDEX tool_call_identity ON fact_tool_call(source,call_id);
 CREATE INDEX tool_result_identity ON fact_tool_result(source,call_id);
 CREATE INDEX relay_result_call ON fact_relay_result(source,call_id);
 CREATE VIEW dim_lineage AS

@@ -340,7 +340,7 @@ fn warehouse_actual_reader_plans_use_indexed_exact_probes_and_local_usage() {
         &db,
         warehouse::DETAIL,
         rusqlite::named_params! {
-            ":source": 1, ":start": 0, ":end": 100, ":component": 1, ":view": 1,
+            ":source": 1, ":start": 0, ":end": 100, ":predecessors": "{}",
             ":entry_block": None::<i64>, ":entry_occurrence": None::<i64>, ":time": i64::MIN,
             ":pos": i64::MIN, ":block": i64::MIN, ":occurrence": i64::MIN, ":limit": 10,
         },
@@ -350,7 +350,7 @@ fn warehouse_actual_reader_plans_use_indexed_exact_probes_and_local_usage() {
         "{detail}"
     );
     assert!(
-        !detail.contains("TEMP B-TREE") && !detail.contains("SCAN fact_record"),
+        !detail.contains("CORRELATED SCALAR SUBQUERY") && !detail.contains("SCAN fact_record"),
         "{detail}"
     );
     let parents = plan(&db, PARENTS, ["[1]", "[]"]);
@@ -739,6 +739,29 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
             {"type":"text","text":"Qualified answer"}
         ]}}),
     );
+    let codex = fixture.codex("codex-native");
+    for (role, part, text, second) in [
+        ("user", "input_text", "Codex prompt", 1),
+        ("assistant", "output_text", "Codex answer", 2),
+    ] {
+        append_native(
+            &codex,
+            json!({"type":"response_item","timestamp":format!("2026-09-24T00:00:0{second}Z"),
+            "payload":{"type":"message","role":role,"content":[{"type":part,"text":text}]}}),
+        );
+    }
+    let copilot_id = "01234567-89ab-4cde-8123-456789abcdef";
+    let copilot = fixture.copilot(copilot_id);
+    for (kind, text, second) in [
+        ("user.message", "Copilot prompt", 1),
+        ("assistant.message", "Copilot answer", 2),
+    ] {
+        append_native(
+            &copilot,
+            json!({"type":kind,"id":format!("event-{second}"),
+            "timestamp":format!("2026-09-24T00:00:0{second}Z"),"data":{"content":text}}),
+        );
+    }
     crate::model::observe_catalog(
         &fixture.options,
         &mut fixture.cache,
@@ -747,105 +770,237 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
         crate::model::now_ms(),
     )
     .unwrap();
-    let actual = selected_page(&fixture, &[&path], "native", 100, None)
-        .unwrap()
-        .unwrap();
-    assert_eq!(actual.title.as_deref(), Some("Original title"));
-    assert!(actual.model.is_none());
-    let mode = crate::SessionSourceReadMode::LocalOrPinnedProvider;
-    let oracle = crate::session_transcript_range_with_mode(
-        &fixture.options,
-        fixture.namespace.as_str(),
-        "sid=native&after=0&limit=100",
-        None,
-        mode,
-    );
-    assert_eq!(
-        oracle.status,
-        200,
-        "{}",
-        String::from_utf8_lossy(&oracle.body)
-    );
-    let oracle: serde_json::Value = serde_json::from_slice(&oracle.body).unwrap();
-    let expected: Vec<_> = oracle["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter(|entry| {
-            matches!(
-                entry["text"].as_str(),
-                Some("Original title" | "Qualified answer")
-            )
-        })
-        .collect();
-    assert_eq!(expected.len(), 2);
-    let items: Vec<_> = actual
-        .records
-        .iter()
-        .filter_map(|record| record.text().map(|text| (record, text)))
-        .collect();
-    assert_eq!(items.len(), expected.len());
-    for ((record, text), entry) in items.into_iter().zip(&expected) {
-        assert_eq!(entry["text"], text);
-        assert_eq!(entry["provenance"]["source"]["path"], record.address.path);
-        assert_eq!(entry["provenance"]["offset"], record.address.offset);
-        assert_eq!(entry["provenance"]["block"], record.address.block);
-        let expanded = selected::record_at(
-            &fixture.options,
-            &fixture.source(&[&path]),
+    for (key, path, prompt, answer) in [
+        (
             "native",
-            &record.address,
-            None,
-        )
-        .unwrap()
-        .unwrap();
-        let reply = crate::session_entry_field_with_mode(
+            path.as_path(),
+            "Original title",
+            "Qualified answer",
+        ),
+        (
+            "codex-native",
+            codex.as_path(),
+            "Codex prompt",
+            "Codex answer",
+        ),
+        (
+            copilot_id,
+            copilot.as_path(),
+            "Copilot prompt",
+            "Copilot answer",
+        ),
+    ] {
+        let actual = selected_page(&fixture, &[path], key, 100, None)
+            .unwrap()
+            .unwrap();
+        if key == "native" {
+            assert_eq!(actual.title.as_deref(), Some(prompt));
+            assert!(actual.model.is_none());
+        }
+        let mode = crate::SessionSourceReadMode::LocalOrPinnedProvider;
+        let oracle = crate::session_transcript_range_with_mode(
             &fixture.options,
             fixture.namespace.as_str(),
-            &format!(
-                "sid=native&after={}&limit=1&generation={}&field_chunk=0",
-                entry["slot"],
-                oracle["projection"]["generation"].as_str().unwrap()
-            ),
+            &format!("sid={key}&after=0&limit=100"),
             None,
             mode,
         );
         assert_eq!(
-            reply.status,
+            oracle.status,
             200,
             "{}",
-            String::from_utf8_lossy(&reply.body)
+            String::from_utf8_lossy(&oracle.body)
         );
-        let field: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
-        assert_eq!(field["text"].as_str(), expanded.text().as_deref());
-    }
-    let turn = expected[0]["turn"].as_str().unwrap();
-    let reply = crate::session_turn_anchor(
-        &fixture.options,
-        fixture.namespace.as_str(),
-        &format!("sid=native&turn={}", crate::viewer::percent_encode(turn)),
-    );
-    assert_eq!(reply.status, 200);
-    let anchor: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
-    assert_eq!(anchor["slot"], expected[0]["slot"]);
-    let address = &actual
-        .records
-        .iter()
-        .find(|record| record.text().as_deref() == Some("Original title"))
-        .unwrap()
-        .address;
-    assert_eq!(
-        selected::record_at(
+        let oracle: serde_json::Value = serde_json::from_slice(&oracle.body).unwrap();
+        let expected: Vec<_> = oracle["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| {
+                entry["text"]
+                    .as_str()
+                    .is_some_and(|text| text == prompt || text == answer)
+            })
+            .collect();
+        assert_eq!(expected.len(), 2);
+        let items: Vec<_> = actual
+            .records
+            .iter()
+            .filter_map(|record| record.text().map(|text| (record, text)))
+            .collect();
+        assert_eq!(items.len(), expected.len());
+        for ((record, text), entry) in items.into_iter().zip(&expected) {
+            assert_eq!(entry["text"], text);
+            assert_eq!(entry["provenance"]["source"]["path"], record.address.path);
+            assert_eq!(entry["provenance"]["offset"], record.address.offset);
+            assert_eq!(entry["provenance"]["block"], record.address.block);
+            let expanded = selected::record_at(
+                &fixture.options,
+                &fixture.source(&[path]),
+                key,
+                &record.address,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            let reply = crate::session_entry_field_with_mode(
+                &fixture.options,
+                fixture.namespace.as_str(),
+                &format!(
+                    "sid={key}&after={}&limit=1&generation={}&field_chunk=0",
+                    entry["slot"],
+                    oracle["projection"]["generation"].as_str().unwrap()
+                ),
+                None,
+                mode,
+            );
+            assert_eq!(
+                reply.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            let field: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(field["text"].as_str(), expanded.text().as_deref());
+        }
+        let turn = expected[0]["turn"].as_str().unwrap();
+        let reply = crate::session_turn_anchor(
             &fixture.options,
-            &fixture.source(&[&path]),
+            fixture.namespace.as_str(),
+            &format!("sid={key}&turn={}", crate::viewer::percent_encode(turn)),
+        );
+        assert_eq!(reply.status, 200);
+        let anchor: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(anchor["slot"], expected[0]["slot"]);
+        let address = &actual
+            .records
+            .iter()
+            .find(|record| record.text().as_deref() == Some(prompt))
+            .unwrap()
+            .address;
+        assert_eq!(
+            selected::record_at(
+                &fixture.options,
+                &fixture.source(&[path]),
+                key,
+                address,
+                None
+            )
+            .unwrap()
+            .unwrap()
+            .text()
+            .as_deref(),
+            Some(prompt)
+        );
+    }
+}
+
+#[test]
+fn warehouse_component_cursor_restarts_after_receipt_expiry() {
+    let mut fixture = Fixture::new("component-expiry");
+    let path = fixture.claude("native", "Original title");
+    let quiet = fixture.claude("quiet", "Keep newest quiet receipt");
+    let inventory = [&path as &Path, &quiet];
+    let first = selected_page(&fixture, &inventory, "native", 1, None)
+        .unwrap()
+        .unwrap();
+    let cursor = first.next.unwrap();
+    let cutoff = crate::model::now_ms() - warehouse::PREFIX_WINDOW_MS - 1;
+    let mut expired = serde_json::to_value(&cursor).unwrap();
+    expired["opened_at"] = json!(cutoff);
+    let expired = serde_json::from_value(expired).unwrap();
+    assert!(matches!(
+        selected_page(&fixture, &inventory, "native", 1, Some(&expired)),
+        Err(ReadError::Restart)
+    ));
+
+    let db = Connection::open(&fixture.db).unwrap();
+    db.execute("UPDATE warehouse_prefix SET committed_at=?1", [cutoff])
+        .unwrap();
+    // The first cursor's watermark includes the quiet receipt, so advance the
+    // native member to the watermark before creating the cursor we will prune.
+    append_native(&path, prompt("native", 1, "Intermediate"));
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let recent = selected_page(&fixture, &inventory, "native", 1, None)
+        .unwrap()
+        .unwrap()
+        .next
+        .unwrap();
+    db.execute("UPDATE warehouse_prefix SET committed_at=?1", [cutoff])
+        .unwrap();
+    append_native(&path, prompt("native", 2, "Newest"));
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let count: i64 = db
+        .query_row("SELECT count(*) FROM warehouse_prefix", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+    assert!(matches!(
+        selected_page(&fixture, &inventory, "native", 1, Some(&recent)),
+        Err(ReadError::Restart)
+    ));
+    let latest = selected_page(&fixture, &inventory, "native", 10, None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        latest
+            .records
+            .iter()
+            .any(|record| record.text().as_deref() == Some("Newest"))
+    );
+    assert!(
+        selected_page(&fixture, &inventory, "quiet", 1, None)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn warehouse_component_tool_results_use_the_selected_prefix() {
+    let mut fixture = Fixture::new("component-late-result");
+    let path = fixture.claude("native", "Original title");
+    let at = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"call","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"true"}}
+        ]}}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let first = selected_page(&fixture, &[&path], "native", 1, None)
+        .unwrap()
+        .unwrap();
+    let call = selected::Address {
+        path: "projects/proj/native.jsonl".into(),
+        offset: at,
+        block: 0,
+        occurrence: 0,
+    };
+    append_native(
+        &path,
+        json!({"type":"user","sessionId":"native","timestamp":"2026-09-24T00:00:02Z",
+        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"qualified result"}]}}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let source = fixture.source(&[&path]);
+    assert!(
+        selected::tool_results(
+            &fixture.options,
+            &source,
             "native",
-            address,
-            None
+            &call,
+            first.next.as_ref()
         )
         .unwrap()
         .unwrap()
-        .text()
-        .as_deref(),
-        Some("Original title")
+        .is_empty()
+    );
+    let latest = selected::tool_results(&fixture.options, &source, "native", &call, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.len(), 1);
+    assert_eq!(
+        latest[0].native["message"]["content"][0]["content"],
+        "qualified result"
     );
 }

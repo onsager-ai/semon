@@ -123,6 +123,44 @@ fn source(
     Ok((source, retired))
 }
 
+pub(crate) const PREFIX_WINDOW_MS: i64 = 24 * 60 * 60 * 1_000;
+
+fn write_prefix(tx: &Transaction<'_>, source: i64, pos: i64, ledger: &str) -> rusqlite::Result<()> {
+    let now = crate::model::now_ms();
+    put(
+        tx,
+        "UPDATE warehouse_prefix SET superseded=1 WHERE source=?1 AND superseded=0",
+        [source],
+    )?;
+    put(
+        tx,
+        "INSERT INTO warehouse_prefix(source,pos,ledger,committed_at,superseded) VALUES(?1,?2,?3,?4,0)",
+        params![source, pos, ledger, now],
+    )?;
+    let cutoff = now.saturating_sub(PREFIX_WINDOW_MS);
+    let mut expired = tx.prepare_cached(
+        "DELETE FROM warehouse_prefix WHERE revision IN (
+           SELECT revision FROM warehouse_prefix WHERE superseded=1 AND committed_at<?1
+           ORDER BY committed_at,revision LIMIT 128
+         ) RETURNING revision",
+    )?;
+    let mut rows = expired.query([cutoff])?;
+    let mut floor = 0;
+    while let Some(row) = rows.next()? {
+        floor = floor.max(row.get::<_, i64>(0)?);
+    }
+    if floor > 0 {
+        put(
+            tx,
+            "INSERT INTO meta(key,value) VALUES('warehouse_prefix_pruned_through',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value
+             WHERE CAST(meta.value AS INTEGER)<CAST(excluded.value AS INTEGER)",
+            [floor],
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn write(
     tx: &Transaction<'_>,
     path: &str,
@@ -155,8 +193,7 @@ pub(super) fn write(
         .optional()?;
     let (old_offset, sidecar_revision) = cursor.unwrap_or_default();
     if cursor.is_none() || old_offset != int(ledger.offset) {
-        tx.prepare_cached("INSERT INTO warehouse_prefix(source,pos,ledger) VALUES(?1,?2,?3)")?
-            .execute(params![source, int(ledger.offset), encoded_ledger])?;
+        write_prefix(tx, source, int(ledger.offset), &encoded_ledger)?;
     }
     let path = Path::new(path);
     let mut header_kind = None;
