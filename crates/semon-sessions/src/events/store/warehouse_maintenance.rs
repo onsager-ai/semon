@@ -320,6 +320,7 @@ fn retire(tx: &Transaction<'_>, source: i64, spawn: &mut SpawnKeys) -> rusqlite:
     let Some(session) = dimension(tx, source)? else {
         return Ok(());
     };
+    super::identity::retire(tx, source)?;
     let old = component(tx, source)?;
     if !session.lineage {
         // Agent and Codex rows are singleton lineages. Codex parent and spawn

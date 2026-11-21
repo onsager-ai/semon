@@ -58,6 +58,17 @@ well as selecting metadata from committed facts.
   list parent fields too. For prompt-dependent parents, measure indexed cwd/time
   candidate selection and run prompt comparison at the origin; keep the bounded
   parent parity requirement in the list gate.
+- The owner chose warehouse-owned retained identity on 2026-11-21. Record a
+  qualified original component and its complete recipe/source generation in an
+  indexed binding for `(retained_history, source_key, catalog_key)`. Withdrawal
+  or replacement freezes that binding. Reusing the key leaves the original
+  binding intact and lists show the current owner. Exact History reads return
+  `retained_identity_unverified` when the binding is missing or its witness
+  fails qualification. Phase 3 does not read `session_history_*`.
+- Qualification starts with the new schema. The host rebuild replays authorized
+  originals without importing old Index rows or a custody manifest. Pre-cutover
+  retained keys without a verified warehouse binding get the same explicit
+  refusal. The old Index stays in place under Infra custody.
 - Preserve list filters, including metadata search. Audit [`catalog_search.rs`](../../crates/semon-sessions/src/catalog_search.rs)
   for reads of published metadata and generation checks. Feed required search
   fields from qualified Index/warehouse data and preserve coverage, bounded
@@ -220,6 +231,10 @@ pinned Codex conformance in CI for changed native read semantics.
 
 ## Suggested implementation PRs
 
+0. **Warehouse-owned retained-history identity.** Advance the Index schema
+   directly, certify and retain original component bindings, and test refusal,
+   withdrawal, replacement and cross-harness key reuse. The host rebuild ships
+   with cutover.
 1. **Warehouse list and identity queries.** Add the fixture-only read adapters,
    source qualification, filters/search, coverage and union/keyset tests. Capture
    the list and append baselines and add production-query plan checks. The
