@@ -101,6 +101,14 @@ pub(crate) fn parse_native_record(bytes: &[u8]) -> Option<Value> {
 type NativeLineReader<'a> = dyn FnMut(&Path, u64) -> io::Result<(Option<Value>, u64)> + 'a;
 type NativePromptReader<'a> = dyn FnMut(&SlotFile, u64) -> Option<(Value, u64)> + 'a;
 
+pub(crate) fn native_event_id(record: &Value) -> Option<String> {
+    ["uuid", "id"]
+        .iter()
+        .find_map(|key| record.get(key).and_then(Value::as_str))
+        .filter(|id| !id.is_empty() && id.len() <= 4096)
+        .map(str::to_owned)
+}
+
 /// Source lines read for one page: a line holding several blocks, or a call
 /// and its result, is read once. Only the last few lines are kept.
 #[derive(Default)]
@@ -142,11 +150,7 @@ impl<'a> Lines<'a> {
             .find(|((seen, at), _)| seen == path && *at == offset)?
             .1
             .as_ref()?;
-        ["uuid", "id"]
-            .iter()
-            .find_map(|key| record.get(key).and_then(Value::as_str))
-            .filter(|id| !id.is_empty() && id.len() <= 4096)
-            .map(str::to_owned)
+        native_event_id(record)
     }
 
     pub(crate) fn get(&mut self, path: &Path, offset: u64) -> Option<Rc<Value>> {

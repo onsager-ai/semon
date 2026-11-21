@@ -158,6 +158,68 @@ fn write_prefix(tx: &Transaction<'_>, source: i64, pos: i64, ledger: &str) -> ru
             [floor],
         )?;
     }
+    put(tx,
+        "DELETE FROM warehouse_signal WHERE (source,seq,revision) IN (
+           SELECT source,seq,revision FROM warehouse_signal
+           WHERE retired_revision<=CAST((SELECT value FROM meta WHERE key='warehouse_prefix_pruned_through') AS INTEGER)
+           ORDER BY retired_revision LIMIT 128
+         )",
+        [],
+    )?;
+    Ok(())
+}
+
+pub(super) fn write_signals(
+    tx: &Transaction<'_>,
+    path: &str,
+    index: &FileIndex,
+    changes: &super::super::DirtyRows,
+) -> rusqlite::Result<()> {
+    if changes.signals.is_empty() && changes.before_signals == index.signals.len() {
+        return Ok(());
+    }
+    let bound: Option<(i64, i64)> = tx
+        .prepare_cached(
+            "SELECT c.source,p.revision FROM warehouse_current c
+         CROSS JOIN warehouse_prefix p ON p.source=c.source AND p.superseded=0 WHERE c.path=?1",
+        )?
+        .query_row([path], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let Some((source, revision)) = bound else {
+        return Ok(());
+    };
+    let mut close = tx.prepare_cached(
+        "UPDATE warehouse_signal SET retired_revision=?3
+         WHERE source=?1 AND seq=?2 AND retired_revision IS NULL AND revision<?3",
+    )?;
+    let mut insert = tx.prepare_cached(
+        "INSERT INTO warehouse_signal(source,seq,revision,pos,payload) VALUES(?1,?2,?3,?4,?5)
+         ON CONFLICT(source,seq,revision) DO UPDATE SET pos=excluded.pos,payload=excluded.payload",
+    )?;
+    super::changed(
+        changes.before_signals,
+        &changes.signals,
+        &index.signals,
+        |seq, signal| {
+            close.execute(params![source, seq as i64, revision])?;
+            insert.execute(params![
+                source,
+                seq as i64,
+                revision,
+                int(signal.o),
+                json(signal)?
+            ])?;
+            Ok(())
+        },
+        |from| {
+            put(
+                tx,
+                "UPDATE warehouse_signal SET retired_revision=?3
+          WHERE source=?1 AND seq>=?2 AND retired_revision IS NULL",
+                params![source, from as i64, revision],
+            )
+        },
+    )?;
     Ok(())
 }
 

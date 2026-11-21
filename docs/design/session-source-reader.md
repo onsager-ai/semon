@@ -359,7 +359,7 @@ pruning cannot retire any registered chain or current native source binding.
 
 ## Current Semon storage contract
 
-The Event Index initializes schema 53 in one transaction with the current
+The Event Index initializes schema 54 in one transaction with the current
 parser/cache version, pricing fingerprints and native usage readiness default 0.
 It includes dedicated publication-bound archive chain evidence, separate from
 retention markers, together with the existing scheduling, activity, body and proof

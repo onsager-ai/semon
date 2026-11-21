@@ -831,6 +831,7 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
             .collect();
         assert_eq!(items.len(), expected.len());
         for ((record, text), entry) in items.into_iter().zip(&expected) {
+            assert_eq!(record.entry_anchor.as_deref(), entry["entry_id"].as_str());
             assert_eq!(entry["text"], text);
             assert_eq!(entry["provenance"]["source"]["path"], record.address.path);
             assert_eq!(entry["provenance"]["offset"], record.address.offset);
@@ -1019,6 +1020,28 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
         .unwrap();
     assert_eq!(call.occurrence, record_occurrence);
     assert_ne!(record_occurrence, call_occurrence);
+    let continued = selected_page(&fixture, &[&path, &peer], "native", 10, first.next.as_ref())
+        .unwrap()
+        .unwrap();
+    let previously_committed = continued
+        .records
+        .iter()
+        .find(|record| record.address == call)
+        .unwrap();
+    assert_eq!(previously_committed.causal.calls.len(), 1);
+    assert_eq!(previously_committed.causal.calls[0].id, "tool-1");
+    assert_eq!(previously_committed.causal.calls[0].tool, "SendMessage");
+    assert_eq!(previously_committed.causal.calls[0].block, 0);
+    assert!(previously_committed.causal.calls[0].replies.is_empty());
+    let fresh = selected::record_at(&fixture.options, &source, "native", &call, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(fresh.causal.calls[0].replies.len(), 1);
+    assert_eq!(
+        fresh.causal.source_turn,
+        previously_committed.causal.source_turn
+    );
+    assert!(fresh.causal.source_turn.is_some());
     let latest = selected::tool_results(&fixture.options, &source, "native", &call, None)
         .unwrap()
         .unwrap();
@@ -1317,4 +1340,53 @@ fn warehouse_prompt_parent_matches_the_authorized_launch_address() {
         .inventory
         .insert(parent.to_str().unwrap().into(), Availability::Unavailable);
     assert!(selected::launch_call(&source, "child").unwrap().is_none());
+}
+
+#[test]
+fn warehouse_component_continuation_preserves_signal_before_late_enrichment() {
+    let mut fixture = Fixture::new("component-signal-as-of");
+    let path = fixture.claude("native", "Signal fixture");
+    let compaction = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        json!({"type":"system","subtype":"compact_boundary",
+        "sessionId":"native","timestamp":"2026-09-24T00:00:01Z"}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let first = selected_page(&fixture, &[&path], "native", 1, None)
+        .unwrap()
+        .unwrap();
+    let cursor = first.next.unwrap();
+    append_native(
+        &path,
+        json!({"type":"system","subtype":"compact_boundary",
+        "sessionId":"native","timestamp":"2026-09-24T00:00:02Z",
+        "compactMetadata":{"trigger":"auto","preTokens":123}}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let address = selected::Address {
+        path: "projects/proj/native.jsonl".into(),
+        offset: compaction,
+        block: 0,
+        occurrence: 0,
+    };
+    let source = fixture.source(&[&path]);
+    let as_of = selected_page(&fixture, &[&path], "native", 10, Some(&cursor))
+        .unwrap()
+        .unwrap();
+    let original = as_of
+        .records
+        .iter()
+        .find(|record| record.address == address)
+        .unwrap();
+    let fresh = selected::record_at(&fixture.options, &source, "native", &address, None)
+        .unwrap()
+        .unwrap();
+    let old = &original.causal.signals[0];
+    let latest = &fresh.causal.signals[0];
+    assert_eq!(old.signal.k, crate::events::SignalKind::Compact);
+    assert_eq!(old.signal.n, None);
+    assert_eq!(latest.signal.n.as_deref(), Some("auto"));
+    assert_eq!(latest.signal.v, Some(123));
+    assert_eq!(old.id, latest.id);
 }

@@ -262,7 +262,8 @@ fn emit_catalog_publish_attempt(
 // v50: origin warehouse observations and current source membership.
 // v52: warehouse-owned retained identity and certified original component receipts.
 // v53: committed warehouse prefix receipts for selected read continuations.
-pub(crate) const SCHEMA_VERSION: i64 = 53;
+// v54: as-of native signal observations for warehouse read continuations.
+pub(crate) const SCHEMA_VERSION: i64 = 54;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -6280,6 +6281,7 @@ fn write_index_changes_measured(
         previous_sidecar.as_ref(),
         measurements,
     )?;
+    warehouse::write_signals(transaction, path, index, changes.unwrap_or(&full))?;
     bodies::write(transaction, path, &index.bodies, changes.is_some())?;
     let started = measurements.start();
     transaction.execute("DELETE FROM catalog_native_dependencies WHERE source_path=?1 AND (harness LIKE 'lineage:%' OR harness LIKE 'bridge:%')", [path])?;

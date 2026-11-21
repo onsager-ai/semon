@@ -166,6 +166,8 @@ pub(in super::super) fn retained_page(
         touched.entry(position.source).or_insert(prefix);
         records.push(Record {
             prompt_anchor: prompt_anchor(&mut prompts, key, &reference, position)?,
+            entry_anchor: None,
+            causal: causal::Context::default(),
             relay_receipts: Vec::new(),
             kind,
             native,
@@ -252,6 +254,8 @@ pub(in super::super) fn retained_record_at(
     .map_err(|_| ReadError::Restart)?;
     Ok(Some(Record {
         prompt_anchor: None,
+        entry_anchor: None,
+        causal: causal::Context::default(),
         relay_receipts: Vec::new(),
         address: address.clone(),
         kind,

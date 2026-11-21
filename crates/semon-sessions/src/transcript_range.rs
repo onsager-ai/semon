@@ -1760,6 +1760,27 @@ fn invalid() -> io::Error {
     )
 }
 
+pub(crate) fn native_entry_id(
+    source_key: &str,
+    catalog_key: &str,
+    reference: &SessionSourceRef,
+    (offset, block): (u64, u32),
+    kind: &str,
+    event_id: Option<&str>,
+    signal: Option<crate::events::SignalKind>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let position = event_id.map_or_else(|| offset.to_string(), str::to_owned);
+    let mut identity = format!(
+        "{source_key}|{catalog_key}|{}|{}|{position}|{block}|{kind}",
+        reference.native_id, reference.path
+    );
+    if let Some(signal) = signal {
+        identity.push_str(&format!("|{signal:?}"));
+    }
+    format!("{:x}", Sha256::digest(identity.as_bytes()))
+}
+
 fn reference_in_selection(
     options: &Options,
     selection: &Selection,
@@ -2235,27 +2256,19 @@ fn render(
                     .and_then(|field| field.native_event_id.clone())
                     .or_else(|| lines.native_event_id(&file.path, slot.offset))
             });
-            let position = native_event_id
-                .clone()
-                .unwrap_or_else(|| slot.offset.to_string());
-            // Generation is observation state, never part of entry identity.
-            use sha2::{Digest, Sha256};
-            let mut identity = format!(
-                "{}|{}|{}|{}|{}|{}|{}",
-                selection.identity.source_key,
-                selection.identity.catalog_key,
-                reference.native_id,
-                reference.path,
-                position,
-                slot.block,
-                entry["k"].as_str().unwrap_or("unknown")
-            );
-            if let crate::slot_projection::Recipe::Signal { signal } =
-                &selection.slots[index].recipe
-            {
-                identity.push_str(&format!("|{:?}", signal.kind));
-            }
-            entry["entry_id"] = json!(format!("{:x}", Sha256::digest(identity.as_bytes())));
+            let signal = match &selection.slots[index].recipe {
+                crate::slot_projection::Recipe::Signal { signal } => Some(signal.kind),
+                _ => None,
+            };
+            entry["entry_id"] = json!(native_entry_id(
+                &selection.identity.source_key,
+                &selection.identity.catalog_key,
+                reference,
+                (slot.offset, slot.block),
+                entry["k"].as_str().unwrap_or("unknown"),
+                native_event_id.as_deref(),
+                signal,
+            ));
             entry["provenance"] = json!({"source":reference,"native_event_id":native_event_id,"offset":slot.offset,"block":slot.block});
         }
         if entry.get("entry_id").is_none() {

@@ -276,7 +276,7 @@ page touches. The server holds no cursor state between requests.
 
 ### Prefix receipts in the selected-read fixture adapter
 
-Schema 53 writes one `warehouse_prefix` receipt when an admitted source
+The Index writes one `warehouse_prefix` receipt when an admitted source
 first commits or advances its consumed offset. The receipt records the source
 incarnation ID, committed offset and ledger at that boundary. It contains no
 source text. Receipts commit with the facts and native proof pages. Keep receipts
@@ -306,6 +306,13 @@ relay receipt addresses for selected tool results. It uses the shared native
 launch matcher on a qualified Codex marker and the parent's committed launch
 candidates. The list compares Codex prompt titles, reads qualified top-level
 process status, and prices winning usage facts and legacy Codex counters.
+Schema 54 preserves the versions of native signals that can change when a
+later record enriches an earlier position. The selected fixture adapter reads
+those signal versions and reply facts within the cursor's committed view. It
+compares native entry IDs against the current reader and resolves each source's
+most recent prompt or gap. The complete component-wide causal partition and
+anchor lookup remain open, including context that crosses source boundaries.
+
 Full causal slots and all anchor types, relay body/time matching, current
 provider fallback, parent/child runtime overrides and family pricing still
 need comparison before cutover.

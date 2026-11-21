@@ -16,6 +16,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "causal.rs"]
+mod causal;
 #[path = "retained.rs"]
 mod retained;
 pub(super) use retained::{retained_page, retained_record_at};
@@ -53,7 +55,8 @@ const TOOL_RESULTS: &str = "WITH call_at AS MATERIALIZED (
       AND all_calls.pos<?4
     GROUP BY c.call_id,c.pos,c.block HAVING count(*)=1
 )
-SELECT coalesce(r.ts,-9223372036854775808),r.pos,r.block,r.occurrence,r.kind
+SELECT coalesce(r.ts,-9223372036854775808),r.pos,r.block,r.occurrence,r.kind,
+       r.ts,r.failed,r.flags,r.correlation
 FROM unique_call c CROSS JOIN fact_tool_result r ON r.source=?1 AND r.call_id=c.call_id
   AND ((r.call_pos IS NULL AND r.kind<>'copilot-execution')
        OR (r.call_pos=c.pos AND r.call_block=c.block))
@@ -119,6 +122,8 @@ pub(super) struct Address {
 #[derive(Debug)]
 pub(super) struct Record {
     pub(super) prompt_anchor: Option<String>,
+    pub(super) entry_anchor: Option<String>,
+    pub(super) causal: causal::Context,
     pub(super) relay_receipts: Vec<RelayReceipt>,
     pub(super) address: Address,
     pub(super) kind: Option<String>,
@@ -924,6 +929,15 @@ fn read(
             }
         }
     }
+    let mut causal = BTreeMap::new();
+    if matches!(target, Target::Page(_) | Target::Address(_)) {
+        for (position, (_, member, _)) in &candidates {
+            causal.insert(
+                *position,
+                causal::Inputs::load(&db, key, &member.reference, *position, view)?,
+            );
+        }
+    }
     let mut relay_context = BTreeMap::new();
     if matches!(target, Target::ToolResults(_)) {
         for position in candidates.keys() {
@@ -960,8 +974,57 @@ fn read(
                 ReadError::Restart
             }
         })?;
+        let reference = &reader.member.reference;
+        let native_id = crate::tx::native_event_id(&native);
+        let entry_kind = match kind.as_deref() {
+            Some("user" | "user.message") => anchors.get(&position).map(|anchor| {
+                if crate::model::is_ask(anchor) {
+                    "h"
+                } else {
+                    "u"
+                }
+            }),
+            Some("assistant" | "assistant.message")
+                if crate::model::assistant_text(&native, 0).is_some() =>
+            {
+                Some("a")
+            }
+            Some("response_item") => match native
+                .pointer("/payload/role")
+                .and_then(serde_json::Value::as_str)
+            {
+                Some("user") if anchors.contains_key(&position) => Some("u"),
+                Some("assistant")
+                    if native
+                        .pointer("/payload/type")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("message") =>
+                {
+                    Some("a")
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        let entry_anchor = entry_kind.map(|kind| {
+            crate::transcript_range::native_entry_id(
+                source.namespace.as_str(),
+                key,
+                reference,
+                (offset, 0),
+                kind,
+                native_id.as_deref(),
+                None,
+            )
+        });
         records.push(Record {
             prompt_anchor: anchors.remove(&position),
+            entry_anchor,
+            causal: causal
+                .remove(&position)
+                .map_or_else(causal::Context::default, |inputs| {
+                    inputs.render(source, key, reference, native_id.as_deref())
+                }),
             relay_receipts: relay_context.remove(&position).unwrap_or_default(),
             address: Address {
                 path: reader.member.reference.path.clone(),

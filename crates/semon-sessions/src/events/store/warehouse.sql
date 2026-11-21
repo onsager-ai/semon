@@ -24,6 +24,16 @@ CREATE TABLE warehouse_prefix (
 CREATE INDEX warehouse_prefix_revision ON warehouse_prefix(source,revision);
 CREATE INDEX warehouse_prefix_expiry ON warehouse_prefix(committed_at,revision) WHERE superseded=1;
 CREATE INDEX warehouse_prefix_latest ON warehouse_prefix(source) WHERE superseded=0;
+-- A later record can enrich an earlier signal, for example a compaction
+-- trigger. Preserve the previous interpretation while its cursor can resume.
+CREATE TABLE warehouse_signal (
+  source INTEGER NOT NULL, seq INTEGER NOT NULL, revision INTEGER NOT NULL,
+  retired_revision INTEGER, pos INTEGER NOT NULL, payload TEXT NOT NULL,
+  PRIMARY KEY(source,seq,revision)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX warehouse_signal_position ON warehouse_signal(source,pos,revision);
+CREATE INDEX warehouse_signal_current ON warehouse_signal(source,seq) WHERE retired_revision IS NULL;
+CREATE INDEX warehouse_signal_expiry ON warehouse_signal(retired_revision) WHERE retired_revision IS NOT NULL;
 CREATE TABLE warehouse_current (
   path TEXT PRIMARY KEY, source INTEGER NOT NULL UNIQUE REFERENCES warehouse_source(source)
 ) STRICT, WITHOUT ROWID;
@@ -218,6 +228,7 @@ CREATE INDEX session_native_key ON dim_session(native_id,harness,source);
 CREATE INDEX session_parent_name ON dim_session(harness,parent_id,nickname);
 CREATE INDEX spawn_call_name ON fact_tool_call(source,tool,task_name);
 CREATE INDEX record_uuid ON fact_record(source,uuid);
+CREATE INDEX record_gap ON fact_record(source,pos) WHERE gap;
 CREATE INDEX record_position ON fact_record(source,coalesce(ts,-9223372036854775808),pos,block,occurrence)
   WHERE pos>=0 AND NOT gap;
 CREATE INDEX usage_message ON fact_step_observation(message_id,uuid,source);
