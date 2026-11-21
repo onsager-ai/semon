@@ -299,8 +299,12 @@ body fetch and rechecks the named file and descriptor before returning the page.
 
 This fixture adapter covers current local record positions, copied-record
 suppression, exact-address text lookup and prefix-bounded tool result reads.
-The retained address adapter obtains original bytes from an authorized
-provider using the warehouse binding. The list compares Codex prompt titles
-and prices winning usage facts. Full causal slots, canonical anchors, relay
-context, retained and provider transcript pages, prompt-dependent parents,
-live runtime status and family pricing still need comparison before cutover.
+The retained adapter pages original records through an authorized provider
+using the warehouse binding and revalidates the previous page's source
+references. The current adapter exposes native prompt anchors and exact-ID
+relay receipt addresses for selected tool results. The list compares Codex
+prompt titles, reads qualified top-level process status, and prices winning
+usage facts and legacy Codex counters. Full causal slots and all anchor types,
+relay body/time matching, current provider fallback, prompt-dependent launch
+placement, parent/child runtime overrides and family pricing still need
+comparison before cutover.

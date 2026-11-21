@@ -16,6 +16,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[path = "retained.rs"]
+mod retained;
+pub(super) use retained::{retained_page, retained_record_at};
+
 const MEMBER_PAGE: i64 = 64;
 const PAGE_BYTES: usize = 8 * 1024 * 1024;
 const MEMBERS: &str = "SELECT m.source,s.incarnation,s.carrier,s.ledger,d.native_id,c.path,
@@ -51,6 +55,20 @@ FROM unique_call c CROSS JOIN fact_tool_result r ON r.source=?1 AND r.call_id=c.
   AND ((r.call_pos IS NULL AND r.kind<>'copilot-execution')
        OR (r.call_pos=c.pos AND r.call_block=c.block))
 WHERE r.pos<?5 ORDER BY 1,r.pos,r.block,r.occurrence LIMIT ?6";
+
+const EXACT_RELAY_RECEIPTS: &str = "SELECT r.source,c.path,s.ledger,r.pos,r.block,r.occurrence,r.ts
+    FROM fact_relay_receipt r INDEXED BY relay_receipt_correlation
+    CROSS JOIN warehouse_source s ON s.source=r.source AND s.origin=?1
+    CROSS JOIN warehouse_current c ON c.source=r.source AND c.path=s.carrier
+    WHERE r.correlation=?2 ORDER BY r.source,r.pos,r.block,r.occurrence";
+
+#[derive(Debug)]
+pub(super) struct RelayReceipt {
+    pub(super) path: String,
+    pub(super) offset: u64,
+    pub(super) block: i64,
+    pub(super) at: Option<i64>,
+}
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 struct Position {
@@ -97,10 +115,106 @@ pub(super) struct Address {
 
 #[derive(Debug)]
 pub(super) struct Record {
+    pub(super) prompt_anchor: Option<String>,
+    pub(super) relay_receipts: Vec<RelayReceipt>,
     pub(super) address: Address,
     pub(super) kind: Option<String>,
     pub(super) native: serde_json::Value,
 }
+
+fn relay_receipts(
+    db: &rusqlite::Connection,
+    source: &Source<'_>,
+    result: Position,
+    view: i64,
+) -> Result<Vec<RelayReceipt>, ReadError> {
+    let correlation: Option<Option<String>> = db
+        .query_row(
+            "SELECT correlation FROM fact_relay_result
+         WHERE source=?1 AND pos=?2 AND block=?3 AND occurrence=?4 AND NOT failed
+         ORDER BY kind LIMIT 1",
+            params![
+                result.source,
+                result.offset,
+                result.block,
+                result.occurrence
+            ],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(index)?;
+    let Some(correlation) = correlation.flatten() else {
+        return Ok(Vec::new());
+    };
+    let mut receipts = db.prepare_cached(EXACT_RELAY_RECEIPTS).map_err(index)?;
+    let mut prefix = db.prepare_cached(COMMITTED_PREFIX).map_err(index)?;
+    let mut rows = receipts
+        .query(params![source.namespace.binding(), correlation])
+        .map_err(index)?;
+    let mut qualified = Vec::new();
+    while let Some(row) = rows.next().map_err(index)? {
+        let id: i64 = row.get(0).map_err(index)?;
+        let path: String = row.get(1).map_err(index)?;
+        let offset = u64::try_from(row.get::<_, i64>(3).map_err(index)?).map_err(index)?;
+        let ledger: String = row.get(2).map_err(index)?;
+        let current = decode(&ledger)?;
+        let Some(Availability::Expected(Some(stat))) = source.inventory.get(&path) else {
+            continue;
+        };
+        if !stable_or_grown(&current.stat, stat)
+            || !raw_stat(Path::new(&path)).is_ok_and(|actual| stable_or_grown(stat, &actual))
+        {
+            continue;
+        }
+        let Some(receipt) = prefix
+            .query_row(params![id, view], |r| r.get::<_, String>(0))
+            .optional()
+            .map_err(index)?
+        else {
+            continue;
+        };
+        let receipt = decode(&receipt)?;
+        if offset < receipt.offset {
+            qualified.push(RelayReceipt {
+                path,
+                offset,
+                block: row.get(4).map_err(index)?,
+                at: row.get(6).map_err(index)?,
+            });
+            if qualified.len() > 100 {
+                return Err(index("Selected relay receipt budget exhausted"));
+            }
+        }
+    }
+    Ok(qualified)
+}
+
+fn prompt_anchor(
+    query: &mut rusqlite::Statement<'_>,
+    key: &str,
+    reference: &SessionSourceRef,
+    position: Position,
+) -> Result<Option<String>, ReadError> {
+    let kind: Option<String> = query
+        .query_row(
+            params![position.source, position.offset, position.block],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(index)?;
+    let offset = u64::try_from(position.offset).map_err(index)?;
+    Ok(match kind.as_deref() {
+        Some("ask") => Some(crate::model::ask_id(&reference.native_id, offset)),
+        Some("user") => Some(crate::model::native_turn_id(
+            key,
+            &reference.native_id,
+            offset,
+        )),
+        _ => None,
+    })
+}
+
+const PROMPT_AT: &str = "SELECT kind FROM fact_prompt WHERE source=?1 AND pos=?2 AND block=?3 ORDER BY occurrence LIMIT 1";
 
 impl Record {
     pub(super) fn text(&self) -> Option<String> {
@@ -228,6 +342,65 @@ fn position(row: &rusqlite::Row<'_>, source: i64) -> rusqlite::Result<(Position,
     ))
 }
 
+struct PositionSearch<'a> {
+    source: i64,
+    start: i64,
+    end: i64,
+    predecessors: &'a str,
+    entry: Option<(i64, i64)>,
+    frontier: (i64, i64, i64, i64),
+    capacity: usize,
+}
+
+fn member_positions(
+    query: &mut rusqlite::Statement<'_>,
+    search: PositionSearch<'_>,
+    mut keep: impl FnMut((Position, Option<String>)),
+) -> Result<(), ReadError> {
+    let (entry_block, entry_occurrence) = search.entry.unzip();
+    let mut frontier = search.frontier;
+    let mut accepted = 0;
+    while accepted < search.capacity {
+        let mut positions = query.query(named_params! {
+            ":source": search.source, ":start": search.start, ":end": search.end,
+            ":predecessors": search.predecessors, ":entry_block": entry_block,
+            ":entry_occurrence": entry_occurrence, ":time": frontier.0, ":pos": frontier.1,
+            ":block": frontier.2, ":occurrence": frontier.3, ":limit": (search.capacity - accepted) as i64,
+        }).map_err(index)?;
+        let mut examined = 0;
+        while let Some(row) = positions.next().map_err(index)? {
+            examined += 1;
+            let (position, kind) = position(row, search.source).map_err(index)?;
+            frontier = (
+                position.time,
+                position.offset,
+                position.block,
+                position.occurrence,
+            );
+            if !row.get::<_, bool>(5).map_err(index)? {
+                keep((position, kind));
+                accepted += 1;
+            }
+        }
+        if examined == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn member_frontier(after: Option<Position>, source: i64) -> (i64, i64, i64, i64) {
+    let Some(after) = after else {
+        return (i64::MIN, i64::MIN, i64::MIN, i64::MIN);
+    };
+    let (offset, block, occurrence) = match source.cmp(&after.source) {
+        std::cmp::Ordering::Less => (i64::MAX, i64::MAX, i64::MAX),
+        std::cmp::Ordering::Equal => (after.offset, after.block, after.occurrence),
+        std::cmp::Ordering::Greater => (i64::MIN, i64::MIN, i64::MIN),
+    };
+    (after.time, offset, block, occurrence)
+}
+
 pub(super) fn prompt_title(
     source: &Source<'_>,
     carrier: String,
@@ -300,67 +473,6 @@ pub(super) fn record_at(
         cursor,
     )
     .map(|component| component.and_then(|component| component.records.into_iter().next()))
-}
-
-/// The host provides an independently authorized archive reader. The warehouse
-/// binding supplies the original source reference and exact record position.
-pub(super) fn retained_record_at(
-    options: &Options,
-    source: &Source<'_>,
-    key: &str,
-    address: &Address,
-    provider: &dyn SessionSourceReader,
-) -> Result<Option<Record>, ReadError> {
-    let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
-    let tx = db.transaction().map_err(index)?;
-    let identity =
-        warehouse::retained_identity(&tx, &source.namespace, key).map_err(super::retained_error)?;
-    let home = match identity.harness.as_str() {
-        "claude" => &options.claude_home,
-        "codex" => &options.codex_home,
-        "copilot" => &options.copilot_home,
-        _ => return Err(ReadError::RetainedUnverified),
-    };
-    if !crate::is_input_path(&identity.harness, &address.path) {
-        return Ok(None);
-    }
-    let full_path = home.join(&address.path);
-    let at = i64::try_from(address.offset).map_err(index)?;
-    let Some((receipt, kind)) = tx.query_row(
-        "SELECT m.receipt,r.kind FROM warehouse_identity_member m
-         CROSS JOIN fact_record r ON r.source=m.source AND r.pos=?3 AND r.block=?4 AND r.occurrence=?5
-         WHERE m.identity=?1 AND json_extract(m.receipt,'$.path')=?2
-          AND r.pos>=0 AND r.pos<json_extract(m.receipt,'$.offset') AND NOT r.gap",
-        params![identity.binding, full_path.to_str(), at, address.block, address.occurrence],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-    ).optional().map_err(index)? else {
-        return Ok(None);
-    };
-    let receipt: crate::model::summary::CatalogSource =
-        serde_json::from_str(&receipt).map_err(index)?;
-    let reference = SessionSourceRef {
-        root: identity.harness,
-        path: address.path.clone(),
-        native_id: receipt.native_id,
-        offset: receipt.offset,
-        prefix_sha256: receipt.prefix_sha256,
-        tail_sha256: receipt.tail_sha256,
-    };
-    let reader = crate::source_reader::BudgetedReader::new(provider, 1024);
-    let mut bytes_left = PAGE_BYTES;
-    let native = crate::source_reader::read_record_bounded(
-        &reader,
-        &reference,
-        address.offset,
-        crate::tx::LINE_MAX as usize,
-        &mut bytes_left,
-    )
-    .map_err(|_| ReadError::Restart)?;
-    Ok(Some(Record {
-        address: address.clone(),
-        kind,
-        native,
-    }))
 }
 
 pub(super) fn tool_results(
@@ -473,17 +585,6 @@ fn read(
     {
         return Err(ReadError::Restart);
     }
-    let minimum = Position {
-        time: i64::MIN,
-        source: 0,
-        offset: 0,
-        block: 0,
-        occurrence: 0,
-    };
-    let after = match target {
-        Target::Page(_) => cursor.map_or(minimum, |cursor| cursor.after),
-        Target::Address(_) | Target::ToolResults(_) => minimum,
-    };
     let mut witness = Sha256::new_with_prefix(encode(&(owner, component))?);
     let mut candidates = BTreeMap::new();
     let mut member_count = 0;
@@ -606,7 +707,7 @@ fn read(
                 };
                 let start = i64::try_from(start).map_err(index)?;
                 let end = i64::try_from(end).map_err(index)?;
-                let (time, tie) = if entry_block.is_some() {
+                let frontier = if entry_block.is_some() {
                     let Some(time) = db
                         .query_row(
                             "SELECT coalesce(ts,-9223372036854775808) FROM fact_record
@@ -619,49 +720,25 @@ fn read(
                     else {
                         continue;
                     };
-                    (time, (i64::MIN, i64::MIN, i64::MIN))
+                    (time, i64::MIN, i64::MIN, i64::MIN)
                 } else {
-                    (
-                        after.time,
-                        match id.cmp(&after.source) {
-                            std::cmp::Ordering::Less => (i64::MAX, i64::MAX, i64::MAX),
-                            std::cmp::Ordering::Equal => {
-                                (after.offset, after.block, after.occurrence)
-                            }
-                            std::cmp::Ordering::Greater => (i64::MIN, i64::MIN, i64::MIN),
-                        },
-                    )
+                    member_frontier(cursor.map(|cursor| cursor.after), id)
                 };
                 let predecessors =
                     continuation_bounds(&mut continuations, &mut prefix, id, component, view)?;
-                let mut frontier = (time, tie.0, tie.1, tie.2);
-                let mut accepted = 0;
-                while accepted < capacity {
-                    let mut positions = detail.query(named_params! {
-                        ":source": id, ":start": start, ":end": end, ":predecessors": predecessors,
-                        ":entry_block": entry_block, ":entry_occurrence": entry_occurrence,
-                        ":time": frontier.0, ":pos": frontier.1, ":block": frontier.2,
-                        ":occurrence": frontier.3, ":limit": (capacity - accepted) as i64,
-                    }).map_err(index)?;
-                    let mut examined = 0;
-                    while let Some(row) = positions.next().map_err(index)? {
-                        examined += 1;
-                        let (position, kind) = position(row, id).map_err(index)?;
-                        frontier = (
-                            position.time,
-                            position.offset,
-                            position.block,
-                            position.occurrence,
-                        );
-                        if !row.get::<_, bool>(5).map_err(index)? {
-                            keep((position, kind));
-                            accepted += 1;
-                        }
-                    }
-                    if examined == 0 {
-                        break;
-                    }
-                }
+                member_positions(
+                    &mut detail,
+                    PositionSearch {
+                        source: id,
+                        start,
+                        end,
+                        predecessors: &predecessors,
+                        entry: entry_block.zip(entry_occurrence),
+                        frontier,
+                        capacity,
+                    },
+                    &mut keep,
+                )?;
             }
             if count < MEMBER_PAGE {
                 break;
@@ -680,6 +757,25 @@ fn read(
         candidates.pop_last();
     }
     let after = candidates.last_key_value().map(|(position, _)| *position);
+    let mut anchors = BTreeMap::new();
+    {
+        let mut prompts = db.prepare_cached(PROMPT_AT).map_err(index)?;
+        if matches!(target, Target::Page(_) | Target::Address(_)) {
+            for (position, (_, member, _)) in &candidates {
+                if let Some(anchor) =
+                    prompt_anchor(&mut prompts, key, &member.reference, *position)?
+                {
+                    anchors.insert(*position, anchor);
+                }
+            }
+        }
+    }
+    let mut relay_context = BTreeMap::new();
+    if matches!(target, Target::ToolResults(_)) {
+        for position in candidates.keys() {
+            relay_context.insert(*position, relay_receipts(&db, source, *position, view)?);
+        }
+    }
     let db = chunk_proofs::Snapshot::new(db);
     let proof_bytes = Mutex::new(PAGE_BYTES);
     let mut readers = BTreeMap::new();
@@ -711,6 +807,8 @@ fn read(
             }
         })?;
         records.push(Record {
+            prompt_anchor: anchors.remove(&position),
+            relay_receipts: relay_context.remove(&position).unwrap_or_default(),
             address: Address {
                 path: reader.member.reference.path.clone(),
                 offset,

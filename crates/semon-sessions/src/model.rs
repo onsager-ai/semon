@@ -33,6 +33,8 @@ pub(crate) use native_text::{
 use native_text::{
     coordinator_body, down_target, input_string, notification_result, received_body,
 };
+#[cfg(test)]
+pub(crate) use turns::native_id as native_turn_id;
 
 pub(crate) mod relation_stage;
 pub(crate) mod summary;
@@ -476,6 +478,10 @@ fn stable_id(prefix: &str, source: &str) -> String {
 /// id starts with it.
 const ASK_PREFIX: &str = "a";
 
+pub(crate) fn ask_id(native_id: &str, offset: u64) -> String {
+    stable_id(ASK_PREFIX, &format!("ask:{native_id}:{offset}"))
+}
+
 /// Whether `id` is an ask's: its transcript slot sits on your message's line.
 pub(crate) fn is_ask(id: &str) -> bool {
     id.strip_prefix(ASK_PREFIX)
@@ -866,6 +872,27 @@ pub(crate) struct PidFile {
     waiting_for: Option<String>,
     waiting_since: Option<i64>,
     name: Option<String>,
+}
+
+impl PidFile {
+    fn busy(&self) -> bool {
+        self.status.as_deref() == Some("busy")
+    }
+
+    fn waiting(&self) -> bool {
+        self.status.as_deref() == Some("waiting") || self.waiting_for.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observed_state(&self) -> &'static str {
+        if self.waiting() {
+            "wait"
+        } else if self.busy() {
+            "work"
+        } else {
+            "idle"
+        }
+    }
 }
 
 /// A file's identity and version: text read back from it is valid while
@@ -2331,9 +2358,8 @@ impl<'a> Builder<'a> {
                 // `shell` (a finished turn with background shells running)
                 // is not busy here: it stays idle rather than working for as
                 // long as a shell lives.
-                session.busy = pid.status.as_deref() == Some("busy");
-                session.waiting =
-                    pid.status.as_deref() == Some("waiting") || pid.waiting_for.is_some();
+                session.busy = pid.busy();
+                session.waiting = pid.waiting();
                 if session.waiting {
                     session.out.waiting_for = pid.waiting_for.clone();
                     session.out.waiting_since = pid.waiting_since;
@@ -4484,8 +4510,7 @@ impl<'a> Builder<'a> {
                 // Query reads its brief from the same captured generation when
                 // a selected session or searched slot actually requests it.
                 let file = &self.files[at.0];
-                let source = format!("ask:{}:{}", file.id, event(self.files, at).o);
-                let id = stable_id(ASK_PREFIX, &source);
+                let id = ask_id(&file.id, event(self.files, at).o);
                 if target == BuildTarget::Query {
                     self.ask_briefs.insert(
                         id.clone(),

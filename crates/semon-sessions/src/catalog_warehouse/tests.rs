@@ -873,12 +873,13 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
         assert_eq!(reply.status, 200);
         let anchor: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
         assert_eq!(anchor["slot"], expected[0]["slot"]);
-        let address = &actual
+        let prompt_record = actual
             .records
             .iter()
             .find(|record| record.text().as_deref() == Some(prompt))
-            .unwrap()
-            .address;
+            .unwrap();
+        assert_eq!(prompt_record.prompt_anchor.as_deref(), Some(turn));
+        let address = &prompt_record.address;
         assert_eq!(
             selected::record_at(
                 &fixture.options,
@@ -960,15 +961,25 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
     let mut fixture = Fixture::new("component-late-result");
     let path = fixture.claude("native", "Original title");
     let at = fs::metadata(&path).unwrap().len();
+    let peer = fixture.claude("peer", "Peer title");
+    let receipt_offset = fs::metadata(&peer).unwrap().len();
+    append_native(
+        &peer,
+        json!({"type":"user","timestamp":"2026-09-24T00:00:03Z","sessionId":"peer",
+        "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/111.sock","name":"native",
+            "fromMode":"prompting","msg_id":"correlation","body":"hello","verifiedPeerPid":111,"verifiedPeerProcStart":"999"},
+        "message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/111.sock\" from-name=\"native\">hello</cross-session-message>"}}),
+    );
+    scan_file(&peer, "claude", &mut fixture.cache, &mut false).unwrap();
     append_native(
         &path,
         json!({"type":"assistant","uuid":"call","sessionId":"native",
         "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
-            {"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"true"}}
+            {"type":"tool_use","id":"tool-1","name":"SendMessage","input":{"to":"peer","message":"hello"}}
         ]}}),
     );
     scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
-    let first = selected_page(&fixture, &[&path], "native", 1, None)
+    let first = selected_page(&fixture, &[&path, &peer], "native", 1, None)
         .unwrap()
         .unwrap();
     let call = selected::Address {
@@ -980,10 +991,10 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
     append_native(
         &path,
         json!({"type":"user","sessionId":"native","timestamp":"2026-09-24T00:00:02Z",
-        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"qualified result"}]}}),
+        "toolUseResult":{"success":true,"msg_id":"correlation"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"qualified result"}]}}),
     );
     scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
-    let source = fixture.source(&[&path]);
+    let source = fixture.source(&[&path, &peer]);
     assert!(
         selected::tool_results(
             &fixture.options,
@@ -1000,6 +1011,12 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
         .unwrap()
         .unwrap();
     assert_eq!(latest.len(), 1);
+    let receipts = &latest[0].relay_receipts;
+    assert_eq!(receipts.len(), 1);
+    assert_eq!(receipts[0].path, peer.to_str().unwrap());
+    assert_eq!(receipts[0].offset, receipt_offset);
+    assert_eq!(receipts[0].block, 0);
+    assert!(receipts[0].at.is_some());
     assert_eq!(
         latest[0].native["message"]["content"][0]["content"],
         "qualified result"
@@ -1104,6 +1121,24 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
         .is_none()
     );
     assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let source = fixture.source(&[&path]);
+    let first = selected::retained_page(&source, "native", 1, None, &provider).unwrap();
+    assert_eq!(first.member_count, 1);
+    let cursor = first.next.unwrap();
+    let next = selected::retained_page(&source, "native", 1, Some(&cursor), &provider).unwrap();
+    assert_eq!(
+        next.records[0].text().as_deref(),
+        Some("Original native prompt")
+    );
+    assert!(next.next.is_none());
+    let denied = Original {
+        data: vec![],
+        calls: Default::default(),
+    };
+    assert!(matches!(
+        selected::retained_page(&source, "native", 1, Some(&cursor), &denied),
+        Err(ReadError::Restart)
+    ));
 }
 
 #[test]
@@ -1200,4 +1235,44 @@ fn warehouse_list_qualifies_codex_prompt_title_for_search() {
         expected["parent"].as_str(),
         actual.rows[0].parent.as_deref()
     );
+}
+
+#[test]
+fn warehouse_list_runtime_rejects_pid_reuse_and_tracks_wait() {
+    let mut fixture = Fixture::new("list-runtime");
+    let path = fixture.claude("native", "Runtime fixture");
+    let pids = fixture.options.claude_home.join("sessions");
+    fs::create_dir_all(&pids).unwrap();
+    let stat = fixture.options.proc_root.join("42/stat");
+    fs::create_dir_all(stat.parent().unwrap()).unwrap();
+    let write_start = |start| {
+        let mut fields = vec!["0".to_owned(); 20];
+        fields[19] = format!("{start}");
+        fs::write(&stat, format!("42 (claude) {}\n", fields.join(" "))).unwrap();
+    };
+    write_start(777);
+    let write_pid = |status| {
+        fs::write(
+            pids.join("42.json"),
+            json!({"pid":42,"sessionId":"native","procStart":777,"status":status}).to_string(),
+        )
+        .unwrap()
+    };
+    let read = || {
+        read_list(
+            &[fixture.source(&[&path])],
+            "workspace",
+            &request("limit=10"),
+            None,
+        )
+        .unwrap()
+        .rows[0]
+            .status
+    };
+    write_pid("busy");
+    assert_eq!(read(), Some("work"));
+    write_pid("waiting");
+    assert_eq!(read(), Some("wait"));
+    write_start(778);
+    assert_eq!(read(), Some("done"));
 }

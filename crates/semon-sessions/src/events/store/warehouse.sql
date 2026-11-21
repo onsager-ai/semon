@@ -224,6 +224,7 @@ CREATE INDEX usage_message ON fact_step_observation(message_id,uuid,source);
 CREATE INDEX tool_call_identity ON fact_tool_call(source,call_id);
 CREATE INDEX tool_result_identity ON fact_tool_result(source,call_id);
 CREATE INDEX relay_result_call ON fact_relay_result(source,call_id);
+CREATE INDEX relay_receipt_correlation ON fact_relay_receipt(correlation,source,pos,block,occurrence);
 CREATE VIEW dim_lineage AS
 SELECT m.source,g.minimum AS component FROM lineage_member m
 JOIN lineage_group g ON g.id=m.component;

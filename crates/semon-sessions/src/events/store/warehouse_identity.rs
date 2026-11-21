@@ -213,6 +213,7 @@ pub(super) fn retire(tx: &Transaction<'_>, source: i64) -> rusqlite::Result<()> 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RetainedIdentity {
     pub(crate) binding: i64,
+    pub(crate) witness: String,
     pub(crate) owner: i64,
     pub(crate) harness: String,
     pub(crate) native_id: String,
@@ -276,7 +277,7 @@ fn read_retained(
          AND i.complete=1 AND i.recipe_version=?3 AND length(i.recipe_generation)=64
          AND i.recipe_source_generation=i.source_generation",
     )?.query_row(params![source_key, key, VERSION], |row| {
-        Ok((row.get::<_, i64>(0)?, RetainedIdentity { binding: row.get(0)?, owner: row.get(1)?, harness: row.get(2)?, native_id: row.get(3)? }, row.get::<_,i64>(4)?, row.get::<_,String>(5)?,row.get::<_,String>(6)?,row.get::<_,String>(7)?))
+        Ok((row.get::<_, i64>(0)?, RetainedIdentity { binding: row.get(0)?, witness: row.get(7)?, owner: row.get(1)?, harness: row.get(2)?, native_id: row.get(3)? }, row.get::<_,i64>(4)?, row.get::<_,String>(5)?,row.get::<_,String>(6)?,row.get::<_,String>(7)?))
     }).optional()?;
     let Some((id, identity, member_count, generation, recipe_generation, expected_witness)) =
         binding
