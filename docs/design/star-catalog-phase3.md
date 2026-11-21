@@ -349,5 +349,9 @@ Its source witness must match the selected warehouse members and prefixes
 before body reads. The fixture compares rendered Claude activity and Codex
 operation addresses with the current reader.
 
-Relay and launch turn placement, relay body/time matching, and remaining
-causal presentation still need comparison before cutover.
+Schema 57 indexes incoming Claude relay positions. The selected fixture
+adapter carries relay boundaries across pages and places qualified native
+launches at the child's first prompt, using the existing handoff IDs. Marker
+launch evidence must be inside the selected prefix. Parent-addressed body/time
+matching and its receipt placement remain open, along with launch placement at
+a header when the child has no prompt.

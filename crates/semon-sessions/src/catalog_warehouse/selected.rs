@@ -25,7 +25,7 @@ pub(super) use retained::{retained_page, retained_record_at};
 const MEMBER_PAGE: i64 = 64;
 const PAGE_BYTES: usize = 8 * 1024 * 1024;
 const MEMBERS: &str = "SELECT m.source,s.incarnation,s.carrier,s.ledger,d.native_id,c.path,
-    f.resume_at,coalesce(r.sidecar_revision,0)
+    f.resume_at,coalesce(r.sidecar_revision,0),d.lineage
     FROM lineage_member m
     CROSS JOIN warehouse_source s ON s.source=m.source AND s.origin=?2 AND s.harness=?3
     CROSS JOIN dim_session d ON d.source=m.source
@@ -1248,8 +1248,20 @@ fn read(
             }
         })?;
         let native_id = crate::tx::native_event_id(&native);
+        let turn = turns.remove(&position).flatten();
+        let starts_handoff = turn.as_ref().is_some_and(|turn| {
+            turn.handoff
+                && turn.address.path == reference.path
+                && turn.address.offset == offset
+                && turn.address.block == position.block
+                && turn.address.occurrence == position.occurrence
+        });
+        if starts_handoff && let Some(turn) = &turn {
+            anchors.insert(position, turn.id.clone());
+        }
         let operation_parent = operations.remove(&position);
         let entry_kind = match kind.as_deref() {
+            _ if starts_handoff => Some("h"),
             Some("event_msg") if operation_parent.is_some() => Some("tool"),
             Some("user" | "user.message") => anchors.get(&position).map(|anchor| {
                 if crate::model::is_ask(anchor) {
@@ -1298,13 +1310,7 @@ fn read(
             causal: causal
                 .remove(&position)
                 .map_or_else(causal::Context::default, |inputs| {
-                    inputs.render(
-                        source,
-                        key,
-                        reference,
-                        native_id.as_deref(),
-                        turns.remove(&position).flatten(),
-                    )
+                    inputs.render(source, key, reference, native_id.as_deref(), turn)
                 }),
             relay_receipts: relay_context.remove(&position).unwrap_or_default(),
             address: Address {

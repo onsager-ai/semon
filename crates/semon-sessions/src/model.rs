@@ -474,6 +474,23 @@ fn stable_id(prefix: &str, source: &str) -> String {
     format!("{prefix}{:016x}", fnv(source))
 }
 
+pub(crate) fn spawn_turn_id(harness: &str, key: &str) -> String {
+    stable_id("s", &format!("spawn:{harness}:{key}"))
+}
+
+#[cfg(test)]
+pub(crate) fn incoming_relay_turn_id(
+    correlation: Option<&str>,
+    native_id: &str,
+    offset: u64,
+) -> String {
+    let identity = match correlation {
+        Some(id) => format!("relay:{id}"),
+        None => format!("relay:recv:{native_id}:{offset}"),
+    };
+    stable_id("r", &identity)
+}
+
 /// The prefix of an ask's id: your message to a session. No other handoff
 /// id starts with it.
 const ASK_PREFIX: &str = "a";
@@ -3352,7 +3369,7 @@ impl<'a> Builder<'a> {
                 done: result.as_ref().and_then(|result| result.1),
                 result: result.map(|(text, _, _)| cap(text.as_deref().unwrap_or(""), MSG_MAX)),
                 ..Handoff::new(
-                    stable_id("s", &format!("spawn:claude:{key}")),
+                    spawn_turn_id("claude", &key),
                     "spawn",
                     (self.sessions[spawner].key.clone(), key),
                     at,
@@ -3823,7 +3840,7 @@ impl<'a> Builder<'a> {
                 result: result.map(|(text, _)| cap(text.as_deref().unwrap_or(""), MSG_MAX)),
                 ambiguous,
                 ..Handoff::new(
-                    stable_id("s", &format!("spawn:codex:{key}")),
+                    spawn_turn_id("codex", &key),
                     "spawn",
                     (self.sessions[spawner].key.clone(), key),
                     call.and_then(|at| event(self.files, at).t)

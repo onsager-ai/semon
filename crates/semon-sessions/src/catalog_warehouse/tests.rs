@@ -1300,6 +1300,66 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
 }
 
 #[test]
+fn warehouse_relay_turn_carries_across_pages_at_the_selected_prefix() {
+    let mut fixture = Fixture::new("relay-turn-placement");
+    let path = fixture.claude("receiver", "First prompt");
+    let receipt = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        json!({"type":"user","uuid":"receipt","sessionId":"receiver",
+        "timestamp":"2026-09-24T00:00:02Z","origin":{"kind":"peer","from":"uds:/fixture.sock",
+        "name":"peer","msg_id":"receipt-id","body":"Relay body"},
+        "message":{"role":"user","content":"<cross-session-message from=\"uds:/fixture.sock\">Relay body</cross-session-message>"}}),
+    );
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"reply","sessionId":"receiver",
+        "timestamp":"2026-09-24T00:00:04Z","message":{"role":"assistant","content":[
+            {"type":"text","text":"Reply to the relay"}
+        ]}}),
+    );
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let oracle = crate::session_transcript_range_with_mode(
+        &fixture.options,
+        fixture.namespace.as_str(),
+        "sid=receiver&after=0&limit=100",
+        None,
+        crate::SessionSourceReadMode::LocalOrPinnedProvider,
+    );
+    assert_eq!(oracle.status, 200);
+    let transcript: serde_json::Value = serde_json::from_slice(&oracle.body).unwrap();
+    let entries = transcript["entries"].as_array().unwrap();
+    let reply = entries
+        .iter()
+        .find(|entry| entry["text"] == "Reply to the relay")
+        .unwrap();
+    let first = selected_page(&fixture, &[&path], "receiver", 3, None)
+        .unwrap()
+        .unwrap();
+    let relay = first
+        .records
+        .iter()
+        .find(|record| record.address.offset == receipt)
+        .unwrap();
+    assert_eq!(relay.prompt_anchor.as_deref(), reply["turn"].as_str());
+    append_native(&path, prompt("receiver", 3, "Later commit"));
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let page = selected_page(&fixture, &[&path], "receiver", 1, first.next.as_ref())
+        .unwrap()
+        .unwrap();
+    let turn = page.records[0].causal.turn.as_ref().unwrap();
+    assert_eq!(turn.address, relay.address);
+    assert_eq!(Some(turn.id.as_str()), reply["turn"].as_str());
+}
+
+#[test]
 fn warehouse_current_provider_pins_the_selected_original_across_pages() {
     use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
     use std::io;
@@ -1922,6 +1982,25 @@ fn warehouse_prompt_parent_matches_the_authorized_launch_address() {
     );
     scan_file(&child, "codex", &mut fixture.cache, &mut false).unwrap();
     let mut source = fixture.source(&[&parent, &child]);
+    let current = selected::page(
+        &fixture.options,
+        &source,
+        CatalogReadScope::Current,
+        "child",
+        10,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    let expected = crate::model::spawn_turn_id("codex", "child");
+    assert!(current.records.iter().any(|record| {
+        record.prompt_anchor.as_deref() == Some(expected.as_str())
+            && record
+                .causal
+                .turn
+                .as_ref()
+                .is_some_and(|turn| turn.handoff && turn.address == record.address)
+    }));
     let launch = selected::launch_call(&source, "child").unwrap().unwrap();
     assert_eq!(launch.id, "launch");
     assert_eq!(launch.name, "Bash");

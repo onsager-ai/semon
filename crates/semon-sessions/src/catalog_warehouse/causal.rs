@@ -1,11 +1,11 @@
 //! Prefix-qualified native causal inputs for the selected-record adapter.
 use super::{
-    Address, COMMITTED_PREFIX, CONTINUATIONS, MEMBER_PAGE, MEMBERS, Position, ReadError,
-    SessionSourceRef, Source, TOOL_RESULTS, committed_prefix, continuation_bounds, index,
-    member_frontier, position, relative,
+    Address, Availability, COMMITTED_PREFIX, CONTINUATIONS, MEMBER_PAGE, MEMBERS, Position,
+    ReadError, SessionSourceRef, Source, TOOL_RESULTS, committed_prefix, continuation_bounds,
+    decode, index, member_frontier, position, raw_stat, relative, stable_or_grown,
 };
 use rusqlite::{Connection, OptionalExtension, named_params, params};
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 const BOUNDARY: &str = include_str!("causal_boundary.sql");
 const PRECEDING_TIME: &str = "SELECT ts FROM fact_record WHERE source=?1 AND pos<?2
@@ -26,6 +26,7 @@ pub(in super::super) struct Context {
 pub(in super::super) struct TurnStart {
     pub(in super::super) id: String,
     pub(in super::super) address: Address,
+    pub(in super::super) handoff: bool,
 }
 
 struct Boundary {
@@ -66,6 +67,9 @@ pub(super) fn turns(
     let mut prefix = db.prepare_cached(COMMITTED_PREFIX).map_err(index)?;
     let mut continuations = db.prepare_cached(CONTINUATIONS).map_err(index)?;
     let mut boundary = db.prepare_cached(BOUNDARY).map_err(index)?;
+    let mut launch = db
+        .prepare_cached(include_str!("launch_boundary.sql"))
+        .map_err(index)?;
     let mut after = 0;
     loop {
         let mut rows = members
@@ -88,6 +92,41 @@ pub(super) fn turns(
                 i64::try_from(committed_prefix(&mut prefix, id, view)?.offset).map_err(index)?;
             let predecessors =
                 continuation_bounds(&mut continuations, &mut prefix, id, component, view)?;
+            let launch_at = if harness == "codex"
+                || (harness == "claude" && !row.get::<_, bool>(8).map_err(index)?)
+            {
+                launch
+                    .query_row(params![id, end, source.namespace.binding()], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    })
+                    .optional()
+                    .map_err(index)?
+            } else {
+                None
+            };
+            let launch_at = if let Some((carrier, ledger, Some(at), parent)) = launch_at {
+                let current = decode(&ledger)?;
+                if matches!(source.inventory.get(&carrier), Some(Availability::Expected(Some(stat)))
+                    if stable_or_grown(&current.stat, stat) && raw_stat(Path::new(&carrier))
+                        .is_ok_and(|actual| stable_or_grown(stat, &actual)))
+                    && prefix
+                        .query_row(params![parent, view], |row| row.get::<_, String>(0))
+                        .optional()
+                        .map_err(index)?
+                        .is_some()
+                {
+                    Some(at)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             for (at, winner) in winners.values_mut() {
                 let (time, pos, _, _) = member_frontier(Some(*at), id);
                 let matched = boundary
@@ -107,12 +146,13 @@ pub(super) fn turns(
                                 },
                                 row.get::<_, Option<String>>(4)?,
                                 row.get(5)?,
+                                row.get::<_, Option<String>>(6)?,
                             ))
                         },
                     )
                     .optional()
                     .map_err(index)?;
-                let Some((position, kind, occurrence)) = matched else {
+                let Some((position, kind, occurrence, correlation)) = matched else {
                     continue;
                 };
                 if winner
@@ -123,8 +163,22 @@ pub(super) fn turns(
                 }
                 let start = if let Some(kind) = kind {
                     let offset = u64::try_from(position.offset).map_err(index)?;
+                    let launch = kind == "user" && launch_at == Some(position.offset);
+                    let relay = kind == "relay";
+                    let id = if launch {
+                        crate::model::spawn_turn_id(harness, key)
+                    } else if relay {
+                        crate::model::incoming_relay_turn_id(
+                            correlation.as_deref(),
+                            &native_id,
+                            offset,
+                        )
+                    } else {
+                        prompt_id(key, &native_id, offset, &kind)
+                    };
                     Some(TurnStart {
-                        id: prompt_id(key, &native_id, offset, &kind),
+                        id,
+                        handoff: launch || relay,
                         address: Address {
                             path: relative(source.options, harness, &carrier)
                                 .ok_or(ReadError::Restart)?

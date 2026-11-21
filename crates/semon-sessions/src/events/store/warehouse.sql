@@ -243,6 +243,7 @@ CREATE INDEX tool_call_identity ON fact_tool_call(source,call_id);
 CREATE INDEX operation_parent ON fact_operation(source,call_pos,pos);
 CREATE INDEX tool_result_identity ON fact_tool_result(source,call_id);
 CREATE INDEX relay_result_call ON fact_relay_result(source,call_id);
+CREATE INDEX relay_receipt_position ON fact_relay_receipt(source,coalesce(ts,-9223372036854775808),pos,block,occurrence);
 CREATE INDEX relay_receipt_correlation ON fact_relay_receipt(correlation,source,pos,block,occurrence);
 CREATE VIEW dim_lineage AS
 SELECT m.source,g.minimum AS component FROM lineage_member m
