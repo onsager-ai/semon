@@ -5663,6 +5663,8 @@ mod tests {
             "machine-3",
             "machine-4",
             "machine-5",
+            "scale-a",
+            "scale-b",
             "stale",
             "twin",
             "unrecorded",
