@@ -38,6 +38,23 @@ WITH prompt AS (
           WHERE r.uuid IS NOT NULL
       )
     ORDER BY time DESC,e.pos DESC,e.block DESC,e.occurrence DESC LIMIT 1
+), progress AS (
+    SELECT coalesce(e.ts,-9223372036854775808) AS time,e.pos,e.block,e.occurrence,'relay' AS kind,
+           r.occurrence AS record_occurrence,NULL AS correlation
+    FROM fact_subagent_event e JOIN fact_record r ON r.source=e.source AND r.pos=e.pos AND r.block=0 AND NOT r.gap
+    WHERE e.source=:source AND e.pos<:end AND e.kind='agm' AND e.flags & :progress<>0
+      AND (coalesce(e.ts,-9223372036854775808),e.pos)<=(:time,:pos)
+      AND NOT EXISTS (
+          SELECT 1 FROM json_each(:predecessors) predecessor
+          CROSS JOIN fact_record old ON old.source=CAST(predecessor.key AS INTEGER)
+            AND old.uuid=r.uuid AND old.pos<predecessor.value
+          WHERE r.uuid IS NOT NULL
+      )
+    ORDER BY time DESC,e.pos DESC,e.block DESC,e.occurrence DESC LIMIT 1
 )
-SELECT * FROM prompt UNION ALL SELECT * FROM gap UNION ALL SELECT * FROM relay
+SELECT * FROM prompt UNION ALL SELECT * FROM gap UNION ALL SELECT * FROM relay UNION ALL SELECT * FROM progress
+UNION ALL SELECT -9223372036854775808,pos,block,occurrence,'launch',occurrence,NULL
+FROM fact_record WHERE :head AND source=:source AND pos=(
+    SELECT min(pos) FROM fact_record WHERE source=:source AND pos>=0 AND pos<:end AND NOT gap
+) AND NOT gap
 ORDER BY time DESC,pos DESC,block DESC,occurrence DESC LIMIT 1;

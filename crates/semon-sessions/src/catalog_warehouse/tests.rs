@@ -1962,6 +1962,51 @@ fn warehouse_list_runtime_uses_qualified_parent_and_child_run_evidence() {
 }
 
 #[test]
+fn warehouse_launch_without_prompt_stays_at_the_selected_head() {
+    let mut fixture = Fixture::new("promptless-launch");
+    let root = fixture.claude("root", "Delegate work");
+    let child = root.with_extension("").join("subagents/agent-worker.jsonl");
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::write(
+        child.with_extension("meta.json"),
+        json!({"agentType":"general-purpose",
+        "toolUseId":"agent"})
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        &child,
+        format!(
+            "{}\n",
+            json!({"type":"assistant","uuid":"reply","sessionId":"root",
+        "timestamp":"2026-09-24T00:00:02Z","message":{"role":"assistant","content":[
+            {"type":"text","text":"Started without a prompt"}]}})
+        ),
+    )
+    .unwrap();
+    append_native(
+        &child,
+        json!({"type":"assistant","uuid":"reply-two","sessionId":"root",
+        "timestamp":"2026-09-24T00:00:04Z","message":{"role":"assistant","content":[
+            {"type":"text","text":"Continued without a prompt"}]}}),
+    );
+    scan_file(&child, "claude", &mut fixture.cache, &mut false).unwrap();
+    let paths = [root.as_path(), child.as_path()];
+    let first = selected_page(&fixture, &paths, "worker", 1, None)
+        .unwrap()
+        .unwrap();
+    let turn = first.records[0].causal.turn.as_ref().unwrap();
+    assert_eq!(turn.id, crate::model::spawn_turn_id("claude", "worker"));
+    assert_eq!(turn.address, first.records[0].address);
+    append_native(&child, prompt("root", 3, "First actual prompt"));
+    scan_file(&child, "claude", &mut fixture.cache, &mut false).unwrap();
+    let next = selected_page(&fixture, &paths, "worker", 1, first.next.as_ref())
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.records[0].causal.turn.as_ref(), Some(turn));
+}
+
+#[test]
 fn warehouse_prompt_parent_matches_the_authorized_launch_address() {
     let mut fixture = Fixture::new("prompt-launch");
     let parent = fixture.claude("parent", "Launch fixture");

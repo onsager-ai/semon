@@ -27,6 +27,7 @@ pub(in super::super) struct TurnStart {
     pub(in super::super) id: String,
     pub(in super::super) address: Address,
     pub(in super::super) handoff: bool,
+    pub(super) head: bool,
 }
 
 struct Boundary {
@@ -109,7 +110,7 @@ pub(super) fn turns(
             } else {
                 None
             };
-            let launch_at = if let Some((carrier, ledger, Some(at), parent)) = launch_at {
+            let launch_at = if let Some((carrier, ledger, at, parent)) = launch_at {
                 let current = decode(&ledger)?;
                 if matches!(source.inventory.get(&carrier), Some(Availability::Expected(Some(stat)))
                     if stable_or_grown(&current.stat, stat) && raw_stat(Path::new(&carrier))
@@ -133,7 +134,7 @@ pub(super) fn turns(
                     .query_row(
                         named_params! {
                             ":source": id, ":end": end, ":predecessors": predecessors,
-                            ":time": time, ":pos": pos,
+                            ":time": time, ":pos": pos, ":head": launch_at == Some(None), ":progress": crate::events::AGM_PROGRESS,
                         },
                         |row| {
                             Ok((
@@ -163,7 +164,8 @@ pub(super) fn turns(
                 }
                 let start = if let Some(kind) = kind {
                     let offset = u64::try_from(position.offset).map_err(index)?;
-                    let launch = kind == "user" && launch_at == Some(position.offset);
+                    let launch = kind == "launch"
+                        || (kind == "user" && launch_at == Some(Some(position.offset)));
                     let relay = kind == "relay";
                     let id = if launch {
                         crate::model::spawn_turn_id(harness, key)
@@ -179,6 +181,7 @@ pub(super) fn turns(
                     Some(TurnStart {
                         id,
                         handoff: launch || relay,
+                        head: kind == "launch",
                         address: Address {
                             path: relative(source.options, harness, &carrier)
                                 .ok_or(ReadError::Restart)?

@@ -1261,7 +1261,7 @@ fn read(
         }
         let operation_parent = operations.remove(&position);
         let entry_kind = match kind.as_deref() {
-            _ if starts_handoff => Some("h"),
+            _ if starts_handoff && turn.as_ref().is_some_and(|turn| !turn.head) => Some("h"),
             Some("event_msg") if operation_parent.is_some() => Some("tool"),
             Some("user" | "user.message") => anchors.get(&position).map(|anchor| {
                 if crate::model::is_ask(anchor) {
