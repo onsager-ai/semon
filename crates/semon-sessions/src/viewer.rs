@@ -5665,6 +5665,7 @@ mod tests {
             "machine-5",
             "scale-a",
             "scale-b",
+            "scale-pending",
             "stale",
             "twin",
             "unrecorded",
