@@ -22,16 +22,12 @@ member AS MATERIALIZED (
   SELECT m.source,m.owner,max(s.pos) AS pos FROM member m
   CROSS JOIN fact_copilot_shutdown s USING(source) GROUP BY m.source,m.owner
 )
-SELECT u.owner,
-  sum(CASE WHEN s.owner IS NULL THEN u.input ELSE 0 END),
-  sum(CASE WHEN s.owner IS NULL THEN u.cached ELSE 0 END),
-  sum(CASE WHEN s.owner IS NULL THEN u.output ELSE 0 END),
-  sum(CASE WHEN s.owner IS NOT NULL THEN u.input ELSE 0 END),
-  sum(CASE WHEN s.owner IS NOT NULL THEN u.cached ELSE 0 END),
-  sum(CASE WHEN s.owner IS NOT NULL THEN u.output ELSE 0 END)
+SELECT u.owner,u.kind,u.model,u.input,u.cached,u.output,s.owner IS NOT NULL,u.ts,b.billing,u.message_id
 FROM ranked u LEFT JOIN shared s ON s.owner=u.owner AND s.message_id=u.message_id
-WHERE u.n=1 GROUP BY u.owner
+LEFT JOIN fact_step_billing b
+  ON b.source=u.source AND b.pos=u.pos AND b.block=u.block AND b.kind=u.kind AND b.occurrence=u.occurrence
+WHERE u.n=1
 UNION ALL
-SELECT m.owner,sum(u.input),sum(u.cached),sum(u.output),0,0,0
+SELECT m.owner,'copilot',u.model,u.input,u.cached,u.output,0,NULL,NULL,u.model
 FROM latest_copilot m CROSS JOIN fact_copilot_usage u ON u.source=m.source AND u.pos=m.pos
-GROUP BY m.owner
+ORDER BY 1,2,10

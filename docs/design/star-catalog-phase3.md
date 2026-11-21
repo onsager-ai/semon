@@ -298,6 +298,9 @@ receipt offset. It re-verifies read blocks if the local carrier grows during
 body fetch and rechecks the named file and descriptor before returning the page.
 
 This fixture adapter covers current local record positions, copied-record
-suppression and exact-address text lookup. The full causal slot and anchor
-comparison, provider and retained body reads, and list title, parent, runtime
-and pricing parity are further selected-read work before the atomic cutover.
+suppression, exact-address text lookup and prefix-bounded tool result reads.
+The retained address adapter obtains original bytes from an authorized
+provider using the warehouse binding. The list compares Codex prompt titles
+and prices winning usage facts. Full causal slots, canonical anchors, relay
+context, retained and provider transcript pages, prompt-dependent parents,
+live runtime status and family pricing still need comparison before cutover.

@@ -108,6 +108,7 @@ impl Fixture {
         Source {
             namespace: self.namespace.clone(),
             path: &self.db,
+            options: &self.options,
             inventory: paths
                 .iter()
                 .map(|path| {
@@ -1002,5 +1003,201 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
     assert_eq!(
         latest[0].native["message"]["content"][0]["content"],
         "qualified result"
+    );
+}
+
+#[test]
+fn warehouse_retained_address_reads_only_the_certified_original_from_provider() {
+    use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
+    use std::io;
+
+    struct Original {
+        data: Vec<u8>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl SessionSourceReader for Original {
+        fn read_range(
+            &self,
+            source: &SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> io::Result<SessionSourceRange> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if source.root != "claude"
+                || source.path != "projects/proj/native.jsonl"
+                || source.native_id != "native"
+                || source.offset != self.data.len() as u64
+                || source.prefix_sha256 != <[u8; 32]>::from(Sha256::digest(&self.data))
+                || expected.is_some_and(|generation| generation != "fixture-original")
+            {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            let start = offset as usize;
+            let end = (start + max).min(self.data.len());
+            Ok(SessionSourceRange {
+                generation: "fixture-original".into(),
+                length: source.offset,
+                offset,
+                bytes: self.data[start..end].into(),
+                cached: false,
+            })
+        }
+    }
+
+    let mut fixture = Fixture::new("retained-component-provider");
+    let path = fixture.claude("native", "Original native prompt");
+    let provider = Original {
+        data: fs::read(&path).unwrap(),
+        calls: Default::default(),
+    };
+    let address = selected::Address {
+        path: "projects/proj/native.jsonl".into(),
+        offset: 0,
+        block: 0,
+        occurrence: 0,
+    };
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    assert!(matches!(
+        selected::retained_record_at(
+            &fixture.options,
+            &fixture.source(&[&path]),
+            "native",
+            &address,
+            &provider
+        ),
+        Err(ReadError::RetainedUnverified)
+    ));
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    fixture.claude("native", "Replacement prompt");
+    let retained = selected::retained_record_at(
+        &fixture.options,
+        &fixture.source(&[&path]),
+        "native",
+        &address,
+        &provider,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(retained.text().as_deref(), Some("Original native prompt"));
+    let missing = selected::Address {
+        offset: provider.data.len() as u64,
+        ..address
+    };
+    assert!(
+        selected::retained_record_at(
+            &fixture.options,
+            &fixture.source(&[&path]),
+            "native",
+            &missing,
+            &provider
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[test]
+fn warehouse_list_prices_claude_usage_with_the_existing_pricing_calculator() {
+    let mut fixture = Fixture::new("warehouse-list-prices");
+    let path = fixture.claude("native", "Price fixture");
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"priced-reply","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:03Z","message":{"id":"priced-message","role":"assistant",
+        "model":"claude-sonnet-4-6","content":[{"type":"text","text":"Response"}],
+        "usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":20}}}),
+    );
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let page = read_list(
+        &[fixture.source(&[&path])],
+        "workspace",
+        &request("limit=1"),
+        None,
+    )
+    .unwrap();
+    let cost = page.rows[0].cost.as_ref().unwrap();
+    let expected =
+        crate::session_catalog_page(&fixture.options, fixture.namespace.as_str(), "limit=1");
+    assert_eq!(expected.status, 200);
+    let oracle: serde_json::Value = serde_json::from_slice(&expected.body).unwrap();
+    assert!(cost.priced_tokens > 0);
+    assert_eq!(
+        serde_json::to_value(cost).unwrap(),
+        oracle["items"][0]["cost"]
+    );
+}
+
+#[test]
+fn warehouse_list_qualifies_codex_prompt_title_for_search() {
+    let mut fixture = Fixture::new("list-prompt-title");
+    let parent = fixture.codex("parent");
+    let path = fixture
+        .options
+        .codex_home
+        .join("sessions/2026/09/24/rollout-child.jsonl");
+    fs::write(&path, []).unwrap();
+    append_native(
+        &path,
+        json!({"type":"session_meta","timestamp":"2026-09-24T00:00:00Z",
+        "payload":{"id":"child","cwd":"/work/synthetic","originator":"codex_exec","thread_source":"subagent",
+            "parent_thread_id":"parent","agent_nickname":"Worker"}}),
+    );
+    append_native(
+        &path,
+        json!({"type":"response_item","timestamp":"2026-09-24T00:00:01Z",
+        "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Check the parsing\nand result correlation"}]}}),
+    );
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let query = "q=check%20the%20parsing&limit=10";
+    let actual = read_list(
+        &[fixture.source(&[&path, &parent])],
+        "workspace",
+        &request(query),
+        None,
+    )
+    .unwrap();
+    assert_eq!(actual.rows.len(), 1);
+    assert_eq!(
+        actual.rows[0].title,
+        "Check the parsing and result correlation"
+    );
+    let expected =
+        crate::session_catalog_page(&fixture.options, fixture.namespace.as_str(), "limit=10");
+    assert_eq!(expected.status, 200);
+    let oracle: serde_json::Value = serde_json::from_slice(&expected.body).unwrap();
+    let expected = oracle["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["key"] == "child")
+        .unwrap();
+    assert_eq!(expected["name"], actual.rows[0].title);
+    assert_eq!(
+        expected["parent"].as_str(),
+        actual.rows[0].parent.as_deref()
     );
 }

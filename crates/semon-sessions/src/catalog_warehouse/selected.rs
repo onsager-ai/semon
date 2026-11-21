@@ -140,7 +140,6 @@ struct Member {
     carrier: String,
     current: Ledger,
     reference: SessionSourceRef,
-    prefix: Prefix,
 }
 
 fn decode(ledger: &str) -> Result<Ledger, ReadError> {
@@ -229,6 +228,51 @@ fn position(row: &rusqlite::Row<'_>, source: i64) -> rusqlite::Result<(Position,
     ))
 }
 
+pub(super) fn prompt_title(
+    source: &Source<'_>,
+    carrier: String,
+    ledger: &str,
+    native_id: String,
+    offset: i64,
+) -> Result<Option<String>, ReadError> {
+    let db = crate::events::store::focused_connection(source.path).map_err(index)?;
+    let db = chunk_proofs::Snapshot::new(db);
+    let current = decode(ledger)?;
+    let path = relative(source.options, "codex", &carrier).ok_or(ReadError::Restart)?;
+    let reference = SessionSourceRef {
+        root: "codex".into(),
+        path: path.into(),
+        native_id,
+        offset: current.offset,
+        prefix_sha256: current.prefix,
+        tail_sha256: current.tail,
+    };
+    let budget = Mutex::new(PAGE_BYTES);
+    let mut reader = PrefixReader::open(
+        db,
+        source.path,
+        Arc::new(Member {
+            carrier,
+            current,
+            reference,
+        }),
+        &budget,
+    )?;
+    let mut bytes_left = 256 * 1024;
+    let native = crate::source_reader::read_record_bounded(
+        &reader,
+        &reader.member.reference,
+        u64::try_from(offset).map_err(index)?,
+        bytes_left,
+        &mut bytes_left,
+    )
+    .map_err(|_| ReadError::Restart)?;
+    reader.finish().map_err(|_| ReadError::Restart)?;
+    Ok(crate::model::prompt_text(&native)
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| crate::model::one_line(&text, 80)))
+}
+
 pub(super) fn page(
     options: &Options,
     source: &Source<'_>,
@@ -256,6 +300,67 @@ pub(super) fn record_at(
         cursor,
     )
     .map(|component| component.and_then(|component| component.records.into_iter().next()))
+}
+
+/// The host provides an independently authorized archive reader. The warehouse
+/// binding supplies the original source reference and exact record position.
+pub(super) fn retained_record_at(
+    options: &Options,
+    source: &Source<'_>,
+    key: &str,
+    address: &Address,
+    provider: &dyn SessionSourceReader,
+) -> Result<Option<Record>, ReadError> {
+    let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
+    let tx = db.transaction().map_err(index)?;
+    let identity =
+        warehouse::retained_identity(&tx, &source.namespace, key).map_err(super::retained_error)?;
+    let home = match identity.harness.as_str() {
+        "claude" => &options.claude_home,
+        "codex" => &options.codex_home,
+        "copilot" => &options.copilot_home,
+        _ => return Err(ReadError::RetainedUnverified),
+    };
+    if !crate::is_input_path(&identity.harness, &address.path) {
+        return Ok(None);
+    }
+    let full_path = home.join(&address.path);
+    let at = i64::try_from(address.offset).map_err(index)?;
+    let Some((receipt, kind)) = tx.query_row(
+        "SELECT m.receipt,r.kind FROM warehouse_identity_member m
+         CROSS JOIN fact_record r ON r.source=m.source AND r.pos=?3 AND r.block=?4 AND r.occurrence=?5
+         WHERE m.identity=?1 AND json_extract(m.receipt,'$.path')=?2
+          AND r.pos>=0 AND r.pos<json_extract(m.receipt,'$.offset') AND NOT r.gap",
+        params![identity.binding, full_path.to_str(), at, address.block, address.occurrence],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+    ).optional().map_err(index)? else {
+        return Ok(None);
+    };
+    let receipt: crate::model::summary::CatalogSource =
+        serde_json::from_str(&receipt).map_err(index)?;
+    let reference = SessionSourceRef {
+        root: identity.harness,
+        path: address.path.clone(),
+        native_id: receipt.native_id,
+        offset: receipt.offset,
+        prefix_sha256: receipt.prefix_sha256,
+        tail_sha256: receipt.tail_sha256,
+    };
+    let reader = crate::source_reader::BudgetedReader::new(provider, 1024);
+    let mut bytes_left = PAGE_BYTES;
+    let native = crate::source_reader::read_record_bounded(
+        &reader,
+        &reference,
+        address.offset,
+        crate::tx::LINE_MAX as usize,
+        &mut bytes_left,
+    )
+    .map_err(|_| ReadError::Restart)?;
+    Ok(Some(Record {
+        address: address.clone(),
+        kind,
+        native,
+    }))
 }
 
 pub(super) fn tool_results(
@@ -459,10 +564,9 @@ fn read(
                     carrier,
                     current,
                     reference,
-                    prefix: witness_prefix,
                 });
                 let mut keep = |(position, kind)| {
-                    candidates.insert(position, (kind, member.clone()));
+                    candidates.insert(position, (kind, member.clone(), witness_prefix.clone()));
                     if candidates.len() > capacity {
                         candidates.pop_last();
                     }
@@ -581,7 +685,9 @@ fn read(
     let mut readers = BTreeMap::new();
     let mut bytes_left = PAGE_BYTES;
     let mut records = Vec::with_capacity(candidates.len());
-    for (position, (kind, member)) in candidates {
+    let mut touched = BTreeMap::new();
+    for (position, (kind, member, prefix)) in candidates {
+        touched.entry(position.source).or_insert(prefix);
         let reader =
             match readers.entry(position.source) {
                 std::collections::btree_map::Entry::Occupied(reader) => reader.into_mut(),
@@ -635,10 +741,7 @@ fn read(
         view,
         opened_at,
         after,
-        touched: readers
-            .values()
-            .map(|reader| reader.member.prefix.clone())
-            .collect(),
+        touched: touched.into_values().collect(),
     });
     Ok(Some(Component {
         harness,
@@ -688,8 +791,8 @@ impl<'a> PrefixReader<'a> {
         let proof = chunk_proofs::Focused::with_db(db, cache, &member.carrier, &member.current)
             .map_err(|_| ReadError::Restart)?;
         let generation = member
-            .prefix
-            .digest
+            .reference
+            .prefix_sha256
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();

@@ -38,6 +38,7 @@ pub(super) enum Availability {
 pub(super) struct Source<'a> {
     pub(super) namespace: Namespace,
     pub(super) path: &'a std::path::Path,
+    pub(super) options: &'a crate::Options,
     pub(super) inventory: BTreeMap<String, Availability>,
     pub(super) repos: BTreeMap<String, String>,
 }
@@ -78,7 +79,7 @@ pub(super) struct Continuation {
     boundary: Boundary,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(super) struct Row {
     position: Position,
     owner: i64,
@@ -89,6 +90,7 @@ pub(super) struct Row {
     branch: Option<String>,
     pub(super) parent: Option<String>,
     pub(super) usage: [i64; 6],
+    pub(super) cost: Option<crate::pricing::Cost>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -143,6 +145,56 @@ struct Snapshot<'a> {
     paths: String,
     coverage: Coverage,
     revision: String,
+}
+
+struct Usage {
+    shared: bool,
+    tokens: [i64; 6],
+    pricing: crate::pricing::CostBuild,
+}
+
+impl Usage {
+    fn account(&mut self, row: &rusqlite::Row<'_>) -> Result<(), ReadError> {
+        let shared: bool = row.get(6).map_err(index)?;
+        let start = usize::from(shared) * 3;
+        for (column, total) in self.tokens[start..start + 3].iter_mut().enumerate() {
+            let tokens: i64 = row.get(column + 3).map_err(index)?;
+            *total = total
+                .checked_add(tokens)
+                .ok_or_else(|| index("Warehouse usage exceeds the supported range"))?;
+        }
+        if shared {
+            self.shared = true;
+            return Ok(());
+        }
+        let kind: String = row.get(1).map_err(index)?;
+        let model: Option<String> = row.get(2).map_err(index)?;
+        match kind.as_str() {
+            "claude" => self.pricing.message(&crate::events::MessageUsage {
+                model,
+                billing: billing(row)?,
+                ..Default::default()
+            }),
+            "codex-response" => self.pricing.codex(&crate::events::CodexUsageEvent {
+                model: model.unwrap_or_else(|| "unknown".into()),
+                tokens: billing(row)?,
+                timestamp: row.get(7).map_err(index)?,
+            }),
+            "copilot" => {
+                let model = model.unwrap_or_else(|| "unknown".into());
+                self.pricing
+                    .unpriced_models
+                    .insert(crate::pricing::normalize_model_id(&model).to_owned());
+            }
+            _ => return Err(index("Unknown warehouse pricing fact")),
+        }
+        Ok(())
+    }
+}
+
+fn billing<T: serde::de::DeserializeOwned>(row: &rusqlite::Row<'_>) -> Result<T, ReadError> {
+    let billing: String = row.get(8).map_err(index)?;
+    serde_json::from_str(&billing).map_err(index)
 }
 
 impl<'a> Snapshot<'a> {
@@ -254,7 +306,7 @@ impl<'a> Snapshot<'a> {
             if next.is_some() {
                 continue;
             }
-            let row = Row {
+            let mut row = Row {
                 position: Position {
                     last: record.get(3).map_err(index)?,
                     key,
@@ -268,6 +320,7 @@ impl<'a> Snapshot<'a> {
                 branch: record.get(7).map_err(index)?,
                 parent: None,
                 usage: [0; 6],
+                cost: None,
             };
             if selected.len() == request.limit || examined == limit || bytes >= MAX_SCAN_BYTES {
                 next = Some(Boundary {
@@ -275,6 +328,26 @@ impl<'a> Snapshot<'a> {
                     inclusive: true,
                 });
                 continue;
+            }
+            if row.harness == "codex" && record.get::<_, bool>(14).map_err(index)? {
+                let task: Option<String> = record.get(13).map_err(index)?;
+                let prompt: Option<i64> = record.get(9).map_err(index)?;
+                if let Some(offset) = prompt {
+                    let path: String = record.get(10).map_err(index)?;
+                    let ledger: String = record.get(11).map_err(index)?;
+                    let native_id: String = record.get(12).map_err(index)?;
+                    row.title =
+                        selected::prompt_title(self.source, path, &ledger, native_id, offset)?
+                            .unwrap_or_else(|| "Codex subagent".into());
+                } else if let Some(task) = task
+                    .as_deref()
+                    .and_then(|task| task.rsplit('/').next())
+                    .filter(|task| !task.trim().is_empty())
+                {
+                    row.title = crate::model::one_line(task, 80);
+                } else if row.title == "Codex run" {
+                    row.title = "Codex subagent".into();
+                }
             }
             let fields = [
                 Some(row.title.as_str()),
@@ -307,24 +380,20 @@ impl<'a> Snapshot<'a> {
             return Ok(());
         }
         let owners = encode(&rows.iter().map(|row| row.owner).collect::<Vec<_>>())?;
+        let table = crate::pricing::snapshot();
         let mut usage = self.transaction.prepare_cached(USAGE).map_err(index)?;
-        let usage = usage
-            .query_map(params![owners, self.paths], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    [
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                    ],
-                ))
-            })
-            .map_err(index)?
-            .collect::<rusqlite::Result<BTreeMap<_, _>>>()
-            .map_err(index)?;
+        let mut facts = usage.query(params![owners, self.paths]).map_err(index)?;
+        let mut priced = BTreeMap::<i64, Usage>::new();
+        while let Some(fact) = facts.next().map_err(index)? {
+            priced
+                .entry(fact.get(0).map_err(index)?)
+                .or_insert_with(|| Usage {
+                    tokens: [0; 6],
+                    shared: false,
+                    pricing: crate::pricing::CostBuild::with_table(table.clone()),
+                })
+                .account(fact)?;
+        }
         let mut parents = self.transaction.prepare_cached(PARENTS).map_err(index)?;
         let mut parents = parents
             .query_map(params![owners, self.paths], |r| {
@@ -334,7 +403,25 @@ impl<'a> Snapshot<'a> {
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()
             .map_err(index)?;
         for row in rows {
-            row.usage = usage.get(&row.owner).copied().unwrap_or_default();
+            let usage = priced.remove(&row.owner).unwrap_or_else(|| Usage {
+                tokens: [0; 6],
+                shared: false,
+                pricing: crate::pricing::CostBuild::with_table(table.clone()),
+            });
+            row.usage = usage.tokens;
+            let mut cost = usage.pricing.finish();
+            let copilot = row.harness == "copilot";
+            if copilot && cost.unpriced_models.is_empty() {
+                cost.unpriced_models.push(if row.model == "—" {
+                    "unknown".into()
+                } else {
+                    row.model.clone()
+                });
+            }
+            if copilot || usage.shared {
+                cost.usd = None;
+            }
+            row.cost = Some(cost);
             row.parent = parents.remove(&row.owner);
         }
         Ok(())
