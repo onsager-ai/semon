@@ -12,6 +12,28 @@ CREATE INDEX warehouse_source_logical ON warehouse_source(logical_source,harness
 CREATE TABLE warehouse_current (
   path TEXT PRIMARY KEY, source INTEGER NOT NULL UNIQUE REFERENCES warehouse_source(source)
 ) STRICT, WITHOUT ROWID;
+-- A certified current recipe can become the original retained binding once.
+-- The owner and member IDs refer to immutable source incarnations, not live lineage.
+CREATE TABLE warehouse_identity (
+  id INTEGER PRIMARY KEY,
+  scope TEXT NOT NULL CHECK(scope='retained_history'),
+  source_key TEXT NOT NULL, catalog_key TEXT NOT NULL,
+  retained INTEGER NOT NULL CHECK(retained IN (0,1)),
+  owner INTEGER NOT NULL REFERENCES warehouse_source(source),
+  harness TEXT NOT NULL, native_id TEXT NOT NULL,
+  member_count INTEGER NOT NULL CHECK(member_count>0),
+  recipe_version INTEGER NOT NULL, recipe_generation TEXT NOT NULL,
+  recipe_source_generation TEXT NOT NULL, source_generation TEXT NOT NULL,
+  complete INTEGER NOT NULL CHECK(complete IN (0,1)),
+  UNIQUE(scope,source_key,catalog_key,retained)
+) STRICT;
+CREATE TABLE warehouse_identity_member (
+  identity INTEGER NOT NULL REFERENCES warehouse_identity(id) ON DELETE CASCADE,
+  source INTEGER NOT NULL REFERENCES warehouse_source(source),
+  ordinal INTEGER NOT NULL, receipt TEXT NOT NULL,
+  PRIMARY KEY(identity,ordinal), UNIQUE(identity,source)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX warehouse_identity_member_source ON warehouse_identity_member(source,identity);
 CREATE TABLE fact_session_observation (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER,

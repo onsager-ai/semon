@@ -260,7 +260,8 @@ fn emit_catalog_publish_attempt(
 // v48: namespace-relative origin body rows, source ownership and external FTS5.
 // v49: publication-bound native archive chain evidence, separate from retention.
 // v50: origin warehouse observations and current source membership.
-pub(crate) const SCHEMA_VERSION: i64 = 51;
+// v52: warehouse-owned retained identity and certified original component receipts.
+pub(crate) const SCHEMA_VERSION: i64 = 52;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -4050,6 +4051,15 @@ impl SqliteStore {
                     let changed = transaction.execute(
                         "INSERT INTO session_slot_projections(session_key,generation,version,total,source_generation) VALUES (?1,?2,?3,?4,?5) ON CONFLICT(session_key) DO UPDATE SET generation=excluded.generation,version=excluded.version,total=excluded.total,source_generation=excluded.source_generation WHERE session_slot_projections.generation != excluded.generation OR session_slot_projections.version != excluded.version OR session_slot_projections.source_generation IS NOT excluded.source_generation",
                         params![projection.key,slot_generation,crate::slot_projection::VERSION,i64::try_from(metadata.len()).map_err(|_| StoreError::Data("slot count exceeds SQL range".into()))?,source_generation]).map_err(failure)?;
+                    warehouse::identity::certify(
+                        &transaction,
+                        row,
+                        projection,
+                        &metadata,
+                        &slot_generation,
+                        &source_generation,
+                    )
+                    .map_err(failure)?;
                     if changed > 0 || projection.repair {
                         transaction
                             .execute(

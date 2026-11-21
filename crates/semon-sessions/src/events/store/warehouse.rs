@@ -1,7 +1,12 @@
 //! Origin warehouse storage. Its source keys and maintenance are local to one Index.
 
+#[path = "warehouse_identity.rs"]
+pub(super) mod identity;
 #[path = "warehouse_maintenance.rs"]
 mod maintenance;
+
+#[cfg(test)]
+pub(crate) use identity::retained_identity;
 
 use std::sync::OnceLock;
 

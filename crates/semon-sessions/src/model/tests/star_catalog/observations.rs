@@ -1295,6 +1295,104 @@ fn warehouse_verified_codex_relocation_keeps_fact_keys_through_append() {
     assert_eq!(count(), vec![vec![Sql::Integer(3)]]);
 }
 
+#[test]
+fn warehouse_retained_identity_preserves_the_first_certified_incarnation() {
+    use crate::{
+        events::store::warehouse::retained_identity,
+        storage::{Namespace, sqlite},
+    };
+
+    let home = Home::new();
+    let namespace = Namespace::new("fixture-machine").unwrap();
+    let mut cache = EventCache::open_scoped(&home.options.cache).unwrap();
+    sqlite::bind(&mut cache, &namespace).unwrap();
+    let publish = |cache: &mut EventCache| {
+        crate::model::observe_catalog(&home.options, cache, &mut false, &mut Texts::default(), NOW)
+            .unwrap();
+    };
+    let path = home.top("reused", &[user("reused", ts(0, 0), "original")]);
+    let withdrawn = home.top("withdrawn", &[user("withdrawn", ts(0, 0), "withdrawn")]);
+    publish(&mut cache);
+    let mut db = Connection::open(EventCache::path(&home.options.cache)).unwrap();
+    let current = |db: &Connection, key: &str| -> (i64, String) {
+        db.query_row(
+            "SELECT owner,harness FROM catalog_keys WHERE id=?1",
+            [key],
+            |record| Ok((record.get(0)?, record.get(1)?)),
+        )
+        .unwrap()
+    };
+    let read = |db: &mut Connection, key: &str| {
+        let tx = db.transaction().unwrap();
+        retained_identity(&tx, &namespace, key)
+    };
+    let original = current(&db, "reused");
+    let withdrawn_owner = current(&db, "withdrawn");
+    assert_eq!(
+        read(&mut db, "reused").unwrap_err().code(),
+        "retained_identity_unverified"
+    );
+    // A pre-cutover history projection cannot act as a warehouse witness.
+    db.execute(
+        "INSERT INTO session_history_catalog VALUES('pre-cutover','{}')",
+        [],
+    )
+    .unwrap();
+    let missing = read(&mut db, "pre-cutover").unwrap_err();
+    assert_eq!(missing.code(), "retained_identity_unverified");
+    assert!(
+        missing
+            .to_string()
+            .contains("No verified original warehouse identity")
+    );
+
+    // Rewrite the same carrier and confirm that the original survives while
+    // the warehouse gives the new bytes a new current incarnation.
+    home.top(
+        "reused",
+        &[user("reused", ts(0, 1), "rewritten at same path")],
+    );
+    scan_file(&path, "claude", &mut cache, &mut false).unwrap();
+    assert_ne!(current(&db, "reused"), original);
+    assert_eq!(read(&mut db, "reused").unwrap().owner, original.0);
+
+    std::fs::remove_file(&withdrawn).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    cache.retain(&BTreeSet::new(), &mut false);
+    assert!(rows(&db, "SELECT id FROM catalog_keys").is_empty());
+    assert_eq!(read(&mut db, "withdrawn").unwrap().owner, withdrawn_owner.0);
+
+    home.codex(
+        "reused",
+        json!({}),
+        &[codex_user(ts(0, 2), "other harness")],
+    );
+    publish(&mut cache);
+    assert_eq!(current(&db, "reused").1, "codex");
+    let retained = read(&mut db, "reused").unwrap();
+    assert_eq!(
+        (retained.owner, retained.harness, retained.native_id),
+        (original.0, original.1, "reused".into())
+    );
+    for corruption in [
+        "UPDATE warehouse_identity SET complete=0 WHERE catalog_key='reused' AND retained=1",
+        "UPDATE warehouse_identity SET recipe_version=0 WHERE catalog_key='reused' AND retained=1",
+        "UPDATE warehouse_identity SET recipe_source_generation='different' WHERE catalog_key='reused' AND retained=1",
+        "UPDATE warehouse_identity_member SET receipt='{}' WHERE source=(SELECT owner FROM warehouse_identity WHERE catalog_key='reused' AND retained=1)",
+    ] {
+        let tx = db.transaction().unwrap();
+        tx.execute(corruption, []).unwrap();
+        let error = retained_identity(&tx, &namespace, "reused").unwrap_err();
+        assert_eq!(error.code(), "retained_identity_unverified");
+    }
+    let tx = db.transaction().unwrap();
+    let wrong = Namespace::new("other-machine").unwrap();
+    assert_eq!(
+        retained_identity(&tx, &wrong, "reused").unwrap_err().code(),
+        "catalog_unavailable"
+    );
+}
+
 pub(super) struct ProductionScale {
     dir: std::path::PathBuf,
     cache: EventCache,
