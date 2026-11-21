@@ -211,15 +211,7 @@ fn prompt_anchor(
         .optional()
         .map_err(index)?;
     let offset = u64::try_from(position.offset).map_err(index)?;
-    Ok(match kind.as_deref() {
-        Some("ask") => Some(crate::model::ask_id(&reference.native_id, offset)),
-        Some("user") => Some(crate::model::native_turn_id(
-            key,
-            &reference.native_id,
-            offset,
-        )),
-        _ => None,
-    })
+    Ok(kind.map(|kind| causal::prompt_id(key, &reference.native_id, offset, &kind)))
 }
 
 const PROMPT_AT: &str = "SELECT kind FROM fact_prompt WHERE source=?1 AND pos=?2 AND block=?3 ORDER BY occurrence LIMIT 1";
@@ -653,9 +645,37 @@ pub(super) fn tool_results(
     .map(|component| component.map(|component| component.records))
 }
 
+/// Native provenance supplied by a selected transcript or activity step.
+#[derive(Clone, Copy)]
+pub(super) enum Evidence<'a> {
+    Event(&'a str),
+    Call(&'a str),
+}
+
+pub(super) fn evidence_at(
+    options: &Options,
+    source: &Source<'_>,
+    key: &str,
+    evidence: Evidence<'_>,
+    cursor: Option<&Cursor>,
+) -> Result<Option<Record>, ReadError> {
+    read(
+        options,
+        source,
+        CatalogReadScope::Current,
+        key,
+        Target::Evidence(evidence),
+        cursor,
+    )
+    .map(|component| component.and_then(|component| component.records.into_iter().next()))
+}
+
+const EVIDENCE: &str = include_str!("evidence.sql");
+
 enum Target<'a> {
     Page(usize),
     Address(&'a Address),
+    Evidence(Evidence<'a>),
     ToolResults(&'a Address),
 }
 
@@ -664,7 +684,7 @@ impl Target<'_> {
         match *self {
             Self::Page(n @ 1..=100) => Ok(n + 1),
             Self::Page(_) => Err(index("Selected pages require a limit of 1–100")),
-            Self::Address(_) => Ok(1),
+            Self::Address(_) | Self::Evidence(_) => Ok(1),
             Self::ToolResults(_) => Ok(101),
         }
     }
@@ -748,11 +768,13 @@ fn read(
     let mut witness = Sha256::new_with_prefix(encode(&(owner, component))?);
     let mut candidates = BTreeMap::new();
     let mut member_count = 0;
+    let mut evidence_matches = 0;
     let mut confirmed = 0;
     let mut member_after = 0;
     {
         let mut members = db.prepare_cached(MEMBERS).map_err(index)?;
         let mut detail = db.prepare_cached(warehouse::DETAIL).map_err(index)?;
+        let mut evidence = db.prepare_cached(EVIDENCE).map_err(index)?;
         let mut prefix = db.prepare_cached(COMMITTED_PREFIX).map_err(index)?;
         let mut continuations = db.prepare_cached(CONTINUATIONS).map_err(index)?;
         let mut results = db.prepare_cached(TOOL_RESULTS).map_err(index)?;
@@ -846,6 +868,30 @@ fn read(
                         )
                     }
                     Target::Address(_) => continue,
+                    Target::Evidence(wanted) => {
+                        if evidence_matches < 2 {
+                            let predecessors = continuation_bounds(
+                                &mut continuations,
+                                &mut prefix,
+                                id,
+                                component,
+                                view,
+                            )?;
+                            let (event, call) = match wanted {
+                                Evidence::Event(id) => (Some(id), None),
+                                Evidence::Call(id) => (None, Some(id)),
+                            };
+                            let mut rows = evidence.query(named_params! {
+                                ":source": id, ":end": i64::try_from(committed.offset).map_err(index)?,
+                                ":event": event, ":call": call, ":predecessors": predecessors,
+                            }).map_err(index)?;
+                            while let Some(row) = rows.next().map_err(index)? {
+                                evidence_matches += 1;
+                                keep(position(row, id).map_err(index)?);
+                            }
+                        }
+                        continue;
+                    }
                     Target::ToolResults(call) => {
                         if member.reference.path == call.path && call.offset < committed.offset {
                             let mut positions = results
@@ -911,6 +957,9 @@ fn read(
     if matches!(target, Target::ToolResults(_)) && candidates.len() == capacity {
         return Err(index("Selected tool result budget exhausted"));
     }
+    if evidence_matches > 1 {
+        candidates.clear();
+    }
     let more = matches!(target, Target::Page(_)) && candidates.len() == capacity;
     if more {
         candidates.pop_last();
@@ -919,7 +968,7 @@ fn read(
     let mut anchors = BTreeMap::new();
     {
         let mut prompts = db.prepare_cached(PROMPT_AT).map_err(index)?;
-        if matches!(target, Target::Page(_) | Target::Address(_)) {
+        if !matches!(target, Target::ToolResults(_)) {
             for (position, (_, member, _)) in &candidates {
                 if let Some(anchor) =
                     prompt_anchor(&mut prompts, key, &member.reference, *position)?
@@ -930,14 +979,23 @@ fn read(
         }
     }
     let mut causal = BTreeMap::new();
-    if matches!(target, Target::Page(_) | Target::Address(_)) {
+    if !matches!(target, Target::ToolResults(_)) {
         for (position, (_, member, _)) in &candidates {
             causal.insert(
                 *position,
-                causal::Inputs::load(&db, key, &member.reference, *position, view)?,
+                causal::Inputs::load(&db, &member.reference, *position, view)?,
             );
         }
     }
+    let mut turns = causal::turns(
+        &db,
+        source,
+        key,
+        &harness,
+        component,
+        view,
+        causal.keys().copied(),
+    )?;
     let mut relay_context = BTreeMap::new();
     if matches!(target, Target::ToolResults(_)) {
         for position in candidates.keys() {
@@ -1023,7 +1081,13 @@ fn read(
             causal: causal
                 .remove(&position)
                 .map_or_else(causal::Context::default, |inputs| {
-                    inputs.render(source, key, reference, native_id.as_deref())
+                    inputs.render(
+                        source,
+                        key,
+                        reference,
+                        native_id.as_deref(),
+                        turns.remove(&position).flatten(),
+                    )
                 }),
             relay_receipts: relay_context.remove(&position).unwrap_or_default(),
             address: Address {

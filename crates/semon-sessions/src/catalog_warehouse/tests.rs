@@ -619,6 +619,104 @@ fn warehouse_component_cursor_pages_members_and_pins_unvisited_prefixes() {
 }
 
 #[test]
+fn warehouse_component_turn_crosses_a_continuation_at_the_selected_prefix() {
+    let mut fixture = Fixture::new("component-cross-source-turn");
+    let original = fixture.claude("original", "First prompt");
+    let resumed = original.with_file_name("resumed.jsonl");
+    let original_text = fs::read_to_string(&original).unwrap();
+    let mut copied: serde_json::Value =
+        serde_json::from_str(original_text.lines().next().unwrap()).unwrap();
+    copied["sessionId"] = json!("resumed");
+    fs::write(&resumed, format!("{copied}\n")).unwrap();
+    append_native(
+        &original,
+        json!({"type":"continued-in","sessionId":"original",
+        "continuedInSessionId":"resumed","timestamp":"2026-09-24T00:00:01Z"}),
+    );
+    append_native(
+        &resumed,
+        json!({"type":"assistant","uuid":"resumed-reply","sessionId":"resumed",
+        "timestamp":"2026-09-24T00:00:03Z","message":{"role":"assistant","content":[
+            {"type":"text","text":"Reply after resuming"}
+        ]}}),
+    );
+    scan_file(&original, "claude", &mut fixture.cache, &mut false).unwrap();
+    scan_file(&resumed, "claude", &mut fixture.cache, &mut false).unwrap();
+    let inventory = [original.as_path(), resumed.as_path()];
+    let first = selected_page(&fixture, &inventory, "original", 1, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.member_count, 2);
+    let cursor = first.next.as_ref().unwrap();
+
+    // This prompt sorts before the reply but did not exist when the page opened.
+    append_native(&original, prompt("original", 2, "A later commit"));
+    scan_file(&original, "claude", &mut fixture.cache, &mut false).unwrap();
+    let source = fixture.source(&inventory);
+    let evidence = |id, cursor| {
+        selected::evidence_at(
+            &fixture.options,
+            &source,
+            "original",
+            selected::Evidence::Event(id),
+            cursor,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let prompt = evidence("original", Some(cursor));
+    let selected = evidence("resumed-reply", Some(cursor));
+    let turn = selected.causal.turn.as_ref().unwrap();
+    assert_eq!(turn.address, prompt.address);
+    assert_eq!(Some(&turn.id), prompt.prompt_anchor.as_ref());
+    let continued = selected_page(&fixture, &inventory, "original", 10, Some(cursor))
+        .unwrap()
+        .unwrap();
+    let reply = continued
+        .records
+        .iter()
+        .find(|record| record.address == selected.address)
+        .unwrap();
+    assert_eq!(reply.causal.turn, selected.causal.turn);
+    let fresh = evidence("resumed-reply", None);
+    assert_eq!(
+        fresh.causal.turn.unwrap().address,
+        evidence("original-2", None).address
+    );
+
+    // An opaque input line after the reply resets the open prompt at its
+    // inherited time. It does not affect the earlier page's snapshot.
+    use std::io::Write;
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&resumed).unwrap(),
+        "invalid native line"
+    )
+    .unwrap();
+    append_native(
+        &resumed,
+        json!({"type":"assistant","uuid":"after-gap","sessionId":"resumed",
+        "timestamp":"2026-09-24T00:00:04Z","message":{"role":"assistant","content":[
+            {"type":"text","text":"After the gap"}
+        ]}}),
+    );
+    scan_file(&resumed, "claude", &mut fixture.cache, &mut false).unwrap();
+    assert!(
+        selected::evidence_at(
+            &fixture.options,
+            &fixture.source(&inventory),
+            "original",
+            selected::Evidence::Event("after-gap"),
+            None
+        )
+        .unwrap()
+        .unwrap()
+        .causal
+        .turn
+        .is_none()
+    );
+}
+
+#[test]
 fn warehouse_component_refuses_rewrites_replacements_and_truncation() {
     for (case, change) in [
         "rewrite",
@@ -991,7 +1089,7 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
     };
     append_native(
         &path,
-        json!({"type":"user","sessionId":"native","timestamp":"2026-09-24T00:00:02Z",
+        json!({"type":"user","uuid":"result-event","sessionId":"native","timestamp":"2026-09-24T00:00:02Z",
         "toolUseResult":{"success":true,"msg_id":"correlation"},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-1","content":"qualified result"}]}}),
     );
     scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
@@ -1036,12 +1134,44 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
     let fresh = selected::record_at(&fixture.options, &source, "native", &call, None)
         .unwrap()
         .unwrap();
-    assert_eq!(fresh.causal.calls[0].replies.len(), 1);
-    assert_eq!(
-        fresh.causal.source_turn,
-        previously_committed.causal.source_turn
+    let resolved_call = selected::evidence_at(
+        &fixture.options,
+        &source,
+        "native",
+        selected::Evidence::Call("tool-1"),
+        first.next.as_ref(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(resolved_call.address, call);
+    assert!(resolved_call.causal.calls[0].replies.is_empty());
+    assert!(
+        selected::evidence_at(
+            &fixture.options,
+            &source,
+            "native",
+            selected::Evidence::Event("result-event"),
+            first.next.as_ref()
+        )
+        .unwrap()
+        .is_none()
     );
-    assert!(fresh.causal.source_turn.is_some());
+    let resolved_result = selected::evidence_at(
+        &fixture.options,
+        &source,
+        "native",
+        selected::Evidence::Event("result-event"),
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        resolved_result.native["message"]["content"][0]["content"],
+        "qualified result"
+    );
+    assert_eq!(fresh.causal.calls[0].replies.len(), 1);
+    assert_eq!(fresh.causal.turn, previously_committed.causal.turn);
+    assert!(fresh.causal.turn.is_some());
     let latest = selected::tool_results(&fixture.options, &source, "native", &call, None)
         .unwrap()
         .unwrap();

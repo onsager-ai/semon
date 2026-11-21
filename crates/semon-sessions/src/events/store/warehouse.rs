@@ -462,8 +462,16 @@ fn write_fact(
             time,
         } => at!(fact_record, kind=>kind,
             uuid=>uuid,message_id=>message_id,parent_id=>parent_id,ts=>time,gap=>false),
-        Fact::Gap => at!(fact_record, kind=>Option::<&str>::None, uuid=>Option::<&str>::None,
-            message_id=>Option::<&str>::None,parent_id=>Option::<&str>::None,ts=>Option::<i64>::None,gap=>true),
+        Fact::Gap => {
+            // A gap resets the turn at the preceding native time. Assign it
+            // at ingest so an append cannot move an earlier gap in a cursor.
+            let time: Option<i64> = tx.prepare_cached(
+                "SELECT ts FROM fact_record WHERE source=?1 AND pos<?2 AND ts IS NOT NULL AND NOT gap
+                 ORDER BY pos DESC LIMIT 1",
+            )?.query_row(params![source, pos], |row| row.get(0)).optional()?;
+            at!(fact_record, kind=>Option::<&str>::None, uuid=>Option::<&str>::None,
+                message_id=>Option::<&str>::None,parent_id=>Option::<&str>::None,ts=>time,gap=>true)
+        }
         Fact::SessionId(id) => at!(fact_session_observation, kind=>"session-id", native_id=>id,
             parent_id=>Option::<&str>::None,nickname=>Option::<&str>::None,
             agent_path=>Option::<&str>::None,metadata=>Option::<&str>::None),

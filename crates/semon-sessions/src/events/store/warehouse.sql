@@ -228,7 +228,9 @@ CREATE INDEX session_native_key ON dim_session(native_id,harness,source);
 CREATE INDEX session_parent_name ON dim_session(harness,parent_id,nickname);
 CREATE INDEX spawn_call_name ON fact_tool_call(source,tool,task_name);
 CREATE INDEX record_uuid ON fact_record(source,uuid);
-CREATE INDEX record_gap ON fact_record(source,pos) WHERE gap;
+CREATE INDEX record_timed_offset ON fact_record(source,pos) WHERE ts IS NOT NULL AND NOT gap;
+CREATE INDEX record_gap ON fact_record(source,coalesce(ts,-9223372036854775808),pos) WHERE gap;
+CREATE INDEX prompt_position ON fact_prompt(source,coalesce(ts,-9223372036854775808),pos,block,occurrence);
 CREATE INDEX record_position ON fact_record(source,coalesce(ts,-9223372036854775808),pos,block,occurrence)
   WHERE pos>=0 AND NOT gap;
 CREATE INDEX usage_message ON fact_step_observation(message_id,uuid,source);

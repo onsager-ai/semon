@@ -309,10 +309,14 @@ process status, and prices winning usage facts and legacy Codex counters.
 Schema 54 preserves the versions of native signals that can change when a
 later record enriches an earlier position. The selected fixture adapter reads
 those signal versions and reply facts within the cursor's committed view. It
-compares native entry IDs against the current reader and resolves each source's
-most recent prompt or gap. The complete component-wide causal partition and
-anchor lookup remain open, including context that crosses source boundaries.
+compares native entry IDs against the current reader. Schema 55 indexes
+prompt and gap boundaries. Selected records carry the latest unsuppressed
+prompt across member files and pages, bounded by the original receipts. A gap
+resets that prompt at the preceding native timestamp. The adapter resolves
+unique native event and tool-call IDs to proof-checked records and carries the
+turn start's canonical address across files. Relay and launch turn placement,
+operation anchors and the full activity anchor contract still need parity.
 
-Full causal slots and all anchor types, relay body/time matching, current
+Full causal presentation, remaining anchors, relay body/time matching, current
 provider fallback, parent/child runtime overrides and family pricing still
 need comparison before cutover.
