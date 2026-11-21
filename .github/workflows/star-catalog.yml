@@ -26,11 +26,16 @@ jobs:
       - name: Fixture parity and atomicity
         run: |
           cargo test --locked -p semon-sessions --lib model::tests::star_catalog:: -- --skip star_catalog_scale --nocapture
+      - name: Receiver Catalog HTTP baseline
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p semon-sessions --lib viewer::tests::receiver_catalog_list_baseline -- --exact --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/star-catalog-scale.log"
       - name: Prototype and production scale (about 1 GB, 20k sessions)
         shell: bash
         run: |
           set -o pipefail
-          cargo test --locked -p semon-sessions --lib model::tests::star_catalog::star_catalog_scale -- --exact --ignored --nocapture 2>&1 | tee "$RUNNER_TEMP/star-catalog-scale.log"
+          cargo test --locked -p semon-sessions --lib model::tests::star_catalog::star_catalog_scale -- --exact --ignored --nocapture 2>&1 | tee -a "$RUNNER_TEMP/star-catalog-scale.log"
       - name: Summarize production timings
         if: always()
         run: |

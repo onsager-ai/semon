@@ -2153,6 +2153,97 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "manual Star Catalog scale baseline"]
+    fn receiver_catalog_list_baseline() {
+        let fixture = Fixture::new();
+        let received_dir = fixture.root.join("received");
+        let machine = receive(&received_dir, "scale-a", Some("scale"), "baseline-a");
+        receive(&received_dir, "scale-b", Some("scale"), "baseline-b");
+        let project = machine.join("claude/projects/project");
+        for index in 0..160 {
+            let key = format!("session-{index:04}");
+            fs::write(project.join(format!("{key}.jsonl")),format!("{}\n",json!({
+                "type":"user", "timestamp":"2026-09-24T00:00:00Z", "sessionId":key,
+                "origin":{"kind":"human"},"message":{"role":"user","content":"synthetic benchmark input"}
+            }))).unwrap();
+        }
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let token = "0123456789abcdef0123456789abcdef";
+        let viewer = Viewer {
+            core: ViewerCore::with_received(Vec::new(), received(&fixture, &fixture.options)),
+            token: token.into(),
+            port,
+            receive: Some(Arc::new(TestAccess)),
+            public_origin: None,
+            asi: None,
+            storage_refusals: Mutex::default(),
+        };
+        let worker = thread::spawn(move || {
+            for phase in [
+                "fresh",
+                "warm",
+                "after_append",
+                "pending_machine",
+                "warm_after_changes",
+            ] {
+                let request = server.recv().unwrap();
+                crate::catalog::LIST_BASELINE
+                    .with(|sample| sample.replace(Some(Default::default())));
+                viewer.handle(request);
+                let sample = crate::catalog::LIST_BASELINE.with(|sample| sample.take().unwrap());
+                println!(
+                    "production receiver_list_split phase={phase} wait_us={} runtime_custody_us={} selection_us={} title_presentation_us={}",
+                    sample.wait.as_micros(),
+                    sample.runtime_and_custody.as_micros(),
+                    sample.selection.as_micros(),
+                    sample.title_and_presentation.as_micros()
+                );
+            }
+            viewer.core.close();
+        });
+        let request = |phase: &str| {
+            let source = machine_id(if phase == "pending_machine" {
+                "scale-pending"
+            } else {
+                "scale-a"
+            });
+            let started = Instant::now();
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(90)))
+                .unwrap();
+            write!(stream,"GET /api/sessions?limit=40&machine={source} HTTP/1.1\r\nHost: localhost:{port}\r\nCookie: semon_session={token}\r\nConnection: close\r\n\r\n").unwrap();
+            stream.shutdown(std::net::Shutdown::Write).unwrap();
+            let mut wire = String::new();
+            stream.read_to_string(&mut wire).unwrap();
+            let (head, body) = wire.split_once("\r\n\r\n").unwrap();
+            let status = head.split_whitespace().nth(1).unwrap();
+            let body: Value = serde_json::from_str(body).unwrap();
+            let rows = body["items"].as_array().map_or(0, Vec::len);
+            println!(
+                "production receiver_list phase={phase} status={status} rows={rows} response_us={}",
+                started.elapsed().as_micros()
+            );
+            (status.to_owned(), rows)
+        };
+        request("fresh");
+        let warm = request("warm");
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(project.join("baseline-a.jsonl"))
+            .unwrap();
+        writeln!(file,"{}",json!({"type":"user","timestamp":"2026-09-24T00:03:00Z","sessionId":"baseline-a","origin":{"kind":"human"},"message":{"role":"user","content":"append"}})).unwrap();
+        request("after_append");
+        let pending = register_received(&received_dir, "scale-pending");
+        fs::create_dir_all(pending).unwrap();
+        request("pending_machine");
+        let last = request("warm_after_changes");
+        worker.join().unwrap();
+        assert!(warm == ("200".into(), 40) || last == ("200".into(), 40));
+    }
+
+    #[test]
     fn receiver_native_redirect_requires_authentication() {
         let fixture = Fixture::new();
         let core = ViewerCore::new(fixture.options.clone());

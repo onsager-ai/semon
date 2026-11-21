@@ -1079,6 +1079,39 @@ pub(crate) fn read_page(
     Ok(reply)
 }
 
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct ListBaseline {
+    pub(crate) wait: Duration,
+    pub(crate) runtime_and_custody: Duration,
+    pub(crate) selection: Duration,
+    pub(crate) title_and_presentation: Duration,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LIST_BASELINE: std::cell::RefCell<Option<ListBaseline>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn baseline_start() -> Option<std::time::Instant> {
+    LIST_BASELINE.with(|sample| sample.borrow().is_some().then(std::time::Instant::now))
+}
+
+#[cfg(test)]
+pub(crate) fn baseline_record(
+    start: Option<std::time::Instant>,
+    phase: impl FnOnce(&mut ListBaseline) -> &mut Duration,
+) {
+    if let Some(start) = start {
+        LIST_BASELINE.with(|sample| {
+            if let Some(sample) = sample.borrow_mut().as_mut() {
+                *phase(sample) += start.elapsed();
+            }
+        });
+    }
+}
+
 fn read_page_snapshot(
     options: &Options,
     namespace: &crate::storage::Namespace,
@@ -1105,6 +1138,8 @@ fn read_page_snapshot(
             false,
         ));
     }
+    #[cfg(test)]
+    let runtime_started = baseline_start();
     let runtime = crate::native_evidence::query_runtime_generation(options).ok();
     let runtime_observations = crate::native_evidence::RuntimeObservations::new(options);
     // Share the same custody capture with selected family status qualification.
@@ -1113,6 +1148,10 @@ fn read_page_snapshot(
         .facts
         .as_ref()
         .and_then(|path| crate::facts::source_authority::CurrentSources::open(path).ok());
+    #[cfg(test)]
+    baseline_record(runtime_started, |sample| &mut sample.runtime_and_custody);
+    #[cfg(test)]
+    let selection_started = baseline_start();
     let meta = |key: &str| {
         transaction
             .query_row("SELECT value FROM meta WHERE key=?1", [key], |row| {
@@ -1372,6 +1411,10 @@ fn read_page_snapshot(
     } else {
         None
     };
+    #[cfg(test)]
+    baseline_record(selection_started, |sample| &mut sample.selection);
+    #[cfg(test)]
+    let presentation_started = baseline_start();
     let mut native_titles = std::collections::BTreeSet::new();
     for row in &selected {
         if row.harness == "claude" {
@@ -1386,7 +1429,7 @@ fn read_page_snapshot(
             }
         }
     }
-    present_page(
+    let response = present_page(
         options,
         machine,
         request,
@@ -1405,7 +1448,12 @@ fn read_page_snapshot(
         runtime,
         runtime_observations,
         recorded,
-    )
+    );
+    #[cfg(test)]
+    baseline_record(presentation_started, |sample| {
+        &mut sample.title_and_presentation
+    });
+    response
 }
 
 #[cfg(feature = "postgres")]
@@ -9828,3 +9876,7 @@ mod tests {
 #[path = "catalog_union.rs"]
 mod union;
 pub use union::session_catalog_union;
+
+#[cfg(test)]
+#[path = "catalog_warehouse.rs"]
+mod warehouse_fixture;

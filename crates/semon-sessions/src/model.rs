@@ -674,6 +674,10 @@ pub(crate) fn cap(text: &str, limit: usize) -> String {
     format!("{}{TRUNCATED}", text[..end].trim_end())
 }
 
+pub(crate) fn claude_project_name(slug: &str) -> &str {
+    slug.rsplit('-').next().unwrap_or(slug)
+}
+
 pub(crate) fn one_line(text: &str, limit: usize) -> String {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if text.chars().count() <= limit {
@@ -2781,7 +2785,7 @@ impl<'a> Builder<'a> {
                 last_file.summary.cwd.clone(),
                 last_file.summary.branch.clone(),
                 None,
-                slug.rsplit('-').next().unwrap_or(slug).to_owned(),
+                claude_project_name(slug).to_owned(),
             ),
             Role::Agent(meta) => (
                 meta.cwd.clone().or_else(|| last_file.summary.cwd.clone()),

@@ -77,28 +77,35 @@ fn wait_for_catalog_read(
     deadline: Instant,
     allow_wait: bool,
 ) -> Result<Option<io::Error>, ViewerReply> {
-    if !view.evidence.storage.is_postgres()
-        && let Some(reply) = crate::index_rebuild::history_reply(view.options())
-    {
-        let _ = view.note_catalog_read();
-        return Err(reply);
-    }
-    if allow_wait {
-        view.wait_until_initial_catalog(deadline)
-            .map_err(|_| catalog_unavailable())?;
-    } else {
-        match view.evidence.storage.page_ready() {
-            // A native page may still hold its source Work fence here. Serve
-            // a published generation without waiting; cold reads request the
-            // ordinary coalesced producer and keep the existing retry path.
-            Ok(true) => {}
-            _ => {
-                let _ = view.note_catalog_read();
-                return Err(catalog_unavailable());
+    #[cfg(test)]
+    let wait_started = crate::catalog::baseline_start();
+    let result = (|| {
+        if !view.evidence.storage.is_postgres()
+            && let Some(reply) = crate::index_rebuild::history_reply(view.options())
+        {
+            let _ = view.note_catalog_read();
+            return Err(reply);
+        }
+        if allow_wait {
+            view.wait_until_initial_catalog(deadline)
+                .map_err(|_| catalog_unavailable())?;
+        } else {
+            match view.evidence.storage.page_ready() {
+                // A native page may still hold its source Work fence here. Serve
+                // a published generation without waiting; cold reads request the
+                // ordinary coalesced producer and keep the existing retry path.
+                Ok(true) => {}
+                _ => {
+                    let _ = view.note_catalog_read();
+                    return Err(catalog_unavailable());
+                }
             }
         }
-    }
-    Ok(view.note_catalog_read().err())
+        Ok(view.note_catalog_read().err())
+    })();
+    #[cfg(test)]
+    crate::catalog::baseline_record(wait_started, |sample| &mut sample.wait);
+    result
 }
 
 fn catalog_unavailable() -> ViewerReply {
