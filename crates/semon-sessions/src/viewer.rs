@@ -2213,7 +2213,7 @@ mod tests {
             stream
                 .set_read_timeout(Some(Duration::from_secs(90)))
                 .unwrap();
-            write!(stream,"GET /api/sessions?limit=40&machine={source} HTTP/1.1\r\nHost: localhost:{port}\r\nCookie: semon_session=test-id.{token}\r\nConnection: close\r\n\r\n").unwrap();
+            write!(stream,"GET /api/sessions?limit=40&machine={source} HTTP/1.0\r\nHost: localhost:{port}\r\nCookie: semon_session=test-id.{token}\r\nConnection: close\r\n\r\n").unwrap();
             stream.shutdown(std::net::Shutdown::Write).unwrap();
             let mut wire = String::new();
             stream.read_to_string(&mut wire).unwrap();
