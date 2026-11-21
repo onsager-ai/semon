@@ -1,5 +1,5 @@
 WITH admitted AS MATERIALIZED (
-  SELECT c.source,f.title,f.agent_name,f.cwd,f.branch
+  SELECT c.source,c.path,f.title,f.agent_name,f.cwd,f.branch
   FROM json_each(?1) paths
   JOIN warehouse_current c ON c.path=paths.value
   JOIN warehouse_source s ON s.source=c.source AND s.origin=?2 AND s.carrier=c.path
@@ -11,7 +11,7 @@ WITH admitted AS MATERIALIZED (
   GROUP BY m.component
 ), members AS (
   SELECT m.component,d.source,d.harness,d.native_id,d.parent_id,d.nickname,d.agent_path,
-    coalesce(a.title,a.agent_name) AS title,d.model,a.cwd,a.branch,
+    coalesce(a.title,a.agent_name) AS title,d.model,a.cwd,a.branch,a.path,
     row_number() OVER(PARTITION BY m.component ORDER BY d.first_ts DESC,d.continued,d.native_id DESC,d.source) AS rank,
     row_number() OVER(PARTITION BY m.component ORDER BY a.title IS NULL AND a.agent_name IS NULL,
       d.first_ts DESC,d.continued,d.native_id DESC,d.source) AS title_rank,
@@ -23,7 +23,7 @@ WITH admitted AS MATERIALIZED (
     coalesce(t.title,CASE k.harness WHEN 'codex' THEN
       CASE WHEN owner.parent_id IS NULL THEN coalesce(nullif(owner.nickname,''),'Codex run')
         ELSE coalesce(nullif(owner.agent_path,''),'Codex subagent') END
-      WHEN 'copilot' THEN 'Copilot CLI' ELSE 'proj' END) AS title,
+      WHEN 'copilot' THEN 'Copilot CLI' WHEN 'claude' THEN semon_claude_project(latest.path) END) AS title,
     coalesce(model.model,CASE k.harness WHEN 'codex' THEN 'codex' ELSE '—' END) AS model,
     repo.value AS repo,
     latest.branch

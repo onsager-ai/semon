@@ -82,6 +82,17 @@ impl Fixture {
         path
     }
 
+    fn titleless_claude(&mut self, id: &str) -> PathBuf {
+        let path = self
+            .options
+            .claude_home
+            .join(format!("projects/-work-semon/{id}.jsonl"));
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, format!("{}\n",json!({"type":"assistant","uuid":id,"sessionId":id,"timestamp":"2026-09-24T00:00:00Z","message":{"role":"assistant","content":[{"type":"text","text":"assistant output"}]}}))).unwrap();
+        scan_file(&path, "claude", &mut self.cache, &mut false).unwrap();
+        path
+    }
+
     fn copilot(&mut self, id: &str) -> PathBuf {
         let path = self
             .options
@@ -99,7 +110,12 @@ impl Fixture {
             path: &self.db,
             inventory: paths
                 .iter()
-                .map(|path| (path.to_str().unwrap().to_owned(), Availability::Expected))
+                .map(|path| {
+                    (
+                        path.to_str().unwrap().to_owned(),
+                        Availability::Expected(Stat::of(path).ok()),
+                    )
+                })
                 .collect(),
             repos: BTreeMap::new(),
         }
@@ -136,7 +152,7 @@ fn warehouse_union_keeps_ties_coverage_and_committed_cursor_witnesses() {
         .insert("unavailable".into(), Availability::Unavailable);
     sources[1]
         .inventory
-        .insert("pending".into(), Availability::Expected);
+        .insert("pending".into(), Availability::Expected(None));
     let filters = request("limit=1&harness=claude&no_repo=1");
     let first = read_list(&sources, "workspace", &filters, None).unwrap();
     assert_eq!(first.total, 3);
@@ -193,6 +209,7 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
     let reserved = fixture.claude("claude:same", "Reserved key");
     let copilot_id = "01234567-89ab-4cde-8123-456789abcdef";
     let copilot = fixture.copilot(copilot_id);
+    let titleless = fixture.titleless_claude("titleless");
     crate::model::observe_catalog(
         &fixture.options,
         &mut fixture.cache,
@@ -201,12 +218,13 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
         crate::model::now_ms(),
     )
     .unwrap();
-    let source = fixture.source(&[&claude, &codex, &reserved, &copilot]);
+    let source = fixture.source(&[&claude, &codex, &reserved, &copilot, &titleless]);
     for query in [
         "limit=20",
         "harness=codex",
         "harness=copilot",
         "q=reserved",
+        "q=semon",
         "model=codex",
         "no_repo=1",
         "repo=nonexistent",
@@ -230,13 +248,28 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
                 (
                     row["key"].as_str().unwrap(),
                     row["harness"].as_str().unwrap(),
+                    row["name"].as_str().unwrap(),
+                    row["model"].as_str().unwrap(),
+                    row["repo"].as_str(),
+                    row["branch"].as_str(),
+                    row["parent"].as_str(),
                 )
             })
             .collect();
         let observed: Vec<_> = actual
             .rows
             .iter()
-            .map(|row| (row.position.key.as_str(), row.harness.as_str()))
+            .map(|row| {
+                (
+                    row.position.key.as_str(),
+                    row.harness.as_str(),
+                    row.title.as_str(),
+                    row.model.as_str(),
+                    row.repo.as_deref(),
+                    row.branch.as_deref(),
+                    row.parent.as_deref(),
+                )
+            })
             .collect();
         assert_eq!(observed, oracle, "{query}");
     }
@@ -257,6 +290,7 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
 fn warehouse_actual_reader_plans_use_indexed_exact_probes_and_local_usage() {
     let fixture = Fixture::new("reader-plan");
     let db = Connection::open(&fixture.db).unwrap();
+    list_functions(&db).unwrap();
     fn plan(db: &Connection, sql: &str, parameters: impl rusqlite::Params) -> String {
         db.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
             .unwrap()
@@ -328,4 +362,70 @@ fn warehouse_search_resumes_at_the_first_unexamined_candidate() {
     assert_eq!(second.rows.len(), 1);
     assert_eq!(second.rows[0].title, "Needle");
     assert!(second.next.is_none());
+}
+
+#[test]
+fn warehouse_reads_keep_verified_growth_and_exclude_unadmitted_replacement() {
+    use std::io::Write;
+    let mut fixture = Fixture::new("replacement-witness");
+    let original = fixture.claude("original", "Original");
+    let peer = fixture.claude("peer", "Peer");
+    let query = request("limit=1");
+    let page = |source| read_list(&[source], "workspace", &query, None).unwrap();
+    let first = page(fixture.source(&[&original, &peer]));
+    let cursor = first.next.as_ref().unwrap();
+    let before = Stat::of(&original).unwrap();
+    let mut file = fs::OpenOptions::new().append(true).open(&original).unwrap();
+    writeln!(file, "{}", json!({"type":"compact_boundary"})).unwrap();
+    drop(file);
+    let after = Stat::of(&original).unwrap();
+    let db = Connection::open(&fixture.db).unwrap();
+    db.execute(
+        "INSERT INTO session_source_mutations VALUES(?1,?2)",
+        params![
+            original.to_str(),
+            serde_json::to_string(&AppendEvidence {
+                generation: "1".repeat(32),
+                before,
+                after
+            })
+            .unwrap()
+        ],
+    )
+    .unwrap();
+    let sources = [fixture.source(&[&original, &peer])];
+    assert_eq!(
+        page(fixture.source(&[&original, &peer])).coverage.committed,
+        2
+    );
+    assert!(
+        identity(&sources[0], CatalogReadScope::Current, "original")
+            .unwrap()
+            .is_some()
+    );
+    assert!(read_list(&sources, "workspace", &query, Some(cursor)).is_ok());
+
+    let replacement = fixture.dir.join("replacement");
+    fs::copy(&original, &replacement).unwrap();
+    fs::rename(replacement, &original).unwrap();
+    let sources = [fixture.source(&[&original, &peer])];
+    let pending = page(fixture.source(&[&original, &peer]));
+    assert_eq!(
+        pending.coverage,
+        Coverage {
+            committed: 1,
+            pending: 1,
+            unavailable: 0
+        }
+    );
+    assert_eq!(keys(&pending), [("peer", "replacement-witness")]);
+    assert!(
+        identity(&sources[0], CatalogReadScope::Current, "original")
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        read_list(&sources, "workspace", &query, Some(cursor)),
+        Err(ReadError::Restart)
+    ));
 }

@@ -1,7 +1,11 @@
 //! Fixture adapter for the committed warehouse. The host supplies authorized
 //! inventory and repository observations. Each source is read independently.
 use super::{CatalogReadScope, Request};
-use crate::{events::store::warehouse, storage::Namespace};
+use crate::{
+    events::{Ledger, Stat, store::warehouse},
+    source_change::AppendEvidence,
+    storage::Namespace,
+};
 use rusqlite::{Connection, Transaction, params};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -16,17 +20,18 @@ const PARENTS: &str = "SELECT p.value,k.id FROM json_each(?1) p
     JOIN json_each(?2) authorized ON authorized.value=c.path
     ORDER BY p.value,k.id DESC";
 const RECEIPTS: &str =
-    "SELECT paths.key,paths.value,s.source,s.ledger,m.sidecar_revision,m.eof_witness
+    "SELECT paths.key,paths.value,s.source,s.ledger,m.sidecar_revision,m.eof_witness,a.evidence
     FROM json_each(?1) paths
     LEFT JOIN warehouse_current c ON paths.value AND c.path=paths.key
     LEFT JOIN warehouse_source s ON s.source=c.source AND s.origin=?2 AND s.carrier=c.path
     LEFT JOIN files f ON f.path=c.path AND f.resume_at=json_extract(s.ledger,'$.offset')
     LEFT JOIN maintenance_cursor m ON m.source=s.source AND f.file_id IS NOT NULL
+    LEFT JOIN session_source_mutations a ON a.source_path=c.path
     ORDER BY paths.key";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Availability {
-    Expected,
+    Expected(Option<Stat>),
     Unavailable,
 }
 
@@ -157,27 +162,46 @@ impl<'a> Snapshot<'a> {
             &source
                 .inventory
                 .iter()
-                .map(|(path, availability)| (path, *availability == Availability::Expected))
+                .map(|(path, availability)| {
+                    (path, matches!(availability, Availability::Expected(_)))
+                })
                 .collect::<BTreeMap<_, _>>(),
         )?;
         let mut probe = transaction.prepare_cached(RECEIPTS).map_err(index)?;
         let mut receipts = probe.query(params![inventory, origin]).map_err(index)?;
         while let Some(record) = receipts.next().map_err(index)? {
             let path: String = record.get(0).map_err(index)?;
-            let expected: bool = record.get(1).map_err(index)?;
+            let availability = source.inventory[&path];
             let sidecar: Option<i64> = record.get(4).map_err(index)?;
-            if let Some(sidecar) = sidecar {
+            if let (Availability::Expected(Some(observed)), Some(sidecar)) = (availability, sidecar)
+            {
                 let source_id: i64 = record.get(2).map_err(index)?;
                 let ledger: String = record.get(3).map_err(index)?;
-                let eof: Option<String> = record.get(5).map_err(index)?;
-                digest.update(encode(&(&path, source_id, ledger, sidecar, eof))?);
-                coverage.committed += 1;
-                authorized.push(path);
-            } else {
-                digest.update(encode(&(path, expected))?);
-                if expected {
+                let committed: Ledger = serde_json::from_str(&ledger).map_err(index)?;
+                let evidence: Option<String> = record.get(6).map_err(index)?;
+                if committed.stat == observed
+                    || evidence
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str::<AppendEvidence>(value).ok())
+                        .is_some_and(|append| {
+                            observed.size > committed.stat.size
+                                && append.qualifies(&committed.stat, &observed)
+                        })
+                {
+                    let eof: Option<String> = record.get(5).map_err(index)?;
+                    digest.update(encode(&(&path, source_id, ledger, sidecar, eof))?);
+                    coverage.committed += 1;
+                    authorized.push(path);
+                    continue;
+                }
+            }
+            match availability {
+                Availability::Expected(observed) => {
+                    digest.update(encode(&(path, "pending", observed))?);
                     coverage.pending += 1;
-                } else {
+                }
+                Availability::Unavailable => {
+                    digest.update(encode(&(path, "unavailable"))?);
                     coverage.unavailable += 1;
                 }
             }
@@ -317,6 +341,23 @@ impl<'a> Snapshot<'a> {
     }
 }
 
+fn list_functions(db: &Connection) -> rusqlite::Result<()> {
+    db.create_scalar_function(
+        "semon_claude_project",
+        1,
+        rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |context| {
+            let path = context.get::<String>(0)?;
+            let slug = std::path::Path::new(&path)
+                .parent()
+                .and_then(std::path::Path::file_name)
+                .and_then(std::ffi::OsStr::to_str)
+                .unwrap_or_default();
+            Ok(crate::model::claude_project_name(slug).to_owned())
+        },
+    )
+}
+
 pub(super) fn read_list(
     sources: &[Source<'_>],
     workspace: &str,
@@ -352,6 +393,7 @@ pub(super) fn read_list(
         let mut db =
             Connection::open_with_flags(source.path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
                 .map_err(index)?;
+        list_functions(&db).map_err(index)?;
         let tx = db.transaction().map_err(index)?;
         let snapshot = Snapshot::read(&tx, source)?;
         digest.update(&snapshot.revision);
@@ -434,20 +476,10 @@ pub(super) fn identity(
                 }
             });
     }
-    crate::events::store::require_current(&tx).map_err(index)?;
-    crate::storage::sqlite::qualify(&tx, &source.namespace).map_err(index)?;
-    let paths = encode(
-        &source
-            .inventory
-            .iter()
-            .filter_map(|(path, availability)| {
-                (*availability == Availability::Expected).then_some(path)
-            })
-            .collect::<Vec<_>>(),
-    )?;
+    let snapshot = Snapshot::read(&tx, source)?;
     let mut exact = tx.prepare_cached(EXACT).map_err(index)?;
     let mut matches = exact
-        .query(params![key, paths, source.namespace.binding()])
+        .query(params![key, snapshot.paths, source.namespace.binding()])
         .map_err(index)?;
     let found = matches
         .next()
