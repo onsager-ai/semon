@@ -30,9 +30,10 @@ mod turns;
 pub(crate) use native_text::{
     assistant_text, content_text, prompt_text, tool_input, tool_result_text,
 };
-use native_text::{
-    coordinator_body, down_target, input_string, notification_result, received_body,
-};
+use native_text::{coordinator_body, down_target, notification_result};
+pub(crate) use native_text::{input_string, received_body};
+#[cfg(test)]
+pub(crate) use relay_match::pair_up;
 #[cfg(test)]
 pub(crate) use turns::native_id as native_turn_id;
 

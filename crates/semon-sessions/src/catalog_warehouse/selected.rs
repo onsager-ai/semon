@@ -18,6 +18,8 @@ use std::{
 
 #[path = "causal.rs"]
 mod causal;
+#[path = "parent_relay.rs"]
+mod parent_relay;
 #[path = "retained.rs"]
 mod retained;
 pub(super) use retained::{retained_page, retained_record_at};
@@ -1201,10 +1203,30 @@ fn read(
             relay_context.insert(*position, relay_receipts(&db, source, *position, view)?);
         }
     }
+    let parent_plan = if let Target::ToolResults(call) = target
+        && let Some((position, (_, member, _))) = candidates.first_key_value()
+        && matches!(
+            source.inventory.get(&member.carrier),
+            Some(Availability::Expected(Some(_)))
+        )
+        && relay_context.values().all(Vec::is_empty)
+    {
+        parent_relay::Plan::collect(&db, source, position.source, call, view)?
+            .map(|plan| (plan, member.clone()))
+    } else {
+        None
+    };
     let db = chunk_proofs::Snapshot::new(db);
     let proof_bytes = Mutex::new(PAGE_BYTES);
     let mut readers = BTreeMap::new();
     let mut bytes_left = PAGE_BYTES;
+    if let Some((plan, member)) = parent_plan
+        && let Some(receipt) =
+            plan.resolve(db.clone(), source, member, &proof_bytes, &mut bytes_left)?
+        && let Some(first) = relay_context.first_entry()
+    {
+        first.into_mut().push(receipt);
+    }
     let mut records = Vec::with_capacity(candidates.len());
     let mut touched = BTreeMap::new();
     for (position, (kind, member, mut prefix)) in candidates {

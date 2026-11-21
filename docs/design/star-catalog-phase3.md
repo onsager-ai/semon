@@ -351,7 +351,15 @@ operation addresses with the current reader.
 
 Schema 57 indexes incoming Claude relay positions. The selected fixture
 adapter carries relay boundaries across pages and places qualified native
-launches at the child's first prompt, using the existing handoff IDs. Marker
-launch evidence must be inside the selected prefix. Parent-addressed body/time
-matching and its receipt placement remain open, along with launch placement at
-a header when the child has no prompt.
+launches at the child's first prompt, or at the first native record when its
+selected prefix has no prompt. Marker launch evidence must be inside the
+selected prefix. For a locally qualified Claude subagent sending to its parent,
+the selected result reader uses the shared native body-first and bounded-time
+matcher on proof-checked sends and non-final receipts. Explicit progress
+receipts start an incoming turn in the parent. Untyped legacy receipts can be
+returned as matched result evidence. Their incoming turn placement and their
+use as a child completion fallback still need parity.
+
+PR 3 owns the atomic Viewer route cutover, end-to-end scale verification,
+concurrent HTTP reads during ingestion, and the Viewer/browser gates. The
+fixture adapters remain separate from the production routes until cutover.

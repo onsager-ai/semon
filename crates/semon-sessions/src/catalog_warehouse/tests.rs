@@ -1360,6 +1360,75 @@ fn warehouse_relay_turn_carries_across_pages_at_the_selected_prefix() {
 }
 
 #[test]
+fn warehouse_parent_relay_matches_body_then_time_at_the_selected_prefix() {
+    let mut fixture = Fixture::new("parent-relay-fallback");
+    let root = fixture.claude("root", "Delegate");
+    append_native(
+        &root,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:01Z",
+        "message":{"role":"assistant","content":[{"type":"tool_use","id":"agent","name":"Agent","input":{"prompt":"Work"}}]}}),
+    );
+    let child = root.with_extension("").join("subagents/agent-worker.jsonl");
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::write(
+        child.with_extension("meta.json"),
+        json!({"agentType":"general-purpose","toolUseId":"agent"}).to_string(),
+    )
+    .unwrap();
+    fs::write(&child, format!("{}\n", prompt("root", 2, "Work"))).unwrap();
+    for (id, offset, text) in [("body", 3, "same body"), ("time", 6, "sender version")] {
+        append_native(
+            &child,
+            json!({"type":"assistant","sessionId":"root","timestamp":format!("2026-09-24T00:00:{offset:02}Z"),
+            "message":{"role":"assistant","content":[{"type":"tool_use","id":id,"name":"SendMessage","input":{"to":"main","message":text}}]}}),
+        );
+        append_native(
+            &child,
+            json!({"type":"user","sessionId":"root","timestamp":format!("2026-09-24T00:00:{:02}Z",offset+2),
+            "toolUseResult":{"success":true},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":"queued"}]}}),
+        );
+    }
+    scan_file(&root, "claude", &mut fixture.cache, &mut false).unwrap();
+    scan_file(&child, "claude", &mut fixture.cache, &mut false).unwrap();
+    let paths = [root.as_path(), child.as_path()];
+    let first = selected_page(&fixture, &paths, "worker", 1, None)
+        .unwrap()
+        .unwrap();
+    let mut offsets = Vec::new();
+    for (time, body) in [(4, "same body"), (7, "receiver version")] {
+        offsets.push(fs::metadata(&root).unwrap().len());
+        append_native(
+            &root,
+            json!({"type":"user","sessionId":"root","timestamp":format!("2026-09-24T00:00:{time:02}Z"),
+            "origin":{"kind":"peer","senderTaskId":"worker","from":"worker","body":body},
+            "message":{"role":"user","content":format!("<agent-message from=\"worker\">{body}</agent-message>")}}),
+        );
+    }
+    scan_file(&root, "claude", &mut fixture.cache, &mut false).unwrap();
+    let source = fixture.source(&paths);
+    for (id, offset) in [("body", offsets[0]), ("time", offsets[1])] {
+        let call = selected::evidence_at(
+            &fixture.options,
+            &source,
+            "worker",
+            selected::Evidence::Call(id),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let read = |cursor| {
+            selected::tool_results(&fixture.options, &source, "worker", &call.address, cursor)
+                .unwrap()
+                .unwrap()
+        };
+        assert!(read(first.next.as_ref())[0].relay_receipts.is_empty());
+        let current = read(None);
+        assert_eq!(current[0].relay_receipts.len(), 1);
+        assert_eq!(current[0].relay_receipts[0].offset, offset);
+    }
+}
+
+#[test]
 fn warehouse_current_provider_pins_the_selected_original_across_pages() {
     use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
     use std::io;
