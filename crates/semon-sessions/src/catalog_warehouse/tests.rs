@@ -1007,6 +1007,18 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
         .unwrap()
         .is_empty()
     );
+    let db = Connection::open(&fixture.db).unwrap();
+    let (record_occurrence, call_occurrence): (i64, i64) = db
+        .query_row(
+            "SELECT r.occurrence,c.occurrence FROM fact_tool_call c
+         JOIN fact_record r ON r.source=c.source AND r.pos=c.pos AND r.block=c.block
+         WHERE c.call_id='tool-1'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(call.occurrence, record_occurrence);
+    assert_ne!(record_occurrence, call_occurrence);
     let latest = selected::tool_results(&fixture.options, &source, "native", &call, None)
         .unwrap()
         .unwrap();

@@ -40,21 +40,24 @@ const CONTINUATIONS: &str = "SELECT e.source,min(e.pos) FROM dim_session target
     WHERE target.source=?1 AND target.harness='claude' GROUP BY e.source";
 
 // Select a unique call and its native result positions within this source's
-// committed prefix. Result order remains stable across equal timestamps.
-const TOOL_RESULTS: &str = "WITH calls AS MATERIALIZED (
-    SELECT call_id,pos,block FROM fact_tool_call WHERE source=?1 AND pos=?2 AND block=?3
-      AND occurrence=?4 AND call_id IS NOT NULL
+// committed prefix. The native offset and block name the call. Warehouse
+// occurrence distinguishes facts emitted for that line and is not shared with
+// fact_record. Refuse a block with more than one call fact.
+const TOOL_RESULTS: &str = "WITH call_at AS MATERIALIZED (
+    SELECT min(call_id) AS call_id,min(pos) AS pos,min(block) AS block
+    FROM fact_tool_call WHERE source=?1 AND pos=?2 AND block=?3
+    HAVING count(*)=1 AND count(call_id)=1
 ), unique_call AS (
-    SELECT c.call_id,c.pos,c.block FROM calls c
+    SELECT c.call_id,c.pos,c.block FROM call_at c
     CROSS JOIN fact_tool_call all_calls ON all_calls.source=?1 AND all_calls.call_id=c.call_id
-      AND all_calls.pos<?5
+      AND all_calls.pos<?4
     GROUP BY c.call_id,c.pos,c.block HAVING count(*)=1
 )
 SELECT coalesce(r.ts,-9223372036854775808),r.pos,r.block,r.occurrence,r.kind
 FROM unique_call c CROSS JOIN fact_tool_result r ON r.source=?1 AND r.call_id=c.call_id
   AND ((r.call_pos IS NULL AND r.kind<>'copilot-execution')
        OR (r.call_pos=c.pos AND r.call_block=c.block))
-WHERE r.pos<?5 ORDER BY 1,r.pos,r.block,r.occurrence LIMIT ?6";
+WHERE r.pos<?4 ORDER BY 1,r.pos,r.block,r.occurrence LIMIT ?5";
 
 const EXACT_RELAY_RECEIPTS: &str = "SELECT r.source,c.path,s.ledger,r.pos,r.block,r.occurrence,r.ts
     FROM fact_relay_receipt r INDEXED BY relay_receipt_correlation
@@ -845,7 +848,6 @@ fn read(
                                     id,
                                     i64::try_from(call.offset).map_err(index)?,
                                     call.block,
-                                    call.occurrence,
                                     i64::try_from(committed.offset).map_err(index)?,
                                     capacity as i64
                                 ])
