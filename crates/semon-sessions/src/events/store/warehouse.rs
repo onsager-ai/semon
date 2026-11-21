@@ -588,6 +588,9 @@ fn write_fact(
             }
             Ok(())
         }
+        Fact::Operation { parent } => {
+            at!(fact_operation,call_pos=>int(parent.offset),call_block=>parent.block)
+        }
         Fact::ToolResult {
             id,
             call,

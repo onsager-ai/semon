@@ -119,6 +119,11 @@ CREATE TABLE fact_tool_call (
   task_name TEXT, ts INTEGER, flags INTEGER NOT NULL, target TEXT,
   PRIMARY KEY(source,pos,block,occurrence)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE fact_operation (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
+  occurrence INTEGER NOT NULL, ordinal INTEGER, call_pos INTEGER NOT NULL, call_block INTEGER NOT NULL,
+  PRIMARY KEY(source,pos,block,occurrence)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE fact_tool_result (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER,
@@ -235,6 +240,7 @@ CREATE INDEX record_position ON fact_record(source,coalesce(ts,-9223372036854775
   WHERE pos>=0 AND NOT gap;
 CREATE INDEX usage_message ON fact_step_observation(message_id,uuid,source);
 CREATE INDEX tool_call_identity ON fact_tool_call(source,call_id);
+CREATE INDEX operation_parent ON fact_operation(source,call_pos,pos);
 CREATE INDEX tool_result_identity ON fact_tool_result(source,call_id);
 CREATE INDEX relay_result_call ON fact_relay_result(source,call_id);
 CREATE INDEX relay_receipt_correlation ON fact_relay_receipt(correlation,source,pos,block,occurrence);

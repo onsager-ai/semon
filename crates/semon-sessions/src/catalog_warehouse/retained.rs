@@ -168,6 +168,7 @@ pub(in super::super) fn retained_page(
         records.push(Record {
             prompt_anchor: prompt_anchor(&mut prompts, key, &reference, position)?,
             entry_anchor: None,
+            operation_parent: None,
             causal: causal::Context::default(),
             relay_receipts: Vec::new(),
             kind,
@@ -256,6 +257,7 @@ pub(in super::super) fn retained_record_at(
     Ok(Some(Record {
         prompt_anchor: None,
         entry_anchor: None,
+        operation_parent: None,
         causal: causal::Context::default(),
         relay_receipts: Vec::new(),
         address: address.clone(),

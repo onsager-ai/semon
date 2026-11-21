@@ -162,6 +162,9 @@ pub(crate) enum Fact {
         target: Option<String>,
         task_name: Option<String>,
     },
+    Operation {
+        parent: Position,
+    },
     ToolResult {
         id: String,
         call: Option<Position>,

@@ -998,6 +998,116 @@ fn warehouse_component_text_address_and_field_match_the_current_reader() {
 }
 
 #[test]
+fn warehouse_operation_and_activity_anchors_match_native_evidence() {
+    use crate::events::session_activity::ActivityStepId;
+    let mut fixture = Fixture::new("operation-activity-anchors");
+    let claude = fixture.claude("native", "Review this");
+    append_native(
+        &claude,
+        json!({"type":"assistant","uuid":"usage-uuid","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:03Z","message":{"id":"activity-message","role":"assistant",
+        "model":"claude-sonnet-4-6","content":[{"type":"text","text":"Review complete"}],
+        "usage":{"input_tokens":100,"output_tokens":10}}}),
+    );
+    let codex = fixture.codex("codex-native");
+    let call = fs::metadata(&codex).unwrap().len();
+    append_native(
+        &codex,
+        json!({"type":"response_item","timestamp":"2026-09-24T00:00:01Z",
+        "payload":{"type":"custom_tool_call","call_id":"exec","name":"exec","input":"tools.exec_command({cmd:'false'})"}}),
+    );
+    let operation = fs::metadata(&codex).unwrap().len();
+    append_native(
+        &codex,
+        json!({"type":"event_msg","timestamp":"2026-09-24T00:00:02Z",
+        "payload":{"type":"item_completed","item":{"type":"CommandExecution","id":"operation",
+            "command":["/bin/sh","-c","false"],"exit_code":1,"aggregated_output":"failed"}}}),
+    );
+    append_native(
+        &codex,
+        json!({"type":"response_item","timestamp":"2026-09-24T00:00:03Z",
+        "payload":{"type":"custom_tool_call_output","call_id":"exec","output":"done"}}),
+    );
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+
+    let db = Connection::open(&fixture.db).unwrap();
+    let generation: String = db
+        .query_row(
+            "SELECT generation FROM session_activity_projections WHERE session_key='native'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let mut anchor = crate::transcript_range::StepAnchor {
+        generation,
+        ordinal: 0,
+        id: ActivityStepId::Claude("activity-message".into()),
+    };
+    let source = fixture.source(&[&claude, &codex]);
+    let found = selected::activity_anchor(&fixture.options, &source, "native", &anchor, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(found.text().as_deref(), Some("Review complete"));
+    let oracle = |key| {
+        let reply = crate::session_transcript_range_with_mode(
+            &fixture.options,
+            fixture.namespace.as_str(),
+            &format!("sid={key}&after=0&limit=100"),
+            None,
+            crate::SessionSourceReadMode::LocalOrPinnedProvider,
+        );
+        assert_eq!(reply.status, 200);
+        serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap()
+    };
+    let transcript = oracle("native");
+    let entry = transcript["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "Review complete")
+        .unwrap();
+    assert_eq!(found.entry_anchor.as_deref(), entry["entry_id"].as_str());
+    anchor.ordinal = 1;
+    assert!(
+        selected::activity_anchor(&fixture.options, &source, "native", &anchor, None)
+            .unwrap()
+            .is_none()
+    );
+    anchor.ordinal = 0;
+    anchor.generation.push_str("-stale");
+    assert!(
+        selected::activity_anchor(&fixture.options, &source, "native", &anchor, None)
+            .unwrap()
+            .is_none()
+    );
+
+    let page = selected_page(&fixture, &[&codex], "codex-native", 100, None)
+        .unwrap()
+        .unwrap();
+    let found = page
+        .records
+        .iter()
+        .find(|record| record.address.offset == operation)
+        .unwrap();
+    assert_eq!(found.operation_parent, Some(call));
+    let transcript = oracle("codex-native");
+    let entry = transcript["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["script"] == call)
+        .unwrap();
+    assert_eq!(found.entry_anchor.as_deref(), entry["entry_id"].as_str());
+}
+
+#[test]
 fn warehouse_component_cursor_restarts_after_receipt_expiry() {
     let mut fixture = Fixture::new("component-expiry");
     let path = fixture.claude("native", "Original title");

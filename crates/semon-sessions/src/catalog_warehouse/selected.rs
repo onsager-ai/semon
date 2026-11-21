@@ -130,6 +130,7 @@ pub(super) struct Address {
 pub(super) struct Record {
     pub(super) prompt_anchor: Option<String>,
     pub(super) entry_anchor: Option<String>,
+    pub(super) operation_parent: Option<u64>,
     pub(super) causal: causal::Context,
     pub(super) relay_receipts: Vec<RelayReceipt>,
     pub(super) address: Address,
@@ -677,12 +678,92 @@ pub(super) fn evidence_at(
     .map(|component| component.and_then(|component| component.records.into_iter().next()))
 }
 
+pub(super) fn activity_anchor(
+    options: &Options,
+    source: &Source<'_>,
+    key: &str,
+    anchor: &crate::transcript_range::StepAnchor,
+    cursor: Option<&Cursor>,
+) -> Result<Option<Record>, ReadError> {
+    read(
+        options,
+        source,
+        CatalogReadScope::Current,
+        key,
+        Target::Activity(anchor),
+        cursor,
+    )
+    .map(|component| component.and_then(|component| component.records.into_iter().next()))
+}
+
+struct ActivityEvidence {
+    sources: BTreeMap<std::path::PathBuf, crate::model::summary::CatalogSource>,
+    events: String,
+    usage: Option<crate::events::session_activity::SourcePosition>,
+    call: Option<crate::events::session_activity::SourcePosition>,
+}
+
+fn activity_evidence(
+    db: &rusqlite::Connection,
+    key: &str,
+    anchor: &crate::transcript_range::StepAnchor,
+) -> Result<Option<ActivityEvidence>, ReadError> {
+    use crate::events::session_activity::Usage;
+    let encoded: Option<String> = db
+        .query_row(
+            "SELECT metadata FROM session_activity_sources WHERE session_key=?1",
+            [key],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(index)?;
+    let Some(encoded) = encoded else {
+        return Ok(None);
+    };
+    let row: crate::model::summary::CatalogRow = serde_json::from_str(&encoded).map_err(index)?;
+    let Some((step, usage)) = crate::events::store::session_activity::step_at(
+        db,
+        &row,
+        &anchor.generation,
+        anchor.ordinal,
+    )
+    .map_err(index)?
+    else {
+        return Ok(None);
+    };
+    if step.id != anchor.id {
+        return Ok(None);
+    }
+    let (events, usage, call) = match usage {
+        Usage::Claude(usage) if usage.record_ids.is_empty() => {
+            ("[]".into(), Some(step.position), None)
+        }
+        Usage::Claude(usage) if usage.record_ids.len() <= 256 => {
+            (encode(&usage.record_ids)?, None, None)
+        }
+        Usage::Claude(_) => return Ok(None),
+        Usage::Codex(_) => ("[]".into(), None, step.call_position),
+    };
+    let sources = row
+        .sources
+        .into_iter()
+        .map(|source| (source.path.clone(), source))
+        .collect();
+    Ok(Some(ActivityEvidence {
+        sources,
+        events,
+        usage,
+        call,
+    }))
+}
+
 const EVIDENCE: &str = include_str!("evidence.sql");
 
 enum Target<'a> {
     Page(usize),
     Address(&'a Address),
     Evidence(Evidence<'a>),
+    Activity(&'a crate::transcript_range::StepAnchor),
     ToolResults(&'a Address),
 }
 
@@ -691,7 +772,7 @@ impl Target<'_> {
         match *self {
             Self::Page(n @ 1..=100) => Ok(n + 1),
             Self::Page(_) => Err(index("Selected pages require a limit of 1–100")),
-            Self::Address(_) | Self::Evidence(_) => Ok(1),
+            Self::Address(_) | Self::Evidence(_) | Self::Activity(_) => Ok(1),
             Self::ToolResults(_) => Ok(101),
         }
     }
@@ -763,6 +844,14 @@ fn read(
             Ok(None)
         };
     };
+    let mut activity = if let Target::Activity(anchor) = target {
+        let Some(evidence) = activity_evidence(&db, key, anchor)? else {
+            return Ok(None);
+        };
+        Some(evidence)
+    } else {
+        None
+    };
     let (component, title, model): (i64, Option<String>, Option<String>) = db
         .query_row(
             "SELECT m.component,coalesce(f.title,f.agent_name),d.model
@@ -801,6 +890,9 @@ fn read(
         let mut members = db.prepare_cached(MEMBERS).map_err(index)?;
         let mut detail = db.prepare_cached(warehouse::DETAIL).map_err(index)?;
         let mut evidence = db.prepare_cached(EVIDENCE).map_err(index)?;
+        let mut activity_query = db
+            .prepare_cached(include_str!("activity_evidence.sql"))
+            .map_err(index)?;
         let mut prefix = db.prepare_cached(COMMITTED_PREFIX).map_err(index)?;
         let mut continuations = db.prepare_cached(CONTINUATIONS).map_err(index)?;
         let mut results = db.prepare_cached(TOOL_RESULTS).map_err(index)?;
@@ -889,6 +981,16 @@ fn read(
                     }
                     confirmed += 1;
                 }
+                if let Some(activity) = activity.as_mut() {
+                    let mut selected = committed.source(Path::new(&carrier), &reference.native_id);
+                    let Some(saved) = activity.sources.remove(Path::new(&carrier)) else {
+                        return Ok(None);
+                    };
+                    selected.native_role.clone_from(&saved.native_role);
+                    if selected != saved {
+                        return Ok(None);
+                    }
+                }
                 let member = Arc::new(Member {
                     carrier,
                     current,
@@ -914,6 +1016,33 @@ fn read(
                         )
                     }
                     Target::Address(_) => continue,
+                    Target::Activity(_) => {
+                        let activity = activity
+                            .as_ref()
+                            .expect("activity target qualified before paging");
+                        let predecessors = continuation_bounds(
+                            &mut continuations,
+                            &mut prefix,
+                            id,
+                            component,
+                            view,
+                        )?;
+                        let offset =
+                            |position: Option<&crate::events::session_activity::SourcePosition>| {
+                                position
+                                    .filter(|position| position.source == member.carrier)
+                                    .map(|position| i64::try_from(position.offset).map_err(index))
+                                    .transpose()
+                            };
+                        if let Some(found) = activity_query.query_row(named_params! {
+                            ":source": id, ":end": i64::try_from(committed.offset).map_err(index)?,
+                            ":events": activity.events, ":usage": offset(activity.usage.as_ref())?,
+                            ":call": offset(activity.call.as_ref())?, ":predecessors": predecessors,
+                        }, |row| position(row, id)).optional().map_err(index)? {
+                            keep(found);
+                        }
+                        continue;
+                    }
                     Target::Evidence(wanted) => {
                         if evidence_matches < 2 {
                             let predecessors = continuation_bounds(
@@ -996,6 +1125,9 @@ fn read(
             }
         }
     }
+    if activity.is_some_and(|activity| !activity.sources.is_empty()) {
+        return Ok(None);
+    }
     let members = format!("{:x}", witness.finalize());
     if cursor.is_some_and(|cursor| cursor.members != members || cursor.touched.len() != confirmed) {
         return Err(ReadError::Restart);
@@ -1029,6 +1161,19 @@ fn read(
                 {
                     anchors.insert(*position, anchor);
                 }
+            }
+        }
+    }
+    let mut operations = BTreeMap::new();
+    {
+        let mut operation = db.prepare_cached("SELECT call_pos FROM fact_operation WHERE source=?1 AND pos=?2 ORDER BY block,occurrence LIMIT 1").map_err(index)?;
+        for position in candidates.keys() {
+            let parent: Option<i64> = operation
+                .query_row(params![position.source, position.offset], |row| row.get(0))
+                .optional()
+                .map_err(index)?;
+            if let Some(parent) = parent {
+                operations.insert(*position, u64::try_from(parent).map_err(index)?);
             }
         }
     }
@@ -1103,7 +1248,9 @@ fn read(
             }
         })?;
         let native_id = crate::tx::native_event_id(&native);
+        let operation_parent = operations.remove(&position);
         let entry_kind = match kind.as_deref() {
+            Some("event_msg") if operation_parent.is_some() => Some("tool"),
             Some("user" | "user.message") => anchors.get(&position).map(|anchor| {
                 if crate::model::is_ask(anchor) {
                     "h"
@@ -1147,6 +1294,7 @@ fn read(
         records.push(Record {
             prompt_anchor: anchors.remove(&position),
             entry_anchor,
+            operation_parent,
             causal: causal
                 .remove(&position)
                 .map_or_else(causal::Context::default, |inputs| {

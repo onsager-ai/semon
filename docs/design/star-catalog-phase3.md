@@ -341,5 +341,13 @@ results to resolve child state. The fixture compares child state with the
 current reader and covers missing parent custody and PID reuse. Legacy
 untyped agent receipts still depend on the relay matching work.
 
-Full causal presentation, remaining anchors and relay body/time matching
-still need comparison before cutover.
+Schema 56 indexes the native parser's exact Codex operation-to-call position.
+The selected adapter uses that relationship for canonical operation entry IDs
+and to resolve activity evidence. Activity anchors validate the requested
+step generation, ordinal and native identity against the activity projection.
+Its source witness must match the selected warehouse members and prefixes
+before body reads. The fixture compares rendered Claude activity and Codex
+operation addresses with the current reader.
+
+Relay and launch turn placement, relay body/time matching, and remaining
+causal presentation still need comparison before cutover.
