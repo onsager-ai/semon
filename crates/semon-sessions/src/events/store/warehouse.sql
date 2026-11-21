@@ -25,6 +25,7 @@ CREATE TABLE warehouse_identity (
   recipe_version INTEGER NOT NULL, recipe_generation TEXT NOT NULL,
   recipe_source_generation TEXT NOT NULL, source_generation TEXT NOT NULL,
   complete INTEGER NOT NULL CHECK(complete IN (0,1)),
+  witness TEXT NOT NULL,
   UNIQUE(scope,source_key,catalog_key,retained)
 ) STRICT;
 CREATE TABLE warehouse_identity_member (
