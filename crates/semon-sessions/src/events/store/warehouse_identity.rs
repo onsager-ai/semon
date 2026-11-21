@@ -112,10 +112,10 @@ pub(in crate::events::store) fn certify(
     let Some((component, owner, native_id)) = cohort else {
         return Ok(());
     };
-    let member_count: usize = tx
+    let member_count: i64 = tx
         .prepare_cached("SELECT count(*) FROM lineage_member WHERE component=?1")?
         .query_row([component], |record| record.get(0))?;
-    if member_count != members.len() {
+    if usize::try_from(member_count).ok() != Some(members.len()) {
         return Ok(());
     }
     let source_generation = crate::retention::source_generation(&row.sources).map_err(data)?;
@@ -132,7 +132,7 @@ pub(in crate::events::store) fn certify(
         put(
             tx,
             "INSERT INTO warehouse_identity_member VALUES(?1,?2,?3,?4)",
-            params![identity, source, ordinal, receipt],
+            params![identity, source, ordinal as i64, receipt],
         )?;
     }
     Ok(())
@@ -235,7 +235,7 @@ fn read_retained(
          AND i.complete=1 AND i.recipe_version=?3 AND length(i.recipe_generation)=64
          AND i.recipe_source_generation=i.source_generation",
     )?.query_row(params![source_key, key, VERSION], |row| {
-        Ok((row.get::<_, i64>(0)?, RetainedIdentity { owner: row.get(1)?, harness: row.get(2)?, native_id: row.get(3)? }, row.get::<_,usize>(4)?, row.get::<_,String>(5)?))
+        Ok((row.get::<_, i64>(0)?, RetainedIdentity { owner: row.get(1)?, harness: row.get(2)?, native_id: row.get(3)? }, row.get::<_,i64>(4)?, row.get::<_,String>(5)?))
     }).optional()?;
     let Some((id, identity, member_count, generation)) = binding else {
         return Ok(None);
@@ -249,7 +249,7 @@ fn read_retained(
     let mut members = statement.query(params![id, source_key, identity.harness])?;
     let mut count = 0;
     while let Some(member) = members.next()? {
-        if member.get::<_, usize>(0)? != count {
+        if member.get::<_, i64>(0)? != count {
             return Ok(None);
         }
         if count > 0 {
