@@ -1,40 +1,22 @@
--- Resolve only possible native IDs encoded by the requested catalog key.
--- Qualification adds harness: and zero or more leading colons. Every possible
--- native ID is therefore a suffix after a colon (or the original key).
-WITH RECURSIVE probes(native_id) AS (
-  SELECT ?1
-  UNION
-  SELECT substr(native_id,instr(native_id,':')+1) FROM probes
-  WHERE instr(native_id,':')>0
-), owners AS MATERIALIZED (
-  SELECT d.source AS owner,d.harness,d.native_id FROM probes p
-  JOIN dim_session d ON d.native_id=p.native_id
-  JOIN bridge_session_owner m ON m.source=d.source AND m.owner=d.source
-), collisions AS (
-  SELECT DISTINCT o.native_id FROM owners o
-  CROSS JOIN dim_session d ON d.native_id=o.native_id AND d.harness<>o.harness
-  CROSS JOIN bridge_session_owner m ON m.source=d.source AND m.owner=d.source
-), candidates(owner,native_id,candidate) AS (
-  SELECT o.owner,o.native_id,
-    CASE WHEN c.native_id IS NULL THEN o.native_id ELSE o.harness||':'||o.native_id END
-  FROM owners o LEFT JOIN collisions c USING(native_id)
-  UNION
-  SELECT c.owner,c.native_id,':'||c.candidate FROM candidates c
-  JOIN dim_session d ON d.native_id=c.candidate
-  WHERE c.candidate<>c.native_id
-), selected AS MATERIALIZED (
-  SELECT l.component FROM candidates c JOIN lineage_member l ON l.source=c.owner
-  LEFT JOIN dim_session reserved ON reserved.native_id=c.candidate
-  WHERE c.candidate=?1 AND (c.candidate=c.native_id OR reserved.source IS NULL)
-), members AS MATERIALIZED (
-  SELECT l.source FROM selected s CROSS JOIN lineage_member l USING(component)
+-- Seek into one member's ordered fact index. Bound suppression work to the
+-- candidate positions and to qualified continuation predecessors of this member.
+WITH candidates AS MATERIALIZED (
+  SELECT coalesce(r.ts,-9223372036854775808) AS time,r.pos,r.block,r.occurrence,r.kind,r.uuid
+  FROM fact_record r INDEXED BY record_position
+  WHERE r.source=:source AND r.pos>=0 AND NOT r.gap
+    AND r.pos>=:start AND r.pos<:end
+    AND (:entry_block IS NULL OR (r.block,r.occurrence)=(:entry_block,:entry_occurrence))
+    AND coalesce(r.ts,-9223372036854775808)>=:time
+    AND (coalesce(r.ts,-9223372036854775808),r.pos,r.block,r.occurrence)
+        > (:time,:pos,:block,:occurrence)
+  ORDER BY time,r.pos,r.block,r.occurrence LIMIT :limit
 ), suppressed AS MATERIALIZED (
-  SELECT DISTINCT target.source,old.uuid FROM members member
-  CROSS JOIN fact_relation_observation e ON e.source=member.source AND e.kind='continued-in'
-  CROSS JOIN fact_record old ON old.source=e.source AND old.uuid IS NOT NULL
-  CROSS JOIN dim_session target ON target.harness='claude' AND target.native_id=e.target
-  CROSS JOIN dim_session original ON original.source=e.source AND original.lineage
+  SELECT DISTINCT c.uuid FROM candidates c
+  CROSS JOIN json_each(:predecessors) predecessor
+  CROSS JOIN fact_record old ON old.source=CAST(predecessor.key AS INTEGER) AND old.uuid=c.uuid
+    AND old.pos<predecessor.value
+  WHERE c.uuid IS NOT NULL
 )
-SELECT r.source,r.pos,r.kind FROM members m CROSS JOIN fact_record r USING(source)
-LEFT JOIN suppressed s ON s.source=r.source AND s.uuid=r.uuid
-WHERE s.source IS NULL AND NOT r.gap ORDER BY r.ts,r.source,r.pos,r.block,r.occurrence;
+SELECT c.time,c.pos,c.block,c.occurrence,c.kind,s.uuid IS NOT NULL AS copied
+FROM candidates c LEFT JOIN suppressed s ON s.uuid=c.uuid
+ORDER BY c.time,c.pos,c.block,c.occurrence;

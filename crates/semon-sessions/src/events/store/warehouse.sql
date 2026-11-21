@@ -9,6 +9,21 @@ CREATE TABLE warehouse_source (
   UNIQUE(origin,harness,logical_source,incarnation)
 ) STRICT;
 CREATE INDEX warehouse_source_logical ON warehouse_source(logical_source,harness,incarnation);
+-- A monotonic commit watermark lets continuations recover the prefix of an
+-- as-yet untouched member without embedding all member ledgers in the cursor.
+-- Receipts contain proof metadata only and are immutable within an incarnation.
+CREATE TABLE warehouse_prefix (
+  revision INTEGER PRIMARY KEY,
+  source INTEGER NOT NULL REFERENCES warehouse_source(source),
+  pos INTEGER NOT NULL,
+  ledger TEXT NOT NULL,
+  committed_at INTEGER NOT NULL,
+  superseded INTEGER NOT NULL CHECK(superseded IN (0,1)),
+  UNIQUE(source,pos)
+) STRICT;
+CREATE INDEX warehouse_prefix_revision ON warehouse_prefix(source,revision);
+CREATE INDEX warehouse_prefix_expiry ON warehouse_prefix(committed_at,revision) WHERE superseded=1;
+CREATE INDEX warehouse_prefix_latest ON warehouse_prefix(source) WHERE superseded=0;
 CREATE TABLE warehouse_current (
   path TEXT PRIMARY KEY, source INTEGER NOT NULL UNIQUE REFERENCES warehouse_source(source)
 ) STRICT, WITHOUT ROWID;
@@ -203,9 +218,13 @@ CREATE INDEX session_native_key ON dim_session(native_id,harness,source);
 CREATE INDEX session_parent_name ON dim_session(harness,parent_id,nickname);
 CREATE INDEX spawn_call_name ON fact_tool_call(source,tool,task_name);
 CREATE INDEX record_uuid ON fact_record(source,uuid);
+CREATE INDEX record_position ON fact_record(source,coalesce(ts,-9223372036854775808),pos,block,occurrence)
+  WHERE pos>=0 AND NOT gap;
 CREATE INDEX usage_message ON fact_step_observation(message_id,uuid,source);
+CREATE INDEX tool_call_identity ON fact_tool_call(source,call_id);
 CREATE INDEX tool_result_identity ON fact_tool_result(source,call_id);
 CREATE INDEX relay_result_call ON fact_relay_result(source,call_id);
+CREATE INDEX relay_receipt_correlation ON fact_relay_receipt(correlation,source,pos,block,occurrence);
 CREATE VIEW dim_lineage AS
 SELECT m.source,g.minimum AS component FROM lineage_member m
 JOIN lineage_group g ON g.id=m.component;

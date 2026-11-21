@@ -6,7 +6,7 @@ use crate::{
     source_change::AppendEvidence,
     storage::Namespace,
 };
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -19,6 +19,13 @@ const PARENTS: &str = "SELECT p.value,k.id FROM json_each(?1) p
     JOIN warehouse_current c ON c.source=b.owner
     JOIN json_each(?2) authorized ON authorized.value=c.path
     ORDER BY p.value,k.id DESC";
+const STATUS: &str = "SELECT p.value,d.harness,d.native_id,s.carrier,s.ledger,d.lineage,m.source
+    FROM json_each(?1) p
+    CROSS JOIN lineage_member root ON root.source=p.value
+    CROSS JOIN lineage_member m ON m.component=root.component
+    CROSS JOIN dim_session d ON d.source=m.source
+    CROSS JOIN warehouse_source s ON s.source=m.source
+    ORDER BY p.value,m.source";
 const RECEIPTS: &str =
     "SELECT paths.key,paths.value,s.source,s.ledger,m.sidecar_revision,m.eof_witness,a.evidence
     FROM json_each(?1) paths
@@ -38,6 +45,7 @@ pub(super) enum Availability {
 pub(super) struct Source<'a> {
     pub(super) namespace: Namespace,
     pub(super) path: &'a std::path::Path,
+    pub(super) options: &'a crate::Options,
     pub(super) inventory: BTreeMap<String, Availability>,
     pub(super) repos: BTreeMap<String, String>,
 }
@@ -78,7 +86,7 @@ pub(super) struct Continuation {
     boundary: Boundary,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(super) struct Row {
     position: Position,
     owner: i64,
@@ -89,6 +97,8 @@ pub(super) struct Row {
     branch: Option<String>,
     pub(super) parent: Option<String>,
     pub(super) usage: [i64; 6],
+    pub(super) cost: Option<crate::pricing::Cost>,
+    pub(super) status: Option<&'static str>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -138,15 +148,68 @@ type LocalPage = (Vec<Row>, usize, usize, Option<Boundary>);
 type Identity = (i64, String, String);
 
 struct Snapshot<'a> {
-    transaction: &'a Transaction<'a>,
+    transaction: &'a Connection,
     source: &'a Source<'a>,
     paths: String,
     coverage: Coverage,
     revision: String,
 }
 
+struct Usage {
+    shared: bool,
+    tokens: [i64; 6],
+    pricing: crate::pricing::CostBuild,
+}
+
+impl Usage {
+    fn account(&mut self, row: &rusqlite::Row<'_>) -> Result<(), ReadError> {
+        let shared: bool = row.get(6).map_err(index)?;
+        let start = usize::from(shared) * 3;
+        for (column, total) in self.tokens[start..start + 3].iter_mut().enumerate() {
+            let tokens: i64 = row.get(column + 3).map_err(index)?;
+            *total = total
+                .checked_add(tokens)
+                .ok_or_else(|| index("Warehouse usage exceeds the supported range"))?;
+        }
+        if shared {
+            self.shared = true;
+            return Ok(());
+        }
+        let kind: String = row.get(1).map_err(index)?;
+        let model: Option<String> = row.get(2).map_err(index)?;
+        match kind.as_str() {
+            "claude" => self.pricing.message(&crate::events::MessageUsage {
+                model,
+                billing: billing(row)?,
+                ..Default::default()
+            }),
+            "codex-snapshot" if model.is_none() => {}
+            "codex-response" | "codex-snapshot" => {
+                self.pricing.codex(&crate::events::CodexUsageEvent {
+                    model: model.unwrap_or_else(|| "unknown".into()),
+                    tokens: billing(row)?,
+                    timestamp: row.get(7).map_err(index)?,
+                })
+            }
+            "copilot" => {
+                let model = model.unwrap_or_else(|| "unknown".into());
+                self.pricing
+                    .unpriced_models
+                    .insert(crate::pricing::normalize_model_id(&model).to_owned());
+            }
+            _ => return Err(index("Unknown warehouse pricing fact")),
+        }
+        Ok(())
+    }
+}
+
+fn billing<T: serde::de::DeserializeOwned>(row: &rusqlite::Row<'_>) -> Result<T, ReadError> {
+    let billing: String = row.get(8).map_err(index)?;
+    serde_json::from_str(&billing).map_err(index)
+}
+
 impl<'a> Snapshot<'a> {
-    fn read(transaction: &'a Transaction<'a>, source: &'a Source<'a>) -> Result<Self, ReadError> {
+    fn read(transaction: &'a Connection, source: &'a Source<'a>) -> Result<Self, ReadError> {
         crate::events::store::require_current(transaction).map_err(index)?;
         crate::storage::sqlite::qualify(transaction, &source.namespace).map_err(index)?;
         let origin = source.namespace.binding();
@@ -254,7 +317,7 @@ impl<'a> Snapshot<'a> {
             if next.is_some() {
                 continue;
             }
-            let row = Row {
+            let mut row = Row {
                 position: Position {
                     last: record.get(3).map_err(index)?,
                     key,
@@ -268,6 +331,8 @@ impl<'a> Snapshot<'a> {
                 branch: record.get(7).map_err(index)?,
                 parent: None,
                 usage: [0; 6],
+                cost: None,
+                status: None,
             };
             if selected.len() == request.limit || examined == limit || bytes >= MAX_SCAN_BYTES {
                 next = Some(Boundary {
@@ -275,6 +340,26 @@ impl<'a> Snapshot<'a> {
                     inclusive: true,
                 });
                 continue;
+            }
+            if row.harness == "codex" && record.get::<_, bool>(14).map_err(index)? {
+                let task: Option<String> = record.get(13).map_err(index)?;
+                let prompt: Option<i64> = record.get(9).map_err(index)?;
+                if let Some(offset) = prompt {
+                    let path: String = record.get(10).map_err(index)?;
+                    let ledger: String = record.get(11).map_err(index)?;
+                    let native_id: String = record.get(12).map_err(index)?;
+                    row.title =
+                        selected::prompt_title(self.source, path, &ledger, native_id, offset)?
+                            .unwrap_or_else(|| "Codex subagent".into());
+                } else if let Some(task) = task
+                    .as_deref()
+                    .and_then(|task| task.rsplit('/').next())
+                    .filter(|task| !task.trim().is_empty())
+                {
+                    row.title = crate::model::one_line(task, 80);
+                } else if row.title == "Codex run" {
+                    row.title = "Codex subagent".into();
+                }
             }
             let fields = [
                 Some(row.title.as_str()),
@@ -302,29 +387,100 @@ impl<'a> Snapshot<'a> {
         Ok((selected, total, examined, next))
     }
 
+    fn runtime_status(&self, owners: &str) -> Result<BTreeMap<i64, &'static str>, ReadError> {
+        use crate::facts::source_authority::CurrentSources;
+        let options = self.source.options;
+        let observed = crate::native_evidence::RuntimeObservations::new(options);
+        let authority = options
+            .facts
+            .as_deref()
+            .and_then(|path| CurrentSources::open(path).ok());
+        if options.facts.is_some() && !authority.as_ref().is_some_and(CurrentSources::facts_known) {
+            return Ok(BTreeMap::new());
+        }
+        let mut statement = self.transaction.prepare_cached(STATUS).map_err(index)?;
+        let mut members = statement.query([owners]).map_err(index)?;
+        let mut phases = self
+            .transaction
+            .prepare_cached(
+                "SELECT phase FROM fact_codex_turn WHERE source=?1 AND thread_id=?2
+             ORDER BY pos DESC,block DESC,occurrence DESC LIMIT 1",
+            )
+            .map_err(index)?;
+        let mut status = BTreeMap::new();
+        let mut unqualified = std::collections::BTreeSet::new();
+        let mut pids = BTreeMap::new();
+        while let Some(row) = members.next().map_err(index)? {
+            let owner: i64 = row.get(0).map_err(index)?;
+            let harness: String = row.get(1).map_err(index)?;
+            let native_id: String = row.get(2).map_err(index)?;
+            let path: String = row.get(3).map_err(index)?;
+            let ledger: Ledger =
+                serde_json::from_str(&row.get::<_, String>(4).map_err(index)?).map_err(index)?;
+            let lineage: bool = row.get(5).map_err(index)?;
+            let id: i64 = row.get(6).map_err(index)?;
+            let source = ledger.source(std::path::Path::new(&path), &native_id);
+            let custody =
+                super::relative_source_custody(options, &harness, &source, authority.as_ref());
+            if custody.is_err()
+                || (harness == "codex" && options.facts.is_some() && custody != Ok(Some(true)))
+            {
+                unqualified.insert(owner);
+                continue;
+            }
+            let process = observed.warehouse_process(&harness, &native_id);
+            if harness == "claude" && lineage {
+                status.entry(owner).or_insert("done");
+                if let Some((pid, state)) = process
+                    && pids.get(&owner).is_none_or(|previous| pid > *previous)
+                {
+                    pids.insert(owner, pid);
+                    status.insert(owner, state);
+                }
+            } else if harness == "codex" {
+                let phase: Option<String> = phases
+                    .query_row(params![id, native_id], |r| r.get(0))
+                    .optional()
+                    .map_err(index)?;
+                let live = process.is_some();
+                status
+                    .entry(owner)
+                    .or_insert(match (phase.as_deref(), live) {
+                        (Some("active"), true) => "work",
+                        (Some("completed" | "aborted"), true) => "idle",
+                        (Some("completed" | "aborted"), false) => "done",
+                        (Some("errored"), _) => "err",
+                        _ => "off",
+                    });
+            }
+        }
+        status.retain(|owner, _| !unqualified.contains(owner));
+        if authority.is_some_and(|authority| authority.validate().is_err()) {
+            status.clear();
+        }
+        Ok(status)
+    }
+
     fn enrich(&self, rows: &mut [Row]) -> Result<(), ReadError> {
         if rows.is_empty() {
             return Ok(());
         }
         let owners = encode(&rows.iter().map(|row| row.owner).collect::<Vec<_>>())?;
+        let status = self.runtime_status(&owners)?;
+        let table = crate::pricing::snapshot();
         let mut usage = self.transaction.prepare_cached(USAGE).map_err(index)?;
-        let usage = usage
-            .query_map(params![owners, self.paths], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    [
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                        r.get(6)?,
-                    ],
-                ))
-            })
-            .map_err(index)?
-            .collect::<rusqlite::Result<BTreeMap<_, _>>>()
-            .map_err(index)?;
+        let mut facts = usage.query(params![owners, self.paths]).map_err(index)?;
+        let mut priced = BTreeMap::<i64, Usage>::new();
+        while let Some(fact) = facts.next().map_err(index)? {
+            priced
+                .entry(fact.get(0).map_err(index)?)
+                .or_insert_with(|| Usage {
+                    tokens: [0; 6],
+                    shared: false,
+                    pricing: crate::pricing::CostBuild::with_table(table.clone()),
+                })
+                .account(fact)?;
+        }
         let mut parents = self.transaction.prepare_cached(PARENTS).map_err(index)?;
         let mut parents = parents
             .query_map(params![owners, self.paths], |r| {
@@ -334,8 +490,27 @@ impl<'a> Snapshot<'a> {
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()
             .map_err(index)?;
         for row in rows {
-            row.usage = usage.get(&row.owner).copied().unwrap_or_default();
+            let usage = priced.remove(&row.owner).unwrap_or_else(|| Usage {
+                tokens: [0; 6],
+                shared: false,
+                pricing: crate::pricing::CostBuild::with_table(table.clone()),
+            });
+            row.usage = usage.tokens;
+            let mut cost = usage.pricing.finish();
+            let copilot = row.harness == "copilot";
+            if copilot && cost.unpriced_models.is_empty() {
+                cost.unpriced_models.push(if row.model == "—" {
+                    "unknown".into()
+                } else {
+                    row.model.clone()
+                });
+            }
+            if copilot || usage.shared {
+                cost.usd = None;
+            }
+            row.cost = Some(cost);
             row.parent = parents.remove(&row.owner);
+            row.status = status.get(&row.owner).copied();
         }
         Ok(())
     }
@@ -468,18 +643,29 @@ pub(super) fn identity(
     if scope == CatalogReadScope::RetainedHistory {
         return warehouse::retained_identity(&tx, &source.namespace, key)
             .map(|identity| Some((identity.owner, identity.harness, identity.native_id)))
-            .map_err(|error| {
-                if error.code() == "retained_identity_unverified" {
-                    ReadError::RetainedUnverified
-                } else {
-                    index(error)
-                }
-            });
+            .map_err(retained_error);
     }
     let snapshot = Snapshot::read(&tx, source)?;
-    let mut exact = tx.prepare_cached(EXACT).map_err(index)?;
+    current_identity(&tx, source, key, &snapshot.paths)
+}
+
+fn retained_error(error: warehouse::RetainedIdentityError) -> ReadError {
+    if error.code() == "retained_identity_unverified" {
+        ReadError::RetainedUnverified
+    } else {
+        index(error)
+    }
+}
+
+fn current_identity(
+    db: &Connection,
+    source: &Source<'_>,
+    key: &str,
+    paths: &str,
+) -> Result<Option<Identity>, ReadError> {
+    let mut exact = db.prepare_cached(EXACT).map_err(index)?;
     let mut matches = exact
-        .query(params![key, snapshot.paths, source.namespace.binding()])
+        .query(params![key, paths, source.namespace.binding()])
         .map_err(index)?;
     let found = matches
         .next()
@@ -495,3 +681,6 @@ pub(super) fn identity(
 
 #[path = "catalog_warehouse/tests.rs"]
 mod tests;
+
+#[path = "catalog_warehouse/selected.rs"]
+mod selected;

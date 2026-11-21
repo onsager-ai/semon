@@ -273,3 +273,39 @@ request or refresh. An incarnation change, replacement, rewrite, truncation,
 custody change or membership change, including one caused by a late parent
 link, requires an explicit restart. Cursor state is bounded by the sources a
 page touches. The server holds no cursor state between requests.
+
+### Prefix receipts in the selected-read fixture adapter
+
+Schema 53 writes one `warehouse_prefix` receipt when an admitted source
+first commits or advances its consumed offset. The receipt records the source
+incarnation ID, committed offset and ledger at that boundary. It contains no
+source text. Receipts commit with the facts and native proof pages. Keep receipts
+from the last 24 hours plus the newest receipt per source incarnation. Normal
+ingest collects expired superseded receipts in bounded batches and records
+the highest removed revision. The reader explicitly restarts a cursor older
+than 24 hours or at or below that revision. Collection can invalidate a
+recent cursor when a long-idle source advances and loses its old receipt.
+
+A first page records the highest receipt revision in its snapshot. A later page
+can use that revision to recover the same bound for a member it has not read
+yet. The cursor also carries a digest of the selected member identities and
+carrier paths and the prefix receipts for the sources read by the previous page.
+The Index incarnation, canonical selection and current source authority qualify
+these values on each request. Covering blocks come from the current proof tree
+in the page's SQLite snapshot. A receipt and current proof may be combined only
+within the same source incarnation. The reader caps returned data at the
+receipt offset. It re-verifies read blocks if the local carrier grows during
+body fetch and rechecks the named file and descriptor before returning the page.
+
+This fixture adapter covers current local record positions, copied-record
+suppression, exact-address text lookup and prefix-bounded tool result reads.
+The retained adapter pages original records through an authorized provider
+using the warehouse binding and revalidates the previous page's source
+references. The current adapter exposes native prompt anchors and exact-ID
+relay receipt addresses for selected tool results. It uses the shared native
+launch matcher on a qualified Codex marker and the parent's committed launch
+candidates. The list compares Codex prompt titles, reads qualified top-level
+process status, and prices winning usage facts and legacy Codex counters.
+Full causal slots and all anchor types, relay body/time matching, current
+provider fallback, parent/child runtime overrides and family pricing still
+need comparison before cutover.

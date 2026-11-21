@@ -261,7 +261,8 @@ fn emit_catalog_publish_attempt(
 // v49: publication-bound native archive chain evidence, separate from retention.
 // v50: origin warehouse observations and current source membership.
 // v52: warehouse-owned retained identity and certified original component receipts.
-pub(crate) const SCHEMA_VERSION: i64 = 52;
+// v53: committed warehouse prefix receipts for selected read continuations.
+pub(crate) const SCHEMA_VERSION: i64 = 53;
 
 /// How long a write waits for another process's transaction. Tests wait
 /// less, so the busy paths they drive stay quick.
@@ -6841,6 +6842,7 @@ mod tests {
             [
                 "files",
                 "warehouse_source",
+                "warehouse_prefix",
                 "warehouse_current",
                 "fact_record",
                 "dim_session",
@@ -6862,24 +6864,24 @@ mod tests {
                 .write_one_dirty(path, None, None, ledger, index)
                 .is_err()
         );
-        assert_eq!(counts(&store), [0; 6]);
+        assert_eq!(counts(&store), [0; 7]);
         drop(store);
         let (mut store, _) = opened(&db);
-        assert_eq!(counts(&store), [0; 6]);
+        assert_eq!(counts(&store), [0; 7]);
         let interrupt = "CREATE TEMP TRIGGER interrupt BEFORE INSERT ON main.session_catalog_invalidations WHEN NEW.source_path LIKE '%/second.jsonl' BEGIN SELECT RAISE(ABORT,'interrupted batch'); END;";
         store.connection.execute_batch(interrupt).unwrap();
         assert!(store.commit_initial_files(&files).is_err());
-        assert_eq!(counts(&store), [0; 6]);
+        assert_eq!(counts(&store), [0; 7]);
         drop(store);
         let (mut store, _) = opened(&db);
-        assert_eq!(counts(&store), [0; 6]);
+        assert_eq!(counts(&store), [0; 7]);
         assert_eq!(
             store.commit_initial_files(&files).unwrap(),
             Outcome::Written
         );
         drop(store);
         let (mut store, _) = opened(&db);
-        assert_eq!(counts(&store), [2; 6]);
+        assert_eq!(counts(&store), [2; 7]);
         assert_eq!(store.ledger(path).unwrap().as_ref(), Some(ledger));
         assert_eq!(
             store.commit_initial_files(&files).unwrap(),
@@ -6892,7 +6894,7 @@ mod tests {
                 .unwrap(),
             Outcome::Written
         );
-        assert_eq!(counts(&store), [2; 6]);
+        assert_eq!(counts(&store), [2; 7]);
         let mut different = (**index).clone();
         different
             .warehouse_observations
@@ -6905,7 +6907,7 @@ mod tests {
                 .write_one_dirty(path, Some(ledger), Some(&changes), ledger, &different)
                 .is_err()
         );
-        assert_eq!(counts(&store), [2; 6]);
+        assert_eq!(counts(&store), [2; 7]);
         assert_eq!(store.ledger(path).unwrap().as_ref(), Some(ledger));
         drop(store);
         fs::remove_dir_all(root).unwrap();
