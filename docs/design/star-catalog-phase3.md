@@ -327,6 +327,13 @@ local carrier appears during provider reads. Pages that can use the provider
 are limited to 32 positions so previous and new reads share the 64-source
 request budget. A changed or invalid existing local carrier still restarts.
 
-Full causal presentation, remaining anchors, relay body/time matching,
-parent/child runtime overrides and family pricing still need comparison before
-cutover.
+The selected family pricing adapter qualifies every member against the
+current inventory and prices each descendant with the same effective rates as
+the list. Inclusive dollars remain unknown when a member has unknown or shared
+cost. Shared dollars count each connected Claude invocation once, using the
+native billing fact of the winner in the existing family fold order. A fixture
+compares inclusive dollars with the current reader and checks shared winner and
+unknown-price coverage.
+
+Full causal presentation, remaining anchors, relay body/time matching, and
+parent/child runtime overrides still need comparison before cutover.

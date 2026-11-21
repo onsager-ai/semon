@@ -1482,6 +1482,123 @@ fn warehouse_list_prices_claude_usage_with_the_existing_pricing_calculator() {
 }
 
 #[test]
+fn warehouse_selected_family_prices_descendants_and_deduplicates_shared_steps() {
+    let mut fixture = Fixture::new("selected-family-price");
+    let root = fixture.claude("root", "Work");
+    let child = fixture.claude("child", "Semon-Parent: claude:root\nChild work");
+    let leaf = fixture.claude("leaf", "Semon-Parent: claude:child\nLeaf work");
+    let paths = [root.as_path(), child.as_path(), leaf.as_path()];
+    let observation = |id, uuid, message, second, input, model| {
+        json!({"type":"assistant","uuid":uuid,"sessionId":id,
+            "timestamp":format!("2026-09-24T00:00:{second:02}Z"),
+            "message":{"id":message,"role":"assistant","model":model,
+                "content":[{"type":"text","text":"Response"}],
+                "usage":{"input_tokens":input,"output_tokens":10}}})
+    };
+    let model = "claude-sonnet-4-6";
+    for (id, path) in [("root", &root), ("child", &child), ("leaf", &leaf)] {
+        append_native(
+            path,
+            observation(
+                id,
+                format!("{id}-unique"),
+                format!("{id}-message"),
+                1,
+                100,
+                model,
+            ),
+        );
+    }
+    let observe = |fixture: &mut Fixture| {
+        crate::model::observe_catalog(
+            &fixture.options,
+            &mut fixture.cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            crate::model::now_ms(),
+        )
+        .unwrap();
+    };
+    let oracle = |fixture: &Fixture| {
+        Connection::open(&fixture.db).unwrap().query_row(
+            "SELECT json_extract(metadata,'$.family_usd') FROM session_trace_headers WHERE session_key='root'",
+            [], |row| row.get::<_, Option<f64>>(0),
+        ).unwrap()
+    };
+    observe(&mut fixture);
+    let family = family_price(&fixture.source(&paths), "root")
+        .unwrap()
+        .unwrap();
+    assert!(family.usd.unwrap() > 0.0);
+    assert!((family.usd.unwrap() - oracle(&fixture).unwrap()).abs() < 1e-12);
+    assert_eq!(family.shared, Default::default());
+    assert!(matches!(
+        family_price(&fixture.source(&paths[..2]), "root"),
+        Err(ReadError::Restart)
+    ));
+
+    for (id, path, input) in [
+        ("root", &root, 10),
+        ("child", &child, 20),
+        ("leaf", &leaf, 30),
+    ] {
+        let uuid = if id == "leaf" { "shared-b" } else { "shared-a" };
+        append_native(
+            path,
+            observation(id, uuid.into(), "shared-message".into(), 2, input, model),
+        );
+    }
+    // The child's second UUID connects the leaf to the root's invocation.
+    append_native(
+        &child,
+        observation(
+            "child",
+            "shared-b".into(),
+            "shared-message".into(),
+            3,
+            200,
+            model,
+        ),
+    );
+    observe(&mut fixture);
+    let family = family_price(&fixture.source(&paths), "root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(family.usd, oracle(&fixture));
+    assert!(family.usd.is_none());
+    let mut expected = crate::pricing::CostBuild::with_table(crate::pricing::snapshot());
+    expected.message(&crate::events::MessageUsage {
+        model: Some(model.into()),
+        billing: crate::events::BillingUsage {
+            input: 10,
+            output: 10,
+            ..Default::default()
+        },
+        ..Default::default()
+    });
+    assert!((family.shared.known - expected.finish().usd.unwrap()).abs() < 1e-12);
+    assert_eq!(family.shared.unknown_steps, 0);
+
+    append_native(
+        &root,
+        observation(
+            "root",
+            "shared-a".into(),
+            "shared-message".into(),
+            4,
+            10,
+            "unknown-fixture-model",
+        ),
+    );
+    observe(&mut fixture);
+    let family = family_price(&fixture.source(&paths), "root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(family.shared.known, 0.0);
+    assert_eq!(family.shared.unknown_steps, 1);
+}
+
+#[test]
 fn warehouse_list_qualifies_codex_prompt_title_for_search() {
     let mut fixture = Fixture::new("list-prompt-title");
     let parent = fixture.codex("parent");

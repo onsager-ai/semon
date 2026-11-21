@@ -462,13 +462,11 @@ impl<'a> Snapshot<'a> {
         Ok(status)
     }
 
-    fn enrich(&self, rows: &mut [Row]) -> Result<(), ReadError> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let owners = encode(&rows.iter().map(|row| row.owner).collect::<Vec<_>>())?;
-        let status = self.runtime_status(&owners)?;
-        let table = crate::pricing::snapshot();
+    fn priced_usage(
+        &self,
+        owners: &str,
+        table: &std::sync::Arc<crate::pricing::EffectiveTable>,
+    ) -> Result<BTreeMap<i64, Usage>, ReadError> {
         let mut usage = self.transaction.prepare_cached(USAGE).map_err(index)?;
         let mut facts = usage.query(params![owners, self.paths]).map_err(index)?;
         let mut priced = BTreeMap::<i64, Usage>::new();
@@ -482,6 +480,17 @@ impl<'a> Snapshot<'a> {
                 })
                 .account(fact)?;
         }
+        Ok(priced)
+    }
+
+    fn enrich(&self, rows: &mut [Row]) -> Result<(), ReadError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let owners = encode(&rows.iter().map(|row| row.owner).collect::<Vec<_>>())?;
+        let status = self.runtime_status(&owners)?;
+        let table = crate::pricing::snapshot();
+        let mut priced = self.priced_usage(&owners, &table)?;
         let mut parents = self.transaction.prepare_cached(PARENTS).map_err(index)?;
         let mut parents = parents
             .query_map(params![owners, self.paths], |r| {
@@ -648,6 +657,94 @@ pub(super) fn identity(
     }
     let snapshot = Snapshot::read(&tx, source)?;
     current_identity(&tx, source, key, &snapshot.paths)
+}
+
+#[derive(Debug)]
+pub(super) struct FamilyPrice {
+    pub(super) usd: Option<f64>,
+    pub(super) shared: crate::events::session_activity::Measured<f64>,
+}
+
+/// Read inclusive and shared pricing for a selected current family. Keep
+/// this on the selected adapter so listing a page does not walk every subtree.
+pub(super) fn family_price(
+    source: &Source<'_>,
+    key: &str,
+) -> Result<Option<FamilyPrice>, ReadError> {
+    let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
+    let tx = db.transaction().map_err(index)?;
+    let snapshot = Snapshot::read(&tx, source)?;
+    let Some((owner, _, _)) = current_identity(&tx, source, key, &snapshot.paths)? else {
+        return Ok(None);
+    };
+    let mut members = tx
+        .prepare_cached(include_str!("events/store/warehouse_selected_family.sql"))
+        .map_err(index)?;
+    let mut rows = members
+        .query(params![owner, snapshot.paths, source.namespace.binding()])
+        .map_err(index)?;
+    let mut family = BTreeMap::new();
+    let mut cycle = false;
+    while let Some(row) = rows.next().map_err(index)? {
+        if !row.get::<_, bool>(3).map_err(index)? {
+            return Err(ReadError::Restart);
+        }
+        cycle = row.get(2).map_err(index)?;
+        family.insert(
+            row.get::<_, i64>(0).map_err(index)?,
+            row.get::<_, String>(1).map_err(index)?,
+        );
+    }
+    let mut shared = crate::events::session_activity::Measured::default();
+    if cycle {
+        return Ok(Some(FamilyPrice { usd: None, shared }));
+    }
+    let owners = encode(&family.keys().collect::<Vec<_>>())?;
+    let table = crate::pricing::snapshot();
+    let mut priced = snapshot.priced_usage(&owners, &table)?;
+    let usd = family
+        .into_iter()
+        .map(|(owner, harness)| {
+            if harness == "copilot" {
+                return None;
+            }
+            match priced.remove(&owner) {
+                Some(usage) if usage.shared => None,
+                Some(usage) => usage.pricing.finish().usd,
+                None => Some(0.0),
+            }
+        })
+        .sum();
+
+    let mut shared_usage = tx
+        .prepare_cached(include_str!(
+            "events/store/warehouse_selected_family_shared.sql"
+        ))
+        .map_err(index)?;
+    let mut steps = shared_usage
+        .query(params![owner, owners, snapshot.paths])
+        .map_err(index)?;
+    while let Some(step) = steps.next().map_err(index)? {
+        let billing = step.get::<_, Option<String>>(1).map_err(index)?;
+        let usd = billing
+            .map(|billing| {
+                let mut pricing = crate::pricing::CostBuild::with_table(table.clone());
+                pricing.message(&crate::events::MessageUsage {
+                    model: step.get(0).map_err(index)?,
+                    billing: serde_json::from_str(&billing).map_err(index)?,
+                    ..Default::default()
+                });
+                Ok::<_, ReadError>(pricing.finish().usd)
+            })
+            .transpose()?
+            .flatten();
+        if let Some(usd) = usd {
+            shared.known += usd;
+        } else {
+            shared.unknown_steps += 1;
+        }
+    }
+    Ok(Some(FamilyPrice { usd, shared }))
 }
 
 fn retained_error(error: warehouse::RetainedIdentityError) -> ReadError {
