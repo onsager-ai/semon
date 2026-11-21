@@ -48,6 +48,7 @@ pub(super) struct Source<'a> {
     pub(super) options: &'a crate::Options,
     pub(super) inventory: BTreeMap<String, Availability>,
     pub(super) repos: BTreeMap<String, String>,
+    pub(super) current_provider: Option<&'a dyn crate::SessionSourceReader>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

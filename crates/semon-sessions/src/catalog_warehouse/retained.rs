@@ -88,6 +88,7 @@ pub(in super::super) fn retained_page(
                     offset: receipt.offset,
                     digest: receipt.prefix_sha256,
                     tail: receipt.tail_sha256,
+                    provider: None,
                 };
                 if let Some(prior) =
                     cursor.and_then(|cursor| cursor.touched.iter().find(|prior| prior.source == id))

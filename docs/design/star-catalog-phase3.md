@@ -317,6 +317,16 @@ unique native event and tool-call IDs to proof-checked records and carries the
 turn start's canonical address across files. Relay and launch turn placement,
 operation anchors and the full activity anchor contract still need parity.
 
-Full causal presentation, remaining anchors, relay body/time matching, current
-provider fallback, parent/child runtime overrides and family pricing still
-need comparison before cutover.
+For current reads, a host may supply an authorized provider for a committed
+source whose local carrier is absent and whose path remains in the authorized
+inventory. The provider authorizes the exact selected receipt. The reader pins
+one provider generation and length for the request and reauthorizes previous
+provider sources on continuation. The cursor carries a digest of each pinned
+generation. The adapter restarts if source custody changes, including when a
+local carrier appears during provider reads. Pages that can use the provider
+are limited to 32 positions so previous and new reads share the 64-source
+request budget. A changed or invalid existing local carrier still restarts.
+
+Full causal presentation, remaining anchors, relay body/time matching,
+parent/child runtime overrides and family pricing still need comparison before
+cutover.

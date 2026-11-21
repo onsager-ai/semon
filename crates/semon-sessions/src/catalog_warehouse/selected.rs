@@ -92,6 +92,13 @@ struct Prefix {
     offset: u64,
     digest: [u8; 32],
     tail: [u8; 32],
+    provider: Option<ProviderPin>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct ProviderPin {
+    generation: [u8; 32],
+    length: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -699,6 +706,22 @@ fn read(
     cursor: Option<&Cursor>,
 ) -> Result<Option<Component>, ReadError> {
     let capacity = target.capacity()?;
+    let provider = source
+        .current_provider
+        .map(|provider| crate::source_reader::BudgetedReader::new(provider, 1024));
+    let capacity = if provider.is_some()
+        && matches!(target, Target::Page(_))
+        && source
+            .inventory
+            .values()
+            .any(|state| *state == Availability::Expected(None))
+    {
+        // Reauthorizing every prior provider source and reading up to 32 new
+        // sources fits the request reader's 64-source budget.
+        capacity.min(33)
+    } else {
+        capacity
+    };
     let db = crate::events::store::focused_connection(source.path).map_err(index)?;
     db.execute_batch("BEGIN DEFERRED").map_err(index)?;
     crate::events::store::require_current(&db).map_err(index)?;
@@ -726,8 +749,10 @@ fn read(
         &source
             .inventory
             .iter()
-            .filter_map(|(path, state)| {
-                matches!(state, Availability::Expected(Some(_))).then_some(path)
+            .filter_map(|(path, state)| match state {
+                Availability::Expected(Some(_)) => Some(path),
+                Availability::Expected(None) if provider.is_some() => Some(path),
+                _ => None,
             })
             .collect::<Vec<_>>(),
     )?;
@@ -769,6 +794,7 @@ fn read(
     let mut candidates = BTreeMap::new();
     let mut member_count = 0;
     let mut evidence_matches = 0;
+    let mut prior_provider = Vec::new();
     let mut confirmed = 0;
     let mut member_after = 0;
     {
@@ -803,9 +829,20 @@ fn read(
                 let committed = committed_prefix(&mut prefix, id, view)?;
                 let sidecar: i64 = row.get(7).map_err(index)?;
                 let path = relative(options, &harness, &carrier).ok_or(ReadError::Restart)?;
-                let Some(Availability::Expected(Some(observed))) = source.inventory.get(&carrier)
-                else {
-                    return Err(ReadError::Restart);
+                let remote = match source.inventory.get(&carrier) {
+                    Some(Availability::Expected(Some(observed)))
+                        if stable_or_grown(&current.stat, observed)
+                            && raw_stat(Path::new(&carrier))
+                                .is_ok_and(|actual| stable_or_grown(observed, &actual)) =>
+                    {
+                        false
+                    }
+                    Some(Availability::Expected(None))
+                        if provider.is_some() && local_missing(&carrier) =>
+                    {
+                        true
+                    }
+                    _ => return Err(ReadError::Restart),
                 };
                 if current_path.as_deref() != Some(&carrier)
                     || resume != Some(i64::try_from(current.offset).map_err(index)?)
@@ -813,28 +850,25 @@ fn read(
                     || (committed.offset == current.offset
                         && (committed.prefix != current.prefix || committed.tail != current.tail))
                     || !committed.stat.is_prefix_of(&current.stat)
-                    || !stable_or_grown(&current.stat, observed)
-                    || !raw_stat(Path::new(&carrier))
-                        .is_ok_and(|actual| stable_or_grown(observed, &actual))
                 {
                     return Err(ReadError::Restart);
                 }
-                witness.update(encode(&(id, incarnation, &carrier, sidecar, &member_id))?);
-                let witness_prefix = Prefix {
+                witness.update(encode(&(
+                    id,
+                    incarnation,
+                    &carrier,
+                    sidecar,
+                    &member_id,
+                    remote,
+                ))?);
+                let mut witness_prefix = Prefix {
                     source: id,
                     incarnation,
                     offset: committed.offset,
                     digest: committed.prefix,
                     tail: committed.tail,
+                    provider: None,
                 };
-                if let Some(prior) =
-                    cursor.and_then(|cursor| cursor.touched.iter().find(|prior| prior.source == id))
-                {
-                    if prior != &witness_prefix {
-                        return Err(ReadError::Restart);
-                    }
-                    confirmed += 1;
-                }
                 let reference = SessionSourceRef {
                     root: harness.clone(),
                     path: path.to_owned(),
@@ -843,6 +877,18 @@ fn read(
                     prefix_sha256: committed.prefix,
                     tail_sha256: committed.tail,
                 };
+                if let Some(prior) =
+                    cursor.and_then(|cursor| cursor.touched.iter().find(|prior| prior.source == id))
+                {
+                    witness_prefix.provider.clone_from(&prior.provider);
+                    if prior != &witness_prefix || remote != prior.provider.is_some() {
+                        return Err(ReadError::Restart);
+                    }
+                    if let Some(pin) = &prior.provider {
+                        prior_provider.push((id, carrier.clone(), reference.clone(), pin));
+                    }
+                    confirmed += 1;
+                }
                 let member = Arc::new(Member {
                     carrier,
                     current,
@@ -954,6 +1000,14 @@ fn read(
     if cursor.is_some_and(|cursor| cursor.members != members || cursor.touched.len() != confirmed) {
         return Err(ReadError::Restart);
     }
+    let mut provider_pins = BTreeMap::new();
+    for (id, carrier, reference, expected) in prior_provider {
+        let observed = pin_provider(provider.as_ref().ok_or(ReadError::Restart)?, &reference)?;
+        if expected != &observed {
+            return Err(ReadError::Restart);
+        }
+        provider_pins.insert(id, (carrier, observed));
+    }
     if matches!(target, Target::ToolResults(_)) && candidates.len() == capacity {
         return Err(index("Selected tool result budget exhausted"));
     }
@@ -1008,31 +1062,46 @@ fn read(
     let mut bytes_left = PAGE_BYTES;
     let mut records = Vec::with_capacity(candidates.len());
     let mut touched = BTreeMap::new();
-    for (position, (kind, member, prefix)) in candidates {
-        touched.entry(position.source).or_insert(prefix);
-        let reader =
+    for (position, (kind, member, mut prefix)) in candidates {
+        let reader: &dyn SessionSourceReader = if matches!(
+            source.inventory.get(&member.carrier),
+            Some(Availability::Expected(None))
+        ) {
+            let provider = provider.as_ref().ok_or(ReadError::Restart)?;
+            let (_, pin) = match provider_pins.entry(position.source) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => entry.insert((
+                    member.carrier.clone(),
+                    pin_provider(provider, &member.reference)?,
+                )),
+            };
+            prefix.provider = Some(pin.clone());
+            provider
+        } else {
             match readers.entry(position.source) {
                 std::collections::btree_map::Entry::Occupied(reader) => reader.into_mut(),
                 std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
-                    PrefixReader::open(db.clone(), source.path, member, &proof_bytes)?,
+                    PrefixReader::open(db.clone(), source.path, member.clone(), &proof_bytes)?,
                 ),
-            };
+            }
+        };
+        touched.entry(position.source).or_insert(prefix);
         let offset = u64::try_from(position.offset).map_err(index)?;
+        let reference = &member.reference;
         let native = crate::source_reader::read_record_bounded(
             reader,
-            &reader.member.reference,
+            reference,
             offset,
             crate::tx::LINE_MAX as usize,
             &mut bytes_left,
         )
         .map_err(|error| {
-            if error.kind() == io::ErrorKind::WouldBlock || bytes_left == 0 {
+            if bytes_left == 0 {
                 index("Selected page source budget exhausted")
             } else {
-                ReadError::Restart
+                body_error(error)
             }
         })?;
-        let reference = &reader.member.reference;
         let native_id = crate::tx::native_event_id(&native);
         let entry_kind = match kind.as_deref() {
             Some("user" | "user.message") => anchors.get(&position).map(|anchor| {
@@ -1091,7 +1160,7 @@ fn read(
                 }),
             relay_receipts: relay_context.remove(&position).unwrap_or_default(),
             address: Address {
-                path: reader.member.reference.path.clone(),
+                path: reference.path.clone(),
                 offset,
                 block: position.block,
                 occurrence: position.occurrence,
@@ -1106,13 +1175,13 @@ fn read(
         }
     });
     for reader in readers.values_mut() {
-        reader.finish().map_err(|error| {
-            if error.kind() == io::ErrorKind::WouldBlock {
-                index("Selected page source budget exhausted")
-            } else {
-                ReadError::Restart
-            }
-        })?;
+        reader.finish().map_err(body_error)?;
+    }
+    if provider_pins
+        .values()
+        .any(|(carrier, _)| !local_missing(carrier))
+    {
+        return Err(ReadError::Restart);
     }
     let next = after.filter(|_| more).map(|after| Cursor {
         selection,
@@ -1131,6 +1200,34 @@ fn read(
         records,
         next,
     }))
+}
+
+fn local_missing(carrier: &str) -> bool {
+    raw_stat(Path::new(carrier)).is_err_and(|error| error.kind() == io::ErrorKind::NotFound)
+}
+
+fn pin_provider(
+    provider: &dyn SessionSourceReader,
+    reference: &SessionSourceRef,
+) -> Result<ProviderPin, ReadError> {
+    let part = provider
+        .read_range(reference, None, 0, 1)
+        .map_err(body_error)?;
+    if part.bytes.len() != 1 || part.length < reference.offset {
+        return Err(ReadError::Restart);
+    }
+    Ok(ProviderPin {
+        generation: Sha256::digest(part.generation.as_bytes()).into(),
+        length: part.length,
+    })
+}
+
+fn body_error(error: io::Error) -> ReadError {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        index("Selected page source budget exhausted")
+    } else {
+        ReadError::Restart
+    }
 }
 
 type TestHook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;

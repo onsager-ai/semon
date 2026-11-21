@@ -119,6 +119,7 @@ impl Fixture {
                 })
                 .collect(),
             repos: BTreeMap::new(),
+            current_provider: None,
         }
     }
 }
@@ -1186,6 +1187,142 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
         latest[0].native["message"]["content"][0]["content"],
         "qualified result"
     );
+}
+
+#[test]
+fn warehouse_current_provider_pins_the_selected_original_across_pages() {
+    use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
+    use std::io;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    struct Provider {
+        data: Vec<u8>,
+        generation: AtomicUsize,
+        change_during_body: AtomicBool,
+        calls: AtomicUsize,
+    }
+
+    impl SessionSourceReader for Provider {
+        fn read_range(
+            &self,
+            source: &SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> io::Result<SessionSourceRange> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if source.root != "claude"
+                || source.path != "projects/proj/native.jsonl"
+                || source.native_id != "native"
+                || source.offset != self.data.len() as u64
+                || source.prefix_sha256 != <[u8; 32]>::from(Sha256::digest(&self.data))
+                || offset + max as u64 > source.offset
+            {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            let version = self.generation.load(Ordering::Relaxed);
+            let generation = format!("opaque-generation-{version}");
+            if expected.is_some_and(|expected| expected != generation) {
+                return Err(io::ErrorKind::PermissionDenied.into());
+            }
+            let generation = if max > 1 && self.change_during_body.load(Ordering::Relaxed) {
+                "changed-during-body".into()
+            } else {
+                generation
+            };
+            let start = offset as usize;
+            let end = start + max.min(32);
+            Ok(SessionSourceRange {
+                generation,
+                length: source.offset,
+                offset,
+                bytes: self.data[start..end].into(),
+                cached: false,
+            })
+        }
+    }
+
+    let mut fixture = Fixture::new("current-provider");
+    let path = fixture.claude("native", "Original prompt");
+    append_native(&path, prompt("native", 1, "Second prompt"));
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let provider = Provider {
+        data: fs::read(&path).unwrap(),
+        generation: AtomicUsize::new(1),
+        change_during_body: AtomicBool::new(false),
+        calls: AtomicUsize::new(0),
+    };
+    let page = |source: &Source<'_>, limit, cursor| {
+        selected::page(
+            &fixture.options,
+            source,
+            CatalogReadScope::Current,
+            "native",
+            limit,
+            cursor,
+        )
+    };
+    let mut local = fixture.source(&[&path]);
+    local.current_provider = Some(&provider);
+    let first_local = page(&local, 1, None).unwrap().unwrap();
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+
+    let original = path.with_extension("fixture-original");
+    fs::rename(&path, &original).unwrap();
+    let mut hosted = fixture.source(&[&path]);
+    assert!(page(&hosted, 1, None).unwrap().is_none());
+    hosted.current_provider = Some(&provider);
+    assert!(matches!(
+        page(&hosted, 1, first_local.next.as_ref()),
+        Err(ReadError::Restart)
+    ));
+    assert_eq!(provider.calls.load(Ordering::Relaxed), 0);
+
+    let first = page(&hosted, 1, None).unwrap().unwrap();
+    let serialized = serde_json::to_string(&first.next).unwrap();
+    assert!(!serialized.contains("opaque-generation"));
+    let cursor: selected::Cursor = serde_json::from_str(&serialized).unwrap();
+    let continued = page(&hosted, 10, Some(&cursor)).unwrap().unwrap();
+    let answer = continued
+        .records
+        .iter()
+        .find(|record| record.text().as_deref() == Some("Second prompt"))
+        .unwrap();
+    let exact = selected::record_at(
+        &fixture.options,
+        &hosted,
+        "native",
+        &answer.address,
+        Some(&cursor),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(exact.text().as_deref(), Some("Second prompt"));
+
+    provider.generation.store(2, Ordering::Relaxed);
+    assert!(matches!(
+        page(&hosted, 10, Some(&cursor)),
+        Err(ReadError::Restart)
+    ));
+    provider.generation.store(1, Ordering::Relaxed);
+    provider.change_during_body.store(true, Ordering::Relaxed);
+    assert!(matches!(page(&hosted, 10, None), Err(ReadError::Restart)));
+    provider.change_during_body.store(false, Ordering::Relaxed);
+
+    let mut denied = fixture.source(&[&path]);
+    denied.current_provider = Some(&provider);
+    denied
+        .inventory
+        .insert(path.to_str().unwrap().to_owned(), Availability::Unavailable);
+    let calls = provider.calls.load(Ordering::Relaxed);
+    assert!(page(&denied, 1, None).unwrap().is_none());
+    assert_eq!(provider.calls.load(Ordering::Relaxed), calls);
+
+    let restored = path.clone();
+    selected::AFTER_BODY.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || fs::rename(original, restored).unwrap()));
+    });
+    assert!(matches!(page(&hosted, 10, None), Err(ReadError::Restart)));
 }
 
 #[test]
