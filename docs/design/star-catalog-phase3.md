@@ -273,3 +273,29 @@ request or refresh. An incarnation change, replacement, rewrite, truncation,
 custody change or membership change, including one caused by a late parent
 link, requires an explicit restart. Cursor state is bounded by the sources a
 page touches. The server holds no cursor state between requests.
+
+### Prefix receipts in the selected-read fixture adapter
+
+Schema 53 writes one `warehouse_prefix` receipt when an admitted source
+first commits or advances its consumed offset. The receipt records the source
+incarnation ID, committed offset and ledger at that boundary. It contains no
+source text. Receipts commit with the facts and native proof pages and remain
+available for the life of this Index incarnation. Receipt storage grows with
+the number of admitted prefix advances. Cursor expiry and receipt collection
+need a policy before the Viewer cutover.
+
+A first page records the highest receipt revision in its snapshot. A later page
+can use that revision to recover the same bound for a member it has not read
+yet. The cursor also carries a digest of the selected member identities and
+carrier paths and the prefix receipts for the sources read by the previous page.
+The Index incarnation, canonical selection and current source authority qualify
+these values on each request. Covering blocks come from the current proof tree
+in the page's SQLite snapshot. A receipt and current proof may be combined only
+within the same source incarnation. The reader caps returned data at the
+receipt offset. It re-verifies read blocks if the local carrier grows during
+body fetch and rechecks the named file and descriptor before returning the page.
+
+This fixture adapter covers current local record positions, copied-record
+suppression and exact-address text lookup. The full causal slot and anchor
+comparison, provider and retained body reads, and list title, parent, runtime
+and pricing parity are further selected-read work before the atomic cutover.

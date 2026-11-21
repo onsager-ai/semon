@@ -1280,14 +1280,26 @@ fn warehouse_verified_codex_relocation_keeps_fact_keys_through_append() {
     scan_file(&new, "codex", &mut cache, &mut false).unwrap();
     assert_eq!(current(&new), original);
     assert_eq!(count(), vec![vec![Sql::Integer(3)]]);
+    let (component, revision, offset): (i64, i64, i64) = db
+        .query_row(
+            "SELECT m.component,p.revision,p.pos FROM lineage_member m
+         JOIN warehouse_prefix p USING(source) WHERE m.source=?1 ORDER BY p.revision DESC LIMIT 1",
+            [original.0],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
     let selected = db
         .prepare(crate::events::store::warehouse::DETAIL)
         .unwrap()
-        .query_map(["codex-move"], |r| r.get::<_, i64>(0))
+        .query_map(rusqlite::named_params! {
+            ":source": original.0, ":start": 0, ":end": offset, ":view": revision, ":component": component,
+            ":entry_block": None::<i64>, ":entry_occurrence": None::<i64>, ":time": i64::MIN,
+            ":pos": i64::MIN, ":block": i64::MIN, ":occurrence": i64::MIN, ":limit": 10,
+        }, |row| row.get::<_, i64>(1))
         .unwrap()
         .collect::<rusqlite::Result<Vec<_>>>()
         .unwrap();
-    assert_eq!(selected, vec![original.0; 3]);
+    assert_eq!(selected.len(), 3);
     cache.retain(&BTreeSet::new(), &mut false);
     assert!(rows(&db, "SELECT * FROM warehouse_current").is_empty());
     assert!(rows(&db, "SELECT * FROM lineage_member").is_empty());

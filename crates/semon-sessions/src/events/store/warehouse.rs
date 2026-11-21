@@ -6,7 +6,7 @@ pub(super) mod identity;
 mod maintenance;
 
 #[cfg(test)]
-pub(crate) use identity::retained_identity;
+pub(crate) use identity::{RetainedIdentityError, retained_identity};
 
 use std::sync::OnceLock;
 
@@ -147,12 +147,17 @@ pub(super) fn write(
     let started = measurements.start();
     #[cfg(test)]
     let fact_started = SCALE_TIMING.with(|timing| timing.get().map(|_| std::time::Instant::now()));
-    let (source, retired) = source(tx, path, batch.harness, &json(ledger)?, append)?;
-    let (old_offset, sidecar_revision): (i64, i64) = tx
+    let encoded_ledger = json(ledger)?;
+    let (source, retired) = source(tx, path, batch.harness, &encoded_ledger, append)?;
+    let cursor: Option<(i64, i64)> = tx
         .prepare_cached("SELECT pos,sidecar_revision FROM maintenance_cursor WHERE source=?1")?
         .query_row([source], |row| Ok((row.get(0)?, row.get(1)?)))
-        .optional()?
-        .unwrap_or((0, 0));
+        .optional()?;
+    let (old_offset, sidecar_revision) = cursor.unwrap_or_default();
+    if cursor.is_none() || old_offset != int(ledger.offset) {
+        tx.prepare_cached("INSERT INTO warehouse_prefix(source,pos,ledger) VALUES(?1,?2,?3)")?
+            .execute(params![source, int(ledger.offset), encoded_ledger])?;
+    }
     let path = Path::new(path);
     let mut header_kind = None;
     if batch.harness == "claude" {

@@ -6,7 +6,7 @@ use crate::{
     source_change::AppendEvidence,
     storage::Namespace,
 };
-use rusqlite::{Connection, Transaction, params};
+use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
@@ -138,7 +138,7 @@ type LocalPage = (Vec<Row>, usize, usize, Option<Boundary>);
 type Identity = (i64, String, String);
 
 struct Snapshot<'a> {
-    transaction: &'a Transaction<'a>,
+    transaction: &'a Connection,
     source: &'a Source<'a>,
     paths: String,
     coverage: Coverage,
@@ -146,7 +146,7 @@ struct Snapshot<'a> {
 }
 
 impl<'a> Snapshot<'a> {
-    fn read(transaction: &'a Transaction<'a>, source: &'a Source<'a>) -> Result<Self, ReadError> {
+    fn read(transaction: &'a Connection, source: &'a Source<'a>) -> Result<Self, ReadError> {
         crate::events::store::require_current(transaction).map_err(index)?;
         crate::storage::sqlite::qualify(transaction, &source.namespace).map_err(index)?;
         let origin = source.namespace.binding();
@@ -468,18 +468,29 @@ pub(super) fn identity(
     if scope == CatalogReadScope::RetainedHistory {
         return warehouse::retained_identity(&tx, &source.namespace, key)
             .map(|identity| Some((identity.owner, identity.harness, identity.native_id)))
-            .map_err(|error| {
-                if error.code() == "retained_identity_unverified" {
-                    ReadError::RetainedUnverified
-                } else {
-                    index(error)
-                }
-            });
+            .map_err(retained_error);
     }
     let snapshot = Snapshot::read(&tx, source)?;
-    let mut exact = tx.prepare_cached(EXACT).map_err(index)?;
+    current_identity(&tx, source, key, &snapshot.paths)
+}
+
+fn retained_error(error: warehouse::RetainedIdentityError) -> ReadError {
+    if error.code() == "retained_identity_unverified" {
+        ReadError::RetainedUnverified
+    } else {
+        index(error)
+    }
+}
+
+fn current_identity(
+    db: &Connection,
+    source: &Source<'_>,
+    key: &str,
+    paths: &str,
+) -> Result<Option<Identity>, ReadError> {
+    let mut exact = db.prepare_cached(EXACT).map_err(index)?;
     let mut matches = exact
-        .query(params![key, snapshot.paths, source.namespace.binding()])
+        .query(params![key, paths, source.namespace.binding()])
         .map_err(index)?;
     let found = matches
         .next()
@@ -495,3 +506,6 @@ pub(super) fn identity(
 
 #[path = "catalog_warehouse/tests.rs"]
 mod tests;
+
+#[path = "catalog_warehouse/selected.rs"]
+mod selected;

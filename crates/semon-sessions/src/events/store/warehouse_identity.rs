@@ -248,7 +248,7 @@ impl std::fmt::Display for RetainedIdentityError {
 
 #[cfg(test)]
 pub(crate) fn retained_identity(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     namespace: &crate::storage::Namespace,
     key: &str,
 ) -> Result<RetainedIdentity, RetainedIdentityError> {
@@ -262,7 +262,7 @@ pub(crate) fn retained_identity(
 
 #[cfg(test)]
 fn read_retained(
-    tx: &Transaction<'_>,
+    tx: &rusqlite::Connection,
     source_key: &str,
     key: &str,
 ) -> rusqlite::Result<Option<RetainedIdentity>> {
