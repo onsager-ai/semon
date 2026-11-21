@@ -1276,3 +1276,33 @@ fn warehouse_list_runtime_rejects_pid_reuse_and_tracks_wait() {
     write_start(778);
     assert_eq!(read(), Some("done"));
 }
+
+#[test]
+fn warehouse_prompt_parent_matches_the_authorized_launch_address() {
+    let mut fixture = Fixture::new("prompt-launch");
+    let parent = fixture.claude("parent", "Launch fixture");
+    append_native(
+        &parent,
+        json!({"type":"assistant","uuid":"launcher","sessionId":"parent",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+          {"type":"tool_use","id":"launch","name":"Bash","input":{"command":"codex exec /work/synthetic/prompt.txt"}}
+        ]}}),
+    );
+    scan_file(&parent, "claude", &mut fixture.cache, &mut false).unwrap();
+    let child = fixture.codex("child");
+    append_native(
+        &child,
+        json!({"type":"response_item","timestamp":"2026-09-24T00:00:02Z",
+      "payload":{"type":"message","role":"user","content":[{"type":"input_text",
+        "text":"Semon-Parent: claude:parent\nSemon-Handoff: /work/synthetic/prompt.txt\nReview the fixture"}]}}),
+    );
+    scan_file(&child, "codex", &mut fixture.cache, &mut false).unwrap();
+    let mut source = fixture.source(&[&parent, &child]);
+    let launch = selected::launch_call(&source, "child").unwrap().unwrap();
+    assert_eq!(launch.id, "launch");
+    assert_eq!(launch.name, "Bash");
+    source
+        .inventory
+        .insert(parent.to_str().unwrap().into(), Availability::Unavailable);
+    assert!(selected::launch_call(&source, "child").unwrap().is_none());
+}

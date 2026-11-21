@@ -410,10 +410,49 @@ pub(super) fn prompt_title(
 ) -> Result<Option<String>, ReadError> {
     let db = crate::events::store::focused_connection(source.path).map_err(index)?;
     let db = chunk_proofs::Snapshot::new(db);
+    let mut bytes_left = 256 * 1024;
+    let native = qualified_record(
+        db,
+        source,
+        RecordProof {
+            harness: "codex",
+            carrier,
+            ledger,
+            native_id,
+            offset,
+        },
+        &mut bytes_left,
+    )?;
+    Ok(crate::model::prompt_text(&native)
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| crate::model::one_line(&text, 80)))
+}
+
+struct RecordProof<'a> {
+    harness: &'a str,
+    carrier: String,
+    ledger: &'a str,
+    native_id: String,
+    offset: i64,
+}
+
+fn qualified_record(
+    db: Arc<chunk_proofs::Snapshot>,
+    source: &Source<'_>,
+    proof: RecordProof<'_>,
+    bytes_left: &mut usize,
+) -> Result<serde_json::Value, ReadError> {
+    let RecordProof {
+        harness,
+        carrier,
+        ledger,
+        native_id,
+        offset,
+    } = proof;
     let current = decode(ledger)?;
-    let path = relative(source.options, "codex", &carrier).ok_or(ReadError::Restart)?;
+    let path = relative(source.options, harness, &carrier).ok_or(ReadError::Restart)?;
     let reference = SessionSourceRef {
-        root: "codex".into(),
+        root: harness.into(),
         path: path.into(),
         native_id,
         offset: current.offset,
@@ -431,19 +470,132 @@ pub(super) fn prompt_title(
         }),
         &budget,
     )?;
-    let mut bytes_left = 256 * 1024;
     let native = crate::source_reader::read_record_bounded(
         &reader,
         &reader.member.reference,
         u64::try_from(offset).map_err(index)?,
+        *bytes_left,
         bytes_left,
-        &mut bytes_left,
     )
     .map_err(|_| ReadError::Restart)?;
     reader.finish().map_err(|_| ReadError::Restart)?;
-    Ok(crate::model::prompt_text(&native)
-        .filter(|text| !text.trim().is_empty())
-        .map(|text| crate::model::one_line(&text, 80)))
+    Ok(native)
+}
+
+pub(super) fn launch_call(
+    source: &Source<'_>,
+    child: &str,
+) -> Result<Option<crate::ToolCall>, ReadError> {
+    let db = crate::events::store::focused_connection(source.path).map_err(index)?;
+    db.execute_batch("BEGIN DEFERRED").map_err(index)?;
+    let snapshot = super::Snapshot::read(&db, source)?;
+    let Some((owner, harness, native_id)) = current_identity(&db, source, child, &snapshot.paths)?
+    else {
+        return Ok(None);
+    };
+    if harness != "codex" {
+        return Ok(None);
+    }
+    type MarkerRow = (String, String, i64, Option<String>, Option<i64>, i64);
+    let marker: Option<MarkerRow> = db.query_row(
+        "SELECT s.carrier,s.ledger,p.pos,f.cwd,d.first_ts,b.owner
+         FROM fact_parent_observation p
+         CROSS JOIN warehouse_source s ON s.source=p.source
+         CROSS JOIN dim_session d ON d.source=p.source
+         CROSS JOIN files f ON f.path=s.carrier
+         CROSS JOIN (SELECT child,parent FROM parent_selection WHERE method='marker') selected ON selected.child=p.source
+         CROSS JOIN dim_session parent ON parent.source=selected.parent AND parent.harness='claude'
+          AND parent.native_id=p.parent_id AND parent.harness=p.parent_harness
+         CROSS JOIN bridge_session_owner b ON b.source=parent.source
+         WHERE p.source=?1 AND p.method='marker' AND p.call_id IS NULL
+         ORDER BY p.pos DESC,p.block DESC,p.occurrence DESC LIMIT 1",
+        [owner], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+    ).optional().map_err(index)?;
+    let Some((carrier, ledger, offset, cwd, start, parent)) = marker else {
+        return Ok(None);
+    };
+    let calls = {
+        let mut statement = db
+            .prepare_cached(
+                "SELECT s.carrier,s.ledger,d.native_id,c.pos,c.block,c.call_id,c.tool
+             FROM lineage_member root CROSS JOIN lineage_member m ON m.component=root.component
+             CROSS JOIN warehouse_source s ON s.source=m.source
+             CROSS JOIN json_each(?2) authorized ON authorized.value=s.carrier
+             CROSS JOIN dim_session d ON d.source=m.source
+             CROSS JOIN fact_claude_call c ON c.source=m.source AND c.tool IN ('Bash','Skill')
+             WHERE root.source=?1 AND c.pos<json_extract(s.ledger,'$.offset')
+             ORDER BY d.first_ts,d.continued DESC,d.native_id,c.pos,c.block
+             LIMIT ?3",
+            )
+            .map_err(index)?;
+        statement
+            .query_map(
+                params![parent, snapshot.paths, crate::handoff::MAX_CALLS as i64 + 1],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, u32>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .map_err(index)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(index)?
+    };
+    if calls.len() > crate::handoff::MAX_CALLS {
+        return Err(index("Selected launch candidate budget exhausted"));
+    }
+    let db = chunk_proofs::Snapshot::new(db);
+    let mut bytes_left = crate::handoff::MAX_INPUT_BYTES;
+    let native = qualified_record(
+        db.clone(),
+        source,
+        RecordProof {
+            harness: "codex",
+            carrier,
+            ledger: &ledger,
+            native_id,
+            offset,
+        },
+        &mut bytes_left,
+    )?;
+    let Some(prompt) = crate::user_text(&native)
+        .and_then(crate::parse_marker)
+        .and_then(|marker| marker.handoff)
+    else {
+        return Ok(None);
+    };
+    let mut matcher = crate::handoff::Matcher::new(&prompt, cwd.as_deref(), start);
+    for (carrier, ledger, native_id, offset, block, id, name) in calls {
+        let native = qualified_record(
+            db.clone(),
+            source,
+            RecordProof {
+                harness: "claude",
+                carrier,
+                ledger: &ledger,
+                native_id,
+                offset,
+            },
+            &mut bytes_left,
+        )?;
+        let Some(input) = crate::model::tool_input(&native, block as usize) else {
+            continue;
+        };
+        if let Some(tool) = matcher.consider(&crate::handoff::Call {
+            tool: crate::ToolCall { id, name },
+            time: crate::events::record_time(&native),
+            input: input.to_string(),
+        }) {
+            return Ok(Some(tool));
+        }
+    }
+    Ok(matcher.finish())
 }
 
 pub(super) fn page(

@@ -302,9 +302,10 @@ suppression, exact-address text lookup and prefix-bounded tool result reads.
 The retained adapter pages original records through an authorized provider
 using the warehouse binding and revalidates the previous page's source
 references. The current adapter exposes native prompt anchors and exact-ID
-relay receipt addresses for selected tool results. The list compares Codex
-prompt titles, reads qualified top-level process status, and prices winning
-usage facts and legacy Codex counters. Full causal slots and all anchor types,
-relay body/time matching, current provider fallback, prompt-dependent launch
-placement, parent/child runtime overrides and family pricing still need
-comparison before cutover.
+relay receipt addresses for selected tool results. It uses the shared native
+launch matcher on a qualified Codex marker and the parent's committed launch
+candidates. The list compares Codex prompt titles, reads qualified top-level
+process status, and prices winning usage facts and legacy Codex counters.
+Full causal slots and all anchor types, relay body/time matching, current
+provider fallback, parent/child runtime overrides and family pricing still
+need comparison before cutover.
