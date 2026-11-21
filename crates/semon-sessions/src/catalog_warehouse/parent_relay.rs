@@ -4,6 +4,7 @@ use super::*;
 struct Send {
     pos: i64,
     block: i64,
+    id: String,
     sent: Option<i64>,
     last: Option<i64>,
 }
@@ -13,14 +14,17 @@ struct Receipt {
     member: Arc<Member>,
     address: RelayReceipt,
     skip: usize,
+    legacy: bool,
+    occurrence: i64,
 }
 
 pub(super) struct Plan {
     sends: Vec<Send>,
     receipts: Vec<Receipt>,
     child: String,
-    call_offset: u64,
-    call_block: i64,
+    call: Option<(u64, i64)>,
+    member: Arc<Member>,
+    explicit_completion: bool,
 }
 
 impl Plan {
@@ -28,10 +32,10 @@ impl Plan {
         db: &rusqlite::Connection,
         source: &Source<'_>,
         child: i64,
-        call: &Address,
+        call: Option<&Address>,
         view: i64,
     ) -> Result<Option<Self>, ReadError> {
-        use crate::events::{AGM_FINAL, AGM_UP, PIN};
+        use crate::events::{AGM_FINAL, AGM_PROGRESS, AGM_UP, PIN};
         let binding: Option<(String, i64, Option<String>)> = db
             .query_row(
                 "SELECT d.native_id,b.owner,p.call_id FROM dim_session d
@@ -47,8 +51,14 @@ impl Plan {
             return Ok(None);
         };
         let mut prefix = db.prepare_cached(COMMITTED_PREFIX).map_err(index)?;
-        let child_end =
-            i64::try_from(committed_prefix(&mut prefix, child, view)?.offset).map_err(index)?;
+        let Some(child_ledger) = prefix
+            .query_row(params![child, view], |row| row.get::<_, String>(0))
+            .optional()
+            .map_err(index)?
+        else {
+            return Ok(None);
+        };
+        let child_end = i64::try_from(decode(&child_ledger)?.offset).map_err(index)?;
         let mut sends = db
             .prepare_cached(include_str!("parent_relay.sql"))
             .map_err(index)?;
@@ -57,6 +67,7 @@ impl Plan {
                 Ok(Send {
                     pos: row.get(0)?,
                     block: row.get(1)?,
+                    id: row.get(2)?,
                     sent: row.get(3)?,
                     last: row.get(4)?,
                 })
@@ -67,15 +78,27 @@ impl Plan {
         if sends.len() > 128 {
             return Err(index("Selected parent relay send budget exhausted"));
         }
-        if !sends
-            .iter()
-            .any(|send| send.pos as u64 == call.offset && send.block == call.block)
-        {
+        if call.is_some_and(|call| {
+            !sends
+                .iter()
+                .any(|send| send.pos as u64 == call.offset && send.block == call.block)
+        }) {
             return Ok(None);
         }
+        let Some(member) = member_at(db, source, &mut prefix, child, view)? else {
+            return Ok(None);
+        };
+        let mut explicit_completion = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM fact_subagent_event WHERE source=?1 AND pos<?2
+             AND kind='tool' AND name='SubagentHandback')",
+                params![child, child_end],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(index)?;
         let mut members = db
             .prepare_cached(
-                "SELECT m.source,s.carrier,s.ledger,d.native_id
+                "SELECT m.source
             FROM lineage_member root JOIN lineage_member m USING(component)
             JOIN warehouse_source s ON s.source=m.source AND s.origin=?2
             JOIN warehouse_current c ON c.source=s.source AND c.path=s.carrier
@@ -87,7 +110,7 @@ impl Plan {
             .map_err(index)?;
         let mut scan = db
             .prepare_cached(
-                "SELECT pos,block,occurrence,ts FROM fact_subagent_event
+                "SELECT pos,block,occurrence,ts,flags FROM fact_subagent_event
             WHERE source=?1 AND pos<?2 AND kind='agm' AND flags & ?3<>0 AND flags & ?4=0
               AND (id IN (?5,?6) OR name IN (?5,?6)) ORDER BY pos,block,occurrence LIMIT 129",
             )
@@ -95,49 +118,23 @@ impl Plan {
         let mut receipts = Vec::new();
         while let Some(row) = members.next().map_err(index)? {
             let id: i64 = row.get(0).map_err(index)?;
-            let carrier: String = row.get(1).map_err(index)?;
-            let current = decode(&row.get::<_, String>(2).map_err(index)?)?;
-            match source.inventory.get(&carrier) {
-                Some(Availability::Expected(Some(stat))) => {
-                    if !stable_or_grown(&current.stat, stat)
-                        || !raw_stat(Path::new(&carrier))
-                            .is_ok_and(|actual| stable_or_grown(stat, &actual))
-                    {
-                        return Err(ReadError::Restart);
-                    }
-                }
-                Some(Availability::Expected(None))
-                    if source.current_provider.is_some() && local_missing(&carrier) => {}
-                _ => return Ok(None),
+            let Some(parent_member) = member_at(db, source, &mut prefix, id, view)? else {
+                return Ok(None);
+            };
+            let end = i64::try_from(parent_member.reference.offset).map_err(index)?;
+            if call.is_none() && !explicit_completion {
+                explicit_completion = db
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM fact_subagent_event WHERE source=?1 AND pos<?2
+                     AND ((kind='tn' AND id=?3) OR (kind='agm' AND flags & ?4<>0
+                       AND (id IN (?3,?5) OR name IN (?3,?5)))))",
+                        params![id, end, spawn, AGM_FINAL, native_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(index)?;
             }
-            let committed = committed_prefix(&mut prefix, id, view)?;
-            if committed.offset > current.offset || !committed.stat.is_prefix_of(&current.stat) {
-                return Err(ReadError::Restart);
-            }
-            let path = relative(source.options, "claude", &carrier)
-                .ok_or(ReadError::Restart)?
-                .to_owned();
-            let member = Arc::new(Member {
-                carrier,
-                current,
-                reference: SessionSourceRef {
-                    root: "claude".into(),
-                    path,
-                    native_id: row.get(3).map_err(index)?,
-                    offset: committed.offset,
-                    prefix_sha256: committed.prefix,
-                    tail_sha256: committed.tail,
-                },
-            });
             let mut rows = scan
-                .query(params![
-                    id,
-                    i64::try_from(committed.offset).map_err(index)?,
-                    AGM_UP,
-                    AGM_FINAL,
-                    native_id,
-                    spawn
-                ])
+                .query(params![id, end, AGM_UP, AGM_FINAL, native_id, spawn])
                 .map_err(index)?;
             let mut prior = None;
             let mut skip = 0;
@@ -150,10 +147,12 @@ impl Plan {
                 prior = Some(offset);
                 receipts.push(Receipt {
                     source: id,
-                    member: member.clone(),
+                    member: parent_member.clone(),
                     skip,
+                    legacy: row.get::<_, u8>(4).map_err(index)? & AGM_PROGRESS == 0,
+                    occurrence: row.get(2).map_err(index)?,
                     address: RelayReceipt {
-                        path: member.carrier.clone(),
+                        path: parent_member.carrier.clone(),
                         offset,
                         block: row.get(1).map_err(index)?,
                         at: row.get(3).map_err(index)?,
@@ -166,23 +165,29 @@ impl Plan {
             sends,
             receipts,
             child: native_id,
-            call_offset: call.offset,
-            call_block: call.block,
+            call: call.map(|call| (call.offset, call.block)),
+            member,
+            explicit_completion,
         }))
     }
 
     pub(super) fn resolve(
         self,
         child_source: i64,
-        child: &Arc<Member>,
         mut read: impl FnMut(i64, &Arc<Member>, u64) -> Result<serde_json::Value, ReadError>,
-    ) -> Result<Option<RelayReceipt>, ReadError> {
-        if self.receipts.is_empty() {
-            return Ok(None);
+    ) -> Result<Resolution, ReadError> {
+        if self.receipts.is_empty()
+            || (self.call.is_none() && !self.receipts.iter().any(|receipt| receipt.legacy))
+        {
+            return Ok(Resolution::default());
         }
         let mut messages = Vec::new();
         for send in &self.sends {
-            let record = read(child_source, child, u64::try_from(send.pos).map_err(index)?)?;
+            let record = read(
+                child_source,
+                &self.member,
+                u64::try_from(send.pos).map_err(index)?,
+            )?;
             messages.push(crate::model::input_string(
                 &record,
                 usize::try_from(send.block).map_err(index)?,
@@ -191,6 +196,10 @@ impl Plan {
         }
         let mut bodies = Vec::new();
         for receipt in &self.receipts {
+            if self.sends.is_empty() {
+                bodies.push(None);
+                continue;
+            }
             let record = read(receipt.source, &receipt.member, receipt.address.offset)?;
             bodies.push(crate::model::received_body(
                 &record,
@@ -209,16 +218,110 @@ impl Plan {
             .iter()
             .map(|receipt| receipt.address.at)
             .collect();
-        let (paired, _) = crate::model::pair_up(&windows, &messages, &times, &bodies);
-        let Some(index) = self
-            .sends
-            .iter()
-            .position(|send| send.pos as u64 == self.call_offset && send.block == self.call_block)
-        else {
-            return Ok(None);
-        };
-        Ok(paired[index]
-            .and_then(|match_index| self.receipts.into_iter().nth(match_index))
-            .map(|receipt| receipt.address))
+        let (matches, claimed) = crate::model::pair_up(&windows, &messages, &times, &bodies);
+        let matched = self
+            .call
+            .and_then(|call| {
+                self.sends
+                    .iter()
+                    .position(|send| (send.pos as u64, send.block) == call)
+            })
+            .and_then(|send| matches[send]);
+        let mut result = Resolution::default();
+        if !self.explicit_completion
+            && let Some(receipt) = self
+                .receipts
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(index, receipt)| (receipt.legacy && !claimed[index]).then_some(receipt))
+        {
+            if self.sends.is_empty() {
+                read(receipt.source, &receipt.member, receipt.address.offset)?;
+            }
+            result.completion = Some(receipt.address.clone());
+        }
+        for (index, receipt) in self.receipts.into_iter().enumerate() {
+            if receipt.legacy
+                && claimed[index]
+                && let Some(send) = matches.iter().position(|matched| *matched == Some(index))
+            {
+                result.incoming.insert(
+                    format!(
+                        "{}:{}:{}:{}",
+                        receipt.source,
+                        receipt.address.offset,
+                        receipt.address.block,
+                        receipt.occurrence
+                    ),
+                    crate::model::legacy_relay_turn_id(&self.sends[send].id),
+                );
+            }
+            if matched == Some(index) {
+                result.matched = Some(receipt.address);
+            }
+        }
+        Ok(result)
     }
+}
+
+#[derive(Default)]
+pub(super) struct Resolution {
+    pub(super) matched: Option<RelayReceipt>,
+    pub(super) completion: Option<RelayReceipt>,
+    pub(super) incoming: BTreeMap<String, String>,
+}
+
+fn member_at(
+    db: &rusqlite::Connection,
+    source: &Source<'_>,
+    prefix: &mut rusqlite::Statement<'_>,
+    id: i64,
+    view: i64,
+) -> Result<Option<Arc<Member>>, ReadError> {
+    let (carrier, ledger, native_id): (String, String, String) = db
+        .query_row(
+            "SELECT s.carrier,s.ledger,d.native_id FROM warehouse_source s
+         JOIN warehouse_current c ON c.source=s.source AND c.path=s.carrier
+         JOIN dim_session d ON d.source=s.source WHERE s.source=?1 AND s.origin=?2",
+            params![id, source.namespace.binding()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(index)?;
+    let current = decode(&ledger)?;
+    match source.inventory.get(&carrier) {
+        Some(Availability::Expected(Some(stat))) => {
+            if !stable_or_grown(&current.stat, stat)
+                || !raw_stat(Path::new(&carrier)).is_ok_and(|actual| stable_or_grown(stat, &actual))
+            {
+                return Err(ReadError::Restart);
+            }
+        }
+        Some(Availability::Expected(None))
+            if source.current_provider.is_some() && local_missing(&carrier) => {}
+        _ => return Ok(None),
+    }
+    let committed = committed_prefix(prefix, id, view)?;
+    if committed.offset > current.offset
+        || !committed.stat.is_prefix_of(&current.stat)
+        || (committed.offset == current.offset
+            && (committed.prefix != current.prefix || committed.tail != current.tail))
+    {
+        return Err(ReadError::Restart);
+    }
+    let path = relative(source.options, "claude", &carrier)
+        .ok_or(ReadError::Restart)?
+        .to_owned();
+    Ok(Some(Arc::new(Member {
+        carrier,
+        current,
+        reference: SessionSourceRef {
+            root: "claude".into(),
+            path,
+            native_id,
+            offset: committed.offset,
+            prefix_sha256: committed.prefix,
+            tail_sha256: committed.tail,
+        },
+    })))
 }

@@ -70,7 +70,7 @@ const EXACT_RELAY_RECEIPTS: &str = "SELECT r.source,c.path,s.ledger,r.pos,r.bloc
     CROSS JOIN warehouse_current c ON c.source=r.source AND c.path=s.carrier
     WHERE r.correlation=?2 ORDER BY r.source,r.pos,r.block,r.occurrence";
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct RelayReceipt {
     pub(super) path: String,
     pub(super) offset: u64,
@@ -256,6 +256,7 @@ pub(super) struct Component {
     pub(super) title: Option<String>,
     pub(super) model: Option<String>,
     pub(super) member_count: usize,
+    pub(super) legacy_completion: Option<RelayReceipt>,
     pub(super) records: Vec<Record>,
     pub(super) next: Option<Cursor>,
 }
@@ -1188,15 +1189,6 @@ fn read(
             );
         }
     }
-    let mut turns = causal::turns(
-        &db,
-        source,
-        key,
-        &harness,
-        component,
-        view,
-        causal.keys().copied(),
-    )?;
     let mut relay_context = BTreeMap::new();
     if matches!(target, Target::ToolResults(_)) {
         for position in candidates.keys() {
@@ -1204,14 +1196,37 @@ fn read(
         }
     }
     let parent_plan = if let Target::ToolResults(call) = target
-        && let Some((position, (_, member, _))) = candidates.first_key_value()
+        && let Some((position, _)) = candidates.first_key_value()
         && relay_context.values().all(Vec::is_empty)
     {
-        parent_relay::Plan::collect(&db, source, position.source, call, view)?
-            .map(|plan| (plan, position.source, member.clone()))
+        parent_relay::Plan::collect(&db, source, position.source, Some(call), view)?
+            .map(|plan| (plan, position.source))
     } else {
         None
     };
+    let mut legacy_plans = Vec::new();
+    if harness == "claude" && !causal.is_empty() {
+        if let Some(plan) = parent_relay::Plan::collect(&db, source, owner, None, view)? {
+            legacy_plans.push((owner, plan));
+        }
+        let mut children = db
+            .prepare_cached(include_str!("legacy_relay_children.sql"))
+            .map_err(index)?;
+        let mut children = children
+            .query(params![component, crate::events::AGM_UP, owner, view])
+            .map_err(index)?;
+        let mut count = 0;
+        while let Some(row) = children.next().map_err(index)? {
+            count += 1;
+            if count > 128 {
+                return Err(index("Selected legacy relay child budget exhausted"));
+            }
+            let child = row.get(0).map_err(index)?;
+            if let Some(plan) = parent_relay::Plan::collect(&db, source, child, None, view)? {
+                legacy_plans.push((child, plan));
+            }
+        }
+    }
     let db = chunk_proofs::Snapshot::new(db);
     let proof_bytes = Mutex::new(PAGE_BYTES);
     let mut readers = BTreeMap::new();
@@ -1255,14 +1270,37 @@ fn read(
         })?;
         Ok::<_, ReadError>((native, pin))
     };
-    if let Some((plan, child, member)) = parent_plan
-        && let Some(receipt) = plan.resolve(child, &member, |id, member, offset| {
+    let mut resolve = |plan: parent_relay::Plan, child| {
+        plan.resolve(child, |id, member, offset| {
             read_body(id, member, offset).map(|(native, _)| native)
-        })?
+        })
+    };
+    if let Some((plan, child)) = parent_plan
+        && let Some(receipt) = resolve(plan, child)?.matched
         && let Some(first) = relay_context.first_entry()
     {
         first.into_mut().push(receipt);
     }
+    let mut legacy_completion = None;
+    let mut incoming = BTreeMap::new();
+    for (child, plan) in legacy_plans {
+        let resolved = resolve(plan, child)?;
+        if child == owner {
+            legacy_completion = resolved.completion;
+        } else {
+            incoming.extend(resolved.incoming);
+        }
+    }
+    let mut turns = causal::turns(
+        &*db.lock().map_err(index)?,
+        source,
+        key,
+        &harness,
+        component,
+        view,
+        causal.keys().copied(),
+        &encode(&incoming)?,
+    )?;
     let mut records = Vec::with_capacity(candidates.len());
     let mut touched = BTreeMap::new();
     for (position, (kind, member, mut prefix)) in candidates {
@@ -1375,6 +1413,7 @@ fn read(
         title,
         model,
         member_count,
+        legacy_completion,
         records,
         next,
     }))

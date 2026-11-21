@@ -1488,6 +1488,139 @@ fn warehouse_parent_relay_matches_body_then_time_at_the_selected_prefix() {
 }
 
 #[test]
+fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
+    let mut fixture = Fixture::new("legacy-relay-detail");
+    let root = fixture.claude("root", "Delegate");
+    append_native(
+        &root,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:01Z",
+        "message":{"role":"assistant","content":[{"type":"tool_use","id":"agent","name":"Agent","input":{"prompt":"Work"}}]}}),
+    );
+    let child = root.with_extension("").join("subagents/agent-worker.jsonl");
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::write(
+        child.with_extension("meta.json"),
+        json!({"agentType":"general-purpose","toolUseId":"agent"}).to_string(),
+    )
+    .unwrap();
+    fs::write(&child, format!("{}\n", prompt("root", 2, "Work"))).unwrap();
+    append_native(
+        &child,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:03Z",
+        "message":{"role":"assistant","content":[{"type":"tool_use","id":"progress","name":"SendMessage",
+        "input":{"to":"main","message":"Still working"}}]}}),
+    );
+    append_native(
+        &child,
+        json!({"type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:05Z",
+        "toolUseResult":{"success":true},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"progress","content":"queued"}]}}),
+    );
+    let mut offsets = Vec::new();
+    for (time, body) in [(4, "Still working"), (7, "Work finished")] {
+        offsets.push(fs::metadata(&root).unwrap().len());
+        append_native(
+            &root,
+            json!({"type":"user","uuid":format!("receipt-{time}"),"sessionId":"root",
+            "timestamp":format!("2026-09-24T00:00:{time:02}Z"),"message":{"role":"user",
+            "content":format!("<agent-message from=\"worker\">{body}</agent-message>")}}),
+        );
+    }
+    append_native(
+        &root,
+        json!({"type":"assistant","uuid":"reply","sessionId":"root","timestamp":"2026-09-24T00:00:08Z",
+        "message":{"role":"assistant","content":[{"type":"text","text":"Thanks for the update"}]}}),
+    );
+    let proc_stat = fixture.options.proc_root.join("42/stat");
+    fs::create_dir_all(proc_stat.parent().unwrap()).unwrap();
+    let mut fields = ["0"; 20];
+    fields[19] = "777";
+    fs::write(proc_stat, format!("42 (claude) {}\n", fields.join(" "))).unwrap();
+    let pid_home = fixture.options.claude_home.join("sessions");
+    fs::create_dir_all(&pid_home).unwrap();
+    fs::write(
+        pid_home.join("42.json"),
+        json!({"pid":42,"sessionId":"root","procStart":777,"status":"idle"}).to_string(),
+    )
+    .unwrap();
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let paths = [root.as_path(), child.as_path()];
+    let detail = selected_page(&fixture, &paths, "root", 100, None)
+        .unwrap()
+        .unwrap();
+    let reply = detail
+        .records
+        .iter()
+        .find(|record| record.text().as_deref() == Some("Thanks for the update"))
+        .unwrap();
+    let turn = reply.causal.turn.as_ref().unwrap();
+    assert_eq!(turn.address.offset, offsets[0]);
+    let oracle = crate::session_transcript_range_with_mode(
+        &fixture.options,
+        fixture.namespace.as_str(),
+        "sid=root&after=0&limit=100",
+        None,
+        crate::SessionSourceReadMode::LocalOrPinnedProvider,
+    );
+    assert_eq!(oracle.status, 200);
+    let oracle: serde_json::Value = serde_json::from_slice(&oracle.body).unwrap();
+    let reply = oracle["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "Thanks for the update")
+        .unwrap();
+    assert_eq!(reply["turn"].as_str(), Some(turn.id.as_str()));
+    let detail = selected_page(&fixture, &paths, "worker", 100, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(detail.legacy_completion.unwrap().offset, offsets[1]);
+    let db = Connection::open(&fixture.db).unwrap();
+    let state: String = db.query_row("SELECT json_extract(metadata,'$.state') FROM session_trace_headers WHERE session_key='worker'",
+        [], |row| row.get(0)).unwrap();
+    assert_eq!(state, "done");
+
+    // Removing the selected proof blocks prevents native result reads, but
+    // the list still derives its child status from process and metadata only.
+    for path in [&root, &child] {
+        let proof = format!(
+            "native_source_chunks:{:x}:header",
+            Sha256::digest(path.to_str().unwrap().as_bytes())
+        );
+        assert_eq!(
+            db.execute("DELETE FROM meta WHERE key=?1", [proof])
+                .unwrap(),
+            1
+        );
+    }
+    assert!(matches!(
+        selected_page(&fixture, &paths, "worker", 100, None),
+        Err(ReadError::Restart)
+    ));
+    let list = read_list(
+        &[fixture.source(&paths)],
+        "workspace",
+        &request("limit=10"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        list.rows
+            .iter()
+            .find(|row| row.position.key == "worker")
+            .unwrap()
+            .status,
+        Some("work")
+    );
+}
+
+#[test]
 fn warehouse_current_provider_pins_the_selected_original_across_pages() {
     use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
     use std::io;

@@ -480,6 +480,11 @@ pub(crate) fn spawn_turn_id(harness: &str, key: &str) -> String {
 }
 
 #[cfg(test)]
+pub(crate) fn legacy_relay_turn_id(call: &str) -> String {
+    stable_id("r", &format!("relay:tool:{call}"))
+}
+
+#[cfg(test)]
 pub(crate) fn incoming_relay_turn_id(
     correlation: Option<&str>,
     native_id: &str,

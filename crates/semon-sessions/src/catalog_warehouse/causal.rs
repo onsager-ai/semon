@@ -38,6 +38,7 @@ struct Boundary {
 /// Resolve the same component boundary for a page and for a direct evidence
 /// read. All member receipts are from the selected view. Keep just one winning
 /// boundary per requested position while walking members in keyset batches.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn turns(
     db: &Connection,
     source: &Source<'_>,
@@ -46,6 +47,7 @@ pub(super) fn turns(
     component: i64,
     view: i64,
     targets: impl Iterator<Item = Position>,
+    legacy: &str,
 ) -> Result<BTreeMap<Position, Option<TurnStart>>, ReadError> {
     let mut previous = db.prepare_cached(PRECEDING_TIME).map_err(index)?;
     let mut winners: BTreeMap<_, (_, Option<Boundary>)> = BTreeMap::new();
@@ -134,7 +136,7 @@ pub(super) fn turns(
                     .query_row(
                         named_params! {
                             ":source": id, ":end": end, ":predecessors": predecessors,
-                            ":time": time, ":pos": pos, ":head": launch_at == Some(None), ":progress": crate::events::AGM_PROGRESS,
+                            ":time": time, ":pos": pos, ":head": launch_at == Some(None), ":progress": crate::events::AGM_PROGRESS, ":legacy": legacy,
                         },
                         |row| {
                             Ok((
@@ -148,12 +150,13 @@ pub(super) fn turns(
                                 row.get::<_, Option<String>>(4)?,
                                 row.get(5)?,
                                 row.get::<_, Option<String>>(6)?,
+                                row.get::<_, Option<String>>(7)?,
                             ))
                         },
                     )
                     .optional()
                     .map_err(index)?;
-                let Some((position, kind, occurrence, correlation)) = matched else {
+                let Some((position, kind, occurrence, correlation, legacy_id)) = matched else {
                     continue;
                 };
                 if winner
@@ -169,6 +172,8 @@ pub(super) fn turns(
                     let relay = kind == "relay";
                     let id = if launch {
                         crate::model::spawn_turn_id(harness, key)
+                    } else if let Some(legacy_id) = legacy_id {
+                        legacy_id
                     } else if relay {
                         crate::model::incoming_relay_turn_id(
                             correlation.as_deref(),

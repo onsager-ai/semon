@@ -195,6 +195,7 @@ pub(in super::super) fn retained_page(
         title: None,
         model: None,
         member_count,
+        legacy_completion: None,
         records,
         next,
     })

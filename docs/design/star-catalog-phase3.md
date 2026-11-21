@@ -338,8 +338,10 @@ unknown-price coverage.
 Selected Claude subagents inherit qualified graph-root process liveness and
 use native hand-backs, task notifications, resumptions and synchronous launch
 results to resolve child state. The fixture compares child state with the
-current reader and covers missing parent custody and PID reuse. Legacy
-untyped agent receipts still depend on the relay matching work.
+current reader and covers missing parent custody and PID reuse. Owner decision
+2026-11-22: legacy completion parity is selected-detail only. Ordinary Catalog
+lists use metadata for status and can show a child as working while selected
+detail has proof that it completed.
 
 Schema 56 indexes the native parser's exact Codex operation-to-call position.
 The selected adapter uses that relationship for canonical operation entry IDs
@@ -358,9 +360,10 @@ result reader uses the shared native body-first and bounded-time matcher. Both
 endpoints use the same request's local proof reader or independently authorized
 provider. The selected request pins provider generations and shares its byte
 and source budgets across relay evidence and selected records. Explicit progress
-receipts start an incoming turn in the parent. Untyped legacy receipts can be
-returned as matched result evidence. Their incoming turn placement and their
-use as a child completion fallback still need parity.
+receipts start an incoming turn in the parent. For untyped legacy receipts,
+selected detail uses matched receipts as incoming relay turns and the latest
+unmatched receipt as completion evidence when explicit terminal evidence is
+absent. Pairing is request-local and uses the selected committed prefixes.
 
 PR 3 owns the atomic Viewer route cutover, end-to-end scale verification,
 concurrent HTTP reads during ingestion, and the Viewer/browser gates. The
