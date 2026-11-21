@@ -24,14 +24,7 @@ pub(in crate::events::store) fn certify(
     if row.lifecycle != CatalogLifecycle::Current || row.sources.is_empty() {
         return Ok(());
     }
-    let Some(source_key): Option<String> = tx
-        .query_row(
-            "SELECT value FROM meta WHERE key='storage_namespace'",
-            [],
-            |record| record.get(0),
-        )
-        .optional()?
-    else {
+    let (_, Some(source_key)) = crate::storage::sqlite::binding(tx)? else {
         return Ok(());
     };
     let previous: Option<i64> = tx
