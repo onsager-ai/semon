@@ -9,6 +9,7 @@ struct Send {
 }
 
 struct Receipt {
+    source: i64,
     member: Arc<Member>,
     address: RelayReceipt,
     skip: usize,
@@ -96,13 +97,18 @@ impl Plan {
             let id: i64 = row.get(0).map_err(index)?;
             let carrier: String = row.get(1).map_err(index)?;
             let current = decode(&row.get::<_, String>(2).map_err(index)?)?;
-            let Some(Availability::Expected(Some(stat))) = source.inventory.get(&carrier) else {
-                return Ok(None);
-            };
-            if !stable_or_grown(&current.stat, stat)
-                || !raw_stat(Path::new(&carrier)).is_ok_and(|actual| stable_or_grown(stat, &actual))
-            {
-                return Err(ReadError::Restart);
+            match source.inventory.get(&carrier) {
+                Some(Availability::Expected(Some(stat))) => {
+                    if !stable_or_grown(&current.stat, stat)
+                        || !raw_stat(Path::new(&carrier))
+                            .is_ok_and(|actual| stable_or_grown(stat, &actual))
+                    {
+                        return Err(ReadError::Restart);
+                    }
+                }
+                Some(Availability::Expected(None))
+                    if source.current_provider.is_some() && local_missing(&carrier) => {}
+                _ => return Ok(None),
             }
             let committed = committed_prefix(&mut prefix, id, view)?;
             if committed.offset > current.offset || !committed.stat.is_prefix_of(&current.stat) {
@@ -143,6 +149,7 @@ impl Plan {
                 skip = if prior == Some(offset) { skip + 1 } else { 0 };
                 prior = Some(offset);
                 receipts.push(Receipt {
+                    source: id,
                     member: member.clone(),
                     skip,
                     address: RelayReceipt {
@@ -166,38 +173,31 @@ impl Plan {
 
     pub(super) fn resolve(
         self,
-        db: Arc<chunk_proofs::Snapshot>,
-        source: &Source<'_>,
-        child: Arc<Member>,
-        budget: &Mutex<usize>,
-        bytes_left: &mut usize,
+        child_source: i64,
+        child: &Arc<Member>,
+        mut read: impl FnMut(i64, &Arc<Member>, u64) -> Result<serde_json::Value, ReadError>,
     ) -> Result<Option<RelayReceipt>, ReadError> {
         if self.receipts.is_empty() {
             return Ok(None);
         }
-        let mut reader = PrefixReader::open(db.clone(), source.path, child, budget)?;
         let mut messages = Vec::new();
         for send in &self.sends {
-            let record = read(&reader, u64::try_from(send.pos).map_err(index)?, bytes_left)?;
+            let record = read(child_source, child, u64::try_from(send.pos).map_err(index)?)?;
             messages.push(crate::model::input_string(
                 &record,
                 usize::try_from(send.block).map_err(index)?,
                 &["message", "content"],
             ));
         }
-        reader.finish().map_err(body_error)?;
         let mut bodies = Vec::new();
         for receipt in &self.receipts {
-            let mut reader =
-                PrefixReader::open(db.clone(), source.path, receipt.member.clone(), budget)?;
-            let record = read(&reader, receipt.address.offset, bytes_left)?;
+            let record = read(receipt.source, &receipt.member, receipt.address.offset)?;
             bodies.push(crate::model::received_body(
                 &record,
                 "agent-message",
                 Some(&self.child),
                 receipt.skip,
             ));
-            reader.finish().map_err(body_error)?;
         }
         let windows: Vec<_> = self
             .sends
@@ -221,19 +221,4 @@ impl Plan {
             .and_then(|match_index| self.receipts.into_iter().nth(match_index))
             .map(|receipt| receipt.address))
     }
-}
-
-fn read(
-    reader: &PrefixReader<'_>,
-    offset: u64,
-    bytes_left: &mut usize,
-) -> Result<serde_json::Value, ReadError> {
-    crate::source_reader::read_record_bounded(
-        reader,
-        &reader.member.reference,
-        offset,
-        crate::tx::LINE_MAX as usize,
-        bytes_left,
-    )
-    .map_err(body_error)
 }

@@ -1406,6 +1406,7 @@ fn warehouse_parent_relay_matches_body_then_time_at_the_selected_prefix() {
     }
     scan_file(&root, "claude", &mut fixture.cache, &mut false).unwrap();
     let source = fixture.source(&paths);
+    let mut call_addresses = Vec::new();
     for (id, offset) in [("body", offsets[0]), ("time", offsets[1])] {
         let call = selected::evidence_at(
             &fixture.options,
@@ -1425,6 +1426,64 @@ fn warehouse_parent_relay_matches_body_then_time_at_the_selected_prefix() {
         let current = read(None);
         assert_eq!(current[0].relay_receipts.len(), 1);
         assert_eq!(current[0].relay_receipts[0].offset, offset);
+        call_addresses.push(call.address);
+    }
+
+    struct Provider(BTreeMap<String, Vec<u8>>);
+    impl crate::SessionSourceReader for Provider {
+        fn read_range(
+            &self,
+            source: &crate::SessionSourceRef,
+            expected: Option<&str>,
+            offset: u64,
+            max: usize,
+        ) -> std::io::Result<crate::SessionSourceRange> {
+            use std::io::ErrorKind::PermissionDenied;
+            let bytes = self.0.get(&source.path).ok_or(PermissionDenied)?;
+            let prefix = bytes
+                .get(..source.offset as usize)
+                .ok_or(PermissionDenied)?;
+            let generation = format!("fixture-{}-{}", source.native_id, source.offset);
+            if source.root != "claude"
+                || <[u8; 32]>::from(Sha256::digest(prefix)) != source.prefix_sha256
+                || expected.is_some_and(|expected| expected != generation)
+            {
+                return Err(PermissionDenied.into());
+            }
+            let start = offset as usize;
+            let part = prefix
+                .get(start..start + max.min(32))
+                .ok_or(PermissionDenied)?;
+            Ok(crate::SessionSourceRange {
+                generation,
+                length: source.offset,
+                offset,
+                bytes: part.into(),
+                cached: false,
+            })
+        }
+    }
+    let provider = Provider(BTreeMap::from([
+        ("projects/proj/root.jsonl".into(), fs::read(&root).unwrap()),
+        (
+            "projects/proj/root/subagents/agent-worker.jsonl".into(),
+            fs::read(&child).unwrap(),
+        ),
+    ]));
+    for (path, hidden) in [
+        (&root, root.with_extension("fixture-original")),
+        (&child, child.with_extension("fixture-original")),
+    ] {
+        fs::rename(path, hidden).unwrap();
+    }
+    let mut hosted = fixture.source(&paths);
+    hosted.current_provider = Some(&provider);
+    for (address, offset) in call_addresses.iter().zip(offsets) {
+        let selected = selected::tool_results(&fixture.options, &hosted, "worker", address, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected[0].relay_receipts.len(), 1);
+        assert_eq!(selected[0].relay_receipts[0].offset, offset);
     }
 }
 

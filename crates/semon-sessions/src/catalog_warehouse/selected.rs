@@ -1205,14 +1205,10 @@ fn read(
     }
     let parent_plan = if let Target::ToolResults(call) = target
         && let Some((position, (_, member, _))) = candidates.first_key_value()
-        && matches!(
-            source.inventory.get(&member.carrier),
-            Some(Availability::Expected(Some(_)))
-        )
         && relay_context.values().all(Vec::is_empty)
     {
         parent_relay::Plan::collect(&db, source, position.source, call, view)?
-            .map(|plan| (plan, member.clone()))
+            .map(|plan| (plan, position.source, member.clone()))
     } else {
         None
     };
@@ -1220,44 +1216,32 @@ fn read(
     let proof_bytes = Mutex::new(PAGE_BYTES);
     let mut readers = BTreeMap::new();
     let mut bytes_left = PAGE_BYTES;
-    if let Some((plan, member)) = parent_plan
-        && let Some(receipt) =
-            plan.resolve(db.clone(), source, member, &proof_bytes, &mut bytes_left)?
-        && let Some(first) = relay_context.first_entry()
-    {
-        first.into_mut().push(receipt);
-    }
-    let mut records = Vec::with_capacity(candidates.len());
-    let mut touched = BTreeMap::new();
-    for (position, (kind, member, mut prefix)) in candidates {
-        let reader: &dyn SessionSourceReader = if matches!(
+    let mut read_body = |id, member: &Arc<Member>, offset| {
+        let (reader, pin): (&dyn SessionSourceReader, Option<ProviderPin>) = if matches!(
             source.inventory.get(&member.carrier),
             Some(Availability::Expected(None))
         ) {
             let provider = provider.as_ref().ok_or(ReadError::Restart)?;
-            let (_, pin) = match provider_pins.entry(position.source) {
+            let (_, pin) = match provider_pins.entry(id) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::btree_map::Entry::Vacant(entry) => entry.insert((
                     member.carrier.clone(),
                     pin_provider(provider, &member.reference)?,
                 )),
             };
-            prefix.provider = Some(pin.clone());
-            provider
+            (provider, Some(pin.clone()))
         } else {
-            match readers.entry(position.source) {
+            let reader = match readers.entry(id) {
                 std::collections::btree_map::Entry::Occupied(reader) => reader.into_mut(),
                 std::collections::btree_map::Entry::Vacant(entry) => entry.insert(
                     PrefixReader::open(db.clone(), source.path, member.clone(), &proof_bytes)?,
                 ),
-            }
+            };
+            (reader, None)
         };
-        touched.entry(position.source).or_insert(prefix);
-        let offset = u64::try_from(position.offset).map_err(index)?;
-        let reference = &member.reference;
         let native = crate::source_reader::read_record_bounded(
             reader,
-            reference,
+            &member.reference,
             offset,
             crate::tx::LINE_MAX as usize,
             &mut bytes_left,
@@ -1269,6 +1253,24 @@ fn read(
                 body_error(error)
             }
         })?;
+        Ok::<_, ReadError>((native, pin))
+    };
+    if let Some((plan, child, member)) = parent_plan
+        && let Some(receipt) = plan.resolve(child, &member, |id, member, offset| {
+            read_body(id, member, offset).map(|(native, _)| native)
+        })?
+        && let Some(first) = relay_context.first_entry()
+    {
+        first.into_mut().push(receipt);
+    }
+    let mut records = Vec::with_capacity(candidates.len());
+    let mut touched = BTreeMap::new();
+    for (position, (kind, member, mut prefix)) in candidates {
+        let offset = u64::try_from(position.offset).map_err(index)?;
+        let (native, pin) = read_body(position.source, &member, offset)?;
+        prefix.provider = pin;
+        touched.entry(position.source).or_insert(prefix);
+        let reference = &member.reference;
         let native_id = crate::tx::native_event_id(&native);
         let turn = turns.remove(&position).flatten();
         let starts_handoff = turn.as_ref().is_some_and(|turn| {

@@ -353,9 +353,11 @@ Schema 57 indexes incoming Claude relay positions. The selected fixture
 adapter carries relay boundaries across pages and places qualified native
 launches at the child's first prompt, or at the first native record when its
 selected prefix has no prompt. Marker launch evidence must be inside the
-selected prefix. For a locally qualified Claude subagent sending to its parent,
-the selected result reader uses the shared native body-first and bounded-time
-matcher on proof-checked sends and non-final receipts. Explicit progress
+selected prefix. For a Claude subagent sending to its parent, the selected
+result reader uses the shared native body-first and bounded-time matcher. Both
+endpoints use the same request's local proof reader or independently authorized
+provider. The selected request pins provider generations and shares its byte
+and source budgets across relay evidence and selected records. Explicit progress
 receipts start an incoming turn in the parent. Untyped legacy receipts can be
 returned as matched result evidence. Their incoming turn placement and their
 use as a child completion fallback still need parity.
