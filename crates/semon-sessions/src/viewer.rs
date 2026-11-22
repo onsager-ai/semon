@@ -6663,6 +6663,12 @@ mod tests {
             received(&receiver, &local.options),
         );
         publish_core_native(&core);
+        // Home schedules a fresh observation. Check ownership while the
+        // synchronous fixture publication still establishes the idle state.
+        assert_eq!(
+            core.session_machine_key("same").unwrap().as_deref(),
+            Some("")
+        );
         let reply = core.respond("GET", "/api/viewer/home", "", None);
         assert_eq!(
             reply.status,
@@ -6674,10 +6680,6 @@ mod tests {
         assert_eq!(machine_ids(&model), ["home", "alpha"]);
         assert_eq!(home_owner(&model, "same").unwrap(), "home");
         assert_eq!(home_owner(&model, "lane-alpha").unwrap(), "alpha");
-        assert_eq!(
-            core.session_machine_key("same").unwrap().as_deref(),
-            Some("")
-        );
         let transcript = core.respond(
             "GET",
             "/api/session-transcript",
@@ -7076,11 +7078,13 @@ mod tests {
         let expected = &before["entries"][0]["address"];
         let address = percent_encode(&expected.to_string());
         let reads = view.hooks.refreshes_first.load(Ordering::SeqCst);
-        let (starts, release) = view.hooks.hold();
+        // The semantic build hook can run after the Index commits. Hold the
+        // writer's work lock so the queued observer cannot reach ingestion.
+        let work = lock(&view.evidence.storage.work);
         say(&fixture, "lane", 1, "written while the rebuild waits");
-        starts
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the native observer rebuilds the changed log");
+        eventually("the native observer takes the queued check", || {
+            (lock(&view.live.state).slot == Slot::Running).then_some(())
+        });
         let during = ask(
             "cached Catalog during observation",
             &view,
@@ -7140,7 +7144,7 @@ mod tests {
         );
         assert_eq!(tree.status, 200);
         assert_eq!(view.hooks.refreshes_first.load(Ordering::SeqCst), reads);
-        drop(release);
+        drop(work);
         let after = eventually("the next qualified native generation", || {
             let reply = native_api(&view, "/api/sessions", "");
             if reply.status != 200 {
@@ -7193,7 +7197,9 @@ mod tests {
             let reply = native_api(&view, "/api/sessions", "");
             (reply.status == 200 && body_of(&reply)["generation"] != v1).then(|| version_of(&reply))
         });
-        assert_eq!(view.hooks.builds(), 2);
+        eventually("the first build completed", || {
+            (view.hooks.builds() == 2 && native_complete_publication(&view).is_some()).then_some(())
+        });
         // Nineteen more, each its own change, within the second after that
         // rebuild: one rebuild takes them all.
         for number in 1..20 {
@@ -7203,7 +7209,8 @@ mod tests {
         let page = eventually("the nineteen lines", || {
             let page = native_api(&view, "/api/session-transcript", "sid=lane&limit=32");
             let done = String::from_utf8_lossy(&page.body).contains("\"line 19\"");
-            done.then_some(page)
+            (done && native_complete_publication(&view).is_some() && view.hooks.builds() >= 3)
+                .then_some(page)
         });
         let text = String::from_utf8_lossy(&page.body);
         assert!((1..20).all(|number| text.contains(&format!("\"line {number}\""))));
@@ -8281,9 +8288,8 @@ mod tests {
     }
 
     /// Fifty views read at once are checked by the pool's three threads,
-    /// never more, and each is queued once at most. With no read after the
-    /// first, each is rebuilt by the pool alone (a read can't do it for
-    /// them), and serves the new line.
+    /// never more, and each is queued once at most. The pool alone checks
+    /// every view and advances their shared Index before another read.
     #[test]
     fn fifty_views_are_checked_by_the_pools_threads_alone() {
         let fixture = lane_fixture();
@@ -8292,31 +8298,36 @@ mod tests {
             .map(|_| {
                 let view = pooled(&fixture, Refresh::Background, &pool);
                 publish_native(&view);
-                assert_eq!(native_api(&view, "/api/sessions", "").status, 200);
                 view
             })
             .collect();
-        // A build counts when it starts: the model it shows is what ends it.
-        let shown = |view: &Arc<MachineView>| native_snapshot(view);
-        let before: Vec<_> = views.iter().map(shown).collect();
-        let builds: Vec<_> = views.iter().map(|view| view.hooks.builds()).collect();
+        let carrier = fixture
+            .options
+            .claude_home
+            .join("projects/project/lane.jsonl");
+        let prefix = committed_carrier_prefix(&fixture.options, &carrier);
+        let checks: Vec<_> = views
+            .iter()
+            .map(|view| view.hooks.stats.load(Ordering::SeqCst))
+            .collect();
+        for view in &views {
+            assert_eq!(native_api(view, "/api/sessions", "").status, 200);
+        }
         say(&fixture, "lane", 1, "seen by fifty views");
-        let mut rebuilt = vec![false; views.len()];
-        eventually("a rebuild of every view, with no read", || {
+        eventually("every view checks the shared source, with no read", || {
             assert!(pool.threads() <= 3, "{} threads", pool.threads());
             assert!(pool.queued() <= views.len());
             for view in &views {
                 assert!(pool.entries_for(view) <= 1);
             }
-            for ((view, (builds, before)), rebuilt) in views
-                .iter()
-                .zip(builds.iter().zip(&before))
-                .zip(&mut rebuilt)
-            {
-                *rebuilt |= view.hooks.builds() > *builds
-                    && shown(view).is_some_and(|snapshot| Some(&snapshot) != before.as_ref());
-            }
-            rebuilt.iter().all(|seen| *seen).then_some(())
+            let current = committed_carrier_prefix(&fixture.options, &carrier);
+            (current.0 > prefix.0
+                && current.1 > prefix.1
+                && views
+                    .iter()
+                    .zip(&checks)
+                    .all(|(view, before)| view.hooks.stats.load(Ordering::SeqCst) > *before))
+            .then_some(())
         });
         for view in &views {
             assert!(serves(view, "seen by fifty views"));

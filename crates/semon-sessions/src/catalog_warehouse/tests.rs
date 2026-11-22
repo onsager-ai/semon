@@ -2624,13 +2624,13 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     let errors: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(reply.status, 200, "{errors}");
     assert_eq!(errors["total"], 2, "{errors}");
-    let offsets: Vec<_> = errors["entries"]
+    let error_offsets: Vec<_> = errors["entries"]
         .as_array()
         .unwrap()
         .iter()
         .map(|entry| entry["address"]["record"]["offset"].as_u64().unwrap())
         .collect();
-    assert_eq!(offsets, [spawn_offset, old_call_offset]);
+    assert_eq!(error_offsets, [spawn_offset, old_call_offset]);
     let identity = http::identity(&configured, "sid=root");
     assert_eq!(identity.status, 200);
     let identity: serde_json::Value = serde_json::from_slice(&identity.body).unwrap();
