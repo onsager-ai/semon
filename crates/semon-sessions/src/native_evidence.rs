@@ -1590,6 +1590,7 @@ impl NativeEvidence {
         }
         let complete = self.refresh_catalog_step(work, now, before_build)?;
         if complete {
+            crate::events::store::publish_catalog_names(&self.options, &self.read_key())?;
             lock(&self.catalog_search).close();
         }
         Ok(complete && !work.tree_repair_pending)

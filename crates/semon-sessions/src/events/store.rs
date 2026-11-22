@@ -5831,6 +5831,68 @@ fn read_claude_sidecar(
     }))
 }
 
+pub(crate) fn committed_claude_agent(
+    db: &Connection,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::native_sidecar::AgentMetadata>> {
+    let mut statement = db.prepare_cached(NATIVE_METADATA_VALUE)?;
+    Ok(read_claude_sidecar(&mut statement, path, ledger)?.map(|sidecar| sidecar.metadata))
+}
+
+const CATALOG_NAMES: &str = "warehouse_codex_names";
+
+pub(crate) fn catalog_names_json(db: &Connection) -> rusqlite::Result<Option<String>> {
+    db.prepare_cached("SELECT value FROM meta WHERE key=?1")?
+        .query_row([CATALOG_NAMES], |row| row.get(0))
+        .optional()
+}
+
+pub(crate) fn publish_catalog_names(options: &crate::Options, source: &str) -> io::Result<()> {
+    let namespace = crate::storage::Namespace::new(source).map_err(io::Error::other)?;
+    let _facts_fence = options
+        .facts
+        .as_ref()
+        .map(|_| crate::source_change::SourceLock::acquire(options, "facts", false))
+        .transpose()?;
+    let names = if let Some(path) = options.facts.as_ref() {
+        let Ok(authority) = crate::facts::source_authority::CurrentSources::open(path) else {
+            // Offline or unavailable Facts cannot publish a new name observation.
+            return Ok(());
+        };
+        if authority.facts_known() {
+            authority.read_snapshot()?.native_names
+        } else {
+            Vec::new()
+        }
+    } else {
+        crate::facts::MachineFacts::native_names_read_only(options)?
+    };
+    let names = names
+        .into_iter()
+        .filter(crate::NativeName::valid)
+        .take(4096)
+        .map(|name| (name.native_id, name.name))
+        .collect::<BTreeMap<_, _>>();
+    let encoded = serde_json::to_string(&names).map_err(io::Error::other)?;
+    let path = super::EventCache::path(&options.cache);
+    let db = focused_connection(&path)?;
+    crate::storage::sqlite::qualify(&db, &namespace).map_err(io::Error::other)?;
+    let previous = catalog_names_json(&db).map_err(io::Error::other)?;
+    if previous.as_ref() == Some(&encoded) || (previous.is_none() && names.is_empty()) {
+        return Ok(());
+    }
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(io::Error::other)?;
+    let tx = Transaction::new_unchecked(&db, TransactionBehavior::Immediate)
+        .map_err(io::Error::other)?;
+    require_current(&tx)?;
+    crate::storage::sqlite::qualify(&tx, &namespace).map_err(io::Error::other)?;
+    tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![CATALOG_NAMES, encoded])
+        .map_err(io::Error::other)?;
+    tx.commit().map_err(io::Error::other)
+}
+
 fn claude_sidecar_digest(connection: &Connection, path: &str) -> rusqlite::Result<Option<String>> {
     let encoded: Option<Option<String>> = connection
         .query_row(NATIVE_METADATA_VALUE, [claude_sidecar_key(path)], |row| {

@@ -2792,7 +2792,8 @@ mod tests {
     fn late_native_name_refreshes_catalog_without_moving_transcript_projection() {
         let fixture = Fixture::new();
         let id = "00000000-0000-0000-0000-000000000077";
-        fixture.codex(id, &[]);
+        fixture.codex(id, &[json!({"type":"response_item","timestamp":"2026-09-24T00:00:01Z",
+            "payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Original prompt"}]}})]);
         let sources =
             crate::SessionSources::with_machines(vec![(String::new(), fixture.options.clone())]);
         let evidence = &sources.machines[0].1;
@@ -2808,34 +2809,43 @@ mod tests {
             }
             panic!("single-source native Catalog publication did not complete");
         };
-        let row = || {
-            let reply = crate::session_catalog_page(&fixture.options, "local", "limit=100");
+        let catalog = |query| {
+            let reply = crate::session_catalog_page(&fixture.options, "local", query);
             assert_eq!(reply.status, 200);
             let page: Value = serde_json::from_slice(&reply.body).unwrap();
             assert_eq!(page["completeness"]["state"], "complete");
-            assert_eq!(page["items"].as_array().unwrap().len(), 1);
-            page["items"][0].clone()
+            page
         };
-        let turns = || {
-            let db = rusqlite::Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-            let mut selected = db.prepare("SELECT metadata FROM session_trace_turns WHERE session_key=?1 ORDER BY turn_id").unwrap();
-            selected
-                .query_map([id], |row| row.get::<_, String>(0))
-                .unwrap()
-                .map(Result::unwrap)
-                .collect::<Vec<_>>()
+        let transcript = || {
+            let reply = crate::session_transcript_range(
+                &fixture.options,
+                "local",
+                &format!("sid={id}"),
+                None,
+            );
+            assert_eq!(reply.status, 200);
+            body_of(&reply)
         };
         prepare();
-        let before = row();
-        let before_turns = turns();
+        let before = catalog("limit=100");
+        let before_transcript = transcript();
+        assert!(!before_transcript["entries"].as_array().unwrap().is_empty());
         fixture.write("codex/session_index.jsonl", &(json!({"id":id,"thread_name":"Meaningful late name","updated_at":"2026-10-10T00:00:00Z"}).to_string() + "\n"));
+        assert_eq!(catalog("limit=100")["generation"], before["generation"]);
         prepare();
-        let after = row();
-        assert_eq!(after["name"], "Meaningful late name");
-        assert_ne!(before["name"], after["name"]);
-        assert_eq!(before["transcript"], after["transcript"]);
-        assert_eq!(before["sources"], after["sources"]);
-        assert_eq!(before_turns, turns());
+        let after = catalog("limit=100");
+        assert_eq!(after["items"][0]["name"], "Meaningful late name");
+        assert_ne!(before["generation"], after["generation"]);
+        assert_eq!(
+            before["items"][0]["source_refs"],
+            after["items"][0]["source_refs"]
+        );
+        let search = catalog("q=meaningful%20late%20name");
+        assert_eq!(search["items"][0]["key"], id);
+        let after_transcript = transcript();
+        assert_eq!(before_transcript["identity"], after_transcript["identity"]);
+        assert_eq!(before_transcript["binding"], after_transcript["binding"]);
+        assert_eq!(before_transcript["entries"], after_transcript["entries"]);
         sources.close();
     }
 

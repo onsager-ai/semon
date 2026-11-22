@@ -67,6 +67,7 @@ pub(super) struct ReadView<'a> {
     db: Arc<chunk_proofs::Snapshot>,
     options: &'a Options,
     runtime: OnceCell<RuntimeObservations>,
+    names: OnceCell<BTreeMap<String, String>>,
     pub(super) archive: super::ArchiveReader<'a>,
     body_bytes: Mutex<usize>,
     transcript: bool,
@@ -111,6 +112,7 @@ impl<'a> ReadView<'a> {
             db: chunk_proofs::Snapshot::new(db),
             options: source.options,
             runtime: OnceCell::new(),
+            names: OnceCell::new(),
             archive: super::ArchiveReader::with_budget(source.options, bytes),
             body_bytes: Mutex::new(bytes),
             transcript: false,
@@ -122,6 +124,24 @@ impl<'a> ReadView<'a> {
     pub(super) fn runtime(&self) -> &RuntimeObservations {
         self.runtime
             .get_or_init(|| RuntimeObservations::new(self.options))
+    }
+
+    pub(super) fn codex_name(&self, id: &str) -> Result<Option<&str>, ReadError> {
+        if self.names.get().is_none() {
+            let db = self.lock()?;
+            let names = crate::events::store::catalog_names_json(&db)
+                .map_err(index)?
+                .map(|encoded| serde_json::from_str(&encoded))
+                .transpose()
+                .map_err(index)?
+                .unwrap_or_default();
+            let _ = self.names.set(names);
+        }
+        Ok(self
+            .names
+            .get()
+            .and_then(|names| names.get(id))
+            .map(String::as_str))
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -2457,6 +2457,7 @@ fn warehouse_trace_uses_the_latest_completed_claude_run() {
 fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     let mut fixture = Fixture::new("legacy-relay-detail");
     let root = fixture.claude("root", "Delegate");
+    let spawn_offset = fs::metadata(&root).unwrap().len();
     append_native(
         &root,
         json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:01Z",
@@ -2594,7 +2595,8 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     );
 
     // The first receipt starts a turn because its body matches the child's send.
-    // Count the unanswered call before that receipt, but leave the live call open.
+    // The Agent launch and Read have no tool results and precede the turn.
+    // The Glob in the current turn is still live.
     append_native(
         &root,
         json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:09Z",
@@ -2617,15 +2619,18 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
         .unwrap()
         .unwrap();
     assert_eq!(row.status, Some("work"));
-    assert_eq!(row.details.unwrap()["errors"], 1);
+    assert_eq!(row.details.unwrap()["errors"], 2);
     let reply = http::annotations(&configured, "sid=root&kind=errors", None, None);
     let errors: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(reply.status, 200, "{errors}");
-    assert_eq!(errors["total"], 1, "{errors}");
-    assert_eq!(
-        errors["entries"][0]["address"]["record"]["offset"],
-        old_call_offset
-    );
+    assert_eq!(errors["total"], 2, "{errors}");
+    let offsets: Vec<_> = errors["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["address"]["record"]["offset"].as_u64().unwrap())
+        .collect();
+    assert_eq!(offsets, [spawn_offset, old_call_offset]);
     let identity = http::identity(&configured, "sid=root");
     assert_eq!(identity.status, 200);
     let identity: serde_json::Value = serde_json::from_slice(&identity.body).unwrap();

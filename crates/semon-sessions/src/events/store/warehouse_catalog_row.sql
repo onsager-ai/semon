@@ -1,14 +1,16 @@
 ), members AS (
   SELECT m.component,d.source,d.harness,d.native_id,d.parent_id,d.nickname,d.agent_path,
-    coalesce(a.title,a.agent_name) AS title,d.model,d.effort,a.cwd,a.branch,a.path,
+    coalesce(a.title,a.agent_name) AS title,coalesce(d.model,agent.model) AS model,d.effort,a.cwd,a.branch,a.path,
     row_number() OVER(PARTITION BY m.component ORDER BY d.first_ts DESC,d.continued,d.native_id DESC,d.source) AS rank,
     row_number() OVER(PARTITION BY m.component ORDER BY a.title IS NULL AND a.agent_name IS NULL,
       d.first_ts DESC,d.continued,d.native_id DESC,d.source) AS title_rank,
-    row_number() OVER(PARTITION BY m.component ORDER BY d.model IS NULL,
+    row_number() OVER(PARTITION BY m.component ORDER BY coalesce(d.model,agent.model) IS NULL,
       d.first_ts DESC,d.continued,d.native_id DESC,d.source) AS model_rank,
     row_number() OVER(PARTITION BY m.component ORDER BY d.effort IS NULL,
       d.first_ts DESC,d.continued,d.native_id DESC,d.source) AS effort_rank
   FROM admitted a JOIN lineage_member m USING(source) JOIN dim_session d USING(source)
+  LEFT JOIN maintenance_cursor current ON d.harness='claude' AND NOT d.lineage AND current.source=d.source
+  LEFT JOIN fact_agent_observation agent ON agent.source=d.source AND agent.revision=current.sidecar_revision AND agent.present
 ), rows AS MATERIALIZED (
   SELECT k.id,k.owner,k.harness,coalesce(c.last,0) AS last,
     coalesce(t.title,CASE k.harness WHEN 'codex' THEN

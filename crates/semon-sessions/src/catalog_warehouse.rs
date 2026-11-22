@@ -380,6 +380,7 @@ pub(super) struct Row {
     pub(super) title: String,
     prompt_title: Option<PromptTitle>,
     native_title: bool,
+    codex_native_id: Option<String>,
     pub(super) model: String,
     effort: Option<String>,
     repo: Option<String>,
@@ -403,7 +404,12 @@ impl Row {
         view: &selected::ReadView<'_>,
         source: &Source<'_>,
     ) -> Result<(), ReadError> {
-        if let Some(prompt) = self.prompt_title.take() {
+        if let Some(id) = &self.codex_native_id
+            && let Some(name) = view.codex_name(id)?
+        {
+            self.title = name.to_owned();
+            self.native_title = true;
+        } else if let Some(prompt) = self.prompt_title.take() {
             self.title = selected::prompt_title(
                 view,
                 source,
@@ -683,6 +689,9 @@ impl<'a> Snapshot<'a> {
         let paths = encode(&authorized)?;
         let repos = repositories(transaction, source, &paths)?;
         digest.update(encode(&repos)?);
+        if let Some(names) = crate::events::store::catalog_names_json(transaction).map_err(index)? {
+            digest.update(encode(&names)?);
+        }
         source.validate_authority()?;
         Ok(Self {
             transaction,
@@ -733,7 +742,13 @@ impl<'a> Snapshot<'a> {
                 total = usize::try_from(record.get::<_, i64>(8).map_err(index)?).map_err(index)?;
                 continue;
             };
-            candidates.push(read_row(self.source, record, key, request.q.is_some())?);
+            candidates.push(read_row(
+                self.transaction,
+                self.source,
+                record,
+                key,
+                request.q.is_some(),
+            )?);
         }
         Ok((candidates, total))
     }
@@ -1207,6 +1222,7 @@ fn selected_metadata(
         let mut rows = Vec::new();
         while let Some(record) = records.next().map_err(index)? {
             rows.push(read_row(
+                transaction,
                 source,
                 record,
                 record.get(0).map_err(index)?,
@@ -1400,6 +1416,7 @@ fn focused_metadata(source: &Source<'_>, key: &str) -> Result<Option<(Row, Strin
 }
 
 fn read_row(
+    db: &Connection,
     source: &Source<'_>,
     record: &rusqlite::Row<'_>,
     key: String,
@@ -1416,6 +1433,7 @@ fn read_row(
         title: record.get(4).map_err(index)?,
         prompt_title: None,
         native_title: record.get(19).map_err(index)?,
+        codex_native_id: None,
         model: record.get(5).map_err(index)?,
         effort: record.get(18).map_err(index)?,
         repo: record.get(6).map_err(index)?,
@@ -1438,6 +1456,18 @@ fn read_row(
         status: None,
         details: None,
     };
+    if row.harness == "codex" {
+        row.codex_native_id = Some(record.get(12).map_err(index)?);
+    } else if row.kind == "subagent" && !row.native_title {
+        let carrier: String = record.get(10).map_err(index)?;
+        let ledger: Ledger =
+            serde_json::from_str(&record.get::<_, String>(11).map_err(index)?).map_err(index)?;
+        if let Some(agent) =
+            crate::events::store::committed_claude_agent(db, &carrier, &ledger).map_err(index)?
+        {
+            row.title = crate::model::one_line(agent.label.as_deref().unwrap_or("Subagent"), 80);
+        }
+    }
     let guardian: bool = record.get(17).map_err(index)?;
     row.presentation_kind = match row.kind {
         "subagent" => Some("Subagent"),

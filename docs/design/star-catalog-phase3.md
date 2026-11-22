@@ -101,6 +101,10 @@ well as selecting metadata from committed facts.
   candidate work and continuation frontiers without a semantic-ready check.
   Keep ordinary lists free of transcript or native-log scans. Resolve title
   positions through the existing authorized metadata/field path when needed.
+  Publish qualified Codex names with the source observer's completed Catalog
+  work. They affect Catalog metadata revisions and search, independently of
+  transcript evidence generations. Read Claude child labels from the committed
+  ledger-bound sidecar and child models from its current warehouse revision.
 - Capture runtime evidence once per source per request. Use the current
   [`RuntimeObservations`](../../crates/semon-sessions/src/native_evidence/runtime.rs)
   and `catalog.rs` `relative_status` rules alongside phase 2's

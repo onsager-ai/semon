@@ -43,6 +43,7 @@ fn read_source(
         let mut rows = Vec::new();
         while let Some(hit) = hits.next().map_err(index)? {
             rows.push(super::read_row(
+                &tx,
                 &source,
                 hit,
                 hit.get(0).map_err(index)?,
