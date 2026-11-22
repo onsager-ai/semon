@@ -1440,6 +1440,12 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
         "usage":{"input_tokens":100,"output_tokens":10}}}),
     );
     let codex = fixture.codex("codex-native");
+    let turn_offset = fs::metadata(&codex).unwrap().len();
+    append_native(
+        &codex,
+        json!({"type":"event_msg","timestamp":"2026-09-24T00:00:00Z",
+        "payload":{"type":"task_started","turn_id":"owned-turn"}}),
+    );
     let call = fs::metadata(&codex).unwrap().len();
     append_native(
         &codex,
@@ -1533,6 +1539,11 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
     assert_eq!(details["calls"], 1);
     assert_eq!(details["errors"], 1);
     assert_eq!(details["tool_calls"], json!({"exec_command":1}));
+    let lifecycle = &details["turn_lifecycle"];
+    assert_eq!(lifecycle["phase"], "active");
+    assert_eq!(lifecycle["turn_id"], "owned-turn");
+    assert_eq!(lifecycle["offset"], turn_offset);
+    assert_eq!(lifecycle["source_generation"].as_str().unwrap().len(), 64);
     let transcript = oracle("codex-native");
     let entry = transcript["entries"]
         .as_array()
@@ -1554,6 +1565,33 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
         value
     };
     let page = body(http::transcript(&configured, "sid=native", None, None));
+    let turn = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["text"] == "Review this")
+        .unwrap()["turn"]
+        .as_str()
+        .unwrap();
+    let home_query = |generation: &str| {
+        crate::native_html::query(&[
+            ("sid", "native"),
+            ("scope", "current"),
+            ("generation", generation),
+            ("session_fields", "[\"detail\"]"),
+            ("turns", &json!([turn]).to_string()),
+        ])
+    };
+    let generation = page["identity"]["generation"].as_str().unwrap();
+    let home = body(http::home(&configured, &home_query(generation), None, None));
+    assert_eq!(home["turns"][turn], "Review this");
+    assert_eq!(home["session"]["detail"], "Review this");
+    assert_eq!(home["session"]["detail_from"], "you");
+    assert_eq!(home["incomplete"], false);
+    assert_eq!(
+        http::home(&configured, &home_query(&"0".repeat(64)), None, None).status,
+        409
+    );
     let usage_entry = page["entries"]
         .as_array()
         .unwrap()
@@ -1880,6 +1918,41 @@ fn warehouse_relay_turn_carries_across_pages_at_the_selected_prefix() {
     assert_eq!(Some(turn.id.as_str()), reply["turn"].as_str());
 }
 
+struct RelayFixtureProvider(BTreeMap<String, Vec<u8>>);
+impl crate::SessionSourceReader for RelayFixtureProvider {
+    fn read_range(
+        &self,
+        source: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> std::io::Result<crate::SessionSourceRange> {
+        use std::io::ErrorKind::PermissionDenied;
+        let bytes = self.0.get(&source.path).ok_or(PermissionDenied)?;
+        let prefix = bytes
+            .get(..source.offset as usize)
+            .ok_or(PermissionDenied)?;
+        let generation = format!("fixture-{}-{}", source.native_id, source.offset);
+        if source.root != "claude"
+            || <[u8; 32]>::from(Sha256::digest(prefix)) != source.prefix_sha256
+            || expected.is_some_and(|expected| expected != generation)
+        {
+            return Err(PermissionDenied.into());
+        }
+        let start = offset as usize;
+        let part = prefix
+            .get(start..start + max.min(32))
+            .ok_or(PermissionDenied)?;
+        Ok(crate::SessionSourceRange {
+            generation,
+            length: source.offset,
+            offset,
+            bytes: part.into(),
+            cached: false,
+        })
+    }
+}
+
 #[test]
 fn warehouse_parent_relay_matches_body_then_time_at_the_selected_prefix() {
     let mut fixture = Fixture::new("parent-relay-fallback");
@@ -1950,41 +2023,7 @@ fn warehouse_parent_relay_matches_body_then_time_at_the_selected_prefix() {
         call_addresses.push(call.address);
     }
 
-    struct Provider(BTreeMap<String, Vec<u8>>);
-    impl crate::SessionSourceReader for Provider {
-        fn read_range(
-            &self,
-            source: &crate::SessionSourceRef,
-            expected: Option<&str>,
-            offset: u64,
-            max: usize,
-        ) -> std::io::Result<crate::SessionSourceRange> {
-            use std::io::ErrorKind::PermissionDenied;
-            let bytes = self.0.get(&source.path).ok_or(PermissionDenied)?;
-            let prefix = bytes
-                .get(..source.offset as usize)
-                .ok_or(PermissionDenied)?;
-            let generation = format!("fixture-{}-{}", source.native_id, source.offset);
-            if source.root != "claude"
-                || <[u8; 32]>::from(Sha256::digest(prefix)) != source.prefix_sha256
-                || expected.is_some_and(|expected| expected != generation)
-            {
-                return Err(PermissionDenied.into());
-            }
-            let start = offset as usize;
-            let part = prefix
-                .get(start..start + max.min(32))
-                .ok_or(PermissionDenied)?;
-            Ok(crate::SessionSourceRange {
-                generation,
-                length: source.offset,
-                offset,
-                bytes: part.into(),
-                cached: false,
-            })
-        }
-    }
-    let provider = Provider(BTreeMap::from([
+    let provider = RelayFixtureProvider(BTreeMap::from([
         ("projects/proj/root.jsonl".into(), fs::read(&root).unwrap()),
         (
             "projects/proj/root/subagents/agent-worker.jsonl".into(),
@@ -2025,6 +2064,7 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     )
     .unwrap();
     fs::write(&child, format!("{}\n", prompt("root", 2, "Work"))).unwrap();
+    let send_offset = fs::metadata(&child).unwrap().len();
     append_native(
         &child,
         json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:03Z",
@@ -2139,6 +2179,67 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
             .status,
         Some("work")
     );
+
+    let child_relative = "projects/proj/root/subagents/agent-worker.jsonl";
+    let provider = RelayFixtureProvider(BTreeMap::from([
+        ("projects/proj/root.jsonl".into(), fs::read(&root).unwrap()),
+        (child_relative.into(), fs::read(&child).unwrap()),
+    ]));
+    fs::rename(&child, child.with_extension("fixture-original")).unwrap();
+    fs::write(
+        &child,
+        format!("{}\n", prompt("root", 10, "Replacement work")),
+    )
+    .unwrap();
+    scan_file(&child, "claude", &mut fixture.cache, &mut false).unwrap();
+    let identity = warehouse::retained_identity(&db, &fixture.namespace, "worker").unwrap();
+    let source = fixture.source(&paths);
+    let sent = selected::Address {
+        path: child_relative.into(),
+        offset: send_offset,
+        block: 0,
+        occurrence: 0,
+    };
+    let relay = selected::retained_peer_relay_address(
+        &source,
+        "worker",
+        &identity.witness,
+        "root",
+        (&sent, 0),
+        Some(&provider),
+    )
+    .unwrap();
+    assert_eq!(relay.record.offset, offsets[0]);
+    let opened = selected::retained_peer_window(
+        &source,
+        "root",
+        selected::PeerBinding {
+            trace: "worker",
+            witness: &identity.witness,
+        },
+        16,
+        None,
+        Some((&relay.record, &relay.binding)),
+        Some(&provider),
+    )
+    .unwrap();
+    let rendered = selected::render::entries(&opened, source.namespace.as_str(), "root", 0);
+    assert!(
+        rendered
+            .iter()
+            .any(|entry| entry["entry_id"] == relay.entry_id)
+    );
+    assert!(matches!(
+        selected::retained_peer_relay_address(
+            &source,
+            "worker",
+            &identity.witness,
+            "root",
+            (&sent, 1),
+            Some(&provider),
+        ),
+        Err(ReadError::PeerUnavailable(_))
+    ));
 }
 
 #[test]
@@ -3113,9 +3214,58 @@ fn warehouse_list_qualifies_codex_prompt_title_for_search() {
 }
 
 #[test]
+fn warehouse_home_previews_a_native_human_ask() {
+    let mut fixture = Fixture::new("home-ask");
+    let path = fixture.claude("native", "Initial prompt");
+    let offset = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        json!({"type":"user","uuid":"human-followup","sessionId":"native",
+            "timestamp":"2026-09-24T00:00:01Z","origin":{"kind":"human"},
+            "message":{"role":"user","content":"Review the second file"}}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let page = http::transcript(&configured, "sid=native", None, None);
+    assert_eq!(page.status, 200);
+    let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
+    let ask = crate::model::ask_id("native", offset);
+    let generation = page["identity"]["generation"].as_str().unwrap();
+    let context = &page["relationship_context"];
+    assert_eq!(context["state"], "complete");
+    assert_eq!(context["handoffs"][0]["id"], ask);
+    assert_eq!(context["previews"]["native"], generation);
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("scope", "current"),
+        ("generation", generation),
+        ("events", &json!([ask]).to_string()),
+    ]);
+    let home = http::home(&configured, &query, None, None);
+    assert_eq!(home.status, 200);
+    let home: serde_json::Value = serde_json::from_slice(&home.body).unwrap();
+    assert_eq!(home["events"][&ask]["brief"], "Review the second file");
+    assert_eq!(home["session"]["detail_from"], "you");
+    assert_eq!(home["incomplete"], false);
+}
+
+#[test]
 fn warehouse_list_runtime_rejects_pid_reuse_and_tracks_wait() {
     let mut fixture = Fixture::new("list-runtime");
     let path = fixture.claude("native", "Runtime fixture");
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"pending","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"pending-tool","name":"Read","input":{"file_path":"/work/note"}}
+        ]}}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
     let pids = fixture.options.claude_home.join("sessions");
     fs::create_dir_all(&pids).unwrap();
     let stat = fixture.options.proc_root.join("42/stat");
@@ -3146,7 +3296,47 @@ fn warehouse_list_runtime_rejects_pid_reuse_and_tracks_wait() {
     };
     write_pid("busy");
     assert_eq!(read(), Some("work"));
+    let selected = || {
+        focused_metadata(&fixture.source(&[&path]), "native")
+            .unwrap()
+            .unwrap()
+            .0
+    };
+    assert_eq!(selected().details.unwrap()["activity"]["tool"], "Read");
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let page = http::transcript(&configured, "sid=native", None, None);
+    assert_eq!(page.status, 200);
+    let page: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("scope", "current"),
+        (
+            "generation",
+            page["identity"]["generation"].as_str().unwrap(),
+        ),
+        ("session_fields", "[\"activity\"]"),
+    ]);
+    let home_activity = || {
+        let reply = http::home(&configured, &query, None, None);
+        assert_eq!(reply.status, 200);
+        serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap()["session"]["activity"]
+            .clone()
+    };
+    let activity = home_activity();
+    assert_eq!(activity[0], "Read");
+    assert_eq!(activity[1], "/work/note");
+    assert_eq!(
+        activity[3],
+        selected().details.unwrap()["activity"]["since"]
+    );
     write_pid("waiting");
+    assert!(home_activity().is_null());
+    assert!(selected().details.unwrap()["activity"].is_null());
     assert_eq!(read(), Some("wait"));
     write_start(778);
     assert_eq!(read(), Some("done"));

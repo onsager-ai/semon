@@ -190,12 +190,31 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
     next !== (end < total ? end : null) ||
     entries.some((item, i) => item.slot !== first + i) ||
     new Set(entries.map((item) => item.entry_id)).size !== entries.length ||
-    (context.state !== 'incomplete' && context.state !== 'complete') ||
-    !Array.isArray(context.handoffs) ||
-    context.handoffs.length > 200 ||
     (state !== 'cached' && state !== 'stale' && state !== 'incomplete' && state !== 'unavailable')
   )
     throw new Error('Invalid catalog transcript page');
+  return {
+    api: 1,
+    identity,
+    session,
+    projection: { version: 6, generation, errorsGeneration, total },
+    range: { first, end, next },
+    entries,
+    freshness: { state },
+    relationship_context: parseRelationshipContext(context, identity, entries),
+  };
+}
+function parseRelationshipContext(
+  context: Record<string, unknown>,
+  identity: CatalogSessionIdentity,
+  entries: readonly Pick<CatalogTranscriptEntry, 'entry'>[],
+): CatalogTranscriptPage['relationship_context'] {
+  if (
+    (context.state !== 'incomplete' && context.state !== 'complete') ||
+    !Array.isArray(context.handoffs) ||
+    context.handoffs.length > 200
+  )
+    throw Error('Invalid ranged relationship context');
   const relationships = array(context.handoffs, parseRecordedRelationship);
   const turns = array(context.turns ?? [], (value) => {
       const row = object(value);
@@ -225,52 +244,43 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
   )
     throw Error('Invalid ranged relationship scope');
   return {
-    api: 1,
-    identity,
-    session,
-    projection: { version: 6, generation, errorsGeneration, total },
-    range: { first, end, next },
-    entries,
-    freshness: { state },
-    relationship_context: {
-      state: context.state,
-      turn_ids: array(context.turn_ids, text),
-      turns,
-      handoffs: relationships,
-      sessions: dictionary(context.sessions ?? {}, (value) => {
-        const row = object(value);
-        const activity = row.activity == null ? undefined : object(row.activity);
-        if (activity && text(activity.tool).length > 256)
-          throw Error('Invalid recorded child activity');
-        return {
-          name: text(row.name),
-          harness: text(row.harness),
-          model: text(row.model),
-          kind: row.kind == null ? undefined : text(row.kind),
-          state: row.state == null ? undefined : text(row.state),
-          start: row.start == null ? undefined : number(row.start),
-          last: row.last == null ? undefined : number(row.last),
-          calls: row.calls == null ? undefined : ordinal(row.calls),
-          usd: row.usd == null ? undefined : number(row.usd),
-          activity: activity
-            ? { tool: text(activity.tool), since: ordinal(activity.since) }
-            : undefined,
-          live_observation:
-            row.live_observation == null
-              ? undefined
-              : row.live_observation === 0
-                ? false
-                : row.live_observation === 1
-                  ? true
-                  : boolean(row.live_observation),
-        };
-      }),
-      previews: dictionary(context.previews ?? {}, (value) => {
-        const generation = text(value);
-        if (!/^[a-f0-9]{64}$/.test(generation)) throw Error('Invalid context generation');
-        return generation;
-      }),
-    },
+    state: context.state,
+    turn_ids: array(context.turn_ids, text),
+    turns,
+    handoffs: relationships,
+    sessions: dictionary(context.sessions ?? {}, (value) => {
+      const row = object(value);
+      const activity = row.activity == null ? undefined : object(row.activity);
+      if (activity && text(activity.tool).length > 256)
+        throw Error('Invalid recorded child activity');
+      return {
+        name: text(row.name),
+        harness: text(row.harness),
+        model: text(row.model),
+        kind: row.kind == null ? undefined : text(row.kind),
+        state: row.state == null ? undefined : text(row.state),
+        start: row.start == null ? undefined : number(row.start),
+        last: row.last == null ? undefined : number(row.last),
+        calls: row.calls == null ? undefined : ordinal(row.calls),
+        usd: row.usd == null ? undefined : number(row.usd),
+        activity: activity
+          ? { tool: text(activity.tool), since: ordinal(activity.since) }
+          : undefined,
+        live_observation:
+          row.live_observation == null
+            ? undefined
+            : row.live_observation === 0
+              ? false
+              : row.live_observation === 1
+                ? true
+                : boolean(row.live_observation),
+      };
+    }),
+    previews: dictionary(context.previews ?? {}, (value) => {
+      const generation = text(value);
+      if (!/^[a-f0-9]{64}$/.test(generation)) throw Error('Invalid context generation');
+      return generation;
+    }),
   };
 }
 
@@ -287,6 +297,7 @@ export interface CatalogNativeTranscriptPage {
   position: 'latest' | 'earlier' | 'address';
   earlierCursor: string | null;
   entries: CatalogNativeTranscriptEntry[];
+  relationship_context: CatalogTranscriptPage['relationship_context'];
   session: CatalogSession | null;
   selected: { harness: string; nativeId: string; title: string | null; model: string | null };
 }
@@ -313,6 +324,7 @@ export function parseCatalogNativeTranscriptPage(value: unknown): CatalogNativeT
   const row = object(value),
     identity = parseCatalogIdentity(row.identity),
     selected = object(row.selected);
+  const { title, model } = selected;
   const binding = text(row.binding),
     earlierCursor = row.earlier_cursor === null ? null : text(row.earlier_cursor);
   if (
@@ -343,6 +355,11 @@ export function parseCatalogNativeTranscriptPage(value: unknown): CatalogNativeT
   return {
     identity,
     binding,
+    relationship_context: parseRelationshipContext(
+      object(row.relationship_context),
+      identity,
+      entries,
+    ),
     session: row.session === null ? null : parseCatalogSession(row.session),
     position: row.position,
     earlierCursor,
@@ -350,8 +367,8 @@ export function parseCatalogNativeTranscriptPage(value: unknown): CatalogNativeT
     selected: {
       harness: identity.harness,
       nativeId: text(selected.native_id),
-      title: selected.title === null ? null : text(selected.title),
-      model: selected.model === null ? null : text(selected.model),
+      title: title === null ? null : text(title),
+      model: model === null ? null : text(model),
     },
   };
 }

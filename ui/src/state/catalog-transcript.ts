@@ -38,6 +38,34 @@ function bodyMetadata(item: CatalogTranscriptEntry): string {
   }
   return JSON.stringify({ ...identity, entry });
 }
+function mergeRelationshipContext(
+  pages: readonly Pick<CatalogTranscriptPage, 'relationship_context'>[],
+): CatalogTranscriptPage['relationship_context'] {
+  const handoffs = new Map<
+    string,
+    CatalogTranscriptPage['relationship_context']['handoffs'][number]
+  >();
+  const sessions: CatalogTranscriptPage['relationship_context']['sessions'] = {};
+  const previews: Record<string, string> = {};
+  const turns = new Map<string, CatalogTranscriptPage['relationship_context']['turns'][number]>();
+  for (const page of pages) {
+    for (const relationship of page.relationship_context.handoffs)
+      handoffs.set(relationship.edge.id, relationship);
+    Object.assign(sessions, page.relationship_context.sessions);
+    Object.assign(previews, page.relationship_context.previews);
+    for (const turn of page.relationship_context.turns) turns.set(turn.id, turn);
+  }
+  return {
+    state: pages.some((page) => page.relationship_context.state === 'incomplete')
+      ? 'incomplete'
+      : 'complete',
+    turn_ids: [...new Set(pages.flatMap((page) => page.relationship_context.turn_ids))],
+    turns: [...turns.values()],
+    handoffs: [...handoffs.values()],
+    sessions,
+    previews,
+  };
+}
 export interface CatalogRangeRequest extends CatalogSelectionScope {
   readonly epoch: number;
   readonly after: number | null;
@@ -248,30 +276,7 @@ export class CatalogTranscriptStore {
     return page ? { first: page.range.first, end: page.range.end } : null;
   }
   context(): CatalogTranscriptPage['relationship_context'] {
-    const handoffs = new Map<
-      string,
-      CatalogTranscriptPage['relationship_context']['handoffs'][number]
-    >();
-    const sessions: CatalogTranscriptPage['relationship_context']['sessions'] = {};
-    const previews: Record<string, string> = {};
-    const turns = new Map<string, CatalogTranscriptPage['relationship_context']['turns'][number]>();
-    for (const page of this.pages) {
-      for (const relationship of page.relationship_context.handoffs)
-        handoffs.set(relationship.edge.id, relationship);
-      Object.assign(sessions, page.relationship_context.sessions);
-      Object.assign(previews, page.relationship_context.previews);
-      for (const turn of page.relationship_context.turns) turns.set(turn.id, turn);
-    }
-    return {
-      state: this.pages.some((page) => page.relationship_context.state === 'incomplete')
-        ? 'incomplete'
-        : 'complete',
-      turn_ids: [...new Set(this.pages.flatMap((page) => page.relationship_context.turn_ids))],
-      turns: [...turns.values()],
-      handoffs: [...handoffs.values()],
-      sessions,
-      previews,
-    };
+    return mergeRelationshipContext(this.pages);
   }
   loadedRanges(): CatalogLoadedRange[] {
     const ranges: CatalogLoadedRange[] = [];
@@ -375,8 +380,24 @@ export class CatalogNativeTranscriptStore {
         const previous = this.pages[overlap];
         const keep = previous.entries.findIndex(({ entry_id }) => entry_id === start);
         this.pages = this.pages.slice(0, overlap);
-        if (keep > 0) this.pages.push({ ...previous, entries: previous.entries.slice(0, keep) });
-        else if (!this.pages.length) page.earlierCursor = previous.earlierCursor;
+        if (keep > 0) {
+          const entries = previous.entries.slice(0, keep),
+            context = previous.relationship_context,
+            turns = new Set(entries.flatMap(({ entry }) => (entry.turn ? [entry.turn] : []))),
+            actions = new Set(entries.flatMap(({ entry }) => (entry.k === 'h' ? [entry.id] : []))),
+            retainedTurns = context.turns.filter((turn) => turns.has(turn.id));
+          for (const turn of retainedTurns) if (turn.start) actions.add(turn.start);
+          this.pages.push({
+            ...previous,
+            entries,
+            relationship_context: {
+              ...context,
+              turn_ids: context.turn_ids.filter((id) => turns.has(id)),
+              turns: retainedTurns,
+              handoffs: context.handoffs.filter(({ edge }) => actions.has(edge.id)),
+            },
+          });
+        } else if (!this.pages.length) page.earlierCursor = previous.earlierCursor;
         this.pages = [...this.pages, page].slice(-5);
       } else {
         this.pages = [page];
@@ -397,6 +418,10 @@ export class CatalogNativeTranscriptStore {
 
   selectedPage(): CatalogNativeTranscriptPage | null {
     return this.pages.at(-1) ?? null;
+  }
+
+  context(): CatalogTranscriptPage['relationship_context'] {
+    return mergeRelationshipContext(this.pages);
   }
 
   entries(): CatalogNativeTranscriptPage['entries'] {

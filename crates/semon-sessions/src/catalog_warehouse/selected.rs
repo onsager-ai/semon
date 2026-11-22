@@ -28,7 +28,7 @@ mod retained;
 pub(super) use retained::{
     PeerBinding, retained_activity_anchor, retained_addressed_window, retained_annotations,
     retained_latest_page, retained_page, retained_peer_record_at, retained_peer_relay_address,
-    retained_peer_window, retained_record_at, retained_turn,
+    retained_peer_window, retained_preview_turns, retained_record_at, retained_turn,
 };
 
 const MEMBER_PAGE: i64 = 64;
@@ -93,6 +93,16 @@ struct Position {
     offset: i64,
     block: i64,
     occurrence: i64,
+}
+
+impl Position {
+    const END: Self = Self {
+        time: i64::MAX,
+        source: i64::MAX,
+        offset: i64::MAX,
+        block: i64::MAX,
+        occurrence: i64::MAX,
+    };
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -269,6 +279,27 @@ pub(super) struct Component {
     pub(super) reply_records: BTreeMap<(String, u64), serde_json::Value>,
     pub(super) next: Option<Cursor>,
     pub(super) annotations: Option<AnnotationPage>,
+    pub(super) home_detail: Option<HomeDetail>,
+    pub(super) home_activity: Option<serde_json::Value>,
+}
+
+#[derive(Debug)]
+pub(super) struct HomeDetail {
+    pub(super) text: serde_json::Value,
+    pub(super) from: Option<&'static str>,
+}
+
+impl HomeDetail {
+    fn from_turn(turn: &causal::TurnStart, native: &serde_json::Value) -> Self {
+        Self {
+            text: crate::model::overview_text(
+                &serde_json::json!({"kind":"prompt","block":turn.address.block}),
+                native,
+                None,
+            ),
+            from: (!turn.handoff).then_some("you"),
+        }
+    }
 }
 
 struct Member {
@@ -873,6 +904,81 @@ pub(super) fn annotations(
     )
 }
 
+struct ActiveTool {
+    position: Position,
+    tool: String,
+    since: i64,
+    block: i64,
+    cwd: Option<String>,
+}
+
+fn active_tool_candidate(
+    db: &rusqlite::Connection,
+    component: i64,
+    harness: &str,
+) -> Result<Option<ActiveTool>, ReadError> {
+    let active = db
+        .prepare_cached(include_str!("active_tool.sql"))
+        .map_err(index)?
+        .query_row(params![component, harness], |row| {
+            let Some(since) = row.get(6)? else {
+                return Ok(None);
+            };
+            Ok(Some(ActiveTool {
+                position: Position {
+                    time: row.get(0)?,
+                    source: row.get(1)?,
+                    offset: row.get(2)?,
+                    block: row.get(3)?,
+                    occurrence: row.get(4)?,
+                },
+                tool: row.get(5)?,
+                since,
+                block: row.get(7)?,
+                cwd: row.get(8)?,
+            }))
+        })
+        .optional()
+        .map_err(index)?;
+    Ok(active.flatten())
+}
+
+pub(super) fn active_tool(
+    db: &rusqlite::Connection,
+    source: &Source<'_>,
+    owner: i64,
+    key: &str,
+    harness: &str,
+) -> Result<Option<(String, i64)>, ReadError> {
+    let (component, view) = db
+        .query_row(
+            "SELECT component,(SELECT max(revision) FROM warehouse_prefix)
+             FROM lineage_member WHERE source=?1",
+            [owner],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(index)?;
+    let Some(active) = active_tool_candidate(db, component, harness)? else {
+        return Ok(None);
+    };
+    let at = active.position;
+    let end = Position::END;
+    let turns = causal::turns(
+        db,
+        source,
+        key,
+        harness,
+        component,
+        view,
+        [at, end].into_iter(),
+        "{}",
+    )?;
+    Ok(turns[&at]
+        .as_ref()
+        .filter(|turn| turns[&end].as_ref() == Some(*turn))
+        .map(|_| (active.tool, active.since)))
+}
+
 pub(super) fn turn(
     source: &Source<'_>,
     key: &str,
@@ -883,9 +989,60 @@ pub(super) fn turn(
         source,
         CatalogReadScope::Current,
         key,
-        Target::Turn(turn),
+        Target::Turns(&[turn], None),
         None,
     )
+}
+
+pub(super) fn preview_turns(
+    source: &Source<'_>,
+    key: &str,
+    turns: &[&str],
+    home: HomeFields<'_>,
+) -> Result<Option<Component>, ReadError> {
+    read(
+        source.options,
+        source,
+        CatalogReadScope::Current,
+        key,
+        Target::Turns(turns, Some(home)),
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn member_turn_positions(
+    db: &rusqlite::Connection,
+    positions: &mut rusqlite::Statement<'_>,
+    key: &str,
+    id: i64,
+    reference: &SessionSourceRef,
+    predecessors: &str,
+    turns: &[&str],
+    mut keep: impl FnMut((Position, Option<String>)),
+) -> Result<(), ReadError> {
+    for turn in turns {
+        turn_candidates(db, key, id, reference.offset, reference, turn, |address| {
+            let Some(frontier) = address_frontier(db, Direction::Forward, id, address)? else {
+                return Ok(());
+            };
+            let start = i64::try_from(address.offset).map_err(index)?;
+            member_positions(
+                positions,
+                PositionSearch {
+                    source: id,
+                    start,
+                    end: start + 1,
+                    predecessors,
+                    entry: Some((address.block, address.occurrence)),
+                    frontier,
+                    capacity: 1,
+                },
+                &mut keep,
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn turn_candidates(
@@ -1111,11 +1268,18 @@ fn activity_evidence(
 
 const EVIDENCE: &str = include_str!("evidence.sql");
 
+#[derive(Clone, Copy)]
+pub(super) struct HomeFields<'a> {
+    pub(super) expected: &'a str,
+    pub(super) detail: bool,
+    pub(super) activity: bool,
+}
+
 enum Target<'a> {
     Page(usize, Direction),
     Address(&'a Address, Option<&'a str>),
     Evidence(Evidence<'a>),
-    Turn(&'a str),
+    Turns(&'a [&'a str], Option<HomeFields<'a>>),
     Annotations(AnnotationRequest<'a>),
     Activity(&'a crate::transcript_range::StepAnchor),
     ToolResults(&'a Address),
@@ -1127,7 +1291,7 @@ impl Target<'_> {
             Self::Page(n @ 1..=100, _) => Ok(n + 1),
             Self::Page(..) => Err(index("Selected pages require a limit of 1–100")),
             Self::Address(..) | Self::Evidence(_) | Self::Activity(_) => Ok(1),
-            Self::Turn(_) => Ok(33),
+            Self::Turns(..) => Ok(33),
             Self::Annotations(_) => Ok(0),
             Self::ToolResults(_) => Ok(101),
         }
@@ -1255,6 +1419,15 @@ fn read(
     }
     let mut witness = Sha256::new_with_prefix(encode(&(owner, component))?);
     let mut candidates = BTreeMap::new();
+    let mut home_members = BTreeMap::new();
+    let include_home_detail = matches!(
+        target,
+        Target::Turns(_, Some(HomeFields { detail: true, .. }))
+    );
+    let include_home_activity = matches!(
+        target,
+        Target::Turns(_, Some(HomeFields { activity: true, .. }))
+    );
     let mut annotation_members = BTreeMap::new();
     let mut member_count = 0;
     let mut references = Vec::new();
@@ -1405,8 +1578,10 @@ fn read(
                             .insert(id, (member.reference.clone(), view, predecessors));
                         continue;
                     }
-                    Target::Turn(turn) => {
-                        let end = i64::try_from(committed.offset).map_err(index)?;
+                    Target::Turns(turns, _) => {
+                        if include_home_detail || include_home_activity {
+                            home_members.insert(id, member.clone());
+                        }
                         let predecessors = continuation_bounds(
                             &mut continuations,
                             &mut prefix,
@@ -1414,33 +1589,15 @@ fn read(
                             component,
                             view,
                         )?;
-                        turn_candidates(
+                        member_turn_positions(
                             &db,
+                            &mut detail,
                             key,
                             id,
-                            committed.offset,
                             &member.reference,
-                            turn,
-                            |address| {
-                                let Some(frontier) = address_frontier(&db, direction, id, address)?
-                                else {
-                                    return Ok(());
-                                };
-                                let start = i64::try_from(address.offset).map_err(index)?;
-                                member_positions(
-                                    &mut detail,
-                                    PositionSearch {
-                                        source: id,
-                                        start,
-                                        end: end.min(start + 1),
-                                        predecessors: &predecessors,
-                                        entry: Some((address.block, address.occurrence)),
-                                        frontier,
-                                        capacity: 1,
-                                    },
-                                    &mut keep,
-                                )
-                            },
+                            &predecessors,
+                            turns,
+                            &mut keep,
                         )?;
                         continue;
                     }
@@ -1565,6 +1722,14 @@ fn read(
     if cursor.is_some_and(|cursor| cursor.members != members || cursor.touched.len() != confirmed) {
         return Err(ReadError::Restart);
     }
+    let owner_identity = (owner, harness.clone(), native_id);
+    let identity_witness =
+        super::current_identity_witness(&db, source, key, &owner_identity, &references)?;
+    if let Target::Turns(_, Some(home)) = target
+        && home.expected != identity_witness
+    {
+        return Err(ReadError::Restart);
+    }
     let mut provider_pins = BTreeMap::new();
     for (id, carrier, reference, expected) in prior_provider {
         let observed = pin_provider(provider.as_ref().ok_or(ReadError::Restart)?, &reference)?;
@@ -1621,8 +1786,16 @@ fn read(
     } else {
         None
     };
+    let home_activity = if include_home_activity
+        && super::selected_runtime_status(&db, source, owner)? == Some("work")
+    {
+        active_tool_candidate(&db, component, &harness)?
+    } else {
+        None
+    };
     let mut legacy_plans = Vec::new();
-    if harness == "claude" && !causal.is_empty() {
+    if harness == "claude" && (!causal.is_empty() || include_home_detail || home_activity.is_some())
+    {
         if let Some(plan) = parent_relay::Plan::collect(&db, source, owner, None, view)? {
             legacy_plans.push((owner, plan));
         }
@@ -1691,7 +1864,7 @@ fn read(
         })?;
         Ok::<_, ReadError>((native, pin))
     };
-    let mut resolve = |plan: parent_relay::Plan, child| {
+    let mut resolve = |plan: parent_relay::Plan<Arc<Member>>, child| {
         plan.resolve(child, |id, member, offset| {
             read_body(id, member, offset).map(|(native, _)| native)
         })
@@ -1719,9 +1892,43 @@ fn read(
         &harness,
         component,
         view,
-        causal.keys().copied(),
+        causal
+            .keys()
+            .copied()
+            .chain((include_home_detail || home_activity.is_some()).then_some(Position::END))
+            .chain(home_activity.as_ref().map(|activity| activity.position)),
         &encode(&incoming)?,
     )?;
+    let latest_turn = turns.remove(&Position::END).flatten();
+    let home_detail = if let Some(turn) = latest_turn.as_ref().filter(|_| include_home_detail) {
+        let (id, member) = home_members
+            .iter()
+            .find(|(_, member)| member.reference.path == turn.address.path)
+            .ok_or(ReadError::Restart)?;
+        let native = read_body(*id, member, turn.address.offset)?.0;
+        Some(HomeDetail::from_turn(turn, &native))
+    } else {
+        None
+    };
+    let home_activity = if let Some(active) = home_activity
+        .filter(|active| latest_turn.is_some() && turns.get(&active.position) == Some(&latest_turn))
+    {
+        let member = home_members
+            .get(&active.position.source)
+            .ok_or(ReadError::Restart)?;
+        let offset = u64::try_from(active.position.offset).map_err(index)?;
+        let (native, _) = read_body(active.position.source, member, offset)?;
+        let recipe = serde_json::json!({"kind":"activity","block":active.block,"tool":active.tool,"cwd":active.cwd});
+        let text = crate::model::overview_text(&recipe, &native, None);
+        Some(serde_json::json!([
+            active.tool,
+            text.as_str().unwrap_or_default(),
+            0,
+            active.since
+        ]))
+    } else {
+        None
+    };
     let mut records = Vec::with_capacity(candidates.len());
     let mut reply_records = BTreeMap::new();
     let mut touched = BTreeMap::new();
@@ -1847,10 +2054,9 @@ fn read(
     source.validate_authority()?;
     // An earlier page may use historical prefix receipts with current row facts.
     // The browser keeps the metadata from its latest or addressed selection.
-    let owner_identity = (owner, harness, native_id);
-    let (metadata, identity_witness) = {
+    let metadata = {
         let transaction = db.lock().map_err(index)?;
-        let metadata = (cursor.is_none()
+        (cursor.is_none()
             && matches!(
                 target,
                 Target::Page(_, Direction::Reverse) | Target::Address(_, Some(_))
@@ -1865,15 +2071,7 @@ fn read(
                 &references,
             )
         })
-        .transpose()?;
-        let identity_witness = super::current_identity_witness(
-            &transaction,
-            source,
-            key,
-            &owner_identity,
-            &references,
-        )?;
-        (metadata, identity_witness)
+        .transpose()?
     };
     let (_, harness, native_id) = owner_identity;
     let identity = super::present_identity(
@@ -1910,6 +2108,8 @@ fn read(
         reply_records,
         next,
         annotations,
+        home_detail,
+        home_activity,
     }))
 }
 

@@ -572,6 +572,125 @@ pub(super) fn annotations(
     }
 }
 
+pub(super) fn home(
+    configured: &OverviewSource,
+    query: &str,
+    current_provider: Option<&dyn crate::SessionSourceReader>,
+    retained_provider: Option<&dyn crate::SessionSourceReader>,
+) -> ViewerReply {
+    let read = || -> Result<ViewerReply, ViewerReply> {
+        let (selection, scope, machine) =
+            crate::overview::parse_session_home_scope(query, true).map_err(|_| invalid())?;
+        let key = selection.key.as_str();
+        if !crate::session_route::identifier(key)
+            || machine.is_some_and(|machine| machine != configured.key)
+        {
+            return Err(invalid());
+        }
+        if let Some(reply) = crate::index_rebuild::history_reply(&configured.options) {
+            return Err(reply);
+        }
+        let path = crate::events::EventCache::path(&configured.options.cache);
+        let namespace = crate::storage::Namespace::new(&configured.key)
+            .map_err(index)
+            .map_err(read_error)?;
+        let source = Source::focused(namespace, &path, &configured.options, current_provider)
+            .map_err(read_error)?;
+        let requested = selection
+            .turns
+            .iter()
+            .chain(selection.ids.iter().filter(|id| crate::model::is_ask(id)))
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let home = selected::HomeFields {
+            expected: &selection.expected,
+            detail: selection
+                .session_fields
+                .iter()
+                .any(|field| field == "detail"),
+            activity: selection
+                .session_fields
+                .iter()
+                .any(|field| field == "activity"),
+        };
+        let component = match scope {
+            CatalogReadScope::Current => selected::preview_turns(&source, key, &requested, home),
+            CatalogReadScope::RetainedHistory => {
+                let archive = super::ArchiveReader::new(&configured.options);
+                selected::retained_preview_turns(
+                    &source,
+                    key,
+                    &requested,
+                    home,
+                    retained_provider.unwrap_or(&archive),
+                )
+                .map(Some)
+            }
+        }
+        .map_err(read_error)?
+        .ok_or_else(not_found)?;
+        let previews = requested
+            .into_iter()
+            .filter_map(|id| {
+                let mut candidates = component.records.iter().filter(|record| {
+                    record
+                        .causal
+                        .turn
+                        .as_ref()
+                        .is_some_and(|turn| turn.id == id && turn.address == record.address)
+                });
+                let record = candidates.next()?;
+                if candidates.next().is_some() {
+                    return None;
+                }
+                let text = crate::model::overview_text(
+                    &json!({"kind":"trace_prompt","block":record.address.block}),
+                    &record.native,
+                    None,
+                );
+                text.is_string().then_some((id, text))
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let turns = selection
+            .turns
+            .iter()
+            .filter_map(|id| Some((id.clone(), previews.get(id.as_str())?.clone())))
+            .collect::<serde_json::Map<_, _>>();
+        let events = selection
+            .ids
+            .iter()
+            .filter_map(|id| {
+                crate::model::is_ask(id).then_some(())?;
+                let brief = previews.get(id.as_str())?;
+                Some((
+                    id.clone(),
+                    json!({"brief":brief,"answer":null,"origin":null}),
+                ))
+            })
+            .collect::<serde_json::Map<_, _>>();
+        let detail = component.home_detail.as_ref();
+        let wait = format!("wait:{}", json!([configured.key, key]));
+        let incomplete = selection.turns.iter().any(|id| !turns.contains_key(id))
+            || selection
+                .ids
+                .iter()
+                .any(|id| *id != wait && !events.contains_key(id));
+        Ok(crate::catalog::reply(
+            200,
+            json!({
+                "api":1,"identity":component.identity,"generation":selection.expected,
+                "session":{"detail":detail.map(|detail| &detail.text),"detail_from":detail.and_then(|detail| detail.from),"detail_from_name":null,"activity":component.home_activity},
+                "events":events,"turns":turns,"incomplete":incomplete,
+            }),
+        ))
+    };
+    match read() {
+        Ok(reply) | Err(reply) => reply,
+    }
+}
+
 pub(super) fn anchor(
     configured: &OverviewSource,
     query: &str,
@@ -958,6 +1077,7 @@ fn read_transcript(
             )),
         };
     }
+    let context = relationship_context(&component, key, &entries, peer.is_none());
     let earlier = component
         .next
         .as_ref()
@@ -981,11 +1101,52 @@ fn read_transcript(
             "api":1, "projection":7,
             "source_key":configured.key, "catalog_key":key, "read_scope":scope,
             "binding":component.binding, "earlier_cursor":earlier, "entries":entries,
-            "identity":component.identity, "session":metadata,
+            "identity":component.identity, "session":metadata, "relationship_context":context,
             "position":if address.is_some() { "address" } else if cursor.is_some() { "earlier" } else { "latest" },
             "selected":{"harness":component.harness,"native_id":component.native_id,"title":component.title,"model":component.model},
         }),
     ))
+}
+
+fn relationship_context(
+    component: &super::selected::Component,
+    key: &str,
+    entries: &[Value],
+    preview: bool,
+) -> Value {
+    let turn_ids = entries
+        .iter()
+        .filter_map(|entry| entry["turn"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let actions = entries
+        .iter()
+        .filter(|entry| entry["k"] == "h")
+        .filter_map(|entry| entry["id"].as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let handoffs = component
+        .records
+        .iter()
+        .filter_map(|record| {
+            let id = record.prompt_anchor.as_deref()?;
+            if !crate::model::is_ask(id) || !actions.contains(id) {
+                return None;
+            }
+            Some(json!({
+                "id":id,"kind":"ask","from":"you","to":key,"status":"done","declined":false,
+                "at":record.at?,"target_turn":id,"brief_session":preview.then_some(key),
+            }))
+        })
+        .take(200)
+        .collect::<Vec<_>>();
+    let previews = if preview && !handoffs.is_empty() {
+        json!({(key):&component.identity.generation})
+    } else {
+        json!({})
+    };
+    json!({
+        "state":if actions.len() == handoffs.len() { "complete" } else { "incomplete" },
+        "turn_ids":turn_ids,"turns":[],"handoffs":handoffs,"sessions":{},"previews":previews,
+    })
 }
 
 fn read_annotations(

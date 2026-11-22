@@ -9,25 +9,25 @@ struct Send {
     last: Option<i64>,
 }
 
-struct Receipt {
+struct Receipt<M> {
     source: i64,
-    member: Arc<Member>,
+    member: M,
     address: RelayReceipt,
     skip: usize,
     legacy: bool,
     occurrence: i64,
 }
 
-pub(super) struct Plan {
+pub(super) struct Plan<M> {
     sends: Vec<Send>,
-    receipts: Vec<Receipt>,
+    receipts: Vec<Receipt<M>>,
     child: String,
     call: Option<(u64, i64)>,
-    member: Arc<Member>,
+    member: M,
     explicit_completion: bool,
 }
 
-impl Plan {
+impl Plan<Arc<Member>> {
     pub(super) fn collect(
         db: &rusqlite::Connection,
         source: &Source<'_>,
@@ -35,7 +35,7 @@ impl Plan {
         call: Option<&Address>,
         view: i64,
     ) -> Result<Option<Self>, ReadError> {
-        use crate::events::{AGM_FINAL, AGM_PROGRESS, AGM_UP, PIN};
+        use crate::events::AGM_FINAL;
         let native_id: Option<String> = db.query_row(
             "SELECT native_id FROM dim_session WHERE source=?1 AND harness='claude' AND NOT lineage",
             [child], |row| row.get(0),
@@ -60,25 +60,7 @@ impl Plan {
             return Ok(None);
         };
         let child_end = i64::try_from(decode(&child_ledger)?.offset).map_err(index)?;
-        let mut sends = db
-            .prepare_cached(include_str!("parent_relay.sql"))
-            .map_err(index)?;
-        let sends = sends
-            .query_map(params![child, child_end, PIN], |row| {
-                Ok(Send {
-                    pos: row.get(0)?,
-                    block: row.get(1)?,
-                    id: row.get(2)?,
-                    sent: row.get(3)?,
-                    last: row.get(4)?,
-                })
-            })
-            .map_err(index)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(index)?;
-        if sends.len() > 128 {
-            return Err(index("Selected parent relay send budget exhausted"));
-        }
+        let sends = collect_sends(db, child, child_end)?;
         if call.is_some_and(|call| {
             !sends
                 .iter()
@@ -109,13 +91,6 @@ impl Plan {
         let mut members = members
             .query(params![parent, source.namespace.binding()])
             .map_err(index)?;
-        let mut scan = db
-            .prepare_cached(
-                "SELECT pos,block,occurrence,ts,flags FROM fact_subagent_event
-            WHERE source=?1 AND pos<?2 AND kind='agm' AND flags & ?3<>0 AND flags & ?4=0
-              AND (id IN (?5,?6) OR name IN (?5,?6)) ORDER BY pos,block,occurrence LIMIT 129",
-            )
-            .map_err(index)?;
         let mut receipts = Vec::new();
         while let Some(row) = members.next().map_err(index)? {
             let id: i64 = row.get(0).map_err(index)?;
@@ -134,32 +109,16 @@ impl Plan {
                     )
                     .map_err(index)?;
             }
-            let mut rows = scan
-                .query(params![id, end, AGM_UP, AGM_FINAL, native_id, spawn])
-                .map_err(index)?;
-            let mut prior = None;
-            let mut skip = 0;
-            while let Some(row) = rows.next().map_err(index)? {
-                if receipts.len() == 128 {
-                    return Err(index("Selected parent relay receipt budget exhausted"));
-                }
-                let offset = u64::try_from(row.get::<_, i64>(0).map_err(index)?).map_err(index)?;
-                skip = if prior == Some(offset) { skip + 1 } else { 0 };
-                prior = Some(offset);
-                receipts.push(Receipt {
-                    source: id,
-                    member: parent_member.clone(),
-                    skip,
-                    legacy: row.get::<_, u8>(4).map_err(index)? & AGM_PROGRESS == 0,
-                    occurrence: row.get(2).map_err(index)?,
-                    address: RelayReceipt {
-                        path: parent_member.carrier.clone(),
-                        offset,
-                        block: row.get(1).map_err(index)?,
-                        at: row.get(3).map_err(index)?,
-                    },
-                });
-            }
+            collect_receipts(
+                db,
+                id,
+                end,
+                &native_id,
+                spawn.as_deref(),
+                &parent_member,
+                &parent_member.carrier,
+                &mut receipts,
+            )?;
         }
         receipts.sort_by_key(|receipt| (receipt.address.at.is_none(), receipt.address.at));
         Ok(Some(Self {
@@ -171,11 +130,59 @@ impl Plan {
             explicit_completion,
         }))
     }
+}
 
+impl Plan<SessionSourceRef> {
+    pub(super) fn collect_certified(
+        db: &rusqlite::Connection,
+        child: i64,
+        reference: SessionSourceRef,
+        call: Option<(&Address, u32)>,
+        parents: &[(i64, SessionSourceRef)],
+    ) -> Result<Option<Self>, ReadError> {
+        let sends = collect_sends(db, child, i64::try_from(reference.offset).map_err(index)?)?;
+        let at = call.map(|(address, block)| (address.offset, i64::from(block)));
+        if sends.is_empty()
+            || at.is_some_and(|at| {
+                sends
+                    .iter()
+                    .filter(|send| (send.pos as u64, send.block) == at)
+                    .count()
+                    != 1
+            })
+        {
+            return Ok(None);
+        }
+        let mut receipts = Vec::new();
+        for (id, parent) in parents {
+            collect_receipts(
+                db,
+                *id,
+                i64::try_from(parent.offset).map_err(index)?,
+                &reference.native_id,
+                None,
+                parent,
+                &parent.path,
+                &mut receipts,
+            )?;
+        }
+        receipts.sort_by_key(|receipt| (receipt.address.at.is_none(), receipt.address.at));
+        Ok(Some(Self {
+            sends,
+            receipts,
+            child: reference.native_id.clone(),
+            call: at,
+            member: reference,
+            explicit_completion: true,
+        }))
+    }
+}
+
+impl<M> Plan<M> {
     pub(super) fn resolve(
         self,
         child_source: i64,
-        mut read: impl FnMut(i64, &Arc<Member>, u64) -> Result<serde_json::Value, ReadError>,
+        mut read: impl FnMut(i64, &M, u64) -> Result<serde_json::Value, ReadError>,
     ) -> Result<Resolution, ReadError> {
         if self.receipts.is_empty()
             || (self.call.is_none() && !self.receipts.iter().any(|receipt| receipt.legacy))
@@ -243,10 +250,17 @@ impl Plan {
             result.completion = Some(receipt.address.clone());
         }
         for (index, receipt) in self.receipts.into_iter().enumerate() {
+            if matched == Some(index) {
+                result.matched = Some(receipt.address.clone());
+            }
             if receipt.legacy
                 && claimed[index]
                 && let Some(send) = matches.iter().position(|matched| *matched == Some(index))
             {
+                let turn = crate::model::legacy_relay_turn_id(&self.sends[send].id);
+                if matched == Some(index) {
+                    result.matched_legacy_turn = Some(turn.clone());
+                }
                 result.incoming.insert(
                     format!(
                         "{}:{}:{}:{}",
@@ -255,20 +269,94 @@ impl Plan {
                         receipt.address.block,
                         receipt.occurrence
                     ),
-                    crate::model::legacy_relay_turn_id(&self.sends[send].id),
+                    turn,
                 );
-            }
-            if matched == Some(index) {
-                result.matched = Some(receipt.address);
             }
         }
         Ok(result)
     }
 }
 
+fn collect_sends(
+    db: &rusqlite::Connection,
+    child: i64,
+    child_end: i64,
+) -> Result<Vec<Send>, ReadError> {
+    use crate::events::PIN;
+    let mut sends = db
+        .prepare_cached(include_str!("parent_relay.sql"))
+        .map_err(index)?;
+    let sends = sends
+        .query_map(params![child, child_end, PIN], |row| {
+            Ok(Send {
+                pos: row.get(0)?,
+                block: row.get(1)?,
+                id: row.get(2)?,
+                sent: row.get(3)?,
+                last: row.get(4)?,
+            })
+        })
+        .map_err(index)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(index)?;
+    if sends.len() > 128 {
+        return Err(index("Selected parent relay send budget exhausted"));
+    }
+    Ok(sends)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_receipts<M: Clone>(
+    db: &rusqlite::Connection,
+    id: i64,
+    end: i64,
+    child: &str,
+    spawn: Option<&str>,
+    member: &M,
+    path: &str,
+    receipts: &mut Vec<Receipt<M>>,
+) -> Result<(), ReadError> {
+    use crate::events::{AGM_FINAL, AGM_PROGRESS, AGM_UP};
+    let mut scan = db
+        .prepare_cached(
+            "SELECT pos,block,occurrence,ts,flags FROM fact_subagent_event
+        WHERE source=?1 AND pos<?2 AND kind='agm' AND flags & ?3<>0 AND flags & ?4=0
+          AND (id IN (?5,?6) OR name IN (?5,?6)) ORDER BY pos,block,occurrence LIMIT 129",
+        )
+        .map_err(index)?;
+    let mut rows = scan
+        .query(params![id, end, AGM_UP, AGM_FINAL, child, spawn])
+        .map_err(index)?;
+    let mut prior = None;
+    let mut skip = 0;
+    while let Some(row) = rows.next().map_err(index)? {
+        if receipts.len() == 128 {
+            return Err(index("Selected parent relay receipt budget exhausted"));
+        }
+        let offset = u64::try_from(row.get::<_, i64>(0).map_err(index)?).map_err(index)?;
+        skip = if prior == Some(offset) { skip + 1 } else { 0 };
+        prior = Some(offset);
+        receipts.push(Receipt {
+            source: id,
+            member: member.clone(),
+            skip,
+            legacy: row.get::<_, u8>(4).map_err(index)? & AGM_PROGRESS == 0,
+            occurrence: row.get(2).map_err(index)?,
+            address: RelayReceipt {
+                path: path.to_owned(),
+                offset,
+                block: row.get(1).map_err(index)?,
+                at: row.get(3).map_err(index)?,
+            },
+        });
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 pub(super) struct Resolution {
     pub(super) matched: Option<RelayReceipt>,
+    pub(super) matched_legacy_turn: Option<String>,
     pub(super) completion: Option<RelayReceipt>,
     pub(super) incoming: BTreeMap<String, String>,
 }

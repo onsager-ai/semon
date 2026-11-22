@@ -782,11 +782,23 @@ impl<'a> Snapshot<'a> {
                     status.insert(owner, state);
                 }
             } else if harness == "codex" {
+                let live = process.is_some();
+                if selected {
+                    let state = crate::events::store::committed_codex_lifecycle(
+                        self.transaction,
+                        &path,
+                        &ledger,
+                        &native_id,
+                    )
+                    .map_err(index)?
+                    .map_or("off", |turn| turn.state(live));
+                    status.entry(owner).or_insert(state);
+                    continue;
+                }
                 let phase: Option<String> = phases
                     .query_row(params![id, native_id], |r| r.get(0))
                     .optional()
                     .map_err(index)?;
-                let live = process.is_some();
                 status
                     .entry(owner)
                     .or_insert(match (phase.as_deref(), live) {
@@ -1034,6 +1046,29 @@ fn relative_keys(
     .map_err(index)
 }
 
+fn selected_runtime_status(
+    transaction: &Connection,
+    source: &Source<'_>,
+    owner: i64,
+) -> Result<Option<&'static str>, ReadError> {
+    let (ancestors, _, _) = parents::Parents::new(transaction)?.relatives(owner)?;
+    let authorized = std::iter::once(owner).chain(ancestors).collect::<Vec<_>>();
+    let paths = encode(&selected_related_paths(
+        transaction,
+        source,
+        &encode(&authorized)?,
+    )?)?;
+    let snapshot = Snapshot {
+        transaction,
+        source,
+        paths,
+        repos: BTreeMap::new(),
+        coverage: Coverage::default(),
+        revision: String::new(),
+    };
+    Ok(snapshot.runtime_status(&[owner], true)?.remove(&owner))
+}
+
 fn selected_metadata(
     transaction: &Connection,
     source: &Source<'_>,
@@ -1116,29 +1151,53 @@ fn selected_metadata(
         "shared_usd": price.map(|price| price.shared),
     });
     row.source_refs = references.to_vec();
-    row.details = Some(selected_details(transaction, &row, family)?);
+    row.details = Some(selected_details(transaction, source, &row, family)?);
     source.validate_authority()?;
     Ok(row)
 }
 
 fn selected_details(
     transaction: &Connection,
+    source: &Source<'_>,
     row: &Row,
     family: serde_json::Value,
 ) -> Result<serde_json::Value, ReadError> {
-    let (cwd, copilot) = transaction
+    let (cwd, copilot, path, native_id, ledger) = transaction
         .query_row(
-            "SELECT f.cwd,f.copilot FROM warehouse_current c
-             CROSS JOIN files f USING(path) WHERE c.source=?1",
+            "SELECT f.cwd,f.copilot,c.path,d.native_id,s.ledger FROM warehouse_current c
+             CROSS JOIN files f USING(path) CROSS JOIN dim_session d USING(source)
+             CROSS JOIN warehouse_source s ON s.source=c.source WHERE c.source=?1",
             [row.owner],
             |record| {
                 Ok((
                     record.get::<_, Option<String>>(0)?,
                     record.get::<_, Option<String>>(1)?,
+                    record.get::<_, String>(2)?,
+                    record.get::<_, String>(3)?,
+                    record.get::<_, String>(4)?,
                 ))
             },
         )
         .map_err(index)?;
+    let turn_lifecycle = if row.harness == "codex" {
+        let ledger = serde_json::from_str(&ledger).map_err(index)?;
+        crate::events::store::committed_codex_lifecycle(transaction, &path, &ledger, &native_id)
+            .map_err(index)?
+    } else {
+        None
+    };
+    let activity = if row.status == Some("work") {
+        selected::active_tool(
+            transaction,
+            source,
+            row.owner,
+            &row.position.key,
+            &row.harness,
+        )?
+        .map(|(tool, since)| serde_json::json!({"tool":tool,"since":since}))
+    } else {
+        None
+    };
     let copilot = copilot
         .as_deref()
         .map(serde_json::from_str::<crate::copilot::Index>)
@@ -1178,6 +1237,7 @@ fn selected_details(
     let tools = crate::model::capped_tool_counts(tools);
     Ok(serde_json::json!({
         "state": row.status.unwrap_or("off"), "cwd": cwd, "family": family,
+        "turn_lifecycle": turn_lifecycle, "activity": activity,
         "turns": turns, "calls": calls, "errors": errors, "tool_calls": tools,
         "signals": signals, "cost": row.cost, "copied_usage": row.usage[3..].iter().any(|count| *count > 0),
         "live_observation": row.status.is_some(),

@@ -5551,6 +5551,20 @@ fn read_tree_summary(
     path: &str,
     ledger: &Ledger,
 ) -> rusqlite::Result<Option<crate::native_tree::Summary>> {
+    let Some(mut summary) = read_tree_summary_header(statement, path, ledger)? else {
+        return Ok(None);
+    };
+    if !tree_state::restore(connection, path, ledger, &mut summary)? {
+        return Ok(None);
+    }
+    Ok(Some(summary))
+}
+
+fn read_tree_summary_header(
+    statement: &mut Statement<'_>,
+    path: &str,
+    ledger: &Ledger,
+) -> rusqlite::Result<Option<crate::native_tree::Summary>> {
     let encoded: Option<Option<String>> = statement
         .query_row([tree_summary_key(path)], |row| {
             crate::selected_read::row(row, 512)?;
@@ -5569,11 +5583,20 @@ fn read_tree_summary(
     {
         return Ok(None);
     }
-    let mut summary = record.summary;
-    if !tree_state::restore(connection, path, ledger, &mut summary)? {
-        return Ok(None);
-    }
-    Ok(Some(summary))
+    Ok(Some(record.summary))
+}
+
+#[cfg(test)]
+pub(crate) fn committed_codex_lifecycle(
+    connection: &Connection,
+    path: &str,
+    ledger: &Ledger,
+    native_id: &str,
+) -> rusqlite::Result<Option<crate::TurnLifecycle>> {
+    let mut statement = connection.prepare_cached(NATIVE_METADATA_VALUE)?;
+    Ok(read_tree_summary_header(&mut statement, path, ledger)?
+        .and_then(|summary| summary.codex_turn.owned(native_id))
+        .map(|turn| turn.with_generation(&ledger.prefix)))
 }
 
 fn write_tree_summary(

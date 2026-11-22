@@ -311,6 +311,13 @@ pub(crate) struct RetainedIdentity {
 }
 
 #[cfg(test)]
+impl RetainedIdentity {
+    pub(crate) fn observed_peers(&self) -> rusqlite::Result<BTreeMap<String, ObservedPeer>> {
+        serde_json::from_str(&self.trace_peers).map_err(data)
+    }
+}
+
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) enum RetainedIdentityError {
     Unverified,
@@ -451,17 +458,15 @@ impl std::fmt::Display for RetainedPeerError {
 pub(crate) fn retained_peer(
     tx: &rusqlite::Connection,
     namespace: &crate::storage::Namespace,
-    trace: &str,
+    identity: &RetainedIdentity,
     witness: &str,
     key: &str,
 ) -> Result<(ObservedPeer, bool), RetainedPeerError> {
     use RetainedPeerError::*;
-    let identity = retained_identity(tx, namespace, trace).map_err(Trace)?;
     if identity.witness != witness {
         return Err(TraceChanged);
     }
-    let mut peers: BTreeMap<String, ObservedPeer> =
-        serde_json::from_str(&identity.trace_peers).map_err(|error| Index(data(error)))?;
+    let mut peers = identity.observed_peers().map_err(Index)?;
     let peer = peers.remove(key).ok_or(PeerUnobserved)?;
     let source_key = namespace.binding();
     if current_peer_covers(tx, source_key, &peer).map_err(Index)? {

@@ -1706,6 +1706,9 @@ export function createCatalogViewer(
   function displayEntries(view: SelectedView): CatalogDisplayedEntry[] {
     return view.nativeStore?.entries() ?? view.store.entries();
   }
+  function relationshipContext(view: SelectedView) {
+    return view.nativeStore?.context() ?? view.store.context();
+  }
   function displayGeneration(view: SelectedView) {
     return (
       view.nativeStore?.selectedPage()?.binding ?? view.store.selectedPage()?.projection.generation
@@ -1959,17 +1962,15 @@ export function createCatalogViewer(
       sourceLabel(view?.sourceKey ?? capabilities.source_key),
       wide,
       !!view &&
-        view.store
-          .context()
-          .turns.some(
-            (row) =>
-              row.id === turn &&
-              row.sent.some((id) =>
-                view.store
-                  .context()
-                  .handoffs.some(({ edge }) => edge.id === id && edge.kind !== 'move'),
+        relationshipContext(view).turns.some(
+          (row) =>
+            row.id === turn &&
+            row.sent.some((id) =>
+              relationshipContext(view).handoffs.some(
+                ({ edge }) => edge.id === id && edge.kind !== 'move',
               ),
-          ),
+            ),
+        ),
     );
     const panel = createPanelChrome(
       {
@@ -2829,15 +2830,14 @@ export function createCatalogViewer(
     }
     overview.markResults(
       view.sourceKey,
-      view.store
-        .context()
+      relationshipContext(view)
         .handoffs.filter(
           (row) =>
             row.edge.kind === 'toyou' && row.edge.ask === 'result' && row.edge.from === view.key,
         )
         .map((row) => row.edge.id),
     );
-    const context = view.store.context(),
+    const context = relationshipContext(view),
       origin = context.handoffs.find(
         (row) => row.edge.kind === 'spawn' && row.edge.to === view.key,
       ),
@@ -2915,7 +2915,7 @@ export function createCatalogViewer(
             incomplete: 'History is incomplete',
             unavailable: 'Source history is unavailable',
           }[(native?.identity.freshness ?? legacy!.freshness).state] +
-            (view.store.context().state === 'incomplete'
+            (relationshipContext(view).state === 'incomplete'
               ? ' · related session context is incomplete'
               : ''),
         observationSummary:
@@ -2938,7 +2938,7 @@ export function createCatalogViewer(
           (entry) => fieldView(view, entry),
           (item) => {
             if (item.entry.k !== 'h') return null;
-            const context = view.store.context(),
+            const context = relationshipContext(view),
               relationship = context.handoffs.find(
                 (row) => row.edge.id === (item.entry as { id: string }).id,
               );
@@ -2964,7 +2964,7 @@ export function createCatalogViewer(
             });
           },
           view.meta?.details?.live_observation === true,
-          view.store.context(),
+          relationshipContext(view),
           (item) =>
             (item.entry.img ?? []).map((image, index) => {
               const p = expansionParams(view, item, generation);
@@ -3372,6 +3372,7 @@ export function createCatalogViewer(
       view.note = '';
       view.transientNote = false;
       view.meta = page.session ?? view.meta;
+      void hydrateContext(view);
       pruneSelectedFields(view);
       if (ticket && view.readScope === 'current') selection.accept(ticket, page.identity);
       view.recovery.reset();
@@ -3591,8 +3592,11 @@ export function createCatalogViewer(
   }
   async function hydrateContext(view: SelectedView) {
     if (disposed || active !== view || view.contextLoading) return;
-    const store = view.store,
-      generation = store.selectedPage()?.projection.generation,
+    const generation = () =>
+        view.nativeStore?.selectedPage()?.identity.generation ??
+        view.store.selectedPage()?.projection.generation,
+      store = view.nativeStore ?? view.store,
+      expected = generation(),
       context = store.context();
     const cache = (view.contextText ??= new Map());
     const owners = new Map<string, Set<string>>();
@@ -3633,8 +3637,8 @@ export function createCatalogViewer(
     const current = () =>
       !disposed &&
       active === view &&
-      view.store === store &&
-      store.selectedPage()?.projection.generation === generation;
+      (view.nativeStore ?? view.store) === store &&
+      generation() === expected;
     let pending = 0;
     try {
       await Promise.all(

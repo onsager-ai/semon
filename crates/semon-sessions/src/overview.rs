@@ -408,15 +408,26 @@ pub(crate) fn session_home_details_with_gate(
     )
 }
 
-struct SessionHomeSelection {
-    key: String,
-    expected: String,
-    ids: Vec<String>,
-    session_fields: Vec<String>,
-    turns: Vec<String>,
+pub(crate) struct SessionHomeSelection {
+    pub(crate) key: String,
+    pub(crate) expected: String,
+    pub(crate) ids: Vec<String>,
+    pub(crate) session_fields: Vec<String>,
+    pub(crate) turns: Vec<String>,
 }
 
 fn parse_session_home_selection(query: &str) -> io::Result<SessionHomeSelection> {
+    parse_session_home_scope(query, false).map(|(selection, _, _)| selection)
+}
+
+pub(crate) fn parse_session_home_scope(
+    query: &str,
+    allow_current: bool,
+) -> io::Result<(
+    SessionHomeSelection,
+    crate::CatalogReadScope,
+    Option<String>,
+)> {
     let args: Vec<_> = query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
@@ -448,9 +459,18 @@ fn parse_session_home_selection(query: &str) -> io::Result<SessionHomeSelection>
     let expected = value("generation").ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "Supply an overview generation")
     })?;
+    let scope = match value("scope").as_deref() {
+        Some("retained_history") => crate::CatalogReadScope::RetainedHistory,
+        Some("current") if allow_current => crate::CatalogReadScope::Current,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Invalid Home detail scope",
+            ));
+        }
+    };
     if expected.len() != 64
         || !expected.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || value("scope").as_deref() != Some("retained_history")
         || args.iter().any(|(name, _)| {
             !matches!(
                 *name,
@@ -499,13 +519,17 @@ fn parse_session_home_selection(query: &str) -> io::Result<SessionHomeSelection>
             "Home detail selection exceeds its bound",
         ));
     }
-    Ok(SessionHomeSelection {
-        key,
-        expected,
-        ids,
-        session_fields,
-        turns,
-    })
+    Ok((
+        SessionHomeSelection {
+            key,
+            expected,
+            ids,
+            session_fields,
+            turns,
+        },
+        scope,
+        value("machine"),
+    ))
 }
 
 pub(crate) fn session_home_details_inner(
