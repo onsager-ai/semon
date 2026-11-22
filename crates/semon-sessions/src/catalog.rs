@@ -3678,7 +3678,6 @@ mod tests {
                 "home",
                 Some(&reader),
                 crate::SessionSourceReadMode::LocalThenProvider,
-                true,
             )
             .unwrap()
         );
