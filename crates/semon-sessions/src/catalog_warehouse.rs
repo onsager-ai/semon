@@ -33,12 +33,16 @@ struct ArchivePrefix {
 
 impl<'a> ArchiveReader<'a> {
     pub(super) fn new(options: &'a crate::Options) -> Self {
+        Self::with_budget(options, selected::PAGE_BYTES)
+    }
+
+    fn with_budget(options: &'a crate::Options, bytes: usize) -> Self {
         Self {
             options,
             archive: crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache)),
             files: std::sync::Mutex::new(ArchiveReads {
                 files: BTreeMap::new(),
-                bytes_left: selected::PAGE_BYTES,
+                bytes_left: bytes,
             }),
         }
     }
@@ -475,12 +479,14 @@ pub(super) enum ReadError {
     RetainedPreparing,
     PeerUnavailable(String),
     ActivityUnavailable,
+    SourceBudget,
 }
 
 impl std::fmt::Display for ReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Index(error) => f.write_str(error),
+            Self::SourceBudget => f.write_str("The selected source evidence exceeds the bounded read budget."),
             Self::Scope => f.write_str("Discard the cursor when changing workspace, source or filters."),
             Self::Restart => f.write_str("The committed session view changed. Restart at the first page."),
             Self::PeerUnavailable(reason) => f.write_str(reason),
@@ -622,6 +628,18 @@ impl<'a> Snapshot<'a> {
                 let ledger: String = record.get(3).map_err(index)?;
                 let committed: Ledger = serde_json::from_str(&ledger).map_err(index)?;
                 let evidence: Option<String> = record.get(6).map_err(index)?;
+                // Discovery can precede this source's SQLite snapshot. If a
+                // commit advanced the same carrier meanwhile, verify its new
+                // stat through the native input opener before admitting it.
+                let observed = if selected::stable_or_grown(&observed, &committed.stat)
+                    && observed != committed.stat
+                {
+                    crate::open_input(std::path::Path::new(&path))
+                        .and_then(|file| Stat::from_metadata(&file.metadata()?))
+                        .unwrap_or(observed)
+                } else {
+                    observed
+                };
                 if committed.stat == observed
                     || evidence
                         .as_deref()
@@ -1267,6 +1285,7 @@ fn selected_details(
         .transpose()
         .map_err(index)?
         .map(|projection| projection.evidence());
+    let (pending, work, boundary) = selected::pending_counts_runtime(transaction, source, row)?;
     let mut statement = transaction
         .prepare_cached(include_str!("events/store/warehouse_selected_details.sql"))
         .map_err(index)?;
@@ -1274,7 +1293,10 @@ fn selected_details(
         .query(params![
             row.owner,
             crate::events::ACK,
-            crate::events::UNKNOWN
+            crate::events::UNKNOWN,
+            pending,
+            work,
+            boundary
         ])
         .map_err(index)?;
     let (mut turns, mut calls, mut errors) = (0, 0, 0);

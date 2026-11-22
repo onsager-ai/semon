@@ -152,6 +152,7 @@ export type Handoff = HandoffBase &
 export interface TurnEnd {
   st?: SessionState;
   why: string;
+  reason?: string;
   h?: string;
   at?: number;
 }

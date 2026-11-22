@@ -159,9 +159,21 @@ well as selecting metadata from committed facts.
   but still rejects a later stat change within the request. Qualify verified
   growth across block reads and the final recheck in the same reader. Verify
   covering blocks and requalify identity and custody before exposing bytes.
+  Oversized prompt image recipes hold source-relative string ranges and image
+  descriptors only. Index writes them with the native record in schema 61.
+  Pages prove the surrounding JSON and text with the page allowance. Exact
+  image reads prove the surrounding JSON and only the requested image range
+  with the attachment allowance, and validate the decoded type, size and
+  content version. Retained reads use the original member's recipe and
+  certified prefix. These facts stay in the origin Index.
   Return an explicit restart when membership, incarnation, custody or prefix
   integrity changes. The next fresh request or refresh uses the latest
   committed state.
+  Large allowlisted text and tool result strings also have source-relative
+  scalar checkpoints. A transcript proves the surrounding record and bounded
+  previews. An expansion proves its requested chunk and checks the full entry
+  address. The Index stores no scalar text. Relay matching reads complete
+  records within its existing budget.
 
 ## Performance and benchmark gate
 
@@ -395,6 +407,9 @@ receipts start an incoming turn in the parent. For untyped legacy receipts,
 selected detail uses matched receipts as incoming relay turns and the latest
 unmatched receipt as completion evidence when explicit terminal evidence is
 absent. Pairing is request-local and uses the selected committed prefixes.
+Trace uses the native Claude run reducer for explicit hand-backs, notifications
+and resumed runs. It includes a bounded return preview and the exact rendered
+entry when available. Otherwise its return evidence carries a refusal reason.
 
 Schema 59 records the signal revision alongside each certified retained member's
 prefix. Signal cleanup preserves versions covered by a certified member after

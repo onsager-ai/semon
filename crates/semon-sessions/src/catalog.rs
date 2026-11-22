@@ -3938,7 +3938,8 @@ mod tests {
         let first: Value = serde_json::from_slice(&response.body).unwrap();
         assert_eq!(first["total"], 206);
         assert_eq!(first["entries"].as_array().unwrap().len(), 100);
-        assert_eq!(first["next_cursor"], 100);
+        assert_eq!(first["first"], 0);
+        assert_eq!(first["projection"], 7);
         assert!(
             !response
                 .body
@@ -3954,9 +3955,21 @@ mod tests {
         )
         .unwrap();
         assert_eq!(second["entries"].as_array().unwrap().len(), 100);
+        assert_eq!(second["first"], 100);
+        let offsets = |page: &Value| {
+            page["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| entry["address"]["record"]["offset"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        let first_offsets = offsets(&first);
+        let second_offsets = offsets(&second);
         assert!(
-            second["entries"][0]["slot"].as_u64().unwrap()
-                > first["entries"][99]["slot"].as_u64().unwrap()
+            first_offsets
+                .iter()
+                .all(|offset| !second_offsets.contains(offset))
         );
         assert_eq!(
             crate::session_annotations(
@@ -3971,7 +3984,7 @@ mod tests {
             crate::session_annotations(
                 &fixture.options,
                 "source",
-                &(query.to_owned() + "&generation=wrong")
+                &format!("{query}&generation={}", "0".repeat(64))
             )
             .status,
             409
@@ -3987,79 +4000,46 @@ mod tests {
         );
     }
     #[test]
-    fn turn_bookmarks_use_indexed_retained_slots_without_native_body_reads() {
+    fn retained_turn_bookmark_selects_the_exact_rendered_entry() {
         let fixture = Fixture::new();
         fixture.publish(1);
-        let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        let turn: String = db.query_row("SELECT json_extract(metadata,'$.turn') FROM session_slots WHERE session_key='session-00000' AND json_extract(metadata,'$.turn') IS NOT NULL ORDER BY slot LIMIT 1", [], |row| row.get(0)).unwrap();
-        let expected: i64 = db.query_row("SELECT slot FROM session_slots WHERE session_key='session-00000' AND json_extract(metadata,'$.turn')=?1 ORDER BY slot LIMIT 1", [&turn], |row| row.get(0)).unwrap();
-        let range = crate::session_transcript_range(
-            &fixture.options,
-            "source",
-            "sid=session-00000&scope=retained_history&after=0&limit=1",
-            None,
-        );
-        assert_eq!(range.status, 200);
-        let range: Value = serde_json::from_slice(&range.body).unwrap();
-        fs::remove_file(
-            fixture
-                .options
-                .claude_home
-                .join("projects/project/session-00000.jsonl"),
-        )
-        .unwrap();
-        let query = format!(
-            "sid=session-00000&turn={}&scope=retained_history",
-            crate::viewer::percent_encode(&turn)
-        );
-        let reply = crate::session_turn_anchor(&fixture.options, "source", &query);
+        let selection = "sid=session-00000&scope=retained_history";
+        let range =
+            |query: &str| crate::session_transcript_range(&fixture.options, "source", query, None);
+        let page = range(selection);
+        assert_eq!(page.status, 200);
+        let page: Value = serde_json::from_slice(&page.body).unwrap();
+        let prompt = page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["k"] == "u")
+            .unwrap();
+        let turn = prompt["turn"].as_str().unwrap();
+        let query = format!("{selection}&turn={}", crate::viewer::percent_encode(turn));
+        let anchor = |query: &str| crate::session_turn_anchor(&fixture.options, "source", query);
+        let reply = anchor(&query);
         assert_eq!(reply.status, 200);
         let value: Value = serde_json::from_slice(&reply.body).unwrap();
-        assert_eq!(value["slot"], expected);
+        assert_eq!(value["address"], prompt["address"]);
         assert_eq!(value["source_key"], "source");
-        assert_eq!(value["generation"], range["projection"]["generation"]);
-        // A turn address is qualified by the same immutable projection as a
-        // range. Concurrent replacement rejects the old address before I/O.
-        db.execute(
-            "UPDATE session_slot_projections SET generation=?1 WHERE session_key='session-00000'",
-            ["e".repeat(64)],
-        )
-        .unwrap();
-        let stale_range = format!(
-            "sid=session-00000&scope=retained_history&after={expected}&limit=1&generation={}",
-            value["generation"].as_str().unwrap()
+        assert_eq!(value["projection"], 7);
+        let address = crate::viewer::percent_encode(&value["address"].to_string());
+        let focused = range(&format!("{selection}&address={address}"));
+        assert_eq!(focused.status, 200);
+        let focused: Value = serde_json::from_slice(&focused.body).unwrap();
+        assert!(
+            focused["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["address"] == value["address"])
         );
-        assert_eq!(
-            crate::session_transcript_range(&fixture.options, "source", &stale_range, None).status,
-            409
-        );
-        assert_eq!(
-            crate::session_turn_anchor(
-                &fixture.options,
-                "source",
-                &(query.clone() + "&turn=other")
-            )
-            .status,
-            400
-        );
-        assert_eq!(
-            crate::session_turn_anchor(
-                &fixture.options,
-                "source",
-                &query.replace("retained_history", "current")
-            )
-            .status,
-            400
-        );
-        db.execute(
-            "UPDATE meta SET value='newer' WHERE key='slot_projection_catalog_generation'",
-            [],
-        )
-        .unwrap();
-        assert_eq!(
-            crate::session_turn_anchor(&fixture.options, "source", &query).status,
-            409
-        );
+        let mut stale = value["address"].clone();
+        stale["binding"] = json!("0".repeat(64));
+        let stale = crate::viewer::percent_encode(&stale.to_string());
+        assert_eq!(range(&format!("{selection}&address={stale}")).status, 409);
+        assert_eq!(anchor(&format!("{query}&turn=other")).status, 400);
     }
     #[test]
     fn exact_source_proof_requires_current_native_mapping_and_consumed_ledger() {
@@ -4585,7 +4565,7 @@ mod tests {
     }
 
     #[test]
-    fn selected_attachments_keep_large_image_bytes_out_of_browsing_and_validate_the_slot() {
+    fn selected_attachments_keep_large_image_bytes_out_of_browsing_and_validate_the_address() {
         let fixture = Fixture::new();
         let path = fixture.source("images");
         let mut image = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x01\0\0\0\x01\x08\x02\0\0\0".to_vec();
@@ -4612,7 +4592,7 @@ mod tests {
         let range = crate::session_transcript_range(
             &fixture.options,
             "source",
-            "sid=images&scope=retained_history&after=0&limit=100",
+            "sid=images&scope=retained_history",
             None,
         );
         assert_eq!(range.status, 200);
@@ -4625,12 +4605,9 @@ mod tests {
             .find(|entry| entry["img"].is_array())
             .unwrap();
         assert_eq!(selected["img"][0]["size"], image.len());
-        assert!(page["observation"]["source_bytes"].as_u64().unwrap() <= 1024 * 1024);
-        let generation = page["projection"]["generation"].as_str().unwrap();
-        let query = format!(
-            "sid=images&scope=retained_history&after={}&limit=1&generation={generation}&part=attachment",
-            selected["slot"]
-        );
+        assert!(range.body.len() < 64 * 1024);
+        let address = crate::viewer::percent_encode(&selected["address"].to_string());
+        let query = format!("sid=images&scope=retained_history&address={address}&part=attachment");
         let read =
             |query: &str| crate::session_entry_field(&fixture.options, "source", query, None);
         assert_eq!(read(&format!("{query}&image=64")).status, 400);
@@ -4643,12 +4620,11 @@ mod tests {
             .status,
             200
         );
+        let mut stale = selected["address"].clone();
+        stale["binding"] = json!("0".repeat(64));
+        let stale = crate::viewer::percent_encode(&stale.to_string());
         assert_eq!(
-            read(&format!(
-                "{}&image=0",
-                query.replace(generation, &"0".repeat(64))
-            ))
-            .status,
+            read(&format!("{}&image=0", query.replace(&address, &stale))).status,
             409
         );
         let reply = read(&format!("{query}&image=0"));
@@ -4659,13 +4635,13 @@ mod tests {
     }
 
     #[test]
-    fn selected_script_uses_the_recorded_slot_and_rejects_unqualified_reads() {
+    fn selected_script_uses_the_exact_operation_address() {
         let fixture = Fixture::new();
         let relative = "sessions/2026/10/01/rollout-script-session.jsonl";
         let path = fixture.options.codex_home.join(relative);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let script = format!("// private recorded script\n{}", "🦀".repeat(20000));
-        let output = format!("native failed result\n{}", "🦀".repeat(20000));
+        let output = format!("native failed result\n{}", "🦀".repeat(280_000));
         let records = [
             json!({"type":"session_meta","timestamp":"2026-10-01T00:00:00Z","payload":{"id":"script-session","cwd":"/synthetic/project"}}),
             json!({"type":"response_item","timestamp":"2026-10-01T00:00:01Z","payload":{"type":"custom_tool_call","call_id":"script-call","name":"exec","input":script}}),
@@ -4685,64 +4661,82 @@ mod tests {
         facts.codex_rollouts = Some(std::collections::BTreeSet::from([relative.to_owned()]));
         crate::write_facts(facts_path, &facts).unwrap();
         fixture.publish(0);
-        let query = "sid=script-session&scope=retained_history&after=0&limit=1";
+        let query = "sid=script-session&scope=retained_history";
         let reply = crate::session_transcript_range(&fixture.options, "source", query, None);
-        assert_eq!(reply.status, 200);
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
         let page: Value = serde_json::from_slice(&reply.body).unwrap();
-        assert_eq!(page["session"]["details"]["calls"], 1);
-        assert_eq!(page["session"]["details"]["errors"], 1);
-        assert!(page["entries"][0].get("scriptText").is_none());
-        let generation = page["projection"]["generation"].as_str().unwrap();
+        let original = page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| {
+                entry["out"]
+                    .as_str()
+                    .is_some_and(|out| out.starts_with("native failed result"))
+            })
+            .unwrap();
+        assert!(original.get("scriptText").is_none());
+        assert_eq!(original["field"]["name"], "out");
+        let address = crate::viewer::percent_encode(&original["address"].to_string());
+        let mut stale = original["address"].clone();
+        stale["binding"] = json!("0".repeat(64));
+        let stale = crate::viewer::percent_encode(&stale.to_string());
         let read =
             |query: &str| crate::session_entry_field(&fixture.options, "source", query, None);
         assert_eq!(read(&format!("{query}&part=script")).status, 400);
         assert_eq!(
-            read(&format!(
-                "{query}&part=script&generation={}",
-                "0".repeat(64)
-            ))
-            .status,
+            read(&format!("{query}&address={stale}&part=script")).status,
             409
         );
         assert_eq!(
-            read(&format!("{query}&part=arbitrary&generation={generation}")).status,
+            read(&format!("{query}&address={address}&part=arbitrary")).status,
             400
         );
-        let reply = read(&format!("{query}&part=script&generation={generation}"));
-        assert_eq!(reply.status, 200);
-        let expanded: Value = serde_json::from_slice(&reply.body).unwrap();
-        let entry = &expanded["entries"][0];
-        assert_eq!(entry["entry_id"], page["entries"][0]["entry_id"]);
-        assert_eq!(entry["provenance"], page["entries"][0]["provenance"]);
+        let expand = |part: &str| {
+            let reply = read(&format!("{query}&address={address}&part={part}"));
+            assert_eq!(
+                reply.status,
+                200,
+                "{}",
+                String::from_utf8_lossy(&reply.body)
+            );
+            let body: Value = serde_json::from_slice(&reply.body).unwrap();
+            assert_eq!(body["projection"], 7);
+            assert_eq!(body["entry"]["address"], original["address"]);
+            assert_eq!(body["entry"]["provenance"], original["provenance"]);
+            body["entry"].clone()
+        };
+        let entry = expand("script");
         let text = entry["scriptText"].as_str().unwrap();
         assert!(script.starts_with(text));
         assert!(text.len() <= 64 * 1024);
         assert_eq!(entry["scriptTruncated"], true);
-        assert!(expanded["observation"]["source_bytes"].as_u64().unwrap() <= 1024 * 1024);
-        assert_eq!(read(&format!("{query}&part=output")).status, 400);
-        assert_eq!(
-            read(&format!(
-                "{query}&part=output&generation={}",
-                "0".repeat(64)
-            ))
-            .status,
-            409
-        );
-        let reply = read(&format!("{query}&part=output&generation={generation}"));
-        assert_eq!(reply.status, 200);
-        let expanded: Value = serde_json::from_slice(&reply.body).unwrap();
-        let entry = &expanded["entries"][0];
-        assert_eq!(entry["entry_id"], page["entries"][0]["entry_id"]);
-        assert_eq!(entry["provenance"], page["entries"][0]["provenance"]);
+        let entry = expand("output");
         let text = entry["out"].as_str().unwrap();
         assert!(output.starts_with(text.trim_end_matches('…')));
         assert!(text.len() <= 64 * 1024 + 3);
         assert_eq!(entry["outputTruncated"], true);
-        assert!(expanded["observation"]["source_bytes"].as_u64().unwrap() <= 1024 * 1024);
+        let last = original["field"]["chunks"].as_u64().unwrap() - 1;
+        let reply = read(&format!("{query}&address={address}&field_chunk={last}"));
+        assert_eq!(
+            reply.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&reply.body)
+        );
+        let body: Value = serde_json::from_slice(&reply.body).unwrap();
+        let text = body["entry"]["text"].as_str().unwrap();
+        assert!(!text.is_empty() && output.ends_with(text));
+        assert_eq!(body["entry"]["field"]["complete"], true);
     }
 
     #[test]
-    fn selected_output_expansion_keeps_native_blocks_under_source_generation() {
+    fn stored_slot_output_expansion_keeps_native_blocks_under_source_generation() {
         const FIXTURE: &str = include_str!(
             "../../../tests/fixtures/compatibility/codex-native-a9b0815/parser-cases.jsonl"
         );
@@ -4767,11 +4761,13 @@ mod tests {
         crate::write_facts(facts_path, &facts).unwrap();
         fixture.publish(0);
 
-        let page = crate::session_transcript_range(
+        let page = crate::transcript_range::session_transcript_range_with_gate(
             &fixture.options,
             "source",
             "sid=parser-cases&scope=retained_history&after=0&limit=100",
             None,
+            crate::SessionSourceReadMode::LocalThenProvider,
+            || Ok(()),
         );
         assert_eq!(page.status, 200);
         let page: Value = serde_json::from_slice(&page.body).unwrap();
@@ -4812,8 +4808,16 @@ mod tests {
         let query = format!(
             "sid=parser-cases&scope=retained_history&after={slot}&limit=1&generation={generation}&part=output"
         );
-        let read =
-            |query: &str| crate::session_entry_field(&fixture.options, "source", query, None);
+        let read = |query: &str| {
+            crate::transcript_range::session_entry_field_with_gate(
+                &fixture.options,
+                "source",
+                query,
+                None,
+                crate::SessionSourceReadMode::LocalThenProvider,
+                || Ok(()),
+            )
+        };
         assert_eq!(
             read(&query.replace(&format!("&generation={generation}"), "")).status,
             400
@@ -4874,7 +4878,7 @@ mod tests {
             let reply = crate::session_transcript_range(
                 &fixture.options,
                 "source",
-                &format!("sid=signal-session&scope={scope}&after=0&limit=100"),
+                &format!("sid=signal-session&scope={scope}&limit=32"),
                 None,
             );
             assert_eq!(reply.status, 200);
@@ -4905,19 +4909,25 @@ mod tests {
                 .iter()
                 .all(|entry| entry["provenance"]["offset"] == first[0]["provenance"]["offset"])
         );
-        assert_eq!(first, signals(&read("retained_history")));
-        let connection = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-        let stored: String = connection.query_row("SELECT generation FROM session_slot_projections WHERE session_key='signal-session'", [], |row| row.get(0)).unwrap();
-        assert_ne!(current["projection"]["generation"], stored);
+        let signal_ids = |entries: &[Value]| {
+            entries
+                .iter()
+                .map(|entry| entry["entry_id"].clone())
+                .collect::<Vec<_>>()
+        };
+        let history = read("retained_history");
+        assert_eq!(signal_ids(&first), signal_ids(&signals(&history)));
+        assert_ne!(current["binding"], history["binding"]);
+        let address = crate::viewer::percent_encode(&first[0]["address"].to_string());
         assert_eq!(
             crate::session_transcript_range(
                 &fixture.options,
                 "source",
-                &format!("sid=signal-session&generation={stored}"),
-                None
+                &format!("sid=signal-session&scope=retained_history&address={address}"),
+                None,
             )
             .status,
-            409
+            409,
         );
         fixture.publish(20);
         assert_eq!(first, signals(&read("current")));
@@ -5001,6 +5011,20 @@ mod tests {
 
     #[test]
     fn transcript_snapshot_survives_publication_after_selected_observation() {
+        let read_slots =
+            |options: &Options,
+             source: &str,
+             query: &str,
+             reader: Option<&dyn crate::SessionSourceReader>| {
+                crate::transcript_range::session_transcript_range_with_gate(
+                    options,
+                    source,
+                    query,
+                    reader,
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    || Ok(()),
+                )
+            };
         use std::io::Write;
         for scope in ["current", "retained_history"] {
             let fixture = Fixture::new();
@@ -5035,7 +5059,7 @@ mod tests {
                 }));
             });
             let query = format!("sid=selected&scope={scope}&after=0&limit=1");
-            let page = crate::session_transcript_range(&fixture.options, "source", &query, None);
+            let page = read_slots(&fixture.options, "source", &query, None);
             assert_eq!(page.status, 200, "{}", String::from_utf8_lossy(&page.body));
             let page: Value = serde_json::from_slice(&page.body).unwrap();
             assert_eq!(page["identity"]["generation"], before.generation);
@@ -5046,7 +5070,7 @@ mod tests {
                 .unwrap();
             assert_ne!(after.generation, before.generation);
             let generation = page["projection"]["generation"].as_str().unwrap();
-            let continuation = crate::session_transcript_range(
+            let continuation = read_slots(
                 &fixture.options,
                 "source",
                 &format!("sid=selected&scope={scope}&after=1&limit=1&generation={generation}"),
@@ -5061,8 +5085,7 @@ mod tests {
             // producer snapshot merely because the caller has no cursor.
             let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             db.execute("UPDATE meta SET value='unpublished' WHERE key='slot_projection_catalog_generation'", []).unwrap();
-            let rejected =
-                crate::session_transcript_range(&fixture.options, "source", &query, None);
+            let rejected = read_slots(&fixture.options, "source", &query, None);
             assert_eq!(rejected.status, 409);
             let rejected: Value = serde_json::from_slice(&rejected.body).unwrap();
             assert_eq!(rejected["error"]["code"], "stale_projection");
@@ -5072,6 +5095,20 @@ mod tests {
 
     #[test]
     fn transcript_snapshot_keeps_original_recipes_during_an_active_append() {
+        let read_slots =
+            |options: &Options,
+             source: &str,
+             query: &str,
+             reader: Option<&dyn crate::SessionSourceReader>| {
+                crate::transcript_range::session_transcript_range_with_gate(
+                    options,
+                    source,
+                    query,
+                    reader,
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    || Ok(()),
+                )
+            };
         use std::io::Write;
         struct Original(Vec<u8>);
         impl crate::SessionSourceReader for Original {
@@ -5133,12 +5170,7 @@ mod tests {
                 }));
             });
             let query = format!("sid=selected&scope={scope}&after=0&limit=100");
-            let page = crate::session_transcript_range(
-                &fixture.options,
-                "source",
-                &query,
-                Some(&original),
-            );
+            let page = read_slots(&fixture.options, "source", &query, Some(&original));
             assert_eq!(page.status, 200, "{}", String::from_utf8_lossy(&page.body));
             let page: Value = serde_json::from_slice(&page.body).unwrap();
             assert_eq!(page["identity"]["generation"], before.generation);
@@ -5156,7 +5188,7 @@ mod tests {
                 .status,
                 200
             );
-            let fresh = crate::session_transcript_range(&fixture.options, "source", &query, None);
+            let fresh = read_slots(&fixture.options, "source", &query, None);
             assert_eq!(fresh.status, 200);
             let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
             assert_ne!(fresh["identity"]["generation"], before.generation);
@@ -5166,12 +5198,11 @@ mod tests {
             let continuation =
                 format!("sid=selected&scope={scope}&after=1&limit=1&generation={generation}");
             assert_eq!(
-                crate::session_transcript_range(&fixture.options, "source", &continuation, None)
-                    .status,
+                read_slots(&fixture.options, "source", &continuation, None).status,
                 200
             );
             let old = page["projection"]["generation"].as_str().unwrap();
-            let stale = crate::session_transcript_range(
+            let stale = read_slots(
                 &fixture.options,
                 "source",
                 &continuation.replace(generation, old),
@@ -5181,7 +5212,7 @@ mod tests {
             let stale: Value = serde_json::from_slice(&stale.body).unwrap();
             assert_eq!(stale["error"]["code"], "stale_projection");
             assert!(stale.get("entries").is_none());
-            let stale_errors = crate::session_transcript_range(
+            let stale_errors = read_slots(
                 &fixture.options,
                 "source",
                 &format!("{continuation}&errors_generation=wrong"),
@@ -5203,7 +5234,14 @@ mod tests {
         fixture.publish(2);
         crate::events::CACHE_READS.with(|reads| reads.set(0));
         let get = |query: &str| {
-            let reply = crate::session_transcript_range(&fixture.options, "source", query, None);
+            let reply = crate::transcript_range::session_transcript_range_with_gate(
+                &fixture.options,
+                "source",
+                query,
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+                || Ok(()),
+            );
             (
                 reply.status,
                 serde_json::from_slice::<Value>(&reply.body).unwrap(),
@@ -5230,7 +5268,14 @@ mod tests {
         for chunk in 0..chunks {
             let query =
                 format!("sid=selected&after=2&limit=1&generation={generation}&field_chunk={chunk}");
-            let reply = crate::session_entry_field(&fixture.options, "source", &query, None);
+            let reply = crate::transcript_range::session_entry_field_with_gate(
+                &fixture.options,
+                "source",
+                &query,
+                None,
+                crate::SessionSourceReadMode::ProviderOnly,
+                || Ok(()),
+            );
             assert_eq!(reply.status, 200);
             let body: Value = serde_json::from_slice(&reply.body).unwrap();
             assert!(body["observation"]["source_bytes"].as_u64().unwrap() <= 64 * 1024 + 11);
@@ -5263,6 +5308,23 @@ mod tests {
             plan.contains("SEARCH session_slots USING PRIMARY KEY"),
             "{plan}"
         );
+    }
+
+    fn read_slot_range(
+        options: &crate::Options,
+        source: &str,
+        query: &str,
+        reader: Option<&dyn crate::SessionSourceReader>,
+        mode: crate::SessionSourceReadMode,
+    ) -> ViewerReply {
+        crate::transcript_range::session_transcript_range_with_gate(
+            options,
+            source,
+            query,
+            reader,
+            mode,
+            || Ok(()),
+        )
     }
 
     #[test]
@@ -5399,11 +5461,12 @@ mod tests {
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
         crate::events::CACHE_READS.with(|reads| reads.set(0));
-        let reply = crate::session_transcript_range(
+        let reply = read_slot_range(
             &fixture.options,
             "source",
             "sid=archived&after=0&limit=2",
             Some(&provider),
+            crate::SessionSourceReadMode::ProviderOnly,
         );
         assert_eq!(reply.status, 200);
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
@@ -5419,22 +5482,24 @@ mod tests {
             cached: false,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
-        let reply = crate::session_transcript_range(
+        let reply = read_slot_range(
             &fixture.options,
             "source",
             "sid=archived&after=0&limit=2",
             Some(&fresh),
+            crate::SessionSourceReadMode::ProviderOnly,
         );
         assert_eq!(reply.status, 200);
         let fresh_body: Value = serde_json::from_slice(&reply.body).unwrap();
         assert_eq!(fresh_body["content_observation"]["state"], "available");
         assert_eq!(fresh_body["identity"]["freshness"]["state"], "unavailable");
         let generation = fresh_body["projection"]["generation"].as_str().unwrap();
-        let reply = crate::session_entry_field(
+        let reply = read_slot_range(
             &fixture.options,
             "source",
             &format!("sid=archived&after=1&limit=1&generation={generation}&field_chunk=0"),
             Some(&fresh),
+            crate::SessionSourceReadMode::ProviderOnly,
         );
         assert_eq!(reply.status, 200);
         let field: Value = serde_json::from_slice(&reply.body).unwrap();
@@ -5447,11 +5512,12 @@ mod tests {
             cached: true,
             calls: std::sync::atomic::AtomicUsize::new(0),
         };
-        let reply = crate::session_transcript_range(
+        let reply = read_slot_range(
             &fixture.options,
             "source",
             "sid=archived&after=0&limit=2",
             Some(&changed),
+            crate::SessionSourceReadMode::ProviderOnly,
         );
         let body: Value = serde_json::from_slice(&reply.body).unwrap();
         assert_eq!(reply.status, 409);
@@ -5486,7 +5552,7 @@ mod tests {
                 crate::session_transcript_range(
                     &fixture.options,
                     "source",
-                    "sid=session-00000&after=0&limit=1",
+                    "sid=session-00000&limit=1",
                     None
                 )
                 .status,
@@ -5512,11 +5578,12 @@ mod tests {
         let before = crate::native_timing::cleanup_tests::snapshot(&connection);
         let cache = EventCache::open_scoped(&fixture.options.cache).unwrap();
         assert!(cache.qualified_catalog().unwrap());
-        let unavailable = crate::session_transcript_range(
+        let unavailable = read_slot_range(
             &fixture.options,
             "source",
             "sid=session-00000&after=0&limit=1",
             None,
+            crate::SessionSourceReadMode::ProviderOnly,
         );
         assert_eq!(unavailable.status, 503);
         assert_eq!(
@@ -5583,7 +5650,7 @@ mod tests {
             ("/api/session-identity", "sid=session-00000"),
             (
                 "/api/session-transcript",
-                "machine=local&sid=session-00000&after=0&limit=1",
+                "machine=local&sid=session-00000&limit=1",
             ),
         ] {
             let reply = core.respond("GET", path, query, None);
@@ -5635,7 +5702,7 @@ mod tests {
         let reply = crate::session_transcript_range(
             &fixture.options,
             "source",
-            "sid=edit-session&limit=100",
+            "sid=edit-session&limit=32",
             None,
         );
         assert_eq!(reply.status, 200);
@@ -5672,7 +5739,14 @@ mod tests {
             }
             fixture.publish(0);
             let read = |query| {
-                let reply = crate::session_transcript_range(&fixture.options, "local", query, None);
+                let reply = crate::transcript_range::session_transcript_range_with_gate(
+                    &fixture.options,
+                    "local",
+                    query,
+                    None,
+                    crate::SessionSourceReadMode::ProviderOnly,
+                    || Ok(()),
+                );
                 assert_eq!(reply.status, 200);
                 serde_json::from_slice::<Value>(&reply.body).unwrap()
             };
@@ -5722,48 +5796,25 @@ mod tests {
                 let reply = crate::session_annotations(
                     &fixture.options,
                     "local",
-                    "sid=pending-call&scope=retained_history&kind=errors&limit=100",
+                    "sid=pending-call&kind=errors&limit=100",
                 );
                 assert_eq!(reply.status, 200);
                 serde_json::from_slice::<Value>(&reply.body).unwrap()
             };
             let before_errors = errors();
             assert_eq!(before_errors["total"], if live { 0 } else { 1 });
-            let descriptor = crate::session_catalog_page(
-                &fixture.options,
-                "local",
-                "sid=pending-call&scope=retained_history",
-            );
-            assert_eq!(descriptor.status, 200);
-            let descriptor: Value = serde_json::from_slice(&descriptor.body).unwrap();
-            assert_eq!(
-                descriptor["items"][0]["transcript"]["errors_generation"],
-                before_errors["generation"]
-            );
-            if live {
-                // Read-only retained custody cannot inherit a recorded live PID.
-                let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
-                db.execute("UPDATE session_catalog SET lifecycle='retained',metadata=json_set(metadata,'$.lifecycle','retained') WHERE session_key='pending-call'", []).unwrap();
-                let retained = errors();
-                assert_eq!(retained["total"], 1);
-                assert_ne!(retained["generation"], before_errors["generation"]);
-                db.execute("UPDATE session_catalog SET lifecycle='current',metadata=json_set(metadata,'$.lifecycle','current') WHERE session_key='pending-call'", []).unwrap();
-                assert_eq!(errors()["generation"], before_errors["generation"]);
-            }
-            let read = || {
-                let reply = crate::session_transcript_range(
-                    &fixture.options,
-                    "local",
-                    "sid=pending-call&scope=retained_history&after=0&limit=100",
-                    None,
-                );
+            let query = "sid=pending-call";
+            let transcript = |query: &str| {
+                let reply = crate::session_transcript_range(&fixture.options, "local", query, None);
                 assert_eq!(
                     reply.status,
                     200,
                     "{}",
                     String::from_utf8_lossy(&reply.body)
                 );
-                let page: Value = serde_json::from_slice(&reply.body).unwrap();
+                serde_json::from_slice::<Value>(&reply.body).unwrap()
+            };
+            let tool = |page: &Value| {
                 page["entries"]
                     .as_array()
                     .unwrap()
@@ -5772,7 +5823,15 @@ mod tests {
                     .unwrap()
                     .clone()
             };
-            let entry = read();
+            let before = transcript(query);
+            assert_eq!(before["errors_generation"], before_errors["generation"]);
+            let retained = transcript("sid=pending-call&scope=retained_history");
+            assert_eq!(tool(&retained)["unfinished"], true);
+            assert_eq!(
+                retained["errors_generation"],
+                retained["identity"]["generation"]
+            );
+            let entry = tool(&before);
             if live {
                 assert_eq!(entry["live"], true);
                 assert!(entry.get("ok").is_none());
@@ -5784,7 +5843,8 @@ mod tests {
                 crate::write_facts(facts_path, &facts).unwrap();
                 fixture.publish(0);
             }
-            let stopped = read();
+            let stopped_page = transcript(query);
+            let stopped = tool(&stopped_page);
             assert_eq!(stopped["unfinished"], true);
             assert_eq!(stopped["ok"], false);
             assert!(stopped["live"].is_null());
@@ -5796,36 +5856,17 @@ mod tests {
                     &fixture.options,
                     "local",
                     &format!(
-                        "sid=pending-call&scope=retained_history&kind=errors&limit=100&generation={}",
+                        "sid=pending-call&kind=errors&limit=100&generation={}",
                         before_errors["generation"].as_str().unwrap()
                     ),
                 );
                 assert_eq!(stale.status, 409);
-                let stale_range = crate::session_transcript_range(
-                    &fixture.options,
-                    "local",
-                    &format!(
-                        "sid=pending-call&scope=retained_history&after=0&limit=100&errors_generation={}",
-                        before_errors["generation"].as_str().unwrap()
-                    ),
-                    None,
-                );
-                assert_eq!(stale_range.status, 409);
-                let current_range = crate::session_transcript_range(
-                    &fixture.options,
-                    "local",
-                    &format!(
-                        "sid=pending-call&scope=retained_history&after=0&limit=100&errors_generation={}",
-                        stopped_errors["generation"].as_str().unwrap()
-                    ),
-                    None,
-                );
-                assert_eq!(current_range.status, 200);
-                let current_range: Value = serde_json::from_slice(&current_range.body).unwrap();
                 assert_eq!(
-                    current_range["projection"]["errors_generation"],
+                    stopped_page["errors_generation"],
                     stopped_errors["generation"]
                 );
+                assert_eq!(before["binding"], stopped_page["binding"]);
+                assert_eq!(entry["address"], stopped["address"]);
             }
             let db = Connection::open(EventCache::path(&fixture.options.cache)).unwrap();
             let stored: String = db.query_row("SELECT metadata FROM session_slots WHERE session_key='pending-call' AND json_extract(metadata,'$.recipe.outcome')='Pending'", [], |row|row.get(0)).unwrap();
@@ -5844,7 +5885,7 @@ mod tests {
             "codex-object",
         ] {
             let fixture = Fixture::new();
-            let body = "native tool output line \"quoted\" \n".repeat(15000);
+            let body = "native tool output line \"quoted\" \n".repeat(35_000);
             let key = if harness.starts_with("claude") {
                 "claude-tools"
             } else {
@@ -5903,7 +5944,7 @@ mod tests {
             let reply = crate::session_transcript_range(
                 &fixture.options,
                 "source",
-                &format!("sid={key}&after=0&limit=100"),
+                &format!("sid={key}"),
                 None,
             );
             assert_eq!(
@@ -5940,46 +5981,55 @@ mod tests {
                     .unwrap()
                     .starts_with("native tool output line")
             );
-            assert!(page["observation"]["source_bytes"].as_u64().unwrap() < 16 * 1024);
-            let generation = page["projection"]["generation"].as_str().unwrap();
-            let slot = entry["slot"].as_u64().unwrap();
-            let chunks = entry["field"]["chunks"].as_u64().unwrap();
-            let mut expanded = String::new();
-            for chunk in 0..chunks {
-                let reply = crate::session_entry_field(
+            assert!(reply.body.len() < 64 * 1024);
+            let address = crate::viewer::percent_encode(&entry["address"].to_string());
+            let read_chunk = |chunk| {
+                crate::session_entry_field(
                     &fixture.options,
                     "source",
-                    &format!(
-                        "sid={key}&after={slot}&limit=1&generation={generation}&field_chunk={chunk}"
-                    ),
+                    &format!("sid={key}&address={address}&field_chunk={chunk}"),
                     None,
-                );
+                )
+            };
+            let chunks = entry["field"]["chunks"].as_u64().unwrap();
+            assert!(chunks > 1);
+            // Read the final chunk first to require a checkpoint seek in a
+            // result whose full record exceeds the 1 MiB request allowance.
+            let tail = read_chunk(chunks - 1);
+            assert_eq!(tail.status, 200);
+            let tail: Value = serde_json::from_slice(&tail.body).unwrap();
+            assert_eq!(tail["entry"]["field"]["complete"], true);
+            assert!(body.ends_with(tail["entry"]["text"].as_str().unwrap()));
+            let mut expanded = String::new();
+            for chunk in 0..chunks {
+                let reply = read_chunk(chunk);
                 assert_eq!(reply.status, 200);
                 let part: Value = serde_json::from_slice(&reply.body).unwrap();
+                let part = &part["entry"];
+                assert_eq!(part["address"], entry["address"]);
                 assert_eq!(part["field"]["name"], "out");
-                assert_eq!(
-                    part["provenance"], entry["field"]["provenance"],
-                    "{harness}: native result anchor"
-                );
-                assert_ne!(
-                    part["provenance"]["offset"], entry["provenance"]["offset"],
-                    "tool calls and results retain distinct native positions"
-                );
-                assert_eq!(
-                    part["field"]["layers"],
-                    if harness == "codex-encoded" { 2 } else { 1 }
-                );
-                assert_eq!(part["content_observation"]["state"], "cached");
-                assert_eq!(
-                    part["content_observation"]["sources"][0]["generation_hash"]
-                        .as_str()
-                        .unwrap()
-                        .len(),
-                    64
-                );
+                assert_eq!(part["field"]["chunk"], chunk);
+                assert_eq!(part["field"]["complete"], chunk + 1 == chunks);
                 expanded.push_str(part["text"].as_str().unwrap());
             }
             assert_eq!(expanded, body);
+            let output = crate::session_entry_field(
+                &fixture.options,
+                "source",
+                &format!("sid={key}&address={address}&part=output"),
+                None,
+            );
+            assert_eq!(output.status, 200);
+            let output: Value = serde_json::from_slice(&output.body).unwrap();
+            assert_eq!(output["entry"]["outputTruncated"], true);
+            assert!(
+                body.starts_with(
+                    output["entry"]["out"]
+                        .as_str()
+                        .unwrap()
+                        .trim_end_matches('…')
+                )
+            );
             crate::events::CACHE_READS.with(|reads| assert_eq!(reads.get(), 0));
         }
     }
@@ -6007,7 +6057,7 @@ mod tests {
         }
         let provider = Reject(std::sync::atomic::AtomicUsize::new(0));
         let get = || {
-            crate::session_transcript_range_with_mode(
+            read_slot_range(
                 &fixture.options,
                 "source",
                 "sid=mixed&after=0&limit=1",
@@ -6140,7 +6190,7 @@ mod tests {
     fn selected_web_field_and_mcp_proofs_share_the_recipe_snapshot() {
         for reader in ["web", "field", "mcp"] {
             let (fixture, path) = local_only_codex_fixture();
-            let first = crate::session_transcript_range_with_mode(
+            let first = read_slot_range(
                 &fixture.options,
                 "source",
                 "sid=local-proof&after=0&limit=1",
@@ -6199,7 +6249,7 @@ mod tests {
                         ""
                     }
                 );
-                let reply = crate::session_transcript_range_with_mode(
+                let reply = read_slot_range(
                     &fixture.options,
                     "source",
                     &request,
@@ -6214,7 +6264,7 @@ mod tests {
                 );
                 assert!(String::from_utf8_lossy(&reply.body).contains("local original answer"));
             }
-            let fresh = crate::session_transcript_range_with_mode(
+            let fresh = read_slot_range(
                 &fixture.options,
                 "source",
                 "sid=local-proof&after=0&limit=1",
@@ -6234,7 +6284,7 @@ mod tests {
         for mutation in ["append", "copy"] {
             let (fixture, path) = local_only_codex_fixture();
             let get = |after: usize, generation: Option<&str>| {
-                crate::session_transcript_range_with_mode(
+                read_slot_range(
                     &fixture.options,
                     "source",
                     &format!(
@@ -6295,7 +6345,7 @@ mod tests {
                     assert_eq!(body["entries"][0]["text"], text);
                     // Native message scalars support the same generation-bound
                     // field expansion as the initially rendered preview.
-                    let expanded = crate::session_entry_field_with_mode(
+                    let expanded = read_slot_range(
                         &fixture.options,
                         "source",
                         &format!(
@@ -6361,15 +6411,8 @@ mod tests {
         use std::io::Write;
         for mutation in ["append", "copy", "touch", "legacy"] {
             let (fixture, path) = local_only_codex_fixture();
-            let get = |query: &str, mode| {
-                crate::session_transcript_range_with_mode(
-                    &fixture.options,
-                    "source",
-                    query,
-                    None,
-                    mode,
-                )
-            };
+            let get =
+                |query: &str, mode| read_slot_range(&fixture.options, "source", query, None, mode);
             let query = "sid=local-proof&scope=retained_history&after=0&limit=1";
             let before = get(query, crate::SessionSourceReadMode::LocalThenProvider);
             assert_eq!(before.status, 200);
@@ -6590,7 +6633,7 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            let page = crate::session_transcript_range_with_mode(
+            let page = read_slot_range(
                 &fixture.options,
                 "source",
                 "sid=local-proof&after=0&limit=2",
@@ -6630,7 +6673,7 @@ mod tests {
                     .unwrap();
             }))
         });
-        let page = crate::session_transcript_range_with_mode(
+        let page = read_slot_range(
             &fixture.options,
             "source",
             "sid=local-proof&after=0&limit=1",
@@ -6697,13 +6740,7 @@ mod tests {
                 };
                 let query = format!("sid=pinned&scope={scope}&after=0&limit=1");
                 let get = |query: &str, mode| {
-                    crate::session_transcript_range_with_mode(
-                        &fixture.options,
-                        "source",
-                        query,
-                        Some(&provider),
-                        mode,
-                    )
+                    read_slot_range(&fixture.options, "source", query, Some(&provider), mode)
                 };
                 let initial = get(&query, crate::SessionSourceReadMode::LocalThenProvider);
                 assert_eq!(initial.status, 200);
@@ -6876,7 +6913,7 @@ mod tests {
             if wrong_reference {
                 provider.source.prefix_sha256[0] ^= 1;
             }
-            let reply = crate::session_transcript_range_with_mode(
+            let reply = read_slot_range(
                 &fixture.options,
                 "source",
                 "sid=pinned&after=0&limit=2",
@@ -7022,7 +7059,7 @@ mod tests {
         let old = crate::session_transcript_range(
             &fixture.options,
             "source",
-            "sid=session-00000&after=0&limit=1",
+            "sid=session-00000&limit=1",
             None,
         );
         let old: Value = serde_json::from_slice(&old.body).unwrap();
@@ -7058,29 +7095,26 @@ mod tests {
         let range = crate::session_transcript_range(
             &fixture.options,
             "source",
-            "sid=session-00000&after=0&limit=1",
+            "sid=session-00000&limit=1",
             None,
         );
         assert_eq!(range.status, 409);
         let range: Value = serde_json::from_slice(&range.body).unwrap();
-        assert_eq!(range["error"]["code"], "stale_projection");
-        assert_eq!(range["resynchronize"], true);
+        assert_eq!(range["error"]["code"], "stale_cursor");
+        assert_eq!(range["reset_cursor"], true);
         assert!(!range.to_string().contains("rewritten prompt"));
         fixture.publish_existing();
         let fresh = crate::session_transcript_range(
             &fixture.options,
             "source",
-            "sid=session-00000&after=0&limit=1",
+            "sid=session-00000&limit=1",
             None,
         );
         let fresh: Value = serde_json::from_slice(&fresh.body).unwrap();
         assert_eq!(fresh["entries"][0]["text"], "rewritten prompt");
-        assert_eq!(fresh["freshness"]["state"], "cached");
-        assert!(fresh["projection"]["generation"].is_string());
-        assert_ne!(
-            fresh["projection"]["generation"],
-            old["projection"]["generation"]
-        );
+        assert_eq!(fresh["entries"][0]["freshness"]["state"], "cached");
+        assert!(fresh["binding"].is_string());
+        assert_ne!(fresh["binding"], old["binding"]);
     }
 
     #[test]
@@ -8124,13 +8158,13 @@ mod tests {
                 let current = crate::session_transcript_range(
                     &fixture.options,
                     "local",
-                    "sid=native-session&limit=100",
+                    "sid=native-session&limit=32",
                     None,
                 );
                 let history = crate::session_transcript_range(
                     &fixture.options,
                     "local",
-                    "sid=native-session&scope=retained_history&limit=100",
+                    "sid=native-session&scope=retained_history&limit=32",
                     None,
                 );
                 assert_eq!(
@@ -8300,7 +8334,7 @@ mod tests {
         let response = crate::session_transcript_range(
             &fixture.options,
             "local",
-            "sid=selected&limit=100",
+            "sid=selected&limit=32",
             None,
         );
         assert_eq!(response.status, 200);
@@ -8399,7 +8433,7 @@ mod tests {
             let response = crate::session_transcript_range(
                 &fixture.options,
                 "local",
-                &format!("sid=move-replay&limit=100{scope}"),
+                &format!("sid=move-replay&limit=32{scope}"),
                 None,
             );
             assert_eq!(response.status, 200);

@@ -294,6 +294,7 @@ export type CatalogDisplayedEntry =
 export interface CatalogNativeTranscriptPage {
   identity: CatalogSessionIdentity;
   binding: string;
+  errorsGeneration: string;
   position: 'latest' | 'earlier' | 'address';
   earlierCursor: string | null;
   entries: CatalogNativeTranscriptEntry[];
@@ -326,11 +327,13 @@ export function parseCatalogNativeTranscriptPage(value: unknown): CatalogNativeT
     selected = object(row.selected);
   const { title, model } = selected;
   const binding = text(row.binding),
+    errorsGeneration = text(row.errors_generation),
     earlierCursor = row.earlier_cursor === null ? null : text(row.earlier_cursor);
   if (
     row.api !== 1 ||
     row.projection !== 7 ||
     !/^[a-f0-9]{64}$/.test(binding) ||
+    !/^[a-f0-9]{64}$/.test(errorsGeneration) ||
     row.source_key !== identity.source_key ||
     row.catalog_key !== identity.catalog_key ||
     row.read_scope !== identity.read_scope ||
@@ -355,6 +358,7 @@ export function parseCatalogNativeTranscriptPage(value: unknown): CatalogNativeT
   return {
     identity,
     binding,
+    errorsGeneration,
     relationship_context: parseRelationshipContext(
       object(row.relationship_context),
       identity,

@@ -1812,7 +1812,10 @@ export function createCatalogViewer(
     });
   }
   function annotationGeneration(view: SelectedView): string | undefined {
-    if (view.nativeStore) return view.nativeStore.selectedPage()?.identity.generation;
+    if (view.nativeStore) {
+      const page = view.nativeStore.selectedPage();
+      return view.errorMode === 'errors' ? page?.errorsGeneration : page?.identity.generation;
+    }
     const projection = view.store.selectedPage()?.projection;
     return view.errorMode === 'errors' ? projection?.errorsGeneration : projection?.generation;
   }
@@ -3436,6 +3439,8 @@ export function createCatalogViewer(
       pruneSelectedFields(view);
       if (ticket && view.readScope === 'current') selection.accept(ticket, page.identity);
       view.recovery.reset();
+      if (view.errorMode && view.annotations?.generation !== annotationGeneration(view))
+        void readAnnotations(view, true);
       chrome();
       if (window.position === 'address')
         scope.frame(() => {

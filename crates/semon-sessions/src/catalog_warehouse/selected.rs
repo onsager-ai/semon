@@ -21,6 +21,7 @@ use std::{
 mod causal;
 #[path = "parent_relay.rs"]
 mod parent_relay;
+pub(super) use parent_relay::TraceCompletion;
 #[path = "render.rs"]
 pub(super) mod render;
 #[path = "retained.rs"]
@@ -28,7 +29,7 @@ mod retained;
 pub(super) use retained::{
     PeerBinding, retained_activity_anchor, retained_addressed_preview, retained_annotations,
     retained_member_bounds, retained_peer_launch_in_view, retained_peer_trace_window,
-    retained_preview_turns, retained_relay_in_view, retained_turn,
+    retained_preview_turns, retained_relay_in_view, retained_spawn_return, retained_turn,
 };
 #[cfg(test)]
 pub(super) use retained::{
@@ -37,32 +38,149 @@ pub(super) use retained::{
 };
 
 const MEMBER_PAGE: i64 = 64;
+// SQLite tags gap rows independently of any native record's `type` field.
+const GAP: &str = "\0";
+
 pub(super) const PAGE_BYTES: usize = 8 * 1024 * 1024;
+
+#[derive(Clone, Copy)]
+enum BodyMode {
+    Complete,
+    Gap,
+    Transcript,
+}
+
+impl BodyMode {
+    fn transcript(kind: Option<&str>) -> Self {
+        if kind == Some(GAP) {
+            Self::Gap
+        } else {
+            Self::Transcript
+        }
+    }
+}
 /// The committed database view and byte allowance shared by selected reads
 /// within one request. Release the SQL guard before any native proof read.
 pub(super) struct ReadView<'a> {
     db: Arc<chunk_proofs::Snapshot>,
     pub(super) archive: super::ArchiveReader<'a>,
     body_bytes: Mutex<usize>,
+    transcript: bool,
+    part: Option<render::Part>,
     proof_bytes: Mutex<usize>,
 }
 
 impl<'a> ReadView<'a> {
     pub(super) fn open(source: &Source<'a>) -> Result<Self, ReadError> {
+        Self::open_with_budget(source, PAGE_BYTES)
+    }
+
+    pub(super) fn open_transcript(
+        source: &Source<'a>,
+        part: Option<render::Part>,
+    ) -> Result<Self, ReadError> {
+        let bytes = if matches!(part, Some(render::Part::Attachment(_))) {
+            crate::transcript_range::ATTACHMENT_SOURCE_BYTES
+        } else {
+            crate::transcript_range::PAGE_SOURCE_BYTES
+        };
+        let mut view = Self::open_with_budget(source, bytes)?;
+        view.transcript = true;
+        view.part = part;
+        Ok(view)
+    }
+
+    fn open_with_budget(source: &Source<'a>, bytes: usize) -> Result<Self, ReadError> {
         let db = crate::events::store::focused_connection(source.path).map_err(index)?;
         db.execute_batch("BEGIN DEFERRED").map_err(index)?;
         crate::events::store::require_current(&db).map_err(index)?;
         crate::storage::sqlite::qualify(&db, &source.namespace).map_err(index)?;
-        Ok(Self::from_connection(db, source))
+        Ok(Self::with_budget(db, source, bytes))
     }
 
     pub(super) fn from_connection(db: rusqlite::Connection, source: &Source<'a>) -> Self {
+        Self::with_budget(db, source, PAGE_BYTES)
+    }
+
+    fn with_budget(db: rusqlite::Connection, source: &Source<'a>, bytes: usize) -> Self {
         Self {
             db: chunk_proofs::Snapshot::new(db),
-            archive: super::ArchiveReader::new(source.options),
-            body_bytes: Mutex::new(PAGE_BYTES),
-            proof_bytes: Mutex::new(PAGE_BYTES),
+            archive: super::ArchiveReader::with_budget(source.options, bytes),
+            body_bytes: Mutex::new(bytes),
+            transcript: false,
+            part: None,
+            proof_bytes: Mutex::new(bytes),
         }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_record(
+        &self,
+        reader: &dyn SessionSourceReader,
+        source: i64,
+        reference: &SessionSourceRef,
+        offset: u64,
+        images: Option<&crate::attachments::PromptMetadata>,
+        mode: BodyMode,
+        budget: &mut usize,
+        fields: &mut Fields,
+    ) -> Result<serde_json::Value, io::Error> {
+        if matches!(mode, BodyMode::Gap) {
+            return crate::source_reader::read_record_bytes_bounded(
+                reader,
+                reference,
+                offset,
+                crate::tx::LINE_MAX as usize,
+                budget,
+            )
+            .map(|_| serde_json::Value::Null);
+        }
+        let image = match self.part {
+            Some(render::Part::Attachment(image)) => Some(image),
+            _ => None,
+        };
+        let recipe: Option<String> = if self.transcript && !matches!(mode, BodyMode::Complete) {
+            self.db
+                .lock()
+                .map_err(|_| io::Error::other("Selected Index lock poisoned"))?
+                .prepare_cached(
+                    "SELECT recipe FROM fact_native_fields WHERE source=?1 AND pos=?2 AND block=0",
+                )
+                .map_err(io::Error::other)?
+                .query_row(params![source, offset], |row| row.get(0))
+                .optional()
+                .map_err(io::Error::other)?
+        } else {
+            None
+        };
+        if let Some(recipe) = recipe {
+            let recipe: crate::native_field::SparseRecord =
+                serde_json::from_str(&recipe).map_err(io::Error::other)?;
+            let (preview, chunk) = match self.part {
+                Some(render::Part::Text(chunk)) => (crate::model::MSG_MAX, Some(chunk)),
+                Some(render::Part::Output) => (64 * 1024, None),
+                _ => (crate::model::MSG_MAX, None),
+            };
+            let omitted = images
+                .map(|images| images.omitted_ranges(image))
+                .transpose()?
+                .into_iter()
+                .flatten();
+            let (value, selected) =
+                recipe.read(reader, reference, offset, (preview, chunk), omitted, budget)?;
+            fields.insert((reference.path.clone(), offset), selected);
+            return Ok(value);
+        }
+        if let Some(images) = images {
+            return images.selected_record(reference, offset, image, reader, budget);
+        }
+        crate::source_reader::read_record_bounded(
+            reader,
+            reference,
+            offset,
+            crate::tx::LINE_MAX as usize,
+            budget,
+        )
     }
 
     pub(super) fn lock(
@@ -108,7 +226,7 @@ SELECT coalesce(r.ts,-9223372036854775808),r.pos,r.block,r.occurrence,r.kind,
 FROM unique_call c CROSS JOIN fact_tool_result r ON r.source=?1 AND r.call_id=c.call_id
   AND ((r.call_pos IS NULL AND r.kind<>'copilot-execution')
        OR (r.call_pos=c.pos AND r.call_block=c.block))
-WHERE r.pos<?4 ORDER BY 1,r.pos,r.block,r.occurrence LIMIT ?5";
+WHERE r.pos<?4 AND r.kind<>'yield_poll' ORDER BY 1,r.pos,r.block,r.occurrence LIMIT ?5";
 
 const EXACT_RELAY_RECEIPTS: &str =
     "SELECT r.source,c.path,s.ledger,r.pos,r.block,r.occurrence,r.ts,s.harness
@@ -191,6 +309,31 @@ pub(super) struct Record {
     pub(super) kind: Option<String>,
     pub(super) at: Option<i64>,
     pub(super) native: serde_json::Value,
+    pub(super) images: Option<Vec<serde_json::Value>>,
+}
+
+fn prompt_images(
+    view: &ReadView<'_>,
+    source: i64,
+    offset: u64,
+    kind: Option<&str>,
+) -> Result<Option<crate::attachments::PromptMetadata>, ReadError> {
+    if !matches!(kind, Some("user" | "response_item" | "attachment")) {
+        return Ok(None);
+    }
+    let row: Option<String> = view
+        .lock()?
+        .prepare_cached(
+            "SELECT recipe FROM fact_prompt_images WHERE source=?1 AND pos=?2 AND block=0",
+        )
+        .map_err(index)?
+        .query_row(params![source, offset], |row| row.get(0))
+        .optional()
+        .map_err(index)?;
+    row.as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(index)
 }
 
 fn relay_receipts(
@@ -304,6 +447,8 @@ impl Record {
     }
 }
 
+pub(super) type Fields = BTreeMap<(String, u64), Vec<crate::native_field::SelectedField>>;
+
 #[derive(Debug)]
 pub(super) struct Component {
     pub(super) binding: String,
@@ -317,20 +462,41 @@ pub(super) struct Component {
     #[cfg(test)]
     pub(super) member_count: usize,
     pub(super) latest_turn: Option<causal::TurnStart>,
-    #[cfg(test)]
+    pub(super) runtime_status: Option<&'static str>,
     pub(super) legacy_completion: Option<RelayReceipt>,
+    pub(super) trace_completion: Option<TraceCompletion>,
     pub(super) records: Vec<Record>,
     pub(super) reply_records: BTreeMap<(String, u64), serde_json::Value>,
+    pub(super) fields: Fields,
     pub(super) next: Option<Cursor>,
     pub(super) annotations: Option<AnnotationPage>,
     pub(super) home_detail: Option<HomeDetail>,
+    home_origins: BTreeMap<Position, serde_json::Value>,
     pub(super) home_activity: Option<serde_json::Value>,
+}
+
+impl Component {
+    pub(super) fn home_origin(&self, record: &Record) -> Option<&serde_json::Value> {
+        self.home_origins
+            .get(&record.causal.turn.as_ref()?.position)
+    }
+
+    pub(super) fn errors_generation(&self) -> String {
+        if self.identity.read_scope == CatalogReadScope::RetainedHistory {
+            return self.identity.generation.clone();
+        }
+        let mut digest = Sha256::new();
+        digest.update(self.identity.generation.as_bytes());
+        digest.update(self.runtime_status.unwrap_or("off").as_bytes());
+        format!("{:x}", digest.finalize())
+    }
 }
 
 #[derive(Debug)]
 pub(super) struct HomeDetail {
     pub(super) text: serde_json::Value,
-    pub(super) from: Option<&'static str>,
+    pub(super) from: Option<String>,
+    pub(super) from_name: Option<String>,
 }
 
 impl HomeDetail {
@@ -341,8 +507,21 @@ impl HomeDetail {
                 native,
                 None,
             ),
-            from: (!turn.handoff).then_some("you"),
+            from: (!turn.handoff).then(|| "you".into()),
+            from_name: None,
         }
+    }
+
+    fn set_parent(&mut self, parent: &str, metadata: &serde_json::Value) {
+        self.from = Some(parent.to_owned());
+        self.from_name = metadata.pointer("/family/ancestors").and_then(|ancestors| {
+            ancestors.as_array()?.iter().find_map(|row| {
+                (row["key"] == parent)
+                    .then(|| row["name"].as_str())
+                    .flatten()
+                    .map(str::to_owned)
+            })
+        });
     }
 }
 
@@ -549,7 +728,7 @@ fn address_frontier(
     let time: Option<i64> = db
         .query_row(
             "SELECT coalesce(ts,-9223372036854775808) FROM fact_record
-             WHERE source=?1 AND pos=?2 AND block=?3 AND occurrence=?4 AND NOT gap",
+             WHERE source=?1 AND pos=?2 AND block=?3 AND occurrence=?4",
             params![source, offset, address.block, address.occurrence],
             |row| row.get(0),
         )
@@ -567,6 +746,27 @@ pub(super) fn prompt_title(
     native_id: String,
     offset: i64,
 ) -> Result<Option<String>, ReadError> {
+    let indexed_source: Option<i64> = view
+        .lock()?
+        .query_row(
+            "SELECT w.source FROM warehouse_current w JOIN warehouse_source s ON s.source=w.source
+         WHERE w.path=?1 AND s.origin=?2",
+            params![carrier, source.namespace.binding()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(index)?;
+    let images = indexed_source
+        .map(|id| {
+            prompt_images(
+                view,
+                id,
+                u64::try_from(offset).map_err(index)?,
+                Some("response_item"),
+            )
+        })
+        .transpose()?
+        .flatten();
     let mut budget = view.body_bytes.lock().map_err(index)?;
     let allowance = (*budget).min(256 * 1024);
     let mut bytes_left = allowance;
@@ -579,6 +779,7 @@ pub(super) fn prompt_title(
             ledger,
             native_id,
             offset,
+            images: images.as_ref(),
         },
         &mut bytes_left,
         &view.proof_bytes,
@@ -595,6 +796,7 @@ struct RecordProof<'a> {
     ledger: &'a str,
     native_id: String,
     offset: i64,
+    images: Option<&'a crate::attachments::PromptMetadata>,
 }
 
 fn qualified_record(
@@ -610,6 +812,7 @@ fn qualified_record(
         ledger,
         native_id,
         offset,
+        images,
     } = proof;
     let current = decode(ledger)?;
     let path = relative(source.options, harness, &carrier).ok_or(ReadError::Restart)?;
@@ -638,15 +841,26 @@ fn qualified_record(
         }),
         proof_budget,
     )?;
-    let native = crate::source_reader::read_record_bounded(
-        &reader,
-        &reader.member.reference,
-        u64::try_from(offset).map_err(index)?,
-        *bytes_left,
-        bytes_left,
-    )
-    .map_err(|_| ReadError::Restart)?;
-    reader.finish().map_err(|_| ReadError::Restart)?;
+    let offset = u64::try_from(offset).map_err(index)?;
+    let native = if let Some(images) = images {
+        images.selected_record(&reader.member.reference, offset, None, &reader, bytes_left)
+    } else {
+        crate::source_reader::read_record_bounded(
+            &reader,
+            &reader.member.reference,
+            offset,
+            *bytes_left,
+            bytes_left,
+        )
+    }
+    .map_err(|error| {
+        if *bytes_left == 0 {
+            ReadError::SourceBudget
+        } else {
+            body_error(error)
+        }
+    })?;
+    reader.finish().map_err(body_error)?;
     Ok(native)
 }
 
@@ -753,6 +967,7 @@ pub(super) fn launch_call(
                 ledger: &ledger,
                 native_id,
                 offset,
+                images: None,
             },
             &mut bytes_left,
             &view.proof_bytes,
@@ -774,6 +989,7 @@ pub(super) fn launch_call(
                     ledger: &ledger,
                     native_id,
                     offset,
+                    images: None,
                 },
                 &mut bytes_left,
                 &view.proof_bytes,
@@ -915,6 +1131,74 @@ pub(super) struct AnnotationPage {
 
 type AnnotationMembers = BTreeMap<i64, (SessionSourceRef, i64, String)>;
 
+#[derive(Default)]
+struct PendingRuntime {
+    include: bool,
+    work: bool,
+    boundary: Option<(i64, i64, i64)>,
+}
+
+impl PendingRuntime {
+    fn retained(harness: &str) -> Self {
+        Self {
+            include: harness != "copilot",
+            ..Self::default()
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pending_runtime(
+    db: &rusqlite::Connection,
+    source: &Source<'_>,
+    key: &str,
+    harness: &str,
+    component: i64,
+    view: i64,
+    status: Option<&str>,
+) -> Result<PendingRuntime, ReadError> {
+    let mut runtime = PendingRuntime::retained(harness);
+    runtime.work = status == Some("work");
+    if runtime.include && matches!(status, Some("work" | "wait")) {
+        let turns = causal::turns(
+            db,
+            source,
+            key,
+            harness,
+            component,
+            view,
+            [Position::END].into_iter(),
+            "{}",
+        )?;
+        runtime.boundary = turns[&Position::END].as_ref().map(|turn| {
+            let at = turn.position;
+            (at.time, at.source, at.offset)
+        });
+    }
+    Ok(runtime)
+}
+
+pub(super) fn pending_counts_runtime(
+    db: &rusqlite::Connection,
+    source: &Source<'_>,
+    row: &super::Row,
+) -> Result<(bool, bool, String), ReadError> {
+    let (component, view) = db.query_row(
+        "SELECT component,(SELECT max(revision) FROM warehouse_prefix) FROM lineage_member WHERE source=?1",
+        [row.owner], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(index)?;
+    let runtime = pending_runtime(
+        db,
+        source,
+        &row.position.key,
+        &row.harness,
+        component,
+        view,
+        row.status,
+    )?;
+    Ok((runtime.include, runtime.work, encode(&runtime.boundary)?))
+}
+
 fn annotation_page(
     db: &rusqlite::Connection,
     source: &Source<'_>,
@@ -922,7 +1206,7 @@ fn annotation_page(
     binding: &str,
     request: AnnotationRequest<'_>,
     members: &AnnotationMembers,
-    include_pending: bool,
+    runtime: PendingRuntime,
 ) -> Result<AnnotationPage, ReadError> {
     let members_json = members
         .iter()
@@ -941,7 +1225,9 @@ fn annotation_page(
             crate::events::UNKNOWN,
             request.limit,
             request.first,
-            include_pending
+            runtime.include,
+            runtime.work,
+            encode(&runtime.boundary)?
         ])
         .map_err(index)?;
     let mut result = AnnotationPage {
@@ -1239,6 +1525,26 @@ fn member_turn_positions(
         })?;
     }
     Ok(())
+}
+
+fn home_question_origin<'a>(
+    target: &Target<'_>,
+    context: &'a causal::Context,
+    reference: &SessionSourceRef,
+    offset: u64,
+) -> Option<&'a causal::TurnStart> {
+    let Target::Turns(requested, Some(_)) = target else {
+        return None;
+    };
+    context.turn.as_ref().filter(|_| {
+        context.calls.iter().any(|call| {
+            is_question_tool(&call.tool)
+                && requested.contains(
+                    &crate::model::question_id(&reference.native_id, offset, Some(&call.id))
+                        .as_str(),
+                )
+        })
+    })
 }
 
 pub(super) fn is_question_id(id: &str) -> bool {
@@ -1658,6 +1964,7 @@ fn read_current(
     let mut witness = Sha256::new_with_prefix(encode(&(owner, component))?);
     let mut candidates = BTreeMap::new();
     let mut home_members = BTreeMap::new();
+    let mut needs_local_proof = false;
     let include_home_detail = matches!(
         target,
         Target::Turns(_, Some(HomeFields { detail: true, .. }))
@@ -1742,6 +2049,7 @@ fn read_current(
                 {
                     return Err(ReadError::Restart);
                 }
+                needs_local_proof |= changed_local.is_some();
                 witness.update(encode(&(
                     id,
                     incarnation,
@@ -1838,7 +2146,11 @@ fn read_current(
                         continue;
                     }
                     Target::Turns(turns, _) => {
-                        if include_home_detail || include_home_activity {
+                        if include_home_detail
+                            || include_home_activity
+                            || (matches!(target, Target::Turns(_, Some(_)))
+                                && turns.iter().any(|turn| is_question_id(turn)))
+                        {
                             home_members.insert(id, member.clone());
                         }
                         let predecessors = continuation_bounds(
@@ -1961,6 +2273,14 @@ fn read_current(
     }
     let members = format!("{:x}", witness.finalize());
     let binding = component_binding(&selection, &members)?;
+    let runtime_status = if direction == Direction::Reverse
+        || include_home_activity
+        || matches!(target, Target::Annotations(_))
+    {
+        super::selected_runtime_status(db, source, owner)?
+    } else {
+        None
+    };
     let annotations = if let Target::Annotations(request) = target {
         Some(annotation_page(
             db,
@@ -1969,7 +2289,11 @@ fn read_current(
             &binding,
             request,
             &annotation_members,
-            false,
+            if request.kind == "errors" {
+                pending_runtime(db, source, key, &harness, component, view, runtime_status)?
+            } else {
+                PendingRuntime::default()
+            },
         )?)
     } else {
         None
@@ -2043,14 +2367,12 @@ fn read_current(
         && let Some((position, _)) = candidates.first_key_value()
         && relay_context.values().all(Vec::is_empty)
     {
-        parent_relay::Plan::collect(db, source, position.source, Some(call), view)?
+        parent_relay::Plan::collect(db, source, position.source, Some(call), view, false)?
             .map(|plan| (plan, position.source))
     } else {
         None
     };
-    let home_activity = if include_home_activity
-        && super::selected_runtime_status(db, source, owner)? == Some("work")
-    {
+    let home_activity = if include_home_activity && runtime_status == Some("work") {
         active_tool_candidate(db, component, &harness)?
     } else {
         None
@@ -2058,7 +2380,10 @@ fn read_current(
     let mut legacy_plans = Vec::new();
     if harness == "claude" && (!causal.is_empty() || include_home_detail || home_activity.is_some())
     {
-        if let Some(plan) = parent_relay::Plan::collect(db, source, owner, None, view)? {
+        let trace_spawn = matches!(target, Target::Turns([turn], None)
+            if *turn == crate::model::spawn_turn_id(&harness, key));
+        if let Some(plan) = parent_relay::Plan::collect(db, source, owner, None, view, trace_spawn)?
+        {
             legacy_plans.push((owner, plan));
         }
         let mut children = db
@@ -2081,15 +2406,20 @@ fn read_current(
             if count > 128 {
                 return Err(index("Selected legacy relay child budget exhausted"));
             }
-            if let Some(plan) = parent_relay::Plan::collect(db, source, child, None, view)? {
+            if let Some(plan) = parent_relay::Plan::collect(db, source, child, None, view, false)? {
                 legacy_plans.push((child, plan));
             }
         }
     }
     drop(transaction);
     let mut readers = BTreeMap::new();
+    let mut fields = Fields::new();
     let mut bytes_left = read_view.body_bytes.lock().map_err(index)?;
-    let mut read_body = |id, member: &Arc<Member>, offset| {
+    let mut read_body = |id,
+                         member: &Arc<Member>,
+                         offset,
+                         images: Option<&crate::attachments::PromptMetadata>,
+                         mode| {
         if !member.remote
             && !provider_pins.contains_key(&id)
             && let std::collections::btree_map::Entry::Vacant(entry) = readers.entry(id)
@@ -2135,25 +2465,29 @@ fn read_current(
                 };
                 (provider, Some(pin.clone()))
             };
-        let native = crate::source_reader::read_record_bounded(
-            reader,
-            &member.reference,
-            offset,
-            crate::tx::LINE_MAX as usize,
-            &mut bytes_left,
-        )
-        .map_err(|error| {
-            if *bytes_left == 0 {
-                index("Selected page source budget exhausted")
-            } else {
-                body_error(error)
-            }
-        })?;
+        let native = read_view
+            .read_record(
+                reader,
+                id,
+                &member.reference,
+                offset,
+                images,
+                mode,
+                &mut bytes_left,
+                &mut fields,
+            )
+            .map_err(|error| {
+                if *bytes_left == 0 {
+                    ReadError::SourceBudget
+                } else {
+                    body_error(error)
+                }
+            })?;
         Ok::<_, ReadError>((native, pin))
     };
     let mut resolve = |plan: parent_relay::Plan<Arc<Member>>, child| {
         plan.resolve(child, |id, member, offset| {
-            read_body(id, member, offset).map(|(native, _)| native)
+            read_body(id, member, offset, None, BodyMode::Complete).map(|(native, _)| native)
         })
     };
     if let Some((plan, child)) = parent_plan
@@ -2162,16 +2496,15 @@ fn read_current(
     {
         first.into_mut().push(receipt);
     }
-    #[cfg(test)]
     let mut legacy_completion = None;
+    let mut trace_completion = None;
     let mut incoming = BTreeMap::new();
     for (child, plan) in legacy_plans {
         let resolved = resolve(plan, child)?;
-        #[cfg(test)]
         if child == owner {
             legacy_completion = resolved.completion;
-        }
-        if child != owner {
+            trace_completion = resolved.trace_completion;
+        } else {
             incoming.extend(resolved.incoming);
         }
     }
@@ -2186,20 +2519,26 @@ fn read_current(
             .keys()
             .copied()
             .chain(
-                (matches!(target, Target::Turns(..) | Target::Address(..))
-                    || home_activity.is_some())
-                .then_some(Position::END),
+                (!causal.is_empty() || include_home_detail || home_activity.is_some())
+                    .then_some(Position::END),
             )
             .chain(home_activity.as_ref().map(|activity| activity.position)),
         &encode(&incoming)?,
     )?;
     let latest_turn = turns.remove(&Position::END).flatten();
-    let home_detail = if let Some(turn) = latest_turn.as_ref().filter(|_| include_home_detail) {
+    let mut home_detail = if let Some(turn) = latest_turn.as_ref().filter(|_| include_home_detail) {
         let (id, member) = home_members
             .iter()
             .find(|(_, member)| member.reference.path == turn.address.path)
             .ok_or(ReadError::Restart)?;
-        let native = read_body(*id, member, turn.address.offset)?.0;
+        let native = read_body(
+            *id,
+            member,
+            turn.address.offset,
+            prompt_images(read_view, *id, turn.address.offset, Some("user"))?.as_ref(),
+            BodyMode::Complete,
+        )?
+        .0;
         Some(HomeDetail::from_turn(turn, &native))
     } else {
         None
@@ -2211,7 +2550,13 @@ fn read_current(
             .get(&active.position.source)
             .ok_or(ReadError::Restart)?;
         let offset = u64::try_from(active.position.offset).map_err(index)?;
-        let (native, _) = read_body(active.position.source, member, offset)?;
+        let (native, _) = read_body(
+            active.position.source,
+            member,
+            offset,
+            None,
+            BodyMode::Complete,
+        )?;
         let recipe = serde_json::json!({"kind":"activity","block":active.block,"tool":active.tool,"cwd":active.cwd});
         let text = crate::model::overview_text(&recipe, &native, None);
         Some(serde_json::json!([
@@ -2225,10 +2570,18 @@ fn read_current(
     };
     let mut records = Vec::with_capacity(candidates.len());
     let mut reply_records = BTreeMap::new();
+    let mut home_origins = BTreeMap::new();
     let mut touched = BTreeMap::new();
     for (position, (kind, member, mut prefix)) in candidates {
         let offset = u64::try_from(position.offset).map_err(index)?;
-        let (native, pin) = read_body(position.source, &member, offset)?;
+        let images = prompt_images(read_view, position.source, offset, kind.as_deref())?;
+        let (native, pin) = read_body(
+            position.source,
+            &member,
+            offset,
+            images.as_ref(),
+            BodyMode::transcript(kind.as_deref()),
+        )?;
         prefix.provider = pin;
         touched.entry(position.source).or_insert(prefix);
         let reference = &member.reference;
@@ -2292,25 +2645,53 @@ fn read_current(
         let causal = inputs.map_or_else(causal::Context::default, |inputs| {
             inputs.render(source, key, reference, native_id.as_deref(), turn)
         });
+        if let Some(turn) = home_question_origin(&target, &causal, reference, offset)
+            && let std::collections::btree_map::Entry::Vacant(entry) =
+                home_origins.entry(turn.position)
+        {
+            let id = turn.position.source;
+            let member = home_members.get(&id).ok_or(ReadError::Restart)?;
+            let images = prompt_images(read_view, id, turn.address.offset, Some("user"))?;
+            let (prompt, _) = read_body(
+                id,
+                member,
+                turn.address.offset,
+                images.as_ref(),
+                BodyMode::Complete,
+            )?;
+            entry.insert(HomeDetail::from_turn(turn, &prompt).text);
+        }
         if direction == Direction::Reverse
             && let Some(operation) = operation
             && let std::collections::btree_map::Entry::Vacant(entry) =
                 reply_records.entry((reference.path.clone(), operation.parent))
         {
-            let (body, _) = read_body(position.source, &member, operation.parent)?;
+            let (body, _) = read_body(
+                position.source,
+                &member,
+                operation.parent,
+                None,
+                BodyMode::Complete,
+            )?;
             entry.insert(body);
         }
         if direction == Direction::Reverse || matches!(target, Target::Turns(_, Some(_))) {
-            for reply in causal
+            for reply_offset in causal
                 .calls
                 .iter()
                 .filter(|call| direction == Direction::Reverse || call.tool == "AskUserQuestion")
-                .filter_map(causal::CallSlot::display_reply)
+                .flat_map(causal::CallSlot::display_offsets)
             {
                 if let std::collections::btree_map::Entry::Vacant(entry) =
-                    reply_records.entry((reference.path.clone(), reply.o))
+                    reply_records.entry((reference.path.clone(), reply_offset))
                 {
-                    let (body, _) = read_body(position.source, &member, reply.o)?;
+                    let (body, _) = read_body(
+                        position.source,
+                        &member,
+                        reply_offset,
+                        None,
+                        BodyMode::Transcript,
+                    )?;
                     entry.insert(body);
                 }
             }
@@ -2332,6 +2713,7 @@ fn read_current(
             reference: reference.clone(),
             kind,
             native,
+            images: images.map(|images| images.refs),
         });
     }
     #[cfg(test)]
@@ -2356,12 +2738,18 @@ fn read_current(
     source.validate_authority()?;
     // An earlier page may use historical prefix receipts with current row facts.
     // The browser keeps the metadata from its latest or addressed selection.
-    let metadata = {
-        (cursor.is_none()
-            && matches!(
-                target,
-                Target::Page(_, Direction::Reverse) | Target::Address(_, Some(_), None)
-            ))
+    let include_metadata = cursor.is_none()
+        && matches!(
+            target,
+            Target::Page(_, Direction::Reverse) | Target::Address(_, Some(_), None)
+        );
+    let launch_detail = home_detail.is_some()
+        && latest_turn
+            .as_ref()
+            .is_some_and(|turn| turn.id == crate::model::spawn_turn_id(&harness, key));
+    // Qualifying a page's blocks from a changed carrier does not make that
+    // carrier eligible for the component's complete metadata projection.
+    let metadata = (!needs_local_proof && (include_metadata || launch_detail))
         .then(|| {
             super::selected_metadata(
                 read_view,
@@ -2370,11 +2758,18 @@ fn read_current(
                 owner,
                 &owner_identity.1,
                 &references,
-                source.current_provider.is_none(),
+                include_metadata && source.current_provider.is_none(),
             )
         })
-        .transpose()?
-    };
+        .transpose()?;
+    if launch_detail
+        && let Some(detail) = &mut home_detail
+        && let Some(row) = &metadata
+        && let (Some(parent), Some(details)) = (&row.parent, &row.details)
+    {
+        detail.set_parent(parent, details);
+    }
+    let runtime_status = metadata.as_ref().map_or(runtime_status, |row| row.status);
     let (_, harness, native_id) = owner_identity;
     let identity = super::present_identity(
         source,
@@ -2404,16 +2799,19 @@ fn read_current(
         native_id,
         title,
         model,
-        metadata,
+        metadata: metadata.filter(|_| include_metadata),
         retained_metadata: None,
         latest_turn,
-        #[cfg(test)]
+        runtime_status,
         legacy_completion,
+        trace_completion,
         records,
         reply_records,
+        fields,
         next,
         annotations,
         home_detail,
+        home_origins,
         home_activity,
     }))
 }
@@ -2455,7 +2853,7 @@ fn pin_provider_with(
 
 fn body_error(error: io::Error) -> ReadError {
     if error.kind() == io::ErrorKind::WouldBlock {
-        index("Selected page source budget exhausted")
+        ReadError::SourceBudget
     } else {
         ReadError::Restart
     }
@@ -2533,7 +2931,9 @@ impl<'a> PrefixReader<'a> {
         let io = self.io.get_mut().map_err(|_| changed())?;
         let path = Path::new(&self.member.carrier);
         let current = raw_stat(path)?;
-        if !stable_or_grown(&io.observed, &current) {
+        if self.member.changed_local.is_some() && current != io.observed
+            || !stable_or_grown(&io.observed, &current)
+        {
             return Err(changed());
         }
         if current != io.observed {

@@ -486,6 +486,8 @@ fn write_fact(
             at!(fact_record, kind=>Option::<&str>::None, uuid=>Option::<&str>::None,
                 message_id=>Option::<&str>::None,parent_id=>Option::<&str>::None,ts=>time,gap=>true)
         }
+        Fact::PromptImages(recipe) => at!(fact_prompt_images, recipe=>json(recipe)?),
+        Fact::NativeFields(recipe) => at!(fact_native_fields, recipe=>json(recipe)?),
         Fact::SessionId(id) => at!(fact_session_observation, kind=>"session-id", native_id=>id,
             parent_id=>Option::<&str>::None,nickname=>Option::<&str>::None,
             agent_path=>Option::<&str>::None,metadata=>Option::<&str>::None),

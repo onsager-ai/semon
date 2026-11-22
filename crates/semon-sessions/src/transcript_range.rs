@@ -24,8 +24,8 @@ use std::{
 
 #[cfg(test)]
 const MAX_LIMIT: usize = 100;
-#[cfg(any(test, feature = "postgres"))]
-const PAGE_SOURCE_BYTES: usize = 1024 * 1024;
+pub(crate) const PAGE_SOURCE_BYTES: usize = 1024 * 1024;
+pub(crate) const ATTACHMENT_SOURCE_BYTES: usize = 12 * 1024 * 1024;
 #[cfg(any(test, feature = "postgres"))]
 const PAGE_SOURCE_REQUESTS: usize = 256;
 #[cfg(any(test, feature = "postgres"))]
@@ -37,10 +37,8 @@ const READ_CHUNK: usize = 4096;
 thread_local! {
     pub(crate) static AFTER_LOCAL_READ: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_SELECTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
-    pub(crate) static LAST_LOCAL_FAILURE: std::cell::Cell<Option<crate::source_carrier::FailureStage>> = const { std::cell::Cell::new(None) };
 }
 
-#[cfg(any(test, feature = "postgres"))]
 fn reply(status: u16, value: Value) -> ViewerReply {
     ViewerReply {
         status,
@@ -985,20 +983,24 @@ enum ProjectionFence {
     SourceRange,
 }
 
+pub(crate) fn source_budget_reply() -> ViewerReply {
+    reply(
+        503,
+        json!({
+            "error":{
+                "code":"source_budget_exhausted",
+                "message":"The selected source evidence exceeds the bounded read budget.",
+                "retryable":false,
+            },
+            "reset_cursor":false,"fence_reason":"source_budget","stage":"budget",
+        }),
+    )
+}
+
 #[cfg(any(test, feature = "postgres"))]
 fn stale(reason: ProjectionFence) -> ViewerReply {
     if matches!(reason, ProjectionFence::SourceBudget) {
-        let mut reply = catalog::error(
-            503,
-            "source_budget_exhausted",
-            "The selected source evidence exceeds the bounded read budget.",
-            false,
-        );
-        let mut body: Value = serde_json::from_slice(&reply.body).expect("owned JSON reply");
-        body["fence_reason"] = json!("source_budget");
-        body["stage"] = json!("budget");
-        reply.body = body.to_string().into_bytes();
-        return reply;
+        return source_budget_reply();
     }
     let mut reply = catalog::error(
         409,
@@ -1050,15 +1052,6 @@ impl std::error::Error for LocalRevisionChanged {
 
 #[cfg(any(test, feature = "postgres"))]
 fn source_read_fence(error: &io::Error) -> ProjectionFence {
-    #[cfg(test)]
-    LAST_LOCAL_FAILURE.with(|stage| {
-        stage.set(
-            error
-                .get_ref()
-                .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
-                .map(|detail| detail.2),
-        );
-    });
     error
         .get_ref()
         .and_then(|error| error.downcast_ref::<LocalRevisionChanged>())
@@ -1588,7 +1581,7 @@ fn render(
         proofs: std::sync::Mutex::default(),
         block: std::sync::Mutex::default(),
         bytes_left: std::sync::Mutex::new(if attachment.is_some() {
-            12 * 1024 * 1024
+            ATTACHMENT_SOURCE_BYTES
         } else {
             PAGE_SOURCE_BYTES
         }),
@@ -1627,7 +1620,7 @@ fn render(
         result
     };
     let source_budget = if attachment.is_some() {
-        12 * 1024 * 1024
+        ATTACHMENT_SOURCE_BYTES
     } else {
         PAGE_SOURCE_BYTES
     };

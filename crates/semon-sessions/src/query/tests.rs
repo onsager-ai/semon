@@ -35,14 +35,14 @@ fn staged_io_json_is_original_io_shape_with_only_additive_stage() {
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "linux")]
-fn sealed_codex_fixture(padding: usize) -> (Home, PathBuf) {
+fn sealed_codex_fixture(turns: usize, padding: usize) -> (Home, PathBuf) {
     let home = Home::new("sealed-pages");
     let mut records = vec![codex_line(
         ts(5, 0),
         "session_meta",
         json!({"id":"sealed-pages","cwd":"/work/proj","originator":"codex_exec","thread_source":"user"}),
     )];
-    for index in 0..240 {
+    for index in 0..turns {
         records.push(codex_line(
             ts(5, 1),
             "response_item",
@@ -85,54 +85,49 @@ fn sealed_codex_fixture(padding: usize) -> (Home, PathBuf) {
 #[cfg(target_os = "linux")]
 #[test]
 fn selected_codex_pages_survive_multi_segment_sealing() {
-    let (home, path) = sealed_codex_fixture(2000);
+    let (home, path) = sealed_codex_fixture(240, 2000);
     let read_pages = |sealed: bool| {
-        let mut after = 0;
+        let mut cursor = None::<String>;
         let mut pages = Vec::new();
         loop {
             crate::source_chunks::READ_BYTES.with(|bytes| bytes.set(0));
             crate::source_chunks::READ_BLOCKS.with(|blocks| blocks.borrow_mut().clear());
-            crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.set(None));
+            let mut query = "sid=sealed-pages&limit=24".to_owned();
+            if let Some(cursor) = &cursor {
+                query.push_str("&cursor=");
+                query.push_str(&crate::viewer::percent_encode(cursor));
+            }
             let reply = crate::session_transcript_range_with_mode(
                 &home.options,
                 "local",
-                &format!("sid=sealed-pages&after={after}&limit=60"),
+                &query,
                 None,
                 crate::SessionSourceReadMode::LocalOrPinnedProvider,
             );
             let body: Value = serde_json::from_slice(&reply.body).unwrap();
             let bytes = crate::source_chunks::READ_BYTES.with(|bytes| bytes.get());
             let blocks = crate::source_chunks::READ_BLOCKS.with(|blocks| blocks.borrow().len());
-            let stage = crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.get());
             println!(
-                "sealed={sealed} after={after} status={} blocks={blocks} bytes={bytes} stage={stage:?}",
+                "sealed={sealed} page={} status={} blocks={blocks} bytes={bytes}",
+                pages.len(),
                 reply.status
             );
-            if reply.status != 200 {
-                assert!(sealed, "pre-seal read failed: {body}");
-                assert!(bytes > blocks as u64 * crate::source_chunks::SIZE as u64);
-                assert_eq!(
-                    crate::transcript_range::LAST_LOCAL_FAILURE.with(|stage| stage.get()),
-                    Some(crate::source_carrier::FailureStage::Budget),
-                    "unexpected underlying source failure: {body}"
-                );
-            }
             assert_eq!(reply.status, 200, "selected page fence: {body}");
-            assert!(crate::source_chunks::READ_BYTES.with(|bytes| bytes.get()) <= 1024 * 1024);
-            let entries = body["entries"].as_array().unwrap();
-            assert!(!entries.is_empty());
-            assert!(
-                entries
-                    .iter()
-                    .any(|entry| entry.to_string().contains("Readable record"))
-            );
-            pages.push(body.clone());
-            let Some(next) = body["range"]["next"].as_u64() else {
+            assert!(bytes <= crate::transcript_range::PAGE_SOURCE_BYTES as u64);
+            let next = body["earlier_cursor"].as_str().map(str::to_owned);
+            pages.push(body);
+            let Some(next) = next else {
                 break;
             };
-            assert!(next > after);
-            after = next;
+            assert_ne!(cursor.as_ref(), Some(&next));
+            assert!(pages.len() < 100);
+            cursor = Some(next);
         }
+        assert!(
+            pages
+                .iter()
+                .any(|page| page["entries"].to_string().contains("Readable record"))
+        );
         assert!(pages.len() >= 2);
         pages
     };
@@ -146,31 +141,42 @@ fn selected_codex_pages_survive_multi_segment_sealing() {
     assert_eq!(second.added.unwrap().start, first.added.unwrap().end);
     crate::sealed::clear_frame_cache_for_test();
     let after = read_pages(true);
-    for (before, after) in before.iter().zip(&after) {
-        assert_eq!(before["entries"], after["entries"]);
-        assert_eq!(before["projection"], after["projection"]);
-        assert_eq!(before["range"], after["range"]);
-    }
     assert_eq!(before.len(), after.len());
+    for (before, after) in before.iter().zip(&after) {
+        assert_eq!(before["identity"], after["identity"]);
+        assert_eq!(before["projection"], after["projection"]);
+        assert_eq!(before["position"], after["position"]);
+        let entries = |page: &Value| {
+            let mut entries = page["entries"].as_array().unwrap().clone();
+            for entry in &mut entries {
+                // The carrier changed, so addresses carry a new binding. The
+                // native entry, provenance and record address stay the same.
+                entry["address"].as_object_mut().unwrap().remove("binding");
+            }
+            entries
+        };
+        assert_eq!(entries(before), entries(after));
+    }
 }
 
 #[cfg(target_os = "linux")]
 #[test]
 fn selected_sealed_page_still_rejects_excess_unique_evidence() {
-    let (home, path) = sealed_codex_fixture(4000);
-    let read = || {
+    let (home, path) = sealed_codex_fixture(24, 12_000);
+    let read = |limit| {
         crate::session_transcript_range_with_mode(
             &home.options,
             "local",
-            "sid=sealed-pages&limit=60",
+            &format!("sid=sealed-pages&limit={limit}"),
             None,
             crate::SessionSourceReadMode::LocalOrPinnedProvider,
         )
     };
-    assert_eq!(read().status, 200);
+    assert_eq!(read(2).status, 200);
     assert!(crate::sealed::seal(&path, 1, u64::MAX).unwrap().punched);
+    assert_eq!(read(2).status, 200);
     crate::source_chunks::READ_BYTES.with(|bytes| bytes.set(0));
-    let reply = read();
+    let reply = read(32);
     let body: Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(reply.status, 503, "{body}");
     assert_eq!(body["error"]["code"], "source_budget_exhausted");
@@ -183,12 +189,12 @@ fn selected_sealed_page_still_rejects_excess_unique_evidence() {
 #[test]
 fn selected_sealed_pages_reject_replacement_truncation_and_corruption() {
     for mutation in 0..3 {
-        let (home, path) = sealed_codex_fixture(2000);
+        let (home, path) = sealed_codex_fixture(240, 2000);
         let read = || {
             crate::session_transcript_range_with_mode(
                 &home.options,
                 "local",
-                "sid=sealed-pages&limit=60",
+                "sid=sealed-pages&limit=24",
                 None,
                 crate::SessionSourceReadMode::LocalOrPinnedProvider,
             )
@@ -1534,69 +1540,56 @@ fn read_transcript_pages_as_the_viewer_does() {
         complete,
         "native fixture Catalog publication did not complete"
     );
-    // Selected Viewer reads expose the same entries and paging positions,
-    // together with generation-bound native provenance.
-    for args in [
-        json!({"id": "done"}),
-        json!({"id": "scan"}),
-        json!({"id": "done", "after": 1}),
-        json!({"id": "done", "turn": ask}),
-    ] {
-        let ours = call(&mut query, "read_transcript", args.clone());
-        let sid = args["id"].as_str().unwrap();
-        let mut url = format!("sid={sid}&after={}&limit=100", ours["from"]);
-        if let Some(turn) = args["turn"].as_str() {
-            let anchor = crate::session_turn_anchor(
-                &home.options,
-                "local",
-                &format!("sid={sid}&turn={turn}"),
-            );
-            assert_eq!(anchor.status, 200);
-            let anchor: Value = serde_json::from_slice(&anchor.body).unwrap();
-            assert_eq!(anchor["slot"], ours["from"]);
-            url.push_str(&format!(
-                "&generation={}",
-                anchor["generation"].as_str().unwrap()
-            ));
-        }
-        let served = crate::session_transcript_range(&home.options, "local", &url, None);
-        assert_eq!(served.status, 200, "{url}");
-        let served: Value = serde_json::from_slice(&served.body).unwrap();
-        assert_eq!(served["api"], 1);
-        assert_eq!(served["range"]["first"], ours["from"]);
-        assert_eq!(served["range"]["end"], ours["to"]);
-        assert_eq!(served["projection"]["total"], ours["total"]);
-        assert_eq!(served["freshness"]["state"], "cached");
-        let mut entries = served["entries"].clone();
-        for (offset, entry) in entries.as_array_mut().unwrap().iter_mut().enumerate() {
-            assert_eq!(
-                entry["slot"].as_u64().unwrap(),
-                ours["from"].as_u64().unwrap() + offset as u64
-            );
-            assert_eq!(entry["entry_id"].as_str().unwrap().len(), 64);
+    // The Viewer and Query render the same native records. The Viewer uses
+    // opaque cursors for pages and exact native addresses for saved positions.
+    for sid in ["done", "scan"] {
+        let ours = call(&mut query, "read_transcript", json!({"id": sid}));
+        let latest =
+            crate::session_transcript_range(&home.options, "local", &format!("sid={sid}"), None);
+        assert_eq!(latest.status, 200, "{sid}");
+        let latest: Value = serde_json::from_slice(&latest.body).unwrap();
+        assert_eq!(latest["api"], 1);
+        assert_eq!(latest["projection"], 7);
+        let entries = latest["entries"].as_array().unwrap();
+        let expected = ours["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), expected.len(), "{sid}");
+        for (entry, expected) in entries.iter().zip(expected) {
+            assert_eq!(entry["address"]["entry_id"], entry["entry_id"]);
             assert!(entry["provenance"].is_object());
             assert_eq!(entry["freshness"]["state"], "cached");
-            if entry.get("field").is_some() {
-                assert_eq!(entry["field"]["name"], "text");
-                assert_eq!(entry["field"]["complete"], true);
-                assert_eq!(entry["clipped"], false);
-                entry.as_object_mut().unwrap().remove("field");
-                entry.as_object_mut().unwrap().remove("clipped");
-            }
-            let expected = &ours["entries"][offset];
-            if expected.get("turn").is_none() {
-                assert_eq!(entry["turn"], turn_id(&model, sid));
-                entry.as_object_mut().unwrap().remove("turn");
-            }
-            if entry["k"] == "h" && sid == "done" {
-                assert_eq!(entry["text"], "Summarize the design doc");
-                entry.as_object_mut().unwrap().remove("text");
-            }
-            for field in ["slot", "observed_at", "freshness", "entry_id", "provenance"] {
-                entry.as_object_mut().unwrap().remove(field);
+            for (field, value) in expected.as_object().unwrap() {
+                assert_eq!(&entry[field], value, "{sid} {field}");
             }
         }
-        assert_eq!(entries, ours["entries"], "{url}");
+        let turn = turn_id(&model, sid);
+        let anchor = crate::session_turn_anchor(
+            &home.options,
+            "local",
+            &format!("sid={sid}&turn={}", crate::viewer::percent_encode(&turn)),
+        );
+        assert_eq!(anchor.status, 200, "{sid}");
+        let anchor: Value = serde_json::from_slice(&anchor.body).unwrap();
+        let address = &anchor["address"];
+        assert!(address.is_object(), "{sid} {anchor}");
+        let addressed = crate::session_transcript_range(
+            &home.options,
+            "local",
+            &format!(
+                "sid={sid}&address={}",
+                crate::viewer::percent_encode(&address.to_string())
+            ),
+            None,
+        );
+        assert_eq!(addressed.status, 200, "{sid}");
+        let addressed: Value = serde_json::from_slice(&addressed.body).unwrap();
+        assert_eq!(addressed["position"], "address");
+        assert!(
+            addressed["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| { entry["address"] == *address && entry["turn"] == turn })
+        );
     }
     let last = call(
         &mut query,

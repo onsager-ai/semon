@@ -151,46 +151,69 @@ pub(super) fn claude_runs(
     finals: &[Ref],
     ends: &[Ref],
 ) -> (Vec<super::Run>, super::BTreeSet<Ref>) {
-    use super::{AGM_DOWN, BTreeSet, Run};
-    /// At one time, ends sort before starts: a message written with a
-    /// hand-back follows it.
-    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-    enum Step {
-        Final,
-        Handback,
-        End,
-        Start,
-    }
+    use super::{AGM_DOWN, BTreeSet};
+    use ClaudeRunStep as Step;
     let mut steps: Vec<(Ref, Step)> = finals
         .iter()
         .map(|at| (*at, Step::Final))
-        .chain(ends.iter().map(|at| (*at, Step::End)))
+        .chain(ends.iter().map(|at| {
+            let completed = matches!(
+                event(files, *at).n.as_deref(),
+                Some("completed" | "success" | "done")
+            );
+            (*at, Step::Notification { completed })
+        }))
         .collect();
     for at in child_events {
         let found = event(files, *at);
         let step = match found.k {
             Kind::Tool if found.n.as_deref() == Some("SubagentHandback") => Step::Handback,
-            Kind::Agm if found.script & AGM_DOWN != 0 => Step::Start,
-            Kind::U if Some(*at) != first_prompt => Step::Start,
+            Kind::Agm if found.script & AGM_DOWN != 0 => Step::Start { coordinator: true },
+            Kind::U if Some(*at) != first_prompt => Step::Start { coordinator: false },
             _ => continue,
         };
         steps.push((*at, step));
     }
-    steps.sort_by_key(|(at, step)| {
-        let t = event(files, *at).t;
-        (t.is_none(), t, *step, *at)
+    let steps = steps
+        .into_iter()
+        .map(|(at, step)| (event(files, at).t, step, at));
+    let mut inline = BTreeSet::new();
+    let runs = group_claude_runs(steps.collect(), |at| {
+        inline.insert(at);
+    });
+    (runs, inline)
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ClaudeRunStep {
+    Final,
+    Handback,
+    Notification { completed: bool },
+    Start { coordinator: bool },
+}
+
+pub(crate) fn group_claude_runs<A: Copy + Ord>(
+    mut steps: Vec<(Option<i64>, ClaudeRunStep, A)>,
+    mut inline: impl FnMut(A),
+) -> Vec<super::Run<A>> {
+    use super::Run;
+    use ClaudeRunStep as Step;
+    steps.sort_by_key(|(time, step, at)| {
+        let order = match step {
+            Step::Final => 0,
+            Step::Handback => 1,
+            Step::Notification { .. } => 2,
+            Step::Start { .. } => 3,
+        };
+        (time.is_none(), *time, order, *at)
     });
     let mut runs = vec![Run::default()];
-    let mut inline = BTreeSet::new();
-    for (at, step) in steps {
+    for (_, step, at) in steps {
         let last = runs.len() - 1;
         match step {
-            Step::Start if runs[last].ended() => runs.push(Run::default()),
-            Step::Start => {
-                if event(files, at).k == Kind::Agm {
-                    inline.insert(at);
-                }
-            }
+            Step::Start { .. } if runs[last].ended() => runs.push(Run::default()),
+            Step::Start { coordinator: true } => inline(at),
+            Step::Start { coordinator: false } => (),
             // The parent records a hand-back at its next turn, so it can
             // land after the message that resumed the child: it belongs
             // to the run the child handed back, when that one has none.
@@ -211,11 +234,7 @@ pub(super) fn claude_runs(
             // handed back before it, when that one has none. A failed or
             // killed one is about the run still open: the one before had
             // handed back, so it didn't fail.
-            Step::End => {
-                let completed = matches!(
-                    event(files, at).n.as_deref(),
-                    Some("completed" | "success" | "done")
-                );
+            Step::Notification { completed } => {
                 let target = if last > 0
                     && completed
                     && !runs[last].ended()
@@ -232,5 +251,5 @@ pub(super) fn claude_runs(
             }
         }
     }
-    (runs, inline)
+    runs
 }

@@ -240,6 +240,42 @@ pub(crate) fn read_native_record(
     )
 }
 
+/// Append a known range from a reader already pinned to this committed source
+/// for the request (a focused proof reader or `BudgetedReader`).
+pub(crate) fn append_committed_range(
+    reader: &dyn SessionSourceReader,
+    source: &SessionSourceRef,
+    range: std::ops::Range<u64>,
+    bytes: &mut Vec<u8>,
+    bytes_left: &mut usize,
+) -> io::Result<()> {
+    let invalid = || io::Error::from(io::ErrorKind::InvalidData);
+    let size = usize::try_from(range.end.checked_sub(range.start).ok_or_else(invalid)?)
+        .map_err(io::Error::other)?;
+    if range.end > source.offset {
+        return Err(invalid());
+    }
+    if size > *bytes_left {
+        return Err(io::Error::from(io::ErrorKind::WouldBlock));
+    }
+    let mut at = range.start;
+    while at < range.end {
+        let max = ((range.end - at) as usize).min(SESSION_SOURCE_CHUNK_MAX);
+        let part = reader.read_range(source, None, at, max)?;
+        if part.offset != at
+            || part.bytes.is_empty()
+            || part.bytes.len() > max
+            || part.length < source.offset
+        {
+            return Err(invalid());
+        }
+        *bytes_left -= part.bytes.len();
+        at += part.bytes.len() as u64;
+        bytes.extend_from_slice(&part.bytes);
+    }
+    Ok(())
+}
+
 pub(crate) fn read_record_bounded(
     reader: &dyn SessionSourceReader,
     source: &SessionSourceRef,

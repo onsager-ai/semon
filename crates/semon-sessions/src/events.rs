@@ -4005,6 +4005,18 @@ fn parse(
                 if let Some(ordinal) = record_ordinal {
                     index.capture_record_identity(&record, line_offset, ordinal, before_signals);
                 }
+                if let Some(batch) = &mut index.warehouse_observations {
+                    if let Some(images) =
+                        crate::attachments::PromptMetadata::oversized(&record, &line)
+                    {
+                        batch.push(line_offset, 0, Fact::PromptImages(images));
+                    }
+                    if let Some(fields) =
+                        crate::native_field::SparseRecord::capture(&record, &line, line_offset)
+                    {
+                        batch.push(line_offset, 0, Fact::NativeFields(fields));
+                    }
+                }
             }
             _ => {
                 index.warehouse_fact(line_offset, 0, || Fact::Gap);
@@ -5794,7 +5806,7 @@ fn assigned_result_projection(
     exact_statement(tokens, at)
 }
 
-fn result_source(script: &str) -> bool {
+pub(crate) fn result_source(script: &str) -> bool {
     if script.len() > RESULT_SOURCE_BYTES_MAX {
         return false;
     }
@@ -6019,7 +6031,7 @@ fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, off
     if operations || failed {
         summary.event_mut(index).expect("event exists").poll = None;
         if let Some(start) = known {
-            push_poll(summary, start, offset);
+            push_poll(summary, start, offset, summary.events[index].t);
         }
         return;
     }
@@ -6040,17 +6052,29 @@ fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, off
         // A command these logs haven't seen yet: a new start, whether this
         // single source call started it.
         Some(session) => {
-            if summary.yields.len() >= YIELDS_MAX
-                && !summary.yields.contains_key(&session)
-                && let Some(oldest) = summary
+            let prior = summary.yields.insert(session, index);
+            let evicted = if summary.yields.len() > YIELDS_MAX {
+                let oldest = summary
                     .yields
                     .iter()
                     .min_by_key(|(_, start)| **start)
                     .map(|(session, _)| session.clone())
+                    .expect("open yield set is over capacity");
+                summary.yields.remove(&oldest)
+            } else {
+                None
+            };
+            if let Some(start) = prior.or(evicted)
+                && let Some(id) = summary.events[start].id.clone()
             {
-                summary.yields.remove(&oldest);
+                let reply = Reply {
+                    o: offset,
+                    t: summary.events[index].t,
+                    f: ACK,
+                    ..Reply::default()
+                };
+                summary.tool_result_fact(&id, Some(start), &reply, "yield_closed", None);
             }
-            summary.yields.insert(session, index);
             summary.event_mut(index).expect("event exists").poll = None;
             summary.event_mut(index).expect("event exists").y = Some(Box::default());
             return;
@@ -6061,12 +6085,21 @@ fn fold_yield(summary: &mut FileIndex, index: usize, output: Option<&Value>, off
         return;
     };
     summary.event_mut(index).expect("event exists").poll = Some(start);
-    push_poll(summary, start, offset);
+    push_poll(summary, start, offset, summary.events[index].t);
 }
 
 /// Adds a poll's output line to the yielded command it polled, up to
 /// [`POLLS_MAX`]; past that the command's output is marked cut.
-fn push_poll(summary: &mut FileIndex, start: usize, offset: u64) {
+fn push_poll(summary: &mut FileIndex, start: usize, offset: u64, time: Option<i64>) {
+    if let Some(id) = summary.events.get(start).and_then(|event| event.id.clone()) {
+        let reply = Reply {
+            o: offset,
+            t: time,
+            f: ACK,
+            ..Reply::default()
+        };
+        summary.tool_result_fact(&id, Some(start), &reply, "yield_poll", None);
+    }
     if let Some(found) = summary.event_mut(start)
         && let Some(yielded) = found.y.as_mut()
     {
@@ -6974,8 +7007,13 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
             } else {
                 None
             };
+            let result_id = if let Some(start) = yielded {
+                summary.events[start].id.clone()
+            } else {
+                field(item, "id").map(str::to_owned)
+            };
             if operation_tool.is_some()
-                && let Some(id) = field(item, "id")
+                && let Some(id) = result_id.as_deref()
             {
                 summary.tool_result_fact(
                     id,
@@ -7240,21 +7278,24 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                         f: flags,
                         ..Reply::default()
                     };
-                    summary.tool_result_fact(
-                        id,
-                        summary.warehouse_call_index(id),
-                        &reply,
-                        "response_output",
-                        code,
-                    );
+                    let call = summary.warehouse_call_index(id);
+                    let mut indexed = reply.clone();
                     if script_output || !code_mode_call {
                         resolve(summary, id, |_| reply);
                     }
+                    let mut kind = "response_output";
                     if let Some(index) = code_mode_index
                         && script_output
                     {
                         fold_yield(summary, index, output, offset);
+                        if summary.events[index].y.is_some() {
+                            indexed.f |= ACK;
+                            kind = "yield_started";
+                        } else if summary.events[index].poll.is_some() {
+                            kind = "yield_poll_wrapper";
+                        }
                     }
+                    summary.tool_result_fact(id, call, &indexed, kind, code);
                 }
             }
             Some("reasoning")

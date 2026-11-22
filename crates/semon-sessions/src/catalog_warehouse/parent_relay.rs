@@ -1,5 +1,25 @@
 //! Parent-addressed Claude relay matching. Native bodies stay in the request.
 use super::*;
+use crate::model::{ClaudeRunStep as Step, group_claude_runs};
+
+struct RunObservation<M> {
+    source: i64,
+    member: M,
+    address: Address,
+    block: u32,
+    time: Option<i64>,
+    step: Step,
+}
+
+pub(in super::super) struct TraceCompletion {
+    pub(in super::super) address: Address,
+    pub(in super::super) block: u32,
+    pub(in super::super) in_child: bool,
+    pub(in super::super) at: Option<i64>,
+    pub(in super::super) failed: bool,
+    pub(in super::super) resumed: bool,
+    pub(in super::super) preview: Option<String>,
+}
 
 struct Send {
     pos: i64,
@@ -16,6 +36,8 @@ struct Receipt<M> {
     skip: usize,
     legacy: bool,
     occurrence: i64,
+    record_occurrence: i64,
+    relative: String,
 }
 
 pub(super) struct Plan<M> {
@@ -25,6 +47,9 @@ pub(super) struct Plan<M> {
     call: Option<(u64, i64)>,
     member: M,
     explicit_completion: bool,
+    run: Vec<RunObservation<M>>,
+    spawn: Option<String>,
+    trace: bool,
 }
 
 impl Plan<Arc<Member>> {
@@ -34,6 +59,7 @@ impl Plan<Arc<Member>> {
         child: i64,
         call: Option<&Address>,
         view: i64,
+        trace: bool,
     ) -> Result<Option<Self>, ReadError> {
         use crate::events::AGM_FINAL;
         let native_id: Option<String> = db.query_row(
@@ -92,6 +118,18 @@ impl Plan<Arc<Member>> {
             .query(params![parent, source.namespace.binding()])
             .map_err(index)?;
         let mut receipts = Vec::new();
+        let mut run = Vec::new();
+        if trace {
+            collect_run(
+                db,
+                child,
+                child_end,
+                &member,
+                &member.reference.path,
+                None,
+                &mut run,
+            )?;
+        }
         while let Some(row) = members.next().map_err(index)? {
             let id: i64 = row.get(0).map_err(index)?;
             let Some(parent_member) = member_at(db, source, &mut prefix, id, view)? else {
@@ -109,6 +147,17 @@ impl Plan<Arc<Member>> {
                     )
                     .map_err(index)?;
             }
+            if trace {
+                collect_run(
+                    db,
+                    id,
+                    end,
+                    &parent_member,
+                    &parent_member.reference.path,
+                    Some((&native_id, spawn.as_deref())),
+                    &mut run,
+                )?;
+            }
             collect_receipts(
                 db,
                 id,
@@ -116,7 +165,7 @@ impl Plan<Arc<Member>> {
                 &native_id,
                 spawn.as_deref(),
                 &parent_member,
-                &parent_member.carrier,
+                (&parent_member.carrier, &parent_member.reference.path),
                 &mut receipts,
             )?;
         }
@@ -128,6 +177,9 @@ impl Plan<Arc<Member>> {
             call: call.map(|call| (call.offset, call.block)),
             member,
             explicit_completion,
+            run,
+            spawn,
+            trace,
         }))
     }
 }
@@ -137,32 +189,82 @@ impl Plan<SessionSourceRef> {
         db: &rusqlite::Connection,
         child: i64,
         reference: SessionSourceRef,
+        spawn: Option<&str>,
         call: Option<(&Address, u32)>,
         parents: &[(i64, SessionSourceRef)],
+        trace: bool,
     ) -> Result<Option<Self>, ReadError> {
         let sends = collect_sends(db, child, i64::try_from(reference.offset).map_err(index)?)?;
         let at = call.map(|(address, block)| (address.offset, i64::from(block)));
-        if sends.is_empty()
-            || at.is_some_and(|at| {
-                sends
-                    .iter()
-                    .filter(|send| (send.pos as u64, send.block) == at)
-                    .count()
-                    != 1
-            })
-        {
+        if at.is_some_and(|at| {
+            sends
+                .iter()
+                .filter(|send| (send.pos as u64, send.block) == at)
+                .count()
+                != 1
+        }) {
             return Ok(None);
         }
+        let child_end = i64::try_from(reference.offset).map_err(index)?;
+        let mut explicit_completion = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM fact_subagent_event WHERE source=?1 AND pos<?2
+             AND kind='tool' AND name='SubagentHandback')",
+                params![child, child_end],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(index)?;
         let mut receipts = Vec::new();
+        let mut run = Vec::new();
+        if trace {
+            collect_run(
+                db,
+                child,
+                child_end,
+                &reference,
+                &reference.path,
+                None,
+                &mut run,
+            )?;
+        }
         for (id, parent) in parents {
+            let end = i64::try_from(parent.offset).map_err(index)?;
+            if !explicit_completion {
+                explicit_completion = db
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM fact_subagent_event WHERE source=?1 AND pos<?2
+                     AND ((kind='tn' AND id=?3) OR (kind='agm' AND flags & ?4<>0
+                       AND (id IN (?3,?5) OR name IN (?3,?5)))))",
+                        params![
+                            id,
+                            end,
+                            spawn,
+                            crate::events::AGM_FINAL,
+                            reference.native_id
+                        ],
+                        |row| row.get(0),
+                    )
+                    .map_err(index)?;
+            }
+            if trace {
+                collect_run(
+                    db,
+                    *id,
+                    end,
+                    parent,
+                    &parent.path,
+                    Some((&reference.native_id, spawn)),
+                    &mut run,
+                )?;
+            }
             collect_receipts(
                 db,
                 *id,
-                i64::try_from(parent.offset).map_err(index)?,
+                end,
                 &reference.native_id,
-                None,
+                spawn,
                 parent,
-                &parent.path,
+                (&parent.path, &parent.path),
                 &mut receipts,
             )?;
         }
@@ -173,7 +275,10 @@ impl Plan<SessionSourceRef> {
             child: reference.native_id.clone(),
             call: at,
             member: reference,
-            explicit_completion: true,
+            explicit_completion,
+            run,
+            spawn: spawn.map(str::to_owned),
+            trace,
         }))
     }
 }
@@ -184,10 +289,14 @@ impl<M> Plan<M> {
         child_source: i64,
         mut read: impl FnMut(i64, &M, u64) -> Result<serde_json::Value, ReadError>,
     ) -> Result<Resolution, ReadError> {
+        let mut result = Resolution {
+            trace_completion: self.trace_completion(child_source, &mut read)?,
+            ..Resolution::default()
+        };
         if self.receipts.is_empty()
             || (self.call.is_none() && !self.receipts.iter().any(|receipt| receipt.legacy))
         {
-            return Ok(Resolution::default());
+            return Ok(result);
         }
         let mut messages = Vec::new();
         for send in &self.sends {
@@ -235,19 +344,42 @@ impl<M> Plan<M> {
                     .position(|send| (send.pos as u64, send.block) == call)
             })
             .and_then(|send| matches[send]);
-        let mut result = Resolution::default();
         if !self.explicit_completion
-            && let Some(receipt) = self
+            && let Some((index, receipt)) = self
                 .receipts
                 .iter()
                 .enumerate()
                 .rev()
-                .find_map(|(index, receipt)| (receipt.legacy && !claimed[index]).then_some(receipt))
+                .find(|(index, receipt)| receipt.legacy && !claimed[*index])
         {
-            if self.sends.is_empty() {
-                read(receipt.source, &receipt.member, receipt.address.offset)?;
-            }
+            let body = if self.sends.is_empty() {
+                let native = read(receipt.source, &receipt.member, receipt.address.offset)?;
+                crate::model::received_body(
+                    &native,
+                    "agent-message",
+                    Some(&self.child),
+                    receipt.skip,
+                )
+            } else {
+                bodies[index].take()
+            };
             result.completion = Some(receipt.address.clone());
+            if self.trace {
+                result.trace_completion = Some(TraceCompletion {
+                    address: Address {
+                        path: receipt.relative.clone(),
+                        offset: receipt.address.offset,
+                        block: 0,
+                        occurrence: receipt.record_occurrence,
+                    },
+                    block: u32::try_from(receipt.address.block).map_err(super::index)?,
+                    in_child: false,
+                    at: receipt.address.at,
+                    failed: false,
+                    resumed: false,
+                    preview: body.map(|text| crate::model::cap(&text, crate::model::MSG_MAX)),
+                });
+            }
         }
         for (index, receipt) in self.receipts.into_iter().enumerate() {
             if matched == Some(index) {
@@ -275,6 +407,156 @@ impl<M> Plan<M> {
         }
         Ok(result)
     }
+}
+
+impl<M> Plan<M> {
+    fn trace_completion(
+        &self,
+        child: i64,
+        read: &mut impl FnMut(i64, &M, u64) -> Result<serde_json::Value, ReadError>,
+    ) -> Result<Option<TraceCompletion>, ReadError> {
+        let steps = self
+            .run
+            .iter()
+            .enumerate()
+            .map(|(index, row)| {
+                (
+                    row.time,
+                    row.step,
+                    (row.source, row.address.offset, row.block, index),
+                )
+            })
+            .collect();
+        let runs = group_claude_runs(steps, |_| ());
+        let Some(run) = runs.iter().rev().find(|run| run.ended()) else {
+            return Ok(None);
+        };
+        let at = [run.fin, run.tn, run.handback]
+            .into_iter()
+            .flatten()
+            .filter_map(|(_, _, _, index)| self.run[index].time)
+            .min();
+        let failed = run.tn.is_some_and(|(_, _, _, index)| {
+            matches!(
+                self.run[index].step,
+                Step::Notification { completed: false }
+            )
+        });
+        // A notification may determine status even when the hand-back is the
+        // preview. Verify each contributor before publishing the result.
+        let mut preview = None;
+        let Some((_, _, _, chosen)) = run.fin.or(run.tn).or(run.handback) else {
+            return Ok(None);
+        };
+        for (_, _, _, index) in [run.fin, run.tn, run.handback].into_iter().flatten() {
+            let row = &self.run[index];
+            let native = read(row.source, &row.member, row.address.offset)?;
+            if index == chosen {
+                let text = match row.step {
+                    Step::Final => {
+                        crate::model::received_body(&native, "agent-message", Some(&self.child), 0)
+                    }
+                    Step::Handback => {
+                        crate::model::input_string(&native, row.block as usize, &["message"])
+                    }
+                    Step::Notification { .. } => self
+                        .spawn
+                        .as_deref()
+                        .and_then(|id| crate::model::notification_result(&native, id)),
+                    Step::Start { .. } => None,
+                };
+                preview = text.map(|text| crate::model::cap(&text, crate::model::MSG_MAX));
+            }
+        }
+        let resumed = runs.last().is_some_and(|run| !run.ended());
+        if resumed {
+            // Verify the child boundary that opened the current run.
+            let start = self
+                .run
+                .iter()
+                .filter(|row| matches!(row.step, Step::Start { .. }))
+                .max_by_key(|row| (row.time.is_none(), row.time, row.address.offset, row.block));
+            if let Some(start) = start {
+                read(start.source, &start.member, start.address.offset)?;
+            }
+        }
+        let row = &self.run[chosen];
+        Ok(Some(TraceCompletion {
+            address: row.address.clone(),
+            block: row.block,
+            in_child: row.source == child,
+            at,
+            failed,
+            resumed,
+            preview,
+        }))
+    }
+}
+
+fn collect_run<M: Clone>(
+    db: &rusqlite::Connection,
+    source: i64,
+    end: i64,
+    member: &M,
+    path: &str,
+    parent_aliases: Option<(&str, Option<&str>)>,
+    run: &mut Vec<RunObservation<M>>,
+) -> Result<(), ReadError> {
+    use crate::events::{AGM_DOWN, AGM_FINAL};
+    let (child, spawn) = parent_aliases.map_or((None, None), |(child, spawn)| (Some(child), spawn));
+    let mut statement = db
+        .prepare_cached(
+            "WITH events AS (
+          SELECT pos,block,kind,ts,name FROM fact_subagent_event
+          WHERE source=?1 AND pos<?2 AND ((?3 IS NULL AND
+            ((kind='tool' AND name='SubagentHandback') OR (kind='agm' AND flags & ?5<>0)))
+            OR (?3 IS NOT NULL AND ((kind='tn' AND id=?4) OR
+              (kind='agm' AND flags & ?6<>0 AND (id IN (?3,?4) OR name IN (?3,?4))))))
+          UNION ALL
+          SELECT pos,block,'prompt',ts,NULL FROM fact_prompt
+          WHERE ?3 IS NULL AND source=?1 AND pos<?2 AND kind='user' AND pos>(
+            SELECT min(pos) FROM fact_prompt WHERE source=?1 AND pos<?2 AND kind='user')
+        ) SELECT e.pos,e.block,e.kind,e.ts,e.name,r.occurrence FROM events e
+          CROSS JOIN fact_record r ON r.source=?1 AND r.pos=e.pos AND r.block=0 AND NOT r.gap
+          ORDER BY e.pos,e.block,r.occurrence LIMIT 129",
+        )
+        .map_err(index)?;
+    let mut rows = statement
+        .query(params![source, end, child, spawn, AGM_DOWN, AGM_FINAL])
+        .map_err(index)?;
+    while let Some(row) = rows.next().map_err(index)? {
+        if run.len() == 128 {
+            return Err(ReadError::SourceBudget);
+        }
+        let kind: String = row.get(2).map_err(index)?;
+        let step = match kind.as_str() {
+            "tool" => Step::Handback,
+            "tn" => {
+                let status: Option<String> = row.get(4).map_err(index)?;
+                Step::Notification {
+                    completed: matches!(status.as_deref(), Some("completed" | "success" | "done")),
+                }
+            }
+            "agm" if parent_aliases.is_some() => Step::Final,
+            "agm" => Step::Start { coordinator: true },
+            "prompt" => Step::Start { coordinator: false },
+            _ => unreachable!("run observation kind"),
+        };
+        run.push(RunObservation {
+            source,
+            member: member.clone(),
+            step,
+            time: row.get(3).map_err(index)?,
+            block: row.get(1).map_err(index)?,
+            address: Address {
+                path: path.to_owned(),
+                offset: row.get(0).map_err(index)?,
+                block: 0,
+                occurrence: row.get(5).map_err(index)?,
+            },
+        });
+    }
+    Ok(())
 }
 
 fn collect_sends(
@@ -313,15 +595,16 @@ fn collect_receipts<M: Clone>(
     child: &str,
     spawn: Option<&str>,
     member: &M,
-    path: &str,
+    (path, relative): (&str, &str),
     receipts: &mut Vec<Receipt<M>>,
 ) -> Result<(), ReadError> {
     use crate::events::{AGM_FINAL, AGM_PROGRESS, AGM_UP};
     let mut scan = db
         .prepare_cached(
-            "SELECT pos,block,occurrence,ts,flags FROM fact_subagent_event
-        WHERE source=?1 AND pos<?2 AND kind='agm' AND flags & ?3<>0 AND flags & ?4=0
-          AND (id IN (?5,?6) OR name IN (?5,?6)) ORDER BY pos,block,occurrence LIMIT 129",
+            "SELECT e.pos,e.block,e.occurrence,e.ts,e.flags,r.occurrence FROM fact_subagent_event e
+        CROSS JOIN fact_record r ON r.source=e.source AND r.pos=e.pos AND r.block=0 AND NOT r.gap
+        WHERE e.source=?1 AND e.pos<?2 AND e.kind='agm' AND e.flags & ?3<>0 AND e.flags & ?4=0
+          AND (e.id IN (?5,?6) OR e.name IN (?5,?6)) ORDER BY e.pos,e.block,e.occurrence LIMIT 129",
         )
         .map_err(index)?;
     let mut rows = scan
@@ -342,6 +625,8 @@ fn collect_receipts<M: Clone>(
             skip,
             legacy: row.get::<_, u8>(4).map_err(index)? & AGM_PROGRESS == 0,
             occurrence: row.get(2).map_err(index)?,
+            record_occurrence: row.get(5).map_err(index)?,
+            relative: relative.to_owned(),
             address: RelayReceipt {
                 path: path.to_owned(),
                 offset,
@@ -358,6 +643,7 @@ pub(super) struct Resolution {
     pub(super) matched: Option<RelayReceipt>,
     pub(super) matched_legacy_turn: Option<String>,
     pub(super) completion: Option<RelayReceipt>,
+    pub(super) trace_completion: Option<TraceCompletion>,
     pub(super) incoming: BTreeMap<String, String>,
 }
 
@@ -420,4 +706,15 @@ fn member_at(
             tail_sha256: committed.tail,
         },
     })))
+}
+
+impl std::fmt::Debug for TraceCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TraceCompletion")
+            .field("address", &self.address)
+            .field("block", &self.block)
+            .field("at", &self.at)
+            .field("failed", &self.failed)
+            .finish_non_exhaustive()
+    }
 }

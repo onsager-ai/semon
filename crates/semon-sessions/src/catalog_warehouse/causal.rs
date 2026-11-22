@@ -15,8 +15,19 @@ const SIGNALS_AT: &str = "SELECT payload FROM warehouse_signal WHERE source=?1 A
 const CALLS_AT: &str = "SELECT c.block,c.tool,c.call_id,EXISTS (
         SELECT 1 FROM fact_operation o INDEXED BY operation_parent
         WHERE o.source=c.source AND o.call_pos=c.pos AND o.call_block=c.block AND o.pos<?3
-    ) FROM fact_tool_call c WHERE c.source=?1 AND c.pos=?2
+    ), (SELECT count(*) FROM fact_tool_call a
+        WHERE a.source=c.source AND a.pos=c.pos AND a.block=c.block)=1
+       AND (SELECT count(*) FROM fact_tool_call a INDEXED BY tool_call_identity
+        WHERE a.source=c.source AND a.call_id=c.call_id AND a.pos<?3)=1
+    FROM fact_tool_call c WHERE c.source=?1 AND c.pos=?2 AND NOT EXISTS (
+        SELECT 1 FROM fact_tool_result r INDEXED BY tool_result_identity
+        WHERE r.source=c.source AND r.call_id=c.call_id AND r.pos<?3
+          AND r.call_pos=c.pos AND r.call_block=c.block AND r.kind='yield_poll_wrapper'
+    )
     ORDER BY c.block,c.occurrence LIMIT 129";
+const POLLS_AT: &str = "SELECT pos FROM fact_tool_result INDEXED BY tool_result_identity
+    WHERE source=?1 AND call_id=?2 AND call_pos=?3 AND call_block=?4 AND pos<?5 AND kind='yield_poll'
+    ORDER BY pos,block,occurrence LIMIT ?6";
 const OPERATION_AT: &str = "SELECT call_pos,ok FROM fact_operation
     WHERE source=?1 AND pos=?2 AND block=?3 ORDER BY occurrence LIMIT 1";
 
@@ -33,6 +44,7 @@ pub(in super::super) struct TurnStart {
     pub(in super::super) address: Address,
     pub(in super::super) handoff: bool,
     pub(super) head: bool,
+    pub(super) position: Position,
 }
 
 struct Boundary {
@@ -260,6 +272,7 @@ impl<'a> TurnSearch<'a> {
                 };
                 Some(TurnStart {
                     id,
+                    position,
                     handoff: launch || relay,
                     head: kind == "launch",
                     address: Address {
@@ -305,9 +318,21 @@ pub(in super::super) struct CallSlot {
     pub(in super::super) tool: String,
     pub(in super::super) block: u32,
     pub(in super::super) replies: Vec<crate::events::Reply>,
+    pub(super) yield_started: Option<u64>,
+    pub(super) yield_open: bool,
+    pub(super) polls: Vec<u64>,
+    pub(super) polls_cut: bool,
+    pub(super) qualified: bool,
 }
 
 impl CallSlot {
+    pub(super) fn display_offsets(&self) -> impl Iterator<Item = u64> {
+        self.yield_started
+            .into_iter()
+            .chain(self.polls.iter().copied())
+            .chain(self.display_reply().map(|reply| reply.o))
+    }
+
     pub(super) fn display_reply(&self) -> Option<&crate::events::Reply> {
         self.replies
             .iter()
@@ -374,13 +399,21 @@ impl Inputs {
                 .query(params![at.source, at.offset, block, end, 129,])
                 .map_err(index)?;
             let mut replies = Vec::new();
+            let mut yield_started = None;
+            let mut yield_closed = false;
             while let Some(row) = result_rows.next().map_err(index)? {
                 if replies.len() == 128 {
                     return Err(index("Selected reply budget exhausted"));
                 }
-                let (reply, _) = position(row, at.source).map_err(index)?;
+                let (reply, kind) = position(row, at.source).map_err(index)?;
+                let offset = u64::try_from(reply.offset).map_err(index)?;
+                match kind.as_deref() {
+                    Some("yield_started") => yield_started = Some(offset),
+                    Some("yield_closed") => yield_closed = true,
+                    _ => (),
+                }
                 replies.push(crate::events::Reply {
-                    o: u64::try_from(reply.offset).map_err(index)?,
+                    o: offset,
                     b: u32::try_from(reply.block).map_err(index)?,
                     t: row.get(5).map_err(index)?,
                     e: row.get(6).map_err(index)?,
@@ -388,17 +421,44 @@ impl Inputs {
                     m: row.get(8).map_err(index)?,
                 });
             }
+            let mut polls = Vec::new();
+            let mut polls_cut = false;
+            if yield_started.is_some() {
+                let mut statement = db.prepare_cached(POLLS_AT).map_err(index)?;
+                let mut rows = statement
+                    .query(params![
+                        at.source,
+                        id,
+                        at.offset,
+                        block,
+                        end,
+                        crate::events::POLLS_MAX + 1
+                    ])
+                    .map_err(index)?;
+                while let Some(row) = rows.next().map_err(index)? {
+                    if polls.len() == crate::events::POLLS_MAX {
+                        polls_cut = true;
+                        break;
+                    }
+                    polls.push(u64::try_from(row.get::<_, i64>(0).map_err(index)?).map_err(index)?);
+                }
+            }
             let call = CallSlot {
                 id,
                 tool,
                 block,
                 replies,
+                yield_started,
+                yield_open: yield_started.is_some() && !yield_closed,
+                polls,
+                polls_cut,
+                qualified: row.get(4).map_err(index)?,
             };
             let has_operations: bool = row.get(3).map_err(index)?;
             if !has_operations
-                || call
-                    .display_reply()
-                    .is_none_or(|reply| reply.e && reply.f & crate::events::UNKNOWN == 0)
+                || call.display_reply().map_or(call.qualified, |reply| {
+                    reply.e && reply.f & crate::events::UNKNOWN == 0
+                })
             {
                 calls.push(call);
             }

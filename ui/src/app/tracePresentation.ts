@@ -12,6 +12,7 @@ import { clock, tok } from '../domain/format';
 import {
   parseNativeEntryAddress,
   parseRetainedPeerAddress,
+  sessionPath,
   tracePath,
   type CatalogReadScope,
   type NativeEntryAddress,
@@ -49,6 +50,7 @@ export interface CausalTrace {
   metadata?: CatalogSession;
   readResults?: ReadonlySet<string>;
   evidence?: Map<string, TraceEvidence>;
+  returnEvidence?: { sid: string; evidence: TraceEvidence };
 }
 
 /** The native trace stores token components in millions rounded to 1,000 tokens. */
@@ -289,6 +291,7 @@ export function parseCausalTrace(
       end: {
         st: state(end.st),
         why: text(end.why),
+        reason: optionalText(end.reason),
         h: optionalText(end.h),
         at: optionalNumber(end.at),
       },
@@ -313,31 +316,37 @@ export function parseCausalTrace(
   });
   if (frontier.length > 1000) throw Error('Causal frontier exceeds its bound');
   let evidence: CausalTrace['evidence'];
+  let returnEvidence: CausalTrace['returnEvidence'];
   if (data.projection === 7) {
     evidence = new Map();
     for (const row of array(data.evidence, object)) {
       const sid = text(row.catalog_key),
         turn = row.turn == null ? undefined : text(row.turn),
-        identity = JSON.stringify([sid, turn]);
+        identity = JSON.stringify([sid, turn]),
+        isReturn = row.role === 'return';
       if (
         evidence.size >= 1100 ||
-        evidence.has(identity) ||
+        (isReturn ? returnEvidence !== undefined || turn !== undefined : evidence.has(identity)) ||
+        (row.role != null && !isReturn) ||
         (!Object.hasOwn(sessions, sid) && !Object.hasOwn(participants, sid)) ||
         (turn !== undefined && byId.get(turn)?.sid !== sid)
       )
         throw Error('Invalid causal evidence selection');
+      let item: TraceEvidence;
       if (row.address == null) {
         const reason = text(row.reason);
         if (!reason || reason.length > 512 || row.peer != null)
           throw Error('Invalid causal evidence refusal');
-        evidence.set(identity, { reason });
+        item = { reason };
       } else {
         const address = parseNativeEntryAddress(row.address),
           peer = row.peer == null ? undefined : parseRetainedPeerAddress(row.peer);
         if (row.reason != null || (peer && (sid === key || peer.trace !== key)))
           throw Error('Invalid causal evidence binding');
-        evidence.set(identity, { address, peer });
+        item = { address, peer };
       }
+      if (isReturn) returnEvidence = { sid, evidence: item };
+      else evidence.set(identity, item);
     }
   }
   return {
@@ -361,6 +370,7 @@ export function parseCausalTrace(
     previews,
     previewOwners,
     evidence,
+    returnEvidence,
   };
 }
 
@@ -647,7 +657,7 @@ export function traceTurnOutcome(
   if (end?.why === 'completed') return { state: 'done', text: withTime('Completed', end.at) };
   if (end?.why === 'interrupted') return { state: 'off', text: withTime('Interrupted', end.at) };
   if (end?.why === 'unavailable')
-    return { state: 'off', text: 'Recorded turn outcome unavailable' };
+    return { state: 'off', text: end.reason ?? 'Recorded turn outcome unavailable' };
   if (end?.why === 'replied') return { state: 'done', text: 'Replied' };
   return { state, text: 'No reply in these logs' };
 }
@@ -776,6 +786,14 @@ export function renderCausalTrace(
           { ...sessionPart(data.key), action: undefined, label: undefined },
           { className: 'verb', text: " · a turn whose start isn't in these logs" },
         ];
+  const returned = data.returnEvidence;
+  let returnHref: string | undefined;
+  if (returned && 'address' in returned.evidence) {
+    const params = new URLSearchParams({ address: JSON.stringify(returned.evidence.address) });
+    if (readScope === 'retained_history') params.set('scope', readScope);
+    if (returned.evidence.peer) params.set('peer', JSON.stringify(returned.evidence.peer));
+    returnHref = sessionPath(data.source, returned.sid) + '?' + params;
+  }
   hops.push({
     key: 'root:' + data.root.id,
     className: 'k-root',
@@ -786,6 +804,9 @@ export function renderCausalTrace(
     parts: rootParts,
     time: traceRootTime(data.root, (at) => clock(at, now)),
     brief: data.root.u?.text || data.root.start?.brief || undefined,
+    result: data.root.start?.kind === 'spawn' ? data.root.start.result : undefined,
+    returnHref,
+    returnReason: returned && 'reason' in returned.evidence ? returned.evidence.reason : undefined,
     meta: meta(data.root),
   });
   const walk = (turn: Turn) => {

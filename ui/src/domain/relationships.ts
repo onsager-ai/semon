@@ -48,6 +48,7 @@ export function parseRecordedRelationship(value: unknown): RecordedRelationship 
     done: row.done == null ? undefined : number(row.done),
     status: status as Handoff['status'],
     brief: '',
+    result: row.result == null ? undefined : text(row.result),
     declined: boolean(row.declined),
   };
   let edge: Handoff;

@@ -118,6 +118,16 @@ CREATE TABLE fact_prompt (
   kind TEXT NOT NULL, occurrence INTEGER NOT NULL, ordinal INTEGER, ts INTEGER,
   PRIMARY KEY(source,pos,block,kind,occurrence)
 ) STRICT, WITHOUT ROWID;
+CREATE TABLE fact_prompt_images (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
+  occurrence INTEGER NOT NULL, ordinal INTEGER, recipe TEXT NOT NULL,
+  PRIMARY KEY(source,pos,block,occurrence)
+) STRICT, WITHOUT ROWID;
+CREATE TABLE fact_native_fields (
+  source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
+  occurrence INTEGER NOT NULL, ordinal INTEGER, recipe TEXT NOT NULL,
+  PRIMARY KEY(source,pos,block,occurrence)
+) STRICT, WITHOUT ROWID;
 CREATE TABLE fact_tool_call (
   source INTEGER NOT NULL, pos INTEGER NOT NULL, block INTEGER NOT NULL,
   occurrence INTEGER NOT NULL, ordinal INTEGER, call_id TEXT, tool TEXT,
@@ -244,7 +254,7 @@ CREATE INDEX record_timed_offset ON fact_record(source,pos) WHERE ts IS NOT NULL
 CREATE INDEX record_gap ON fact_record(source,coalesce(ts,-9223372036854775808),pos) WHERE gap;
 CREATE INDEX prompt_position ON fact_prompt(source,coalesce(ts,-9223372036854775808),pos,block,occurrence);
 CREATE INDEX record_position ON fact_record(source,coalesce(ts,-9223372036854775808),pos,block,occurrence)
-  WHERE pos>=0 AND NOT gap;
+  WHERE pos>=0;
 CREATE INDEX usage_message ON fact_step_observation(message_id,uuid,source);
 CREATE INDEX tool_call_identity ON fact_tool_call(source,call_id);
 CREATE INDEX claude_call_identity ON fact_claude_call(call_id,source);

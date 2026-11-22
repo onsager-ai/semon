@@ -28,7 +28,7 @@ pub(in super::super) fn entries(
     key: &str,
     now: i64,
 ) -> Vec<Value> {
-    render(component, source, key, now, |entry, _, _| Some(entry))
+    render(component, source, key, now, |entry, _, _, _| Some(entry))
 }
 
 pub(in super::super) fn turn_address(
@@ -42,7 +42,7 @@ pub(in super::super) fn turn_address(
         source,
         key,
         model::now_ms(),
-        |mut entry, slot, _| {
+        |mut entry, slot, _, _| {
             if !slot.first || slot.turn.as_deref() != Some(turn) {
                 return None;
             }
@@ -63,13 +63,14 @@ pub(in super::super) fn expand(
     address: &NativeEntryAddress,
     part: Part,
 ) -> Option<Expansion> {
+    let exact = json!(address);
     render(
         component,
         source,
         key,
         model::now_ms(),
-        |mut entry, slot, lines| {
-            if entry["entry_id"] != address.entry_id || entry["address"]["block"] != address.block {
+        |mut entry, slot, lines, field| {
+            if entry["address"] != exact {
                 return None;
             }
             match part {
@@ -88,6 +89,14 @@ pub(in super::super) fn expand(
                     entry["scriptTruncated"] = json!(truncated);
                 }
                 Part::Text(chunk) => {
+                    if let Some(field) = field {
+                        let next = (chunk.checked_add(1)? < field.chunks).then_some(chunk + 1);
+                        return Some(Expansion::Json(json!({
+                            "entry_id":address.entry_id,"address":address,
+                            "field":{"name":field.kind.name(),"chunk":chunk,"next":next,"complete":next.is_none()},
+                            "text":field.text.as_ref()?,
+                        })));
+                    }
                     let (name, text) = tx::selected_chunk_text(lines, slot)?;
                     let mut chunks = text_chunks(&text).skip(chunk);
                     let text = chunks.next()?;
@@ -128,7 +137,12 @@ fn render<T>(
     source: &str,
     key: &str,
     now: i64,
-    mut finish: impl FnMut(Value, &Slot, &mut Lines<'_>) -> Option<T>,
+    mut finish: impl FnMut(
+        Value,
+        &Slot,
+        &mut Lines<'_>,
+        Option<&crate::native_field::SelectedField>,
+    ) -> Option<T>,
 ) -> Vec<T> {
     let context = RenderContext {
         home: None,
@@ -173,7 +187,9 @@ fn render<T>(
                 .is_some_and(|turn| turn.address == record.address);
             record_slots.push((slot, entry_id));
         };
-        if let Some(anchor) = &record.prompt_anchor {
+        if record.native.is_null() {
+            add(SlotKind::Gap, 0, None);
+        } else if let Some(anchor) = &record.prompt_anchor {
             let kind = if model::is_ask(anchor)
                 || record.causal.turn.as_ref().is_some_and(|turn| {
                     turn.handoff && !turn.head && turn.address == record.address
@@ -210,26 +226,51 @@ fn render<T>(
                 Some(reply) if reply.f & UNKNOWN != 0 => Shown::Unknown,
                 Some(reply) if reply.e => Shown::Err,
                 Some(_) => Shown::Ok,
-                None if component.harness != "copilot"
-                    && component.identity.read_scope
-                        == super::CatalogReadScope::RetainedHistory =>
-                {
-                    Shown::Unfinished
+                None if component.harness == "copilot" || !call.qualified => Shown::Unknown,
+                None if call.yield_started.is_some() => {
+                    if call.yield_open && component.runtime_status == Some("work") {
+                        Shown::Live
+                    } else {
+                        Shown::Unfinished
+                    }
                 }
-                None => Shown::Unknown,
+                None if matches!(component.runtime_status, Some("work" | "wait"))
+                    && component.latest_turn.is_some()
+                    && component.latest_turn == record.causal.turn =>
+                {
+                    Shown::Live
+                }
+                None => Shown::Unfinished,
             };
-            add(
+            let kind = if let Some(first) = call.yield_started {
+                SlotKind::Yielded {
+                    shown,
+                    first: Some(first),
+                    polls: call.polls.clone(),
+                    cut: call.polls_cut,
+                    done: reply,
+                }
+            } else {
                 SlotKind::Tool {
                     shown,
                     name: call.tool.clone(),
-                    result_source: false,
+                    result_source: call.tool == "exec"
+                        && record
+                            .native
+                            .pointer("/payload/type")
+                            .and_then(Value::as_str)
+                            == Some("custom_tool_call")
+                        && record
+                            .native
+                            .pointer("/payload/input")
+                            .and_then(Value::as_str)
+                            .is_some_and(crate::events::result_source),
                     reply,
                     item: None,
                     bg: None,
-                },
-                call.block,
-                None,
-            );
+                }
+            };
+            add(kind, call.block, None);
         }
         record_slots.sort_by_key(|(slot, _)| slot.block);
         for (slot, entry_id) in record_slots {
@@ -274,6 +315,14 @@ fn render<T>(
             let mut entry = tx::render(&context, &mut lines, &slots, slot, index, now)?;
             entry.as_object_mut()?.remove("slot");
             let (record, id) = addresses[index];
+            if matches!(slot.kind, SlotKind::U | SlotKind::H(_))
+                && let Some(mut images) = record.images.clone()
+            {
+                for image in &mut images {
+                    image["o"] = json!(slot.offset);
+                }
+                entry["img"] = Value::Array(images);
+            }
             let event_id = tx::native_event_id(&record.native);
             let entry_id = id.map_or_else(
                 || crate::transcript_range::native_entry_id(
@@ -300,19 +349,53 @@ fn render<T>(
                 entry["turn"] = json!(turn);
             }
             entry["entry_id"] = json!(entry_id);
+            let field = field_at(component, record, slot);
             let has_clipped_output = entry["more"].as_array()
                 .is_some_and(|parts| parts.iter().any(|part| part == "out"));
             let may_have_clipped_text = entry["text"].as_str().is_some_and(|text| text.len() >= model::MSG_MAX);
-            if (has_clipped_output || may_have_clipped_text)
+            if let Some(field) = field {
+                entry["field"] = json!({"name":field.kind.name(),"chunks":field.chunks,"complete":false});
+                entry["clipped"] = json!(true);
+            } else if (has_clipped_output || may_have_clipped_text)
                 && let Some((name, text)) = tx::selected_chunk_text(&mut lines, slot)
                 && (text.len() > model::MSG_MAX || has_clipped_output)
             {
                 entry["field"] = json!({"name":name,"chunks":text_chunks(&text).count(),"complete":false});
                 entry["clipped"] = json!(true);
             }
-            finish(entry, slot, &mut lines)
+            finish(entry, slot, &mut lines, field)
         })
         .collect()
+}
+
+fn field_at<'a>(
+    component: &'a Component,
+    record: &Record,
+    slot: &Slot,
+) -> Option<&'a crate::native_field::SelectedField> {
+    let (offset, block, name) = match &slot.kind {
+        SlotKind::U | SlotKind::A | SlotKind::Think => (slot.offset, slot.block, "text"),
+        SlotKind::H(id) if model::is_ask(id) => (slot.offset, slot.block, "text"),
+        SlotKind::Tool {
+            reply: Some(reply), ..
+        }
+        | SlotKind::Yielded {
+            done: Some(reply), ..
+        } => (reply.o, reply.b, "out"),
+        SlotKind::Operation { kind, .. } if kind == "CommandExecution" => {
+            (slot.offset, slot.block, "out")
+        }
+        _ => return None,
+    };
+    component
+        .fields
+        .get(&(record.address.path.clone(), offset))?
+        .iter()
+        .find(|field| field.block == block && field.kind.name() == name)
+}
+
+pub(in super::super) fn has_assistant_text(record: &Record) -> bool {
+    display_blocks(record).any(|(kind, _)| matches!(kind, SlotKind::A))
 }
 
 fn display_blocks(record: &Record) -> impl Iterator<Item = (SlotKind, u32)> + '_ {

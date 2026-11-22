@@ -20,28 +20,29 @@ pub(super) fn read(
     let provider = provider
         .as_ref()
         .map(|reader| reader as &dyn SessionSourceReader);
-    let component = if let Some(address) = address {
-        selected::transcript_window(
-            &view,
-            source,
-            scope,
-            key,
-            1,
-            None,
-            Some(address),
-            provider,
-            origin,
-        )?
-    } else {
-        selected::trace_turn(
-            &view,
-            source,
-            scope,
-            key,
-            root,
-            provider.unwrap_or(&view.archive),
-        )?
-    };
+    let component =
+        if let Some(address) = address.filter(|_| scope == CatalogReadScope::RetainedHistory) {
+            selected::transcript_window(
+                &view,
+                source,
+                scope,
+                key,
+                1,
+                None,
+                Some(address),
+                provider,
+                origin,
+            )?
+        } else {
+            selected::trace_turn(
+                &view,
+                source,
+                scope,
+                key,
+                root,
+                provider.unwrap_or(&view.archive),
+            )?
+        };
     let Some(component) = component else {
         return Ok(None);
     };
@@ -78,6 +79,7 @@ pub(super) fn read(
     let mut participants = serde_json::Map::new();
     let mut handoffs = Vec::new();
     let mut start = None;
+    let mut launch_return = None;
     if crate::model::is_ask(root)
         && let Some(at) = record.at
     {
@@ -100,30 +102,55 @@ pub(super) fn read(
             witness: &component.identity.generation,
         };
         participants.insert(parent.to_owned(), json!(parent));
-        evidence.push(launch_evidence(&view, source, parent, peer, provider)?);
+        let (launch, synchronous) = launch_evidence(&view, source, parent, peer, provider)?;
+        let synchronous_evidence = synchronous.as_ref().map(|_| return_at_launch(&launch));
+        evidence.push(launch);
+        launch_return = synchronous;
+        let mut reason = None;
+        match selected::retained_spawn_return(&view, source, peer, parent, provider) {
+            Ok(Some(completion)) => {
+                launch_return = Some(explicit_return(
+                    &view,
+                    source,
+                    key,
+                    parent,
+                    &completion,
+                    Some(peer),
+                    provider,
+                    &mut evidence,
+                )?);
+            }
+            Ok(None) => evidence.extend(synchronous_evidence),
+            Err(ReadError::PeerUnavailable(message)) => reason = Some(message),
+            Err(ReadError::SourceBudget) => {
+                reason = Some("The selected return read budget was exhausted.".into())
+            }
+            Err(ReadError::RetainedPreparing) => {
+                reason = Some("Preparing recorded history.".into())
+            }
+            Err(
+                ReadError::RetainedUnavailable | ReadError::RetainedUnverified | ReadError::Restart,
+            ) => {
+                reason = Some("The certified return source could not be verified.".into());
+            }
+            Err(error) => return Err(error),
+        }
         start = Some(root.to_owned());
+        let returned = launch_return.as_ref();
         handoffs.push(json!({
-            "id":root,"kind":"spawn","from":parent,"to":key,"status":"off","declined":false,
-            "at":at,"target_turn":root,"brief_session":key,
+            "id":root,"kind":"spawn","from":parent,"to":key,
+            "status":returned.map_or("off", LaunchReturn::status),"declined":false,
+            "at":at,"done":returned.and_then(|result| result.at),
+            "target_turn":root,"brief_session":key,
+            "result":returned.and_then(|result| result.preview.as_deref()),
         }));
+        if let Some(reason) = reason {
+            evidence.push(
+                json!({"catalog_key":parent,"role":"return","reason":reason.chars().take(256).collect::<String>()}),
+            );
+        }
     }
-    let current = if scope == CatalogReadScope::Current {
-        let (owner, harness, _) = {
-            let tx = view.lock()?;
-            super::current_identity(&tx, source, key, None)?.ok_or(ReadError::Restart)?
-        };
-        Some(super::selected_metadata(
-            &view,
-            source,
-            key,
-            owner,
-            &harness,
-            &component.identity.source_refs,
-            false,
-        )?)
-    } else {
-        None
-    };
+    let current = current_metadata(&view, source, &component)?;
     if root == crate::model::spawn_turn_id(&component.harness, key)
         && let Some(at) = record.at
         && let Some(parent) = current
@@ -132,59 +159,47 @@ pub(super) fn read(
             .filter(|parent| *parent != key && *parent != "you")
     {
         participants.insert(parent.to_owned(), json!(parent));
-        evidence.push(current_launch_evidence(&view, source, key, parent)?);
+        let (launch, synchronous) = current_launch_evidence(&view, source, key, parent)?;
+        let synchronous_evidence = synchronous.as_ref().map(|_| return_at_launch(&launch));
+        evidence.push(launch);
         start = Some(root.to_owned());
+        launch_return = if let Some(completion) = &component.trace_completion {
+            Some(explicit_return(
+                &view,
+                source,
+                key,
+                parent,
+                completion,
+                None,
+                provider,
+                &mut evidence,
+            )?)
+        } else {
+            evidence.extend(synchronous_evidence);
+            synchronous
+        };
+        let returned = launch_return.as_ref();
+        let resumed = returned.is_some_and(|result| result.resumed);
+        let status = if resumed
+            && current
+                .as_ref()
+                .is_some_and(|row| row.status == Some("work"))
+        {
+            "work"
+        } else if resumed {
+            "done"
+        } else {
+            returned.map_or("off", LaunchReturn::status)
+        };
         handoffs.push(json!({
-            "id":root,"kind":"spawn","from":parent,"to":key,"status":"off","declined":false,
-            "at":at,"target_turn":root,"brief_session":key,
+            "id":root,"kind":"spawn","from":parent,"to":key,
+            "status":status,"declined":false,
+            "at":at,"done":returned.and_then(|result| result.at),
+            "target_turn":root,"brief_session":key,
+            "result":returned.and_then(|result| result.preview.as_deref()),
         }));
     }
-    let metadata = component.retained_metadata.as_ref();
-    let name = current
-        .as_ref()
-        .map(|row| row.title.as_str())
-        .or_else(|| metadata.and_then(|row| row["name"].as_str()))
-        .or(component.title.as_deref())
-        .unwrap_or(key);
-    let model = current
-        .as_ref()
-        .map(|row| row.model.as_str())
-        .or_else(|| metadata.and_then(|row| row["model"].as_str()))
-        .or(component.model.as_deref())
-        .unwrap_or("");
-    let first = current
-        .as_ref()
-        .and_then(|row| row.start)
-        .or_else(|| metadata.and_then(|row| row["start"].as_i64()))
-        .or(record.at)
-        .unwrap_or_default();
-    let last = current
-        .as_ref()
-        .map(|row| row.position.last)
-        .filter(|last| *last != 0)
-        .or_else(|| metadata.and_then(|row| row["last"].as_i64()))
-        .unwrap_or(first);
-    let tokens = current
-        .as_ref()
-        .map(|row| json!(row.token_millions()))
-        .or_else(|| metadata.and_then(|row| row.get("tokens")).cloned())
-        .unwrap_or_else(|| json!([0, 0, 0]));
-    let cost = current
-        .as_ref()
-        .and_then(|row| row.cost.as_ref())
-        .map(|cost| json!(cost))
-        .or_else(|| metadata.and_then(|row| row.get("cost")).cloned())
-        .unwrap_or_else(|| json!({"usd":null,"unpriced_models":[]}));
-    let status = current.as_ref().and_then(|row| row.status);
-    let mut sessions = json!({(key):{
-            "name":name,"harness":component.harness,"model":model,"state":status.unwrap_or("off"),"live_observation":status.is_some(),"start":first,"last":last,
-            "tokens":tokens,"cost":cost,"busy":[],"wait_edges":[],"wait_edges_truncated":false,
-    }});
-    let (end, last_turn) = recorded_end(&view, source, &component, record)?;
-    let mut turns = vec![
-        json!({"id":root,"sid":key,"start":start,"at":record.at,"u":!turn.handoff,
-        "sent":[],"end":end,"last":last_turn}),
-    ];
+    let mut sessions = json!({(key):session_summary(&component, current.as_ref(), record.at)});
     let mut previews = json!({(key):component.identity.generation});
     let root_identity = component.identity.clone();
     let peer = origin.or_else(|| {
@@ -193,11 +208,24 @@ pub(super) fn read(
             witness: &root_identity.generation,
         })
     });
+    let (end, last_turn) = if let Some(completion) = &launch_return {
+        (
+            json!({"st":completion.status(),"why":if completion.failed {"handoff_failed"} else {"returned"},"at":completion.at}),
+            component.latest_turn.as_ref() == Some(turn),
+        )
+    } else {
+        trace_end(&view, source, &component, record, peer, provider)?
+    };
+    let mut turns = vec![
+        json!({"id":root,"sid":key,"start":start,"at":record.at,"u":!turn.handoff,
+        "sent":[],"end":end,"last":last_turn}),
+    ];
     let mut ids = BTreeSet::from([root.to_owned()]);
     let mut reported = BTreeSet::new();
     let mut queue = std::collections::VecDeque::new();
     let mut frontier = Vec::new();
     let mut reads = 0;
+    let mut relay_limit_reached = false;
     let root_address = record.address.clone();
     let mut next = Some((0, component, root_address));
     while let Some((index, component, address)) = next {
@@ -217,7 +245,7 @@ pub(super) fn read(
             .id
             .as_str();
         let mut refusals = Vec::new();
-        let relays = match peer {
+        let (relays, limited) = match peer {
             Some(peer) => retained_relays(
                 &view,
                 source,
@@ -229,12 +257,12 @@ pub(super) fn read(
             )?,
             None => current_relays(&view, source, &component, from, record, &mut refusals)?,
         };
+        relay_limit_reached |= limited;
         reads += 1;
         let mut sent = Vec::new();
         for receipt in relays {
             let Relay {
                 key: target,
-                harness,
                 turn,
                 address,
                 sent_at,
@@ -248,29 +276,22 @@ pub(super) fn read(
             participants.remove(&target);
             previews[target.as_str()] = json!(generation);
             if sessions.get(&target).is_none() {
-                sessions[target.as_str()] = json!({
-                    "name":target,"harness":harness,"model":"","state":"off","start":received_at,"last":received_at,
-                    "tokens":[0,0,0],"cost":{"usd":null,"unpriced_models":[]},
-                    "busy":[],"wait_edges":[],"wait_edges_truncated":false,
-                });
+                let current = current_metadata(&view, source, &window.0)?;
+                sessions[target.as_str()] =
+                    session_summary(&window.0, current.as_ref(), Some(received_at));
             }
             handoffs.push(json!({
                 "id":turn,"kind":"relay","from":from,"to":target,"at":sent_at,"status":"done",
                 "declined":false,"target_turn":turn,"source_turn":from_turn,"brief_session":target,
             }));
-            let (end, last) = if let Some((window, native)) = &window {
-                let receiving = window
-                    .records
-                    .iter()
-                    .find(|record| record.address == *native)
-                    .ok_or(ReadError::Restart)?;
-                recorded_end(&view, source, window, receiving)?
-            } else {
-                (json!({"st":"off","why":"unavailable"}), false)
-            };
-            if let Some((window, native)) = window {
-                queue.push_back((turns.len(), window, native));
-            }
+            let (window, native) = window;
+            let receiving = window
+                .records
+                .iter()
+                .find(|record| record.address == native)
+                .ok_or(ReadError::Restart)?;
+            let (end, last) = trace_end(&view, source, &window, receiving, peer, provider)?;
+            queue.push_back((turns.len(), window, native));
             turns.push(json!({
                 "id":turn,"sid":target,"start":turn,"at":received_at,"u":false,"sent":[],
                 "end":end,"last":last,
@@ -317,13 +338,294 @@ pub(super) fn read(
         next = queue.pop_front();
     }
     let previews_incomplete = !reported.is_empty();
+    let incomplete = relay_limit_reached
+        || !frontier.is_empty()
+        || evidence.iter().any(|row| row.get("reason").is_some())
+        || turns.iter().any(|turn| turn["end"]["why"] == "unavailable");
     Ok(Some(json!({
         "api":1,"projection":7,"source_key":source_key,"catalog_key":key,"root":root,
         "generation":root_identity.generation,"identity":root_identity,
         "sessions":sessions,"participants":participants,"handoffs":handoffs,"turns":turns,
         "frontier":frontier,"evidence":evidence,"previews":previews,
-        "incomplete":true,"previews_incomplete":previews_incomplete,
+        "incomplete":incomplete,"previews_incomplete":previews_incomplete,
     })))
+}
+
+fn current_metadata(
+    view: &selected::ReadView<'_>,
+    source: &Source<'_>,
+    component: &selected::Component,
+) -> Result<Option<super::Row>, ReadError> {
+    if component.identity.read_scope != CatalogReadScope::Current {
+        return Ok(None);
+    }
+    let key = &component.identity.catalog_key;
+    let (owner, harness, _) = {
+        let tx = view.lock()?;
+        super::current_identity(&tx, source, key, None)?.ok_or(ReadError::Restart)?
+    };
+    super::selected_metadata(
+        view,
+        source,
+        key,
+        owner,
+        &harness,
+        &component.identity.source_refs,
+        false,
+    )
+    .map(Some)
+}
+
+fn session_summary(
+    component: &selected::Component,
+    current: Option<&super::Row>,
+    at: Option<i64>,
+) -> Value {
+    let key = component.identity.catalog_key.as_str();
+    let metadata = component.retained_metadata.as_ref();
+    let name = current
+        .map(|row| row.title.as_str())
+        .or_else(|| metadata.and_then(|row| row["name"].as_str()))
+        .or(component.title.as_deref())
+        .unwrap_or(key);
+    let model = current
+        .map(|row| row.model.as_str())
+        .or_else(|| metadata.and_then(|row| row["model"].as_str()))
+        .or(component.model.as_deref())
+        .unwrap_or("");
+    let first = current
+        .and_then(|row| row.start)
+        .or_else(|| metadata.and_then(|row| row["start"].as_i64()))
+        .or(at)
+        .unwrap_or_default();
+    let last = current
+        .map(|row| row.position.last)
+        .filter(|last| *last != 0)
+        .or_else(|| metadata.and_then(|row| row["last"].as_i64()))
+        .unwrap_or(first);
+    let tokens = current
+        .map(|row| json!(row.token_millions()))
+        .or_else(|| metadata.and_then(|row| row.get("tokens")).cloned())
+        .unwrap_or_else(|| json!([0, 0, 0]));
+    let cost = current
+        .and_then(|row| row.cost.as_ref())
+        .map(|cost| json!(cost))
+        .or_else(|| metadata.and_then(|row| row.get("cost")).cloned())
+        .unwrap_or_else(|| json!({"usd":null,"unpriced_models":[]}));
+    let status = current.and_then(|row| row.status);
+    json!({
+            "name":name,"harness":component.harness,"model":model,"state":status.unwrap_or("off"),"live_observation":status.is_some(),"start":first,"last":last,
+            "tokens":tokens,"cost":cost,"busy":[],"wait_edges":[],"wait_edges_truncated":false,
+    })
+}
+
+fn trace_end(
+    view: &selected::ReadView<'_>,
+    source: &Source<'_>,
+    component: &selected::Component,
+    root: &selected::Record,
+    peer: Option<selected::PeerBinding<'_>>,
+    provider: Option<&dyn SessionSourceReader>,
+) -> Result<(Value, bool), ReadError> {
+    let (mut end, last) = recorded_end(view, source, component, root)?;
+    if end["why"] != "unavailable" || !matches!(component.harness.as_str(), "claude" | "copilot") {
+        return Ok((end, last));
+    }
+    let copilot = component.harness == "copilot";
+    let native_turn = root.native.pointer("/data/turnId").and_then(Value::as_str);
+    if copilot && native_turn.is_none() {
+        end["reason"] = json!("The selected prompt does not identify a native Copilot turn.");
+        return Ok((end, last));
+    }
+    let limit = if copilot { 32 } else { 8 };
+    let addresses = {
+        let tx = view.lock()?;
+        let retained = peer
+            .map(|peer| {
+                let identity = crate::events::store::warehouse::retained_identity(
+                    &tx,
+                    &source.namespace,
+                    peer.trace,
+                )
+                .map_err(super::retained_error)?;
+                selected::retained_member_bounds(
+                    &tx,
+                    source,
+                    &identity,
+                    peer,
+                    &component.identity.catalog_key,
+                    None,
+                )
+            })
+            .transpose()?;
+        let harness = crate::InputRoot::parse(&component.harness).ok_or(ReadError::Restart)?;
+        let order = if copilot { "ASC" } else { "DESC" };
+        let sql = format!(
+            "WITH member(source) AS (
+               SELECT CAST(m.key AS INTEGER) FROM json_each(?1) m
+               WHERE json_extract(m.value,'$[0]')=?2 AND json_extract(m.value,'$[1]')=?5
+               UNION ALL
+               SELECT w.source FROM warehouse_current w
+               CROSS JOIN warehouse_source s ON s.source=w.source AND s.origin=?3
+               WHERE ?1 IS NULL AND w.path=?2
+             )
+             SELECT r.pos,r.occurrence,r.ts FROM member m
+             CROSS JOIN fact_record r ON r.source=m.source
+             WHERE r.pos>?4 AND r.pos<min(coalesce((
+               SELECT min(p.pos) FROM fact_prompt p WHERE p.source=m.source AND p.pos>?4 AND p.pos<?5
+             ),?5),coalesce((
+               SELECT min(g.pos) FROM fact_record g WHERE g.source=m.source AND g.pos>?4 AND g.pos<?5 AND g.gap
+             ),?5)) AND NOT r.gap AND r.block=0 AND (
+               (NOT ?6 AND r.kind='assistant') OR (?6 AND r.kind IN
+                 ('assistant.turn_start','assistant.message','abort','assistant.turn_end'))
+             ) AND coalesce(r.ts,-9223372036854775808)>=?7
+             ORDER BY r.ts {order},r.pos {order},r.occurrence {order} LIMIT ?8"
+        );
+        let mut lookup = tx.prepare_cached(&sql).map_err(super::index)?;
+        let mut addresses = Vec::new();
+        for member in &component.identity.source_refs {
+            let reference = &member.source;
+            let same = reference.path == root.address.path;
+            if !same && (copilot || root.at.is_none()) {
+                continue;
+            }
+            let carrier = harness.home(source.options).join(&reference.path);
+            let mut rows = lookup
+                .query(params![
+                    retained.as_deref(),
+                    carrier.to_str(),
+                    source.namespace.binding(),
+                    if same {
+                        i64::try_from(root.address.offset).map_err(super::index)?
+                    } else {
+                        -1
+                    },
+                    i64::try_from(reference.offset).map_err(super::index)?,
+                    copilot,
+                    if same {
+                        i64::MIN
+                    } else {
+                        root.at.unwrap_or(i64::MIN)
+                    },
+                    limit + 1,
+                ])
+                .map_err(super::index)?;
+            while let Some(row) = rows.next().map_err(super::index)? {
+                addresses.push((
+                    row.get::<_, Option<i64>>(2).map_err(super::index)?,
+                    selected::Address {
+                        path: reference.path.clone(),
+                        offset: row.get(0).map_err(super::index)?,
+                        block: 0,
+                        occurrence: row.get(1).map_err(super::index)?,
+                    },
+                ));
+            }
+            if !copilot {
+                addresses.sort_by(|(a_at, a), (b_at, b)| {
+                    (b_at, &b.path, b.offset, b.occurrence).cmp(&(
+                        a_at,
+                        &a.path,
+                        a.offset,
+                        a.occurrence,
+                    ))
+                });
+            }
+            addresses.truncate(limit + 1);
+        }
+        addresses
+    };
+    let key = &component.identity.catalog_key;
+    let mut started = false;
+    let mut interrupted = None;
+    let mut reply = None;
+    let mut reason = if addresses.len() > limit {
+        "The native turn end was outside the Trace candidate limit."
+    } else {
+        "No terminal record matched this turn in the selected prefix."
+    };
+    for (_, address) in addresses.into_iter().take(limit) {
+        let window = match peer {
+            Some(peer) => {
+                selected::retained_peer_trace_window(view, source, key, peer, &address, provider)
+                    .map(Some)
+            }
+            None => selected::trace_record(view, source, key, &address),
+        };
+        let window = match window {
+            Ok(Some(window)) => window,
+            Ok(None)
+            | Err(
+                ReadError::RetainedPreparing
+                | ReadError::RetainedUnavailable
+                | ReadError::PeerUnavailable(_),
+            ) => {
+                reason =
+                    "A candidate terminal record could not be verified in the selected prefix.";
+                if copilot {
+                    break;
+                }
+                continue;
+            }
+            Err(ReadError::SourceBudget) => {
+                reason =
+                    "The native turn end could not be verified within the Trace source budget.";
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+        let Some(record) = window
+            .records
+            .iter()
+            .find(|record| record.address == address && record.causal.turn == root.causal.turn)
+        else {
+            continue;
+        };
+        if !copilot {
+            if selected::render::has_assistant_text(record) {
+                end = json!({"st":"done","why":"replied","at":record.at});
+                break;
+            }
+            continue;
+        }
+        let candidate = record
+            .native
+            .pointer("/data/turnId")
+            .and_then(Value::as_str);
+        let matches_turn = candidate == native_turn;
+        match record.kind.as_deref() {
+            Some("assistant.turn_start") if started => break,
+            Some("assistant.turn_start") => {
+                let interaction = root.native.pointer("/data/interactionId");
+                started = matches_turn
+                    && interaction
+                        .is_none_or(|id| record.native.pointer("/data/interactionId") == Some(id));
+            }
+            Some("abort") if started && (candidate.is_none() || matches_turn) => {
+                interrupted = Some(record.at);
+            }
+            Some("assistant.message") if started && matches_turn => {
+                if selected::render::has_assistant_text(record) {
+                    reply = Some(record.at);
+                }
+            }
+            Some("assistant.turn_end") if started && matches_turn => {
+                end = if let Some(at) = interrupted {
+                    json!({"st":"off","why":"interrupted","at":at})
+                } else if let Some(at) = reply {
+                    json!({"st":"done","why":"replied","at":at})
+                } else {
+                    json!({"st":"done","why":"completed","at":record.at})
+                };
+                break;
+            }
+            _ => (),
+        }
+    }
+    if end["why"] == "unavailable" {
+        end["reason"] = json!(reason);
+    }
+    Ok((end, last))
 }
 
 pub(super) fn recorded_end(
@@ -338,6 +640,12 @@ pub(super) fn recorded_end(
         .turn
         .as_ref()
         .is_some_and(|turn| component.latest_turn.as_ref() == Some(turn));
+    if root.causal.turn.as_ref().is_some_and(|turn| {
+        turn.id == crate::model::spawn_turn_id(&component.harness, &component.identity.catalog_key)
+    }) && let Some(receipt) = &component.legacy_completion
+    {
+        return Ok((json!({"st":"done","why":"returned","at":receipt.at}), last));
+    }
     if component.harness != "codex"
         || root.causal.turn.as_ref().is_none_or(|turn| turn.handoff)
         || root.prompt_anchor.is_none()
@@ -441,13 +749,12 @@ pub(super) fn recorded_end(
 
 struct Relay {
     key: String,
-    harness: String,
     turn: String,
     address: Value,
     sent_at: i64,
     received_at: i64,
     generation: String,
-    window: Option<(selected::Component, selected::Address)>,
+    window: (selected::Component, selected::Address),
 }
 
 struct Send {
@@ -463,14 +770,14 @@ fn relay_sends(
     component: &selected::Component,
     root: &selected::Record,
     retained: Option<&str>,
-) -> Result<Vec<Send>, ReadError> {
+) -> Result<(Vec<Send>, bool), ReadError> {
     let Some(harness) = crate::InputRoot::parse(&component.harness) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     };
     let tx = view.lock()?;
     let mut query = tx
         .prepare_cached(
-            "WITH member AS (
+            "WITH member(source) AS (
            SELECT CAST(m.key AS INTEGER) FROM json_each(?1) m
            WHERE json_extract(m.value,'$[0]')=?2 AND json_extract(m.value,'$[1]')=?5
            UNION ALL
@@ -481,10 +788,11 @@ fn relay_sends(
          SELECT s.pos,r.occurrence,s.block,s.target,s.ts FROM member m
          CROSS JOIN fact_relay_send s ON s.source=m.source AND s.pos>=?4 AND s.pos<?5
          CROSS JOIN fact_record r ON r.source=s.source AND r.pos=s.pos AND r.block=0 AND NOT r.gap
-         WHERE s.ts>=?6 ORDER BY s.pos,s.block,s.occurrence LIMIT 16",
+         WHERE s.ts>=?6 ORDER BY s.pos,s.block,s.occurrence LIMIT 17",
         )
         .map_err(super::index)?;
     let mut sends = Vec::new();
+    let mut limited = false;
     for member in &component.identity.source_refs {
         let reference = &member.source;
         let same = reference.path == root.address.path;
@@ -531,9 +839,10 @@ fn relay_sends(
                 b.block,
             ))
         });
+        limited |= sends.len() > 16;
         sends.truncate(16);
     }
-    Ok(sends)
+    Ok((sends, limited))
 }
 
 fn retained_relays(
@@ -544,7 +853,7 @@ fn retained_relays(
     root: &selected::Record,
     provider: Option<&dyn SessionSourceReader>,
     refusals: &mut Vec<(String, String, i64, String)>,
-) -> Result<Vec<Relay>, ReadError> {
+) -> Result<(Vec<Relay>, bool), ReadError> {
     let sender = component.identity.catalog_key.as_str();
     let (bounds, identity, observed) = {
         let tx = view.lock()?;
@@ -555,7 +864,7 @@ fn retained_relays(
         let observed = identity.observed_peers().map_err(super::index)?;
         (bounds, identity, observed)
     };
-    let sends = relay_sends(view, source, component, root, Some(&bounds))?;
+    let (sends, limited) = relay_sends(view, source, component, root, Some(&bounds))?;
     let mut relays = Vec::new();
     let mut attempts = 0;
     for Send {
@@ -572,7 +881,8 @@ fn retained_relays(
                 Err(
                     error @ (ReadError::RetainedPreparing
                     | ReadError::RetainedUnavailable
-                    | ReadError::PeerUnavailable(_)),
+                    | ReadError::PeerUnavailable(_)
+                    | ReadError::SourceBudget),
                 ) => {
                     if crate::session_route::identifier(&recipient) {
                         refusals.push((
@@ -635,7 +945,8 @@ fn retained_relays(
                 Err(
                     error @ (ReadError::PeerUnavailable(_)
                     | ReadError::RetainedPreparing
-                    | ReadError::RetainedUnavailable),
+                    | ReadError::RetainedUnavailable
+                    | ReadError::SourceBudget),
                 ) => {
                     reason = error.to_string();
                     continue;
@@ -655,7 +966,8 @@ fn retained_relays(
                     error @ (ReadError::PeerUnavailable(_)
                     | ReadError::RetainedPreparing
                     | ReadError::RetainedUnavailable
-                    | ReadError::Restart),
+                    | ReadError::Restart
+                    | ReadError::SourceBudget),
                 ) => {
                     reason = error.to_string();
                     continue;
@@ -683,13 +995,12 @@ fn retained_relays(
             }
             found = Some(Relay {
                 key: key.into(),
-                harness: window.harness.clone(),
                 turn,
                 address: json!(address),
                 sent_at,
                 received_at,
                 generation: window.identity.generation.clone(),
-                window: Some((window, address.record)),
+                window: (window, address.record),
             });
         }
         if let Some(accepted) = found {
@@ -710,7 +1021,7 @@ fn retained_relays(
             }
         }
     }
-    Ok(relays)
+    Ok((relays, limited))
 }
 
 fn current_relays(
@@ -720,8 +1031,8 @@ fn current_relays(
     key: &str,
     root: &selected::Record,
     refusals: &mut Vec<(String, String, i64, String)>,
-) -> Result<Vec<Relay>, ReadError> {
-    let sends = relay_sends(view, source, component, root, None)?;
+) -> Result<(Vec<Relay>, bool), ReadError> {
+    let (sends, limited) = relay_sends(view, source, component, root, None)?;
     let mut out = Vec::new();
     for Send {
         address: mut call,
@@ -836,13 +1147,12 @@ fn current_relays(
             };
             Ok(Some(Relay {
                 key: target,
-                harness,
                 turn: turn.id.clone(),
                 address,
                 sent_at,
                 received_at,
                 generation: window.identity.generation.clone(),
-                window: Some((window, native)),
+                window: (window, native),
             }))
         };
         match read()? {
@@ -858,7 +1168,7 @@ fn current_relays(
             None => (),
         }
     }
-    Ok(out)
+    Ok((out, limited))
 }
 
 fn refused_relay_id(address: &selected::Address, block: u32) -> String {
@@ -873,7 +1183,7 @@ fn current_launch_evidence(
     source: &Source<'_>,
     child_key: &str,
     parent: &str,
-) -> Result<Value, ReadError> {
+) -> Result<(Value, Option<LaunchReturn>), ReadError> {
     let locate = || -> Result<Option<(selected::Address, u32)>, ReadError> {
         let tx = view.lock()?;
         let Some((child, _, _)) = super::current_identity(&tx, source, child_key, None)? else {
@@ -940,17 +1250,20 @@ fn current_launch_evidence(
     let unavailable = || json!({"catalog_key":parent,"reason":"No exact launch call could be proven in the selected prefixes."});
     let (address, block) = match locate() {
         Ok(Some(located)) => located,
-        Ok(None) | Err(ReadError::Restart) => return Ok(unavailable()),
+        Ok(None) | Err(ReadError::Restart) => return Ok((unavailable(), None)),
         Err(error) => return Err(error),
     };
     let window = match selected::trace_record(view, source, parent, &address) {
         Ok(Some(window)) => window,
-        Ok(None) | Err(ReadError::Restart) => return Ok(unavailable()),
+        Ok(None) | Err(ReadError::Restart) => return Ok((unavailable(), None)),
         Err(error) => return Err(error),
     };
-    Ok(rendered_call(&window, source, parent, block).map_or_else(
-        unavailable,
-        |address| json!({"catalog_key":parent,"address":address}),
+    let Some(rendered) = rendered_call(&window, source, parent, &address, block) else {
+        return Ok((unavailable(), None));
+    };
+    Ok((
+        json!({"catalog_key":parent,"address":rendered}),
+        synchronous_return(&window, &address, block),
     ))
 }
 
@@ -958,12 +1271,129 @@ fn rendered_call(
     window: &selected::Component,
     source: &Source<'_>,
     key: &str,
+    record: &selected::Address,
     block: u32,
 ) -> Option<Value> {
+    let record = json!(record);
     selected::render::entries(window, source.namespace.as_str(), key, 0)
         .into_iter()
-        .find(|entry| entry["k"] == "tool" && entry["address"]["block"] == block)
+        .find(|entry| {
+            entry["k"] == "tool"
+                && entry["address"]["record"] == record
+                && entry["address"]["block"] == block
+        })
         .and_then(|mut entry| entry.as_object_mut()?.remove("address"))
+}
+
+struct LaunchReturn {
+    at: Option<i64>,
+    failed: bool,
+    resumed: bool,
+    preview: Option<String>,
+}
+
+impl LaunchReturn {
+    fn status(&self) -> &'static str {
+        if self.failed { "err" } else { "done" }
+    }
+}
+
+fn synchronous_return(
+    window: &selected::Component,
+    address: &selected::Address,
+    block: u32,
+) -> Option<LaunchReturn> {
+    let record = window
+        .records
+        .iter()
+        .find(|record| record.address == *address)?;
+    let call = record
+        .causal
+        .calls
+        .iter()
+        .find(|call| call.block == block)?;
+    if window.harness != "claude" || !matches!(call.tool.as_str(), "Agent" | "Task") {
+        return None;
+    }
+    let reply = call.display_reply()?;
+    if reply.f & (crate::events::ASYNC | crate::events::UNKNOWN | crate::events::DENIED) != 0 {
+        return None;
+    }
+    let native = window.reply_records.get(&(address.path.clone(), reply.o))?;
+    Some(LaunchReturn {
+        at: reply.t,
+        failed: reply.e,
+        resumed: false,
+        preview: crate::model::tool_result_text(native, reply.b as usize)
+            .map(|text| crate::model::cap(&text, crate::model::MSG_MAX)),
+    })
+}
+
+fn return_at_launch(launch: &Value) -> Value {
+    let mut evidence = launch.clone();
+    evidence["role"] = json!("return");
+    evidence
+}
+
+#[allow(clippy::too_many_arguments)]
+fn explicit_return(
+    view: &selected::ReadView<'_>,
+    source: &Source<'_>,
+    child: &str,
+    parent: &str,
+    completion: &selected::TraceCompletion,
+    peer: Option<selected::PeerBinding<'_>>,
+    provider: Option<&dyn SessionSourceReader>,
+    evidence: &mut Vec<Value>,
+) -> Result<LaunchReturn, ReadError> {
+    let key = if completion.in_child { child } else { parent };
+    let address = &completion.address;
+    let window = if let Some(peer) = peer {
+        selected::retained_peer_trace_window(view, source, key, peer, address, provider).map(Some)
+    } else {
+        selected::trace_record(view, source, key, address)
+    };
+    let mut reason = "The verified return has no available exact transcript entry.".to_owned();
+    let entry = match window {
+        Ok(Some(window)) => {
+            let record = json!(address);
+            let mut entries = selected::render::entries(&window, source.namespace.as_str(), key, 0)
+                .into_iter()
+                .filter(|entry| {
+                    entry["address"]["record"] == record
+                        && entry["address"]["block"] == completion.block
+                });
+            let first = entries.next();
+            first
+                .filter(|_| entries.next().is_none())
+                .map(|entry| entry["address"].clone())
+        }
+        Ok(None) => None,
+        Err(
+            error @ (ReadError::Restart
+            | ReadError::PeerUnavailable(_)
+            | ReadError::RetainedPreparing
+            | ReadError::RetainedUnavailable
+            | ReadError::RetainedUnverified
+            | ReadError::SourceBudget),
+        ) => {
+            reason = error.to_string();
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    evidence.push(if let Some(address) = entry {
+        json!({"catalog_key":key,"role":"return","address":address,
+            "peer":peer.filter(|peer| key != peer.trace).map(|peer| json!({"trace":peer.trace,"witness":peer.witness}))})
+    } else {
+        json!({"catalog_key":key,"role":"return","reason":reason.chars().take(256).collect::<String>()})
+    });
+    Ok(LaunchReturn {
+        at: completion.at,
+        failed: completion.failed,
+        resumed: completion.resumed,
+        preview: completion.preview.clone(),
+    })
 }
 
 fn launch_evidence(
@@ -972,8 +1402,8 @@ fn launch_evidence(
     parent: &str,
     peer: selected::PeerBinding<'_>,
     provider: Option<&dyn SessionSourceReader>,
-) -> Result<Value, ReadError> {
-    let read = || -> Result<Value, ReadError> {
+) -> Result<(Value, Option<LaunchReturn>), ReadError> {
+    let read = || -> Result<(Value, Option<LaunchReturn>), ReadError> {
         let (address, block, _) = selected::retained_peer_launch_in_view(
             view,
             source,
@@ -984,22 +1414,28 @@ fn launch_evidence(
         )?;
         let window =
             selected::retained_peer_trace_window(view, source, parent, peer, &address, provider)?;
-        rendered_call(&window, source, parent, block).ok_or_else(|| {
+        let entry = rendered_call(&window, source, parent, &address, block).ok_or_else(|| {
             ReadError::PeerUnavailable("The launch call has no rendered transcript entry.".into())
-        })
+        })?;
+        Ok((entry, synchronous_return(&window, &address, block)))
     };
     let reason = match read() {
-        Ok(address) => {
-            return Ok(
+        Ok((address, completion)) => {
+            return Ok((
                 json!({"catalog_key":parent,"address":address,"peer":{"trace":peer.trace,"witness":peer.witness}}),
-            );
+                completion,
+            ));
         }
         Err(ReadError::PeerUnavailable(reason)) => reason,
         Err(ReadError::RetainedPreparing) => "Preparing recorded history.".into(),
+        Err(ReadError::SourceBudget) => "The selected launch read budget was exhausted.".into(),
         Err(
             ReadError::RetainedUnavailable | ReadError::RetainedUnverified | ReadError::Restart,
         ) => "The certified launch source could not be verified.".into(),
         Err(error) => return Err(error),
     };
-    Ok(json!({"catalog_key":parent,"reason":reason.chars().take(256).collect::<String>()}))
+    Ok((
+        json!({"catalog_key":parent,"reason":reason.chars().take(256).collect::<String>()}),
+        None,
+    ))
 }

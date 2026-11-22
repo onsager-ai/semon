@@ -19,6 +19,8 @@ export interface Hop {
   brief?: string;
   answers?: readonly string[];
   result?: string;
+  returnHref?: string;
+  returnReason?: string;
   meta?: {
     state: string;
     stateLabel: string;
@@ -617,6 +619,8 @@ export function renderTraceScreen(root: HTMLElement, snapshot: TraceSnapshot, ho
                         </span>
                       </div>
                     )}
+                    {hop.returnHref && <a href={hop.returnHref}>Open return in transcript</a>}
+                    {hop.returnReason && <div class="meta">{hop.returnReason}</div>}
                     {hop.meta && (
                       <div class="meta">
                         <span class={'stat ' + hop.meta.state}>

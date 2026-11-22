@@ -868,7 +868,8 @@ fn warehouse_transcript_transport_keeps_earlier_windows_and_exact_addresses_acro
     scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
     let page = latest();
     let long = &page["entries"][1];
-    assert_eq!(long["field"]["chunks"], 2);
+    let chunks = long["field"]["chunks"].as_u64().unwrap();
+    assert!(chunks > 1);
     assert!(long.get("img").is_some());
     let long_address = long["address"].to_string();
     let expand = |arguments: &[(&str, &str)]| {
@@ -877,8 +878,8 @@ fn warehouse_transcript_transport_keeps_earlier_windows_and_exact_addresses_acro
         http::entry(&configured, &crate::native_html::query(&params), None, None)
     };
     let mut reconstructed = String::new();
-    for chunk in ["0", "1"] {
-        let reply = expand(&[("field_chunk", chunk)]);
+    for chunk in 0..chunks {
+        let reply = expand(&[("field_chunk", &chunk.to_string())]);
         let value: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
         assert_eq!(reply.status, 200, "{value}");
         reconstructed.push_str(value["entry"]["text"].as_str().unwrap());
@@ -888,6 +889,40 @@ fn warehouse_transcript_transport_keeps_earlier_windows_and_exact_addresses_acro
     assert_eq!(attachment.status, 200);
     assert_eq!(attachment.content_type, "image/png");
     assert_eq!(attachment.body, image);
+
+    let mut oversized_image = image.to_vec();
+    oversized_image.resize(1024 * 1024, 0);
+    let long_text = "x".repeat(768 * 1024 + 1) + "verified tail";
+    let mut mixed = prompt("native", 9, &long_text);
+    mixed["message"]["content"] = json!([
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+            "data":crate::attachments::tests::encode(&oversized_image)}},
+        {"type":"text","text":long_text},
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+            "data":crate::attachments::tests::encode(image)}},
+    ]);
+    append_native(&path, mixed);
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let page = latest();
+    let mixed = &page["entries"][1];
+    assert_eq!(mixed["img"].as_array().unwrap().len(), 2);
+    let last_chunk = (mixed["field"]["chunks"].as_u64().unwrap() - 1).to_string();
+    let mixed_address = mixed["address"].to_string();
+    let expand_mixed = |arguments: &[(&str, &str)]| {
+        let mut params = vec![("sid", "native"), ("address", mixed_address.as_str())];
+        params.extend_from_slice(arguments);
+        http::entry(&configured, &crate::native_html::query(&params), None, None)
+    };
+    let last = expand_mixed(&[("field_chunk", &last_chunk)]);
+    let value: serde_json::Value = serde_json::from_slice(&last.body).unwrap();
+    assert_eq!(last.status, 200, "{value}");
+    assert_eq!(value["entry"]["text"], "xverified tail");
+    for (index, expected) in [("0", oversized_image.as_slice()), ("1", image.as_slice())] {
+        let attachment = expand_mixed(&[("part", "attachment"), ("image", index)]);
+        assert_eq!(attachment.status, 200);
+        assert_eq!(attachment.content_type, "image/png");
+        assert_eq!(attachment.body.as_slice(), expected);
+    }
 
     let replacement = path.with_extension("replacement");
     fs::write(
@@ -2150,6 +2185,13 @@ fn warehouse_trace_follows_a_send_from_a_continuation_and_a_peer_reply() {
     };
     append_relay(&resumed, "resumed", &peer, "peer", "delivery-one", 2);
     append_relay(&peer, "peer", &last, "last", "delivery-two", 5);
+    append_native(
+        &last,
+        json!({"type":"assistant","uuid":"last-reply","sessionId":"last",
+        "timestamp":"2026-09-24T00:00:08Z","message":{"role":"assistant","content":[
+            {"type":"text","text":"Finished"}
+        ]}}),
+    );
     let paths = [
         original.as_path(),
         resumed.as_path(),
@@ -2196,6 +2238,11 @@ fn warehouse_trace_follows_a_send_from_a_continuation_and_a_peer_reply() {
             .any(|edge| edge["from"] == "peer" && edge["to"] == "last" && edge["status"] == "done"),
         "{trace}"
     );
+    let turns = trace["turns"].as_array().unwrap();
+    assert_eq!(turns[0]["last"], true, "{trace}");
+    let receiving = turns.iter().find(|turn| turn["sid"] == "last").unwrap();
+    assert_eq!(receiving["last"], true, "{trace}");
+    assert_eq!(receiving["end"]["why"], "replied", "{trace}");
 }
 
 #[test]
@@ -2248,6 +2295,160 @@ fn warehouse_trace_codex_end_belongs_to_selected_turn() {
         assert_eq!(body["turns"][0]["end"]["why"], expected, "{body}");
         assert_eq!(body["turns"][0]["last"], last);
     }
+}
+
+#[test]
+fn warehouse_trace_copilot_pairs_the_terminal_and_prioritizes_abort() {
+    let mut fixture = Fixture::new("trace-copilot-end");
+    let key = "01234567-89ab-4cde-8123-456789abcdef";
+    let path = fixture.copilot(key);
+    let event = |second: u32, kind, data| {
+        append_native(
+            &path,
+            json!({"type":kind,"id":format!("event-{second}"),
+                "timestamp":format!("2026-09-24T00:00:{second:02}Z"),"data":data}),
+        );
+    };
+    // Copilot 1.0.90 cancellation records omit turnId on abort. The surrounding
+    // native start and end records must establish its owner.
+    event(
+        1,
+        "user.message",
+        json!({"content":"First","messageId":"prompt-1","turnId":"0","interactionId":"one"}),
+    );
+    event(
+        2,
+        "assistant.turn_start",
+        json!({"turnId":"0","interactionId":"one"}),
+    );
+    event(
+        3,
+        "assistant.message",
+        json!({"content":"Partial","turnId":"0","originatingMessageId":"prompt-1"}),
+    );
+    event(4, "abort", json!({"reason":"user"}));
+    event(5, "assistant.turn_end", json!({"turnId":"0"}));
+    event(
+        6,
+        "user.message",
+        json!({"content":"Second","messageId":"prompt-2","turnId":"1","interactionId":"two"}),
+    );
+    event(
+        7,
+        "assistant.turn_start",
+        json!({"turnId":"1","interactionId":"two"}),
+    );
+    event(
+        8,
+        "assistant.message",
+        json!({"content":"Second answer","turnId":"1","originatingMessageId":"prompt-2"}),
+    );
+    event(9, "assistant.turn_end", json!({"turnId":"0"}));
+    scan_file(&path, "copilot", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let component = selected_page(&fixture, &[&path], key, 20, None)
+        .unwrap()
+        .unwrap();
+    let read = |prompt| {
+        let record = component
+            .records
+            .iter()
+            .find(|record| record.text().as_deref() == Some(prompt))
+            .unwrap();
+        let turn = &record.causal.turn.as_ref().unwrap().id;
+        let query = crate::native_html::query(&[("sid", key), ("turn", turn)]);
+        let response = http::trace(&configured, &query, None, None);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response.status, 200, "{body}");
+        body
+    };
+    let interrupted = read("First");
+    assert_eq!(interrupted["turns"][0]["end"]["why"], "interrupted");
+    assert_eq!(interrupted["incomplete"], false);
+    let unpaired = read("Second");
+    assert_eq!(unpaired["turns"][0]["end"]["why"], "unavailable");
+    assert_eq!(unpaired["incomplete"], true);
+    event(10, "assistant.turn_end", json!({"turnId":"1"}));
+    scan_file(&path, "copilot", &mut fixture.cache, &mut false).unwrap();
+    let replied = read("Second");
+    assert_eq!(replied["turns"][0]["end"]["why"], "replied");
+    assert_eq!(replied["incomplete"], false);
+}
+
+#[test]
+fn warehouse_trace_uses_the_latest_completed_claude_run() {
+    let mut fixture = Fixture::new("claude-trace-runs");
+    let root = fixture.claude("root", "Delegate");
+    append_native(
+        &root,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:01Z",
+        "message":{"role":"assistant","content":[{"type":"tool_use","id":"agent","name":"Agent","input":{"prompt":"Work"}}]}}),
+    );
+    let child = root.with_extension("").join("subagents/agent-worker.jsonl");
+    fs::create_dir_all(child.parent().unwrap()).unwrap();
+    fs::write(
+        child.with_extension("meta.json"),
+        json!({"agentType":"general-purpose","toolUseId":"agent"}).to_string(),
+    )
+    .unwrap();
+    fs::write(&child, format!("{}\n", prompt("root", 2, "Work"))).unwrap();
+    append_native(
+        &child,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:03Z",
+        "message":{"role":"assistant","content":[{"type":"tool_use","id":"handback","name":"SubagentHandback","input":{"message":"First return"}}]}}),
+    );
+    append_native(&child, prompt("root", 4, "Resume"));
+    for (at, status, summary) in [
+        (5, "completed", "Late first notification"),
+        (6, "failed", "Second run failed"),
+    ] {
+        append_native(
+            &root,
+            prompt(
+                "root",
+                at,
+                &format!(
+                    "<task-notification><tool-use-id>agent</tool-use-id><status>{status}</status><summary>{summary}</summary></task-notification>"
+                ),
+            ),
+        );
+    }
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let launch = crate::model::spawn_turn_id("claude", "worker");
+    let query = crate::native_html::query(&[("sid", "worker"), ("turn", &launch)]);
+    let reply = http::trace(&configured, &query, None, None);
+    let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{trace}");
+    assert_eq!(trace["handoffs"][0]["status"], "err", "{trace}");
+    assert_eq!(trace["handoffs"][0]["result"], "Second run failed");
+    assert_eq!(trace["turns"][0]["end"]["why"], "handoff_failed");
+    assert!(
+        trace["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["role"] == "return"
+                && row["catalog_key"] == "root"
+                && row["reason"].is_string())
+    );
 }
 
 #[test]
@@ -2362,6 +2563,14 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(reply.status, 200, "{trace}");
     assert_eq!(trace["handoffs"][0]["from"], "root");
+    assert_eq!(trace["handoffs"][0]["result"], "Work finished");
+    assert!(
+        trace["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["role"] == "return" && row["catalog_key"] == "root")
+    );
     let address = &trace["evidence"][1]["address"];
     assert_eq!(address["record"]["path"], "projects/proj/root.jsonl");
     let query = crate::native_html::query(&[("sid", "root"), ("address", &address.to_string())]);
@@ -2466,6 +2675,9 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     let reply = http::trace(&configured, &query, None, Some(&provider));
     let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(reply.status, 200, "{trace}");
+    assert_eq!(trace["handoffs"][0]["status"], "done");
+    assert_eq!(trace["handoffs"][0]["result"], "Work finished");
+    assert_eq!(trace["turns"][0]["end"]["why"], "returned");
     let relay_turn = crate::model::legacy_relay_turn_id("progress");
     assert_eq!(trace["turns"][0]["sent"], json!([relay_turn]));
     let evidence = trace["evidence"]
@@ -3667,6 +3879,49 @@ fn warehouse_home_previews_a_native_human_ask() {
     assert_eq!(home["events"][&ask]["brief"], "Review the second file");
     assert_eq!(home["session"]["detail_from"], "you");
     assert_eq!(home["incomplete"], false);
+}
+
+#[test]
+fn warehouse_home_question_origin_uses_the_call_turn() {
+    let mut fixture = Fixture::new("home-question-origin");
+    let path = fixture.claude("native", "First prompt");
+    append_native(&path, prompt("native", 1, "Review the fixture"));
+    let offset = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"question","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:02Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"question-tool","name":"AskUserQuestion","input":{"questions":[
+                {"question":"Which file?","header":"File","multiSelect":false,"options":[
+                    {"label":"First","description":"Review the first file"},
+                    {"label":"Second","description":"Review the second file"}]}
+            ]}}
+        ]}}),
+    );
+    append_native(&path, prompt("native", 3, "Latest prompt"));
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let identity = http::identity(&configured, "sid=native");
+    assert_eq!(identity.status, 200);
+    let identity: serde_json::Value = serde_json::from_slice(&identity.body).unwrap();
+    let generation = identity["identity"]["generation"].as_str().unwrap();
+    let question = crate::model::question_id("native", offset, Some("question-tool"));
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("scope", "current"),
+        ("generation", generation),
+        ("events", &json!([question]).to_string()),
+    ]);
+    let home = http::home(&configured, &query, None, None);
+    let value: serde_json::Value = serde_json::from_slice(&home.body).unwrap();
+    assert_eq!(home.status, 200, "{value}");
+    assert_eq!(value["events"][&question]["brief"], "Which file?");
+    assert_eq!(value["events"][&question]["origin"], "Review the fixture");
 }
 
 #[test]

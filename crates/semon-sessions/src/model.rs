@@ -26,11 +26,13 @@ use serde::{Deserialize, Serialize};
 
 mod native_text;
 mod relay_match;
+pub(crate) use relay_match::{ClaudeRunStep, group_claude_runs};
 mod turns;
+pub(crate) use native_text::notification_result;
 pub(crate) use native_text::{
     assistant_text, content_text, prompt_text, tool_input, tool_result_text,
 };
-use native_text::{coordinator_body, down_target, notification_result};
+use native_text::{coordinator_body, down_target};
 pub(crate) use native_text::{input_string, received_body};
 pub(crate) use relay_match::pair_up;
 pub(crate) use turns::native_id as native_turn_id;
@@ -1686,22 +1688,31 @@ struct DownMessage {
 type Deliveries = HashMap<usize, Vec<(Ref, Option<String>, String)>>;
 
 /// One run of a Claude subagent ([`Builder::claude_runs`]): how it ended.
-#[derive(Default)]
-struct Run {
+pub(crate) struct Run<A = Ref> {
     /// Its hand-back as the parent received it (the latest, if several).
-    fin: Option<Ref>,
+    pub(crate) fin: Option<A>,
     /// Its agent-end task notification in the parent.
-    tn: Option<Ref>,
+    pub(crate) tn: Option<A>,
     /// Its `SubagentHandback` call in the child.
-    handback: Option<Ref>,
+    pub(crate) handback: Option<A>,
 }
 
-impl Run {
+impl<A> Default for Run<A> {
+    fn default() -> Self {
+        Self {
+            fin: None,
+            tn: None,
+            handback: None,
+        }
+    }
+}
+
+impl<A> Run<A> {
     fn handed_back(&self) -> bool {
         self.fin.is_some() || self.handback.is_some()
     }
 
-    fn ended(&self) -> bool {
+    pub(crate) fn ended(&self) -> bool {
         self.handed_back() || self.tn.is_some()
     }
 }

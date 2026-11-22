@@ -59,6 +59,7 @@ fn read_error(error_value: ReadError) -> ViewerReply {
             "The activity evidence is outside the selected prefixes.",
             false,
         ),
+        ReadError::SourceBudget => crate::transcript_range::source_budget_reply(),
         ReadError::Index(_) => error(
             503,
             "catalog_unavailable",
@@ -561,7 +562,11 @@ pub(crate) fn annotations(
         }
         .map_err(read_error)?
         .ok_or_else(not_found)?;
-        let observed = component.identity.generation;
+        let observed = if kind == "errors" {
+            component.errors_generation()
+        } else {
+            component.identity.generation.clone()
+        };
         if generation.is_some_and(|expected| expected != observed) {
             return Err(read_error(ReadError::Restart));
         }
@@ -666,7 +671,9 @@ pub(crate) fn home_with_mode(
             .turns
             .iter()
             .chain(selection.ids.iter().filter(|id| {
-                crate::model::is_ask(id) || selected::is_question_id(id) || id.starts_with('r')
+                crate::model::is_ask(id)
+                    || selected::is_question_id(id)
+                    || id.starts_with(['r', 's'])
             }))
             .map(String::as_str)
             .collect::<std::collections::BTreeSet<_>>()
@@ -814,9 +821,10 @@ pub(crate) fn home_with_mode(
                     } else {
                         None
                     };
+                    let origin = component.home_origin(record);
                     return Some((
                         id.clone(),
-                        json!({"brief":brief,"answer":answer,"origin":null}),
+                        json!({"brief":brief,"answer":answer,"origin":origin}),
                     ));
                 }
                 let brief = previews.get(id.as_str())?;
@@ -837,7 +845,7 @@ pub(crate) fn home_with_mode(
             200,
             json!({
                 "api":1,"identity":component.identity,"generation":selection.expected,
-                "session":{"detail":detail.map(|detail| &detail.text),"detail_from":detail.and_then(|detail| detail.from),"detail_from_name":null,"activity":component.home_activity},
+                "session":{"detail":detail.map(|detail| &detail.text),"detail_from":detail.and_then(|detail| detail.from.as_deref()),"detail_from_name":detail.and_then(|detail| detail.from_name.as_deref()),"activity":component.home_activity},
                 "events":events,"turns":turns,"incomplete":incomplete,
             }),
         ))
@@ -1206,9 +1214,13 @@ fn read_transcript(
         (false, None, None, None) => None,
         (true, Some("output"), None, None) => Some(Part::Output),
         (true, Some("script"), None, None) => Some(Part::Script),
-        (true, Some("attachment"), Some(image), None) => {
-            Some(Part::Attachment(image.parse().map_err(|_| invalid())?))
-        }
+        (true, Some("attachment"), Some(image), None) => Some(Part::Attachment(
+            image
+                .parse::<usize>()
+                .ok()
+                .filter(|index| *index < 64)
+                .ok_or_else(invalid)?,
+        )),
         (true, None, None, Some(chunk)) => Some(Part::Text(chunk.parse().map_err(|_| invalid())?)),
         _ => return Err(invalid()),
     };
@@ -1224,7 +1236,7 @@ fn read_transcript(
     let source = Source::focused(namespace, &path, &configured.options, current_provider)
         .map_err(read_error)?
         .with_mode(mode);
-    let view = selected::ReadView::open(&source).map_err(read_error)?;
+    let view = selected::ReadView::open_transcript(&source, part).map_err(read_error)?;
     let component = selected::transcript_window(
         &view,
         &source,
@@ -1295,6 +1307,7 @@ fn read_transcript(
         .map(super::encode)
         .transpose()
         .map_err(read_error)?;
+    let errors_generation = component.errors_generation();
     let metadata = if let Some(row) = component.metadata {
         Some(list_item(row, None, &read_annotations(configured)?))
     } else if let Some(saved) = component.retained_metadata {
@@ -1312,6 +1325,7 @@ fn read_transcript(
             "api":1, "projection":7,
             "source_key":configured.key, "catalog_key":key, "read_scope":scope,
             "binding":component.binding, "earlier_cursor":earlier, "entries":entries,
+            "errors_generation":errors_generation,
             "identity":component.identity, "session":metadata, "relationship_context":context,
             "position":if address.is_some() { "address" } else if cursor.is_some() { "earlier" } else { "latest" },
             "selected":{"harness":component.harness,"native_id":component.native_id,"title":component.title,"model":component.model},

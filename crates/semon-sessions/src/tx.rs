@@ -1044,6 +1044,37 @@ pub(crate) fn selected_script(lines: &mut Lines, slot: &Slot) -> Option<(String,
 /// Large plain strings use scalar checkpoints instead of this record path.
 pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
     let file = slot.file.as_ref()?;
+    if let SlotKind::Yielded {
+        first,
+        polls,
+        cut,
+        done,
+        ..
+    } = &slot.kind
+    {
+        if let Some(output) = done
+            .as_ref()
+            .and_then(|reply| lines.get(&file.path, reply.o))
+            .and_then(|record| {
+                field(command_item(&record)?, "aggregated_output").map(str::to_owned)
+            })
+        {
+            return Some(selected_text_value(
+                &output,
+                Source::Collected,
+                false,
+                SELECTED_OUTPUT_MAX,
+            ));
+        }
+        let (output, truncated) =
+            chunks(lines, &file.path, *first, polls, *cut, SELECTED_OUTPUT_MAX);
+        return Some(selected_text_value(
+            &output,
+            Source::Model,
+            truncated,
+            SELECTED_OUTPUT_MAX,
+        ));
+    }
     let (text, source) = match &slot.kind {
         SlotKind::Tool {
             reply,

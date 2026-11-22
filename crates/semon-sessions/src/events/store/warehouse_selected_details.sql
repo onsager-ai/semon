@@ -39,12 +39,29 @@ WITH members AS MATERIALIZED (
     CROSS JOIN fact_tool_call c ON c.source=m.source AND c.pos<m.end
     CROSS JOIN visible v ON v.source=c.source AND v.pos=c.pos
     WHERE c.tool IS NOT NULL AND c.call_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM fact_tool_result r INDEXED BY tool_result_identity
+        WHERE r.source=c.source AND r.call_id=c.call_id AND r.pos<m.end
+          AND r.call_pos=c.pos AND r.call_block=c.block AND r.kind='yield_poll_wrapper')
 ), replies AS (
     SELECT c.source,c.pos,c.block,c.occurrence,c.tool,c.end,
+           ?4 AND CASE WHEN EXISTS (
+      SELECT 1 FROM fact_tool_result y INDEXED BY tool_result_identity
+      WHERE y.source=c.source AND y.call_id=c.call_id AND y.pos<c.end
+        AND y.call_pos=c.pos AND y.call_block=c.block AND y.kind='yield_started'
+    ) THEN (NOT ?5 OR EXISTS (
+      SELECT 1 FROM fact_tool_result y INDEXED BY tool_result_identity
+      WHERE y.source=c.source AND y.call_id=c.call_id AND y.pos<c.end
+        AND y.call_pos=c.pos AND y.call_block=c.block AND y.kind='yield_closed'
+    )) ELSE (json_type(?6)='null' OR (
+      coalesce((SELECT r.ts FROM fact_record r WHERE r.source=c.source AND r.pos=c.pos AND r.block=0 AND NOT r.gap),
+        (SELECT r.ts FROM fact_record r WHERE r.source=c.source AND r.pos<c.pos AND r.ts IS NOT NULL AND NOT r.gap ORDER BY r.pos DESC LIMIT 1),
+        -9223372036854775808),c.source,c.pos
+    ) < (json_extract(?6,'$[0]'),json_extract(?6,'$[1]'),json_extract(?6,'$[2]'))) END AS unfinished,
            coalesce((
                SELECT r.failed AND r.flags & ?3=0
                FROM fact_tool_result r INDEXED BY tool_result_identity
                WHERE r.source=c.source AND r.call_id=c.call_id AND r.pos<c.end
+                 AND r.kind NOT IN ('yield_poll','yield_poll_wrapper')
                  AND ((r.call_pos IS NULL AND r.kind<>'copilot-execution')
                    OR (r.call_pos=c.pos AND r.call_block=c.block))
                  AND r.flags & ?2=0
@@ -55,10 +72,10 @@ WITH members AS MATERIALIZED (
     WHERE (SELECT count(*) FROM fact_tool_call a WHERE a.source=c.source AND a.pos=c.pos AND a.block=c.block)=1
       AND (SELECT count(*) FROM fact_tool_call a WHERE a.source=c.source AND a.call_id=c.call_id AND a.pos<c.end)=1
 ), visible_calls AS (
-    SELECT c.tool,coalesce(r.failed=1,0) AS failed
+    SELECT c.tool,coalesce(r.failed=1 OR (r.failed=-1 AND r.unfinished),0) AS failed
     FROM calls c
     LEFT JOIN replies r USING(source,pos,block,occurrence)
-    WHERE coalesce(r.failed,-1)<>0 OR NOT EXISTS (
+    WHERE r.failed IN (-1,1) OR NOT EXISTS (
         SELECT 1 FROM fact_operation o INDEXED BY operation_parent
         WHERE o.source=c.source AND o.call_pos=c.pos AND o.call_block=c.block AND o.pos<c.end
     )

@@ -214,6 +214,15 @@ pub(crate) struct CatalogSource {
     pub(crate) native_role: Option<Value>,
 }
 
+impl CatalogSource {
+    pub(crate) fn claude_agent_call(&self) -> Option<&str> {
+        self.native_role
+            .as_ref()?
+            .pointer("/Agent/tool_use_id")?
+            .as_str()
+    }
+}
+
 pub(crate) const CATALOG_VERSION: u32 = 9;
 
 pub(super) fn source(file: &super::SourceFile) -> CatalogSource {

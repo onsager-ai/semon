@@ -20,6 +20,7 @@ fn certified_parent_relay(
     identity: &warehouse::RetainedIdentity,
     parents: &[(i64, SessionSourceRef)],
     call: Option<(&Address, u32)>,
+    trace: bool,
 ) -> Result<Option<parent_relay::Plan<SessionSourceRef>>, ReadError> {
     if identity.harness != "claude" {
         return Ok(None);
@@ -73,7 +74,15 @@ fn certified_parent_relay(
         }
     }
     let reference = frozen_reference(&identity.harness, path, &receipt);
-    parent_relay::Plan::collect_certified(tx, identity.owner, reference, call, parents)
+    parent_relay::Plan::collect_certified(
+        tx,
+        identity.owner,
+        reference,
+        receipt.claude_agent_call(),
+        call,
+        parents,
+        trace,
+    )
 }
 
 fn predecessor_bounds(
@@ -468,7 +477,8 @@ pub(super) fn read_frozen(
                         ))
                     })
                     .collect::<Result<Vec<_>, ReadError>>()?;
-                parent_relay = certified_parent_relay(&tx, source, &identity, &parents, None)?;
+                parent_relay =
+                    certified_parent_relay(&tx, source, &identity, &parents, None, false)?;
             }
             let members = observed
                 .members
@@ -707,7 +717,7 @@ pub(super) fn read_frozen(
             &binding,
             request,
             &annotation_members,
-            harness != "copilot",
+            PendingRuntime::retained(&harness),
         )?)
     } else {
         None
@@ -739,20 +749,35 @@ pub(super) fn read_frozen(
     let mut bytes_left = view.body_bytes.lock().map_err(index)?;
     let mut touched = BTreeMap::new();
     let mut reply_records = BTreeMap::new();
+    let mut home_origins = BTreeMap::new();
     let mut records = Vec::with_capacity(candidates.len());
-    let mut read = |reference: &SessionSourceRef, offset| {
-        crate::source_reader::read_record_bounded(
+    let mut fields = Fields::new();
+    let mut read = |id,
+                    reference: &SessionSourceRef,
+                    offset,
+                    images: Option<&crate::attachments::PromptMetadata>,
+                    mode| {
+        view.read_record(
             &reader,
+            id,
             reference,
             offset,
-            crate::tx::LINE_MAX as usize,
+            images,
+            mode,
             &mut bytes_left,
+            &mut fields,
         )
-        .map_err(|error| retained_body_error(error, cursor.is_some()))
+        .map_err(|error| {
+            if *bytes_left == 0 {
+                ReadError::SourceBudget
+            } else {
+                retained_body_error(error, cursor.is_some())
+            }
+        })
     };
     let legacy = if let Some(plan) = parent_relay.filter(|_| !candidates.is_empty()) {
-        match plan.resolve(origin_owner, |_, reference, offset| {
-            let native = read(reference, offset)?;
+        match plan.resolve(origin_owner, |id, reference, offset| {
+            let native = read(id, reference, offset, None, BodyMode::Complete)?;
             pin_provider_with(&reader, reference, |error| {
                 retained_body_error(error, cursor.is_some())
             })?;
@@ -765,14 +790,13 @@ pub(super) fn read_frozen(
     } else {
         "{}".into()
     };
-    let include_latest_turn = matches!(target, Target::Turns(..) | Target::Address(..));
     let mut turns = if candidates.is_empty() && !include_home_detail {
         BTreeMap::new()
     } else {
         let positions = candidates
             .keys()
             .copied()
-            .chain(include_latest_turn.then_some(Position::END));
+            .chain(std::iter::once(Position::END));
         let tx = view.lock()?;
         let mut search = causal::TurnSearch::new(&tx, positions)?;
         for (id, reference, predecessors, carrier) in &turn_members {
@@ -808,13 +832,20 @@ pub(super) fn read_frozen(
         search.finish()
     };
     let latest_turn = turns.remove(&Position::END).flatten();
-    let home_detail = match latest_turn.as_ref().filter(|_| include_home_detail) {
+    let mut home_detail = match latest_turn.as_ref().filter(|_| include_home_detail) {
         Some(turn) => {
-            let (_, reference, _, _) = turn_members
+            let (id, reference, _, _) = turn_members
                 .iter()
                 .find(|(_, reference, _, _)| reference.path == turn.address.path)
                 .ok_or(ReadError::RetainedUnverified)?;
-            let native = read(reference, turn.address.offset)?;
+            let images = prompt_images(view, *id, turn.address.offset, Some("user"))?;
+            let native = read(
+                *id,
+                reference,
+                turn.address.offset,
+                images.as_ref(),
+                BodyMode::Complete,
+            )?;
             pin_provider_with(&reader, reference, |error| {
                 retained_body_error(error, false)
             })?;
@@ -824,7 +855,14 @@ pub(super) fn read_frozen(
     };
     for (position, (kind, reference, prefix, revision)) in candidates {
         let offset = u64::try_from(position.offset).map_err(index)?;
-        let native = read(&reference, offset)?;
+        let images = prompt_images(view, position.source, offset, kind.as_deref())?;
+        let native = read(
+            position.source,
+            &reference,
+            offset,
+            images.as_ref(),
+            BodyMode::transcript(kind.as_deref()),
+        )?;
         let event_id = crate::tx::native_event_id(&native);
         let turn = turns.remove(&position).flatten();
         let address = Address {
@@ -851,24 +889,58 @@ pub(super) fn read_frozen(
         };
         let operation = inputs.operation();
         let causal = inputs.render(source, key, &reference, event_id.as_deref(), turn);
+        if let Some(turn) = home_question_origin(&target, &causal, &reference, offset)
+            && let std::collections::btree_map::Entry::Vacant(entry) =
+                home_origins.entry(turn.position)
+        {
+            let id = turn.position.source;
+            let (_, reference, _, _) = turn_members
+                .iter()
+                .find(|(member, ..)| *member == id)
+                .ok_or(ReadError::RetainedUnverified)?;
+            let images = prompt_images(view, id, turn.address.offset, Some("user"))?;
+            let prompt = read(
+                id,
+                reference,
+                turn.address.offset,
+                images.as_ref(),
+                BodyMode::Complete,
+            )?;
+            pin_provider_with(&reader, reference, |error| {
+                retained_body_error(error, cursor.is_some())
+            })?;
+            entry.insert(HomeDetail::from_turn(turn, &prompt).text);
+        }
         if direction == Direction::Reverse
             && let Some(operation) = operation
             && let std::collections::btree_map::Entry::Vacant(entry) =
                 reply_records.entry((reference.path.clone(), operation.parent))
         {
-            entry.insert(read(&reference, operation.parent)?);
+            entry.insert(read(
+                position.source,
+                &reference,
+                operation.parent,
+                None,
+                BodyMode::Complete,
+            )?);
         }
         if direction == Direction::Reverse || matches!(target, Target::Turns(_, Some(_))) {
-            for reply in causal
+            for reply_offset in causal
                 .calls
                 .iter()
                 .filter(|call| direction == Direction::Reverse || call.tool == "AskUserQuestion")
-                .filter_map(causal::CallSlot::display_reply)
+                .flat_map(causal::CallSlot::display_offsets)
             {
                 if let std::collections::btree_map::Entry::Vacant(entry) =
-                    reply_records.entry((reference.path.clone(), reply.o))
+                    reply_records.entry((reference.path.clone(), reply_offset))
                 {
-                    entry.insert(read(&reference, reply.o)?);
+                    entry.insert(read(
+                        position.source,
+                        &reference,
+                        reply_offset,
+                        None,
+                        BodyMode::Transcript,
+                    )?);
                 }
             }
         }
@@ -886,6 +958,7 @@ pub(super) fn read_frozen(
             kind,
             at: (position.time != i64::MIN).then_some(position.time),
             native,
+            images: images.map(|images| images.refs),
             address,
         });
     }
@@ -922,6 +995,17 @@ pub(super) fn read_frozen(
         .map(serde_json::from_str)
         .transpose()
         .map_err(index)?;
+    if let Some(detail) = &mut home_detail
+        && latest_turn
+            .as_ref()
+            .is_some_and(|turn| turn.id == crate::model::spawn_turn_id(&harness, key))
+        && let Some(row) = &metadata
+        && let Some(parent) = row["parent"]
+            .as_str()
+            .filter(|parent| *parent != "you" && *parent != key)
+    {
+        detail.set_parent(parent, &row["details"]);
+    }
     let title = metadata
         .as_ref()
         .and_then(|m| m["name"].as_str())
@@ -942,13 +1026,16 @@ pub(super) fn read_frozen(
         #[cfg(test)]
         member_count,
         latest_turn,
-        #[cfg(test)]
+        runtime_status: None,
         legacy_completion: None,
+        trace_completion: None,
         records,
         reply_records,
+        fields,
         next,
         annotations,
         home_detail,
+        home_origins,
         home_activity: None,
     })
 }
@@ -1063,7 +1150,7 @@ pub(in super::super) fn retained_peer_record_at(
         peer,
         provider,
         PAGE_BYTES,
-        |_, _, _, _| Ok(address.clone()),
+        |_, _, _, _| Ok(Some(address.clone())),
     )
 }
 
@@ -1153,7 +1240,7 @@ pub(in super::super) fn retained_relay_in_view(
         drop(rows);
         drop(query);
         let plan = if correlated.is_none() && sender == trace && peer != trace {
-            Some(certified_parent_relay(&tx, source, identity, parents, Some((send, block)))?
+            Some(certified_parent_relay(&tx, source, identity, parents, Some((send, block)), false)?
                 .ok_or_else(unavailable)?)
         } else {
             None
@@ -1245,7 +1332,7 @@ pub(in super::super) fn retained_relay_in_view(
         }
         let selection = if peer == trace { origin } else { encode(&(origin, peer))? };
         matched = Some((component_binding(&selection, witness)?, turn));
-        Ok(address)
+        Ok(Some(address))
     })?
     .ok_or_else(unavailable)?;
     let entry_id = crate::transcript_range::native_entry_id(
@@ -1318,36 +1405,36 @@ pub(in super::super) fn retained_peer_launch_in_view(
             let child_path = relative(source.options, &identity.harness, child_carrier)
                 .ok_or_else(unavailable)?;
             let child_reference = frozen_reference(&identity.harness, child_path, &child.receipt);
-            let marker_offset: i64 = tx
-                .query_row(
+            let claude_parent = (identity.harness == "claude" && observed.harness == "claude")
+                .then(|| claude_storage_parent(Path::new(child_path), &identity.native_id))
+                .flatten()
+                .filter(|storage_parent| parents.iter().any(|(_, parent)| {
+                    *storage_parent == Path::new(&parent.path).with_extension("")
+                }));
+            let native_call = claude_parent.and_then(|_| child.receipt.claude_agent_call());
+            let marker = if native_call.is_none() {
+                let marker_offset: i64 = tx.query_row(
                     "SELECT p.pos FROM fact_parent_observation p
-                 JOIN fact_record r ON r.source=p.source AND r.pos=p.pos AND r.block=0 AND NOT r.gap
-                 WHERE p.source=?1 AND p.pos<?2 AND p.method='marker'
-                 ORDER BY p.pos DESC,p.block DESC,p.occurrence DESC LIMIT 1",
-                    params![
-                        child.id,
-                        i64::try_from(child_reference.offset).map_err(index)?
-                    ],
+                     JOIN fact_record r ON r.source=p.source AND r.pos=p.pos AND r.block=0 AND NOT r.gap
+                     WHERE p.source=?1 AND p.pos<?2 AND p.method='marker'
+                     ORDER BY p.pos DESC,p.block DESC,p.occurrence DESC LIMIT 1",
+                    params![child.id, i64::try_from(child_reference.offset).map_err(index)?],
                     |row| row.get(0),
-                )
-                .optional()
-                .map_err(index)?
-                .ok_or_else(unavailable)?;
-            drop(tx);
-            let marker_native = read(
-                &child_reference,
-                u64::try_from(marker_offset).map_err(index)?,
-            )?;
-            let marker = crate::user_text(&marker_native)
-                .and_then(crate::parse_marker)
-                .filter(|marker| {
-                    marker.harness == observed.harness && marker.parent_id == observed.native_id
-                })
-                .ok_or_else(unavailable)?;
-            let prompt = match (marker.tool_id.as_deref(), marker.handoff.as_deref()) {
-                (Some(_), _) => None,
-                (None, Some(prompt)) => Some(prompt),
-                (None, None) => return Err(unavailable()),
+                ).optional().map_err(index)?.ok_or_else(unavailable)?;
+                drop(tx);
+                let native = read(&child_reference, u64::try_from(marker_offset).map_err(index)?)?;
+                Some(crate::user_text(&native).and_then(crate::parse_marker)
+                    .filter(|marker| marker.harness == observed.harness && marker.parent_id == observed.native_id)
+                    .ok_or_else(unavailable)?)
+            } else {
+                drop(tx);
+                None
+            };
+            let call_id = native_call.or_else(|| marker.as_ref().and_then(|marker| marker.tool_id.as_deref()));
+            let prompt = if call_id.is_none() {
+                Some(marker.as_ref().and_then(|marker| marker.handoff.as_deref()).ok_or_else(unavailable)?)
+            } else {
+                None
             };
             let bounds = encode(
                 &parents
@@ -1355,12 +1442,15 @@ pub(in super::super) fn retained_peer_launch_in_view(
                     .map(|(id, reference)| (*id, reference.offset))
                     .collect::<BTreeMap<_, _>>(),
             )?;
-            let candidates = certified_launch_calls(db, &bounds, marker.tool_id.as_deref())?;
+            let candidates = certified_launch_calls(db, &bounds, call_id)?;
             if candidates.len() > crate::handoff::MAX_CALLS {
                 return Err(unavailable());
             }
             let mut location = None;
             for (id, offset, occurrence, block, call_id, tool) in candidates {
+                if native_call.is_some() && !matches!(tool.as_str(), "Agent" | "Task") {
+                    continue;
+                }
                 let (_, reference) = parents
                     .iter()
                     .find(|(candidate, _)| *candidate == id)
@@ -1392,12 +1482,46 @@ pub(in super::super) fn retained_peer_launch_in_view(
                     occurrence,
                 });
             }
-            location.ok_or_else(unavailable)
+            Ok(location)
         },
     )?
     .ok_or_else(unavailable)?;
     let (block, tool) = matched_call.ok_or_else(unavailable)?;
     Ok((record.address, block, tool))
+}
+
+/// Qualify the return against the original child's and observed parent's prefixes.
+pub(in super::super) fn retained_spawn_return(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    peer: PeerBinding<'_>,
+    parent: &str,
+    provider: Option<&dyn SessionSourceReader>,
+) -> Result<Option<TraceCompletion>, ReadError> {
+    let mut completion = None;
+    read_retained_peer_in_view(
+        view,
+        source,
+        peer,
+        parent,
+        provider,
+        PAGE_BYTES,
+        |db, (identity, _), parents, read| {
+            let plan = {
+                let tx = db.lock().map_err(index)?;
+                certified_parent_relay(&tx, source, identity, parents, None, true)?
+            };
+            if let Some(plan) = plan {
+                completion = plan
+                    .resolve(identity.owner, |_, reference, offset| {
+                        read(reference, offset)
+                    })?
+                    .trace_completion;
+            }
+            Ok(None)
+        },
+    )?;
+    Ok(completion)
 }
 
 type LaunchCallRow = (i64, i64, i64, u32, String, String);
@@ -1454,7 +1578,7 @@ fn read_retained_peer(
         (&warehouse::RetainedIdentity, &warehouse::ObservedPeer),
         &[(i64, SessionSourceRef)],
         &mut CertifiedRecordRead<'_>,
-    ) -> Result<Address, ReadError>,
+    ) -> Result<Option<Address>, ReadError>,
 ) -> Result<Option<Record>, ReadError> {
     if peer == trace {
         return Ok(None);
@@ -1543,7 +1667,7 @@ fn read_retained_peer_in_view(
         (&warehouse::RetainedIdentity, &warehouse::ObservedPeer),
         &[(i64, SessionSourceRef)],
         &mut CertifiedRecordRead<'_>,
-    ) -> Result<Address, ReadError>,
+    ) -> Result<Option<Address>, ReadError>,
 ) -> Result<Option<Record>, ReadError> {
     let tx = view.lock()?;
     let identity = warehouse::retained_identity(&tx, &source.namespace, trace)
@@ -1622,7 +1746,10 @@ fn read_retained_peer_in_view(
         Ok(native)
     };
     let result = (|| {
-        let address = select(&view.db, (&identity, &observed), &parents, &mut read)?;
+        let Some(address) = select(&view.db, (&identity, &observed), &parents, &mut read)? else {
+            peer_reader.finish().map_err(peer_body_error)?;
+            return Ok(None);
+        };
         let Some((id, reference)) = parents.into_iter().find(|(_, reference)| reference.path == address.path) else {
             return Ok(None);
         };
@@ -1652,6 +1779,7 @@ fn read_retained_peer_in_view(
             kind,
             at: crate::events::record_time(&native),
             native,
+            images: None,
         }))
     })().map_err(|error| match error {
         ReadError::Restart => ReadError::PeerUnavailable(
@@ -1730,6 +1858,7 @@ fn read_certified_record(
         kind,
         at: crate::events::record_time(&native),
         native,
+        images: None,
     }))
 }
 

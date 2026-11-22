@@ -6,9 +6,16 @@ WITH members AS MATERIALIZED (
   SELECT c.*,m.end FROM members m
   CROSS JOIN fact_tool_call c ON c.source=m.source AND c.pos<m.end
   WHERE ?2='errors' AND c.call_id IS NOT NULL AND c.tool IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM fact_tool_result r INDEXED BY tool_result_identity
+        WHERE r.source=c.source AND r.call_id=c.call_id AND r.pos<m.end
+          AND r.call_pos=c.pos AND r.call_block=c.block AND r.kind='yield_poll_wrapper')
 ), unique_calls AS MATERIALIZED (
   SELECT source,min(pos) AS pos,min(block) AS block,min(call_id) AS call_id,max(end) AS end
-  FROM calls GROUP BY source,call_id HAVING count(*)=1
+  FROM calls c GROUP BY source,call_id HAVING count(*)=1
+    AND (SELECT count(*) FROM fact_tool_call a INDEXED BY tool_call_identity
+      WHERE a.source=c.source AND a.call_id=c.call_id AND a.pos<c.end)=1
+    AND (SELECT count(*) FROM fact_tool_call a
+      WHERE a.source=c.source AND a.pos=c.pos AND a.block=c.block)=1
 ), ranked AS (
   SELECT c.source,c.pos,c.block,r.failed,r.flags,row_number() OVER (
     PARTITION BY c.source,c.pos,c.block ORDER BY coalesce(r.ts,-9223372036854775808) DESC,
@@ -16,14 +23,27 @@ WITH members AS MATERIALIZED (
   ) AS rank
   FROM unique_calls c CROSS JOIN fact_tool_result r INDEXED BY tool_result_identity
     ON r.source=c.source AND r.call_id=c.call_id AND r.pos<c.end
+    AND r.kind NOT IN ('yield_poll','yield_poll_wrapper')
     AND ((r.call_pos IS NULL AND r.kind<>'copilot-execution')
       OR (r.call_pos=c.pos AND r.call_block=c.block))
   WHERE r.flags & ?3=0
 ), marks(source,pos,display_block,signal) AS (
   SELECT source,pos,block,NULL FROM ranked WHERE rank=1 AND failed AND flags & ?4=0
   UNION ALL
-  SELECT c.source,c.pos,c.block,NULL FROM calls c
-  WHERE ?7 AND NOT EXISTS (
+  SELECT c.source,c.pos,c.block,NULL FROM unique_calls c
+  WHERE ?7 AND CASE WHEN EXISTS (
+      SELECT 1 FROM fact_tool_result y INDEXED BY tool_result_identity
+      WHERE y.source=c.source AND y.call_id=c.call_id AND y.pos<c.end
+        AND y.call_pos=c.pos AND y.call_block=c.block AND y.kind='yield_started'
+    ) THEN (NOT ?8 OR EXISTS (
+      SELECT 1 FROM fact_tool_result y INDEXED BY tool_result_identity
+      WHERE y.source=c.source AND y.call_id=c.call_id AND y.pos<c.end
+        AND y.call_pos=c.pos AND y.call_block=c.block AND y.kind='yield_closed'
+    )) ELSE (json_type(?9)='null' OR (
+      coalesce((SELECT r.ts FROM fact_record r WHERE r.source=c.source AND r.pos=c.pos AND r.block=0 AND NOT r.gap),
+        (SELECT r.ts FROM fact_record r WHERE r.source=c.source AND r.pos<c.pos AND r.ts IS NOT NULL AND NOT r.gap ORDER BY r.pos DESC LIMIT 1),
+        -9223372036854775808),c.source,c.pos
+    ) < (json_extract(?9,'$[0]'),json_extract(?9,'$[1]'),json_extract(?9,'$[2]'))) END AND NOT EXISTS (
     SELECT 1 FROM ranked r WHERE r.source=c.source AND r.pos=c.pos AND r.block=c.block
   )
   UNION ALL
