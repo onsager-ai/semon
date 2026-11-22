@@ -120,6 +120,7 @@ impl Fixture {
                 .collect(),
             repos: BTreeMap::new(),
             current_provider: None,
+            focused: None,
         }
     }
 }
@@ -476,6 +477,42 @@ fn selected_page(
         limit,
         cursor,
     )
+}
+
+#[test]
+fn warehouse_focused_reads_require_only_the_selected_committed_component() {
+    let mut fixture = Fixture::new("focused-authority");
+    let path = fixture.claude("selected", "Selected prompt");
+    let unrelated = fixture.claude("unrelated", "Unrelated prompt");
+    fs::remove_file(unrelated).unwrap();
+    let source = Source::focused(
+        fixture.namespace.clone(),
+        &fixture.db,
+        &fixture.options,
+        None,
+    )
+    .unwrap();
+    assert!(source.inventory.is_empty());
+    let identity = identity(&source, CatalogReadScope::Current, "selected")
+        .unwrap()
+        .unwrap();
+    assert_eq!(identity.2, "selected");
+    let page = selected::latest_page(&fixture.options, &source, "selected", 10, None)
+        .unwrap()
+        .unwrap();
+    assert_eq!(page.records[0].text().as_deref(), Some("Selected prompt"));
+    let replacement = path.with_extension("replacement");
+    fs::write(&replacement, fs::read(&path).unwrap()).unwrap();
+    fs::rename(replacement, path).unwrap();
+    assert!(
+        super::identity(&source, CatalogReadScope::Current, "selected")
+            .unwrap()
+            .is_none()
+    );
+    assert!(matches!(
+        selected::latest_page(&fixture.options, &source, "selected", 10, None),
+        Err(ReadError::Restart)
+    ));
 }
 
 #[test]

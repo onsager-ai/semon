@@ -105,6 +105,7 @@ pub(super) fn turns(
                             row.get::<_, String>(1)?,
                             row.get::<_, Option<i64>>(2)?,
                             row.get::<_, i64>(3)?,
+                            row.get::<_, String>(4)?,
                         ))
                     })
                     .optional()
@@ -112,11 +113,11 @@ pub(super) fn turns(
             } else {
                 None
             };
-            let launch_at = if let Some((carrier, ledger, at, parent)) = launch_at {
+            let launch_at = if let Some((carrier, ledger, at, parent, parent_harness)) = launch_at {
                 let current = decode(&ledger)?;
-                if matches!(source.inventory.get(&carrier), Some(Availability::Expected(Some(stat)))
-                    if stable_or_grown(&current.stat, stat) && raw_stat(Path::new(&carrier))
-                        .is_ok_and(|actual| stable_or_grown(stat, &actual)))
+                if matches!(source.availability(&parent_harness, &carrier)?, Availability::Expected(Some(stat))
+                    if stable_or_grown(&current.stat, &stat) && raw_stat(Path::new(&carrier))
+                        .is_ok_and(|actual| stable_or_grown(&stat, &actual)))
                     && prefix
                         .query_row(params![parent, view], |row| row.get::<_, String>(0))
                         .optional()

@@ -66,7 +66,8 @@ FROM unique_call c CROSS JOIN fact_tool_result r ON r.source=?1 AND r.call_id=c.
        OR (r.call_pos=c.pos AND r.call_block=c.block))
 WHERE r.pos<?4 ORDER BY 1,r.pos,r.block,r.occurrence LIMIT ?5";
 
-const EXACT_RELAY_RECEIPTS: &str = "SELECT r.source,c.path,s.ledger,r.pos,r.block,r.occurrence,r.ts
+const EXACT_RELAY_RECEIPTS: &str =
+    "SELECT r.source,c.path,s.ledger,r.pos,r.block,r.occurrence,r.ts,s.harness
     FROM fact_relay_receipt r INDEXED BY relay_receipt_correlation
     CROSS JOIN warehouse_source s ON s.source=r.source AND s.origin=?1
     CROSS JOIN warehouse_current c ON c.source=r.source AND c.path=s.carrier
@@ -179,11 +180,12 @@ fn relay_receipts(
         let offset = u64::try_from(row.get::<_, i64>(3).map_err(index)?).map_err(index)?;
         let ledger: String = row.get(2).map_err(index)?;
         let current = decode(&ledger)?;
-        let Some(Availability::Expected(Some(stat))) = source.inventory.get(&path) else {
+        let harness: String = row.get(7).map_err(index)?;
+        let Availability::Expected(Some(stat)) = source.availability(&harness, &path)? else {
             continue;
         };
-        if !stable_or_grown(&current.stat, stat)
-            || !raw_stat(Path::new(&path)).is_ok_and(|actual| stable_or_grown(stat, &actual))
+        if !stable_or_grown(&current.stat, &stat)
+            || !raw_stat(Path::new(&path)).is_ok_and(|actual| stable_or_grown(&stat, &actual))
         {
             continue;
         }
@@ -268,6 +270,7 @@ struct Member {
     carrier: String,
     current: Ledger,
     reference: SessionSourceRef,
+    remote: bool,
 }
 
 fn decode(ledger: &str) -> Result<Ledger, ReadError> {
@@ -309,7 +312,7 @@ fn continuation_bounds(
     encode(&bounds)
 }
 
-fn stable_or_grown(prior: &Stat, now: &Stat) -> bool {
+pub(super) fn stable_or_grown(prior: &Stat, now: &Stat) -> bool {
     prior == now
         || (prior.is_prefix_of(now)
             && prior.size < now.size
@@ -332,7 +335,7 @@ fn changed() -> io::Error {
     )
 }
 
-fn relative<'a>(options: &Options, harness: &str, path: &'a str) -> Option<&'a str> {
+pub(super) fn relative<'a>(options: &Options, harness: &str, path: &'a str) -> Option<&'a str> {
     let home = match harness {
         "claude" => &options.claude_home,
         "codex" => &options.codex_home,
@@ -521,6 +524,7 @@ fn qualified_record(
             carrier,
             current,
             reference,
+            remote: false,
         }),
         &budget,
     )?;
@@ -543,7 +547,8 @@ pub(super) fn launch_call(
     let db = crate::events::store::focused_connection(source.path).map_err(index)?;
     db.execute_batch("BEGIN DEFERRED").map_err(index)?;
     let snapshot = super::Snapshot::read(&db, source)?;
-    let Some((owner, harness, native_id)) = current_identity(&db, source, child, &snapshot.paths)?
+    let Some((owner, harness, native_id)) =
+        current_identity(&db, source, child, Some(&snapshot.paths))?
     else {
         return Ok(None);
     };
@@ -871,10 +876,11 @@ fn read(
         .map(|provider| crate::source_reader::BudgetedReader::new(provider, 1024));
     let capacity = if provider.is_some()
         && matches!(target, Target::Page(..))
-        && source
-            .inventory
-            .values()
-            .any(|state| *state == Availability::Expected(None))
+        && (source.focused.is_some()
+            || source
+                .inventory
+                .values()
+                .any(|state| *state == Availability::Expected(None)))
     {
         // Reauthorizing every prior provider source and reading up to 32 new
         // sources fits the request reader's 64-source budget.
@@ -905,18 +911,25 @@ fn read(
     if cursor.is_some_and(|cursor| cursor.selection != selection) {
         return Err(ReadError::Restart);
     }
-    let paths = encode(
-        &source
-            .inventory
-            .iter()
-            .filter_map(|(path, state)| match state {
-                Availability::Expected(Some(_)) => Some(path),
-                Availability::Expected(None) if provider.is_some() => Some(path),
-                _ => None,
-            })
-            .collect::<Vec<_>>(),
-    )?;
-    let Some((owner, harness, native_id)) = current_identity(&db, source, key, &paths)? else {
+    let paths = source
+        .focused
+        .is_none()
+        .then(|| {
+            encode(
+                &source
+                    .inventory
+                    .iter()
+                    .filter_map(|(path, state)| match state {
+                        Availability::Expected(Some(_)) => Some(path),
+                        Availability::Expected(None) if provider.is_some() => Some(path),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .transpose()?;
+    let Some((owner, harness, native_id)) = current_identity(&db, source, key, paths.as_deref())?
+    else {
         return if cursor.is_some() {
             Err(ReadError::Restart)
         } else {
@@ -1000,15 +1013,15 @@ fn read(
                 let committed = committed_prefix(&mut prefix, id, view)?;
                 let sidecar: i64 = row.get(7).map_err(index)?;
                 let path = relative(options, &harness, &carrier).ok_or(ReadError::Restart)?;
-                let remote = match source.inventory.get(&carrier) {
-                    Some(Availability::Expected(Some(observed)))
-                        if stable_or_grown(&current.stat, observed)
+                let remote = match source.availability(&harness, &carrier)? {
+                    Availability::Expected(Some(observed))
+                        if stable_or_grown(&current.stat, &observed)
                             && raw_stat(Path::new(&carrier))
-                                .is_ok_and(|actual| stable_or_grown(observed, &actual)) =>
+                                .is_ok_and(|actual| stable_or_grown(&observed, &actual)) =>
                     {
                         false
                     }
-                    Some(Availability::Expected(None))
+                    Availability::Expected(None)
                         if provider.is_some() && local_missing(&carrier) =>
                     {
                         true
@@ -1074,6 +1087,7 @@ fn read(
                     carrier,
                     current,
                     reference,
+                    remote,
                 });
                 let mut keep = |(position, kind)| {
                     candidates.insert(position, (kind, member.clone(), witness_prefix.clone()));
@@ -1308,10 +1322,7 @@ fn read(
     let mut readers = BTreeMap::new();
     let mut bytes_left = PAGE_BYTES;
     let mut read_body = |id, member: &Arc<Member>, offset| {
-        let (reader, pin): (&dyn SessionSourceReader, Option<ProviderPin>) = if matches!(
-            source.inventory.get(&member.carrier),
-            Some(Availability::Expected(None))
-        ) {
+        let (reader, pin): (&dyn SessionSourceReader, Option<ProviderPin>) = if member.remote {
             let provider = provider.as_ref().ok_or(ReadError::Restart)?;
             let (_, pin) = match provider_pins.entry(id) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
@@ -1475,6 +1486,7 @@ fn read(
     {
         return Err(ReadError::Restart);
     }
+    source.validate_authority()?;
     let next = after.filter(|_| more).map(|after| Cursor {
         direction,
         selection,

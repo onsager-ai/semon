@@ -49,6 +49,87 @@ pub(super) struct Source<'a> {
     pub(super) inventory: BTreeMap<String, Availability>,
     pub(super) repos: BTreeMap<String, String>,
     pub(super) current_provider: Option<&'a dyn crate::SessionSourceReader>,
+    focused: Option<FocusedAuthority>,
+}
+
+struct FocusedAuthority {
+    recorded: Option<crate::facts::source_authority::CurrentSources>,
+}
+
+impl<'a> Source<'a> {
+    fn focused(
+        namespace: Namespace,
+        path: &'a std::path::Path,
+        options: &'a crate::Options,
+        current_provider: Option<&'a dyn crate::SessionSourceReader>,
+    ) -> Result<Self, ReadError> {
+        let recorded = options
+            .facts
+            .as_deref()
+            .map(crate::facts::source_authority::CurrentSources::open)
+            .transpose()
+            .map_err(index)?;
+        Ok(Self {
+            namespace,
+            path,
+            options,
+            inventory: BTreeMap::new(),
+            repos: BTreeMap::new(),
+            current_provider,
+            focused: Some(FocusedAuthority { recorded }),
+        })
+    }
+
+    fn availability(&self, harness: &str, carrier: &str) -> Result<Availability, ReadError> {
+        let Some(authority) = &self.focused else {
+            return Ok(self
+                .inventory
+                .get(carrier)
+                .copied()
+                .unwrap_or(Availability::Unavailable));
+        };
+        let Some(path) = selected::relative(self.options, harness, carrier) else {
+            return Ok(Availability::Unavailable);
+        };
+        if harness == "codex"
+            && let Some(recorded) = &authority.recorded
+            && recorded
+                .codex_current(path)
+                .map_err(|_| ReadError::Restart)?
+                == Some(false)
+        {
+            return Ok(Availability::Unavailable);
+        }
+        match crate::open_input(std::path::Path::new(carrier))
+            .and_then(|file| Stat::from_metadata(&file.metadata()?))
+        {
+            Ok(stat) => Ok(Availability::Expected(Some(stat))),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && self.current_provider.is_some() =>
+            {
+                Ok(Availability::Expected(None))
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    || error.kind() == std::io::ErrorKind::InvalidInput =>
+            {
+                Ok(Availability::Unavailable)
+            }
+            Err(error) => Err(index(error)),
+        }
+    }
+
+    fn validate_authority(&self) -> Result<(), ReadError> {
+        if let Some(recorded) = self
+            .focused
+            .as_ref()
+            .and_then(|authority| authority.recorded.as_ref())
+        {
+            recorded.validate().map_err(|_| ReadError::Restart)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -789,8 +870,37 @@ pub(super) fn identity(
             .map(|identity| Some((identity.owner, identity.harness, identity.native_id)))
             .map_err(retained_error);
     }
+    if source.focused.is_some() {
+        crate::events::store::require_current(&tx).map_err(index)?;
+        crate::storage::sqlite::qualify(&tx, &source.namespace).map_err(index)?;
+        let Some(identity) = current_identity(&tx, source, key, None)? else {
+            return Ok(None);
+        };
+        let (owner, harness, _) = &identity;
+        let mut members = tx
+            .prepare_cached(
+                "SELECT s.carrier,s.ledger FROM lineage_member root
+             CROSS JOIN lineage_member m ON m.component=root.component
+             CROSS JOIN warehouse_source s ON s.source=m.source WHERE root.source=?1",
+            )
+            .map_err(index)?;
+        let mut rows = members.query([owner]).map_err(index)?;
+        while let Some(row) = rows.next().map_err(index)? {
+            let carrier: String = row.get(0).map_err(index)?;
+            let ledger: Ledger =
+                serde_json::from_str(&row.get::<_, String>(1).map_err(index)?).map_err(index)?;
+            match source.availability(harness, &carrier)? {
+                Availability::Expected(Some(stat))
+                    if selected::stable_or_grown(&ledger.stat, &stat) => {}
+                Availability::Expected(None) if source.current_provider.is_some() => {}
+                _ => return Ok(None),
+            }
+        }
+        source.validate_authority()?;
+        return Ok(Some(identity));
+    }
     let snapshot = Snapshot::read(&tx, source)?;
-    current_identity(&tx, source, key, &snapshot.paths)
+    current_identity(&tx, source, key, Some(&snapshot.paths))
 }
 
 #[derive(Debug)]
@@ -808,7 +918,7 @@ pub(super) fn family_price(
     let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
     let tx = db.transaction().map_err(index)?;
     let snapshot = Snapshot::read(&tx, source)?;
-    let Some((owner, _, _)) = current_identity(&tx, source, key, &snapshot.paths)? else {
+    let Some((owner, _, _)) = current_identity(&tx, source, key, Some(&snapshot.paths))? else {
         return Ok(None);
     };
     let mut members = tx
@@ -893,7 +1003,7 @@ fn current_identity(
     db: &Connection,
     source: &Source<'_>,
     key: &str,
-    paths: &str,
+    paths: Option<&str>,
 ) -> Result<Option<Identity>, ReadError> {
     let mut exact = db.prepare_cached(EXACT).map_err(index)?;
     let mut matches = exact

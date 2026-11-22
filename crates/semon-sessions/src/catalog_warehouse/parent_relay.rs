@@ -289,18 +289,23 @@ fn member_at(
         )
         .map_err(index)?;
     let current = decode(&ledger)?;
-    match source.inventory.get(&carrier) {
-        Some(Availability::Expected(Some(stat))) => {
-            if !stable_or_grown(&current.stat, stat)
-                || !raw_stat(Path::new(&carrier)).is_ok_and(|actual| stable_or_grown(stat, &actual))
+    let remote = match source.availability("claude", &carrier)? {
+        Availability::Expected(Some(stat)) => {
+            if !stable_or_grown(&current.stat, &stat)
+                || !raw_stat(Path::new(&carrier))
+                    .is_ok_and(|actual| stable_or_grown(&stat, &actual))
             {
                 return Err(ReadError::Restart);
             }
+            false
         }
-        Some(Availability::Expected(None))
-            if source.current_provider.is_some() && local_missing(&carrier) => {}
+        Availability::Expected(None)
+            if source.current_provider.is_some() && local_missing(&carrier) =>
+        {
+            true
+        }
         _ => return Ok(None),
-    }
+    };
     let committed = committed_prefix(prefix, id, view)?;
     if committed.offset > current.offset
         || !committed.stat.is_prefix_of(&current.stat)
@@ -315,6 +320,7 @@ fn member_at(
     Ok(Some(Arc::new(Member {
         carrier,
         current,
+        remote,
         reference: SessionSourceRef {
             root: "claude".into(),
             path,

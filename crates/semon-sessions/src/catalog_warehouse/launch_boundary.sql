@@ -14,7 +14,7 @@ WITH parents AS (
     JOIN dim_session p ON p.harness=e.parent_harness AND p.native_id=e.parent_id
     WHERE e.source=?1 AND e.pos<?2 AND e.method='marker'
 )
-SELECT c.path,s.ledger,(SELECT min(pos) FROM fact_prompt WHERE source=?1 AND kind='user' AND pos<?2),s.source
+SELECT c.path,s.ledger,(SELECT min(pos) FROM fact_prompt WHERE source=?1 AND kind='user' AND pos<?2),s.source,s.harness
 FROM parents p JOIN warehouse_current c ON c.source=p.source
 JOIN warehouse_source s ON s.source=p.source AND s.origin=?3 AND s.carrier=c.path
 WHERE p.source<>?1 ORDER BY p.priority,p.pos DESC LIMIT 1;
