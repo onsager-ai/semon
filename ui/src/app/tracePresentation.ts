@@ -9,12 +9,22 @@ import type {
   Turn,
 } from '../domain/types';
 import { clock, tok } from '../domain/format';
-import { tracePath } from '../lib/sessionRoute';
+import {
+  parseNativeEntryAddress,
+  parseRetainedPeerAddress,
+  tracePath,
+  type NativeEntryAddress,
+  type RetainedPeerAddress,
+} from '../lib/sessionRoute';
 import { renderTraceScreen, type Hop } from '../lib/trace';
 import { HARNESSES, HARNESS, I, STATE } from './registry';
 import { parseRecordedRelationship } from '../domain/relationships';
 import { parseRecordedStatus } from '../domain/sessionDetails';
 import type { CatalogSession } from '../state/catalog-wire';
+
+export type TraceEvidence =
+  | { address: NativeEntryAddress; peer?: RetainedPeerAddress }
+  | { reason: string };
 
 export interface CausalTrace {
   source: string;
@@ -37,6 +47,7 @@ export interface CausalTrace {
   observation?: string;
   metadata?: CatalogSession;
   readResults?: ReadonlySet<string>;
+  evidence?: Map<string, TraceEvidence>;
 }
 
 /** The native trace stores token components in millions rounded to 1,000 tokens. */
@@ -300,6 +311,34 @@ export function parseCausalTrace(
     return { catalog_key: text(row.catalog_key), turn: text(row.turn) };
   });
   if (frontier.length > 1000) throw Error('Causal frontier exceeds its bound');
+  let evidence: CausalTrace['evidence'];
+  if (data.projection === 7) {
+    evidence = new Map();
+    for (const row of array(data.evidence, object)) {
+      const sid = text(row.catalog_key),
+        turn = row.turn == null ? undefined : text(row.turn),
+        identity = JSON.stringify([sid, turn]);
+      if (
+        evidence.size >= 1100 ||
+        evidence.has(identity) ||
+        (!Object.hasOwn(sessions, sid) && !Object.hasOwn(participants, sid)) ||
+        (turn !== undefined && byId.get(turn)?.sid !== sid)
+      )
+        throw Error('Invalid causal evidence selection');
+      if (row.address == null) {
+        const reason = text(row.reason);
+        if (!reason || reason.length > 512 || row.peer != null)
+          throw Error('Invalid causal evidence refusal');
+        evidence.set(identity, { reason });
+      } else {
+        const address = parseNativeEntryAddress(row.address),
+          peer = row.peer == null ? undefined : parseRetainedPeerAddress(row.peer);
+        if (row.reason != null || (peer && (sid === key || peer.trace !== key)))
+          throw Error('Invalid causal evidence binding');
+        evidence.set(identity, { address, peer });
+      }
+    }
+  }
   return {
     source,
     key,
@@ -320,7 +359,21 @@ export function parseCausalTrace(
     previewsIncomplete: boolean(data.previews_incomplete),
     previews,
     previewOwners,
+    evidence,
   };
+}
+
+export function causalEvidence(
+  data: CausalTrace,
+  sid: string,
+  turn?: string,
+): TraceEvidence | undefined {
+  if (!data.evidence) return;
+  return (
+    data.evidence.get(JSON.stringify([sid, turn])) ?? {
+      reason: 'The exact transcript evidence for this Trace is unavailable.',
+    }
+  );
 }
 
 /** Names come from this branch's bounded participants or the selected family observation. */
@@ -671,8 +724,10 @@ export function renderCausalTrace(
     outcome: { state: string; text?: string },
   ) => {
     const session = Object.hasOwn(data.sessions, sessionId) ? data.sessions[sessionId] : undefined;
+    const evidence = causalEvidence(data, sessionId, turnId);
     return {
       ...traceSessionMeta(session, sessionId, turnId, outcome),
+      ...(evidence && 'reason' in evidence ? { session: undefined, note: evidence.reason } : {}),
       harness: harness(sessionId),
     };
   };
@@ -772,7 +827,13 @@ export function renderCausalTrace(
                           : undefined,
                       ...(unjoinedRelay
                         ? {
-                            session: unjoinedRelay.session,
+                            ...sessionMeta(unjoinedRelay.session, undefined, edgeOutcome),
+                            note: (() => {
+                              const evidence = causalEvidence(data, unjoinedRelay.session);
+                              return evidence && 'reason' in evidence
+                                ? evidence.reason
+                                : "Its turn isn't in these logs";
+                            })(),
                             name: unjoinedRelay.name,
                             harness: unjoinedRelay.summary
                               ? harness(unjoinedRelay.session)

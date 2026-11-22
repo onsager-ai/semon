@@ -20,7 +20,12 @@ import {
 import { render } from 'preact';
 import { createOverviewPages } from './overviewPages';
 import { openPairMachine } from './pairMachine';
-import { parseCausalTrace, renderCausalTrace, type CausalTrace } from './tracePresentation';
+import {
+  causalEvidence,
+  parseCausalTrace,
+  renderCausalTrace,
+  type CausalTrace,
+} from './tracePresentation';
 import { reachableResultIds } from '../domain/trace';
 import type { ViewerApplication } from './viewer';
 import { object, text } from '../domain/validate';
@@ -1076,12 +1081,18 @@ export function createCatalogViewer(
     const route = navigation.route;
     renderCausalTrace(root, accepted, Date.now(), causalExpanded, {
       session(key, turn) {
+        const evidence = causalEvidence(accepted, key, turn);
+        if (evidence && 'reason' in evidence) {
+          accepted.observation = evidence.reason;
+          drawCausal();
+          return;
+        }
         const url =
           sessionPath(accepted.source, key) +
           '?' +
-          sessionControls(route.readScope) +
-          (turn ? '#' + encodeURIComponent(turn) : '');
-        history.pushState(null, '', url);
+          sessionControls(route.readScope, evidence?.address, evidence?.peer) +
+          (turn && !evidence ? '#' + encodeURIComponent(turn) : '');
+        history.pushState(evidence ? { traceEvidence: true } : null, '', url);
         fromLocation();
       },
       fold: drawCausal,
@@ -1342,6 +1353,20 @@ export function createCatalogViewer(
     chrome();
     void loadCausal();
   }
+  function backFromTrace() {
+    const route = navigation.route;
+    if (route.v !== 'trace') return;
+    const evidence = causal && causalEvidence(causal, route.sid, route.turn);
+    void goSession(
+      route.sid,
+      undefined,
+      true,
+      evidence && 'address' in evidence ? undefined : route.turn,
+      route.readScope,
+      false,
+      evidence && 'address' in evidence ? evidence.address : undefined,
+    );
+  }
   function chrome() {
     if (shell.account.open) {
       pendingChrome = true;
@@ -1548,18 +1573,14 @@ export function createCatalogViewer(
         traceTitle = true;
         machineTitle = false;
         const trace = navigation.route.v === 'trace' ? navigation.route : undefined;
-        const key = trace?.sid ?? '',
-          turn = trace?.turn,
-          session = causal?.sessions[key];
+        const session = causal?.sessions[trace?.sid ?? ''];
         render(
           <div class="l1">
             <button
               type="button"
               class="crumb"
               aria-label={'Back to ' + (session?.name ?? 'session')}
-              onClick={() => {
-                void goSession(key, undefined, true, turn, trace?.readScope);
-              }}
+              onClick={backFromTrace}
             >
               {session?.name ?? 'Session'}
             </button>
@@ -1647,18 +1668,11 @@ export function createCatalogViewer(
             ? {
                 label: 'Back to ' + (causal?.metadata?.name ?? 'session'),
                 icon: I.chev,
-                back: () => {
-                  if (navigation.route.v === 'trace')
-                    void goSession(
-                      navigation.route.sid,
-                      undefined,
-                      true,
-                      navigation.route.turn,
-                      navigation.route.readScope,
-                    );
-                },
+                back: backFromTrace,
               }
-            : { label: 'Open menu', icon: I.menu },
+            : active && history.state?.traceEvidence === true
+              ? { label: 'Back to Trace', icon: I.chev, back: () => history.back() }
+              : { label: 'Open menu', icon: I.menu },
         account: account
           ? {
               account,
