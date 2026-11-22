@@ -1918,7 +1918,7 @@ mod tests {
             fixture.options.clone(),
         );
         let mut work = crate::viewer::lock(&evidence.storage.work);
-        while !session_catalog_page_ready(&fixture.options).unwrap() {
+        while !sqlite_page_ready(&fixture.options).unwrap() {
             evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
                 .unwrap();
@@ -1995,7 +1995,7 @@ mod tests {
             fixture.options.clone(),
         );
         let mut work = crate::viewer::lock(&evidence.storage.work);
-        while !session_catalog_page_ready(&fixture.options).unwrap() {
+        while !sqlite_page_ready(&fixture.options).unwrap() {
             evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
                 .unwrap();
@@ -2094,7 +2094,7 @@ mod tests {
             fixture.options.clone(),
         );
         let mut work = crate::viewer::lock(&evidence.storage.work);
-        while !session_catalog_page_ready(&fixture.options).unwrap() {
+        while !sqlite_page_ready(&fixture.options).unwrap() {
             evidence
                 .refresh_catalog(&mut work, crate::model::now_ms())
                 .unwrap();
@@ -2741,7 +2741,10 @@ mod tests {
             session_catalog_union(&[sources[0].clone(), missing], "workspace-a", "limit=3");
         assert_eq!(partial.status, 200);
         let partial: Value = serde_json::from_slice(&partial.body).unwrap();
-        assert_eq!(partial["coverage"]["pending"], 1);
+        assert_eq!(partial["coverage"]["committed"], 7);
+        // The rewritten carrier in `a` and all eight carriers without an Index
+        // are pending. Coverage counts carriers within each source.
+        assert_eq!(partial["coverage"]["pending"], 9);
         assert_eq!(partial["completeness"]["state"], "partial");
         let many: Vec<_> = (0..65).map(|_| sources[0].clone()).collect();
         assert_eq!(session_catalog_union(&many, "workspace-a", "").status, 503);
@@ -5833,8 +5836,8 @@ mod tests {
             .find(|entry| entry["name"] == "Edit")
             .unwrap();
         assert_eq!(edit["diff"], json!([["del", "-before"], ["add", "+after"]]));
-        assert_eq!(edit["clipped"], false);
-        assert_eq!(edit["field"]["complete"], true);
+        assert!(edit.get("clipped").is_none());
+        assert!(edit.get("field").is_none());
         assert!(edit.get("out").is_none());
     }
 
@@ -9613,7 +9616,8 @@ mod tests {
             if response.status == 200 {
                 let body: Value = serde_json::from_slice(&response.body).unwrap();
                 if body["items"][0]["key"] == "first" {
-                    assert_eq!(body["refresh"]["state"], "updating");
+                    assert_eq!(body["projection"], 7);
+                    assert_eq!(body["coverage"]["committed"], 1);
                     break;
                 }
             }

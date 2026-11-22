@@ -146,6 +146,17 @@ const RECEIPTS: &str =
     LEFT JOIN session_source_mutations a ON a.source_path=c.path
     ORDER BY paths.key";
 
+fn carrier_unavailable(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    if matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR)) {
+        return true;
+    }
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Availability {
     Expected(Option<Stat>),
@@ -244,12 +255,7 @@ impl<'a> Source<'a> {
                 crate::open_input(&full).and_then(|file| Stat::from_metadata(&file.metadata()?));
             let availability = match observed {
                 Ok(stat) => Availability::Expected(Some(stat)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    Availability::Unavailable
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
-                    Availability::Unavailable
-                }
+                Err(error) if carrier_unavailable(&error) => Availability::Unavailable,
                 Err(error) => return Err(index(error)),
             };
             source.inventory.insert(path.to_owned(), availability);
@@ -282,12 +288,7 @@ impl<'a> Source<'a> {
             {
                 Ok(Availability::Expected(None))
             }
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound
-                    || error.kind() == std::io::ErrorKind::InvalidInput =>
-            {
-                Ok(Availability::Unavailable)
-            }
+            Err(error) if carrier_unavailable(&error) => Ok(Availability::Unavailable),
             Err(error) => Err(index(error)),
         }
     }
@@ -1557,7 +1558,7 @@ pub(crate) fn after_list_snapshot(hook: impl FnOnce() + 'static) {
 }
 
 #[cfg(test)]
-pub(crate) fn after_transcript_body(hook: impl FnOnce() + 'static) {
+pub(crate) fn after_transcript_body(hook: impl FnOnce(usize) + 'static) {
     selected::AFTER_BODY.with(|slot| slot.replace(Some(Box::new(hook))));
 }
 

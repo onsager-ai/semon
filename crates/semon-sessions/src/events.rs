@@ -1780,7 +1780,6 @@ impl EventCache {
         Some(inputs)
     }
 
-    #[cfg(test)]
     pub(crate) fn catalog_search_sources(
         connection: &rusqlite::Connection,
         options: &crate::Options,
@@ -6842,7 +6841,20 @@ const HARNESS_TAGS: [&str; 5] = [
     "turn_aborted",
 ];
 
-fn harness_tag(text: &str) -> Option<&'static str> {
+pub(crate) fn codex_message_text(payload: &Value) -> String {
+    payload
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|parts| {
+            parts
+                .iter()
+                .filter_map(|part| field(part, "text"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub(crate) fn harness_tag(text: &str) -> Option<&'static str> {
     let rest = text.trim_start().strip_prefix('<')?;
     HARNESS_TAGS.into_iter().find(|tag| {
         rest.strip_prefix(tag)
@@ -7154,16 +7166,7 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
         }
         Some("response_item") => match field(payload, "type") {
             Some("message") => {
-                let text = payload
-                    .get("content")
-                    .and_then(Value::as_array)
-                    .map(|parts| {
-                        parts
-                            .iter()
-                            .filter_map(|part| field(part, "text"))
-                            .collect::<String>()
-                    })
-                    .unwrap_or_default();
+                let text = codex_message_text(payload);
                 match field(payload, "role") {
                     Some("user") => {
                         close_code_mode(summary);

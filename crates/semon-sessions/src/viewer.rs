@@ -2161,7 +2161,7 @@ mod tests {
                     if path.starts_with("/api/sessions?") {
                         after_list_snapshot(hook);
                     } else {
-                        after_transcript_body(hook);
+                        after_transcript_body(move |_| hook());
                     }
                 }
                 viewer.handle(server.recv_timeout(deadline).unwrap().unwrap());
@@ -3116,7 +3116,7 @@ mod tests {
         let (fixture, stat) = claude_running_call();
         let viewer = fixture.viewer();
         publish_native(&viewer);
-        crate::catalog::warehouse::after_transcript_body(move || fs::remove_file(stat).unwrap());
+        crate::catalog::warehouse::after_transcript_body(move |_| fs::remove_file(stat).unwrap());
 
         let held = native_selected(&viewer, "lane");
         assert_eq!(held["session"]["details"]["state"], "work");
@@ -3230,6 +3230,12 @@ mod tests {
         );
         let lock = fixture.write("codex/thread-writer-locks/run.lock", "");
         let (major, minor, ino) = crate::lock_identity(&lock).unwrap();
+        let mut fields = vec!["0"; 20];
+        fields[19] = "777";
+        let stat = fixture.write(
+            "proc/1234/stat",
+            &format!("1234 (codex) {}\n", fields.join(" ")),
+        );
         fixture.write(
             "proc/locks",
             &format!("2: FLOCK  ADVISORY  WRITE 1234 {major:02x}:{minor:02x}:{ino} 0 EOF\n"),
@@ -3245,6 +3251,7 @@ mod tests {
             .filter(|entry| entry["live"] == true)
             .collect();
         assert_eq!(running.len(), 1, "one running call or yielded step");
+        fs::remove_file(stat).unwrap();
         fixture.write("proc/locks", "");
         publish_native(&viewer);
         let stopped = native_selected(&viewer, "run");
@@ -4826,7 +4833,7 @@ mod tests {
         let fixture = Fixture::new();
         let mut records = vec![
             json!({"type":"event_msg","payload":{"type":"user_message","message":"<recommended_plugins>injected</recommended_plugins>"}}),
-            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_plugins>injected</recommended_plugins>"}]}}),
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<recommended_"},{"type":"input_text","text":"plugins>injected</recommended_plugins>"}]}}),
             json!({"type":"event_msg","payload":{"type":"user_message","message":"real prompt"}}),
             json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"real prompt"}]}}),
             json!({"type":"event_msg","payload":{"type":"agent_reasoning","text":"summary"}}),
@@ -4845,7 +4852,19 @@ mod tests {
         publish_native(&viewer);
         let page = native_selected(&viewer, "codex");
         let entries = page["entries"].as_array().unwrap();
-        assert!(entries.iter().any(|entry| entry["k"] == "harness"));
+        let harness = entries
+            .iter()
+            .find(|entry| entry["k"] == "harness")
+            .unwrap();
+        assert_eq!(harness["label"], "recommended_plugins");
+        let address = percent_encode(&harness["address"].to_string());
+        let reply = native_api(
+            &viewer,
+            "/api/session-transcript",
+            &format!("sid=codex&address={address}"),
+        );
+        assert_eq!(reply.status, 200);
+        assert_eq!(body_of(&reply)["entries"][0]["address"], harness["address"]);
         assert!(
             entries
                 .iter()
@@ -4985,6 +5004,11 @@ mod tests {
         assert!(fs::metadata(&path).unwrap().len() >= 8 * 1024 * 1024);
         let view = fixture.viewer();
         publish_native(&view);
+        let body_budget = Arc::new(std::sync::OnceLock::new());
+        let remaining = body_budget.clone();
+        crate::catalog::warehouse::after_transcript_body(move |bytes_left| {
+            remaining.set(bytes_left).unwrap();
+        });
         let reply =
             crate::session_transcript_range(&fixture.options, "local", "sid=large&limit=1", None);
         assert_eq!(reply.status, 200);
@@ -4997,11 +5021,10 @@ mod tests {
                 .unwrap()
                 .starts_with(&format!("line {} ", number - 1))
         );
-        let bytes_read = page["observation"]["source_bytes"].as_u64().unwrap();
-        assert!(bytes_read <= page["limits"]["source_bytes"].as_u64().unwrap());
+        let bytes_read = crate::transcript_range::PAGE_SOURCE_BYTES - body_budget.get().unwrap();
         assert!(
-            bytes_read < 32 * 1024,
-            "one selected native record read {bytes_read} bytes from 8 MB history"
+            (1..32 * 1024).contains(&bytes_read),
+            "one selected native record read {bytes_read} body bytes from 8 MB history"
         );
         assert_retired_routes_absent(&view);
     }
@@ -5712,17 +5735,17 @@ mod tests {
         publish_core_native(&core);
         let catalog = body_of(&core.respond("GET", "/api/sessions", "sid=older", None));
         assert_eq!(catalog["items"][0]["key"], "older");
-        let home = body_of(&core.respond("GET", "/api/viewer/home", "", None));
         let day = analytics_of(&core, "range=24h");
         let week = analytics_of(&core, "range=7d");
         let month = analytics_of(&core, "range=30d");
+        let generation = day["version"].as_str().unwrap();
         for (answer, range, started, minutes) in [
             (&day, "24h", 1, 2),
             (&week, "7d", 2, 6),
             (&month, "30d", 4, 14),
         ] {
             assert_eq!(answer["range"], range);
-            assert_eq!(answer["version"], home["version"], "{range}");
+            assert_eq!(answer["version"], generation, "{range}");
             assert_eq!(answer["current"]["started"], started, "{range}");
             assert_eq!(answer["current"]["turns"], started, "{range}");
             assert_eq!(answer["current"]["agent_ms"], minutes * MINUTE, "{range}");
@@ -5813,8 +5836,10 @@ mod tests {
         let answer = analytics_of(&core, "range=7d");
         assert_ne!(answer["version"], version);
         assert_eq!(answer["current"]["agent_ms"], 4 * MINUTE);
-        let home = body_of(&core.respond("GET", "/api/viewer/home", "", None));
-        assert_eq!(answer["version"], home["version"]);
+        assert_eq!(
+            analytics_of(&core, "range=30d")["version"],
+            answer["version"]
+        );
         assert_eq!(
             analytics_of(&core, "range=7d")["version"],
             answer["version"]
@@ -5970,9 +5995,7 @@ mod tests {
             ("b".into(), bravo.options.clone()),
         ]);
         publish_core_native(&core);
-        let home = body_of(&core.respond("GET", "/api/viewer/home", "", None));
         let week = analytics_of(&core, "range=7d");
-        assert_eq!(week["version"], home["version"]);
         assert_eq!(week["current"]["started"], 2);
         assert_eq!(week["facets"]["machine"], json!(["a", "b"]));
         let machines: Vec<&Value> = week["breakdown"]["machine"]
@@ -5986,6 +6009,7 @@ mod tests {
         assert_eq!(bravo_only["current"]["started"], 1);
         assert_eq!(bravo_only["current"]["agent_ms"], 2 * MINUTE);
         let day = analytics_of(&core, "range=24h");
+        assert_eq!(day["version"], week["version"]);
         assert_eq!(day["current"]["started"], 1);
         assert!(day["sessions"].get(selected_id("a", "a-old")).is_none());
         // One machine through `with_machines` answers as it does alone.
@@ -7206,7 +7230,7 @@ mod tests {
                             let rows = catalog["items"].as_array().unwrap();
                             assert_eq!(rows.len(), 1);
                             assert_eq!(rows[0]["key"], sid);
-                            assert_eq!(rows[0]["machine"]["key"], source);
+                            assert_eq!(catalog["machine_info"]["key"], source);
                             let page = core.respond(
                                 "GET",
                                 "/api/session-transcript",
@@ -8176,6 +8200,12 @@ mod tests {
             loop {
                 assert!(pool.threads() <= 1);
                 assert!(pool.entries_for(&view) <= 1);
+                let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
+                let body: Value = serde_json::from_slice(&page.body).unwrap();
+                let completeness = body["completeness"]["state"].as_str().unwrap_or("invalid");
+                let complete =
+                    page.status == 200 && completeness == "complete" && pool.running() == 0;
+                // Sample the committed count after checking whether the producer finished.
                 let indexed: i64 = connection
                     .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
                     .unwrap();
@@ -8186,10 +8216,7 @@ mod tests {
                 if indexed > observed {
                     observed = indexed;
                 }
-                let page = crate::session_catalog_page(&fixture.options, "local", "limit=60");
-                let body: Value = serde_json::from_slice(&page.body).unwrap();
-                let completeness = body["completeness"]["state"].as_str().unwrap_or("invalid");
-                if page.status == 200 && completeness == "complete" && pool.running() == 0 {
+                if complete {
                     break;
                 }
                 assert!(

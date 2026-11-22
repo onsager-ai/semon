@@ -199,6 +199,14 @@ fn render<T>(
                 SlotKind::U
             };
             add(kind, 0, record.entry_anchor.as_deref());
+        } else if record.kind.as_deref() == Some("response_item")
+            && crate::field(&record.native["payload"], "type") == Some("message")
+            && crate::field(&record.native["payload"], "role") == Some("user")
+            && let Some(tag) = crate::events::harness_tag(&crate::events::codex_message_text(
+                &record.native["payload"],
+            ))
+        {
+            add(SlotKind::Harness(tag.to_owned()), 0, None);
         } else {
             for block in display_blocks(record) {
                 add(block.0, block.1, None);

@@ -2924,7 +2924,7 @@ fn read_current(
     #[cfg(test)]
     AFTER_BODY.with(|hook| {
         if let Some(hook) = hook.borrow_mut().take() {
-            hook();
+            hook(*bytes_left);
         }
     });
     for reader in readers.values_mut() {
@@ -3067,7 +3067,7 @@ fn body_error(error: io::Error) -> ReadError {
 }
 
 #[cfg(test)]
-type TestHook = std::cell::RefCell<Option<Box<dyn FnOnce()>>>;
+type TestHook = std::cell::RefCell<Option<Box<dyn FnOnce(usize)>>>;
 
 #[cfg(test)]
 thread_local! {

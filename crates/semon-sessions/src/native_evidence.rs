@@ -533,38 +533,36 @@ impl NativeEvidence {
         queue.note(interest, paths)
     }
 
-    pub(crate) fn note_warehouse_search(&self, interest: (&str, Option<&str>)) {
-        let epoch = self.catalog_search_epoch();
-        self.note_catalog_search_result(epoch, Some(interest), Err(()));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn note_catalog_search(&self, interest: Option<(&str, Option<&str>)>) {
-        let Some((query, harness)) = interest else {
-            return;
-        };
+    pub(crate) fn note_warehouse_search(&self, (query, harness): (&str, Option<&str>)) -> bool {
         let epoch = self.catalog_search_epoch();
         let paths = (|| {
-            let connection = crate::events::store::catalog_probe_connection(&EventCache::path(
-                &self.options.cache,
-            ))
-            .map_err(|_| ())?;
-            let draining: bool = connection.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_backfill_state')='draining' AND EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation')", [], |row| row.get::<_, Option<bool>>(0)).map_err(|_| ())?.unwrap_or(false);
+            let connection =
+                crate::events::store::focused_connection(&EventCache::path(&self.options.cache))
+                    .map_err(|_| ())?;
+            let snapshot = connection.unchecked_transaction().map_err(|_| ())?;
+            let draining: bool = snapshot.query_row("SELECT (SELECT value FROM meta WHERE key='catalog_backfill_state')='draining' AND EXISTS(SELECT 1 FROM meta WHERE key='catalog_generation')", [], |row| row.get::<_, Option<bool>>(0)).map_err(|_| ())?.unwrap_or(false);
             if !draining {
                 return Ok(Vec::new());
             }
             EventCache::catalog_search_sources(
-                &connection,
+                &snapshot,
                 &self.options,
                 crate::events::CatalogSearchInterest { query, harness },
                 CATALOG_SEARCH_CAPACITY,
             )
             .map_err(|_| ())
         })();
-        assert!(
-            self.note_catalog_search_result(epoch, interest, paths),
-            "test search admission exceeds the pending-path capacity"
-        );
+        self.note_catalog_search_result(epoch, Some((query, harness)), paths)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_catalog_search(&self, interest: Option<(&str, Option<&str>)>) {
+        if let Some(interest) = interest {
+            assert!(
+                self.note_warehouse_search(interest),
+                "test search admission exceeds the pending-path capacity"
+            );
+        }
     }
 
     fn acknowledge_catalog_search(&self, cache: &EventCache, prepared: &model::PreparedSources) {
@@ -2915,7 +2913,10 @@ mod catalog_owner_tests {
                 assert_eq!(body["search"]["index_complete"], false);
             }
         }
-        pending_search_source(&evidence, &db, "audit");
+        let pending = pending_search_source(&evidence, &db, "audit");
+        // This basename is still a scheduling hint for `audit`, while its
+        // header leaves the committed audit session unambiguous.
+        fs::write(pending, "{\"type\":\"session_meta\",\"timestamp\":\"2026-10-01T00:00:00Z\",\"payload\":{\"id\":\"pending-audit\"}}\n").unwrap();
         let reply = core.respond("GET", "/api/sessions", "q=audit&harness=codex", None);
         assert_eq!(reply.status, 200);
         let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
