@@ -985,6 +985,7 @@ impl SessionSourceReader for FrozenPeerReader<'_> {
                         current: current.clone(),
                         reference: reference.clone(),
                         remote: false,
+                        changed_local: None,
                     }),
                     self.budget,
                 )

@@ -217,7 +217,6 @@ impl CurrentSources {
     /// Read the full machine observations for a list, without repairing the
     /// projection or taking a producer lock. The indexed authority and JSON
     /// must name the same atomic Facts observation throughout the capture.
-    #[cfg(test)]
     pub(crate) fn read_snapshot(&self) -> io::Result<Facts> {
         use std::io::Read;
         const MAX_FACTS: u64 = 64 * 1024 * 1024;

@@ -5586,7 +5586,6 @@ fn read_tree_summary_header(
     Ok(Some(record.summary))
 }
 
-#[cfg(test)]
 pub(crate) fn committed_codex_lifecycle(
     connection: &Connection,
     path: &str,

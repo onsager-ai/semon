@@ -410,6 +410,7 @@ fn member_at(
         carrier,
         current,
         remote,
+        changed_local: None,
         reference: SessionSourceRef {
             root: "claude".into(),
             path,

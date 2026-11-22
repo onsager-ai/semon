@@ -22,8 +22,8 @@ use crate::{
     received::{Listing, ReceivedMachines},
     refresh::RefreshPool,
     viewer::{
-        MachineView, ViewerReply, decoded, is_named_page, lock, page_parts, percent_encode,
-        query_value, read_lock, write_lock,
+        MachineView, ViewerReply, decoded, is_named_page, lock, page_parts, query_value, read_lock,
+        write_lock,
     },
 };
 

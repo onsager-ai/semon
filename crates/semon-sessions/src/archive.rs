@@ -40,7 +40,6 @@ use sha2::{Digest, Sha256};
 
 use crate::{sealed::hex, source_chunks::PrefixState};
 
-#[cfg(test)]
 pub(crate) mod seekable;
 
 /// The archive's directory name, under a receiver's machine directory and
@@ -863,7 +862,6 @@ impl Archive {
                 })
                 .cloned()
                 .collect();
-            #[cfg(test)]
             for chain in &expired {
                 seekable::remove(&self.dir, chain)?;
             }
@@ -1166,7 +1164,6 @@ impl Archive {
         lock_file(&path, file, exclusive, false)
     }
 
-    #[cfg(test)]
     fn existing_read_lock(&self, nonblocking: bool) -> io::Result<Guard> {
         let path = self.dir.join(LOCK);
         let file = crate::open_input(&path)?;

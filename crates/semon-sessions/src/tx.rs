@@ -1084,7 +1084,6 @@ pub(crate) fn selected_output(lines: &mut Lines, slot: &Slot) -> Option<Value> {
 }
 
 /// Expand only text fields already interpreted by the selected native renderer.
-#[cfg(test)]
 pub(crate) fn selected_chunk_text(
     lines: &mut Lines,
     slot: &Slot,

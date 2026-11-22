@@ -32,9 +32,7 @@ pub(crate) use native_text::{
 };
 use native_text::{coordinator_body, down_target, notification_result};
 pub(crate) use native_text::{input_string, received_body};
-#[cfg(test)]
 pub(crate) use relay_match::pair_up;
-#[cfg(test)]
 pub(crate) use turns::native_id as native_turn_id;
 
 pub(crate) mod relation_stage;
@@ -479,12 +477,10 @@ pub(crate) fn spawn_turn_id(harness: &str, key: &str) -> String {
     stable_id("s", &format!("spawn:{harness}:{key}"))
 }
 
-#[cfg(test)]
 pub(crate) fn legacy_relay_turn_id(call: &str) -> String {
     stable_id("r", &format!("relay:tool:{call}"))
 }
 
-#[cfg(test)]
 pub(crate) fn incoming_relay_turn_id(
     correlation: Option<&str>,
     native_id: &str,

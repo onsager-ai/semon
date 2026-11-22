@@ -5,12 +5,16 @@ use crate::{
     model::{Handoff, Session, Turn},
     viewer::ViewerReply,
 };
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(test)]
-use {crate::events::EventCache, rusqlite::OpenFlags, serde::Serialize};
+use {
+    crate::events::EventCache,
+    rusqlite::{Connection, OpenFlags},
+    serde::Serialize,
+};
 
 pub(crate) const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS session_trace_headers(session_key TEXT PRIMARY KEY, generation TEXT NOT NULL, source_generation TEXT NOT NULL, metadata TEXT NOT NULL) STRICT;

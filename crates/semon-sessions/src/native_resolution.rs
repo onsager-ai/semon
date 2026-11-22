@@ -1,5 +1,10 @@
 //! Indexed native-to-catalog navigation. This grants no native control authority.
-use crate::{CatalogIdentityError, CatalogReadScope, Options, viewer::ViewerReply};
+use crate::{
+    CatalogIdentityError, CatalogReadScope, Options,
+    events::EventCache,
+    model::summary::{CATALOG_VERSION, CatalogRow},
+    viewer::ViewerReply,
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
