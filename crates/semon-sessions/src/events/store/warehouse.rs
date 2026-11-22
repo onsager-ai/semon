@@ -646,7 +646,7 @@ fn write_fact(
                     pid=>peer_pid,start=>peer_start,sock=>peer_sock,ts=>time)?;
             }
             let kind = match kind {
-                Kind::A => "assistant",
+                Kind::A if batch.harness != "copilot" => "assistant",
                 Kind::Agm => "agm",
                 Kind::Xsm => "xsm",
                 Kind::Tool if batch.harness != "copilot" => "tool",
