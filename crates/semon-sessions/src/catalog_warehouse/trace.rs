@@ -658,7 +658,7 @@ fn current_relays(
         {
             continue;
         }
-        call.block = block;
+        call.block = i64::from(block);
         let mut reason = "No receipt could be matched to this relay in the selected prefixes.";
         let mut read = || -> Result<Option<Relay>, ReadError> {
             let Some(results) = selected::trace_results(view, source, key, &call)? else {
