@@ -579,21 +579,37 @@ pub(super) fn launch_call(
     if harness != "codex" {
         return Ok(None);
     }
+    let marker_parent = super::parents::Parents::new(&db)?.parent(owner)?;
+    let Some(marker_parent) = marker_parent.filter(|parent| parent.method == "marker") else {
+        return Ok(None);
+    };
     type MarkerRow = (String, String, i64, Option<String>, Option<i64>, i64);
-    let marker: Option<MarkerRow> = db.query_row(
-        "SELECT s.carrier,s.ledger,p.pos,f.cwd,d.first_ts,b.owner
+    let marker: Option<MarkerRow> = db
+        .query_row(
+            "SELECT s.carrier,s.ledger,p.pos,f.cwd,d.first_ts,b.owner
          FROM fact_parent_observation p
          CROSS JOIN warehouse_source s ON s.source=p.source
          CROSS JOIN dim_session d ON d.source=p.source
          CROSS JOIN files f ON f.path=s.carrier
-         CROSS JOIN (SELECT child,parent FROM parent_selection WHERE method='marker') selected ON selected.child=p.source
-         CROSS JOIN dim_session parent ON parent.source=selected.parent AND parent.harness='claude'
+         CROSS JOIN dim_session parent ON parent.source=?2 AND parent.harness='claude'
           AND parent.native_id=p.parent_id AND parent.harness=p.parent_harness
          CROSS JOIN bridge_session_owner b ON b.source=parent.source
          WHERE p.source=?1 AND p.method='marker' AND p.call_id IS NULL
          ORDER BY p.pos DESC,p.block DESC,p.occurrence DESC LIMIT 1",
-        [owner], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
-    ).optional().map_err(index)?;
+            params![owner, marker_parent.source],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(index)?;
     let Some((carrier, ledger, offset, cwd, start, parent)) = marker else {
         return Ok(None);
     };
@@ -805,7 +821,7 @@ fn annotation_page(
             break;
         };
         let (reference, _, _) = &members[&id];
-        let offset = row.get(2).map_err(index)?;
+        let offset = u64::try_from(row.get::<_, i64>(2).map_err(index)?).map_err(index)?;
         let event: Option<String> = row.get(5).map_err(index)?;
         let block = row.get(6).map_err(index)?;
         let signal = row
@@ -909,7 +925,7 @@ fn turn_candidates(
         ])
         .map_err(index)?;
     while let Some(row) = rows.next().map_err(index)? {
-        let offset = row.get::<_, u64>(0).map_err(index)?;
+        let offset = u64::try_from(row.get::<_, i64>(0).map_err(index)?).map_err(index)?;
         let kind = row.get::<_, String>(1).map_err(index)?;
         let correlation = row.get::<_, Option<String>>(2).map_err(index)?;
         if !launch

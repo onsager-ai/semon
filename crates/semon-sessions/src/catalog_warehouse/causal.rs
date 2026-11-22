@@ -407,13 +407,17 @@ impl Inputs {
             .prepare_cached(OPERATION_AT)
             .map_err(index)?
             .query_row(params![at.source, at.offset, at.block], |row| {
-                Ok(Operation {
-                    parent: row.get(0)?,
-                    ok: row.get(1)?,
-                })
+                Ok((row.get::<_, i64>(0)?, row.get(1)?))
             })
             .optional()
-            .map_err(index)?;
+            .map_err(index)?
+            .map(|(parent, ok)| {
+                Ok(Operation {
+                    parent: u64::try_from(parent).map_err(index)?,
+                    ok,
+                })
+            })
+            .transpose()?;
         Ok(Self {
             signals,
             calls,

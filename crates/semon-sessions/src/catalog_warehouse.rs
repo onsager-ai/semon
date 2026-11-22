@@ -946,11 +946,8 @@ fn repositories(
             .as_ref()
             .and_then(|authority| authority.recorded.as_ref())
     {
-        if let Some(facts) = recorded
-            .read_snapshot()
-            .map_err(index)?
-            .filter(|facts| facts.version == crate::facts::FACTS_VERSION)
-        {
+        let facts = recorded.read_snapshot().map_err(index)?;
+        if facts.version == crate::facts::FACTS_VERSION {
             repos.extend(
                 facts
                     .repos
