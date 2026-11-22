@@ -4261,6 +4261,62 @@ fn warehouse_home_completes_codex_questions_on_the_next_prompt_and_previews_resu
 }
 
 #[test]
+fn warehouse_home_result_preserves_the_human_turn_through_its_spawn_notification() {
+    let mut fixture = Fixture::new("home-result-boundary");
+    let case = |fixture: &mut Fixture, key: &str, origin: &str, content: &str| {
+        let path = fixture.claude(key, "Review the fixture");
+        let mut ask = prompt(key, 1, "Review the second file");
+        ask["origin"] = json!({"kind":"human"});
+        append_native(&path, ask);
+        append_native(
+            &path,
+            json!({"type":"assistant","uuid":"spawn-call","sessionId":key,
+            "timestamp":"2026-09-24T00:00:02Z","message":{"role":"assistant","content":[
+                {"type":"tool_use","id":"spawn","name":"Agent","input":{"prompt":"Review"}}
+            ]}}),
+        );
+        append_native(
+            &path,
+            json!({"type":"user","uuid":"incoming","sessionId":key,
+            "timestamp":"2026-09-24T00:00:03Z","origin":{"kind":origin},
+            "message":{"role":"user","content":content}}),
+        );
+        let offset = fs::metadata(&path).unwrap().len();
+        append_native(
+            &path,
+            json!({"type":"assistant","uuid":"result","sessionId":key,
+            "timestamp":"2026-09-24T00:00:04Z","message":{"role":"assistant","content":[
+                {"type":"text","text":"Review complete"}
+            ]}}),
+        );
+        scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+        let db = Connection::open(&fixture.db).unwrap();
+        let owner: i64 = db
+            .query_row(
+                "SELECT source FROM dim_session WHERE native_id=?1",
+                [key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let actual = db
+            .query_row(
+                include_str!("home_result_feed.sql"),
+                params![owner, 0, crate::events::AGM_FINAL],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .unwrap();
+        (actual, (key.to_owned(), i64::try_from(offset).unwrap()))
+    };
+    let notification = "<task-notification><tool-use-id>spawn</tool-use-id><status>completed</status></task-notification>";
+    let (actual, expected) = case(&mut fixture, "own", "task-notification", notification);
+    assert_eq!(actual, Some(expected));
+    let unrelated = notification.replace(">spawn<", ">other<");
+    let (actual, _) = case(&mut fixture, "unrelated", "task-notification", &unrelated);
+    assert!(actual.is_none());
+}
+
+#[test]
 fn warehouse_list_runtime_rejects_pid_reuse_and_tracks_wait() {
     let mut fixture = Fixture::new("list-runtime");
     let path = fixture.claude("native", "Runtime fixture");

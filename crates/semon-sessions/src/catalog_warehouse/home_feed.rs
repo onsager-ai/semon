@@ -147,7 +147,7 @@ fn home_events(
         let result = db
             .query_row(
                 include_str!("home_result_feed.sql"),
-                params![row.owner, since],
+                params![row.owner, since, crate::events::AGM_FINAL],
                 |hit| {
                     Ok((
                         hit.get::<_, String>(0)?,
