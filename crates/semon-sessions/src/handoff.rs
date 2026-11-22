@@ -82,7 +82,7 @@ impl<'a> Matcher<'a> {
 
 /// A shell path component ends at slash, whitespace or shell punctuation.
 /// Dots, hyphens and underscores stay in the name, so `foo` cannot join `foobar`.
-fn matches_segment(input: &str, needle: &str) -> bool {
+pub(crate) fn matches_segment(input: &str, needle: &str) -> bool {
     let boundary =
         |character: char| character.is_whitespace() || "/\\\"'`;|&(){}[]<>=$,:".contains(character);
     let contains = |needle: &str| {

@@ -5,6 +5,15 @@ const COPIES: &str = "SELECT e.source,min(e.pos),m.value FROM fact_relation_obse
      CROSS JOIN json_each(?1) m ON CAST(m.key AS INTEGER)=e.source
      WHERE e.target=?2 AND e.kind='continued-in' AND e.source<>?3 GROUP BY e.source";
 
+fn claude_storage_parent<'a>(child: &'a Path, native_id: &str) -> Option<&'a Path> {
+    if !crate::native_sidecar::agent_path(child)
+        || child.file_stem()?.to_str()?.strip_prefix("agent-")? != native_id
+    {
+        return None;
+    }
+    child.parent()?.parent()
+}
+
 fn certified_parent_relay(
     tx: &rusqlite::Connection,
     source: &Source<'_>,
@@ -35,20 +44,12 @@ fn certified_parent_relay(
     else {
         return Ok(None);
     };
-    let child = Path::new(path);
-    let storage_parent = child.parent().and_then(Path::parent);
-    let native_parent = parents.iter().any(|(_, parent)| {
-        parent.root == "claude"
-            && storage_parent == Some(Path::new(&parent.path).with_extension("").as_path())
-    });
-    if !crate::native_sidecar::agent_path(child)
-        || !native_parent
-        || child
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .and_then(|stem| stem.strip_prefix("agent-"))
-            != Some(identity.native_id.as_str())
-    {
+    let Some(storage_parent) = claude_storage_parent(Path::new(path), &identity.native_id) else {
+        return Ok(None);
+    };
+    if !parents.iter().any(|(_, parent)| {
+        parent.root == "claude" && storage_parent == Path::new(&parent.path).with_extension("")
+    }) {
         return Ok(None);
     }
     if let Some((address, _)) = call {
@@ -259,6 +260,23 @@ fn certified_launch_at(
         .map_err(index)
 }
 
+fn frozen_members(tx: &rusqlite::Connection, binding: i64) -> Result<Vec<FrozenMember>, ReadError> {
+    let mut members = tx.prepare_cached(
+        "SELECT source,revision,receipt FROM warehouse_identity_member WHERE identity=?1 ORDER BY ordinal"
+    ).map_err(index)?;
+    let mut rows = members.query([binding]).map_err(index)?;
+    let mut frozen = Vec::new();
+    while let Some(row) = rows.next().map_err(index)? {
+        frozen.push(FrozenMember {
+            id: row.get(0).map_err(index)?,
+            revision: row.get(1).map_err(index)?,
+            receipt: serde_json::from_str(&row.get::<_, String>(2).map_err(index)?)
+                .map_err(index)?,
+        });
+    }
+    Ok(frozen)
+}
+
 fn read_frozen_page(
     source: &Source<'_>,
     key: &str,
@@ -308,84 +326,89 @@ fn read_frozen_page(
     )?;
     let mut parent_relay = None;
     let origin_owner = identity.owner;
-    let mut launch_peers = identity
-        .observed_peers()
-        .map_err(index)?
-        .into_iter()
-        .filter(|(participant, _)| participant != key)
-        .map(|(_, peer)| (peer.harness, peer.native_id))
-        .collect::<Vec<_>>();
-    let (harness, native_id, witness, selection, metadata, members, live) = if let Some((
-        peer,
-        use_local,
-    )) = peer
-    {
-        let (observed, current) =
-            warehouse::retained_peer(&tx, &source.namespace, &identity, peer.witness, key)
-                .map_err(|error| ReadError::PeerUnavailable(error.to_string()))?;
-        if observed.harness == "claude" && identity.harness == "claude" {
-            let parents = observed
+    let observed_peers = identity.observed_peers().map_err(index)?;
+    let mut launch_peers = Vec::new();
+    let mut launch_parents = std::collections::BTreeSet::new();
+    for (participant, observed) in &observed_peers {
+        if participant == key {
+            continue;
+        }
+        launch_peers.push((observed.harness.as_str(), observed.native_id.as_str()));
+        if observed.harness == "claude" {
+            launch_parents.extend(
+                observed
+                    .members
+                    .iter()
+                    .map(|m| m.receipt.path.with_extension("")),
+            );
+        }
+    }
+    if peer.is_some() {
+        launch_peers.push((&identity.harness, &identity.native_id));
+        if identity.harness == "claude" {
+            launch_parents.extend(
+                frozen_members(&tx, identity.binding)?
+                    .into_iter()
+                    .map(|m| m.receipt.path.with_extension("")),
+            );
+        }
+    }
+    let launch_peers = encode(&launch_peers)?;
+    let (harness, native_id, witness, selection, metadata, members, live) =
+        if let Some((peer, use_local)) = peer {
+            let (observed, current) =
+                warehouse::retained_peer(&tx, &source.namespace, &identity, peer.witness, key)
+                    .map_err(|error| ReadError::PeerUnavailable(error.to_string()))?;
+            if observed.harness == "claude" && identity.harness == "claude" {
+                let parents = observed
+                    .members
+                    .iter()
+                    .map(|member| {
+                        let path = member
+                            .receipt
+                            .path
+                            .to_str()
+                            .and_then(|p| relative(source.options, "claude", p))
+                            .ok_or(ReadError::RetainedUnverified)?;
+                        Ok((
+                            member.source,
+                            frozen_reference("claude", path, &member.receipt),
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, ReadError>>()?;
+                parent_relay = certified_parent_relay(&tx, source, &identity, &parents, None)?;
+            }
+            let members = observed
                 .members
-                .iter()
-                .map(|member| {
-                    let path = member
-                        .receipt
-                        .path
-                        .to_str()
-                        .and_then(|p| relative(source.options, "claude", p))
-                        .ok_or(ReadError::RetainedUnverified)?;
-                    Ok((
-                        member.source,
-                        frozen_reference("claude", path, &member.receipt),
-                    ))
+                .into_iter()
+                .map(|m| FrozenMember {
+                    id: m.source,
+                    revision: m.revision,
+                    receipt: m.receipt,
                 })
-                .collect::<Result<Vec<_>, ReadError>>()?;
-            parent_relay = certified_parent_relay(&tx, source, &identity, &parents, None)?;
-        }
-        launch_peers.push((identity.harness, identity.native_id));
-        let members = observed
-            .members
-            .into_iter()
-            .map(|m| FrozenMember {
-                id: m.source,
-                revision: m.revision,
-                receipt: m.receipt,
-            })
-            .collect::<Vec<_>>();
-        let selection = encode(&(selection_for(peer.trace)?, key))?;
-        (
-            observed.harness,
-            observed.native_id,
-            peer.witness.to_owned(),
-            selection,
-            None,
-            members,
-            current && use_local,
-        )
-    } else {
-        let mut members = tx.prepare_cached(
-            "SELECT source,revision,receipt FROM warehouse_identity_member WHERE identity=?1 ORDER BY ordinal"
-        ).map_err(index)?;
-        let mut rows = members.query([identity.binding]).map_err(index)?;
-        let mut frozen = Vec::new();
-        while let Some(row) = rows.next().map_err(index)? {
-            frozen.push(FrozenMember {
-                id: row.get(0).map_err(index)?,
-                revision: row.get(1).map_err(index)?,
-                receipt: serde_json::from_str(&row.get::<_, String>(2).map_err(index)?)
-                    .map_err(index)?,
-            });
-        }
-        (
-            identity.harness,
-            identity.native_id,
-            identity.witness,
-            selection_for(key)?,
-            Some(identity.metadata),
-            frozen,
-            false,
-        )
-    };
+                .collect::<Vec<_>>();
+            let selection = encode(&(selection_for(peer.trace)?, key))?;
+            (
+                observed.harness,
+                observed.native_id,
+                peer.witness.to_owned(),
+                selection,
+                None,
+                members,
+                current && use_local,
+            )
+        } else {
+            let frozen = frozen_members(&tx, identity.binding)?;
+            (
+                identity.harness,
+                identity.native_id,
+                identity.witness,
+                selection_for(key)?,
+                Some(identity.metadata),
+                frozen,
+                false,
+            )
+        };
     if let Target::Turns(_, Some(home)) = target
         && home.expected != witness
     {
@@ -409,7 +432,6 @@ fn read_frozen_page(
     } else {
         None
     };
-    let launch_peers = encode(&launch_peers)?;
     let member_count = members.len();
     let prefixes = encode(
         &members
@@ -490,7 +512,12 @@ fn read_frozen_page(
             }
             let predecessors =
                 predecessor_bounds(&mut copies, &harness, &prefixes, &reference.native_id, id)?;
-            turn_members.push((id, reference.clone(), predecessors.clone()));
+            turn_members.push((
+                id,
+                reference.clone(),
+                predecessors.clone(),
+                carrier.to_owned(),
+            ));
             if let Some(activity) = &activity {
                 if let Some((position, kind)) = activity.candidate(
                     &mut activity_query,
@@ -654,24 +681,30 @@ fn read_frozen_page(
             .chain(include_home_detail.then_some(Position::END));
         let tx = db.lock().map_err(index)?;
         let mut search = causal::TurnSearch::new(&tx, positions)?;
-        for (id, reference, predecessors) in &turn_members {
+        for (id, reference, predecessors, carrier) in &turn_members {
+            let end = i64::try_from(reference.offset).map_err(index)?;
+            let launch_at = if harness == "codex" {
+                certified_launch_at(&tx, *id, end, &launch_peers)?
+            } else if harness == "claude"
+                && claude_storage_parent(Path::new(carrier), &reference.native_id)
+                    .is_some_and(|parent| launch_parents.contains(parent))
+            {
+                Some(tx.query_row(
+                    "SELECT min(pos) FROM fact_prompt WHERE source=?1 AND kind='user' AND pos<?2",
+                    params![id, end],
+                    |row| row.get(0),
+                ).map_err(index)?)
+            } else {
+                None
+            };
             search.consider(
                 key,
                 &harness,
                 causal::BoundaryMember {
                     id: *id,
-                    end: i64::try_from(reference.offset).map_err(index)?,
+                    end,
                     predecessors,
-                    launch_at: if harness == "codex" {
-                        certified_launch_at(
-                            &tx,
-                            *id,
-                            i64::try_from(reference.offset).map_err(index)?,
-                            &launch_peers,
-                        )?
-                    } else {
-                        None
-                    },
+                    launch_at,
                     native_id: &reference.native_id,
                     path: &reference.path,
                 },
@@ -682,9 +715,9 @@ fn read_frozen_page(
     };
     let home_detail = match turns.remove(&Position::END).flatten() {
         Some(turn) => {
-            let (_, reference, _) = turn_members
+            let (_, reference, _, _) = turn_members
                 .iter()
-                .find(|(_, reference, _)| reference.path == turn.address.path)
+                .find(|(_, reference, _, _)| reference.path == turn.address.path)
                 .ok_or(ReadError::RetainedUnverified)?;
             let native = read(reference, turn.address.offset)?;
             pin_provider_with(&reader, reference, |error| {
@@ -919,9 +952,15 @@ pub(in super::super) fn retained_peer_record_at(
     address: &Address,
     provider: Option<&dyn SessionSourceReader>,
 ) -> Result<Option<Record>, ReadError> {
-    read_retained_peer(source, trace, witness, peer, provider, |_, _, _, _| {
-        Ok(address.clone())
-    })
+    read_retained_peer(
+        source,
+        trace,
+        witness,
+        peer,
+        provider,
+        PAGE_BYTES,
+        |_, _, _, _| Ok(address.clone()),
+    )
 }
 
 pub(in super::super) fn retained_peer_relay_address(
@@ -938,7 +977,7 @@ pub(in super::super) fn retained_peer_relay_address(
     )
     };
     let mut binding = String::new();
-    let record = read_retained_peer(source, trace, witness, peer, provider, |db, (identity, observed), parents, read| {
+    let record = read_retained_peer(source, trace, witness, peer, provider, PAGE_BYTES, |db, (identity, observed), parents, read| {
         let tx = db.lock().map_err(index)?;
         let incarnation: String = tx
             .query_row("SELECT value FROM meta WHERE key='incarnation'", [], |r| {
@@ -1102,6 +1141,159 @@ pub(in super::super) fn retained_peer_relay_address(
     })
 }
 
+/// Locate a native launch call only when the child's verified marker names
+/// the certified parent and uniquely identifies a call in its frozen prefix.
+pub(in super::super) fn retained_peer_launch_call(
+    source: &Source<'_>,
+    trace: &str,
+    witness: &str,
+    peer: &str,
+    provider: Option<&dyn SessionSourceReader>,
+) -> Result<(Address, u32, crate::ToolCall), ReadError> {
+    let unavailable = || {
+        ReadError::PeerUnavailable(
+            "No exact launch call could be proven in the certified prefixes.".into(),
+        )
+    };
+    let mut matched_call = None;
+    let record = read_retained_peer(
+        source,
+        trace,
+        witness,
+        peer,
+        provider,
+        crate::handoff::MAX_INPUT_BYTES,
+        |db, (identity, observed), parents, read| {
+            let tx = db.lock().map_err(index)?;
+            let child_members = frozen_members(&tx, identity.binding)?;
+            let child = child_members
+                .iter()
+                .find(|member| member.id == identity.owner)
+                .ok_or_else(unavailable)?;
+            let child_carrier = child.receipt.path.to_str().ok_or_else(unavailable)?;
+            let child_path = relative(source.options, &identity.harness, child_carrier)
+                .ok_or_else(unavailable)?;
+            let child_reference = frozen_reference(&identity.harness, child_path, &child.receipt);
+            let marker_offset: i64 = tx
+                .query_row(
+                    "SELECT p.pos FROM fact_parent_observation p
+                 JOIN fact_record r ON r.source=p.source AND r.pos=p.pos AND r.block=0 AND NOT r.gap
+                 WHERE p.source=?1 AND p.pos<?2 AND p.method='marker'
+                 ORDER BY p.pos DESC,p.block DESC,p.occurrence DESC LIMIT 1",
+                    params![
+                        child.id,
+                        i64::try_from(child_reference.offset).map_err(index)?
+                    ],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(index)?
+                .ok_or_else(unavailable)?;
+            drop(tx);
+            let marker_native = read(
+                &child_reference,
+                u64::try_from(marker_offset).map_err(index)?,
+            )?;
+            let marker = crate::user_text(&marker_native)
+                .and_then(crate::parse_marker)
+                .filter(|marker| {
+                    marker.harness == observed.harness && marker.parent_id == observed.native_id
+                })
+                .ok_or_else(unavailable)?;
+            let prompt = match (marker.tool_id.as_deref(), marker.handoff.as_deref()) {
+                (Some(_), _) => None,
+                (None, Some(prompt)) => Some(prompt),
+                (None, None) => return Err(unavailable()),
+            };
+            let bounds = encode(
+                &parents
+                    .iter()
+                    .map(|(id, reference)| (*id, reference.offset))
+                    .collect::<BTreeMap<_, _>>(),
+            )?;
+            let candidates = certified_launch_calls(db, &bounds, marker.tool_id.as_deref())?;
+            if candidates.len() > crate::handoff::MAX_CALLS {
+                return Err(unavailable());
+            }
+            let mut location = None;
+            for (id, offset, occurrence, block, call_id, tool) in candidates {
+                let (_, reference) = parents
+                    .iter()
+                    .find(|(candidate, _)| *candidate == id)
+                    .ok_or_else(unavailable)?;
+                let offset = u64::try_from(offset).map_err(index)?;
+                if let Some(path) = prompt {
+                    let native = read(reference, offset)?;
+                    let Some(input) = crate::model::tool_input(&native, block as usize) else {
+                        continue;
+                    };
+                    if !crate::handoff::matches_segment(&input.to_string(), path) {
+                        continue;
+                    }
+                }
+                if location.is_some() {
+                    return Err(unavailable());
+                }
+                matched_call = Some((
+                    block,
+                    crate::ToolCall {
+                        id: call_id,
+                        name: tool,
+                    },
+                ));
+                location = Some(Address {
+                    path: reference.path.clone(),
+                    offset,
+                    block: 0,
+                    occurrence,
+                });
+            }
+            location.ok_or_else(unavailable)
+        },
+    )?
+    .ok_or_else(unavailable)?;
+    let (block, tool) = matched_call.ok_or_else(unavailable)?;
+    Ok((record.address, block, tool))
+}
+
+type LaunchCallRow = (i64, i64, i64, u32, String, String);
+
+fn certified_launch_calls(
+    db: &chunk_proofs::Snapshot,
+    bounds: &str,
+    call: Option<&str>,
+) -> Result<Vec<LaunchCallRow>, ReadError> {
+    let tx = db.lock().map_err(index)?;
+    let mut statement = tx
+        .prepare_cached(
+            "SELECT c.source,c.pos,r.occurrence,c.block,c.call_id,c.tool
+         FROM json_each(?1) prefix
+         CROSS JOIN fact_tool_call c ON c.source=CAST(prefix.key AS INTEGER) AND c.pos<prefix.value
+         CROSS JOIN fact_record r ON r.source=c.source AND r.pos=c.pos AND r.block=0 AND NOT r.gap
+         WHERE c.call_id IS NOT NULL AND c.tool IS NOT NULL AND
+           ((?2 IS NULL AND c.tool IN ('Bash','Skill')) OR c.call_id=?2)
+         ORDER BY c.source,c.pos,c.block,c.occurrence LIMIT ?3",
+        )
+        .map_err(index)?;
+    statement
+        .query_map(
+            params![bounds, call, crate::handoff::MAX_CALLS as i64 + 1],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(index)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(index)
+}
+
 type CertifiedRecordRead<'a> =
     dyn FnMut(&SessionSourceRef, u64) -> Result<serde_json::Value, ReadError> + 'a;
 
@@ -1111,6 +1303,7 @@ fn read_retained_peer(
     witness: &str,
     peer: &str,
     provider: Option<&dyn SessionSourceReader>,
+    bytes: usize,
     select: impl FnOnce(
         &Arc<chunk_proofs::Snapshot>,
         (&warehouse::RetainedIdentity, &warehouse::ObservedPeer),
@@ -1169,7 +1362,7 @@ fn read_retained_peer(
         readers: Mutex::new(BTreeMap::new()),
     };
     let reader = crate::source_reader::BudgetedReader::new(&peer_reader, 1024);
-    let mut bytes_left = PAGE_BYTES;
+    let mut bytes_left = bytes;
     let mut read = |reference: &SessionSourceRef, offset| {
         let native = crate::source_reader::read_record_bounded(
             &reader,

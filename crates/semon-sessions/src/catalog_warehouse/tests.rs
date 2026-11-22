@@ -2194,6 +2194,26 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
     scan_file(&child, "claude", &mut fixture.cache, &mut false).unwrap();
     let identity = warehouse::retained_identity(&db, &fixture.namespace, "worker").unwrap();
     let source = fixture.source(&paths);
+    let launch = crate::model::spawn_turn_id("claude", "worker");
+    let retained = selected::retained_turn(&source, "worker", &launch, &provider).unwrap();
+    let address: crate::session_route::NativeEntryAddress = serde_json::from_value(
+        selected::render::turn_address(&retained, source.namespace.as_str(), "worker", &launch)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(address.record.offset, 0);
+    let opened = selected::retained_addressed_window(
+        &source,
+        "worker",
+        &address.record,
+        &address.binding,
+        &provider,
+    )
+    .unwrap();
+    assert_eq!(
+        selected::render::turn_address(&opened, source.namespace.as_str(), "worker", &launch),
+        Some(json!(address)),
+    );
     let sent = selected::Address {
         path: child_relative.into(),
         offset: send_offset,
@@ -3532,6 +3552,58 @@ fn warehouse_prompt_parent_matches_the_authorized_launch_address() {
         .inventory
         .insert(parent.to_str().unwrap().into(), Availability::Unavailable);
     assert!(selected::launch_call(&source, "child").unwrap().is_none());
+
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let provider = RelayFixtureProvider(BTreeMap::from([
+        (
+            "projects/proj/parent.jsonl".into(),
+            fs::read(&parent).unwrap(),
+        ),
+        (
+            "sessions/2026/09/24/rollout-child.jsonl".into(),
+            fs::read(&child).unwrap(),
+        ),
+    ]));
+    append_native(
+        &parent,
+        json!({"type":"assistant","uuid":"later-launcher","sessionId":"parent",
+          "timestamp":"2026-09-24T00:00:03Z","message":{"role":"assistant","content":[
+          {"type":"tool_use","id":"later-launch","name":"Bash","input":{"command":"codex exec /work/synthetic/prompt.txt"}}
+        ]}}),
+    );
+    scan_file(&parent, "claude", &mut fixture.cache, &mut false).unwrap();
+    fixture.codex("child");
+    let db = Connection::open(&fixture.db).unwrap();
+    let identity = warehouse::retained_identity(&db, &fixture.namespace, "child").unwrap();
+    let source = fixture.source(&[&parent, &child]);
+    let (address, block, retained) = selected::retained_peer_launch_call(
+        &source,
+        "child",
+        &identity.witness,
+        "parent",
+        Some(&provider),
+    )
+    .unwrap();
+    assert_eq!(retained, launch);
+    assert_eq!(address.path, "projects/proj/parent.jsonl");
+    assert_eq!(block, 0);
+    assert!(matches!(
+        selected::retained_peer_launch_call(
+            &source,
+            "child",
+            &"0".repeat(64),
+            "parent",
+            Some(&provider)
+        ),
+        Err(ReadError::PeerUnavailable(_))
+    ));
 }
 
 #[test]
