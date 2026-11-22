@@ -486,7 +486,7 @@ fn current_relays(
         if target == key {
             continue;
         }
-        let Some(path) = super::relative(source.options, &harness, &carrier) else {
+        let Some(path) = selected::relative(source.options, &harness, &carrier) else {
             continue;
         };
         let native = selected::Address {
@@ -576,7 +576,7 @@ fn current_launch_evidence(
             return Ok(None);
         };
         let carrier: String = row.get(0).map_err(super::index)?;
-        let Some(path) = super::relative(source.options, &harness, &carrier) else {
+        let Some(path) = selected::relative(source.options, &harness, &carrier) else {
             return Ok(None);
         };
         let address = selected::Address {
