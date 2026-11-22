@@ -1,8 +1,8 @@
 //! Prefix-qualified native causal inputs for the selected-record adapter.
 use super::{
-    Address, Availability, COMMITTED_PREFIX, CONTINUATIONS, MEMBER_PAGE, MEMBERS, Position,
-    ReadError, SessionSourceRef, Source, TOOL_RESULTS, committed_prefix, continuation_bounds,
-    decode, index, member_frontier, position, raw_stat, relative, stable_or_grown,
+    Address, Availability, COMMITTED_PREFIX, CONTINUATIONS, Direction, MEMBER_PAGE, MEMBERS,
+    Position, ReadError, SessionSourceRef, Source, TOOL_RESULTS, committed_prefix,
+    continuation_bounds, decode, index, position, raw_stat, relative, stable_or_grown,
 };
 use rusqlite::{Connection, OptionalExtension, named_params, params};
 use std::{collections::BTreeMap, path::Path};
@@ -131,7 +131,7 @@ pub(super) fn turns(
                 None
             };
             for (at, winner) in winners.values_mut() {
-                let (time, pos, _, _) = member_frontier(Some(*at), id);
+                let (time, pos, _, _) = Direction::Forward.frontier(Some(*at), id);
                 let matched = boundary
                     .query_row(
                         named_params! {
