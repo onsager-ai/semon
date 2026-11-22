@@ -876,19 +876,27 @@ fn archive_and_unarchive_pushes_select_current_sources_without_deleting_old_copi
     let active = "codex/sessions/2026/09/24/rollout-archive-root.jsonl";
     let archive = "codex/archived_sessions/rollout-archive-root.jsonl";
     let secret = "sk-ant-api03-SECRETSECRETSECRETSECRET";
-    let record = |number| {
-        json!({"timestamp":format!("2026-09-24T00:00:0{number}Z"),"type":"event_msg","payload":{"type":"user_message","message":format!("fixture {number} {secret}")}}).to_string()+"\n"
+    let prompt = |number| format!("fixture {number} {secret}");
+    let turn = |number| {
+        let timestamp = format!("2026-09-24T00:00:0{number}Z");
+        let text = prompt(number);
+        let event = json!({"timestamp":timestamp,"type":"event_msg",
+            "payload":{"type":"user_message","message":text}});
+        let response = json!({"timestamp":timestamp,"type":"response_item",
+            "payload":{"type":"message","role":"user",
+                "content":[{"type":"input_text","text":text}]}});
+        format!("{event}\n{response}\n")
     };
-    let initial = json!({"timestamp":"2026-09-24T00:00:00Z","type":"session_meta","payload":{"id":"archive-root","cwd":"/fixture/repo"}}).to_string()+"\n"+&record(1);
+    let initial = json!({"timestamp":"2026-09-24T00:00:00Z","type":"session_meta","payload":{"id":"archive-root","cwd":"/fixture/repo"}}).to_string()+"\n"+&turn(1);
     home.write(active, &initial);
     for pass in 0..3 {
         if pass == 1 {
-            home.append(active, &record(2));
+            home.append(active, &turn(2));
             fs::create_dir_all(home.root.join("codex/archived_sessions")).unwrap();
             fs::rename(home.root.join(active), home.root.join(archive)).unwrap();
         } else if pass == 2 {
             fs::rename(home.root.join(archive), home.root.join(active)).unwrap();
-            home.append(active, &record(3));
+            home.append(active, &turn(3));
         }
         semon_push::push(&home.push_options(&receiver.url), false).unwrap();
         let (files, facts) = {
@@ -930,14 +938,38 @@ fn archive_and_unarchive_pushes_select_current_sources_without_deleting_old_copi
         let expected_corpus = native_query_corpus(&expected_options, now);
         assert_eq!(actual_corpus, expected_corpus, "pass {pass}");
         assert_viewer_parity(&mirrored_options, &expected_options, &["archive-root"], 32);
+        let core = ViewerCore::new(mirrored_options.clone());
+        let page = transcript_page(&core, "archive-root", 32, None);
+        assert_eq!(page["earlier_cursor"], Value::Null);
+        let rollout = current.strip_prefix("codex/").unwrap();
+        let mut rendered: Vec<_> = page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["k"] == "u")
+            .map(|entry| {
+                assert_eq!(entry["address"]["record"]["path"], rollout, "pass {pass}");
+                assert_eq!(
+                    entry["provenance"]["source"]["path"], rollout,
+                    "pass {pass}"
+                );
+                entry["text"].as_str().unwrap().as_bytes().to_vec()
+            })
+            .collect();
+        rendered.sort_unstable();
+        let expected_prompts: Vec<_> = (1..=pass + 1)
+            .map(|number| redacted(&prompt(number)))
+            .collect();
+        assert_eq!(rendered, expected_prompts, "pass {pass}");
+        core.close();
         assert_eq!(
             fs::read(home.root.join(current)).unwrap(),
             if pass == 0 {
                 initial.clone()
             } else if pass == 1 {
-                initial.clone() + &record(2)
+                initial.clone() + &turn(2)
             } else {
-                initial.clone() + &record(2) + &record(3)
+                initial.clone() + &turn(2) + &turn(3)
             }
             .as_bytes()
         );
