@@ -158,10 +158,7 @@ impl<'a> Parents<'a> {
         Ok(children)
     }
 
-    pub(super) fn relatives(
-        &mut self,
-        owner: i64,
-    ) -> Result<(Vec<i64>, Vec<i64>, bool), ReadError> {
+    pub(super) fn ancestors(&mut self, owner: i64) -> Result<(Vec<i64>, bool), ReadError> {
         let mut ancestors = Vec::new();
         let mut seen = BTreeSet::from([owner]);
         let mut frontier = VecDeque::from([owner]);
@@ -183,6 +180,17 @@ impl<'a> Parents<'a> {
             }
         }
         ancestors.reverse();
+        Ok((ancestors, incomplete))
+    }
+
+    pub(super) fn relatives(
+        &mut self,
+        owner: i64,
+    ) -> Result<(Vec<i64>, Vec<i64>, bool), ReadError> {
+        let (ancestors, mut incomplete) = self.ancestors(owner)?;
+        let seen: BTreeSet<_> = std::iter::once(owner)
+            .chain(ancestors.iter().copied())
+            .collect();
         let mut descendants = BTreeSet::new();
         let mut frontier = VecDeque::from([owner]);
         'descendants: while let Some(current) = frontier.pop_front() {

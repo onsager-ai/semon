@@ -1008,12 +1008,13 @@ fn selected_related_paths(
     transaction: &Connection,
     source: &Source<'_>,
     owners: &str,
+    shared_usage: bool,
 ) -> Result<Vec<String>, ReadError> {
     let mut query = transaction
         .prepare_cached(include_str!("events/store/warehouse_selected_related.sql"))
         .map_err(index)?;
     let mut candidates = query
-        .query(params![owners, source.namespace.binding()])
+        .query(params![owners, source.namespace.binding(), shared_usage])
         .map_err(index)?;
     let mut paths = Vec::new();
     while let Some(row) = candidates.next().map_err(index)? {
@@ -1051,12 +1052,13 @@ fn selected_runtime_status(
     source: &Source<'_>,
     owner: i64,
 ) -> Result<Option<&'static str>, ReadError> {
-    let (ancestors, _, _) = parents::Parents::new(transaction)?.relatives(owner)?;
+    let (ancestors, _) = parents::Parents::new(transaction)?.ancestors(owner)?;
     let authorized = std::iter::once(owner).chain(ancestors).collect::<Vec<_>>();
     let paths = encode(&selected_related_paths(
         transaction,
         source,
         &encode(&authorized)?,
+        false,
     )?)?;
     let snapshot = Snapshot {
         transaction,
@@ -1089,6 +1091,7 @@ fn selected_metadata(
         transaction,
         source,
         &encode(&owners)?,
+        true,
     )?)?;
     let repos = repositories(transaction, source, &paths)?;
     let mut statement = transaction
@@ -2096,7 +2099,7 @@ fn selected_family_price(
         }
     }
     let owners = encode(&edges.keys().collect::<Vec<_>>())?;
-    let paths = encode(&selected_related_paths(tx, source, &owners)?)?;
+    let paths = encode(&selected_related_paths(tx, source, &owners, true)?)?;
     let mut members = tx
         .prepare_cached(include_str!("events/store/warehouse_selected_family.sql"))
         .map_err(index)?;

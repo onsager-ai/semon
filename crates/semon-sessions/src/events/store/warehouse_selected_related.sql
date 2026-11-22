@@ -5,7 +5,7 @@ WITH owners(owner) AS (SELECT value FROM json_each(?1)), own AS MATERIALIZED (
 ), messages AS MATERIALIZED (
   SELECT DISTINCT u.message_id FROM own m
   CROSS JOIN fact_step_observation u ON u.source=m.source AND u.kind='claude'
-  WHERE u.uuid IS NOT NULL
+  WHERE ?3 AND u.uuid IS NOT NULL
 ), sources(source) AS (
   SELECT source FROM own
   UNION
