@@ -1371,7 +1371,12 @@ fn assert_bounded_causal_previews(home: &Home, built: &QueryData, root: &Turn) {
         crate::viewer::percent_encode(&root.sid),
         crate::viewer::percent_encode(&root.id)
     );
-    let reply = crate::session_causal_trace(&home.options, "fixture", &query);
+    let reply = crate::causal_trace::session_causal_trace_with_gate(
+        &home.options,
+        "fixture",
+        &query,
+        || Ok(()),
+    );
     assert_eq!(
         reply.status,
         200,
@@ -1400,12 +1405,13 @@ fn assert_bounded_causal_previews(home: &Home, built: &QueryData, root: &Turn) {
                 crate::viewer::percent_encode(owner),
                 crate::viewer::percent_encode(&json!([native.id]).to_string())
             );
-            let reply = crate::session_home_details_with_mode(
+            let reply = crate::overview::session_home_details_inner(
                 &home.options,
                 "fixture",
                 &query,
                 None,
                 crate::SessionSourceReadMode::LocalThenProvider,
+                true,
             );
             assert_eq!(
                 reply.status,
@@ -2092,7 +2098,12 @@ fn causal_peer_names_do_not_invent_branch_turns_or_reuse_stale_evidence() {
         crate::viewer::percent_encode(&root.id)
     );
     let read = || {
-        let reply = crate::session_causal_trace(&home.options, "fixture", &query);
+        let reply = crate::causal_trace::session_causal_trace_with_gate(
+            &home.options,
+            "fixture",
+            &query,
+            || Ok(()),
+        );
         assert_eq!(
             reply.status,
             200,
@@ -4718,12 +4729,13 @@ fn finish_companion_fixture_against_oracle(home: &Home, oracle: &QueryData) {
                 "sid={owner}&generation={generation}&scope=retained_history&events={}",
                 crate::viewer::percent_encode(&json!(ids).to_string())
             );
-            let details = crate::session_home_details_with_mode(
+            let details = crate::overview::session_home_details_inner(
                 &home.options,
                 "fixture",
                 &query,
                 None,
                 crate::SessionSourceReadMode::LocalThenProvider,
+                true,
             );
             assert_eq!(
                 details.status,
@@ -10818,7 +10830,7 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
             .contains(&"root".into()),
         "an unchanged current observation must retain exact history metadata"
     );
-    let causal = crate::session_causal_trace(
+    let causal = crate::causal_trace::session_causal_trace_with_gate(
         &home.options,
         "fixture",
         &format!(
@@ -10834,6 +10846,7 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
                     .unwrap()
             )
         ),
+        || Ok(()),
     );
     assert_eq!(
         causal.status,
@@ -10851,13 +10864,14 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
         .unwrap()["turn"]
         .as_str()
         .unwrap();
-    let anchor = crate::session_turn_anchor(
+    let anchor = crate::transcript_range::session_turn_anchor_with_gate(
         &home.options,
         "fixture",
         &format!(
             "sid=root&scope=retained_history&turn={}",
             crate::viewer::percent_encode(historical_turn)
         ),
+        || Ok(()),
     );
     assert_eq!(
         anchor.status,
@@ -10867,10 +10881,11 @@ fn partial_lineage_source_disappearance_preserves_natural_history_context() {
     );
     let anchor: Value = serde_json::from_slice(&anchor.body).unwrap();
     assert!(anchor["slot"].is_u64(), "{anchor}");
-    let absent = crate::session_turn_anchor(
+    let absent = crate::transcript_range::session_turn_anchor_with_gate(
         &home.options,
         "fixture",
         "sid=root&scope=retained_history&turn=not-a-recorded-turn",
+        || Ok(()),
     );
     assert_eq!(absent.status, 200);
     let absent: Value = serde_json::from_slice(&absent.body).unwrap();
@@ -12132,7 +12147,8 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
             &[codex_user(ts(0, 0), "Old native identity")],
         );
         let old_relative = format!("sessions/2026/09/24/rollout-{native}.jsonl");
-        let old_evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+        let old_evidence =
+            crate::native_evidence::NativeEvidence::for_source_key("", home.options.clone());
         let mut old_complete = false;
         for _ in 0..16 {
             if old_evidence
@@ -12454,7 +12470,7 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
         .extend((0..130).map(|n| codex_reply(ts(19, 0), &format!("Original retained reply {n}"))));
     home.codex(native, json!({}), &original_records);
     let drain = |options: &Options| {
-        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        let evidence = crate::native_evidence::NativeEvidence::for_source_key("", options.clone());
         for _ in 0..128 {
             if evidence
                 .refresh_catalog(&mut crate::viewer::lock(&evidence.storage.work), NOW)

@@ -868,7 +868,7 @@ pub(super) fn recorded_end(
             .map_err(super::index)?;
             if lifecycle.is_some_and(|turn| {
                 turn.turn_id == native_turn && turn.phase == crate::TurnPhase::Active
-            }) && super::selected_runtime_status(&tx, source, source_id)? == Some("work")
+            }) && super::selected_runtime_status(&tx, source, source_id, view)? == Some("work")
             {
                 json!({"st":"work","why":"working"})
             } else {

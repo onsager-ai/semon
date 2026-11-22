@@ -2186,6 +2186,24 @@ mod tests {
         })
     }
 
+    fn committed_carrier_prefix(options: &Options, carrier: &Path) -> (i64, u64) {
+        use rusqlite::OptionalExtension;
+
+        let db = crate::events::EventCache::path(&options.cache);
+        rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap()
+            .query_row(
+                "SELECT p.revision,p.pos FROM warehouse_current c
+                 JOIN warehouse_prefix p ON p.source=c.source
+                 WHERE c.path=?1 AND p.superseded=0",
+                [carrier.to_str().unwrap()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or_default()
+    }
+
     #[test]
     fn sqlite_http_reads_committed_prefixes_while_the_index_advances() {
         let fixture = lane_fixture();
@@ -2211,18 +2229,6 @@ mod tests {
             public_origin: None,
             asi: None,
             storage_refusals: Mutex::default(),
-        };
-        let db = crate::events::EventCache::path(&fixture.options.cache);
-        let revision = |path: &Path| {
-            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap()
-                .query_row(
-                    "SELECT coalesce(max(p.revision),0) FROM warehouse_current c
-                     JOIN warehouse_prefix p ON p.source=c.source WHERE c.path=?1",
-                    [path.to_str().unwrap()],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap()
         };
         let admit = || {
             view.invalidate();
@@ -2255,12 +2261,13 @@ mod tests {
             list,
             Some(&|| {
                 admit();
-                let before = revision(&pending);
+                let before = committed_carrier_prefix(&fixture.options, &pending);
                 let mut file = fs::OpenOptions::new().append(true).open(&pending).unwrap();
                 writeln!(file).unwrap();
                 admit();
+                let after = committed_carrier_prefix(&fixture.options, &pending);
                 assert!(
-                    revision(&pending) > before,
+                    after.0 > before.0 && after.1 > before.1,
                     "the Index committed a complete record during the list read"
                 );
             }),
@@ -2283,11 +2290,12 @@ mod tests {
             let during = request(
                 latest,
                 Some(&|| {
-                    let before = revision(&lane);
+                    let before = committed_carrier_prefix(&fixture.options, &lane);
                     say(&fixture, "lane", round + 1, text);
                     admit();
+                    let after = committed_carrier_prefix(&fixture.options, &lane);
                     assert!(
-                        revision(&lane) > before,
+                        after.0 > before.0 && after.1 > before.1,
                         "the Index advanced while the transcript body was held"
                     );
                 }),
@@ -2301,7 +2309,7 @@ mod tests {
             let concurrent = request(
                 list,
                 Some(&|| {
-                    let before = revision(&pending);
+                    let before = committed_carrier_prefix(&fixture.options, &pending);
                     say(
                         &fixture,
                         "new-lane",
@@ -2309,8 +2317,9 @@ mod tests {
                         "advance during repeated list reads",
                     );
                     admit();
+                    let after = committed_carrier_prefix(&fixture.options, &pending);
                     assert!(
-                        revision(&pending) > before,
+                        after.0 > before.0 && after.1 > before.1,
                         "the writer progressed during a repeated list read"
                     );
                 }),
@@ -2352,17 +2361,6 @@ mod tests {
             asi: None,
             storage_refusals: Mutex::default(),
         };
-        let revision = |view: &MachineView| -> i64 {
-            rusqlite::Connection::open_with_flags(
-                crate::events::EventCache::path(&view.options().cache),
-                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-            )
-            .unwrap()
-            .query_row("SELECT max(revision) FROM warehouse_prefix", [], |row| {
-                row.get(0)
-            })
-            .unwrap()
-        };
         let sources = [(&alpha, "a"), (&bravo, "b")].map(|(fixture, key)| crate::OverviewSource {
             key: key.into(),
             label: key.into(),
@@ -2403,12 +2401,13 @@ mod tests {
                 let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
                 writeln!(file).unwrap();
             }
-            for view in &views {
-                let before = revision(view);
+            for (view, carrier) in views.iter().zip(&pending) {
+                let before = committed_carrier_prefix(view.options(), carrier);
                 view.invalidate();
                 publish_native(view);
+                let after = committed_carrier_prefix(view.options(), carrier);
                 assert!(
-                    revision(view) > before,
+                    after.0 > before.0 && after.1 == fs::metadata(carrier).unwrap().len(),
                     "the source committed during the union read"
                 );
             }
@@ -2463,17 +2462,22 @@ mod tests {
                 .iter()
                 .find(|view| view.evidence.read_key() == source)
                 .unwrap();
+            let carrier = fixture
+                .options
+                .claude_home
+                .join(format!("projects/project/{sid}.jsonl"));
             let during = committed_http_request(
                 &server,
                 &viewer,
                 &latest,
                 Some(&|| {
-                    let before = revision(selected);
+                    let before = committed_carrier_prefix(selected.options(), &carrier);
                     say(fixture, sid, 1, appended);
                     selected.invalidate();
                     publish_native(selected);
+                    let after = committed_carrier_prefix(selected.options(), &carrier);
                     assert!(
-                        revision(selected) > before,
+                        after.0 > before.0 && after.1 > before.1,
                         "the Index committed during the transcript request"
                     );
                 }),

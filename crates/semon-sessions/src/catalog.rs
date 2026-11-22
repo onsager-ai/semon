@@ -6301,9 +6301,29 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .owner_qualification,
-            CatalogOwnerQualification::Provisional
+            CatalogOwnerQualification::Qualified
         );
         (fixture, path)
+    }
+
+    #[test]
+    fn warehouse_identity_is_provisional_without_recorded_codex_selection() {
+        let (fixture, _) = local_only_codex_fixture();
+        let facts_path = fixture.options.facts.as_ref().unwrap();
+        let mut facts = crate::read_facts(facts_path).unwrap();
+        facts.codex_rollouts = None;
+        crate::write_facts(facts_path, &facts).unwrap();
+
+        let identity = session_catalog_identity(&fixture.options, "local", "local-proof")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            identity.owner_qualification,
+            CatalogOwnerQualification::Provisional
+        );
+        assert!(identity.native_id.is_none());
+        assert_eq!(identity.native_ids, ["local-proof"]);
+        assert_eq!(identity.native_selection.unwrap().state, "unavailable");
     }
 
     #[test]
@@ -6854,7 +6874,7 @@ mod tests {
                     .unwrap();
                 assert_eq!(
                     before.owner_qualification,
-                    CatalogOwnerQualification::Provisional
+                    CatalogOwnerQualification::Qualified
                 );
                 let original = fs::read(&path).unwrap();
                 let provider = PinnedOriginal {

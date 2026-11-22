@@ -308,11 +308,8 @@ fn ask(sid: &str, time: String, text: &str) -> Value {
 }
 
 fn annotations(home: &Home, sid: &str, kind: &str) -> Value {
-    let reply = crate::session_annotations(
-        &home.options,
-        "fixture",
-        &format!("sid={sid}&scope=retained_history&kind={kind}"),
-    );
+    let reply =
+        crate::session_annotations(&home.options, "fixture", &format!("sid={sid}&kind={kind}"));
     assert_eq!(
         reply.status,
         200,
@@ -1561,6 +1558,8 @@ fn signals_keep_positions_turns_counts_and_setting_history_content_free() {
         codex_line(ts(6,0,6), "response_item", json!({"type":"function_call_output","call_id":"c1","output":"ok"})),
         codex_line(ts(6,0,7), "response_item", json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"Done"}]})),
     ]);
+    let namespace = crate::storage::Namespace::new("fixture").unwrap();
+    drop(crate::storage::sqlite::open_index(&home.options, &namespace).unwrap());
     let built = home.built(BASE + 6 * 3_600_000 + 60_000);
     let page: Value = serde_json::from_str(
         &page(
