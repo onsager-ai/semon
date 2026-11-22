@@ -66,16 +66,13 @@ pub(in crate::events::store) fn certify(
     }
     let trace_peers = json(&observe_trace_peers(tx, &source_key, row)?)?;
     let turn_lifecycle = if row.harness == "codex" {
-        let carrier: String = tx.query_row(
-            "SELECT carrier FROM warehouse_source WHERE source=?1",
+        let (carrier, ledger): (String, String) = tx.query_row(
+            "SELECT carrier,ledger FROM warehouse_source WHERE source=?1",
             [owner],
-            |record| record.get(0),
+            |record| Ok((record.get(0)?, record.get(1)?)),
         )?;
-        if let Some((ledger, _)) = super::committed_ledger(tx, &carrier)? {
-            super::committed_codex_lifecycle(tx, &carrier, &ledger, &native_id)?
-        } else {
-            None
-        }
+        let ledger: Ledger = serde_json::from_str(&ledger).map_err(data)?;
+        crate::events::store::committed_codex_lifecycle(tx, &carrier, &ledger, &native_id)?
     } else {
         None
     };
