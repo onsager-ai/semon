@@ -2480,6 +2480,12 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
         json!({"type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:05Z",
         "toolUseResult":{"success":true},"message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"progress","content":"queued"}]}}),
     );
+    let old_call_offset = fs::metadata(&root).unwrap().len();
+    append_native(
+        &root,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:02Z",
+        "message":{"role":"assistant","content":[{"type":"tool_use","id":"before-relay","name":"Read","input":{"file_path":"/work/before"}}]}}),
+    );
     let mut offsets = Vec::new();
     for (time, body) in [(4, "Still working"), (7, "Work finished")] {
         offsets.push(fs::metadata(&root).unwrap().len());
@@ -2584,6 +2590,55 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
             .iter()
             .any(|entry| entry["address"] == *address && entry["name"] == "Agent")
     );
+
+    // The first receipt starts a turn because its body matches the child's send.
+    // Count the unanswered call before that receipt, but leave the live call open.
+    append_native(
+        &root,
+        json!({"type":"assistant","sessionId":"root","timestamp":"2026-09-24T00:00:09Z",
+        "message":{"role":"assistant","content":[{"type":"tool_use","id":"after-relay","name":"Glob","input":{"pattern":"*.rs"}}]}}),
+    );
+    fs::write(
+        pid_home.join("42.json"),
+        json!({"pid":42,"sessionId":"root","procStart":777,"status":"busy"}).to_string(),
+    )
+    .unwrap();
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let (row, _) = focused_metadata(&fixture.source(&paths), "root")
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.status, Some("work"));
+    assert_eq!(row.details.unwrap()["errors"], 1);
+    let reply = http::annotations(&configured, "sid=root&kind=errors", None, None);
+    let errors: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{errors}");
+    assert_eq!(errors["total"], 1, "{errors}");
+    assert_eq!(
+        errors["entries"][0]["address"]["record"]["offset"],
+        old_call_offset
+    );
+    let identity = http::identity(&configured, "sid=root");
+    assert_eq!(identity.status, 200);
+    let identity: serde_json::Value = serde_json::from_slice(&identity.body).unwrap();
+    let generation = identity["identity"]["generation"].as_str().unwrap();
+    let query = crate::native_html::query(&[
+        ("sid", "root"),
+        ("scope", "current"),
+        ("generation", generation),
+        ("session_fields", "[\"detail\"]"),
+    ]);
+    let home = http::home(&configured, &query, None, None);
+    let detail: serde_json::Value = serde_json::from_slice(&home.body).unwrap();
+    assert_eq!(home.status, 200, "{detail}");
+    assert_eq!(detail["session"]["detail"], "Still working");
+    assert_eq!(detail["session"]["detail_from"], "worker");
 
     // Removing the selected proof blocks prevents native result reads, but
     // the list still derives its child status from process and metadata only.
@@ -3232,49 +3287,46 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
     assert_eq!(provider.calls.load(Ordering::Relaxed), calls);
 }
 
+struct OriginalNativeProvider {
+    data: Vec<u8>,
+    calls: std::sync::atomic::AtomicUsize,
+}
+impl crate::SessionSourceReader for OriginalNativeProvider {
+    fn read_range(
+        &self,
+        source: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max: usize,
+    ) -> std::io::Result<crate::SessionSourceRange> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if source.root != "claude"
+            || source.path != "projects/proj/native.jsonl"
+            || source.native_id != "native"
+            || source.offset != self.data.len() as u64
+            || source.prefix_sha256 != <[u8; 32]>::from(Sha256::digest(&self.data))
+            || expected.is_some_and(|generation| generation != "fixture-original")
+        {
+            return Err(std::io::ErrorKind::PermissionDenied.into());
+        }
+        let start = offset as usize;
+        let end = (start + max).min(self.data.len());
+        Ok(crate::SessionSourceRange {
+            generation: "fixture-original".into(),
+            length: source.offset,
+            offset,
+            bytes: self.data[start..end].into(),
+            cached: false,
+        })
+    }
+}
+
 #[test]
 fn warehouse_retained_address_reads_only_the_certified_original_from_provider() {
-    use crate::{SessionSourceRange, SessionSourceReader, SessionSourceRef};
-    use std::io;
-
-    struct Original {
-        data: Vec<u8>,
-        calls: std::sync::atomic::AtomicUsize,
-    }
-    impl SessionSourceReader for Original {
-        fn read_range(
-            &self,
-            source: &SessionSourceRef,
-            expected: Option<&str>,
-            offset: u64,
-            max: usize,
-        ) -> io::Result<SessionSourceRange> {
-            self.calls
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if source.root != "claude"
-                || source.path != "projects/proj/native.jsonl"
-                || source.native_id != "native"
-                || source.offset != self.data.len() as u64
-                || source.prefix_sha256 != <[u8; 32]>::from(Sha256::digest(&self.data))
-                || expected.is_some_and(|generation| generation != "fixture-original")
-            {
-                return Err(io::ErrorKind::PermissionDenied.into());
-            }
-            let start = offset as usize;
-            let end = (start + max).min(self.data.len());
-            Ok(SessionSourceRange {
-                generation: "fixture-original".into(),
-                length: source.offset,
-                offset,
-                bytes: self.data[start..end].into(),
-                cached: false,
-            })
-        }
-    }
-
     let mut fixture = Fixture::new("retained-component-provider");
     let path = fixture.claude("native", "Original native prompt");
-    let provider = Original {
+    let provider = OriginalNativeProvider {
         data: fs::read(&path).unwrap(),
         calls: Default::default(),
     };
@@ -3469,7 +3521,7 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
         Some("Original native prompt")
     );
     assert!(next.next.is_none());
-    let denied = Original {
+    let denied = OriginalNativeProvider {
         data: vec![],
         calls: Default::default(),
     };
@@ -3481,6 +3533,173 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
         selected::retained_page(&source, "native", 1, Some(&cursor), &denied),
         Err(ReadError::Restart)
     ));
+}
+
+#[test]
+fn warehouse_sparse_fields_use_exact_provider_prefixes_in_both_read_scopes() {
+    let mut fixture = Fixture::new("sparse-fields-provider");
+    let path = fixture.claude("native", "Original prompt");
+    let mut image = b"\x89PNG\r\n\x1a\nexample".to_vec();
+    image.resize(1024 * 1024, 0);
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"read-call","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"large-read","name":"Read","input":{"file_path":"/work/note"}}
+        ]}}),
+    );
+    append_native(
+        &path,
+        json!({"type":"user","uuid":"read-result","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:02Z","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"large-read","content":[
+                {"type":"text","text":"y".repeat(1152 * 1024 + 1) + "result tail"}
+            ]}
+        ]}}),
+    );
+    let mut mixed = prompt("native", 3, "");
+    mixed["message"]["content"] = json!([
+        {"type":"image","source":{"type":"base64","media_type":"image/png",
+            "data":crate::attachments::tests::encode(&image)}},
+        {"type":"text","text":"x".repeat(768 * 1024 + 1) + "verified tail"},
+    ]);
+    append_native(&path, mixed);
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let provider = OriginalNativeProvider {
+        data: fs::read(&path).unwrap(),
+        calls: Default::default(),
+    };
+    let archive =
+        crate::archive::Archive::new(crate::archive::standalone_dir(&fixture.options.cache));
+    archive
+        .preserve(
+            path.to_str().unwrap(),
+            &mut provider.data.as_slice(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
+    let admit = |fixture: &mut Fixture| {
+        crate::model::observe_catalog(
+            &fixture.options,
+            &mut fixture.cache,
+            &mut false,
+            &mut crate::model::Texts::default(),
+            crate::model::now_ms(),
+        )
+        .unwrap();
+    };
+    admit(&mut fixture);
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let mode = crate::SessionSourceReadMode::ProviderOnly;
+    let read = |scope: &str, params: &[(&str, &str)], expanded, reader: &OriginalNativeProvider| {
+        let mut fields = vec![("sid", "native"), ("scope", scope)];
+        fields.extend_from_slice(params);
+        http::transcript_with_mode(
+            &configured,
+            &crate::native_html::query(&fields),
+            Some(reader),
+            mode,
+            expanded,
+        )
+    };
+    let check = |scope| {
+        let page = read(scope, &[("limit", "4")], false, &provider);
+        let body: serde_json::Value = serde_json::from_slice(&page.body).unwrap();
+        assert_eq!(page.status, 200, "{body}");
+        let entries = body["entries"].as_array().unwrap();
+        let output = entries
+            .iter()
+            .find(|entry| entry["field"]["name"] == "out")
+            .unwrap_or_else(|| panic!("missing sparse output: {body}"));
+        let result_address = output["address"].to_string();
+        let result_last = (output["field"]["chunks"].as_u64().unwrap() - 1).to_string();
+        let chunk = read(
+            scope,
+            &[("address", &result_address), ("field_chunk", &result_last)],
+            true,
+            &provider,
+        );
+        let result: serde_json::Value = serde_json::from_slice(&chunk.body).unwrap();
+        assert_eq!(chunk.status, 200, "{result}");
+        assert_eq!(result["entry"]["field"]["name"], "out");
+        assert!(
+            result["entry"]["text"]
+                .as_str()
+                .unwrap()
+                .ends_with("yresult tail")
+        );
+        let entry = entries
+            .iter()
+            .find(|entry| entry["field"]["name"] == "text")
+            .unwrap_or_else(|| panic!("missing sparse prompt: {body}"));
+        let mut encoded = entry["address"].clone();
+        let address = encoded.to_string();
+        let last = (entry["field"]["chunks"].as_u64().unwrap() - 1).to_string();
+        let chunk = read(
+            scope,
+            &[("address", &address), ("field_chunk", &last)],
+            true,
+            &provider,
+        );
+        let body: serde_json::Value = serde_json::from_slice(&chunk.body).unwrap();
+        assert_eq!(chunk.status, 200, "{body}");
+        assert_eq!(body["entry"]["text"], "xverified tail");
+        let attachment = read(
+            scope,
+            &[
+                ("address", &address),
+                ("part", "attachment"),
+                ("image", "0"),
+            ],
+            true,
+            &provider,
+        );
+        assert_eq!(
+            (attachment.status, attachment.content_type),
+            (200, "image/png")
+        );
+        assert_eq!(attachment.body, image);
+        encoded["entry_id"] = json!("wrong-entry");
+        let refused = read(
+            scope,
+            &[("address", &encoded.to_string()), ("field_chunk", &last)],
+            true,
+            &provider,
+        );
+        assert!((400..500).contains(&refused.status));
+        let mut changed = provider.data.clone();
+        *changed.last_mut().unwrap() = b' ';
+        let changed = OriginalNativeProvider {
+            data: changed,
+            calls: Default::default(),
+        };
+        let refused = read(
+            scope,
+            &[("address", &address), ("field_chunk", &last)],
+            true,
+            &changed,
+        );
+        assert!(refused.status >= 400);
+        let body: serde_json::Value = serde_json::from_slice(&refused.body).unwrap();
+        assert!(body.get("entry").is_none());
+    };
+    check("current");
+    assert!(provider.calls.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    let replacement = fixture.claude("native", "Replacement prompt");
+    let bytes = fs::read(&replacement).unwrap();
+    archive
+        .preserve(
+            replacement.to_str().unwrap(),
+            &mut bytes.as_slice(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
+    check("retained_history");
 }
 
 #[test]
@@ -3911,6 +4130,17 @@ fn warehouse_home_question_origin_uses_the_call_turn() {
     let identity: serde_json::Value = serde_json::from_slice(&identity.body).unwrap();
     let generation = identity["identity"]["generation"].as_str().unwrap();
     let question = crate::model::question_id("native", offset, Some("question-tool"));
+    let feed = crate::session_overview_reply(
+        std::slice::from_ref(&configured),
+        "home",
+        "",
+        1_790_208_004_000,
+    )
+    .unwrap();
+    let feed: serde_json::Value = serde_json::from_slice(&feed.body).unwrap();
+    let event = &feed["answered"][0];
+    assert_eq!(event["event"]["id"], question, "{feed}");
+    assert_eq!(event["session"]["content_generation"], generation);
     let query = crate::native_html::query(&[
         ("sid", "native"),
         ("scope", "current"),

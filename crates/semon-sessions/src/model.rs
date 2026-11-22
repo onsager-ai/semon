@@ -475,6 +475,10 @@ fn stable_id(prefix: &str, source: &str) -> String {
     format!("{prefix}{:016x}", fnv(source))
 }
 
+pub(crate) fn result_id(native_id: &str, offset: u64, block: u32) -> String {
+    stable_id("q", &format!("toyou:result:{native_id}:{offset}:{block}"))
+}
+
 pub(crate) fn question_id(native_id: &str, offset: u64, call: Option<&str>) -> String {
     let fallback;
     let source = match call {
@@ -4732,10 +4736,7 @@ impl<'a> Builder<'a> {
                     let handoff = Handoff {
                         ask: Some("result"),
                         ..Handoff::new(
-                            stable_id(
-                                "q",
-                                &format!("toyou:result:{}:{}:{}", file.id, found.o, found.b),
-                            ),
+                            result_id(&file.id, found.o, found.b),
                             "toyou",
                             (self.sessions[index].key.clone(), "you".into()),
                             found.t.unwrap_or(self.sessions[index].out.last),
@@ -4789,10 +4790,7 @@ impl<'a> Builder<'a> {
                         let handoff = Handoff {
                             ask: Some("result"),
                             ..Handoff::new(
-                                stable_id(
-                                    "q",
-                                    &format!("toyou:result:{}:{}:{}", file.id, found.o, found.b),
-                                ),
+                                result_id(&file.id, found.o, found.b),
                                 "toyou",
                                 (self.sessions[index].key.clone(), "you".into()),
                                 found.t.unwrap_or(self.sessions[index].out.last),

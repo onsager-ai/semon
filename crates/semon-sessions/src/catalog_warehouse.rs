@@ -13,6 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 #[path = "catalog_warehouse/parents.rs"]
 mod parents;
 
+#[path = "catalog_warehouse/home_feed.rs"]
+pub(crate) mod home_feed;
+
 /// Request-local reader for custody held by the source owning this Index.
 /// Callers supply references from a qualified frozen warehouse binding.
 pub(super) struct ArchiveReader<'a> {
@@ -1130,6 +1133,7 @@ fn selected_runtime_status(
     Ok(snapshot.runtime_status(&[owner], true)?.remove(&owner))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn selected_metadata(
     view: &selected::ReadView<'_>,
     source: &Source<'_>,
@@ -1138,6 +1142,7 @@ fn selected_metadata(
     harness: &str,
     references: &[crate::CatalogSourceObservation],
     native_titles: bool,
+    latest_turn: Option<Option<&selected::causal::TurnStart>>,
 ) -> Result<Row, ReadError> {
     let (ancestors, runs, incomplete, mut rows, price) = {
         let tx = view.lock()?;
@@ -1229,9 +1234,17 @@ fn selected_metadata(
         "shared_usd": price.map(|price| price.shared),
     });
     row.source_refs = references.to_vec();
+    let resolved_turn = if latest_turn.is_none() && selected::live_pending(&row.harness, row.status)
+    {
+        selected::pending_boundary(view, source, key)?
+    } else {
+        None
+    };
+    let pending =
+        selected::pending_counts_runtime(&row, latest_turn.unwrap_or(resolved_turn.as_ref()))?;
     row.details = {
         let tx = view.lock()?;
-        Some(selected_details(&tx, source, &row, family)?)
+        Some(selected_details(&tx, source, &row, family, pending)?)
     };
     source.validate_authority()?;
     Ok(row)
@@ -1242,6 +1255,7 @@ fn selected_details(
     source: &Source<'_>,
     row: &Row,
     family: serde_json::Value,
+    pending: (bool, bool, String),
 ) -> Result<serde_json::Value, ReadError> {
     let (cwd, copilot, path, native_id, ledger) = transaction
         .query_row(
@@ -1285,7 +1299,7 @@ fn selected_details(
         .transpose()
         .map_err(index)?
         .map(|projection| projection.evidence());
-    let (pending, work, boundary) = selected::pending_counts_runtime(transaction, source, row)?;
+    let (pending, work, boundary) = pending;
     let mut statement = transaction
         .prepare_cached(include_str!("events/store/warehouse_selected_details.sql"))
         .map_err(index)?;
@@ -1351,6 +1365,7 @@ fn focused_metadata(source: &Source<'_>, key: &str) -> Result<Option<(Row, Strin
         &identity.1,
         &references,
         true,
+        None,
     )?;
     Ok(Some((row, witness)))
 }

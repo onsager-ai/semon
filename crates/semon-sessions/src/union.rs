@@ -1207,35 +1207,6 @@ impl ViewerCore {
         if path == "/api/session-sources" {
             return self.source_inventory(&views).page(query);
         }
-        if views
-            .iter()
-            .any(|(_, view)| view.evidence.storage.is_postgres())
-            && path.starts_with("/api/")
-            && !matches!(
-                path,
-                "/api/sessions"
-                    | "/api/session-transcript"
-                    | "/api/session-resolve"
-                    | "/api/session-annotations"
-                    | "/api/session-entry"
-            )
-        {
-            if path == "/api/session-activity-anchor" {
-                return ViewerReply {
-                    status: 200,
-                    content_type: "application/json; charset=utf-8",
-                    body: br#"{"available":false,"reason":"unsupported_storage"}"#.to_vec(),
-                    etag: None,
-                    extra_headers: Vec::new(),
-                };
-            }
-            return crate::catalog::error(
-                503,
-                "capability_unavailable",
-                "This session operation is not yet available on PostgreSQL.",
-                false,
-            );
-        }
         if matches!(path, "/api/viewer/home" | "/api/viewer/analytics") {
             let selected_source = match crate::overview_source_key(query) {
                 Ok(source) => source,
@@ -1247,6 +1218,19 @@ impl ViewerCore {
                     .any(|(key, _)| (if key.is_empty() { "local" } else { key }) == selected)
             }) {
                 return text(404, "Not found");
+            }
+            if views.iter().any(|(key, view)| {
+                view.evidence.storage.is_postgres()
+                    && selected_source.as_ref().is_none_or(|selected| {
+                        (if key.is_empty() { "local" } else { key }) == selected
+                    })
+            }) {
+                return crate::catalog::error(
+                    503,
+                    "capability_unavailable",
+                    "This session operation is not yet available on PostgreSQL.",
+                    false,
+                );
             }
             let labels = machine_display_labels(&views);
             let sources: Vec<_> = views
@@ -1653,6 +1637,25 @@ impl ViewerCore {
         }
         #[cfg(feature = "postgres")]
         if view.evidence.storage.is_postgres() {
+            if path == "/api/session-capabilities" {
+                return crate::read_capabilities::capabilities(
+                    key,
+                    crate::SessionReadEndpoints {
+                        native_resolution: true,
+                        selected_transcript: true,
+                        selected_entry: true,
+                        ..Default::default()
+                    },
+                    views.len() > 1,
+                    crate::slot_projection::VERSION,
+                );
+            }
+            if path == "/api/session-activity-anchor" {
+                return crate::catalog::reply(
+                    200,
+                    json!({"available":false,"reason":"unsupported_storage"}),
+                );
+            }
             if path == "/api/session-locate" {
                 return postgres_locate(view, key, query, _deadline, _allow_catalog_wait);
             }
@@ -1721,6 +1724,7 @@ impl ViewerCore {
                     selected_entry: true,
                 },
                 views.len() > 1,
+                7,
             ),
             _ => http::list(&[configured], key, query, false),
         }

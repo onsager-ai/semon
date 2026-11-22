@@ -417,6 +417,10 @@ its transient prefix receipt expires. It also records the native Codex
 operation outcome for exact error markers and selected rendering, and indexes
 normalized effort for Catalog metadata.
 
-PR 3 owns the atomic Viewer route cutover, end-to-end scale verification,
-concurrent HTTP reads during ingestion, and the Viewer/browser gates. The
-fixture adapters remain separate from the production routes until cutover.
+The SQLite Viewer, host Catalog APIs and workspace reads use projection 7.
+They queue observation demand and serve each source's committed Index snapshot.
+Home publishes event metadata and the current selection's identity generation.
+Question and result text is read on demand from verified native records. Schema
+62 indexes the native positions of assistant text for that selection.
+PostgreSQL remains on projection 6. Analytics and ASI retain their existing
+read paths until phase 4.

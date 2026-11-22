@@ -18,7 +18,7 @@ use std::{
 };
 
 #[path = "causal.rs"]
-mod causal;
+pub(super) mod causal;
 #[path = "parent_relay.rs"]
 mod parent_relay;
 pub(super) use parent_relay::TraceCompletion;
@@ -147,7 +147,10 @@ impl<'a> ReadView<'a> {
                     "SELECT recipe FROM fact_native_fields WHERE source=?1 AND pos=?2 AND block=0",
                 )
                 .map_err(io::Error::other)?
-                .query_row(params![source, offset], |row| row.get(0))
+                .query_row(
+                    params![source, i64::try_from(offset).map_err(io::Error::other)?],
+                    |row| row.get(0),
+                )
                 .optional()
                 .map_err(io::Error::other)?
         } else {
@@ -327,7 +330,10 @@ fn prompt_images(
             "SELECT recipe FROM fact_prompt_images WHERE source=?1 AND pos=?2 AND block=0",
         )
         .map_err(index)?
-        .query_row(params![source, offset], |row| row.get(0))
+        .query_row(
+            params![source, i64::try_from(offset).map_err(index)?],
+            |row| row.get(0),
+        )
         .optional()
         .map_err(index)?;
     row.as_deref()
@@ -501,15 +507,32 @@ pub(super) struct HomeDetail {
 
 impl HomeDetail {
     fn from_turn(turn: &causal::TurnStart, native: &serde_json::Value) -> Self {
+        let kinds: &[_] = if turn.id.starts_with('r') {
+            &["received_cross", "received_down", "received_agent"]
+        } else {
+            &["prompt"]
+        };
+        let text = kinds
+            .iter()
+            .map(|kind| {
+                crate::model::overview_text(
+                    &serde_json::json!({"kind":kind,"block":turn.address.block}),
+                    native,
+                    None,
+                )
+            })
+            .find(serde_json::Value::is_string)
+            .unwrap_or_default();
         Self {
-            text: crate::model::overview_text(
-                &serde_json::json!({"kind":"prompt","block":turn.address.block}),
-                native,
-                None,
-            ),
+            text,
             from: (!turn.handoff).then(|| "you".into()),
             from_name: None,
         }
+    }
+
+    fn set_sender(&mut self, key: String, title: Option<String>) {
+        self.from = Some(key);
+        self.from_name = title;
     }
 
     fn set_parent(&mut self, parent: &str, metadata: &serde_json::Value) {
@@ -523,6 +546,51 @@ impl HomeDetail {
             })
         });
     }
+}
+
+fn relay_sender(
+    db: &rusqlite::Connection,
+    source: &Source<'_>,
+    turn: &causal::TurnStart,
+    certified: Option<&str>,
+) -> Result<Option<(i64, String, String)>, ReadError> {
+    let at = turn.position;
+    let mut statement = db.prepare_cached(
+        "WITH receipt AS MATERIALIZED (
+           SELECT DISTINCT correlation FROM fact_relay_receipt WHERE source=?1 AND pos=?2 AND correlation IS NOT NULL
+         ), delivered AS MATERIALIZED (
+           SELECT r.*,s.carrier,s.harness,CASE WHEN ?4 IS NULL THEN json_extract(s.ledger,'$.offset')
+             ELSE json_extract(?4,'$.\"' || r.source || '\"') END AS end
+           FROM receipt e CROSS JOIN fact_relay_result r ON r.correlation=e.correlation AND NOT r.failed
+           CROSS JOIN warehouse_source s ON s.source=r.source AND s.origin=?3
+           WHERE ?4 IS NOT NULL OR EXISTS (SELECT 1 FROM warehouse_current WHERE source=r.source)
+         )
+         SELECT DISTINCT r.source,r.carrier,r.harness FROM delivered r
+         CROSS JOIN fact_relay_send c ON c.source=r.source AND c.call_id=r.call_id AND c.pos<r.pos
+           AND ((r.call_pos=c.pos AND r.call_block=c.block) OR (r.call_pos IS NULL AND 1=(
+               SELECT count(*) FROM fact_tool_call a WHERE a.source=r.source AND a.call_id=r.call_id AND a.pos<r.end)))
+         WHERE r.pos<r.end LIMIT 2",
+    ).map_err(index)?;
+    let mut rows = statement
+        .query(params![
+            at.source,
+            at.offset,
+            source.namespace.binding(),
+            certified
+        ])
+        .map_err(index)?;
+    let Some(hit) = rows.next().map_err(index)? else {
+        return Ok(None);
+    };
+    let result = (
+        hit.get(0).map_err(index)?,
+        hit.get(1).map_err(index)?,
+        hit.get(2).map_err(index)?,
+    );
+    if rows.next().map_err(index)?.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(result))
 }
 
 struct Member {
@@ -1147,55 +1215,47 @@ impl PendingRuntime {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn pending_runtime(
-    db: &rusqlite::Connection,
+pub(super) fn live_pending(harness: &str, status: Option<&str>) -> bool {
+    harness != "copilot" && matches!(status, Some("work" | "wait"))
+}
+
+impl PendingRuntime {
+    fn current(harness: &str, status: Option<&str>, turn: Option<&causal::TurnStart>) -> Self {
+        let mut runtime = Self::retained(harness);
+        runtime.work = status == Some("work");
+        if live_pending(harness, status) {
+            runtime.boundary = turn.map(|turn| {
+                let at = turn.position;
+                (at.time, at.source, at.offset)
+            });
+        }
+        runtime
+    }
+}
+
+pub(super) fn pending_boundary(
+    view: &ReadView<'_>,
     source: &Source<'_>,
     key: &str,
-    harness: &str,
-    component: i64,
-    view: i64,
-    status: Option<&str>,
-) -> Result<PendingRuntime, ReadError> {
-    let mut runtime = PendingRuntime::retained(harness);
-    runtime.work = status == Some("work");
-    if runtime.include && matches!(status, Some("work" | "wait")) {
-        let turns = causal::turns(
-            db,
-            source,
-            key,
-            harness,
-            component,
-            view,
-            [Position::END].into_iter(),
-            "{}",
-        )?;
-        runtime.boundary = turns[&Position::END].as_ref().map(|turn| {
-            let at = turn.position;
-            (at.time, at.source, at.offset)
-        });
-    }
-    Ok(runtime)
+) -> Result<Option<causal::TurnStart>, ReadError> {
+    let selected = read_current(
+        view,
+        source.options,
+        source,
+        CatalogReadScope::Current,
+        key,
+        Target::PendingBoundary,
+        None,
+    )?
+    .ok_or(ReadError::Restart)?;
+    Ok(selected.latest_turn)
 }
 
 pub(super) fn pending_counts_runtime(
-    db: &rusqlite::Connection,
-    source: &Source<'_>,
     row: &super::Row,
+    turn: Option<&causal::TurnStart>,
 ) -> Result<(bool, bool, String), ReadError> {
-    let (component, view) = db.query_row(
-        "SELECT component,(SELECT max(revision) FROM warehouse_prefix) FROM lineage_member WHERE source=?1",
-        [row.owner], |row| Ok((row.get(0)?, row.get(1)?)),
-    ).map_err(index)?;
-    let runtime = pending_runtime(
-        db,
-        source,
-        &row.position.key,
-        &row.harness,
-        component,
-        view,
-        row.status,
-    )?;
+    let runtime = PendingRuntime::current(&row.harness, row.status, turn);
     Ok((runtime.include, runtime.work, encode(&runtime.boundary)?))
 }
 
@@ -1503,6 +1563,44 @@ fn member_turn_positions(
             )?;
         }
     }
+    if turns.iter().any(|turn| is_question_id(turn)) {
+        let mut results = db
+            .prepare_cached(
+                "SELECT a.pos,a.block,r.occurrence FROM fact_subagent_event a
+             JOIN fact_record r ON r.source=a.source AND r.pos=a.pos AND r.block=0 AND NOT r.gap
+             WHERE a.source=?1 AND a.pos<?2 AND a.kind='assistant'
+             ORDER BY a.pos DESC,a.block DESC LIMIT 32",
+            )
+            .map_err(index)?;
+        let mut rows = results
+            .query(params![id, i64::try_from(reference.offset).map_err(index)?])
+            .map_err(index)?;
+        while let Some(row) = rows.next().map_err(index)? {
+            let offset: i64 = row.get(0).map_err(index)?;
+            let block: u32 = row.get(1).map_err(index)?;
+            let event = crate::model::result_id(
+                &reference.native_id,
+                u64::try_from(offset).map_err(index)?,
+                block,
+            );
+            if !turns.contains(&event.as_str()) {
+                continue;
+            }
+            member_positions(
+                positions,
+                PositionSearch {
+                    source: id,
+                    start: offset,
+                    end: offset + 1,
+                    predecessors,
+                    entry: Some((0, row.get(2).map_err(index)?)),
+                    frontier: Direction::Forward.frontier(None, id),
+                    capacity: 1,
+                },
+                &mut keep,
+            )?;
+        }
+    }
     for turn in turns {
         turn_candidates(db, key, id, reference.offset, reference, turn, |address| {
             let Some(frontier) = address_frontier(db, Direction::Forward, id, address)? else {
@@ -1527,11 +1625,12 @@ fn member_turn_positions(
     Ok(())
 }
 
-fn home_question_origin<'a>(
+fn home_event_origin<'a>(
     target: &Target<'_>,
     context: &'a causal::Context,
     reference: &SessionSourceRef,
     offset: u64,
+    native: &serde_json::Value,
 ) -> Option<&'a causal::TurnStart> {
     let Target::Turns(requested, Some(_)) = target else {
         return None;
@@ -1543,7 +1642,49 @@ fn home_question_origin<'a>(
                     &crate::model::question_id(&reference.native_id, offset, Some(&call.id))
                         .as_str(),
                 )
-        })
+        }) || requested
+            .iter()
+            .any(|id| home_result(context, reference, offset, native, id).is_some())
+    })
+}
+
+pub(super) fn home_result(
+    context: &causal::Context,
+    reference: &SessionSourceRef,
+    offset: u64,
+    native: &serde_json::Value,
+    id: &str,
+) -> Option<serde_json::Value> {
+    let turn = context.turn.as_ref()?;
+    if turn.handoff || !(crate::model::is_ask(&turn.id) || reference.root == "codex") {
+        return None;
+    }
+    if !matches!(
+        native.get("type").and_then(serde_json::Value::as_str),
+        Some("assistant" | "response_item")
+    ) || (reference.root == "codex"
+        && native
+            .pointer("/payload/role")
+            .and_then(serde_json::Value::as_str)
+            != Some("assistant"))
+    {
+        return None;
+    }
+    let blocks = native
+        .pointer("/message/content")
+        .and_then(serde_json::Value::as_array)
+        .map_or(1, Vec::len);
+    (0..blocks).find_map(|block| {
+        let block = u32::try_from(block).ok()?;
+        if crate::model::result_id(&reference.native_id, offset, block) != id {
+            return None;
+        }
+        let text = crate::model::overview_text(
+            &serde_json::json!({"kind":"assistant","block":block}),
+            native,
+            None,
+        );
+        text.is_string().then_some(text)
     })
 }
 
@@ -1804,6 +1945,7 @@ enum Target<'a> {
     Evidence(Evidence<'a>),
     Turns(&'a [&'a str], Option<HomeFields<'a>>),
     Annotations(AnnotationRequest<'a>),
+    PendingBoundary,
     Activity(&'a crate::transcript_range::StepAnchor),
     ToolResults(&'a Address),
 }
@@ -1825,7 +1967,7 @@ impl Target<'_> {
             #[cfg(test)]
             Self::Evidence(_) => Ok(1),
             Self::Turns(..) => Ok(33),
-            Self::Annotations(_) => Ok(0),
+            Self::Annotations(_) | Self::PendingBoundary => Ok(0),
             Self::ToolResults(_) => Ok(101),
         }
     }
@@ -2133,6 +2275,7 @@ fn read_current(
                         )
                     }
                     Target::Address(..) => continue,
+                    Target::PendingBoundary => continue,
                     Target::Annotations(_) => {
                         let predecessors = continuation_bounds(
                             &mut continuations,
@@ -2281,23 +2424,12 @@ fn read_current(
     } else {
         None
     };
-    let annotations = if let Target::Annotations(request) = target {
-        Some(annotation_page(
-            db,
-            source,
-            key,
-            &binding,
-            request,
-            &annotation_members,
-            if request.kind == "errors" {
-                pending_runtime(db, source, key, &harness, component, view, runtime_status)?
-            } else {
-                PendingRuntime::default()
-            },
-        )?)
-    } else {
-        None
-    };
+    let need_pending_turn = matches!(target, Target::PendingBoundary)
+        || (live_pending(&harness, runtime_status)
+            && (matches!(
+                target,
+                Target::Page(_, Direction::Reverse) | Target::Address(_, Some(_), None)
+            ) || matches!(target, Target::Annotations(request) if request.kind == "errors")));
     if let Target::Address(_, Some(expected), _) = target
         && expected != binding
     {
@@ -2378,8 +2510,9 @@ fn read_current(
         None
     };
     let mut legacy_plans = Vec::new();
-    if harness == "claude" && (!causal.is_empty() || include_home_detail || home_activity.is_some())
-    {
+    let need_latest_turn =
+        need_pending_turn || !causal.is_empty() || include_home_detail || home_activity.is_some();
+    if harness == "claude" && need_latest_turn {
         let trace_spawn = matches!(target, Target::Turns([turn], None)
             if *turn == crate::model::spawn_turn_id(&harness, key));
         if let Some(plan) = parent_relay::Plan::collect(db, source, owner, None, view, trace_spawn)?
@@ -2499,12 +2632,21 @@ fn read_current(
     let mut legacy_completion = None;
     let mut trace_completion = None;
     let mut incoming = BTreeMap::new();
+    let mut legacy_sender = BTreeMap::new();
     for (child, plan) in legacy_plans {
         let resolved = resolve(plan, child)?;
         if child == owner {
             legacy_completion = resolved.completion;
             trace_completion = resolved.trace_completion;
         } else {
+            if include_home_detail {
+                for turn in resolved.incoming.values() {
+                    legacy_sender
+                        .entry(turn.clone())
+                        .and_modify(|owner| *owner = None)
+                        .or_insert(Some(child));
+                }
+            }
             incoming.extend(resolved.incoming);
         }
     }
@@ -2518,14 +2660,28 @@ fn read_current(
         causal
             .keys()
             .copied()
-            .chain(
-                (!causal.is_empty() || include_home_detail || home_activity.is_some())
-                    .then_some(Position::END),
-            )
+            .chain(need_latest_turn.then_some(Position::END))
             .chain(home_activity.as_ref().map(|activity| activity.position)),
         &encode(&incoming)?,
     )?;
     let latest_turn = turns.remove(&Position::END).flatten();
+    let annotations = if let Target::Annotations(request) = target {
+        Some(annotation_page(
+            &*read_view.lock()?,
+            source,
+            key,
+            &binding,
+            request,
+            &annotation_members,
+            if request.kind == "errors" {
+                PendingRuntime::current(&harness, runtime_status, latest_turn.as_ref())
+            } else {
+                PendingRuntime::default()
+            },
+        )?)
+    } else {
+        None
+    };
     let mut home_detail = if let Some(turn) = latest_turn.as_ref().filter(|_| include_home_detail) {
         let (id, member) = home_members
             .iter()
@@ -2539,7 +2695,45 @@ fn read_current(
             BodyMode::Complete,
         )?
         .0;
-        Some(HomeDetail::from_turn(turn, &native))
+        let mut detail = HomeDetail::from_turn(turn, &native);
+        if turn.id.starts_with('r') {
+            let db = read_view.lock()?;
+            let sender = if let Some(sender) = legacy_sender.get(&turn.id) {
+                *sender
+            } else if let Some((sender, carrier, harness)) = relay_sender(&db, source, turn, None)?
+            {
+                match (
+                    source.availability(&harness, &carrier)?,
+                    super::parents::Parents::new(&db)?.owner(sender)?,
+                ) {
+                    (Availability::Expected(Some(stat)), Some(owner))
+                        if db
+                            .query_row(
+                                "SELECT ledger FROM warehouse_source WHERE source=?1",
+                                [sender],
+                                |row| row.get::<_, String>(0),
+                            )
+                            .map_err(index)
+                            .and_then(|ledger| decode(&ledger))
+                            .is_ok_and(|ledger| stable_or_grown(&ledger.stat, &stat)) =>
+                    {
+                        Some(owner)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Some(sender) = sender.filter(|sender| *sender != owner)
+                && let Some((_, key, _)) = super::relative_keys(&db, &encode(&[sender])?)?.pop()
+            {
+                let name = db.query_row("SELECT coalesce(f.title,f.agent_name,d.nickname) FROM dim_session d
+                    CROSS JOIN warehouse_current c USING(source) CROSS JOIN files f USING(path) WHERE d.source=?1",
+                    [sender], |row| row.get(0)).optional().map_err(index)?.flatten();
+                detail.set_sender(key, name);
+            }
+        }
+        Some(detail)
     } else {
         None
     };
@@ -2645,7 +2839,7 @@ fn read_current(
         let causal = inputs.map_or_else(causal::Context::default, |inputs| {
             inputs.render(source, key, reference, native_id.as_deref(), turn)
         });
-        if let Some(turn) = home_question_origin(&target, &causal, reference, offset)
+        if let Some(turn) = home_event_origin(&target, &causal, reference, offset, &native)
             && let std::collections::btree_map::Entry::Vacant(entry) =
                 home_origins.entry(turn.position)
         {
@@ -2735,6 +2929,7 @@ fn read_current(
     {
         return Err(ReadError::Restart);
     }
+    drop(bytes_left);
     source.validate_authority()?;
     // An earlier page may use historical prefix receipts with current row facts.
     // The browser keeps the metadata from its latest or addressed selection.
@@ -2759,6 +2954,7 @@ fn read_current(
                 &owner_identity.1,
                 &references,
                 include_metadata && source.current_provider.is_none(),
+                Some(latest_turn.as_ref()),
             )
         })
         .transpose()?;

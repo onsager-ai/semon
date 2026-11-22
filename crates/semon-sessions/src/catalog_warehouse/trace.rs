@@ -222,6 +222,7 @@ pub(super) fn read(
     ];
     let mut ids = BTreeSet::from([root.to_owned()]);
     let mut reported = BTreeSet::new();
+    let mut qualified_participants = BTreeSet::new();
     let mut queue = std::collections::VecDeque::new();
     let mut frontier = Vec::new();
     let mut reads = 0;
@@ -302,7 +303,14 @@ pub(super) fn read(
             }));
             sent.push(turn);
         }
-        for (id, target, at, reason) in refusals {
+        for RelayRefusal {
+            id,
+            target,
+            at,
+            reason,
+            qualified,
+        } in refusals
+        {
             if target == from.as_str() || target == "you" || !ids.insert(id.clone()) {
                 continue;
             }
@@ -310,6 +318,9 @@ pub(super) fn read(
                 participants
                     .entry(target.clone())
                     .or_insert_with(|| json!(target));
+            }
+            if qualified {
+                qualified_participants.insert(target.clone());
             }
             if reported.insert(target.clone())
                 && !evidence
@@ -337,6 +348,26 @@ pub(super) fn read(
         }
         next = queue.pop_front();
     }
+    let mut participant_summaries = serde_json::Map::new();
+    for target in &qualified_participants {
+        if !participants.contains_key(target) {
+            continue;
+        }
+        match passive_summary(&view, source, target, peer) {
+            Ok(Some(summary)) => {
+                participants.insert(target.clone(), summary["name"].clone());
+                participant_summaries.insert(target.clone(), summary);
+            }
+            Ok(None)
+            | Err(
+                ReadError::Restart
+                | ReadError::SourceBudget
+                | ReadError::PeerUnavailable(_)
+                | ReadError::RetainedUnverified,
+            ) => {}
+            Err(error) => return Err(error),
+        }
+    }
     let previews_incomplete = !reported.is_empty();
     let incomplete = relay_limit_reached
         || !frontier.is_empty()
@@ -345,10 +376,110 @@ pub(super) fn read(
     Ok(Some(json!({
         "api":1,"projection":7,"source_key":source_key,"catalog_key":key,"root":root,
         "generation":root_identity.generation,"identity":root_identity,
-        "sessions":sessions,"participants":participants,"handoffs":handoffs,"turns":turns,
+        "sessions":sessions,"participants":participants,"participant_summaries":participant_summaries,
+        "handoffs":handoffs,"turns":turns,
         "frontier":frontier,"evidence":evidence,"previews":previews,
         "incomplete":incomplete,"previews_incomplete":previews_incomplete,
     })))
+}
+
+pub(super) fn passive_summary(
+    view: &selected::ReadView<'_>,
+    source: &Source<'_>,
+    key: &str,
+    peer: Option<selected::PeerBinding<'_>>,
+) -> Result<Option<Value>, ReadError> {
+    use crate::events::store::warehouse;
+    let (identity, references) = {
+        let tx = view.lock()?;
+        let observed = if let Some(peer) = peer {
+            let original = warehouse::retained_identity(&tx, &source.namespace, peer.trace)
+                .map_err(super::retained_error)?;
+            if original.witness != peer.witness {
+                return Err(ReadError::Restart);
+            }
+            let (observed, current) =
+                warehouse::retained_peer(&tx, &source.namespace, &original, peer.witness, key)
+                    .map_err(|err| ReadError::PeerUnavailable(err.to_string()))?;
+            if !current {
+                let (metadata, identity) = super::retained_metadata_in_snapshot(&tx, source, key)?;
+                return Ok(exact_observed_prefix(source, &observed, &identity.source_refs).then(|| json!({
+                    "name": metadata["name"], "harness": identity.harness,
+                    "kind": metadata["presentation_kind"].as_str().or(metadata["kind"].as_str()).unwrap_or(""),
+                    "model": metadata["model"], "tokens": metadata["tokens"],
+                    "cost": {"usd":metadata["cost"]["usd"],"unpriced_models":metadata["cost"]["unpriced_models"]},
+                    "observed_extent": {"scope":"whole_session","last":metadata["last"],
+                        "status":{"state":null,"observation":"unavailable"},
+                        "recorded_activity":{"state":"unavailable"}},
+                })));
+            }
+            Some(observed)
+        } else {
+            None
+        };
+        let Some(identity) = super::current_identity(&tx, source, key, None)? else {
+            return Ok(None);
+        };
+        let Some(references) = super::focused_members(&tx, source, &identity)? else {
+            return Ok(None);
+        };
+        if observed.as_ref().is_some_and(|peer| {
+            identity.0 != peer.owner
+                || identity.1 != peer.harness
+                || identity.2 != peer.native_id
+                || !exact_observed_prefix(source, peer, &references)
+        }) {
+            return Ok(None);
+        }
+        (identity, references)
+    };
+    let row = super::selected_metadata(
+        view,
+        source,
+        key,
+        identity.0,
+        &identity.1,
+        &references,
+        false,
+        Some(None),
+    )?;
+    let status = if peer.is_some() {
+        json!({"state":null,"observation":"unavailable"})
+    } else {
+        row.recorded_status()
+    };
+    Ok(Some(json!({
+        "name": row.title, "harness": row.harness,
+        "kind": row.presentation_kind.as_deref().unwrap_or(&row.kind),
+        "model": row.model, "tokens": row.token_millions(),
+        "cost": {"usd":row.cost.as_ref().and_then(|cost| cost.usd),
+            "unpriced_models":row.cost.as_ref().map_or(&[][..], |cost| cost.unpriced_models.as_slice())},
+        "observed_extent": {"scope":"whole_session","last":(row.position.last != 0).then_some(row.position.last),
+            "status":status,"recorded_activity":{"state":"unavailable"}},
+    })))
+}
+
+fn exact_observed_prefix(
+    source: &Source<'_>,
+    peer: &crate::events::store::warehouse::ObservedPeer,
+    references: &[crate::CatalogSourceObservation],
+) -> bool {
+    references.len() == peer.members.len()
+        && peer.members.iter().all(|member| {
+            let receipt = &member.receipt;
+            let path = receipt
+                .path
+                .to_str()
+                .and_then(|path| selected::relative(source.options, &peer.harness, path));
+            references.iter().any(|reference| {
+                let reference = &reference.source;
+                path == Some(reference.path.as_str())
+                    && receipt.native_id == reference.native_id
+                    && receipt.offset == reference.offset
+                    && receipt.prefix_sha256 == reference.prefix_sha256
+                    && receipt.tail_sha256 == reference.tail_sha256
+            })
+        })
 }
 
 fn current_metadata(
@@ -372,6 +503,7 @@ fn current_metadata(
         &harness,
         &component.identity.source_refs,
         false,
+        Some(component.latest_turn.as_ref()),
     )
     .map(Some)
 }
@@ -507,7 +639,7 @@ fn trace_end(
                     } else {
                         root.at.unwrap_or(i64::MIN)
                     },
-                    limit + 1,
+                    i64::try_from(limit + 1).map_err(super::index)?,
                 ])
                 .map_err(super::index)?;
             while let Some(row) = rows.next().map_err(super::index)? {
@@ -515,7 +647,8 @@ fn trace_end(
                     row.get::<_, Option<i64>>(2).map_err(super::index)?,
                     selected::Address {
                         path: reference.path.clone(),
-                        offset: row.get(0).map_err(super::index)?,
+                        offset: u64::try_from(row.get::<_, i64>(0).map_err(super::index)?)
+                            .map_err(super::index)?,
                         block: 0,
                         occurrence: row.get(1).map_err(super::index)?,
                     },
@@ -757,6 +890,14 @@ struct Relay {
     window: (selected::Component, selected::Address),
 }
 
+struct RelayRefusal {
+    id: String,
+    target: String,
+    at: i64,
+    reason: String,
+    qualified: bool,
+}
+
 struct Send {
     address: selected::Address,
     block: u32,
@@ -852,7 +993,7 @@ fn retained_relays(
     peer: selected::PeerBinding<'_>,
     root: &selected::Record,
     provider: Option<&dyn SessionSourceReader>,
-    refusals: &mut Vec<(String, String, i64, String)>,
+    refusals: &mut Vec<RelayRefusal>,
 ) -> Result<(Vec<Relay>, bool), ReadError> {
     let sender = component.identity.catalog_key.as_str();
     let (bounds, identity, observed) = {
@@ -885,12 +1026,13 @@ fn retained_relays(
                     | ReadError::SourceBudget),
                 ) => {
                     if crate::session_route::identifier(&recipient) {
-                        refusals.push((
-                            refused_relay_id(&send, block),
-                            recipient,
-                            sent_at,
-                            error.to_string(),
-                        ));
+                        refusals.push(RelayRefusal {
+                            id: refused_relay_id(&send, block),
+                            target: recipient,
+                            at: sent_at,
+                            reason: error.to_string(),
+                            qualified: false,
+                        });
                     }
                     continue;
                 }
@@ -922,6 +1064,7 @@ fn retained_relays(
             })
             .peekable();
         let target = candidates.peek().map(|(key, _)| *key);
+        let qualified_target = target.filter(|_| candidates.clone().nth(1).is_none());
         let mut reason = "No certified peer receipt could be matched to this relay.".to_string();
         for (key, _) in candidates {
             if attempts == 32 {
@@ -1012,12 +1155,13 @@ fn retained_relays(
                 if target.is_none() {
                     reason = "The recipient is absent from the original certified peer set.".into();
                 }
-                refusals.push((
-                    refused_relay_id(&send, block),
-                    label.into(),
-                    sent_at,
+                refusals.push(RelayRefusal {
+                    id: refused_relay_id(&send, block),
+                    target: label.into(),
+                    at: sent_at,
                     reason,
-                ));
+                    qualified: qualified_target.is_some(),
+                });
             }
         }
     }
@@ -1030,7 +1174,7 @@ fn current_relays(
     component: &selected::Component,
     key: &str,
     root: &selected::Record,
-    refusals: &mut Vec<(String, String, i64, String)>,
+    refusals: &mut Vec<RelayRefusal>,
 ) -> Result<(Vec<Relay>, bool), ReadError> {
     let (sends, limited) = relay_sends(view, source, component, root, None)?;
     let mut out = Vec::new();
@@ -1053,6 +1197,7 @@ fn current_relays(
         }
         call.block = i64::from(block);
         let mut reason = "No receipt could be matched to this relay in the selected prefixes.";
+        let mut qualified_target = None;
         let mut read = || -> Result<Option<Relay>, ReadError> {
             let Some(results) = selected::trace_results(view, source, key, &call)? else {
                 return Ok(None);
@@ -1108,6 +1253,7 @@ fn current_relays(
             if target == key {
                 return Ok(None);
             }
+            qualified_target = Some(target.clone());
             let Some(path) = selected::relative(source.options, &harness, &carrier) else {
                 return Ok(None);
             };
@@ -1157,13 +1303,15 @@ fn current_relays(
         };
         match read()? {
             Some(relay) => out.push(relay),
-            None if crate::session_route::identifier(&recipient) => {
-                refusals.push((
-                    refused_relay_id(&call, block),
-                    recipient,
-                    sent_at,
-                    reason.into(),
-                ));
+            None if qualified_target.is_some() || crate::session_route::identifier(&recipient) => {
+                let qualified = qualified_target.is_some();
+                refusals.push(RelayRefusal {
+                    id: refused_relay_id(&call, block),
+                    target: qualified_target.unwrap_or(recipient),
+                    at: sent_at,
+                    reason: reason.into(),
+                    qualified,
+                });
             }
             None => (),
         }

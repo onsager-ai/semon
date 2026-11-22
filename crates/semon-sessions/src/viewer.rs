@@ -4451,7 +4451,9 @@ mod tests {
             );
             let reply = core.respond("GET", "/api/session-capabilities", "machine=source-0", None);
             assert_eq!(reply.status, 200);
-            assert_eq!(body_of(&reply)["source_candidates"], count > 1);
+            let capabilities = body_of(&reply);
+            assert_eq!(capabilities["source_candidates"], count > 1);
+            assert_eq!(capabilities["projection"], 7);
             for view in core.machine_views() {
                 assert_eq!(view.hooks.builds(), 0);
                 assert!(lock(&view.evidence.storage.work).events.is_none());

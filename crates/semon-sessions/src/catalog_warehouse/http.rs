@@ -266,7 +266,7 @@ fn read(
         return Ok(crate::catalog::reply(
             200,
             json!({
-                "api": 1, "machine": configured.key, "read_scope": request.scope, "generation": generation,
+                "api": 1, "projection": 7, "machine": configured.key, "read_scope": request.scope, "generation": generation,
                 "observed_at": null, "machine_info": {"key": configured.key, "label": configured.label, "freshness": "cached"},
                 "freshness": "cached", "completeness": {"state": "complete"},
                 "capabilities": {"pagination": true, "metadata_search": true, "filters": ["harness", "repo", "no_repo", "model", "q"],
@@ -341,7 +341,7 @@ fn read(
     Ok(crate::catalog::reply(
         200,
         json!({
-            "api":1,"machine":machine,"read_scope":request.scope,"generation":page.generation,
+            "api":1,"projection":7,"machine":machine,"read_scope":request.scope,"generation":page.generation,
             "observed_at":null,"machine_info":{"key":machine,"label":label,"freshness":"cached"},
             "capabilities":{"pagination":true,"metadata_search":true,"filters":["harness","repo","no_repo","model","q"],
                 "order":if union { "last_desc_key_asc_machine_asc" } else { "last_desc_key_asc" },
@@ -777,6 +777,16 @@ pub(crate) fn home_with_mode(
             .iter()
             .filter_map(|id| {
                 if selected::is_question_id(id) {
+                    let mut results = component.records.iter().filter_map(|record| {
+                        let brief = selected::home_result(&record.causal, &record.reference, record.address.offset, &record.native, id)?;
+                        Some((record, brief))
+                    });
+                    if let Some((record, brief)) = results.next() {
+                        if results.next().is_some() {
+                            return None;
+                        }
+                        return Some((id.clone(), json!({"brief":brief,"answer":null,"origin":component.home_origin(record)})));
+                    }
                     let mut calls = component.records.iter().flat_map(|record| {
                         record.causal.calls.iter().filter_map(move |call| {
                             (selected::is_question_tool(&call.tool)

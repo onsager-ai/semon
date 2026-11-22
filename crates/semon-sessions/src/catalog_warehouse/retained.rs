@@ -889,7 +889,7 @@ pub(super) fn read_frozen(
         };
         let operation = inputs.operation();
         let causal = inputs.render(source, key, &reference, event_id.as_deref(), turn);
-        if let Some(turn) = home_question_origin(&target, &causal, &reference, offset)
+        if let Some(turn) = home_event_origin(&target, &causal, &reference, offset, &native)
             && let std::collections::btree_map::Entry::Vacant(entry) =
                 home_origins.entry(turn.position)
         {
@@ -995,6 +995,73 @@ pub(super) fn read_frozen(
         .map(serde_json::from_str)
         .transpose()
         .map_err(index)?;
+    drop(bytes_left);
+    if let (Some(detail), Some(turn)) = (&mut home_detail, &latest_turn)
+        && turn.id.starts_with('r')
+    {
+        let binding = PeerBinding {
+            trace: trace_key,
+            witness: &selection_identity.generation,
+        };
+        let candidate = {
+            let tx = view.lock()?;
+            let original = warehouse::retained_identity(&tx, &source.namespace, trace_key)
+                .map_err(super::super::retained_error)?;
+            let bounds = encode(
+                &observed_peers
+                    .iter()
+                    .filter(|(name, _)| *name != key)
+                    .flat_map(|(_, peer)| {
+                        peer.members
+                            .iter()
+                            .map(|member| (member.source, member.receipt.offset))
+                    })
+                    .collect::<BTreeMap<_, _>>(),
+            )?;
+            if let Some((sender, _, _)) = relay_sender(&tx, source, turn, Some(&bounds))? {
+                let mut candidates = observed_peers.iter().filter(|(name, observed)| {
+                    *name != key
+                        && observed
+                            .members
+                            .iter()
+                            .any(|member| member.source == sender)
+                });
+                match (candidates.next(), candidates.next()) {
+                    (Some((name, _)), None)
+                        if warehouse::retained_peer(
+                            &tx,
+                            &source.namespace,
+                            &original,
+                            binding.witness,
+                            name,
+                        )
+                        .is_ok() =>
+                    {
+                        Some(name)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(sender) = candidate {
+            let name =
+                match super::super::trace::passive_summary(view, source, sender, Some(binding)) {
+                    Ok(summary) => {
+                        summary.and_then(|summary| summary["name"].as_str().map(str::to_owned))
+                    }
+                    Err(
+                        ReadError::Restart
+                        | ReadError::SourceBudget
+                        | ReadError::PeerUnavailable(_)
+                        | ReadError::RetainedUnverified,
+                    ) => None,
+                    Err(error) => return Err(error),
+                };
+            detail.set_sender(sender.clone(), name);
+        }
+    }
     if let Some(detail) = &mut home_detail
         && latest_turn
             .as_ref()

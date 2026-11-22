@@ -550,7 +550,7 @@ fn collect_run<M: Clone>(
             block: row.get(1).map_err(index)?,
             address: Address {
                 path: path.to_owned(),
-                offset: row.get(0).map_err(index)?,
+                offset: u64::try_from(row.get::<_, i64>(0).map_err(index)?).map_err(index)?,
                 block: 0,
                 occurrence: row.get(5).map_err(index)?,
             },

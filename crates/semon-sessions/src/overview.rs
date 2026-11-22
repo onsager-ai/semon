@@ -43,6 +43,14 @@ pub(crate) struct Summary {
     source_generation: String,
 }
 impl Summary {
+    pub(crate) fn home_feed(home: Value) -> Self {
+        Self {
+            home,
+            activity: None,
+            source_generation: String::new(),
+        }
+    }
+
     pub(crate) fn query_recipe(&self, id: &str) -> Value {
         self.home["content"]["events"][id].clone()
     }
@@ -254,12 +262,12 @@ pub struct OverviewSource {
     pub options: Options,
     pub up: bool,
 }
-struct Saved {
-    id: String,
-    key: String,
-    source: String,
-    summary: Summary,
-    content_generation: String,
+pub(crate) struct Saved {
+    pub(crate) id: String,
+    pub(crate) key: String,
+    pub(crate) source: String,
+    pub(crate) summary: Summary,
+    pub(crate) content_generation: String,
 }
 fn failed(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
@@ -852,6 +860,26 @@ pub fn session_overview_reply(
     query: &str,
     now: i64,
 ) -> io::Result<ViewerReply> {
+    overview_reply(sources, page, query, now, page == "home")
+}
+
+#[cfg(test)]
+pub(crate) fn slot_overview_reply(
+    sources: &[OverviewSource],
+    page: &str,
+    query: &str,
+    now: i64,
+) -> io::Result<ViewerReply> {
+    overview_reply(sources, page, query, now, false)
+}
+
+fn overview_reply(
+    sources: &[OverviewSource],
+    page: &str,
+    query: &str,
+    now: i64,
+    warehouse_home: bool,
+) -> io::Result<ViewerReply> {
     if !query.is_empty() && query.split('&').any(str::is_empty) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -970,7 +998,7 @@ pub fn session_overview_reply(
     let mut pending = Vec::new();
     let mut ordered: Vec<_> = sources.iter().collect();
     ordered.sort_by_key(|source| &source.key);
-    for source in &ordered {
+    for source in ordered.iter().filter(|_| !warehouse_home) {
         if pending.len() == 8 {
             break;
         }
@@ -986,7 +1014,7 @@ pub fn session_overview_reply(
             pending.push(json!({"source_key":source.key,"catalog_key":key}));
         }
     }
-    if pending.is_empty() && after.is_some() {
+    if !warehouse_home && pending.is_empty() && after.is_some() {
         for source in &ordered {
             if pending.len() == 8 {
                 break;
@@ -998,12 +1026,14 @@ pub fn session_overview_reply(
             }
         }
     }
+    let since = now.saturating_sub(analytics::KEEP_MS);
     for source in &sources {
-        match read(
-            source,
-            now.saturating_sub(analytics::KEEP_MS),
-            page == "analytics",
-        ) {
+        let observation = if warehouse_home {
+            crate::catalog::warehouse::home_feed::read(source, since)
+        } else {
+            read(source, since, page == "analytics")
+        };
+        match observation {
             Ok((rows, complete, generation)) => {
                 versions.push(json!([source.key, generation, source.up]));
                 records.extend(rows);
@@ -1187,6 +1217,16 @@ pub fn session_overview_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_overview_reply(
+        sources: &[OverviewSource],
+        page: &str,
+        query: &str,
+        now: i64,
+    ) -> io::Result<ViewerReply> {
+        overview_reply(sources, page, query, now, false)
+    }
+
     #[test]
     fn retained_activity_never_joins_old_arguments_to_a_new_observation() {
         let prior = json!({"name":"before","state":"work","activity":["Read","","1s",10],"content":{"activity":{"offset":42},"events":{"edge":{}}}});

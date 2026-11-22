@@ -333,7 +333,7 @@ impl CallSlot {
             .chain(self.display_reply().map(|reply| reply.o))
     }
 
-    pub(super) fn display_reply(&self) -> Option<&crate::events::Reply> {
+    pub(in super::super) fn display_reply(&self) -> Option<&crate::events::Reply> {
         self.replies
             .iter()
             .rev()
@@ -432,7 +432,7 @@ impl Inputs {
                         at.offset,
                         block,
                         end,
-                        crate::events::POLLS_MAX + 1
+                        (crate::events::POLLS_MAX + 1) as i64
                     ])
                     .map_err(index)?;
                 while let Some(row) = rows.next().map_err(index)? {

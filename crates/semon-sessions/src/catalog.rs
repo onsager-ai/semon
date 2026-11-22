@@ -3477,7 +3477,7 @@ mod tests {
             up: true,
         };
         let output: Value = serde_json::from_slice(
-            &crate::session_overview_reply(&[source], "home", "", 1790812810000)
+            &crate::overview::slot_overview_reply(&[source], "home", "", 1790812810000)
                 .unwrap()
                 .body,
         )
@@ -3497,7 +3497,12 @@ mod tests {
             "sid=home&scope=retained_history&turn={}",
             row["event"]["turn"].as_str().unwrap()
         );
-        let trace = crate::session_causal_trace(&fixture.options, "source", &trace_query);
+        let trace = crate::causal_trace::session_causal_trace_with_gate(
+            &fixture.options,
+            "source",
+            &trace_query,
+            || Ok(()),
+        );
         assert_eq!(
             trace.status,
             200,
@@ -3514,10 +3519,11 @@ mod tests {
         );
         assert!(!String::from_utf8_lossy(&trace.body).contains("NATIVE_PRIVATE_"));
         assert_eq!(
-            crate::session_causal_trace(
+            crate::causal_trace::session_causal_trace_with_gate(
                 &fixture.options,
                 "source",
-                &trace_query.replace("retained_history", "current")
+                &trace_query.replace("retained_history", "current"),
+                || Ok(()),
             )
             .status,
             400
@@ -3531,12 +3537,13 @@ mod tests {
             row["session"]["content_generation"].as_str().unwrap(),
             crate::viewer::percent_encode(&json!([question_id]).to_string())
         );
-        let read = crate::session_home_details_with_mode(
+        let read = crate::overview::session_home_details_inner(
             &fixture.options,
             "source",
             &query,
             None,
             crate::SessionSourceReadMode::ProviderOnly,
+            true,
         );
         assert_eq!(read.status, 200, "{}", String::from_utf8_lossy(&read.body));
         let details: Value = serde_json::from_slice(&read.body).unwrap();
@@ -3591,12 +3598,13 @@ mod tests {
         let archived_trace: Value = serde_json::from_slice(&archived_trace.body).unwrap();
         assert_eq!(archived_trace["turns"], trace_body["turns"]);
         assert_eq!(archived_trace["handoffs"], trace_body["handoffs"]);
-        let archived = crate::session_home_details_with_mode(
+        let archived = crate::overview::session_home_details_inner(
             &fixture.options,
             "source",
             &query,
             Some(&reader),
             crate::SessionSourceReadMode::LocalThenProvider,
+            true,
         );
         assert_eq!(
             archived.status,
@@ -3669,7 +3677,8 @@ mod tests {
                 "source",
                 "home",
                 Some(&reader),
-                crate::SessionSourceReadMode::LocalThenProvider
+                crate::SessionSourceReadMode::LocalThenProvider,
+                true,
             )
             .unwrap()
         );
@@ -3678,7 +3687,12 @@ mod tests {
                 .unwrap()
                 .contains(&"home".into())
         );
-        let repaired_trace = crate::session_causal_trace(&fixture.options, "source", &trace_query);
+        let repaired_trace = crate::causal_trace::session_causal_trace_with_gate(
+            &fixture.options,
+            "source",
+            &trace_query,
+            || Ok(()),
+        );
         assert_eq!(
             repaired_trace.status,
             200,
@@ -3692,12 +3706,13 @@ mod tests {
             row["session"]["content_generation"].as_str().unwrap(),
             repaired["previews"]["home"].as_str().unwrap(),
         );
-        let recovered = crate::session_home_details_with_mode(
+        let recovered = crate::overview::session_home_details_inner(
             &fixture.options,
             "source",
             &updated,
             Some(&reader),
             crate::SessionSourceReadMode::LocalThenProvider,
+            true,
         );
         assert_eq!(
             recovered.status,
@@ -3716,12 +3731,13 @@ mod tests {
         // ledger, so the Catalog identity read itself refuses it.
         db.execute("UPDATE session_catalog SET metadata=json_set(metadata,'$.sources[0].prefix_sha256',json(?1)) WHERE session_key='home'", [json!(vec![9;32]).to_string()]).unwrap();
         assert_eq!(
-            crate::session_home_details_with_mode(
+            crate::overview::session_home_details_inner(
                 &fixture.options,
                 "source",
                 &updated,
                 Some(&reader),
-                crate::SessionSourceReadMode::ProviderOnly
+                crate::SessionSourceReadMode::ProviderOnly,
+                true,
             )
             .status,
             503
