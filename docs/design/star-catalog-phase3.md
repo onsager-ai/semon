@@ -77,6 +77,14 @@ well as selecting metadata from committed facts.
   custody no longer qualifies, show why the peer is unavailable. A peer link
   never falls through to a replacement owner, and an ordinary unbound History
   request still returns `retained_identity_unverified`.
+- Owner decision 2026-11-22: the source prepares a seekable copy of each
+  needed archive chain in a background job. The copy lives next to the Index,
+  is checked against the archive chain, and stores hash-verified chunks. It is
+  a rebuildable cache owned by Semon. Preparation leaves the archives untouched.
+  Selected History reads verify only the chunks they need and charge them to
+  the request budget. An old retired session whose copy is pending shows a
+  preparing state. Body bytes and derived copies stay origin-local and follow
+  the archive's custody rules.
 - Qualification starts with the new schema. The host rebuild replays authorized
   originals without importing old Index rows or a custody manifest. Pre-cutover
   retained keys without a verified warehouse binding get the same explicit

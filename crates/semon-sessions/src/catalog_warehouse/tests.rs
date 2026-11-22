@@ -628,7 +628,12 @@ fn warehouse_focused_reads_require_only_the_selected_committed_component() {
     let page = selected::latest_page(&fixture.options, &source, "selected", 10, None)
         .unwrap()
         .unwrap();
-    assert_eq!(page.records[0].text().as_deref(), Some("Selected prompt"));
+    let prompts = page
+        .records
+        .iter()
+        .filter_map(selected::Record::text)
+        .collect::<Vec<_>>();
+    assert_eq!(prompts, ["Selected prompt"]);
     let replacement = path.with_extension("replacement");
     fs::write(&replacement, fs::read(&path).unwrap()).unwrap();
     fs::rename(replacement, path).unwrap();
