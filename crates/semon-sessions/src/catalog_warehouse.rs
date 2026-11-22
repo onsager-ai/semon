@@ -1491,6 +1491,16 @@ thread_local! {
         std::cell::RefCell::new(None);
 }
 
+#[cfg(test)]
+pub(crate) fn after_list_snapshot(hook: impl FnOnce() + 'static) {
+    AFTER_LIST_SNAPSHOT.with(|slot| slot.replace(Some(Box::new(hook))));
+}
+
+#[cfg(test)]
+pub(crate) fn after_transcript_body(hook: impl FnOnce() + 'static) {
+    selected::AFTER_BODY.with(|slot| slot.replace(Some(Box::new(hook))));
+}
+
 pub(super) fn read_list(
     sources: &[Source<'_>],
     workspace: &str,
@@ -1509,14 +1519,22 @@ pub(super) fn read_list(
         |view, source, boundary| {
             let (candidates, count, paths, repos, coverage, revision) = {
                 let tx = view.lock()?;
+                #[cfg(test)]
+                let phase = crate::catalog::baseline_start();
                 let snapshot = Snapshot::read(&tx, source)?;
+                #[cfg(test)]
+                crate::catalog::baseline_record(phase, |sample| &mut sample.runtime_and_custody);
                 #[cfg(test)]
                 AFTER_LIST_SNAPSHOT.with(|hook| {
                     if let Some(hook) = hook.borrow_mut().take() {
                         hook();
                     }
                 });
+                #[cfg(test)]
+                let phase = crate::catalog::baseline_start();
                 let (candidates, count) = snapshot.candidates(request, boundary)?;
+                #[cfg(test)]
+                crate::catalog::baseline_record(phase, |sample| &mut sample.selection);
                 (
                     candidates,
                     count,
@@ -1526,7 +1544,11 @@ pub(super) fn read_list(
                     snapshot.revision,
                 )
             };
+            #[cfg(test)]
+            let phase = crate::catalog::baseline_start();
             let (mut rows, scanned, next) = select_list_rows(view, source, request, candidates)?;
+            #[cfg(test)]
+            crate::catalog::baseline_record(phase, |sample| &mut sample.title_and_presentation);
             let tx = view.lock()?;
             let snapshot = Snapshot {
                 transaction: &tx,
@@ -1536,7 +1558,11 @@ pub(super) fn read_list(
                 coverage,
                 revision,
             };
+            #[cfg(test)]
+            let phase = crate::catalog::baseline_start();
             snapshot.enrich(&mut rows, false)?;
+            #[cfg(test)]
+            crate::catalog::baseline_record(phase, |sample| &mut sample.runtime_and_custody);
             Ok((
                 (rows, count, scanned, next),
                 snapshot.coverage,
@@ -1768,6 +1794,7 @@ fn read_pages<T>(
     let mut digest = Sha256::new();
     let (mut rows, mut total, mut examined, mut coverage, mut frontier) =
         (Vec::new(), 0, 0, Coverage::default(), None::<Boundary>);
+    let allow_pending = workspace_read || request.scope == CatalogReadScope::Current;
     for source in ordered {
         let db = match Connection::open_with_flags(
             source.path,
@@ -1775,7 +1802,7 @@ fn read_pages<T>(
         ) {
             Ok(db) => db,
             Err(error) => {
-                if workspace_read
+                if allow_pending
                     && std::fs::metadata(source.path)
                         .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
                 {
@@ -1789,7 +1816,7 @@ fn read_pages<T>(
         };
         list_functions(&db).map_err(index)?;
         db.execute_batch("BEGIN DEFERRED").map_err(index)?;
-        if workspace_read && !crate::events::store::current_or_fresh(&db).map_err(index)? {
+        if allow_pending && !crate::events::store::current_or_fresh(&db).map_err(index)? {
             digest.update(encode(&(source.namespace.binding(), "pending"))?);
             coverage.pending += source.inventory.len().max(1);
             source.validate_authority()?;

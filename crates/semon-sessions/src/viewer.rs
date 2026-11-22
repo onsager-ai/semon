@@ -2153,6 +2153,186 @@ mod tests {
     }
 
     #[test]
+    fn sqlite_http_reads_committed_prefixes_while_the_index_advances() {
+        use crate::catalog::warehouse::{after_list_snapshot, after_transcript_body};
+
+        let fixture = lane_fixture();
+        let child = json!({"type":"user","sessionId":"lane","agentId":"child","isSidechain":true,
+            "uuid":"child-prompt","timestamp":"2026-09-24T00:02:00Z","message":{"role":"user","content":"Inspect the lane"}});
+        fixture.write(
+            "claude/projects/project/lane/subagents/agent-child.jsonl",
+            &format!("{child}\n"),
+        );
+        let view = fixture.viewer();
+        publish_native(&view);
+        let server = Server::http("127.0.0.1:0").unwrap();
+        let port = server.server_addr().to_ip().unwrap().port();
+        let token = "0123456789abcdef0123456789abcdef";
+        let viewer = Viewer {
+            core: ViewerCore::with_test_view(view.clone()),
+            token: token.into(),
+            port,
+            receive: Some(Arc::new(TestAccess)),
+            public_origin: None,
+            asi: None,
+            storage_refusals: Mutex::default(),
+        };
+        let deadline = Duration::from_secs(10);
+        let db = crate::events::EventCache::path(&fixture.options.cache);
+        let revision = || {
+            rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap()
+                .query_row(
+                    "SELECT coalesce(max(revision),0) FROM warehouse_prefix",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        let admit = || {
+            let mut work = lock(&view.evidence.storage.work);
+            view.refresh_catalog_locked(&mut work, model::now_ms())
+                .unwrap();
+        };
+        let request = |path: &str, during_read: Option<&dyn Fn()>| {
+            let (opened, read_open) = mpsc::channel();
+            let (release, resume) = mpsc::channel();
+            thread::scope(|scope| {
+                let server = &server;
+                let viewer = &viewer;
+                let pause = during_read.is_some();
+                scope.spawn(move || {
+                    if pause {
+                        let hook = move || {
+                            opened.send(()).unwrap();
+                            resume.recv_timeout(deadline).unwrap();
+                        };
+                        if path.starts_with("/api/sessions?") {
+                            after_list_snapshot(hook);
+                        } else {
+                            after_transcript_body(hook);
+                        }
+                    }
+                    viewer.handle(server.recv_timeout(deadline).unwrap().unwrap());
+                });
+                let client = scope.spawn(move || {
+                    let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                    stream.set_read_timeout(Some(deadline)).unwrap();
+                    write!(stream, "GET {path} HTTP/1.0\r\nHost: localhost:{port}\r\nCookie: semon_session=test-id.{token}\r\nConnection: close\r\n\r\n").unwrap();
+                    stream.shutdown(std::net::Shutdown::Write).unwrap();
+                    let mut wire = String::new();
+                    stream.read_to_string(&mut wire).unwrap();
+                    let (head, body) = wire.split_once("\r\n\r\n").unwrap();
+                    assert_eq!(head.split_whitespace().nth(1), Some("200"), "{path} {head} {body}");
+                    serde_json::from_str::<Value>(body).unwrap()
+                });
+                if let Some(advance) = during_read {
+                    read_open.recv_timeout(deadline).unwrap();
+                    advance();
+                    release.send(()).unwrap();
+                }
+                client.join().unwrap()
+            })
+        };
+
+        let list = "/api/sessions?machine=local&limit=20";
+        let latest = "/api/session-transcript?machine=local&sid=lane&limit=1";
+        let first = request(latest, None);
+        let cursor = first["earlier_cursor"].as_str().unwrap();
+        let earlier = format!("{latest}&cursor={}", percent_encode(cursor));
+        let session = json!({"type":"user","timestamp":"2026-09-24T00:02:00Z","sessionId":"new-lane",
+            "origin":{"kind":"human"},"message":{"role":"user","content":"A newly admitted session"}});
+        let pending = fixture.write(
+            "claude/projects/project/new-lane.jsonl",
+            &session.to_string(),
+        );
+        let assert_relationship = |page: &Value, total: u64| {
+            let rows = page["items"].as_array().unwrap();
+            assert_eq!(page["total"], total);
+            assert_eq!(rows.len() as u64, total);
+            let child = rows.iter().find(|row| row["key"] == "child").unwrap();
+            assert_eq!(child["parent"], "lane");
+        };
+        let old_list = request(
+            list,
+            Some(&|| {
+                admit();
+                let before = revision();
+                let mut file = fs::OpenOptions::new().append(true).open(&pending).unwrap();
+                writeln!(file).unwrap();
+                admit();
+                assert!(
+                    revision() > before,
+                    "the Index committed a complete record during the list read"
+                );
+            }),
+        );
+        assert_relationship(&old_list, 2);
+        assert!(
+            old_list["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row["key"] != "new-lane")
+        );
+        assert_eq!(old_list["coverage"]["pending"], 1);
+
+        for (round, text) in ["first committed append", "second committed append"]
+            .into_iter()
+            .enumerate()
+        {
+            let previous = request(latest, None);
+            let during = request(
+                latest,
+                Some(&|| {
+                    let before = revision();
+                    say(&fixture, "lane", round + 1, text);
+                    admit();
+                    assert!(
+                        revision() > before,
+                        "the Index advanced while the transcript body was held"
+                    );
+                }),
+            );
+            assert_eq!(during["entries"], previous["entries"]);
+            let fresh = request(latest, None);
+            assert_eq!(fresh["entries"][0]["text"], text);
+            let old = request(&earlier, None);
+            assert_eq!(old["position"], "earlier");
+            assert_eq!(old["entries"][0]["text"], "<script>alert(1)</script>");
+            let concurrent = request(
+                list,
+                Some(&|| {
+                    let before = revision();
+                    say(
+                        &fixture,
+                        "new-lane",
+                        round + 10,
+                        "advance during repeated list reads",
+                    );
+                    admit();
+                    assert!(
+                        revision() > before,
+                        "the writer progressed during a repeated list read"
+                    );
+                }),
+            );
+            assert_relationship(&concurrent, 3);
+            let page = request(list, None);
+            assert_relationship(&page, 3);
+            assert!(
+                page["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|item| item["key"] == "new-lane")
+            );
+            assert_eq!(page["coverage"]["pending"], 0);
+        }
+        viewer.core.close();
+    }
+
+    #[test]
     #[ignore = "manual Star Catalog scale baseline"]
     fn receiver_catalog_list_baseline() {
         let fixture = Fixture::new();
@@ -2179,6 +2359,7 @@ mod tests {
             asi: None,
             storage_refusals: Mutex::default(),
         };
+        let (warmed, warm_ready) = mpsc::channel();
         let worker = thread::spawn(move || {
             for phase in [
                 "fresh",
@@ -2187,7 +2368,10 @@ mod tests {
                 "pending_machine",
                 "warm_after_changes",
             ] {
-                let request = server.recv().unwrap();
+                let request = server
+                    .recv_timeout(Duration::from_secs(90))
+                    .unwrap()
+                    .unwrap();
                 crate::catalog::LIST_BASELINE
                     .with(|sample| sample.replace(Some(Default::default())));
                 viewer.handle(request);
@@ -2199,6 +2383,16 @@ mod tests {
                     sample.selection.as_micros(),
                     sample.title_and_presentation.as_micros()
                 );
+                if phase == "fresh" {
+                    let view = viewer
+                        .core
+                        .machine_views()
+                        .into_iter()
+                        .find(|view| view.evidence.read_key() == machine_id("scale-a"))
+                        .unwrap();
+                    publish_native(&view);
+                    warmed.send(()).unwrap();
+                }
             }
             viewer.core.close();
         });
@@ -2227,7 +2421,8 @@ mod tests {
             );
             (status.to_owned(), rows)
         };
-        request("fresh");
+        let fresh = request("fresh");
+        warm_ready.recv_timeout(Duration::from_secs(90)).unwrap();
         let warm = request("warm");
         let mut file = fs::OpenOptions::new()
             .append(true)
@@ -2237,10 +2432,13 @@ mod tests {
         request("after_append");
         let pending = register_received(&received_dir, "scale-pending");
         fs::create_dir_all(pending).unwrap();
-        request("pending_machine");
+        let pending = request("pending_machine");
         let last = request("warm_after_changes");
         worker.join().unwrap();
-        assert!(warm == ("200".into(), 40) || last == ("200".into(), 40));
+        assert_eq!(fresh.0, "200");
+        assert_eq!(warm, ("200".into(), 40));
+        assert_eq!(pending, ("200".into(), 0));
+        assert_eq!(last, ("200".into(), 40));
     }
 
     #[test]

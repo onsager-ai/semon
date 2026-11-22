@@ -1637,6 +1637,8 @@ impl ViewerCore {
         }
         let configured = crate::catalog::warehouse::host_source(view.options(), key);
         use crate::catalog::warehouse::http;
+        #[cfg(test)]
+        let queue = crate::catalog::baseline_start();
         if path != "/api/session-capabilities" {
             if view.evidence.validate_configuration().is_err() {
                 return catalog_unavailable();
@@ -1646,6 +1648,8 @@ impl ViewerCore {
             }
             let _ = view.note_catalog_read();
         }
+        #[cfg(test)]
+        crate::catalog::baseline_record(queue, |sample| &mut sample.wait);
         match path {
             "/api/session-locate" => http::locate(&configured, query),
             "/api/session-observe" => http::observe(&configured, query),
