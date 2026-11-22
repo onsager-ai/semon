@@ -1044,7 +1044,7 @@ fn warehouse_component_cursor_pages_members_and_pins_unvisited_prefixes() {
     let path = paths[1].clone();
     let cache = fixture.options.cache.clone();
     selected::AFTER_BODY.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move || {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
             append_native(&path, prompt("member-01", 72, "during body fetch"));
             let mut cache = EventCache::open_scoped(&cache).unwrap();
             scan_file(&path, "claude", &mut cache, &mut false).unwrap();
@@ -1305,7 +1305,7 @@ fn warehouse_component_refuses_rewrites_replacements_and_truncation() {
             "during-body" => {
                 let path = path.clone();
                 selected::AFTER_BODY.with(|hook| {
-                    *hook.borrow_mut() = Some(Box::new(move || {
+                    *hook.borrow_mut() = Some(Box::new(move |_| {
                         let raw = fs::read_to_string(&path).unwrap();
                         fs::write(&path, raw.replace("Original", "Modified")).unwrap();
                         append_native(&path, prompt("native", 3, "unqualified growth"));
@@ -2966,7 +2966,7 @@ fn warehouse_current_provider_pins_the_selected_original_across_pages() {
 
     let restored = path.clone();
     selected::AFTER_BODY.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move || fs::rename(original, restored).unwrap()));
+        *hook.borrow_mut() = Some(Box::new(move |_| fs::rename(original, restored).unwrap()));
     });
     assert!(matches!(page(&hosted, 10, None), Err(ReadError::Restart)));
 }

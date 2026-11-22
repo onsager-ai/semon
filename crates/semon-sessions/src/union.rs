@@ -1995,7 +1995,15 @@ mod tests {
                 scan_window: false,
             }
         };
-        let core = ViewerCore::with_machines(vec![("one".into(), options("one"))]);
+        let publish = |core: &ViewerCore| {
+            for view in core.machine_views() {
+                view.wait_until_initial_catalog(Instant::now() + INITIAL_CATALOG_WAIT)
+                    .unwrap();
+            }
+        };
+        let one = options("one");
+        let core = ViewerCore::with_machines(vec![("one".into(), one.clone())]);
+        publish(&core);
         let redirect = core.respond("GET", "/session/by-native/claude/native", "", None);
         assert_eq!(redirect.status, 303);
         assert!(redirect.body.is_empty());
@@ -2023,10 +2031,9 @@ mod tests {
             "path segments are percent-decoded exactly once"
         );
         core.close();
-        let ambiguous = ViewerCore::with_machines(vec![
-            ("one".into(), options("one")),
-            ("two".into(), options("two")),
-        ]);
+        let ambiguous =
+            ViewerCore::with_machines(vec![("one".into(), one), ("two".into(), options("two"))]);
+        publish(&ambiguous);
         let reply = ambiguous.respond("GET", "/session/by-native/claude/native", "", None);
         assert_eq!(reply.status, 409);
         assert_eq!(reply.body, b"ambiguous");
