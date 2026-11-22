@@ -65,12 +65,27 @@ pub(in crate::events::store) fn certify(
         return Ok(());
     }
     let trace_peers = json(&observe_trace_peers(tx, &source_key, row)?)?;
+    let turn_lifecycle = if row.harness == "codex" {
+        let carrier: String = tx.query_row(
+            "SELECT carrier FROM warehouse_source WHERE source=?1",
+            [owner],
+            |record| record.get(0),
+        )?;
+        if let Some((ledger, _)) = super::committed_ledger(tx, &carrier)? {
+            super::committed_codex_lifecycle(tx, &carrier, &ledger, &native_id)?
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let metadata = json(&serde_json::json!({
         "key": row.key, "name": row.name, "harness": row.harness,
         "kind": row.kind, "presentation_kind": row.presentation_kind,
         "native_ids": row.native_ids, "parent": row.parent, "parent_source": row.parent_source,
         "repo": row.repo, "branch": row.branch, "model": row.model, "effort": row.effort,
         "start": row.start, "last": row.last, "tokens": row.tokens, "cost": row.cost,
+        "details": {"turn_lifecycle":turn_lifecycle,"live_observation":false},
     }))?;
     let mut witness = binding_digest(&(
         source_key.as_str(),

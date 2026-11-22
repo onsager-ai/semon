@@ -2147,11 +2147,11 @@ pub(super) fn host_source_proof(
         let Availability::Expected(Some(stat)) = source.availability(harness, carrier)? else {
             return Err(ReadError::Restart);
         };
-        if !selected::stable_or_grown(&ledger.stat, &stat) {
+        if ledger.stat != stat {
             return Err(ReadError::Restart);
         }
         source.validate_authority()?;
-        let state = if ledger.stat.size == ledger.offset && stat == ledger.stat {
+        let state = if ledger.stat.size == ledger.offset {
             "cached"
         } else {
             "incomplete"

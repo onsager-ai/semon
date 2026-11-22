@@ -539,7 +539,7 @@ pub(super) struct HomeDetail {
 impl HomeDetail {
     fn from_turn(turn: &causal::TurnStart, native: &serde_json::Value) -> Self {
         let kinds: &[_] = if turn.id.starts_with('r') {
-            &["received_cross", "received_down", "received_agent"]
+            &["received_cross", "received_agent", "received_down"]
         } else {
             &["prompt"]
         };

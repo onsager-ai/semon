@@ -9264,7 +9264,7 @@ mod tests {
     #[test]
     fn catalog_batch_matches_row_wise_partial_native_lineage_history_and_archive_proofs() {
         let root = scratch("catalog-batch-partial-lineage");
-        let (options, _, _) = catalog_native_fixture(&root, 4, false);
+        let (options, _, _) = catalog_native_fixture(&root, 4, true);
         let relative = "projects/-work-proj/native-cl-02.jsonl";
         let path = options.claude_home.join(relative);
         use std::io::Write;

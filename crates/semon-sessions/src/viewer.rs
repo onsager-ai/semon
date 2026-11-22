@@ -7063,11 +7063,18 @@ mod tests {
     #[test]
     fn native_reads_during_observation_keep_the_committed_prefix() {
         let fixture = lane_fixture();
-        let (view, v1) = warm_background(&fixture);
+        let (view, _) = warm_background(&fixture);
+        assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
+        let before_list = body_of(&native_api(&view, "/api/sessions", ""));
+        let v1 = before_list["generation"].as_str().unwrap();
+        let carrier = fixture
+            .options
+            .claude_home
+            .join("projects/project/lane.jsonl");
+        let prefix = committed_carrier_prefix(&fixture.options, &carrier);
         let before = native_selected(&view, "lane");
         let expected = &before["entries"][0]["address"];
         let address = percent_encode(&expected.to_string());
-        assert_eq!(view.respond("GET", "/api/tree", "", None).status, 200);
         let reads = view.hooks.refreshes_first.load(Ordering::SeqCst);
         let (starts, release) = view.hooks.hold();
         say(&fixture, "lane", 1, "written while the rebuild waits");
@@ -7081,7 +7088,13 @@ mod tests {
             "",
         );
         assert_eq!(during.status, 200);
-        assert_eq!(body_of(&during)["generation"], v1);
+        assert_eq!(committed_carrier_prefix(&fixture.options, &carrier), prefix);
+        let during = body_of(&during);
+        assert_eq!(during["items"][0]["key"], "lane");
+        assert_eq!(
+            during["items"][0]["source_refs"],
+            before_list["items"][0]["source_refs"]
+        );
         for query in ["sid=lane".to_owned(), format!("sid=lane&address={address}")] {
             let reply = ask(
                 "qualified selected prefix during observation",
@@ -7130,11 +7143,20 @@ mod tests {
         drop(release);
         let after = eventually("the next qualified native generation", || {
             let reply = native_api(&view, "/api/sessions", "");
-            (reply.status == 200 && body_of(&reply)["generation"] != v1).then_some(reply)
+            if reply.status != 200 {
+                return None;
+            }
+            let page = body_of(&reply);
+            let offset = page["items"][0]["source_refs"][0]["source"]["offset"].as_u64()?;
+            let committed = committed_carrier_prefix(&fixture.options, &carrier);
+            (committed.0 > prefix.0
+                && offset == committed.1
+                && offset > prefix.1
+                && serves(&view, "while the rebuild waits"))
+            .then_some(reply)
         });
         let v2 = version_of(&after);
         assert_ne!(v1, v2);
-        assert!(serves(&view, "while the rebuild waits"));
         for _ in 0..5 {
             let reply = native_api(&view, "/api/sessions", "");
             assert_eq!(reply.status, 200);
@@ -8279,20 +8301,22 @@ mod tests {
         let before: Vec<_> = views.iter().map(shown).collect();
         let builds: Vec<_> = views.iter().map(|view| view.hooks.builds()).collect();
         say(&fixture, "lane", 1, "seen by fifty views");
+        let mut rebuilt = vec![false; views.len()];
         eventually("a rebuild of every view, with no read", || {
             assert!(pool.threads() <= 3, "{} threads", pool.threads());
             assert!(pool.queued() <= views.len());
             for view in &views {
                 assert!(pool.entries_for(view) <= 1);
             }
-            views
+            for ((view, (builds, before)), rebuilt) in views
                 .iter()
                 .zip(builds.iter().zip(&before))
-                .all(|(view, (builds, before))| {
-                    view.hooks.builds() > *builds
-                        && shown(view).is_some_and(|snapshot| Some(&snapshot) != before.as_ref())
-                })
-                .then_some(())
+                .zip(&mut rebuilt)
+            {
+                *rebuilt |= view.hooks.builds() > *builds
+                    && shown(view).is_some_and(|snapshot| Some(&snapshot) != before.as_ref());
+            }
+            rebuilt.iter().all(|seen| *seen).then_some(())
         });
         for view in &views {
             assert!(serves(view, "seen by fifty views"));
@@ -8845,7 +8869,8 @@ mod tests {
         assert_eq!(core.respond("GET", "/viewer.js", "", None).status, 200);
         assert_eq!(refresh_counts(&view), (0, 0, 0), "a page read the logs");
 
-        let generation = warm(&view);
+        warm(&view);
+        let generation = version_of(&native_api(&view, "/api/sessions", "sid=lane"));
         let selected = native_selected(&view, "lane");
         let turn = selected["entries"][0]["turn"].as_str().unwrap().to_owned();
         assert_eq!(view.hooks.builds(), 1);
