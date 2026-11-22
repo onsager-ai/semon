@@ -1468,7 +1468,7 @@ fn tool_output(
     ))
 }
 
-fn think_text(record: &Value, block: usize) -> Option<String> {
+pub(crate) fn think_text(record: &Value, block: usize) -> Option<String> {
     if let Some(payload) = record.get("payload") {
         if field(record, "type") != Some("response_item")
             || field(payload, "type") != Some("reasoning")

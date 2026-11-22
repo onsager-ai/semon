@@ -194,7 +194,9 @@ fn read_retained_page(
             operation_parent: None,
             causal: causal::Context::default(),
             relay_receipts: Vec::new(),
+            reference: reference.clone(),
             kind,
+            at: (position.time != i64::MIN).then_some(position.time),
             native,
             address: Address {
                 path: reference.path.clone(),
@@ -221,6 +223,7 @@ fn read_retained_page(
         member_count,
         legacy_completion: None,
         records,
+        reply_records: BTreeMap::new(),
         next,
     })
 }
@@ -340,7 +343,9 @@ fn read_certified_record(
         causal: causal::Context::default(),
         relay_receipts: Vec::new(),
         address: address.clone(),
+        reference,
         kind,
+        at: crate::events::record_time(&native),
         native,
     }))
 }

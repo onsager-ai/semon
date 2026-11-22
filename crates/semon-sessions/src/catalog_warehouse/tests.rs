@@ -1362,6 +1362,23 @@ fn warehouse_component_tool_results_use_the_selected_prefix() {
         "qualified result"
     );
     assert_eq!(fresh.causal.calls[0].replies.len(), 1);
+    let latest = selected::latest_page(&fixture.options, &source, "native", 10, None)
+        .unwrap()
+        .unwrap();
+    let rendered = selected::render::entries(
+        &latest,
+        fixture.namespace.as_str(),
+        "native",
+        crate::model::now_ms(),
+    );
+    let tool = rendered
+        .iter()
+        .find(|entry| entry["name"] == "SendMessage")
+        .unwrap();
+    assert_eq!(tool["address"]["record"], json!(call));
+    assert_eq!(tool["ok"], true);
+    assert!(tool.to_string().contains("qualified result"));
+
     assert_eq!(fresh.causal.turn, previously_committed.causal.turn);
     assert!(fresh.causal.turn.is_some());
     let latest = selected::tool_results(&fixture.options, &source, "native", &call, None)

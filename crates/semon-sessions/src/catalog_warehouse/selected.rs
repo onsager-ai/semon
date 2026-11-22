@@ -20,6 +20,8 @@ use std::{
 mod causal;
 #[path = "parent_relay.rs"]
 mod parent_relay;
+#[path = "render.rs"]
+pub(super) mod render;
 #[path = "retained.rs"]
 mod retained;
 pub(super) use retained::{
@@ -124,7 +126,8 @@ impl Cursor {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Address {
     pub(super) path: String,
     pub(super) offset: u64,
@@ -140,7 +143,9 @@ pub(super) struct Record {
     pub(super) causal: causal::Context,
     pub(super) relay_receipts: Vec<RelayReceipt>,
     pub(super) address: Address,
+    pub(super) reference: SessionSourceRef,
     pub(super) kind: Option<String>,
+    pub(super) at: Option<i64>,
     pub(super) native: serde_json::Value,
 }
 
@@ -263,6 +268,7 @@ pub(super) struct Component {
     pub(super) member_count: usize,
     pub(super) legacy_completion: Option<RelayReceipt>,
     pub(super) records: Vec<Record>,
+    pub(super) reply_records: BTreeMap<(String, u64), serde_json::Value>,
     pub(super) next: Option<Cursor>,
 }
 
@@ -1389,6 +1395,7 @@ fn read(
         &encode(&incoming)?,
     )?;
     let mut records = Vec::with_capacity(candidates.len());
+    let mut reply_records = BTreeMap::new();
     let mut touched = BTreeMap::new();
     for (position, (kind, member, mut prefix)) in candidates {
         let offset = u64::try_from(position.offset).map_err(index)?;
@@ -1452,15 +1459,31 @@ fn read(
                 None,
             )
         });
+        let causal = causal
+            .remove(&position)
+            .map_or_else(causal::Context::default, |inputs| {
+                inputs.render(source, key, reference, native_id.as_deref(), turn)
+            });
+        if direction == Direction::Reverse {
+            for reply in causal
+                .calls
+                .iter()
+                .filter_map(causal::CallSlot::display_reply)
+            {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    reply_records.entry((reference.path.clone(), reply.o))
+                {
+                    let (body, _) = read_body(position.source, &member, reply.o)?;
+                    entry.insert(body);
+                }
+            }
+        }
         records.push(Record {
             prompt_anchor: anchors.remove(&position),
             entry_anchor,
             operation_parent,
-            causal: causal
-                .remove(&position)
-                .map_or_else(causal::Context::default, |inputs| {
-                    inputs.render(source, key, reference, native_id.as_deref(), turn)
-                }),
+            causal,
+            at: (position.time != i64::MIN).then_some(position.time),
             relay_receipts: relay_context.remove(&position).unwrap_or_default(),
             address: Address {
                 path: reference.path.clone(),
@@ -1468,6 +1491,7 @@ fn read(
                 block: position.block,
                 occurrence: position.occurrence,
             },
+            reference: reference.clone(),
             kind,
             native,
         });
@@ -1504,6 +1528,7 @@ fn read(
         member_count,
         legacy_completion,
         records,
+        reply_records,
         next,
     }))
 }

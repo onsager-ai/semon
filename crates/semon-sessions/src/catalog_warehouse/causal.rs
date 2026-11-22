@@ -235,6 +235,15 @@ pub(in super::super) struct CallSlot {
     pub(in super::super) replies: Vec<crate::events::Reply>,
 }
 
+impl CallSlot {
+    pub(super) fn display_reply(&self) -> Option<&crate::events::Reply> {
+        self.replies
+            .iter()
+            .rev()
+            .find(|reply| reply.f & crate::events::ACK == 0)
+    }
+}
+
 pub(super) struct Inputs {
     signals: Vec<crate::events::Signal>,
     calls: Vec<CallSlot>,
