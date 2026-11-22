@@ -1,12 +1,12 @@
-import type { CatalogTranscriptEntry } from '../state/catalog-transcript-wire';
+import type { CatalogDisplayedEntry } from '../state/catalog-transcript-wire';
 /** Display adjacent Codex snapshots without changing accepted records or crossing native turn boundaries. */
 export function coalesceRecordedThoughts(
-  entries: readonly CatalogTranscriptEntry[],
+  entries: readonly CatalogDisplayedEntry[],
   harness: string,
   knownTurns: ReadonlySet<string>,
-): readonly CatalogTranscriptEntry[] {
+): readonly CatalogDisplayedEntry[] {
   if (harness !== 'codex') return entries;
-  const out: CatalogTranscriptEntry[] = [];
+  const out: CatalogDisplayedEntry[] = [];
   let chain: { index: number; owner: string | null; text: string | null } | null = null;
   let owner: string | null = null,
     sawOwner = false,
@@ -55,9 +55,9 @@ export function coalesceRecordedThoughts(
 }
 /** Masked reasoning has one quiet placeholder per qualified native turn. */
 export function visibleMaskedThoughts(
-  entries: readonly CatalogTranscriptEntry[],
+  entries: readonly CatalogDisplayedEntry[],
   knownTurns: ReadonlySet<string>,
-): readonly CatalogTranscriptEntry[] {
+): readonly CatalogDisplayedEntry[] {
   const seen = new Set<string>();
   let owner: string | undefined;
   return entries.filter(({ entry }) => {

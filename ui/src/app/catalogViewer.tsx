@@ -2,6 +2,8 @@ import {
   sessionPath,
   tracePath,
   parseSessionRoute,
+  parseNativeEntryAddress,
+  type NativeEntryAddress,
   sessionHashTurn,
   type SessionRoute,
 } from '../lib/sessionRoute';
@@ -35,7 +37,11 @@ import {
 } from '../state/catalog-count';
 import { CatalogSelectionStore, type CatalogSelectionRequest } from '../state/catalog-selection';
 import { parseCatalogAnnotations, type CatalogAnnotations } from '../state/catalog-annotations';
-import { CatalogTranscriptStore } from '../state/catalog-transcript';
+import {
+  CatalogNativeTranscriptStore,
+  CatalogTranscriptStore,
+  type CatalogNativeWindow,
+} from '../state/catalog-transcript';
 import { CatalogRecovery, type CatalogRecoveryProgress } from '../state/catalog-recovery';
 import { createShellChrome } from '../lib/shell';
 import { createOrdering, orderRows, type OrderScope } from '../lib/ordering';
@@ -93,7 +99,8 @@ import {
 import { parseNativeRelationships } from '../domain/relationships';
 import {
   parseCatalogTranscriptPage,
-  type CatalogTranscriptEntry,
+  parseCatalogNativeEntry,
+  type CatalogDisplayedEntry,
 } from '../state/catalog-transcript-wire';
 import { parseCatalogField } from '../state/catalog-field-wire';
 import { I, STATE, HARNESS } from './registry';
@@ -108,6 +115,7 @@ interface SelectedView {
   key: string;
   root: HTMLElement;
   store: CatalogTranscriptStore;
+  nativeStore?: CatalogNativeTranscriptStore;
   meta: CatalogSession | null;
   observedName?: string;
   sourceLabel?: string | null;
@@ -160,7 +168,7 @@ interface SelectedView {
   errorIndex?: number;
   annotations?: CatalogAnnotations;
   annotationsLoading?: boolean;
-  annotationRange?: number;
+  annotationRange?: string | number;
   navigationEpoch?: number;
   annotationsEpoch?: number;
   annotationsFocus?: boolean;
@@ -727,10 +735,11 @@ export function createCatalogViewer(
       value.set('all_machines', '1');
     return value;
   };
-  const sessionControls = (readScope: CatalogReadScope) => {
+  const sessionControls = (readScope: CatalogReadScope, address?: NativeEntryAddress) => {
     const p = browsingParams();
     p.delete('machine');
     if (readScope === 'retained_history') p.set('scope', readScope);
+    if (address) p.set('address', JSON.stringify(address));
     return p;
   };
   const sessionAnchor = () => {
@@ -1686,10 +1695,23 @@ export function createCatalogViewer(
       orderIdle = undefined;
     }
   }
+  function displayEntries(view: SelectedView): CatalogDisplayedEntry[] {
+    return view.nativeStore?.entries() ?? view.store.entries();
+  }
+  function displayGeneration(view: SelectedView) {
+    return (
+      view.nativeStore?.selectedPage()?.binding ?? view.store.selectedPage()?.projection.generation
+    );
+  }
+  function hasEarlier(view: SelectedView) {
+    return view.nativeStore
+      ? view.nativeStore.earlierCursor() !== null
+      : (view.store.loadedRanges()[0]?.first ?? 0) > 0;
+  }
   function visibleEntries(view: SelectedView) {
     const query = view.find ?? '',
       filter = view.filter ?? 'all';
-    return view.store.entries().filter((item) => {
+    return displayEntries(view).filter((item) => {
       const entry = item.entry;
       if (filter === 'messages' && !['u', 'a', 'h'].includes(entry.k)) return false;
       if (filter === 'steps' && entry.k !== 'tool') return false;
@@ -1719,11 +1741,12 @@ export function createCatalogViewer(
     });
   }
   function annotationGeneration(view: SelectedView): string | undefined {
+    if (view.nativeStore) return view.nativeStore.selectedPage()?.identity.generation;
     const projection = view.store.selectedPage()?.projection;
     return view.errorMode === 'errors' ? projection?.errorsGeneration : projection?.generation;
   }
   async function readAnnotations(view: SelectedView, force = false) {
-    const current = view.store.selectedPage(),
+    const current = view.nativeStore?.selectedPage() ?? view.store.selectedPage(),
       mode = view.errorMode;
     if (disposed || active !== view || !mode || !current || view.annotationsLoading) return;
     const index = view.errorIndex ?? 0,
@@ -1762,6 +1785,7 @@ export function createCatalogViewer(
         next.source !== view.sourceKey ||
         next.key !== view.key ||
         next.kind !== mode ||
+        next.scope !== view.readScope ||
         next.first !== first
       )
         throw Error('Annotation identity changed');
@@ -1791,16 +1815,24 @@ export function createCatalogViewer(
     const page = view.annotations,
       target = page?.entries[(view.errorIndex ?? 0) - page.first];
     if (!target) return;
-    const identity = view.store.entries().find((item) => item.slot === target.slot)?.entry_id;
+    const identity =
+      'address' in target
+        ? target.address.entry_id
+        : view.store.entries().find((item) => item.slot === target.slot)?.entry_id;
     const node = [...view.root.querySelectorAll<HTMLElement>('[data-entry-key]')].find(
       (node) =>
         node.dataset.entryKey === identity &&
         (node.classList.contains('signal-marker') || node.classList.contains('step')),
     );
     if (!node) {
-      if (view.annotationRange !== target.slot) {
-        view.annotationRange = target.slot;
-        void loadSelected(view, Math.max(0, target.slot - 30)).finally(() => {
+      const range = 'address' in target ? target.address.entry_id : target.slot;
+      if (view.annotationRange !== range && !view.loading) {
+        view.annotationRange = range;
+        const load =
+          'address' in target
+            ? loadNative(view, { position: 'address', address: target.address })
+            : loadSelected(view, Math.max(0, target.slot - 30));
+        void load.finally(() => {
           view.annotationRange = undefined;
         });
       }
@@ -1997,7 +2029,7 @@ export function createCatalogViewer(
   }
   function openRecordedTool(view: SelectedView, key: string, inputLabel: string, script = false) {
     if (active !== view || disposed || !view.meta) return;
-    const item = view.store.entries().find((item) => item.entry_id === key);
+    const item = displayEntries(view).find((item) => item.entry_id === key);
     if (!item || item.entry.k !== 'tool') return;
     const entry = item.entry,
       trigger = document.activeElement;
@@ -2087,96 +2119,66 @@ export function createCatalogViewer(
     };
     draw();
     panel.show();
-    if (script) {
-      const generation = view.store.selectedPage()!.projection.generation,
-        p = params(view.readScope);
-      p.set('sid', view.key);
-      p.set('after', String(item.slot));
-      p.set('limit', '1');
-      p.set('generation', generation);
-      p.set('part', 'script');
-      void api('/api/session-entry?' + p)
-        .then((value) => {
-          if (
-            disposed ||
-            active !== view ||
-            sessionPanel !== panel ||
-            view.store.selectedPage()?.projection.generation !== generation
-          )
-            return;
-          const page = parseCatalogTranscriptPage(value),
-            saved = page.entries[0];
+    if (!script && fieldView(view, item)?.action) {
+      void loadField(view, item).then(draw);
+      draw();
+      return;
+    }
+    if (!script && !entry.cut) return;
+    const generation = displayGeneration(view)!;
+    const p = expansionParams(view, item, generation);
+    p.set('part', script ? 'script' : 'output');
+    if (!script) outputNote = 'Loading recorded output…';
+    draw();
+    void api('/api/session-entry?' + p)
+      .then((value) => {
+        if (
+          disposed ||
+          active !== view ||
+          sessionPanel !== panel ||
+          displayGeneration(view) !== generation
+        )
+          return;
+        let saved: CatalogDisplayedEntry;
+        if (item.address) {
+          saved = parseCatalogNativeEntry(nativeExpansion(view, item.address, value), generation);
+        } else {
+          const page = parseCatalogTranscriptPage(value);
           if (
             page.identity.source_key !== view.sourceKey ||
             page.identity.catalog_key !== view.key ||
-            page.identity.read_scope !== view.store.selectedPage()!.identity.read_scope ||
+            page.identity.read_scope !== view.readScope ||
             page.projection.generation !== generation ||
             page.range.first !== item.slot ||
             page.entries.length !== 1 ||
-            saved.entry_id !== item.entry_id ||
-            JSON.stringify(saved.provenance) !== JSON.stringify(item.provenance) ||
-            saved.entry.k !== 'tool' ||
-            typeof saved.entry.scriptText !== 'string'
+            JSON.stringify(page.entries[0].provenance) !== JSON.stringify(item.provenance)
           )
-            throw Error('Invalid recorded script scope');
+            throw Error('Invalid recorded tool scope');
+          saved = page.entries[0];
+        }
+        if (saved.entry_id !== item.entry_id || saved.entry.k !== 'tool')
+          throw Error('Invalid recorded tool provenance');
+        if (script) {
+          if (typeof saved.entry.scriptText !== 'string') throw Error('Invalid recorded script');
           scriptResult = {
             scriptText: saved.entry.scriptText,
             scriptTruncated: saved.entry.scriptTruncated,
           };
-          draw();
-        })
-        .catch(() => {
-          scriptResult = { scriptFailed: true };
-          draw();
-        });
-    } else if (fieldView(view, item)?.action) {
-      void loadField(view, item).then(draw);
-      draw();
-    } else if (entry.cut) {
-      const generation = view.store.selectedPage()!.projection.generation,
-        p = params(view.readScope);
-      p.set('sid', view.key);
-      p.set('after', String(item.slot));
-      p.set('limit', '1');
-      p.set('generation', generation);
-      p.set('part', 'output');
-      outputNote = 'Loading recorded output…';
-      draw();
-      void api('/api/session-entry?' + p)
-        .then((value) => {
-          if (
-            disposed ||
-            active !== view ||
-            sessionPanel !== panel ||
-            view.store.selectedPage()?.projection.generation !== generation
-          )
-            return;
-          const page = parseCatalogTranscriptPage(value),
-            saved = page.entries[0];
-          if (
-            page.identity.source_key !== view.sourceKey ||
-            page.identity.catalog_key !== view.key ||
-            page.identity.read_scope !== view.store.selectedPage()!.identity.read_scope ||
-            page.projection.generation !== generation ||
-            page.range.first !== item.slot ||
-            page.entries.length !== 1 ||
-            saved.entry_id !== item.entry_id ||
-            JSON.stringify(saved.provenance) !== JSON.stringify(item.provenance) ||
-            saved.entry.k !== 'tool'
-          )
-            throw Error('Invalid recorded output scope');
+        } else {
           outputResult = { out: saved.entry.out, cut: saved.entry.cut };
           outputNote = saved.entry.outputTruncated
             ? 'The output preview is bounded; the remaining text is not shown.'
             : '';
-          draw();
-        })
-        .catch(() => {
-          outputNote = "Couldn't load the full text: this is the preview.";
-          draw();
-        });
-    }
+        }
+        draw();
+      })
+      .catch(() => {
+        if (script) scriptResult = { scriptFailed: true };
+        else outputNote = "Couldn't load the full text: this is the preview.";
+        draw();
+      });
   }
+
   function openCatalogSession(item: Pick<CatalogSession, 'key' | 'harness' | 'machine'>) {
     if (item.machine) {
       saveSource();
@@ -2624,6 +2626,13 @@ export function createCatalogViewer(
   }
   function readError(error: unknown): string {
     if (error instanceof ApiError) {
+      if (
+        error.code === 'retained_identity_unverified' ||
+        error.code === 'retained_source_unavailable' ||
+        error.code === 'retained_source_preparing' ||
+        error.code === 'retained_peer_unavailable'
+      )
+        return error.message;
       if (error.history === 'recovery_failed')
         return 'History recovery failed. Check the host log for the recovery error.';
       if (error.history)
@@ -2645,7 +2654,11 @@ export function createCatalogViewer(
     return 'History could not be read. Retry after checking your connection.';
   }
   function retryable(error: unknown) {
-    if (error instanceof ApiError && error.history === 'recovery_failed') return false;
+    if (
+      error instanceof ApiError &&
+      (error.history === 'recovery_failed' || error.code === 'retained_source_unavailable')
+    )
+      return false;
     if (!(error && typeof error === 'object' && 'status' in error))
       return error instanceof Error && error.name === 'AbortError';
     const status = error && typeof error === 'object' && 'status' in error ? error.status : 0;
@@ -2707,7 +2720,9 @@ export function createCatalogViewer(
   }
   function drawSelected(view: SelectedView, captureReading = true) {
     if (disposed || active !== view) return;
-    const current = view.store.selectedPage(),
+    const native = view.nativeStore?.selectedPage(),
+      legacy = view.store.selectedPage(),
+      current = native ?? legacy,
       identity = selection.selectedIdentity(),
       recoveryNote = view.recovery.stopped
         ? 'Recorded history could not be loaded. Retry to try again.'
@@ -2780,8 +2795,9 @@ export function createCatalogViewer(
       );
       return;
     }
-    const changedProjection = view.jumpGeneration !== current.projection.generation;
-    view.jumpGeneration = current.projection.generation;
+    const generation = native?.binding ?? legacy!.projection.generation;
+    const changedProjection = view.jumpGeneration !== generation;
+    view.jumpGeneration = generation;
     // A reader can move before the browser delivers its scroll event. Capture
     // the existing reading geometry before a late context redraw, as the
     // complete viewer's scroll transaction does, rather than trusting that
@@ -2797,9 +2813,12 @@ export function createCatalogViewer(
       view.following = false;
       pinUntil = 0;
     }
-    if (view.lastTotal !== null && !view.following && current.projection.total > view.lastTotal)
-      view.newCount += current.projection.total - view.lastTotal;
-    view.lastTotal = current.projection.total;
+    if (legacy) {
+      const total = legacy.projection.total;
+      if (view.lastTotal !== null && !view.following && total > view.lastTotal)
+        view.newCount += total - view.lastTotal;
+      view.lastTotal = total;
+    }
     overview.markResults(
       view.sourceKey,
       view.store
@@ -2831,14 +2850,14 @@ export function createCatalogViewer(
         : undefined,
       footerKey = JSON.stringify(footer ?? null);
     if (
-      view.renderedRevision === view.store.revision &&
+      view.renderedRevision === (view.nativeStore?.revision ?? view.store.revision) &&
       view.renderedNote === observationNote &&
       view.renderedFooter === footerKey
     ) {
       measureSessionScreen(view.root);
       updateSessionRuntime(view.root, runtimeFor(view));
       syncJump(view, changedProjection);
-      if ((view.store.loadedRanges()[0]?.first ?? 0) > 0)
+      if (hasEarlier(view))
         updateSessionPager(view.root, {
           sid: view.key,
           where: 'before',
@@ -2851,7 +2870,7 @@ export function createCatalogViewer(
       if (view.errorMode) scope.frame(() => highlightAnnotation(view));
       return;
     }
-    view.renderedRevision = view.store.revision;
+    view.renderedRevision = view.nativeStore?.revision ?? view.store.revision;
     view.renderedNote = observationNote;
     view.renderedFooter = footerKey;
     const anchor = [...view.root.querySelectorAll<HTMLElement>('[data-entry-key]')].find(
@@ -2887,7 +2906,7 @@ export function createCatalogViewer(
             stale: 'Stale history',
             incomplete: 'History is incomplete',
             unavailable: 'Source history is unavailable',
-          }[current.freshness.state] +
+          }[(native?.identity.freshness ?? legacy!.freshness).state] +
             (view.store.context().state === 'incomplete'
               ? ' · related session context is incomplete'
               : ''),
@@ -2900,7 +2919,7 @@ export function createCatalogViewer(
               : 'History details'
             : undefined,
         started:
-          view.store.loadedRanges()[0]?.first === 0 && view.meta?.start != null
+          !hasEarlier(view) && view.meta?.start != null
             ? {
                 lead: 'Started ' + clock(view.meta.start, Date.now()) + ' on\u00a0',
                 machine: sourceLabel(view.sourceKey),
@@ -2940,11 +2959,7 @@ export function createCatalogViewer(
           view.store.context(),
           (item) =>
             (item.entry.img ?? []).map((image, index) => {
-              const p = params(view.readScope);
-              p.set('sid', view.key);
-              p.set('after', String(item.slot));
-              p.set('limit', '1');
-              p.set('generation', current.projection.generation);
+              const p = expansionParams(view, item, generation);
               p.set('part', 'attachment');
               p.set('image', String(index));
               const scale = image.w && image.h ? Math.min(1, 200 / image.w, 160 / image.h) : null;
@@ -2975,22 +2990,21 @@ export function createCatalogViewer(
           view.key,
           view.meta?.details?.state === 'work' ? view.meta.details.activity : undefined,
         ),
-        order: [...new Set(view.store.entries().map((item) => item.entry.turn ?? item.entry_id))],
-        before:
-          (view.store.loadedRanges()[0]?.first ?? 0) > 0
-            ? {
-                sid: view.key,
-                where: 'before',
-                text: 'Load earlier records',
-                disabled: view.loading,
-                busy: view.loading,
-              }
-            : undefined,
+        order: [...new Set(displayEntries(view).map((item) => item.entry.turn ?? item.entry_id))],
+        before: hasEarlier(view)
+          ? {
+              sid: view.key,
+              where: 'before',
+              text: 'Load earlier records',
+              disabled: view.loading,
+              busy: view.loading,
+            }
+          : undefined,
         empty: view.recovery.stopped
           ? view.note
           : visibleEntries(view).length
             ? undefined
-            : view.store.entries().length
+            : displayEntries(view).length
               ? 'No loaded records match your search or filter.'
               : 'No native records in this range.',
       },
@@ -3032,9 +3046,9 @@ export function createCatalogViewer(
           image.show();
         },
         background(call) {
-          const saved = view.store
-            .entries()
-            .find((item) => item.entry.k === 'tool' && item.entry.tid === call);
+          const saved = displayEntries(view).find(
+            (item) => item.entry.k === 'tool' && item.entry.tid === call,
+          );
           const target =
             saved &&
             [...view.root.querySelectorAll<HTMLElement>('[data-entry-key]')].find(
@@ -3052,7 +3066,10 @@ export function createCatalogViewer(
           jumpLatest(view);
         },
         pager() {
-          void loadSelected(view, Math.max(0, view.store.loadedRanges()[0].first - 100));
+          const cursor = view.nativeStore?.earlierCursor();
+          if (cursor) void loadNative(view, { position: 'earlier', cursor });
+          else if (!view.nativeStore)
+            void loadSelected(view, Math.max(0, view.store.loadedRanges()[0].first - 100));
         },
       },
     );
@@ -3108,7 +3125,11 @@ export function createCatalogViewer(
       const gap = readingGap(),
         page = view.store.selectedPage(),
         latestEnd = view.store.loadedRanges().at(-1)?.end ?? 0;
-      view.jumpVisible = gap > 80 || !!(page && latestEnd < page.projection.total);
+      view.jumpVisible =
+        gap > 80 ||
+        (!!view.nativeStore?.selectedPage() &&
+          view.nativeStore.selectedPage()?.position !== 'latest') ||
+        !!(page && latestEnd < page.projection.total);
       if (gap <= 80) view.newCount = 0;
     }
     updateSessionJump(view.root, view.jumpVisible, view.newCount, false, jumpTarget);
@@ -3124,10 +3145,37 @@ export function createCatalogViewer(
       if (active === view && !disposed && view.following) scrollEnd();
     });
   }
-  function fieldView(view: SelectedView, entry: CatalogTranscriptEntry) {
+  function expansionParams(view: SelectedView, entry: CatalogDisplayedEntry, generation: string) {
+    const p = params(view.readScope);
+    p.set('sid', view.key);
+    if (entry.address) p.set('address', JSON.stringify(entry.address));
+    else {
+      p.set('after', String(entry.slot));
+      p.set('limit', '1');
+      p.set('generation', generation);
+    }
+    return p;
+  }
+  function nativeExpansion(view: SelectedView, address: NativeEntryAddress, value: unknown) {
+    const row = object(value),
+      entry = object(row.entry);
+    if (
+      row.api !== 1 ||
+      row.projection !== 7 ||
+      row.source_key !== view.sourceKey ||
+      row.catalog_key !== view.key ||
+      row.read_scope !== view.readScope ||
+      row.binding !== address.binding ||
+      JSON.stringify(parseNativeEntryAddress(entry.address)) !== JSON.stringify(address) ||
+      entry.entry_id !== address.entry_id
+    )
+      throw Error('Invalid addressed field scope');
+    return entry;
+  }
+  function fieldView(view: SelectedView, entry: CatalogDisplayedEntry) {
     if (!entry.clipped || !entry.field) return null;
     const progress = view.fields.get(entry.entry_id),
-      generation = view.store.selectedPage()!.projection.generation,
+      generation = displayGeneration(view),
       changed = progress && progress.generation !== generation;
     return {
       text: progress?.text,
@@ -3157,7 +3205,7 @@ export function createCatalogViewer(
       ...(progress?.next === null && !changed ? { action: undefined } : {}),
     };
   }
-  async function loadField(view: SelectedView, entry: CatalogTranscriptEntry) {
+  async function loadField(view: SelectedView, entry: CatalogDisplayedEntry) {
     if (
       disposed ||
       view.sourceKey !== capabilities.source_key ||
@@ -3165,7 +3213,7 @@ export function createCatalogViewer(
       !entry.field
     )
       return;
-    const generation = view.store.selectedPage()?.projection.generation;
+    const generation = displayGeneration(view);
     if (!generation) return;
     let progress = view.fields.get(entry.entry_id);
     if (progress?.loading) return progress.promise;
@@ -3175,12 +3223,8 @@ export function createCatalogViewer(
     }
     if (progress.next === null) return;
     const chunk = progress.next,
-      p = params(view.readScope),
+      p = expansionParams(view, entry, generation),
       pending = progress;
-    p.set('sid', view.key);
-    p.set('after', String(entry.slot));
-    p.set('limit', '1');
-    p.set('generation', generation);
     p.set('field_chunk', String(chunk));
     pending.loading = true;
     pending.note = '';
@@ -3190,17 +3234,31 @@ export function createCatalogViewer(
       try {
         const value = await api('/api/session-entry?' + p);
         if (disposed || view.fields.get(entry.entry_id) !== pending) return;
-        if (view.store.selectedPage()?.projection.generation !== generation) {
+        if (displayGeneration(view) !== generation) {
           pending.note = 'Source projection changed. Reload recorded text. ';
           return;
         }
-        const field = parseCatalogField(value, {
-          source_key: capabilities.source_key,
-          catalog_key: view.key,
-          generation,
-          entry,
-          chunk,
-        });
+        const field = entry.address
+          ? (() => {
+              const expanded = nativeExpansion(view, entry.address, value),
+                field = object(expanded.field);
+              const next = field.next === null ? null : chunk + 1;
+              if (
+                field.name !== entry.field!.name ||
+                field.chunk !== chunk ||
+                field.next !== next ||
+                field.complete !== (next === null)
+              )
+                throw Error('Invalid addressed field chunk');
+              return { text: text(expanded.text), next };
+            })()
+          : parseCatalogField(value, {
+              source_key: view.sourceKey,
+              catalog_key: view.key,
+              generation,
+              entry,
+              chunk,
+            });
         pending.text = (chunk === 0 ? '' : (pending.text ?? '')) + field.text;
         pending.next = field.next;
       } catch (error) {
@@ -3271,14 +3329,98 @@ export function createCatalogViewer(
     }
   }
   function pruneSelectedFields(view: SelectedView) {
-    const retainedEntries = new Set(view.store.entries().map((item) => item.entry_id));
+    const retainedEntries = new Set(displayEntries(view).map((item) => item.entry_id));
     for (const key of view.fields.keys()) if (!retainedEntries.has(key)) view.fields.delete(key);
+  }
+  async function loadNative(
+    view: SelectedView,
+    window: CatalogNativeWindow = { position: 'latest' },
+  ) {
+    const store = view.nativeStore,
+      epoch = view.navigationEpoch,
+      ticket = view.ticket;
+    if (!store || disposed || active !== view || !capabilities.selected_transcript || view.loading)
+      return;
+    scope.clearTimeout(view.retry);
+    view.retry = undefined;
+    const request = store.request(window),
+      p = params(view.readScope);
+    p.set('sid', view.key);
+    if (window.position === 'earlier') p.set('cursor', window.cursor);
+    if (window.position === 'address') p.set('address', JSON.stringify(window.address));
+    if (window.position === 'earlier') view.following = false;
+    let newest = false;
+    const current = () =>
+      !disposed && active === view && view.nativeStore === store && view.navigationEpoch === epoch;
+    view.loading = true;
+    view.root.setAttribute('aria-busy', 'true');
+    drawSelected(view);
+    try {
+      const value = await api('/api/session-transcript?' + p);
+      if (!current() || !store.accept(request, value)) return;
+      const page = store.selectedPage()!;
+      view.note = '';
+      view.transientNote = false;
+      view.meta = page.session ?? view.meta;
+      pruneSelectedFields(view);
+      if (ticket && view.readScope === 'current') selection.accept(ticket, page.identity);
+      view.recovery.reset();
+      chrome();
+      if (window.position === 'address')
+        scope.frame(() => {
+          if (!current()) return;
+          const target = [...view.root.querySelectorAll<HTMLElement>('[data-entry-key]')].find(
+            (node) => node.dataset.entryKey === window.address.entry_id,
+          );
+          if (!target) return;
+          target
+            .closest('.tgroup')
+            ?.querySelector<HTMLButtonElement>('.tgroup > button[aria-expanded="false"]')
+            ?.click();
+          target.scrollIntoView({ block: 'center' });
+          target.classList.add('flash');
+          scope.timeout(() => target.classList.remove('flash'), 1200);
+        });
+    } catch (error) {
+      if (!current()) return;
+      if (
+        error instanceof ApiError &&
+        (error.code === 'entry_not_found' || error.code === 'stale_cursor') &&
+        window.position === 'address'
+      ) {
+        view.anchorNote = 'This saved transcript position is unavailable.';
+        newest = true;
+      } else {
+        view.note = readError(error);
+        view.transientNote = retryable(error);
+        if (error instanceof ApiError && error.code === 'retained_source_preparing') {
+          const delay = view.recovery.fail();
+          if (delay !== null)
+            view.retry = scope.timeout(() => {
+              view.retry = undefined;
+              if (current()) void loadNative(view, window);
+            }, delay);
+        }
+      }
+    } finally {
+      store.reject(request);
+      if (view.navigationEpoch === epoch) {
+        view.loading = false;
+        view.root.setAttribute('aria-busy', 'false');
+        drawSelected(view);
+      }
+    }
+    if (newest && current()) await loadNative(view);
   }
   async function loadSelected(
     view: SelectedView,
     after: number | null = null,
     preservePosition = false,
   ) {
+    if (view.nativeStore) {
+      const cursor = after === null ? null : view.nativeStore.earlierCursor();
+      return loadNative(view, cursor ? { position: 'earlier', cursor } : { position: 'latest' });
+    }
     if (view.loading && !disposed && capabilities.selected_transcript) {
       if (view.queuedAfter === undefined || after !== null)
         view.queuedAfter = { after, preservePosition };
@@ -3379,6 +3521,15 @@ export function createCatalogViewer(
     }
   }
   async function observeSelected(view: SelectedView) {
+    if (view.nativeStore) {
+      if (
+        view.following &&
+        !view.loading &&
+        view.nativeStore.selectedPage()?.position !== 'address'
+      )
+        await loadNative(view);
+      return;
+    }
     if (disposed || active !== view || view.loading || view.observing) return;
     const source = view.sourceKey,
       p = params(view.readScope);
@@ -3620,6 +3771,7 @@ export function createCatalogViewer(
     anchor?: string,
     readScope: CatalogReadScope = 'current',
     savedPositionUnavailable = false,
+    address?: NativeEntryAddress,
   ) {
     if (disposed || !capabilities.source_key) return;
     const navigationFocus = document.activeElement;
@@ -3638,6 +3790,12 @@ export function createCatalogViewer(
         key,
         root: document.createElement('div'),
         store,
+        nativeStore: capabilities.native_transcript
+          ? new CatalogNativeTranscriptStore(
+              { source_key: capabilities.source_key, catalog_key: key },
+              readScope,
+            )
+          : undefined,
         meta: meta ?? null,
         scroll: 0,
         loading: false,
@@ -3668,6 +3826,7 @@ export function createCatalogViewer(
       scope.clearTimeout(oldest[1].retry);
       readerResize.unobserve(oldest[1].root);
       oldest[1].store.destroy();
+      oldest[1].nativeStore?.destroy();
       releaseScreen(oldest[1].root);
       render(null, oldest[1].root);
     }
@@ -3679,7 +3838,7 @@ export function createCatalogViewer(
     view.anchorNote = savedPositionUnavailable
       ? 'This saved transcript position is unavailable.'
       : undefined;
-    if (turn) {
+    if (turn || address) {
       // An anchored reader must not inherit or start the delayed tail pin. The
       // first render happens before its generation-bound range is available.
       view.following = false;
@@ -3724,7 +3883,7 @@ export function createCatalogViewer(
         '',
         sessionPath(view.sourceKey, key) +
           '?' +
-          sessionControls(view.readScope) +
+          sessionControls(view.readScope, address) +
           (anchor ? '#' + encodeURIComponent(anchor) : ''),
       );
     chrome();
@@ -3733,6 +3892,10 @@ export function createCatalogViewer(
     drawSelected(view, false);
     const navigationEpoch = (view.navigationEpoch ?? 0) + 1;
     view.navigationEpoch = navigationEpoch;
+    if (view.nativeStore) {
+      view.loading = false;
+      view.root.setAttribute('aria-busy', 'false');
+    }
     const focusHeading = () => {
       if (disposed || active !== view || view.navigationEpoch !== navigationEpoch) return;
       // Match the complete reader's navigation focus without stealing a focus
@@ -3746,6 +3909,16 @@ export function createCatalogViewer(
       }
     };
     focusHeading();
+    if (view.nativeStore && address) {
+      await loadNative(view, { position: 'address', address });
+      return;
+    }
+    if (!turn && view.nativeStore?.selectedPage()?.position === 'address') {
+      view.following = true;
+      await loadNative(view);
+      focusHeading();
+      return;
+    }
     if (turn && view.store.selectedPage()) {
       if (window.matchMedia('(max-width: 760px)').matches) window.scrollTo(0, view.scroll);
       else document.querySelector<HTMLElement>('#main')!.scrollTop = view.scroll;
@@ -3766,6 +3939,34 @@ export function createCatalogViewer(
         view.anchorNote =
           'Recorded transcript is updating. The source refresh will appear automatically.';
         drawSelected(view);
+        return;
+      }
+      if (view.nativeStore) {
+        try {
+          const anchor = object(await api('/api/session-anchor?' + p));
+          if (!currentAnchor()) return;
+          if (
+            anchor.api !== 1 ||
+            anchor.projection !== 7 ||
+            anchor.source_key !== sourceKey ||
+            anchor.catalog_key !== key ||
+            anchor.read_scope !== view.readScope ||
+            anchor.turn !== turn
+          )
+            throw Error('Invalid native turn anchor');
+          if (anchor.address !== null) {
+            await loadNative(view, {
+              position: 'address',
+              address: parseNativeEntryAddress(anchor.address),
+            });
+            return;
+          }
+          view.anchorNote = 'This saved transcript position is unavailable.';
+        } catch (error) {
+          if (!currentAnchor()) return;
+          view.anchorNote = readError(error);
+        }
+        await loadNative(view);
         return;
       }
       try {
@@ -3908,15 +4109,15 @@ export function createCatalogViewer(
       }
       if (!currentAnchor()) return;
     }
-    if (view.store.selectedPage()) {
-      void loadIdentity(view);
+    if (view.store.selectedPage() || view.nativeStore?.selectedPage()) {
+      if (!view.nativeStore) void loadIdentity(view);
       view.opening = false;
       if (push && !turn) scrollEnd();
       else if (window.matchMedia('(max-width: 760px)').matches) window.scrollTo(0, view.scroll);
       else document.querySelector<HTMLElement>('#main')!.scrollTop = view.scroll;
       syncJump(view, true);
     } else {
-      void loadIdentity(view);
+      if (!view.nativeStore) void loadIdentity(view);
       if (capabilities.selected_transcript) await loadSelected(view);
     }
     focusHeading();
@@ -4400,6 +4601,7 @@ export function createCatalogViewer(
     }
     if (!sourcesOpen && viewerHost?.catalogSources && !sourceItems.length) void loadSources(false);
     const savedPositionUnavailable = sessionRoute?.controls.has('generation') === true;
+    const address = sessionRoute?.controls.get('address');
     if (sessionRoute?.turn && !savedPositionUnavailable) {
       goCausal(sessionRoute.key, sessionRoute.turn, sessionRoute.readScope);
     } else if (sessionRoute) {
@@ -4410,6 +4612,7 @@ export function createCatalogViewer(
         undefined,
         sessionRoute.readScope,
         savedPositionUnavailable,
+        address ? parseNativeEntryAddress(JSON.parse(address)) : undefined,
       );
     } else if (machineBookmark) {
       leaveScreen();
@@ -4640,6 +4843,7 @@ export function createCatalogViewer(
       navigation.destroy();
       for (const view of selected.values()) {
         view.store.destroy();
+        view.nativeStore?.destroy();
         releaseScreen(view.root);
         render(null, view.root);
       }

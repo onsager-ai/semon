@@ -277,12 +277,17 @@ export function parseCatalogTranscriptPage(value: unknown): CatalogTranscriptPag
 export type CatalogNativeTranscriptEntry = Omit<CatalogTranscriptEntry, 'slot'> & {
   address: NativeEntryAddress;
 };
+export type CatalogDisplayedEntry =
+  | (CatalogTranscriptEntry & { address?: undefined })
+  | (CatalogNativeTranscriptEntry & { slot?: undefined });
+
 export interface CatalogNativeTranscriptPage {
   identity: CatalogSessionIdentity;
   binding: string;
   position: 'latest' | 'earlier' | 'address';
   earlierCursor: string | null;
   entries: CatalogNativeTranscriptEntry[];
+  session: CatalogSession | null;
   selected: { harness: string; nativeId: string; title: string | null; model: string | null };
 }
 export function parseCatalogNativeEntry(
@@ -338,6 +343,7 @@ export function parseCatalogNativeTranscriptPage(value: unknown): CatalogNativeT
   return {
     identity,
     binding,
+    session: row.session === null ? null : parseCatalogSession(row.session),
     position: row.position,
     earlierCursor,
     entries,

@@ -1,4 +1,4 @@
-import type { CatalogTranscriptEntry } from '../state/catalog-transcript-wire';
+import type { CatalogDisplayedEntry } from '../state/catalog-transcript-wire';
 import type { TranscriptBlock, EntryView, ToolView, BackgroundView } from '../lib/transcript';
 import { toolInfo, runningToolLabel } from '../domain/toolNames';
 import { I } from './registry';
@@ -126,12 +126,12 @@ function gatherTools(entries: readonly EntryView[]): EntryView[] {
 }
 /** Native source records can be readable before relationship context is complete. */
 export function catalogTranscriptBlocks(
-  entries: readonly CatalogTranscriptEntry[],
-  fieldView?: (entry: CatalogTranscriptEntry) => CatalogFieldView | null,
-  relationshipView?: (entry: CatalogTranscriptEntry) => EntryView[] | null,
+  entries: readonly CatalogDisplayedEntry[],
+  fieldView?: (entry: CatalogDisplayedEntry) => CatalogFieldView | null,
+  relationshipView?: (entry: CatalogDisplayedEntry) => EntryView[] | null,
   liveObservation = false,
   context?: CatalogTranscriptPage['relationship_context'],
-  attachments?: (item: CatalogTranscriptEntry) => import('../lib/attachments').Attachment[],
+  attachments?: (item: CatalogDisplayedEntry) => import('../lib/attachments').Attachment[],
   harness = '',
   sessionKey = '',
   activity?: { tool: string; since: number },
@@ -144,7 +144,7 @@ export function catalogTranscriptBlocks(
   const closingBodies = new Map<string, string>(),
     returnedFailures = new Set<string>();
   if (relationshipView)
-    for (const item of entries) {
+    for (const [index, item] of entries.entries()) {
       if (item.entry.k !== 'h') continue;
       const recorded = item.entry;
       const edge = context?.handoffs.find((row) => row.edge.id === recorded.id)?.edge;
@@ -155,12 +155,10 @@ export function catalogTranscriptBlocks(
         !context?.turns.some((turn) => turn.id === item.entry.turn && turn.sent.includes(edge.id))
       )
         continue;
-      const body = [...entries]
+      const body = entries
+        .slice(0, index)
         .reverse()
-        .find(
-          (row) =>
-            row.slot < item.slot && row.entry.k === 'a' && row.entry.turn === item.entry.turn,
-        );
+        .find((row) => row.entry.k === 'a' && row.entry.turn === item.entry.turn);
       if (body?.entry.k !== 'a') continue;
       closingBodies.set(item.entry_id, body.entry.text);
     }
@@ -462,7 +460,7 @@ export function catalogTranscriptBlocks(
 }
 
 export function recordedRelationshipViews(
-  item: CatalogTranscriptEntry,
+  item: CatalogDisplayedEntry,
   relationship: RecordedRelationship,
   selected: string,
   participants: Record<string, RecordedSessionPresentation>,
