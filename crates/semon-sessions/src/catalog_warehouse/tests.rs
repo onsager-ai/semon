@@ -411,6 +411,50 @@ fn warehouse_search_resumes_at_the_first_unexamined_candidate() {
 }
 
 #[test]
+fn warehouse_list_transport_uses_committed_index_while_publication_is_absent() {
+    let mut fixture = Fixture::new("warehouse-list-transport");
+    fixture.claude("first", "First title");
+    fixture.claude("second", "Second title");
+    let db = Connection::open(&fixture.db).unwrap();
+    let semantic_rows: i64 = db
+        .query_row("SELECT count(*) FROM session_catalog", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(semantic_rows, 0);
+    let configured = [crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    }];
+    let get = |query| {
+        let reply = http::list(&configured, "fixture", query, false);
+        (
+            reply.status,
+            serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap(),
+        )
+    };
+    let (status, first) = get("limit=1");
+    assert_eq!(status, 200, "{first}");
+    assert_eq!(first["total"], 2);
+    assert_eq!(first["coverage"]["committed"], 2);
+    assert_eq!(first["items"][0]["key"], "first");
+    assert_eq!(
+        first["items"][0]["source_refs"][0]["source"]["native_id"],
+        "first"
+    );
+    let cursor = first["next_cursor"].as_str().unwrap();
+    let query = crate::native_html::query(&[("limit", "1"), ("cursor", cursor)]);
+    let (status, second) = get(&query);
+    assert_eq!(status, 200, "{second}");
+    assert_eq!(second["items"][0]["key"], "second");
+    assert!(second["next_cursor"].is_null());
+    fixture.claude("third", "Third title");
+    let (status, stale) = get(&query);
+    assert_eq!(status, 409, "{stale}");
+    assert_eq!(stale["error"]["code"], "stale_cursor");
+}
+
+#[test]
 fn warehouse_reads_keep_verified_growth_and_exclude_unadmitted_replacement() {
     use std::io::Write;
     let mut fixture = Fixture::new("replacement-witness");

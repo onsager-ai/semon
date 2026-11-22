@@ -194,7 +194,7 @@ fn read_retained_page(
             operation_parent: None,
             causal: causal::Context::default(),
             relay_receipts: Vec::new(),
-            reference: reference.clone(),
+            reference: (*reference).clone(),
             kind,
             at: (position.time != i64::MIN).then_some(position.time),
             native,

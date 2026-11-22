@@ -214,6 +214,28 @@ impl CurrentSources {
         }
         Ok(())
     }
+    /// Read the full machine observations for a list, without repairing the
+    /// projection or taking a producer lock. The indexed authority and JSON
+    /// must name the same atomic Facts observation throughout the capture.
+    #[cfg(test)]
+    pub(crate) fn read_snapshot(&self) -> io::Result<Facts> {
+        use std::io::Read;
+        const MAX_FACTS: u64 = 64 * 1024 * 1024;
+        let file = crate::open_input(&self.path)?;
+        let metadata = file.metadata()?;
+        if Identity::of(&metadata)? != self.head.source || metadata.len() > MAX_FACTS {
+            return Err(unavailable());
+        }
+        let mut bytes = Vec::new();
+        (&file).take(MAX_FACTS + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > MAX_FACTS || Identity::of(&file.metadata()?)? != self.head.source {
+            return Err(unavailable());
+        }
+        let facts = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+        self.validate()?;
+        Ok(facts)
+    }
+
     pub(crate) fn facts_known(&self) -> bool {
         self.head.facts_version == FACTS_VERSION
     }

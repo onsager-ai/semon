@@ -5,7 +5,7 @@ WITH admitted AS MATERIALIZED (
   JOIN warehouse_source s ON s.source=c.source AND s.origin=?2 AND s.carrier=c.path
   JOIN files f ON f.path=c.path AND f.resume_at=json_extract(s.ledger,'$.offset')
 ), components AS (
-  SELECT m.component,max(d.last_ts) AS last,count(a.source) AS qualified,count(*) AS total
+  SELECT m.component,max(d.last_ts) AS last,min(d.first_ts) AS start,count(a.source) AS qualified,count(*) AS total
   FROM lineage_member m JOIN lineage_group g ON g.id=m.component
   JOIN dim_session d USING(source) LEFT JOIN admitted a USING(source)
   GROUP BY m.component
@@ -32,7 +32,8 @@ WITH admitted AS MATERIALIZED (
       AND nullif(owner.agent_path,'') IS NULL AND t.title IS NULL THEN owner.prompt_pos END AS prompt_pos,
     owner_file.path AS owner_path,owner_file.ledger AS owner_ledger,owner.native_id,owner.agent_path,
     ((owner.parent_id IS NOT NULL OR coalesce(json_extract(source_meta.metadata,'$.subagent'),0))
-      AND NOT coalesce(json_extract(source_meta.metadata,'$.guardian_review'),0)) AS is_child
+      AND NOT coalesce(json_extract(source_meta.metadata,'$.guardian_review'),0)) AS is_child,
+    c.start,owner.lineage,coalesce(json_extract(source_meta.metadata,'$.guardian_review'),0) AS guardian
   FROM catalog_keys k JOIN lineage_member m ON m.source=k.owner
   JOIN components c ON c.component=m.component AND c.qualified=c.total
   JOIN members latest ON latest.component=c.component AND latest.rank=1
@@ -53,7 +54,7 @@ WITH admitted AS MATERIALIZED (
   ORDER BY last DESC,id LIMIT ?10
 )
 SELECT id,owner,harness,last,title,model,repo,branch,NULL AS total,
-       prompt_pos,owner_path,owner_ledger,native_id,agent_path,is_child FROM page
+       prompt_pos,owner_path,owner_ledger,native_id,agent_path,is_child,start,lineage,guardian FROM page
 UNION ALL
-SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,count(*),NULL,NULL,NULL,NULL,NULL,NULL FROM filtered
+SELECT NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,count(*),NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL FROM filtered
 ORDER BY last DESC,id

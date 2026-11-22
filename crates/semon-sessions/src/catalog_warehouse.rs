@@ -13,7 +13,14 @@ use std::collections::{BTreeMap, BTreeSet};
 const LIST: &str = include_str!("events/store/warehouse_list.sql");
 const EXACT: &str = include_str!("events/store/warehouse_exact.sql");
 const USAGE: &str = include_str!("events/store/warehouse_list_usage.sql");
-const PARENTS: &str = "SELECT p.value,k.id FROM json_each(?1) p
+const PAGE_MEMBERS: &str = "SELECT p.value,d.harness,d.native_id,s.carrier,s.ledger
+    FROM json_each(?1) p
+    CROSS JOIN lineage_member root ON root.source=p.value
+    CROSS JOIN lineage_member m ON m.component=root.component
+    CROSS JOIN dim_session d ON d.source=m.source
+    CROSS JOIN warehouse_source s ON s.source=m.source AND s.origin=?2 AND s.harness=d.harness
+    ORDER BY p.value,m.source";
+const PARENTS: &str = "SELECT p.value,k.id,e.method FROM json_each(?1) p
     JOIN parent_selection e ON e.child=p.value JOIN bridge_session_owner b ON b.source=e.parent
     JOIN catalog_keys k ON k.owner=b.owner
     JOIN warehouse_current c ON c.source=b.owner
@@ -80,6 +87,62 @@ impl<'a> Source<'a> {
         })
     }
 
+    fn discover(
+        namespace: Namespace,
+        path: &'a std::path::Path,
+        options: &'a crate::Options,
+    ) -> Result<Self, ReadError> {
+        let mut source = Self::focused(namespace, path, options, None)?;
+        let facts = source
+            .focused
+            .as_ref()
+            .and_then(|authority| authority.recorded.as_ref())
+            .map(crate::facts::source_authority::CurrentSources::read_snapshot)
+            .transpose()
+            .map_err(index)?;
+        let mut inputs: BTreeSet<_> = crate::inputs(options)
+            .map_err(index)?
+            .into_iter()
+            .filter(|input| input.path.ends_with(".jsonl"))
+            .collect();
+        if let Some(facts) = facts.filter(|facts| facts.version == crate::facts::FACTS_VERSION) {
+            if let Some(mut paths) = facts.codex_rollouts {
+                paths.extend(facts.codex_provisional_rollouts.into_iter().flatten());
+                inputs.retain(|input| input.root != crate::InputRoot::Codex);
+                inputs.extend(paths.into_iter().filter_map(|path| {
+                    crate::is_input_path("codex", &path).then_some(crate::Input {
+                        root: crate::InputRoot::Codex,
+                        path,
+                    })
+                }));
+            }
+            source.repos = facts
+                .repos
+                .into_iter()
+                .filter_map(|(cwd, repo)| repo.map(|repo| (cwd, repo)))
+                .collect();
+        }
+        for input in inputs {
+            let full = input.full_path(options);
+            let Some(path) = full.to_str() else { continue };
+            let observed =
+                crate::open_input(&full).and_then(|file| Stat::from_metadata(&file.metadata()?));
+            let availability = match observed {
+                Ok(stat) => Availability::Expected(Some(stat)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    Availability::Unavailable
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                    Availability::Unavailable
+                }
+                Err(error) => return Err(index(error)),
+            };
+            source.inventory.insert(path.to_owned(), availability);
+        }
+        source.validate_authority()?;
+        Ok(source)
+    }
+
     fn availability(&self, harness: &str, carrier: &str) -> Result<Availability, ReadError> {
         let Some(authority) = &self.focused else {
             return Ok(self
@@ -132,7 +195,8 @@ impl<'a> Source<'a> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 struct Position {
     last: i64,
     key: String,
@@ -155,13 +219,15 @@ impl PartialOrd for Position {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 struct Boundary {
     position: Position,
     inclusive: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct Continuation {
     revision: String,
     query: String,
@@ -178,6 +244,12 @@ pub(super) struct Row {
     repo: Option<String>,
     branch: Option<String>,
     pub(super) parent: Option<String>,
+    parent_source: Option<String>,
+    native_ids: BTreeSet<String>,
+    source_refs: Vec<crate::CatalogSourceObservation>,
+    start: Option<i64>,
+    kind: &'static str,
+    presentation_kind: Option<&'static str>,
     pub(super) usage: [i64; 6],
     pub(super) cost: Option<crate::pricing::Cost>,
     pub(super) status: Option<&'static str>,
@@ -197,6 +269,7 @@ pub(super) struct Page {
     pub(super) coverage: Coverage,
     pub(super) examined: usize,
     pub(super) next: Option<Continuation>,
+    generation: String,
 }
 
 #[derive(Debug)]
@@ -235,6 +308,7 @@ struct Snapshot<'a> {
     transaction: &'a Connection,
     source: &'a Source<'a>,
     paths: String,
+    repos: BTreeMap<String, String>,
     coverage: Coverage,
     revision: String,
 }
@@ -324,7 +398,7 @@ impl<'a> Snapshot<'a> {
                 r.get(0)
             })
             .map_err(index)?;
-        let mut digest = Sha256::new_with_prefix(encode(&(origin, incarnation, &source.repos))?);
+        let mut digest = Sha256::new_with_prefix(encode(&(origin, incarnation))?);
         let mut authorized = Vec::new();
         let mut coverage = Coverage::default();
         let inventory = encode(
@@ -376,10 +450,32 @@ impl<'a> Snapshot<'a> {
             }
         }
         let paths = encode(&authorized)?;
+        let mut repos = source.repos.clone();
+        if source.focused.is_some() && source.options.facts.is_none() {
+            let home = crate::facts::env_home();
+            let mut directories = transaction
+                .prepare_cached(
+                    "SELECT DISTINCT f.cwd FROM json_each(?1) path
+                     CROSS JOIN files f ON f.path=path.value WHERE f.cwd IS NOT NULL",
+                )
+                .map_err(index)?;
+            let mut rows = directories.query([&paths]).map_err(index)?;
+            while let Some(row) = rows.next().map_err(index)? {
+                let cwd: String = row.get(0).map_err(index)?;
+                if let Some(repo) =
+                    crate::model::repo_of(&cwd, home.as_deref().map(std::path::Path::new))
+                {
+                    repos.insert(cwd, repo);
+                }
+            }
+        }
+        digest.update(encode(&repos)?);
+        source.validate_authority()?;
         Ok(Self {
             transaction,
             source,
             paths,
+            repos,
             coverage,
             revision: format!("{:x}", digest.finalize()),
         })
@@ -387,7 +483,7 @@ impl<'a> Snapshot<'a> {
 
     fn rows(&self, request: &Request, boundary: Option<&Boundary>) -> Result<LocalPage, ReadError> {
         use crate::catalog_search::{MAX_CANDIDATES, MAX_SCAN_BYTES};
-        let repo = encode(&self.source.repos)?;
+        let repo = encode(&self.repos)?;
         let machine = self.source.namespace.as_str();
         let (last, key, inclusive) = boundary.map_or((None, None, false), |b| {
             (
@@ -436,6 +532,18 @@ impl<'a> Snapshot<'a> {
                 repo: record.get(6).map_err(index)?,
                 branch: record.get(7).map_err(index)?,
                 parent: None,
+                parent_source: None,
+                native_ids: BTreeSet::new(),
+                source_refs: Vec::new(),
+                start: record.get(15).map_err(index)?,
+                kind: match record.get::<_, String>(2).map_err(index)?.as_str() {
+                    "claude" if record.get::<_, bool>(16).map_err(index)? => "session",
+                    "claude" => "subagent",
+                    "codex" => "codex-run",
+                    "copilot" => "copilot-session",
+                    _ => return Err(index("Unknown warehouse session harness")),
+                },
+                presentation_kind: None,
                 usage: [0; 6],
                 cost: None,
                 status: None,
@@ -446,6 +554,17 @@ impl<'a> Snapshot<'a> {
                     inclusive: true,
                 });
                 continue;
+            }
+            let guardian: bool = record.get(17).map_err(index)?;
+            row.presentation_kind = match row.kind {
+                "subagent" => Some("Subagent"),
+                "codex-run" if guardian => Some("Approval review"),
+                "codex-run" => Some("Codex run"),
+                "copilot-session" => Some("Copilot CLI"),
+                _ => None,
+            };
+            if guardian {
+                row.title = "Approval review".into();
             }
             if row.harness == "codex" && record.get::<_, bool>(14).map_err(index)? {
                 let task: Option<String> = record.get(13).map_err(index)?;
@@ -643,10 +762,34 @@ impl<'a> Snapshot<'a> {
         let owners = encode(&owners)?;
         let table = crate::pricing::snapshot();
         let mut priced = self.priced_usage(&owners, &table)?;
+        let mut members = self
+            .transaction
+            .prepare_cached(PAGE_MEMBERS)
+            .map_err(index)?;
+        let mut records = members
+            .query(params![owners, self.source.namespace.binding()])
+            .map_err(index)?;
+        let mut references = BTreeMap::<i64, Vec<crate::CatalogSourceObservation>>::new();
+        while let Some(record) = records.next().map_err(index)? {
+            let harness: String = record.get(1).map_err(index)?;
+            let native_id = record.get(2).map_err(index)?;
+            let carrier: String = record.get(3).map_err(index)?;
+            let ledger =
+                serde_json::from_str(&record.get::<_, String>(4).map_err(index)?).map_err(index)?;
+            let path = selected::relative(self.source.options, &harness, &carrier)
+                .ok_or(ReadError::Restart)?;
+            references
+                .entry(record.get(0).map_err(index)?)
+                .or_default()
+                .push(observation(&harness, path, native_id, ledger, "cached"));
+        }
         let mut parents = self.transaction.prepare_cached(PARENTS).map_err(index)?;
         let mut parents = parents
             .query_map(params![owners, self.paths], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
+                ))
             })
             .map_err(index)?
             .collect::<rusqlite::Result<BTreeMap<_, _>>>()
@@ -671,7 +814,16 @@ impl<'a> Snapshot<'a> {
                 cost.usd = None;
             }
             row.cost = Some(cost);
-            row.parent = parents.remove(&row.owner);
+            if let Some((parent, method)) = parents.remove(&row.owner) {
+                row.parent = Some(parent);
+                row.parent_source = (method != "native").then_some(method);
+            }
+            row.source_refs = references.remove(&row.owner).unwrap_or_default();
+            row.native_ids = row
+                .source_refs
+                .iter()
+                .map(|member| member.source.native_id.clone())
+                .collect();
             row.status = status.get(&row.owner).copied();
         }
         Ok(())
@@ -775,14 +927,21 @@ pub(super) fn read_list(
     {
         return Err(ReadError::Scope);
     }
-    let query = encode(&(
-        workspace,
-        request.scope,
-        &request.harness,
-        &request.repo,
-        &request.model,
-        &request.q,
-    ))?;
+    let query = format!(
+        "{:x}",
+        Sha256::digest(encode(&(
+            workspace,
+            request.scope,
+            &request.harness,
+            &request.repo,
+            &request.model,
+            &request.q,
+            ordered
+                .iter()
+                .map(|source| source.namespace.as_str())
+                .collect::<Vec<_>>(),
+        ))?),
+    );
     if cursor.is_some_and(|cursor| cursor.query != query) {
         return Err(ReadError::Scope);
     }
@@ -800,6 +959,7 @@ pub(super) fn read_list(
         let (mut local, count, scanned, local_next) =
             snapshot.rows(request, cursor.map(|cursor| &cursor.boundary))?;
         snapshot.enrich(&mut local)?;
+        source.validate_authority()?;
         rows.extend(local);
         rows.sort_by(|a, b| a.position.cmp(&b.position));
         if rows.len() > request.limit {
@@ -842,7 +1002,7 @@ pub(super) fn read_list(
             };
         }
         Continuation {
-            revision,
+            revision: revision.clone(),
             query,
             boundary,
         }
@@ -853,6 +1013,7 @@ pub(super) fn read_list(
         coverage,
         examined,
         next,
+        generation: revision,
     })
 }
 
@@ -880,6 +1041,26 @@ pub(super) fn identity(
     }
     let snapshot = Snapshot::read(&tx, source)?;
     current_identity(&tx, source, key, Some(&snapshot.paths))
+}
+
+fn observation(
+    harness: &str,
+    path: &str,
+    native_id: String,
+    ledger: Ledger,
+    state: &str,
+) -> crate::CatalogSourceObservation {
+    crate::CatalogSourceObservation {
+        source: crate::SessionSourceRef {
+            root: harness.to_owned(),
+            path: path.to_owned(),
+            native_id,
+            offset: ledger.offset,
+            prefix_sha256: ledger.prefix,
+            tail_sha256: ledger.tail,
+        },
+        state: state.to_owned(),
+    }
 }
 
 fn focused_members(
@@ -921,17 +1102,13 @@ fn focused_members(
             Availability::Expected(None) if source.current_provider.is_some() => "unavailable",
             _ => return Ok(None),
         };
-        references.push(crate::CatalogSourceObservation {
-            source: crate::SessionSourceRef {
-                root: harness.clone(),
-                path: path.to_owned(),
-                native_id: row.get(2).map_err(index)?,
-                offset: ledger.offset,
-                prefix_sha256: ledger.prefix,
-                tail_sha256: ledger.tail,
-            },
-            state: state.into(),
-        });
+        references.push(observation(
+            harness,
+            path,
+            row.get(2).map_err(index)?,
+            ledger,
+            state,
+        ));
     }
     source.validate_authority()?;
     Ok((!references.is_empty()).then_some(references))
@@ -1221,3 +1398,6 @@ mod tests;
 
 #[path = "catalog_warehouse/selected.rs"]
 mod selected;
+
+#[path = "catalog_warehouse/http.rs"]
+mod http;
