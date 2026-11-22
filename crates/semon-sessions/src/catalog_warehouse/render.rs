@@ -31,6 +31,31 @@ pub(in super::super) fn entries(
     render(component, source, key, now, |entry, _, _| Some(entry))
 }
 
+pub(in super::super) fn turn_address(
+    component: &Component,
+    source: &str,
+    key: &str,
+    turn: &str,
+) -> Option<Value> {
+    render(
+        component,
+        source,
+        key,
+        model::now_ms(),
+        |mut entry, slot, _| {
+            if !slot.first || slot.turn.as_deref() != Some(turn) {
+                return None;
+            }
+            let secondary = !matches!(entry["k"].as_str(), Some("u" | "h"));
+            let address = entry.as_object_mut()?.remove("address")?;
+            Some((secondary, address))
+        },
+    )
+    .into_iter()
+    .min_by_key(|(order, _)| *order)
+    .map(|(_, address)| address)
+}
+
 pub(in super::super) fn expand(
     component: &Component,
     source: &str,
@@ -163,12 +188,34 @@ fn render<T>(
                 add(block.0, block.1, None);
             }
         }
+        if let Some(operation) = record.operation
+            && let Some(kind) = record
+                .native
+                .pointer("/payload/item/type")
+                .and_then(Value::as_str)
+        {
+            add(
+                SlotKind::Operation {
+                    kind: kind.to_owned(),
+                    ok: operation.ok,
+                    script_offset: Some(operation.parent),
+                },
+                0,
+                record.entry_anchor.as_deref(),
+            );
+        }
         for call in &record.causal.calls {
             let reply = call.display_reply().cloned();
             let shown = match reply.as_ref() {
                 Some(reply) if reply.f & UNKNOWN != 0 => Shown::Unknown,
                 Some(reply) if reply.e => Shown::Err,
                 Some(_) => Shown::Ok,
+                None if component.harness != "copilot"
+                    && component.identity.read_scope
+                        == super::CatalogReadScope::RetainedHistory =>
+                {
+                    Shown::Unfinished
+                }
                 None => Shown::Unknown,
             };
             add(

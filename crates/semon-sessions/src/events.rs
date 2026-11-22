@@ -7000,7 +7000,10 @@ pub(crate) fn codex(summary: &mut FileIndex, record: &Value, offset: u64) -> boo
                     offset: call.o,
                     block: call.b,
                 };
-                summary.warehouse_fact(offset, 0, || Fact::Operation { parent: position });
+                summary.warehouse_fact(offset, 0, || Fact::Operation {
+                    parent: position,
+                    ok: known.then_some(!failed),
+                });
                 extra(
                     summary,
                     Event {

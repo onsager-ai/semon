@@ -10,7 +10,109 @@ use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-const LIST: &str = include_str!("events/store/warehouse_list.sql");
+#[path = "catalog_warehouse/parents.rs"]
+mod parents;
+
+/// Request-local reader for custody held by the source owning this Index.
+/// Callers supply references from a qualified frozen warehouse binding.
+pub(super) struct ArchiveReader<'a> {
+    options: &'a crate::Options,
+    archive: crate::archive::Archive,
+    files: std::sync::Mutex<ArchiveReads>,
+}
+
+struct ArchiveReads {
+    files: BTreeMap<(String, String), ArchivePrefix>,
+    bytes_left: usize,
+}
+
+struct ArchivePrefix {
+    reference: crate::SessionSourceRef,
+    read: crate::archive::seekable::CopyRead,
+}
+
+impl<'a> ArchiveReader<'a> {
+    pub(super) fn new(options: &'a crate::Options) -> Self {
+        Self {
+            options,
+            archive: crate::archive::Archive::new(crate::archive::standalone_dir(&options.cache)),
+            files: std::sync::Mutex::new(ArchiveReads {
+                files: BTreeMap::new(),
+                bytes_left: selected::PAGE_BYTES,
+            }),
+        }
+    }
+}
+
+impl crate::SessionSourceReader for ArchiveReader<'_> {
+    fn read_range(
+        &self,
+        source: &crate::SessionSourceRef,
+        expected: Option<&str>,
+        offset: u64,
+        max_bytes: usize,
+    ) -> std::io::Result<crate::SessionSourceRange> {
+        use std::{io, sync::Arc};
+        let unavailable = || {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "Frozen native prefix is unavailable",
+            )
+        };
+        let root = crate::InputRoot::parse(&source.root).ok_or_else(unavailable)?;
+        if !crate::is_input_path(&source.root, &source.path)
+            || !source.path.ends_with(".jsonl")
+            || offset > source.offset
+            || max_bytes > crate::SESSION_SOURCE_CHUNK_MAX
+        {
+            return Err(unavailable());
+        }
+        let mut reads = self.files.lock().map_err(|_| unavailable())?;
+        let ArchiveReads { files, bytes_left } = &mut *reads;
+        let prefix = match files.entry((source.root.clone(), source.path.clone())) {
+            std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                let path = root.home(self.options).join(&source.path);
+                let read = crate::archive::seekable::CopyRead::open(
+                    &self.archive,
+                    &path,
+                    source,
+                    expected,
+                    bytes_left,
+                )?;
+                entry.insert(ArchivePrefix {
+                    reference: source.clone(),
+                    read,
+                })
+            }
+        };
+        let generation = prefix.read.generation().to_owned();
+        if prefix.reference != *source || expected.is_some_and(|value| value != generation) {
+            return Err(unavailable());
+        }
+        let count = (max_bytes as u64).min(source.offset - offset) as usize;
+        let bytes = prefix.read.range(offset, count, bytes_left)?;
+        Ok(crate::SessionSourceRange {
+            generation,
+            length: source.offset,
+            offset,
+            bytes: Arc::from(bytes),
+            cached: true,
+        })
+    }
+}
+
+const LIST: &str = concat!(
+    include_str!("events/store/warehouse_list.sql"),
+    include_str!("events/store/warehouse_catalog_row.sql"),
+    include_str!("events/store/warehouse_list_page.sql"),
+);
+const SELECTED_METADATA: &str = concat!(
+    include_str!("events/store/warehouse_selected_metadata.sql"),
+    include_str!("events/store/warehouse_catalog_row.sql"),
+    include_str!("events/store/warehouse_selected_row.sql"),
+);
+const RELATIVE_KEYS: &str = include_str!("events/store/warehouse_relative_keys.sql");
 const EXACT: &str = include_str!("events/store/warehouse_exact.sql");
 const USAGE: &str = include_str!("events/store/warehouse_list_usage.sql");
 const PAGE_MEMBERS: &str = "SELECT p.value,d.harness,d.native_id,s.carrier,s.ledger
@@ -20,12 +122,6 @@ const PAGE_MEMBERS: &str = "SELECT p.value,d.harness,d.native_id,s.carrier,s.led
     CROSS JOIN dim_session d ON d.source=m.source
     CROSS JOIN warehouse_source s ON s.source=m.source AND s.origin=?2 AND s.harness=d.harness
     ORDER BY p.value,m.source";
-const PARENTS: &str = "SELECT p.value,k.id,e.method FROM json_each(?1) p
-    JOIN parent_selection e ON e.child=p.value JOIN bridge_session_owner b ON b.source=e.parent
-    JOIN catalog_keys k ON k.owner=b.owner
-    JOIN warehouse_current c ON c.source=b.owner
-    JOIN json_each(?2) authorized ON authorized.value=c.path
-    ORDER BY p.value,k.id DESC";
 const STATUS: &str = "SELECT p.value,d.harness,d.native_id,s.carrier,s.ledger,d.lineage,m.source
     FROM json_each(?1) p
     CROSS JOIN lineage_member root ON root.source=p.value
@@ -241,6 +337,7 @@ pub(super) struct Row {
     pub(super) harness: String,
     pub(super) title: String,
     pub(super) model: String,
+    effort: Option<String>,
     repo: Option<String>,
     branch: Option<String>,
     pub(super) parent: Option<String>,
@@ -253,6 +350,16 @@ pub(super) struct Row {
     pub(super) usage: [i64; 6],
     pub(super) cost: Option<crate::pricing::Cost>,
     pub(super) status: Option<&'static str>,
+    details: Option<serde_json::Value>,
+}
+
+impl Row {
+    fn recorded_status(&self) -> serde_json::Value {
+        serde_json::json!({
+            "state": self.status,
+            "observation": if self.status.is_some() { "current" } else { "unavailable" },
+        })
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -263,13 +370,26 @@ pub(super) struct Coverage {
 }
 
 #[derive(Debug)]
-pub(super) struct Page {
-    pub(super) rows: Vec<Row>,
+pub(super) struct Page<T = Row> {
+    pub(super) rows: Vec<T>,
     pub(super) total: usize,
     pub(super) coverage: Coverage,
     pub(super) examined: usize,
     pub(super) next: Option<Continuation>,
     generation: String,
+}
+
+impl<T> Page<T> {
+    fn map<U>(self, transform: impl FnMut(T) -> U) -> Page<U> {
+        Page {
+            rows: self.rows.into_iter().map(transform).collect(),
+            total: self.total,
+            coverage: self.coverage,
+            examined: self.examined,
+            next: self.next,
+            generation: self.generation,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -278,6 +398,8 @@ pub(super) enum ReadError {
     Scope,
     Restart,
     RetainedUnverified,
+    RetainedUnavailable,
+    RetainedPreparing,
     PeerUnavailable(String),
 }
 
@@ -288,6 +410,8 @@ impl std::fmt::Display for ReadError {
             Self::Scope => f.write_str("Discard the cursor when changing workspace, source or filters."),
             Self::Restart => f.write_str("The committed session view changed. Restart at the first page."),
             Self::PeerUnavailable(reason) => f.write_str(reason),
+            Self::RetainedPreparing => f.write_str("Preparing recorded history."),
+            Self::RetainedUnavailable => f.write_str("The frozen session prefix is unavailable from its authorized source reader."),
             Self::RetainedUnverified => f.write_str("retained_identity_unverified: no verified original warehouse identity is available for this key."),
         }
     }
@@ -301,7 +425,8 @@ fn encode(value: &impl serde::Serialize) -> Result<String, ReadError> {
     serde_json::to_string(value).map_err(index)
 }
 
-type LocalPage = (Vec<Row>, usize, usize, Option<Boundary>);
+type LocalPage<T = Row> = (Vec<T>, usize, usize, Option<Boundary>);
+type SourcePage<T> = (LocalPage<T>, Coverage, String);
 type Identity = (i64, String, String);
 
 struct Snapshot<'a> {
@@ -450,25 +575,7 @@ impl<'a> Snapshot<'a> {
             }
         }
         let paths = encode(&authorized)?;
-        let mut repos = source.repos.clone();
-        if source.focused.is_some() && source.options.facts.is_none() {
-            let home = crate::facts::env_home();
-            let mut directories = transaction
-                .prepare_cached(
-                    "SELECT DISTINCT f.cwd FROM json_each(?1) path
-                     CROSS JOIN files f ON f.path=path.value WHERE f.cwd IS NOT NULL",
-                )
-                .map_err(index)?;
-            let mut rows = directories.query([&paths]).map_err(index)?;
-            while let Some(row) = rows.next().map_err(index)? {
-                let cwd: String = row.get(0).map_err(index)?;
-                if let Some(repo) =
-                    crate::model::repo_of(&cwd, home.as_deref().map(std::path::Path::new))
-                {
-                    repos.insert(cwd, repo);
-                }
-            }
-        }
+        let repos = repositories(transaction, source, &paths)?;
         digest.update(encode(&repos)?);
         source.validate_authority()?;
         Ok(Self {
@@ -519,73 +626,18 @@ impl<'a> Snapshot<'a> {
             if next.is_some() {
                 continue;
             }
-            let mut row = Row {
-                position: Position {
-                    last: record.get(3).map_err(index)?,
-                    key,
-                    source: machine.to_owned(),
-                },
-                owner: record.get(1).map_err(index)?,
-                harness: record.get(2).map_err(index)?,
-                title: record.get(4).map_err(index)?,
-                model: record.get(5).map_err(index)?,
-                repo: record.get(6).map_err(index)?,
-                branch: record.get(7).map_err(index)?,
-                parent: None,
-                parent_source: None,
-                native_ids: BTreeSet::new(),
-                source_refs: Vec::new(),
-                start: record.get(15).map_err(index)?,
-                kind: match record.get::<_, String>(2).map_err(index)?.as_str() {
-                    "claude" if record.get::<_, bool>(16).map_err(index)? => "session",
-                    "claude" => "subagent",
-                    "codex" => "codex-run",
-                    "copilot" => "copilot-session",
-                    _ => return Err(index("Unknown warehouse session harness")),
-                },
-                presentation_kind: None,
-                usage: [0; 6],
-                cost: None,
-                status: None,
-            };
             if selected.len() == request.limit || examined == limit || bytes >= MAX_SCAN_BYTES {
                 next = Some(Boundary {
-                    position: row.position,
+                    position: Position {
+                        last: record.get(3).map_err(index)?,
+                        key,
+                        source: machine.to_owned(),
+                    },
                     inclusive: true,
                 });
                 continue;
             }
-            let guardian: bool = record.get(17).map_err(index)?;
-            row.presentation_kind = match row.kind {
-                "subagent" => Some("Subagent"),
-                "codex-run" if guardian => Some("Approval review"),
-                "codex-run" => Some("Codex run"),
-                "copilot-session" => Some("Copilot CLI"),
-                _ => None,
-            };
-            if guardian {
-                row.title = "Approval review".into();
-            }
-            if row.harness == "codex" && record.get::<_, bool>(14).map_err(index)? {
-                let task: Option<String> = record.get(13).map_err(index)?;
-                let prompt: Option<i64> = record.get(9).map_err(index)?;
-                if let Some(offset) = prompt {
-                    let path: String = record.get(10).map_err(index)?;
-                    let ledger: String = record.get(11).map_err(index)?;
-                    let native_id: String = record.get(12).map_err(index)?;
-                    row.title =
-                        selected::prompt_title(self.source, path, &ledger, native_id, offset)?
-                            .unwrap_or_else(|| "Codex subagent".into());
-                } else if let Some(task) = task
-                    .as_deref()
-                    .and_then(|task| task.rsplit('/').next())
-                    .filter(|task| !task.trim().is_empty())
-                {
-                    row.title = crate::model::one_line(task, 80);
-                } else if row.title == "Codex run" {
-                    row.title = "Codex subagent".into();
-                }
-            }
+            let row = read_row(self.source, record, key)?;
             let fields = [
                 Some(row.title.as_str()),
                 Some(row.position.key.as_str()),
@@ -623,24 +675,55 @@ impl<'a> Snapshot<'a> {
         if options.facts.is_some() && !authority.as_ref().is_some_and(CurrentSources::facts_known) {
             return Ok(BTreeMap::new());
         }
-        let mut children = self
+        let authorized: BTreeSet<String> = serde_json::from_str(&self.paths).map_err(index)?;
+        let mut graph = parents::Parents::new(self.transaction)?;
+        let mut native = self.transaction.prepare_cached(
+            "SELECT native_id FROM dim_session WHERE source=?1 AND harness='claude' AND NOT lineage",
+        ).map_err(index)?;
+        let mut member_paths = self
             .transaction
-            .prepare_cached(include_str!("events/store/warehouse_child_runtime.sql"))
+            .prepare_cached(
+                "SELECT c.path FROM lineage_member root
+             CROSS JOIN lineage_member m ON m.component=root.component
+             LEFT JOIN warehouse_current c ON c.source=m.source WHERE root.source=?1",
+            )
             .map_err(index)?;
-        let children = children
-            .query_map(params![encode(&owners)?, self.paths], |row| {
-                Ok(ChildRuntime {
-                    child: row.get(0)?,
-                    native_id: row.get(1)?,
-                    parent: row.get(2)?,
-                    call: row.get(3)?,
-                    root: row.get(4)?,
-                    qualified: row.get(5)?,
-                })
-            })
-            .map_err(index)?
-            .collect::<rusqlite::Result<Vec<_>>>()
-            .map_err(index)?;
+        let mut children = Vec::new();
+        for &child in owners {
+            let Some(native_id) = native
+                .query_row([child], |row| row.get::<_, String>(0))
+                .optional()
+                .map_err(index)?
+            else {
+                continue;
+            };
+            let direct = graph.owner_parents(child)?;
+            let Some(&parent) = direct.first().filter(|_| direct.len() == 1) else {
+                continue;
+            };
+            let (ancestors, roots) = graph.roots(parent)?;
+            let Some(&root) = roots.first().filter(|_| roots.len() == 1) else {
+                continue;
+            };
+            let mut qualified = true;
+            for ancestor in ancestors {
+                let mut member_paths = member_paths.query([ancestor]).map_err(index)?;
+                while let Some(row) = member_paths.next().map_err(index)? {
+                    qualified &= row
+                        .get::<_, Option<String>>(0)
+                        .map_err(index)?
+                        .is_some_and(|path| authorized.contains(&path));
+                }
+            }
+            children.push(ChildRuntime {
+                child,
+                native_id,
+                parent,
+                root,
+                qualified,
+                call: graph.parent(child)?.and_then(|parent| parent.call),
+            });
+        }
         let mut dependencies: BTreeSet<i64> = owners.iter().copied().collect();
         dependencies.extend(
             children
@@ -783,17 +866,38 @@ impl<'a> Snapshot<'a> {
                 .or_default()
                 .push(observation(&harness, path, native_id, ledger, "cached"));
         }
-        let mut parents = self.transaction.prepare_cached(PARENTS).map_err(index)?;
-        let mut parents = parents
-            .query_map(params![owners, self.paths], |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    (r.get::<_, String>(1)?, r.get::<_, String>(2)?),
-                ))
-            })
-            .map_err(index)?
-            .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        let mut graph = parents::Parents::new(self.transaction)?;
+        let authorized: BTreeSet<String> = serde_json::from_str(&self.paths).map_err(index)?;
+        let mut carrier = self
+            .transaction
+            .prepare_cached("SELECT path FROM warehouse_current WHERE source=?1")
             .map_err(index)?;
+        let mut edges = Vec::new();
+        for row in rows.iter() {
+            if let Some(parent) = graph.parent(row.owner)?
+                && let Some(owner) = graph.owner(parent.source)?
+                && carrier
+                    .query_row([owner], |record| record.get::<_, String>(0))
+                    .optional()
+                    .map_err(index)?
+                    .is_some_and(|path| authorized.contains(path.as_str()))
+            {
+                edges.push((row.owner, owner, parent.method));
+            }
+        }
+        let parent_owners = edges.iter().map(|edge| edge.1).collect::<BTreeSet<_>>();
+        let keys = relative_keys(self.transaction, &encode(&parent_owners)?)?
+            .into_iter()
+            .map(|(owner, key, _)| (owner, key))
+            .collect::<BTreeMap<_, _>>();
+        let mut parents = edges
+            .into_iter()
+            .filter_map(|(child, parent, method)| {
+                keys.get(&parent).map(|key| (child, (key.clone(), method)))
+            })
+            .collect::<Vec<_>>();
+        parents.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut parents = parents.into_iter().collect::<BTreeMap<_, _>>();
         for row in rows {
             let usage = priced.remove(&row.owner).unwrap_or_else(|| Usage {
                 tokens: [0; 6],
@@ -828,6 +932,306 @@ impl<'a> Snapshot<'a> {
         }
         Ok(())
     }
+}
+
+fn repositories(
+    transaction: &Connection,
+    source: &Source<'_>,
+    paths: &str,
+) -> Result<BTreeMap<String, String>, ReadError> {
+    let mut repos = source.repos.clone();
+    if source.inventory.is_empty()
+        && let Some(recorded) = source
+            .focused
+            .as_ref()
+            .and_then(|authority| authority.recorded.as_ref())
+    {
+        if let Some(facts) = recorded
+            .read_snapshot()
+            .map_err(index)?
+            .filter(|facts| facts.version == crate::facts::FACTS_VERSION)
+        {
+            repos.extend(
+                facts
+                    .repos
+                    .into_iter()
+                    .filter_map(|(cwd, repo)| repo.map(|repo| (cwd, repo))),
+            );
+        }
+    }
+    if source.focused.is_some() && source.options.facts.is_none() {
+        let home = crate::facts::env_home();
+        let mut directories = transaction
+            .prepare_cached(
+                "SELECT DISTINCT f.cwd FROM json_each(?1) path
+                     CROSS JOIN files f ON f.path=path.value WHERE f.cwd IS NOT NULL",
+            )
+            .map_err(index)?;
+        let mut rows = directories.query([paths]).map_err(index)?;
+        while let Some(row) = rows.next().map_err(index)? {
+            let cwd: String = row.get(0).map_err(index)?;
+            if let Some(repo) =
+                crate::model::repo_of(&cwd, home.as_deref().map(std::path::Path::new))
+            {
+                repos.insert(cwd, repo);
+            }
+        }
+    }
+    Ok(repos)
+}
+
+/// Qualify the current rows used by selected presentation. Parent runtime
+/// can depend on ancestor components, while shared usage joins by native UUID.
+fn selected_related_paths(
+    transaction: &Connection,
+    source: &Source<'_>,
+    owners: &str,
+) -> Result<Vec<String>, ReadError> {
+    let mut query = transaction
+        .prepare_cached(include_str!("events/store/warehouse_selected_related.sql"))
+        .map_err(index)?;
+    let mut candidates = query
+        .query(params![owners, source.namespace.binding()])
+        .map_err(index)?;
+    let mut paths = Vec::new();
+    while let Some(row) = candidates.next().map_err(index)? {
+        let path: String = row.get(0).map_err(index)?;
+        let harness: String = row.get(1).map_err(index)?;
+        let ledger: Ledger =
+            serde_json::from_str(&row.get::<_, String>(2).map_err(index)?).map_err(index)?;
+        let available = match source.availability(&harness, &path)? {
+            Availability::Expected(Some(stat)) => selected::stable_or_grown(&ledger.stat, &stat),
+            Availability::Expected(None) => source.current_provider.is_some(),
+            Availability::Unavailable => false,
+        };
+        if available {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
+fn relative_keys(
+    transaction: &Connection,
+    owners: &str,
+) -> Result<Vec<(i64, String, String)>, ReadError> {
+    let mut keys = transaction.prepare_cached(RELATIVE_KEYS).map_err(index)?;
+    keys.query_map([owners], |record| {
+        Ok((record.get(0)?, record.get(3)?, record.get(1)?))
+    })
+    .map_err(index)?
+    .collect::<rusqlite::Result<Vec<_>>>()
+    .map_err(index)
+}
+
+fn selected_metadata(
+    transaction: &Connection,
+    source: &Source<'_>,
+    key: &str,
+    owner: i64,
+    harness: &str,
+    references: &[crate::CatalogSourceObservation],
+) -> Result<Row, ReadError> {
+    list_functions(transaction).map_err(index)?;
+    let (ancestors, runs, mut incomplete) = parents::Parents::new(transaction)?.relatives(owner)?;
+    let visible = std::iter::once(&owner).chain(&ancestors).chain(&runs);
+    let identities = relative_keys(transaction, &encode(&visible.copied().collect::<Vec<_>>())?)?;
+    let owners = identities
+        .iter()
+        .map(|(owner, _, _)| owner)
+        .collect::<Vec<_>>();
+    let paths = encode(&selected_related_paths(
+        transaction,
+        source,
+        &encode(&owners)?,
+    )?)?;
+    let repos = repositories(transaction, source, &paths)?;
+    let mut statement = transaction
+        .prepare_cached(SELECTED_METADATA)
+        .map_err(index)?;
+    let mut records = statement
+        .query(params![
+            paths,
+            source.namespace.binding(),
+            encode(&repos)?,
+            encode(&identities)?,
+        ])
+        .map_err(index)?;
+    let mut rows = Vec::new();
+    while let Some(record) = records.next().map_err(index)? {
+        rows.push(read_row(source, record, record.get(0).map_err(index)?)?);
+    }
+    incomplete |= rows.len() != owners.len();
+    let snapshot = Snapshot {
+        transaction,
+        source,
+        paths,
+        repos,
+        coverage: Coverage::default(),
+        revision: String::new(),
+    };
+    snapshot.enrich(&mut rows)?;
+    let mut relatives = rows
+        .into_iter()
+        .map(|row| (row.owner, row))
+        .collect::<BTreeMap<_, _>>();
+    let mut row = relatives.remove(&owner).ok_or(ReadError::Restart)?;
+    if row.position.key != key || row.harness != harness {
+        return Err(ReadError::Restart);
+    }
+    let mut presentation = |owners: Vec<i64>| {
+        owners.into_iter().filter_map(|owner| {
+            let relative = relatives.remove(&owner)?;
+            Some(serde_json::json!({
+                "key": relative.position.key, "name": relative.title, "harness": relative.harness,
+                "kind": relative.presentation_kind.unwrap_or(relative.kind), "parent": relative.parent,
+                "last": (relative.position.last != 0).then_some(relative.position.last),
+                "status": relative.recorded_status(), "cost": relative.cost,
+            }))
+        }).collect::<Vec<_>>()
+    };
+    let family = serde_json::json!({
+        "state": if incomplete { "incomplete" } else { "complete" },
+        "ancestors": presentation(ancestors),
+        "runs": presentation(runs),
+    });
+    row.source_refs = references.to_vec();
+    row.details = Some(selected_details(transaction, &row, family)?);
+    source.validate_authority()?;
+    Ok(row)
+}
+
+fn selected_details(
+    transaction: &Connection,
+    row: &Row,
+    family: serde_json::Value,
+) -> Result<serde_json::Value, ReadError> {
+    let cwd = transaction
+        .query_row(
+            "SELECT f.cwd FROM dim_session d
+         JOIN warehouse_current c USING(source) JOIN files f USING(path) WHERE d.source=?1",
+            [row.owner],
+            |record| record.get::<_, Option<String>>(0),
+        )
+        .map_err(index)?;
+    let (turns, errors): (i64, i64) = transaction.query_row(
+        "WITH member AS MATERIALIZED (
+           SELECT m.source FROM lineage_member root
+           CROSS JOIN lineage_member m ON m.component=root.component WHERE root.source=?1
+         ) SELECT
+           (SELECT count(*) FROM member m CROSS JOIN fact_prompt p USING(source)),
+           (SELECT count(*) FROM member m CROSS JOIN fact_tool_result r USING(source) WHERE r.failed)",
+        [row.owner],
+        |record| Ok((record.get(0)?, record.get(1)?)),
+    ).map_err(index)?;
+    let mut tools = transaction
+        .prepare_cached(
+            "SELECT c.tool,count(*) FROM lineage_member root
+         CROSS JOIN lineage_member m ON m.component=root.component
+         CROSS JOIN fact_tool_call c ON c.source=m.source
+         WHERE root.source=?1 AND c.tool IS NOT NULL GROUP BY c.tool",
+        )
+        .map_err(index)?;
+    let tools = tools
+        .query_map([row.owner], |record| {
+            Ok((record.get::<_, String>(0)?, record.get::<_, i64>(1)?))
+        })
+        .map_err(index)?
+        .collect::<rusqlite::Result<BTreeMap<_, _>>>()
+        .map_err(index)?;
+    let calls = tools.values().sum::<i64>();
+    Ok(serde_json::json!({
+        "state": row.status.unwrap_or("off"), "cwd": cwd, "family": family,
+        "turns": turns, "calls": calls, "errors": errors, "tool_calls": tools,
+        "signals": {}, "cost": row.cost, "copied_usage": row.usage[3..].iter().any(|count| *count > 0),
+        "live_observation": row.status.is_some(),
+        "copilot": null, "reported_runs": [], "cost_check": [],
+    }))
+}
+
+fn focused_metadata(source: &Source<'_>, key: &str) -> Result<Option<(Row, String)>, ReadError> {
+    let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
+    let tx = db.transaction().map_err(index)?;
+    crate::events::store::require_current(&tx).map_err(index)?;
+    crate::storage::sqlite::qualify(&tx, &source.namespace).map_err(index)?;
+    let Some(identity) = current_identity(&tx, source, key, None)? else {
+        return Ok(None);
+    };
+    let Some(references) = focused_members(&tx, source, &identity)? else {
+        return Ok(None);
+    };
+    let witness = current_identity_witness(&tx, source, key, &identity, &references)?;
+    let row = selected_metadata(&tx, source, key, identity.0, &identity.1, &references)?;
+    Ok(Some((row, witness)))
+}
+
+fn read_row(
+    source: &Source<'_>,
+    record: &rusqlite::Row<'_>,
+    key: String,
+) -> Result<Row, ReadError> {
+    let mut row = Row {
+        position: Position {
+            last: record.get(3).map_err(index)?,
+            key,
+            source: source.namespace.as_str().to_owned(),
+        },
+        owner: record.get(1).map_err(index)?,
+        harness: record.get(2).map_err(index)?,
+        title: record.get(4).map_err(index)?,
+        model: record.get(5).map_err(index)?,
+        effort: record.get(18).map_err(index)?,
+        repo: record.get(6).map_err(index)?,
+        branch: record.get(7).map_err(index)?,
+        parent: None,
+        parent_source: None,
+        native_ids: BTreeSet::new(),
+        source_refs: Vec::new(),
+        start: record.get(15).map_err(index)?,
+        kind: match record.get::<_, String>(2).map_err(index)?.as_str() {
+            "claude" if record.get::<_, bool>(16).map_err(index)? => "session",
+            "claude" => "subagent",
+            "codex" => "codex-run",
+            "copilot" => "copilot-session",
+            _ => return Err(index("Unknown warehouse session harness")),
+        },
+        presentation_kind: None,
+        usage: [0; 6],
+        cost: None,
+        status: None,
+        details: None,
+    };
+    let guardian: bool = record.get(17).map_err(index)?;
+    row.presentation_kind = match row.kind {
+        "subagent" => Some("Subagent"),
+        "codex-run" if guardian => Some("Approval review"),
+        "codex-run" => Some("Codex run"),
+        "copilot-session" => Some("Copilot CLI"),
+        _ => None,
+    };
+    if guardian {
+        row.title = "Approval review".into();
+    }
+    if row.harness == "codex" && record.get::<_, bool>(14).map_err(index)? {
+        let task: Option<String> = record.get(13).map_err(index)?;
+        let prompt: Option<i64> = record.get(9).map_err(index)?;
+        if let Some(offset) = prompt {
+            let path: String = record.get(10).map_err(index)?;
+            let ledger: String = record.get(11).map_err(index)?;
+            let native_id: String = record.get(12).map_err(index)?;
+            row.title = selected::prompt_title(source, path, &ledger, native_id, offset)?
+                .unwrap_or_else(|| "Codex subagent".into());
+        } else if let Some(task) = task
+            .as_deref()
+            .and_then(|task| task.rsplit('/').next())
+            .filter(|task| !task.trim().is_empty())
+        {
+            row.title = crate::model::one_line(task, 80);
+        } else if row.title == "Codex run" {
+            row.title = "Codex subagent".into();
+        }
+    }
+    Ok(row)
 }
 
 fn child_runtime_state(
@@ -922,6 +1326,166 @@ pub(super) fn read_list(
     request: &Request,
     cursor: Option<&Continuation>,
 ) -> Result<Page, ReadError> {
+    debug_assert_eq!(request.scope, CatalogReadScope::Current);
+    read_pages(
+        sources,
+        workspace,
+        request,
+        cursor,
+        |row| &row.position,
+        |tx, source, boundary| {
+            let snapshot = Snapshot::read(tx, source)?;
+            #[cfg(test)]
+            AFTER_LIST_SNAPSHOT.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().take() {
+                    hook();
+                }
+            });
+            let (mut local, count, scanned, next) = snapshot.rows(request, boundary)?;
+            snapshot.enrich(&mut local)?;
+            Ok((
+                (local, count, scanned, next),
+                snapshot.coverage,
+                snapshot.revision,
+            ))
+        },
+    )
+}
+
+struct RetainedRow {
+    position: Position,
+    metadata: serde_json::Value,
+    identity: crate::CatalogSessionIdentity,
+}
+
+fn read_retained_list(
+    sources: &[Source<'_>],
+    workspace: &str,
+    request: &Request,
+    cursor: Option<&Continuation>,
+) -> Result<Page<RetainedRow>, ReadError> {
+    debug_assert_eq!(request.scope, CatalogReadScope::RetainedHistory);
+    read_pages(
+        sources,
+        workspace,
+        request,
+        cursor,
+        |row| &row.position,
+        |tx, source, boundary| retained_rows(tx, source, request, boundary),
+    )
+}
+
+fn retained_rows(
+    tx: &Connection,
+    source: &Source<'_>,
+    request: &Request,
+    boundary: Option<&Boundary>,
+) -> Result<SourcePage<RetainedRow>, ReadError> {
+    use crate::catalog_search::{MAX_CANDIDATES, MAX_SCAN_BYTES};
+    crate::events::store::require_current(tx).map_err(index)?;
+    crate::storage::sqlite::qualify(tx, &source.namespace).map_err(index)?;
+    let machine = source.namespace.as_str();
+    let origin = source.namespace.binding();
+    let incarnation: String = tx
+        .query_row(
+            "SELECT value FROM meta WHERE key='incarnation'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(index)?;
+    let count: i64 = tx.query_row(
+        "SELECT count(*) FROM warehouse_identity WHERE scope='retained_history' AND source_key=?1 AND retained=1",
+        [origin], |row| row.get(0),
+    ).map_err(index)?;
+    // A frozen binding is written at most once per key and lasts for this Index incarnation.
+    let coverage = Coverage {
+        committed: usize::try_from(count).map_err(index)?,
+        ..Default::default()
+    };
+    let revision = format!(
+        "{:x}",
+        Sha256::digest(encode(&(origin, incarnation, count))?)
+    );
+    let (last, key, inclusive) = boundary.map_or((None, None, false), |b| {
+        (
+            Some(b.position.last),
+            Some(b.position.key.as_str()),
+            machine > b.position.source.as_str() || (machine == b.position.source && b.inclusive),
+        )
+    });
+    let limit = request.q.as_ref().map_or(request.limit, |_| MAX_CANDIDATES);
+    let mut statement = tx
+        .prepare_cached(include_str!("events/store/warehouse_retained_list.sql"))
+        .map_err(index)?;
+    let mut records = statement
+        .query(params![
+            origin,
+            request.harness,
+            request.repo,
+            request.model,
+            last,
+            key,
+            inclusive,
+            (limit + 1) as i64
+        ])
+        .map_err(index)?;
+    let (mut selected, mut total, mut examined, mut bytes, mut next) = (Vec::new(), 0, 0, 0, None);
+    while let Some(record) = records.next().map_err(index)? {
+        let Some(key) = record.get::<_, Option<String>>(0).map_err(index)? else {
+            total = usize::try_from(record.get::<_, i64>(3).map_err(index)?).map_err(index)?;
+            continue;
+        };
+        if next.is_some() {
+            continue;
+        }
+        let position = Position {
+            key,
+            source: machine.to_owned(),
+            last: record.get(1).map_err(index)?,
+        };
+        if selected.len() == request.limit || examined == limit || bytes >= MAX_SCAN_BYTES {
+            next = Some(Boundary {
+                position,
+                inclusive: true,
+            });
+            continue;
+        }
+        let saved: String = record.get(2).map_err(index)?;
+        let metadata: serde_json::Value = serde_json::from_str(&saved).map_err(index)?;
+        let fields =
+            ["name", "key", "repo", "branch", "model", "harness"].map(|key| metadata[key].as_str());
+        examined += 1;
+        bytes += fields
+            .iter()
+            .flatten()
+            .map(|field| field.len())
+            .sum::<usize>();
+        if request.q.as_ref().is_some_and(|q| {
+            !fields
+                .into_iter()
+                .flatten()
+                .any(|field| field.to_lowercase().contains(q))
+        }) {
+            continue;
+        }
+        let (metadata, identity) = retained_metadata_in_snapshot(tx, source, &position.key)?;
+        selected.push(RetainedRow {
+            position,
+            metadata,
+            identity,
+        });
+    }
+    Ok(((selected, total, examined, next), coverage, revision))
+}
+
+fn read_pages<T>(
+    sources: &[Source<'_>],
+    workspace: &str,
+    request: &Request,
+    cursor: Option<&Continuation>,
+    position: fn(&T) -> &Position,
+    read: impl Fn(&Connection, &Source<'_>, Option<&Boundary>) -> Result<SourcePage<T>, ReadError>,
+) -> Result<Page<T>, ReadError> {
     let mut ordered: Vec<_> = sources.iter().collect();
     ordered.sort_by(|a, b| a.namespace.binding().cmp(b.namespace.binding()));
     if ordered.len() > 64
@@ -960,22 +1524,14 @@ pub(super) fn read_list(
                 .map_err(index)?;
         list_functions(&db).map_err(index)?;
         let tx = db.transaction().map_err(index)?;
-        let snapshot = Snapshot::read(&tx, source)?;
-        #[cfg(test)]
-        AFTER_LIST_SNAPSHOT.with(|hook| {
-            if let Some(hook) = hook.borrow_mut().take() {
-                hook();
-            }
-        });
-        digest.update(&snapshot.revision);
-        let (mut local, count, scanned, local_next) =
-            snapshot.rows(request, cursor.map(|cursor| &cursor.boundary))?;
-        snapshot.enrich(&mut local)?;
+        let ((local, count, scanned, local_next), source_coverage, revision) =
+            read(&tx, source, cursor.map(|cursor| &cursor.boundary))?;
+        digest.update(revision);
         source.validate_authority()?;
         rows.extend(local);
-        rows.sort_by(|a, b| a.position.cmp(&b.position));
+        rows.sort_by(|a, b| position(a).cmp(position(b)));
         if rows.len() > request.limit {
-            let position = rows[request.limit].position.clone();
+            let position = position(&rows[request.limit]).clone();
             if frontier.as_ref().is_none_or(|old| position < old.position) {
                 frontier = Some(Boundary {
                     position,
@@ -993,23 +1549,23 @@ pub(super) fn read_list(
         }
         total += count;
         examined += scanned;
-        coverage.committed += snapshot.coverage.committed;
-        coverage.pending += snapshot.coverage.pending;
-        coverage.unavailable += snapshot.coverage.unavailable;
+        coverage.committed += source_coverage.committed;
+        coverage.pending += source_coverage.pending;
+        coverage.unavailable += source_coverage.unavailable;
     }
     let revision = format!("{:x}", digest.finalize());
     if cursor.is_some_and(|cursor| cursor.revision != revision) {
         return Err(ReadError::Restart);
     }
     if let Some(next) = &frontier {
-        rows.retain(|row| row.position < next.position);
+        rows.retain(|row| position(row) < &next.position);
     }
     let next = frontier.map(|mut boundary| {
         if request.q.is_none()
             && let Some(last) = rows.last()
         {
             boundary = Boundary {
-                position: last.position.clone(),
+                position: position(last).clone(),
                 inclusive: false,
             };
         }
@@ -1143,49 +1699,13 @@ pub(super) fn focused_identity(
             let Some(references) = focused_members(&tx, source, &identity)? else {
                 return Ok(None);
             };
-            let incarnation: String = tx
-                .query_row(
-                    "SELECT value FROM meta WHERE key='incarnation'",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(index)?;
-            let digest = Sha256::digest(encode(&(
-                source.namespace.binding(),
-                key,
-                &identity,
-                incarnation,
-                &references,
-            ))?);
-            (identity.1, references, format!("{digest:x}"))
+            let witness = current_identity_witness(&tx, source, key, &identity, &references)?;
+            (identity.1, references, witness)
         }
         CatalogReadScope::RetainedHistory => {
             let identity = warehouse::retained_identity(&tx, &source.namespace, key)
                 .map_err(retained_error)?;
-            let mut members = tx.prepare_cached("SELECT receipt FROM warehouse_identity_member WHERE identity=?1 ORDER BY ordinal").map_err(index)?;
-            let mut rows = members.query([identity.binding]).map_err(index)?;
-            let mut references = Vec::new();
-            while let Some(row) = rows.next().map_err(index)? {
-                let receipt: crate::model::summary::CatalogSource =
-                    serde_json::from_str(&row.get::<_, String>(0).map_err(index)?)
-                        .map_err(index)?;
-                let path = receipt
-                    .path
-                    .to_str()
-                    .and_then(|path| selected::relative(source.options, &identity.harness, path))
-                    .ok_or(ReadError::RetainedUnverified)?;
-                references.push(crate::CatalogSourceObservation {
-                    source: crate::SessionSourceRef {
-                        root: identity.harness.clone(),
-                        path: path.to_owned(),
-                        native_id: receipt.native_id,
-                        offset: receipt.offset,
-                        prefix_sha256: receipt.prefix_sha256,
-                        tail_sha256: receipt.tail_sha256,
-                    },
-                    state: "unavailable".into(),
-                });
-            }
+            let references = retained_references(&tx, source, &identity)?;
             (identity.harness, references, identity.witness)
         }
     };
@@ -1198,6 +1718,73 @@ pub(super) fn focused_identity(
         references,
         identity_witness,
     )))
+}
+
+fn retained_references(
+    tx: &Connection,
+    source: &Source<'_>,
+    identity: &warehouse::RetainedIdentity,
+) -> Result<Vec<crate::CatalogSourceObservation>, ReadError> {
+    let mut members = tx
+        .prepare_cached(
+            "SELECT receipt FROM warehouse_identity_member WHERE identity=?1 ORDER BY ordinal",
+        )
+        .map_err(index)?;
+    let mut rows = members.query([identity.binding]).map_err(index)?;
+    let mut references = Vec::new();
+    while let Some(row) = rows.next().map_err(index)? {
+        let receipt: crate::model::summary::CatalogSource =
+            serde_json::from_str(&row.get::<_, String>(0).map_err(index)?).map_err(index)?;
+        let path = receipt
+            .path
+            .to_str()
+            .and_then(|path| selected::relative(source.options, &identity.harness, path))
+            .ok_or(ReadError::RetainedUnverified)?;
+        references.push(crate::CatalogSourceObservation {
+            source: crate::SessionSourceRef {
+                root: identity.harness.clone(),
+                path: path.to_owned(),
+                native_id: receipt.native_id,
+                offset: receipt.offset,
+                prefix_sha256: receipt.prefix_sha256,
+                tail_sha256: receipt.tail_sha256,
+            },
+            state: "unavailable".into(),
+        });
+    }
+    source.validate_authority()?;
+    Ok(references)
+}
+
+fn focused_retained_metadata(
+    source: &Source<'_>,
+    key: &str,
+) -> Result<(serde_json::Value, crate::CatalogSessionIdentity), ReadError> {
+    let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
+    let tx = db.transaction().map_err(index)?;
+    retained_metadata_in_snapshot(&tx, source, key)
+}
+
+fn retained_metadata_in_snapshot(
+    tx: &Connection,
+    source: &Source<'_>,
+    key: &str,
+) -> Result<(serde_json::Value, crate::CatalogSessionIdentity), ReadError> {
+    let identity =
+        warehouse::retained_identity(tx, &source.namespace, key).map_err(retained_error)?;
+    let refs = retained_references(tx, source, &identity)?;
+    let metadata = serde_json::from_str(&identity.metadata).map_err(index)?;
+    Ok((
+        metadata,
+        present_identity(
+            source,
+            CatalogReadScope::RetainedHistory,
+            key,
+            identity.harness,
+            refs,
+            identity.witness,
+        ),
+    ))
 }
 
 fn present_identity(
@@ -1275,15 +1862,43 @@ fn present_identity(
     }
 }
 
-pub(super) fn resolve_current_native(
+fn current_identity_witness(
+    tx: &Connection,
     source: &Source<'_>,
+    key: &str,
+    identity: &Identity,
+    references: &[crate::CatalogSourceObservation],
+) -> Result<String, ReadError> {
+    let incarnation: String = tx
+        .query_row(
+            "SELECT value FROM meta WHERE key='incarnation'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(index)?;
+    let digest = Sha256::digest(encode(&(
+        source.namespace.binding(),
+        key,
+        identity,
+        incarnation,
+        references,
+    ))?);
+    Ok(format!("{digest:x}"))
+}
+
+pub(super) fn resolve_native(
+    source: &Source<'_>,
+    scope: CatalogReadScope,
     harness: &str,
     native_id: &str,
-) -> Result<Vec<String>, ReadError> {
+) -> Result<Vec<crate::CatalogSessionIdentity>, ReadError> {
     let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
     let tx = db.transaction().map_err(index)?;
     crate::events::store::require_current(&tx).map_err(index)?;
     crate::storage::sqlite::qualify(&tx, &source.namespace).map_err(index)?;
+    if scope == CatalogReadScope::RetainedHistory {
+        return resolve_retained_native(&tx, source, harness, native_id);
+    }
     let mut aliases = tx
         .prepare_cached(include_str!("events/store/warehouse_native_key.sql"))
         .map_err(index)?;
@@ -1295,13 +1910,54 @@ pub(super) fn resolve_current_native(
             row.get(1).map_err(index)?,
             row.get(2).map_err(index)?,
         );
-        if focused_members(&tx, source, &identity)?.is_some() {
-            matches.push(row.get(3).map_err(index)?);
+        if let Some(references) = focused_members(&tx, source, &identity)? {
+            let key: String = row.get(3).map_err(index)?;
+            let witness = current_identity_witness(&tx, source, &key, &identity, &references)?;
+            matches.push(present_identity(
+                source, scope, &key, identity.1, references, witness,
+            ));
             if matches.len() == 2 {
                 break;
             }
         }
     }
+    source.validate_authority()?;
+    Ok(matches)
+}
+
+fn resolve_retained_native(
+    tx: &Connection,
+    source: &Source<'_>,
+    harness: &str,
+    native_id: &str,
+) -> Result<Vec<crate::CatalogSessionIdentity>, ReadError> {
+    let mut aliases = tx
+        .prepare_cached(
+            "SELECT DISTINCT i.catalog_key FROM warehouse_identity_member m
+         CROSS JOIN warehouse_identity i ON i.id=m.identity
+         WHERE json_extract(m.receipt,'$.native_id')=?1 AND i.source_key=?2
+           AND i.harness=?3 AND i.scope='retained_history' AND i.retained=1
+         ORDER BY i.catalog_key",
+        )
+        .map_err(index)?;
+    let mut rows = aliases
+        .query(params![native_id, source.namespace.binding(), harness])
+        .map_err(index)?;
+    let mut matches = Vec::new();
+    while let Some(row) = rows.next().map_err(index)? {
+        let key: String = row.get(0).map_err(index)?;
+        match retained_metadata_in_snapshot(tx, source, &key) {
+            Ok((_, identity)) if identity.native_ids.iter().any(|id| id == native_id) => {
+                matches.push(identity);
+                if matches.len() == 2 {
+                    break;
+                }
+            }
+            Ok(_) | Err(ReadError::RetainedUnverified) => (),
+            Err(error) => return Err(error),
+        }
+    }
+    source.validate_authority()?;
     Ok(matches)
 }
 

@@ -213,6 +213,12 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
     let copilot_id = "01234567-89ab-4cde-8123-456789abcdef";
     let copilot = fixture.copilot(copilot_id);
     let titleless = fixture.titleless_claude("titleless");
+    append_native(
+        &claude,
+        json!({"type":"assistant","uuid":"effort","sessionId":"same","effort":"high",
+        "perTurnEffort":" MAX ","timestamp":"2026-09-24T00:00:02Z",
+        "message":{"role":"assistant","content":[{"type":"text","text":"Response"}]}}),
+    );
     crate::model::observe_catalog(
         &fixture.options,
         &mut fixture.cache,
@@ -256,6 +262,7 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
                     row["repo"].as_str(),
                     row["branch"].as_str(),
                     row["parent"].as_str(),
+                    row["effort"].as_str(),
                 )
             })
             .collect();
@@ -271,6 +278,7 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
                     row.repo.as_deref(),
                     row.branch.as_deref(),
                     row.parent.as_deref(),
+                    row.effort.as_deref(),
                 )
             })
             .collect();
@@ -289,13 +297,11 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
         ("codex", "same", "codex:same"),
         ("copilot", copilot_id, copilot_id),
     ] {
-        assert_eq!(
-            resolve_current_native(&focused, harness, native).unwrap(),
-            [key]
-        );
+        let aliases = resolve_native(&focused, CatalogReadScope::Current, harness, native).unwrap();
         let resolved = focused_identity(&focused, CatalogReadScope::Current, key)
             .unwrap()
             .unwrap();
+        assert_eq!(aliases.as_slice(), std::slice::from_ref(&resolved));
         assert_eq!(resolved.native_id.as_deref(), Some(native));
         assert_eq!(resolved.harness, harness);
         assert_eq!(resolved.source_refs.len(), 1);
@@ -382,8 +388,32 @@ fn warehouse_actual_reader_plans_use_indexed_exact_probes_and_local_usage() {
         !detail.contains("CORRELATED SCALAR SUBQUERY") && !detail.contains("SCAN fact_record"),
         "{detail}"
     );
-    let parents = plan(&db, PARENTS, ["[1]", "[]"]);
-    assert!(!parents.contains("CORRELATED SCALAR SUBQUERY"), "{parents}");
+    let parents = plan(
+        &db,
+        include_str!("../events/store/warehouse_parent_offer.sql"),
+        params![1, false],
+    );
+    let children = plan(
+        &db,
+        include_str!("../events/store/warehouse_parent_children.sql"),
+        [1],
+    );
+    assert!(
+        parents.contains("claude_call_identity") && parents.contains("process_capture_pid"),
+        "{parents}"
+    );
+    assert!(
+        children.contains("session_parent_name") && children.contains("agent_storage_parent"),
+        "{children}"
+    );
+    for query in [&parents, &children] {
+        assert!(
+            !query
+                .lines()
+                .any(|line| matches!(line, "SCAN m" | "SCAN g" | "SCAN active" | "SCAN carrier")),
+            "{query}"
+        );
+    }
 }
 
 #[test]
@@ -721,10 +751,27 @@ fn warehouse_transcript_transport_keeps_earlier_windows_and_exact_addresses_acro
     };
     let tail = latest();
     assert_eq!(tail["projection"], 7);
+    let exact = http::identity(&configured, "sid=native");
+    assert_eq!(exact.status, 200);
+    let exact: serde_json::Value = serde_json::from_slice(&exact.body).unwrap();
+    assert_eq!(
+        tail["identity"]["generation"],
+        exact["identity"]["generation"]
+    );
     assert_eq!(tail["entries"][0]["text"], "Prompt 3");
     assert_eq!(tail["entries"][1]["text"], "Prompt 4");
     assert!(tail["entries"][1].get("slot").is_none());
     let address = tail["entries"][1]["address"].to_string();
+    let turn = tail["entries"][1]["turn"].as_str().unwrap();
+    let anchor = http::anchor(
+        &configured,
+        &crate::native_html::query(&[("sid", "native"), ("turn", turn)]),
+        None,
+        None,
+    );
+    let body: serde_json::Value = serde_json::from_slice(&anchor.body).unwrap();
+    assert_eq!(anchor.status, 200, "{body}");
+    assert_eq!(body["address"], tail["entries"][1]["address"]);
 
     for second in 5..=7 {
         append_native(&path, prompt("native", second, &format!("Prompt {second}")));
@@ -742,6 +789,8 @@ fn warehouse_transcript_transport_keeps_earlier_windows_and_exact_addresses_acro
     ]);
     assert_eq!(status, 200, "{earlier}");
     assert_eq!(earlier["position"], "earlier");
+    assert!(tail["session"].is_object());
+    assert!(earlier["session"].is_null());
     assert_eq!(earlier["entries"][0]["text"], "Prompt 1");
     assert_eq!(earlier["entries"][1]["text"], "Prompt 2");
     let (status, exact) = read(&[("sid", "native"), ("address", &address)]);
@@ -795,6 +844,68 @@ fn warehouse_transcript_transport_keeps_earlier_windows_and_exact_addresses_acro
     fs::rename(replacement, &path).unwrap();
     scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
     assert_eq!(read(&[("sid", "native"), ("address", &address)]).0, 409);
+}
+
+#[test]
+fn warehouse_failed_tool_marker_opens_the_rendered_entry() {
+    let mut fixture = Fixture::new("native-failure-marker");
+    let path = fixture.claude("native", "Original prompt");
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"call","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"text","text":"Checking the result"},
+            {"type":"tool_use","id":"command","name":"Bash","input":{"command":"pwd"}}
+        ]}}),
+    );
+    append_native(
+        &path,
+        json!({"type":"user","uuid":"reply","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:02Z","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"command","content":"failure","is_error":true}
+        ]}}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let parse = |reply: crate::viewer::ViewerReply| {
+        let body: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(reply.status, 200, "{body}");
+        body
+    };
+    let page = parse(http::transcript(&configured, "sid=native", None, None));
+    let tool = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["k"] == "tool")
+        .unwrap();
+    assert_eq!(tool["ok"], false);
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("kind", "errors"),
+        (
+            "generation",
+            page["identity"]["generation"].as_str().unwrap(),
+        ),
+    ]);
+    let markers = parse(http::annotations(&configured, &query, None, None));
+    assert_eq!(markers["total"], 1);
+    assert_eq!(markers["entries"][0]["address"], tool["address"]);
+    let address = markers["entries"][0]["address"].to_string();
+    let query = crate::native_html::query(&[("sid", "native"), ("address", &address)]);
+    let exact = parse(http::transcript(&configured, &query, None, None));
+    assert!(
+        exact["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["address"] == tool["address"])
+    );
 }
 
 #[test]
@@ -1415,7 +1526,7 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
         .iter()
         .find(|record| record.address.offset == operation)
         .unwrap();
-    assert_eq!(found.operation_parent, Some(call));
+    assert_eq!(found.operation.unwrap().parent, call);
     let transcript = oracle("codex-native");
     let entry = transcript["entries"]
         .as_array()
@@ -1424,6 +1535,51 @@ fn warehouse_operation_and_activity_anchors_match_native_evidence() {
         .find(|entry| entry["script"] == call)
         .unwrap();
     assert_eq!(found.entry_anchor.as_deref(), entry["entry_id"].as_str());
+
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let body = |reply: crate::viewer::ViewerReply| {
+        let value: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+        assert_eq!(reply.status, 200, "{value}");
+        value
+    };
+    let page = body(http::transcript(
+        &configured,
+        "sid=codex-native",
+        None,
+        None,
+    ));
+    let operation = page["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["script"] == call)
+        .unwrap();
+    assert_eq!(operation["ok"], false);
+    assert_eq!(operation["entry_id"], entry["entry_id"]);
+    let markers = body(http::annotations(
+        &configured,
+        "sid=codex-native&kind=errors",
+        None,
+        None,
+    ));
+    assert_eq!(markers["total"], 1);
+    assert_eq!(markers["entries"][0]["address"], operation["address"]);
+    let address = operation["address"].to_string();
+    let query = crate::native_html::query(&[
+        ("sid", "codex-native"),
+        ("address", &address),
+        ("part", "script"),
+    ]);
+    let script = body(http::entry(&configured, &query, None, None));
+    assert_eq!(
+        script["entry"]["scriptText"],
+        "tools.exec_command({cmd:'false'})"
+    );
 }
 
 #[test]
@@ -2137,6 +2293,13 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
     let mut fixture = Fixture::new("retained-trace-peer");
     let root = fixture.claude("root", "Original trace");
     let peer = fixture.claude("peer", "Original peer");
+    let sent = selected::Address {
+        path: "projects/proj/root.jsonl".into(),
+        offset: fs::metadata(&root).unwrap().len(),
+        block: 0,
+        occurrence: 0,
+    };
+    let receipt_offset = fs::metadata(&peer).unwrap().len();
     append_native(
         &root,
         json!({"type":"assistant","uuid":"call","sessionId":"root",
@@ -2194,7 +2357,7 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
             witness,
             key,
             &address,
-            &provider,
+            Some(&provider),
         )
     };
     assert!(matches!(
@@ -2225,7 +2388,40 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
             .as_deref(),
         Some("Original peer")
     );
+    let locally_proven = selected::retained_peer_record_at(
+        &fixture.source(&[&root, &peer]),
+        "root",
+        &root_identity.witness,
+        "peer",
+        &address,
+        None,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(locally_proven.text().as_deref(), Some("Original peer"));
+    assert_eq!(locally_proven.reference.offset, provider.bytes.len() as u64);
+    let relay = |fixture: &Fixture, block, provider: Option<&dyn SessionSourceReader>| {
+        selected::retained_peer_relay_address(
+            &fixture.source(&[&root, &peer]),
+            "root",
+            &root_identity.witness,
+            "peer",
+            (&sent, block),
+            provider,
+        )
+    };
+    let observed = relay(&fixture, 0, None).unwrap();
+    assert_eq!(observed.record.path, address.path);
+    assert_eq!(observed.record.offset, receipt_offset);
+    assert!(matches!(
+        relay(&fixture, 1, None),
+        Err(ReadError::PeerUnavailable(_))
+    ));
     fixture.claude("peer", "Replacement peer");
+    let archived = relay(&fixture, 0, Some(&provider)).unwrap();
+    assert_eq!(archived.record, observed.record);
+    assert_eq!(archived.binding, observed.binding);
+    assert_eq!(archived.entry_id, observed.entry_id);
     assert_eq!(
         open(&fixture, &root_identity.witness, "peer")
             .unwrap()
@@ -2293,6 +2489,15 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
         data: fs::read(&path).unwrap(),
         calls: Default::default(),
     };
+    let archive =
+        crate::archive::Archive::new(crate::archive::standalone_dir(&fixture.options.cache));
+    archive
+        .preserve(
+            path.to_str().unwrap(),
+            &mut provider.data.as_slice(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
     let address = selected::Address {
         path: "projects/proj/native.jsonl".into(),
         offset: 0,
@@ -2319,6 +2524,14 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
     ));
     assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     fixture.claude("native", "Replacement prompt");
+    let replacement = fs::read(&path).unwrap();
+    archive
+        .preserve(
+            path.to_str().unwrap(),
+            &mut replacement.as_slice(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
     let retained = selected::retained_record_at(
         &fixture.options,
         &fixture.source(&[&path]),
@@ -2344,11 +2557,31 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
         .unwrap()
         .is_none()
     );
-    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     let source = fixture.source(&[&path]);
     let retained_identity = focused_identity(&source, CatalogReadScope::RetainedHistory, "native")
         .unwrap()
         .unwrap();
+    let current_alias =
+        resolve_native(&source, CatalogReadScope::Current, "claude", "native").unwrap();
+    let retained_alias = resolve_native(
+        &source,
+        CatalogReadScope::RetainedHistory,
+        "claude",
+        "native",
+    )
+    .unwrap();
+    assert_eq!(
+        retained_alias.as_slice(),
+        std::slice::from_ref(&retained_identity)
+    );
+    assert_eq!(current_alias.len(), 1);
+    assert_eq!(current_alias[0].catalog_key, retained_identity.catalog_key);
+    assert_ne!(current_alias[0].generation, retained_identity.generation);
+    assert_ne!(
+        current_alias[0].source_refs[0].source.prefix_sha256,
+        retained_identity.source_refs[0].source.prefix_sha256
+    );
     assert_eq!(
         retained_identity.source_refs[0].source.offset,
         provider.data.len() as u64
@@ -2357,7 +2590,7 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
         retained_identity.source_refs[0].source.prefix_sha256,
         <[u8; 32]>::from(Sha256::digest(&provider.data))
     );
-    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     let latest = selected::retained_latest_page(&source, "native", 1, None, &provider).unwrap();
     assert_eq!(
         latest.records[0].text().as_deref(),
@@ -2371,6 +2604,42 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
         options: fixture.options.clone(),
         up: true,
     };
+    for (scope, alias) in [
+        ("current", &current_alias[0]),
+        ("retained_history", &retained_identity),
+    ] {
+        let query = crate::native_html::query(&[
+            ("machine", &configured.key),
+            ("harness", "claude"),
+            ("native_id", "native"),
+            ("scope", scope),
+        ]);
+        let response = http::resolve_native(&configured, &query);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).unwrap();
+        assert_eq!(response.status, 200, "{body}");
+        assert_eq!(body["resolution"]["state"], "resolved");
+        assert_eq!(body["resolution"]["generation"], alias.generation);
+        assert_eq!(body["resolution"]["catalog_key"], alias.catalog_key);
+    }
+    for (scope, alias) in [
+        ("current", &current_alias[0]),
+        ("retained_history", &retained_identity),
+    ] {
+        let query = crate::native_html::query(&[("sid", "native"), ("scope", scope)]);
+        let metadata = http::list(std::slice::from_ref(&configured), "fixture", &query, false);
+        let identity = http::identity(&configured, &query);
+        let locate = http::locate(&configured, &query);
+        assert_eq!(
+            (metadata.status, identity.status, locate.status),
+            (200, 200, 200)
+        );
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.body).unwrap();
+        let identity: serde_json::Value = serde_json::from_slice(&identity.body).unwrap();
+        let locate: serde_json::Value = serde_json::from_slice(&locate.body).unwrap();
+        assert_eq!(identity["identity"]["generation"], alias.generation);
+        assert_eq!(metadata["generation"], alias.generation);
+        assert_eq!(locate["matches"][0]["catalog_key"], alias.catalog_key);
+    }
     let query = crate::native_html::query(&[
         ("sid", "native"),
         ("scope", "retained_history"),
@@ -2381,6 +2650,27 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
     assert_eq!(reply.status, 200, "{body}");
     assert_eq!(body["entries"][0]["entry_id"], entries[0]["entry_id"]);
     assert_eq!(body["entries"][0]["text"], "Original native prompt");
+    assert_eq!(body["session"]["name"], "Original native prompt");
+    for query in [
+        "scope=retained_history",
+        "scope=retained_history&sid=native",
+    ] {
+        let listed = http::list(std::slice::from_ref(&configured), "fixture", query, false);
+        let listed_body: serde_json::Value = serde_json::from_slice(&listed.body).unwrap();
+        assert_eq!(listed.status, 200, "{listed_body}");
+        assert_eq!(listed_body["items"][0]["name"], "Original native prompt");
+        assert_eq!(listed_body["items"][0]["lifecycle"], "retained");
+    }
+    let pending = http::transcript(&configured, &query, None, None);
+    assert_eq!(pending.status, 503);
+    let pending: serde_json::Value = serde_json::from_slice(&pending.body).unwrap();
+    assert_eq!(pending["error"]["code"], "retained_source_preparing");
+    crate::archive::seekable::prepare(&archive, &path, &retained_identity.source_refs[0].source)
+        .unwrap();
+    let local = http::transcript(&configured, &query, None, None);
+    let local_body: serde_json::Value = serde_json::from_slice(&local.body).unwrap();
+    assert_eq!(local.status, 200, "{local_body}");
+    assert_eq!(local_body["entries"][0]["text"], "Original native prompt");
     let first = selected::retained_page(&source, "native", 1, None, &provider).unwrap();
     assert_eq!(first.member_count, 1);
     let cursor = first.next.unwrap();
@@ -2394,10 +2684,121 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
         data: vec![],
         calls: Default::default(),
     };
+    assert_eq!(
+        http::transcript(&configured, &query, None, Some(&denied)).status,
+        503
+    );
     assert!(matches!(
         selected::retained_page(&source, "native", 1, Some(&cursor), &denied),
         Err(ReadError::Restart)
     ));
+}
+
+#[test]
+fn warehouse_retained_tool_expansion_reads_the_frozen_reply() {
+    let mut fixture = Fixture::new("retained-tool-reply");
+    let path = fixture.claude("native", "Original prompt");
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"call","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:01Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"command","name":"Bash","input":{"command":"pwd"}}
+        ]}}),
+    );
+    append_native(
+        &path,
+        json!({"type":"user","uuid":"reply","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:02Z","message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"command","content":"original output"}
+        ]}}),
+    );
+    append_native(
+        &path,
+        json!({"type":"assistant","uuid":"stopped","sessionId":"native",
+        "timestamp":"2026-09-24T00:00:03Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"incomplete","name":"Bash","input":{"command":"ls"}}
+        ]}}),
+    );
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let archive =
+        crate::archive::Archive::new(crate::archive::standalone_dir(&fixture.options.cache));
+    archive
+        .preserve(
+            path.to_str().unwrap(),
+            &mut fs::File::open(&path).unwrap(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
+    fixture.claude("native", "Replacement prompt");
+    let source = fixture.source(&[&path]);
+    let identity = focused_identity(&source, CatalogReadScope::RetainedHistory, "native")
+        .unwrap()
+        .unwrap();
+    crate::archive::seekable::prepare(&archive, &path, &identity.source_refs[0].source).unwrap();
+    let reader = ArchiveReader::new(&fixture.options);
+    let component = selected::retained_latest_page(&source, "native", 32, None, &reader).unwrap();
+    let call = component
+        .records
+        .iter()
+        .find(|record| !record.causal.calls.is_empty())
+        .unwrap();
+    let reply = call.causal.calls[0].replies.first().unwrap();
+    assert_eq!(
+        component.reply_records[&(call.address.path.clone(), reply.o)]["message"]["content"][0]["content"],
+        "original output"
+    );
+    let entries = selected::render::entries(&component, source.namespace.as_str(), "native", 0);
+    let pending = entries
+        .iter()
+        .find(|entry| entry["unfinished"] == true)
+        .unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let reply = http::annotations(
+        &configured,
+        "sid=native&scope=retained_history&kind=errors",
+        None,
+        None,
+    );
+    let markers: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{markers}");
+    assert_eq!(markers["total"], 1);
+    assert_eq!(markers["entries"][0]["address"], pending["address"]);
+    let call = entries
+        .iter()
+        .find(|entry| entry["k"] == "tool" && entry["ok"] == true)
+        .unwrap();
+    let address: crate::session_route::NativeEntryAddress =
+        serde_json::from_value(call["address"].clone()).unwrap();
+    let addressed = selected::retained_addressed_window(
+        &source,
+        "native",
+        &address.record,
+        &address.binding,
+        &reader,
+    )
+    .unwrap();
+    let Some(selected::render::Expansion::Json(entry)) = selected::render::expand(
+        &addressed,
+        source.namespace.as_str(),
+        "native",
+        &address,
+        selected::render::Part::Output,
+    ) else {
+        panic!("frozen tool reply did not expand");
+    };
+    assert_eq!(entry["out"], "original output");
 }
 
 #[test]
@@ -2483,6 +2884,25 @@ fn warehouse_selected_family_prices_descendants_and_deduplicates_shared_steps() 
         ).unwrap()
     };
     observe(&mut fixture);
+    let source = Source::focused(
+        fixture.namespace.clone(),
+        &fixture.db,
+        &fixture.options,
+        None,
+    )
+    .unwrap();
+    let (metadata, _) = focused_metadata(&source, "child").unwrap().unwrap();
+    assert_eq!(metadata.parent.as_deref(), Some("root"));
+    let details = metadata.details.unwrap();
+    assert_eq!(details["family"]["state"], "complete");
+    assert_eq!(details["family"]["ancestors"][0]["key"], "root");
+    assert_eq!(details["family"]["runs"][0]["key"], "leaf");
+    assert!(
+        details["family"]["runs"][0]["cost"]["usd"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
     let family = family_price(&fixture.source(&paths), "root")
         .unwrap()
         .unwrap();
@@ -2840,6 +3260,93 @@ fn warehouse_prompt_parent_matches_the_authorized_launch_address() {
         .inventory
         .insert(parent.to_str().unwrap().into(), Availability::Unavailable);
     assert!(selected::launch_call(&source, "child").unwrap().is_none());
+}
+
+#[test]
+fn warehouse_retained_signal_survives_append_and_prefix_expiry() {
+    let mut fixture = Fixture::new("retained-signal-expiry");
+    let path = fixture.claude("native", "Original prompt");
+    let offset = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        json!({"type":"system","subtype":"compact_boundary",
+        "sessionId":"native","timestamp":"2026-09-24T00:00:01Z"}),
+    );
+    crate::model::observe_catalog(
+        &fixture.options,
+        &mut fixture.cache,
+        &mut false,
+        &mut crate::model::Texts::default(),
+        crate::model::now_ms(),
+    )
+    .unwrap();
+    let archive =
+        crate::archive::Archive::new(crate::archive::standalone_dir(&fixture.options.cache));
+    archive
+        .preserve(
+            path.to_str().unwrap(),
+            &mut fs::File::open(&path).unwrap(),
+            crate::archive::NATIVE_REDACTOR,
+        )
+        .unwrap();
+    let db = Connection::open(&fixture.db).unwrap();
+    let (source_id, revision): (i64, i64) = db
+        .query_row(
+            "SELECT m.source,m.revision FROM warehouse_identity i
+         JOIN warehouse_identity_member m ON m.identity=i.id WHERE i.catalog_key='native'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    db.execute(
+        "UPDATE warehouse_prefix SET committed_at=?1 WHERE source=?2",
+        params![
+            crate::model::now_ms() - warehouse::PREFIX_WINDOW_MS - 1,
+            source_id
+        ],
+    )
+    .unwrap();
+    append_native(
+        &path,
+        json!({"type":"system","subtype":"compact_boundary",
+        "sessionId":"native","timestamp":"2026-09-24T00:00:02Z",
+        "compactMetadata":{"trigger":"auto","preTokens":123}}),
+    );
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let expired: bool = db
+        .query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM warehouse_prefix WHERE revision=?1)",
+            [revision],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(expired);
+    fixture.claude("native", "Replacement prompt");
+    let source = fixture.source(&[&path]);
+    let identity = focused_identity(&source, CatalogReadScope::RetainedHistory, "native")
+        .unwrap()
+        .unwrap();
+    crate::archive::seekable::prepare(&archive, &path, &identity.source_refs[0].source).unwrap();
+    let page = selected::retained_latest_page(
+        &source,
+        "native",
+        32,
+        None,
+        &ArchiveReader::new(&fixture.options),
+    )
+    .unwrap();
+    let signal = page
+        .records
+        .iter()
+        .find(|record| record.address.offset == offset)
+        .unwrap()
+        .causal
+        .signals
+        .iter()
+        .find(|slot| slot.signal.k == crate::events::SignalKind::Compact)
+        .unwrap();
+    assert_eq!(signal.signal.n, None);
+    assert_eq!(signal.signal.v, None);
 }
 
 #[test]

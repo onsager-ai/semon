@@ -77,6 +77,12 @@ well as selecting metadata from committed facts.
   custody no longer qualifies, show why the peer is unavailable. A peer link
   never falls through to a replacement owner, and an ordinary unbound History
   request still returns `retained_identity_unverified`.
+- Owner decision 2026-11-22: selected reads derive retained edges and their
+  native entry addresses solely from the certified prefixes, within the
+  existing request budgets. When an exact match cannot be proven, show the
+  evidence as unavailable and give the reason. Untyped relay matching stays
+  in selected reads. Retained reads never fall back to the semantic trace
+  tables keyed by Catalog key. Phase 3 adds no persisted graph contract.
 - Owner decision 2026-11-22: the source prepares a seekable copy of each
   needed archive chain in a background job. The copy lives next to the Index,
   is checked against the archive chain, and stores hash-verified chunks. It is
@@ -389,6 +395,12 @@ receipts start an incoming turn in the parent. For untyped legacy receipts,
 selected detail uses matched receipts as incoming relay turns and the latest
 unmatched receipt as completion evidence when explicit terminal evidence is
 absent. Pairing is request-local and uses the selected committed prefixes.
+
+Schema 59 records the signal revision alongside each certified retained member's
+prefix. Signal cleanup preserves versions covered by a certified member after
+its transient prefix receipt expires. It also records the native Codex
+operation outcome for exact error markers and selected rendering, and indexes
+normalized effort for Catalog metadata.
 
 PR 3 owns the atomic Viewer route cutover, end-to-end scale verification,
 concurrent HTTP reads during ingestion, and the Viewer/browser gates. The

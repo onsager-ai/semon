@@ -6,7 +6,9 @@ pub(super) mod identity;
 mod maintenance;
 
 #[cfg(test)]
-pub(crate) use identity::{RetainedIdentityError, retained_identity, retained_peer};
+pub(crate) use identity::{
+    RetainedIdentity, RetainedIdentityError, retained_identity, retained_peer,
+};
 
 use std::sync::OnceLock;
 
@@ -160,9 +162,11 @@ fn write_prefix(tx: &Transaction<'_>, source: i64, pos: i64, ledger: &str) -> ru
     }
     put(tx,
         "DELETE FROM warehouse_signal WHERE (source,seq,revision) IN (
-           SELECT source,seq,revision FROM warehouse_signal
-           WHERE retired_revision<=CAST((SELECT value FROM meta WHERE key='warehouse_prefix_pruned_through') AS INTEGER)
-           ORDER BY retired_revision LIMIT 128
+           SELECT s.source,s.seq,s.revision FROM warehouse_signal s
+           WHERE s.retired_revision<=CAST((SELECT value FROM meta WHERE key='warehouse_prefix_pruned_through') AS INTEGER)
+             AND NOT EXISTS (SELECT 1 FROM warehouse_identity_member m
+                 WHERE m.source=s.source AND m.revision>=s.revision AND m.revision<s.retired_revision)
+           ORDER BY s.retired_revision LIMIT 128
          )",
         [],
     )?;
@@ -220,7 +224,18 @@ pub(super) fn write_signals(
             )
         },
     )?;
-    Ok(())
+    put(
+        tx,
+        "WITH latest AS MATERIALIZED (
+           SELECT lower(trim(json_extract(payload,'$.n'))) AS effort
+           FROM warehouse_signal
+           WHERE source=?1 AND retired_revision IS NULL AND json_extract(payload,'$.k')='effort'
+           ORDER BY pos DESC,seq DESC LIMIT 1
+         )
+         UPDATE dim_session SET effort=(SELECT effort FROM latest)
+         WHERE source=?1 AND effort IS NOT (SELECT effort FROM latest)",
+        [source],
+    )
 }
 
 pub(super) fn write(
@@ -588,8 +603,8 @@ fn write_fact(
             }
             Ok(())
         }
-        Fact::Operation { parent } => {
-            at!(fact_operation,call_pos=>int(parent.offset),call_block=>parent.block)
+        Fact::Operation { parent, ok } => {
+            at!(fact_operation,call_pos=>int(parent.offset),call_block=>parent.block,ok=>ok)
         }
         Fact::ToolResult {
             id,

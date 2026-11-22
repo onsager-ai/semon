@@ -6,6 +6,11 @@ use std::sync::{LazyLock, mpsc};
 
 const CACHE: &str = "archive-ranges-v1";
 
+fn chunk_ordinal(offset: u64) -> i64 {
+    // A chunk ordinal fits a SQLite integer even when its byte offset does not.
+    (offset / SIZE as u64) as i64
+}
+
 #[derive(Clone)]
 struct Candidate {
     archive: PathBuf,
@@ -108,7 +113,7 @@ impl Candidate {
                 digest.update(&*bytes);
                 insert
                     .execute(params![
-                        offset / SIZE as u64,
+                        chunk_ordinal(offset),
                         &*bytes,
                         &Sha256::digest(&*bytes)[..],
                         serde_json::to_string(&prefix).map_err(io::Error::other)?
@@ -324,9 +329,11 @@ impl CopyRead {
         let boundary = at * SIZE as u64;
         let state: String = self
             .db
-            .query_row("SELECT prefix FROM chunk WHERE ordinal=?1", [at], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT prefix FROM chunk WHERE ordinal=?1",
+                [chunk_ordinal(source.offset.saturating_sub(1))],
+                |r| r.get(0),
+            )
             .map_err(io::Error::other)?;
         let state: PrefixState = serde_json::from_str(&state).map_err(io::Error::other)?;
         let end = (source.offset - boundary) as usize;
@@ -359,7 +366,7 @@ impl CopyRead {
                 .query_row(
                     "SELECT body,sha256 FROM chunk
                 WHERE ordinal=?1 AND length(body)=?2 AND length(sha256)=32",
-                    params![ordinal, len],
+                    params![chunk_ordinal(start), len as i64],
                     |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, [u8; 32]>(1)?)),
                 )
                 .optional()

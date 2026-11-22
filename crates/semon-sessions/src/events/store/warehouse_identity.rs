@@ -34,7 +34,7 @@ pub(in crate::events::store) fn certify(
     let member_count = i64::try_from(observed.len()).map_err(|_| rusqlite::Error::InvalidQuery)?;
     let members = observed
         .iter()
-        .map(|member| Ok((member.source, json(&member.receipt)?)))
+        .map(|member| Ok((member.source, json(&member.receipt)?, member.revision)))
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let previous: Option<(i64, i64)> = tx.prepare_cached(
         "SELECT id,owner FROM warehouse_identity WHERE scope='retained_history' AND source_key=?1
@@ -65,6 +65,13 @@ pub(in crate::events::store) fn certify(
         return Ok(());
     }
     let trace_peers = json(&observe_trace_peers(tx, &source_key, row)?)?;
+    let metadata = json(&serde_json::json!({
+        "key": row.key, "name": row.name, "harness": row.harness,
+        "kind": row.kind, "presentation_kind": row.presentation_kind,
+        "native_ids": row.native_ids, "parent": row.parent, "parent_source": row.parent_source,
+        "repo": row.repo, "branch": row.branch, "model": row.model, "effort": row.effort,
+        "start": row.start, "last": row.last, "tokens": row.tokens, "cost": row.cost,
+    }))?;
     let mut witness = binding_digest(&(
         source_key.as_str(),
         row.key.as_str(),
@@ -75,9 +82,10 @@ pub(in crate::events::store) fn certify(
         recipe_generation,
         source_generation.as_str(),
         trace_peers.as_str(),
+        metadata.as_str(),
     ))?;
-    for (ordinal, (source, receipt)) in members.iter().enumerate() {
-        binding_member(&mut witness, ordinal as i64, *source, receipt)?;
+    for (ordinal, (source, receipt, revision)) in members.iter().enumerate() {
+        binding_member(&mut witness, ordinal as i64, *source, receipt, *revision)?;
     }
     let witness = format!("{:x}", witness.finalize());
     if let Some((previous, previous_owner)) = previous
@@ -87,15 +95,15 @@ pub(in crate::events::store) fn certify(
     }
     let identity: i64 = tx.prepare_cached(
         "INSERT INTO warehouse_identity(scope,source_key,catalog_key,retained,owner,harness,native_id,
-          member_count,recipe_version,recipe_generation,recipe_source_generation,source_generation,complete,trace_peers,witness)
-         VALUES('retained_history',?1,?2,0,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12) RETURNING id",
+          member_count,recipe_version,recipe_generation,recipe_source_generation,source_generation,complete,trace_peers,metadata,witness)
+         VALUES('retained_history',?1,?2,0,?3,?4,?5,?6,?7,?8,?9,?10,1,?11,?12,?13) RETURNING id",
     )?.query_row(params![source_key, row.key, owner, row.harness, native_id, member_count, VERSION,
-        recipe_generation, recipe_source_generation, source_generation, trace_peers, witness], |record| record.get(0))?;
-    for (ordinal, (source, receipt)) in members.into_iter().enumerate() {
+        recipe_generation, recipe_source_generation, source_generation, trace_peers, metadata, witness], |record| record.get(0))?;
+    for (ordinal, (source, receipt, revision)) in members.into_iter().enumerate() {
         put(
             tx,
-            "INSERT INTO warehouse_identity_member VALUES(?1,?2,?3,?4)",
-            params![identity, source, ordinal as i64, receipt],
+            "INSERT INTO warehouse_identity_member(identity,source,ordinal,receipt,revision) VALUES(?1,?2,?3,?4,?5)",
+            params![identity, source, ordinal as i64, receipt, revision],
         )?;
     }
     Ok(())
@@ -106,6 +114,7 @@ pub(in crate::events::store) fn certify(
 pub(crate) struct ObservedMember {
     pub(crate) source: i64,
     pub(crate) receipt: CatalogSource,
+    revision: i64,
 }
 
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
@@ -125,14 +134,15 @@ fn observe_component(
     let mut cohort = None;
     let mut members = Vec::with_capacity(row.sources.len());
     let mut source_query = tx.prepare_cached(
-        "SELECT c.source,m.component,g.owner,d.native_id,s.ledger FROM warehouse_current c
+        "SELECT c.source,m.component,g.owner,d.native_id,s.ledger,p.revision FROM warehouse_current c
          JOIN warehouse_source s ON s.source=c.source
+         JOIN warehouse_prefix p ON p.source=c.source AND p.superseded=0
          JOIN lineage_member m ON m.source=c.source JOIN lineage_group g ON g.id=m.component
          JOIN dim_session d ON d.source=g.owner
          WHERE c.path=?1 AND s.harness=?2 AND s.origin=?3",
     )?;
     for source in &row.sources {
-        let Some((id, component, owner, native_id, ledger)) = source_query
+        let Some((id, component, owner, native_id, ledger, revision)) = source_query
             .query_row(
                 params![
                     source.path.to_string_lossy().as_ref(),
@@ -146,6 +156,7 @@ fn observe_component(
                         record.get::<_, i64>(2)?,
                         record.get::<_, String>(3)?,
                         record.get::<_, String>(4)?,
+                        record.get::<_, i64>(5)?,
                     ))
                 },
             )
@@ -173,6 +184,7 @@ fn observe_component(
         members.push(ObservedMember {
             source: id,
             receipt: source.clone(),
+            revision,
         });
     }
     let Some((component, owner, native_id)) = cohort else {
@@ -227,7 +239,7 @@ fn observe_trace_peers(
 }
 
 fn binding_digest(identity: &impl serde::Serialize) -> rusqlite::Result<Sha256> {
-    let mut digest = Sha256::new_with_prefix(b"semon-retained-history-identity-v2\0");
+    let mut digest = Sha256::new_with_prefix(b"semon-retained-history-identity-v3\0");
     digest.update(serde_json::to_vec(identity).map_err(data)?);
     Ok(digest)
 }
@@ -237,8 +249,9 @@ fn binding_member(
     ordinal: i64,
     source: i64,
     receipt: &str,
+    revision: i64,
 ) -> rusqlite::Result<()> {
-    digest.update(serde_json::to_vec(&(ordinal, source, receipt)).map_err(data)?);
+    digest.update(serde_json::to_vec(&(ordinal, source, receipt, revision)).map_err(data)?);
     Ok(())
 }
 
@@ -293,6 +306,7 @@ pub(crate) struct RetainedIdentity {
     pub(crate) owner: i64,
     pub(crate) harness: String,
     pub(crate) native_id: String,
+    pub(crate) metadata: String,
     trace_peers: String,
 }
 
@@ -346,7 +360,7 @@ fn read_retained(
     key: &str,
 ) -> rusqlite::Result<Option<RetainedIdentity>> {
     let binding = tx.prepare_cached(
-        "SELECT i.id,i.owner,i.harness,i.native_id,i.member_count,i.source_generation,i.recipe_generation,i.witness,i.trace_peers
+        "SELECT i.id,i.owner,i.harness,i.native_id,i.member_count,i.source_generation,i.recipe_generation,i.witness,i.trace_peers,i.metadata
          FROM warehouse_identity i
          JOIN warehouse_source s ON s.source=i.owner AND s.origin=i.source_key AND s.harness=i.harness
          JOIN warehouse_identity_member m ON m.identity=i.id AND m.source=i.owner
@@ -354,7 +368,7 @@ fn read_retained(
          AND i.complete=1 AND i.recipe_version=?3 AND length(i.recipe_generation)=64
          AND i.recipe_source_generation=i.source_generation",
     )?.query_row(params![source_key, key, VERSION], |row| {
-        Ok((row.get::<_, i64>(0)?, RetainedIdentity { binding: row.get(0)?, witness: row.get(7)?, owner: row.get(1)?, harness: row.get(2)?, native_id: row.get(3)?, trace_peers: row.get(8)? }, row.get::<_,i64>(4)?, row.get::<_,String>(5)?,row.get::<_,String>(6)?,row.get::<_,String>(7)?))
+        Ok((row.get::<_, i64>(0)?, RetainedIdentity { binding: row.get(0)?, witness: row.get(7)?, owner: row.get(1)?, harness: row.get(2)?, native_id: row.get(3)?, trace_peers: row.get(8)?, metadata: row.get(9)? }, row.get::<_,i64>(4)?, row.get::<_,String>(5)?,row.get::<_,String>(6)?,row.get::<_,String>(7)?))
     }).optional()?;
     let Some((id, identity, member_count, generation, recipe_generation, expected_witness)) =
         binding
@@ -372,9 +386,10 @@ fn read_retained(
         recipe_generation.as_str(),
         generation.as_str(),
         identity.trace_peers.as_str(),
+        identity.metadata.as_str(),
     ))?;
     let mut statement = tx.prepare_cached(
-        "SELECT m.ordinal,m.receipt,m.source FROM warehouse_identity_member m
+        "SELECT m.ordinal,m.receipt,m.source,m.revision FROM warehouse_identity_member m
          JOIN warehouse_source s ON s.source=m.source AND s.origin=?2 AND s.harness=?3
          WHERE m.identity=?1 ORDER BY m.ordinal",
     )?;
@@ -389,7 +404,13 @@ fn read_retained(
         }
         let receipt: String = member.get(1)?;
         digest.update(receipt.as_bytes());
-        binding_member(&mut witness, count, member.get(2)?, &receipt)?;
+        binding_member(
+            &mut witness,
+            count,
+            member.get(2)?,
+            &receipt,
+            member.get(3)?,
+        )?;
         count += 1;
     }
     digest.update(b"]");
@@ -433,7 +454,7 @@ pub(crate) fn retained_peer(
     trace: &str,
     witness: &str,
     key: &str,
-) -> Result<ObservedPeer, RetainedPeerError> {
+) -> Result<(ObservedPeer, bool), RetainedPeerError> {
     use RetainedPeerError::*;
     let identity = retained_identity(tx, namespace, trace).map_err(Trace)?;
     if identity.witness != witness {
@@ -443,10 +464,11 @@ pub(crate) fn retained_peer(
         serde_json::from_str(&identity.trace_peers).map_err(|error| Index(data(error)))?;
     let peer = peers.remove(key).ok_or(PeerUnobserved)?;
     let source_key = namespace.binding();
-    if current_peer_covers(tx, source_key, &peer).map_err(Index)?
-        || retained_peer_covers(tx, source_key, key, &peer).map_err(Index)?
-    {
-        return Ok(peer);
+    if current_peer_covers(tx, source_key, &peer).map_err(Index)? {
+        return Ok((peer, true));
+    }
+    if retained_peer_covers(tx, source_key, key, &peer).map_err(Index)? {
+        return Ok((peer, false));
     }
     Err(CustodyChanged)
 }

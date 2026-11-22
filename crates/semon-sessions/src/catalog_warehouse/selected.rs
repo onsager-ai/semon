@@ -26,12 +26,12 @@ pub(super) mod render;
 #[path = "retained.rs"]
 mod retained;
 pub(super) use retained::{
-    retained_addressed_window, retained_latest_page, retained_page, retained_peer_record_at,
-    retained_record_at,
+    retained_addressed_window, retained_annotations, retained_latest_page, retained_page,
+    retained_peer_record_at, retained_peer_relay_address, retained_record_at, retained_turn,
 };
 
 const MEMBER_PAGE: i64 = 64;
-const PAGE_BYTES: usize = 8 * 1024 * 1024;
+pub(super) const PAGE_BYTES: usize = 8 * 1024 * 1024;
 const MEMBERS: &str = "SELECT m.source,s.incarnation,s.carrier,s.ledger,d.native_id,c.path,
     f.resume_at,coalesce(r.sidecar_revision,0),d.lineage
     FROM lineage_member m
@@ -132,7 +132,7 @@ impl Cursor {
 pub(super) struct Record {
     pub(super) prompt_anchor: Option<String>,
     pub(super) entry_anchor: Option<String>,
-    pub(super) operation_parent: Option<u64>,
+    pub(super) operation: Option<causal::Operation>,
     pub(super) causal: causal::Context,
     pub(super) relay_receipts: Vec<RelayReceipt>,
     pub(super) address: Address,
@@ -260,11 +260,14 @@ pub(super) struct Component {
     pub(super) native_id: String,
     pub(super) title: Option<String>,
     pub(super) model: Option<String>,
+    pub(super) metadata: Option<super::Row>,
+    pub(super) retained_metadata: Option<serde_json::Value>,
     pub(super) member_count: usize,
     pub(super) legacy_completion: Option<RelayReceipt>,
     pub(super) records: Vec<Record>,
     pub(super) reply_records: BTreeMap<(String, u64), serde_json::Value>,
     pub(super) next: Option<Cursor>,
+    pub(super) annotations: Option<AnnotationPage>,
 }
 
 struct Member {
@@ -748,6 +751,191 @@ pub(super) fn addressed_window(
     )
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct AnnotationRequest<'a> {
+    pub(super) kind: &'a str,
+    pub(super) first: i64,
+    pub(super) limit: i64,
+}
+
+#[derive(Debug)]
+pub(super) struct AnnotationPage {
+    pub(super) total: i64,
+    pub(super) addresses: Vec<crate::session_route::NativeEntryAddress>,
+}
+
+type AnnotationMembers = BTreeMap<i64, (SessionSourceRef, i64, String)>;
+
+fn annotation_page(
+    db: &rusqlite::Connection,
+    source: &Source<'_>,
+    key: &str,
+    binding: &str,
+    request: AnnotationRequest<'_>,
+    members: &AnnotationMembers,
+    include_pending: bool,
+) -> Result<AnnotationPage, ReadError> {
+    let members_json = members
+        .iter()
+        .map(|(id, (reference, revision, predecessors))| {
+            (*id, reference.offset, revision, predecessors)
+        })
+        .collect::<Vec<_>>();
+    let mut statement = db
+        .prepare_cached(include_str!("annotation_page.sql"))
+        .map_err(index)?;
+    let mut rows = statement
+        .query(params![
+            encode(&members_json)?,
+            request.kind,
+            crate::events::ACK,
+            crate::events::UNKNOWN,
+            request.limit,
+            request.first,
+            include_pending
+        ])
+        .map_err(index)?;
+    let mut result = AnnotationPage {
+        total: 0,
+        addresses: Vec::new(),
+    };
+    while let Some(row) = rows.next().map_err(index)? {
+        result.total = row.get(0).map_err(index)?;
+        let Some(id) = row.get::<_, Option<i64>>(1).map_err(index)? else {
+            break;
+        };
+        let (reference, _, _) = &members[&id];
+        let offset = row.get(2).map_err(index)?;
+        let event: Option<String> = row.get(5).map_err(index)?;
+        let block = row.get(6).map_err(index)?;
+        let signal = row
+            .get::<_, Option<String>>(7)
+            .map_err(index)?
+            .map(|kind| serde_json::from_value(serde_json::Value::String(kind)).map_err(index))
+            .transpose()?;
+        let kind = if signal.is_some() { "signal" } else { "tool" };
+        result
+            .addresses
+            .push(crate::session_route::NativeEntryAddress {
+                record: Address {
+                    path: reference.path.clone(),
+                    offset,
+                    block: row.get(3).map_err(index)?,
+                    occurrence: row.get(4).map_err(index)?,
+                },
+                binding: binding.to_owned(),
+                block,
+                entry_id: crate::transcript_range::native_entry_id(
+                    source.namespace.as_str(),
+                    key,
+                    reference,
+                    (offset, block),
+                    kind,
+                    event
+                        .as_deref()
+                        .filter(|event| !event.is_empty() && event.len() <= 4096),
+                    signal,
+                ),
+            });
+    }
+    Ok(result)
+}
+
+pub(super) fn annotations(
+    source: &Source<'_>,
+    key: &str,
+    request: AnnotationRequest<'_>,
+) -> Result<Option<Component>, ReadError> {
+    read(
+        source.options,
+        source,
+        CatalogReadScope::Current,
+        key,
+        Target::Annotations(request),
+        None,
+    )
+}
+
+pub(super) fn turn(
+    source: &Source<'_>,
+    key: &str,
+    turn: &str,
+) -> Result<Option<Component>, ReadError> {
+    read(
+        source.options,
+        source,
+        CatalogReadScope::Current,
+        key,
+        Target::Turn(turn),
+        None,
+    )
+}
+
+fn turn_candidates(
+    db: &rusqlite::Connection,
+    key: &str,
+    source: i64,
+    end: u64,
+    reference: &SessionSourceRef,
+    turn: &str,
+    mut accept: impl FnMut(&Address) -> Result<(), ReadError>,
+) -> Result<(), ReadError> {
+    let offset = turn
+        .strip_prefix(key)
+        .and_then(|suffix| suffix.strip_prefix(':'))
+        .and_then(|suffix| suffix.strip_prefix(&reference.native_id))
+        .and_then(|suffix| suffix.strip_prefix(':'))
+        .and_then(|suffix| suffix.parse::<i64>().ok());
+    let launch = turn == crate::model::spawn_turn_id(&reference.root, key);
+    let ask = crate::model::is_ask(turn);
+    let relay = turn
+        .strip_prefix('r')
+        .is_some_and(|hash| hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    if offset.is_none() && !launch && !ask && !relay {
+        return Ok(());
+    }
+    let mut lookup = db
+        .prepare_cached(include_str!("turn_anchor.sql"))
+        .map_err(index)?;
+    let mut rows = lookup
+        .query(params![
+            source,
+            i64::try_from(end).map_err(index)?,
+            offset,
+            launch,
+            ask,
+            relay,
+            crate::events::AGM_PROGRESS
+        ])
+        .map_err(index)?;
+    while let Some(row) = rows.next().map_err(index)? {
+        let offset = row.get::<_, u64>(0).map_err(index)?;
+        let kind = row.get::<_, String>(1).map_err(index)?;
+        let correlation = row.get::<_, Option<String>>(2).map_err(index)?;
+        if !launch
+            && turn
+                != if kind == "relay" {
+                    crate::model::incoming_relay_turn_id(
+                        correlation.as_deref(),
+                        &reference.native_id,
+                        offset,
+                    )
+                } else {
+                    causal::prompt_id(key, &reference.native_id, offset, &kind)
+                }
+        {
+            continue;
+        }
+        accept(&Address {
+            path: reference.path.clone(),
+            offset,
+            block: 0,
+            occurrence: row.get(3).map_err(index)?,
+        })?;
+    }
+    Ok(())
+}
+
 pub(super) fn tool_results(
     options: &Options,
     source: &Source<'_>,
@@ -876,6 +1064,8 @@ enum Target<'a> {
     Page(usize, Direction),
     Address(&'a Address, Option<&'a str>),
     Evidence(Evidence<'a>),
+    Turn(&'a str),
+    Annotations(AnnotationRequest<'a>),
     Activity(&'a crate::transcript_range::StepAnchor),
     ToolResults(&'a Address),
 }
@@ -886,6 +1076,8 @@ impl Target<'_> {
             Self::Page(n @ 1..=100, _) => Ok(n + 1),
             Self::Page(..) => Err(index("Selected pages require a limit of 1–100")),
             Self::Address(..) | Self::Evidence(_) | Self::Activity(_) => Ok(1),
+            Self::Turn(_) => Ok(33),
+            Self::Annotations(_) => Ok(0),
             Self::ToolResults(_) => Ok(101),
         }
     }
@@ -1012,6 +1204,7 @@ fn read(
     }
     let mut witness = Sha256::new_with_prefix(encode(&(owner, component))?);
     let mut candidates = BTreeMap::new();
+    let mut annotation_members = BTreeMap::new();
     let mut member_count = 0;
     let mut references = Vec::new();
     let mut evidence_matches = 0;
@@ -1153,6 +1346,57 @@ fn read(
                         )
                     }
                     Target::Address(..) => continue,
+                    Target::Annotations(_) => {
+                        let predecessors = continuation_bounds(
+                            &mut continuations,
+                            &mut prefix,
+                            id,
+                            component,
+                            view,
+                        )?;
+                        annotation_members
+                            .insert(id, (member.reference.clone(), view, predecessors));
+                        continue;
+                    }
+                    Target::Turn(turn) => {
+                        let end = i64::try_from(committed.offset).map_err(index)?;
+                        let predecessors = continuation_bounds(
+                            &mut continuations,
+                            &mut prefix,
+                            id,
+                            component,
+                            view,
+                        )?;
+                        turn_candidates(
+                            &db,
+                            key,
+                            id,
+                            committed.offset,
+                            &member.reference,
+                            turn,
+                            |address| {
+                                let Some(frontier) = address_frontier(&db, direction, id, address)?
+                                else {
+                                    return Ok(());
+                                };
+                                let start = i64::try_from(address.offset).map_err(index)?;
+                                member_positions(
+                                    &mut detail,
+                                    PositionSearch {
+                                        source: id,
+                                        start,
+                                        end: end.min(start + 1),
+                                        predecessors: &predecessors,
+                                        entry: Some((address.block, address.occurrence)),
+                                        frontier,
+                                        capacity: 1,
+                                    },
+                                    &mut keep,
+                                )
+                            },
+                        )?;
+                        continue;
+                    }
                     Target::Activity(_) => {
                         let activity = activity
                             .as_ref()
@@ -1258,6 +1502,19 @@ fn read(
     }
     let members = format!("{:x}", witness.finalize());
     let binding = component_binding(&selection, &members)?;
+    let annotations = if let Target::Annotations(request) = target {
+        Some(annotation_page(
+            &db,
+            source,
+            key,
+            &binding,
+            request,
+            &annotation_members,
+            false,
+        )?)
+    } else {
+        None
+    };
     if let Target::Address(_, Some(expected)) = target
         && expected != binding
     {
@@ -1298,19 +1555,6 @@ fn read(
             }
         }
     }
-    let mut operations = BTreeMap::new();
-    {
-        let mut operation = db.prepare_cached("SELECT call_pos FROM fact_operation WHERE source=?1 AND pos=?2 ORDER BY block,occurrence LIMIT 1").map_err(index)?;
-        for position in candidates.keys() {
-            let parent: Option<i64> = operation
-                .query_row(params![position.source, position.offset], |row| row.get(0))
-                .optional()
-                .map_err(index)?;
-            if let Some(parent) = parent {
-                operations.insert(*position, u64::try_from(parent).map_err(index)?);
-            }
-        }
-    }
     let mut causal = BTreeMap::new();
     if !matches!(target, Target::ToolResults(_)) {
         for (position, (_, member, _)) in &candidates {
@@ -1344,15 +1588,22 @@ fn read(
             .prepare_cached(include_str!("legacy_relay_children.sql"))
             .map_err(index)?;
         let mut children = children
-            .query(params![component, crate::events::AGM_UP, owner, view])
+            .query(params![component, crate::events::AGM_UP, view])
             .map_err(index)?;
         let mut count = 0;
+        let mut graph = super::parents::Parents::new(&db)?;
         while let Some(row) = children.next().map_err(index)? {
+            let child = row.get(0).map_err(index)?;
+            let Some(edge) = graph.parent(child)?.filter(|edge| edge.method == "native") else {
+                continue;
+            };
+            if graph.owner(edge.source)? != Some(owner) {
+                continue;
+            }
             count += 1;
             if count > 128 {
                 return Err(index("Selected legacy relay child budget exhausted"));
             }
-            let child = row.get(0).map_err(index)?;
             if let Some(plan) = parent_relay::Plan::collect(&db, source, child, None, view)? {
                 legacy_plans.push((child, plan));
             }
@@ -1450,10 +1701,11 @@ fn read(
         if starts_handoff && let Some(turn) = &turn {
             anchors.insert(position, turn.id.clone());
         }
-        let operation_parent = operations.remove(&position);
+        let inputs = causal.remove(&position);
+        let operation = inputs.as_ref().and_then(causal::Inputs::operation);
         let entry_kind = match kind.as_deref() {
             _ if starts_handoff && turn.as_ref().is_some_and(|turn| !turn.head) => Some("h"),
-            Some("event_msg") if operation_parent.is_some() => Some("tool"),
+            Some("event_msg") if operation.is_some() => Some("tool"),
             Some("user" | "user.message") => anchors.get(&position).map(|anchor| {
                 if crate::model::is_ask(anchor) {
                     "h"
@@ -1494,12 +1746,17 @@ fn read(
                 None,
             )
         });
-        let causal = causal
-            .remove(&position)
-            .map_or_else(causal::Context::default, |inputs| {
-                inputs.render(source, key, reference, native_id.as_deref(), turn)
-            });
+        let causal = inputs.map_or_else(causal::Context::default, |inputs| {
+            inputs.render(source, key, reference, native_id.as_deref(), turn)
+        });
         if direction == Direction::Reverse {
+            if let Some(operation) = operation
+                && let std::collections::btree_map::Entry::Vacant(entry) =
+                    reply_records.entry((reference.path.clone(), operation.parent))
+            {
+                let (body, _) = read_body(position.source, &member, operation.parent)?;
+                entry.insert(body);
+            }
             for reply in causal
                 .calls
                 .iter()
@@ -1516,7 +1773,7 @@ fn read(
         records.push(Record {
             prompt_anchor: anchors.remove(&position),
             entry_anchor,
-            operation_parent,
+            operation,
             causal,
             at: (position.time != i64::MIN).then_some(position.time),
             relay_receipts: relay_context.remove(&position).unwrap_or_default(),
@@ -1546,7 +1803,37 @@ fn read(
         return Err(ReadError::Restart);
     }
     source.validate_authority()?;
-    let identity_witness = format!("{:x}", Sha256::digest(encode(&(&binding, &references))?));
+    // An earlier page may use historical prefix receipts with current row facts.
+    // The browser keeps the metadata from its latest or addressed selection.
+    let owner_identity = (owner, harness, native_id);
+    let (metadata, identity_witness) = {
+        let transaction = db.lock().map_err(index)?;
+        let metadata = (cursor.is_none()
+            && matches!(
+                target,
+                Target::Page(_, Direction::Reverse) | Target::Address(_, Some(_))
+            ))
+        .then(|| {
+            super::selected_metadata(
+                &transaction,
+                source,
+                key,
+                owner,
+                &owner_identity.1,
+                &references,
+            )
+        })
+        .transpose()?;
+        let identity_witness = super::current_identity_witness(
+            &transaction,
+            source,
+            key,
+            &owner_identity,
+            &references,
+        )?;
+        (metadata, identity_witness)
+    };
+    let (_, harness, native_id) = owner_identity;
     let identity = super::present_identity(
         source,
         scope,
@@ -1573,11 +1860,14 @@ fn read(
         native_id,
         title,
         model,
+        metadata,
+        retained_metadata: None,
         member_count,
         legacy_completion,
         records,
         reply_records,
         next,
+        annotations,
     }))
 }
 
@@ -1596,9 +1886,17 @@ fn pin_provider(
     provider: &dyn SessionSourceReader,
     reference: &SessionSourceRef,
 ) -> Result<ProviderPin, ReadError> {
+    pin_provider_with(provider, reference, body_error)
+}
+
+fn pin_provider_with(
+    provider: &dyn SessionSourceReader,
+    reference: &SessionSourceRef,
+    map_error: impl FnOnce(io::Error) -> ReadError,
+) -> Result<ProviderPin, ReadError> {
     let part = provider
         .read_range(reference, None, 0, 1)
-        .map_err(body_error)?;
+        .map_err(map_error)?;
     if part.bytes.len() != 1 || part.length < reference.offset {
         return Err(ReadError::Restart);
     }

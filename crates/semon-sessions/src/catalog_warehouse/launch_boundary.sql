@@ -5,9 +5,7 @@ WITH parents AS (
     FROM dim_session c JOIN dim_session p ON p.harness=c.harness AND p.native_id=c.parent_id
     WHERE c.source=?1 AND c.harness='codex'
     UNION ALL
-    SELECT e.parent,0,0 FROM parent_selection e
-    JOIN dim_session c ON c.source=e.child AND c.harness='claude' AND NOT c.lineage
-    WHERE e.child=?1 AND e.method='native'
+    SELECT ?4,0,0 WHERE ?4 IS NOT NULL
     UNION ALL
     SELECT p.source,1,e.pos FROM fact_parent_observation e
     JOIN dim_session c ON c.source=e.source AND c.harness='codex' AND c.parent_id IS NULL

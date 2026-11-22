@@ -30,7 +30,7 @@ pub(crate) struct NativeRecordAddress {
     pub(crate) occurrence: i64,
 }
 
-#[derive(serde::Deserialize, serde::Serialize)]
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct NativeEntryAddress {
     pub(crate) record: NativeRecordAddress,

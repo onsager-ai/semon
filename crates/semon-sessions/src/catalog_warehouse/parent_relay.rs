@@ -36,20 +36,21 @@ impl Plan {
         view: i64,
     ) -> Result<Option<Self>, ReadError> {
         use crate::events::{AGM_FINAL, AGM_PROGRESS, AGM_UP, PIN};
-        let binding: Option<(String, i64, Option<String>)> = db
-            .query_row(
-                "SELECT d.native_id,b.owner,p.call_id FROM dim_session d
-             JOIN parent_selection p ON p.child=d.source AND p.method='native'
-             JOIN bridge_session_owner b ON b.source=p.parent
-             WHERE d.source=?1 AND d.harness='claude' AND NOT d.lineage",
-                [child],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(index)?;
-        let Some((native_id, parent, spawn)) = binding else {
+        let native_id: Option<String> = db.query_row(
+            "SELECT native_id FROM dim_session WHERE source=?1 AND harness='claude' AND NOT lineage",
+            [child], |row| row.get(0),
+        ).optional().map_err(index)?;
+        let Some(native_id) = native_id else {
             return Ok(None);
         };
+        let mut graph = super::super::parents::Parents::new(db)?;
+        let Some(edge) = graph.parent(child)?.filter(|edge| edge.method == "native") else {
+            return Ok(None);
+        };
+        let Some(parent) = graph.owner(edge.source)? else {
+            return Ok(None);
+        };
+        let spawn = edge.call;
         let mut prefix = db.prepare_cached(COMMITTED_PREFIX).map_err(index)?;
         let Some(child_ledger) = prefix
             .query_row(params![child, view], |row| row.get::<_, String>(0))

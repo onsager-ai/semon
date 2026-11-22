@@ -12,8 +12,13 @@ const PRECEDING_TIME: &str = "SELECT ts FROM fact_record WHERE source=?1 AND pos
     AND ts IS NOT NULL AND NOT gap ORDER BY pos DESC LIMIT 1";
 const SIGNALS_AT: &str = "SELECT payload FROM warehouse_signal WHERE source=?1 AND pos=?2
     AND revision<=?3 AND (retired_revision IS NULL OR retired_revision>?3) ORDER BY seq LIMIT 129";
-const CALLS_AT: &str = "SELECT block,tool,call_id FROM fact_tool_call WHERE source=?1 AND pos=?2
-    ORDER BY block,occurrence LIMIT 129";
+const CALLS_AT: &str = "SELECT c.block,c.tool,c.call_id,EXISTS (
+        SELECT 1 FROM fact_operation o INDEXED BY operation_parent
+        WHERE o.source=c.source AND o.call_pos=c.pos AND o.call_block=c.block AND o.pos<?3
+    ) FROM fact_tool_call c WHERE c.source=?1 AND c.pos=?2
+    ORDER BY c.block,c.occurrence LIMIT 129";
+const OPERATION_AT: &str = "SELECT call_pos,ok FROM fact_operation
+    WHERE source=?1 AND pos=?2 AND block=?3 ORDER BY occurrence LIMIT 1";
 
 #[derive(Debug, Default)]
 pub(in super::super) struct Context {
@@ -49,30 +54,18 @@ pub(super) fn turns(
     targets: impl Iterator<Item = Position>,
     legacy: &str,
 ) -> Result<BTreeMap<Position, Option<TurnStart>>, ReadError> {
-    let mut previous = db.prepare_cached(PRECEDING_TIME).map_err(index)?;
-    let mut winners: BTreeMap<_, (_, Option<Boundary>)> = BTreeMap::new();
-    for target in targets {
-        let mut ordered = target;
-        if ordered.time == i64::MIN {
-            ordered.time = previous
-                .query_row(params![target.source, target.offset], |row| row.get(0))
-                .optional()
-                .map_err(index)?
-                .unwrap_or(i64::MIN);
-        }
-        winners.insert(target, (ordered, None));
-    }
-    if winners.is_empty() {
+    let mut search = TurnSearch::new(db, targets)?;
+    if search.winners.is_empty() {
         return Ok(BTreeMap::new());
     }
 
     let mut members = db.prepare_cached(MEMBERS).map_err(index)?;
     let mut prefix = db.prepare_cached(COMMITTED_PREFIX).map_err(index)?;
     let mut continuations = db.prepare_cached(CONTINUATIONS).map_err(index)?;
-    let mut boundary = db.prepare_cached(BOUNDARY).map_err(index)?;
     let mut launch = db
         .prepare_cached(include_str!("launch_boundary.sql"))
         .map_err(index)?;
+    let mut graph = super::super::parents::Parents::new(db)?;
     let mut after = 0;
     loop {
         let mut rows = members
@@ -95,19 +88,29 @@ pub(super) fn turns(
                 i64::try_from(committed_prefix(&mut prefix, id, view)?.offset).map_err(index)?;
             let predecessors =
                 continuation_bounds(&mut continuations, &mut prefix, id, component, view)?;
-            let launch_at = if harness == "codex"
-                || (harness == "claude" && !row.get::<_, bool>(8).map_err(index)?)
-            {
+            let claude_child = harness == "claude" && !row.get::<_, bool>(8).map_err(index)?;
+            let native_parent = if claude_child {
+                graph
+                    .parent(id)?
+                    .filter(|edge| edge.method == "native")
+                    .map(|edge| edge.source)
+            } else {
+                None
+            };
+            let launch_at = if harness == "codex" || native_parent.is_some() {
                 launch
-                    .query_row(params![id, end, source.namespace.binding()], |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, Option<i64>>(2)?,
-                            row.get::<_, i64>(3)?,
-                            row.get::<_, String>(4)?,
-                        ))
-                    })
+                    .query_row(
+                        params![id, end, source.namespace.binding(), native_parent],
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, Option<i64>>(2)?,
+                                row.get::<_, i64>(3)?,
+                                row.get::<_, String>(4)?,
+                            ))
+                        },
+                    )
                     .optional()
                     .map_err(index)?
             } else {
@@ -131,86 +134,155 @@ pub(super) fn turns(
             } else {
                 None
             };
-            for (at, winner) in winners.values_mut() {
-                let (time, pos, _, _) = Direction::Forward.frontier(Some(*at), id);
-                let matched = boundary
-                    .query_row(
-                        named_params! {
-                            ":source": id, ":end": end, ":predecessors": predecessors,
-                            ":time": time, ":pos": pos, ":head": launch_at == Some(None), ":progress": crate::events::AGM_PROGRESS, ":legacy": legacy,
-                        },
-                        |row| {
-                            Ok((
-                                Position {
-                                    time: row.get(0)?,
-                                    source: id,
-                                    offset: row.get(1)?,
-                                    block: row.get(2)?,
-                                    occurrence: row.get(3)?,
-                                },
-                                row.get::<_, Option<String>>(4)?,
-                                row.get(5)?,
-                                row.get::<_, Option<String>>(6)?,
-                                row.get::<_, Option<String>>(7)?,
-                            ))
-                        },
-                    )
-                    .optional()
-                    .map_err(index)?;
-                let Some((position, kind, occurrence, correlation, legacy_id)) = matched else {
-                    continue;
-                };
-                if winner
-                    .as_ref()
-                    .is_some_and(|current| current.position >= position)
-                {
-                    continue;
-                }
-                let start = if let Some(kind) = kind {
-                    let offset = u64::try_from(position.offset).map_err(index)?;
-                    let launch = kind == "launch"
-                        || (kind == "user" && launch_at == Some(Some(position.offset)));
-                    let relay = kind == "relay";
-                    let id = if launch {
-                        crate::model::spawn_turn_id(harness, key)
-                    } else if let Some(legacy_id) = legacy_id {
-                        legacy_id
-                    } else if relay {
-                        crate::model::incoming_relay_turn_id(
-                            correlation.as_deref(),
-                            &native_id,
-                            offset,
-                        )
-                    } else {
-                        prompt_id(key, &native_id, offset, &kind)
-                    };
-                    Some(TurnStart {
-                        id,
-                        handoff: launch || relay,
-                        head: kind == "launch",
-                        address: Address {
-                            path: relative(source.options, harness, &carrier)
-                                .ok_or(ReadError::Restart)?
-                                .to_owned(),
-                            offset,
-                            block: 0,
-                            occurrence,
-                        },
-                    })
-                } else {
-                    None
-                };
-                *winner = Some(Boundary { position, start });
-            }
+            let path = relative(source.options, harness, &carrier).ok_or(ReadError::Restart)?;
+            search.consider(
+                key,
+                harness,
+                BoundaryMember {
+                    id,
+                    end,
+                    predecessors: &predecessors,
+                    launch_at,
+                    native_id: &native_id,
+                    path,
+                },
+                legacy,
+            )?;
         }
         if count < MEMBER_PAGE {
             break;
         }
     }
-    Ok(winners
-        .into_iter()
-        .map(|(target, (_, winner))| (target, winner.and_then(|boundary| boundary.start)))
-        .collect())
+    Ok(search.finish())
+}
+
+pub(super) struct BoundaryMember<'a> {
+    pub(super) id: i64,
+    pub(super) end: i64,
+    pub(super) predecessors: &'a str,
+    pub(super) launch_at: Option<Option<i64>>,
+    pub(super) native_id: &'a str,
+    pub(super) path: &'a str,
+}
+
+pub(super) struct TurnSearch<'a> {
+    boundary: rusqlite::CachedStatement<'a>,
+    winners: BTreeMap<Position, (Position, Option<Boundary>)>,
+}
+
+impl<'a> TurnSearch<'a> {
+    pub(super) fn new(
+        db: &'a Connection,
+        targets: impl Iterator<Item = Position>,
+    ) -> Result<Self, ReadError> {
+        let mut previous = db.prepare_cached(PRECEDING_TIME).map_err(index)?;
+        let mut winners: BTreeMap<_, (_, Option<Boundary>)> = BTreeMap::new();
+        for target in targets {
+            let mut ordered = target;
+            if ordered.time == i64::MIN {
+                ordered.time = previous
+                    .query_row(params![target.source, target.offset], |row| row.get(0))
+                    .optional()
+                    .map_err(index)?
+                    .unwrap_or(i64::MIN);
+            }
+            winners.insert(target, (ordered, None));
+        }
+        Ok(Self {
+            boundary: db.prepare_cached(BOUNDARY).map_err(index)?,
+            winners,
+        })
+    }
+
+    pub(super) fn consider(
+        &mut self,
+        key: &str,
+        harness: &str,
+        member: BoundaryMember<'_>,
+        legacy: &str,
+    ) -> Result<(), ReadError> {
+        let BoundaryMember {
+            id,
+            end,
+            predecessors,
+            launch_at,
+            native_id,
+            path,
+        } = member;
+        for (at, winner) in self.winners.values_mut() {
+            let (time, pos, _, _) = Direction::Forward.frontier(Some(*at), id);
+            let matched = self.boundary
+                .query_row(
+                    named_params! {
+                        ":source": id, ":end": end, ":predecessors": predecessors,
+                        ":time": time, ":pos": pos, ":head": launch_at == Some(None), ":progress": crate::events::AGM_PROGRESS, ":legacy": legacy,
+                    },
+                    |row| {
+                        Ok((
+                            Position {
+                                time: row.get(0)?,
+                                source: id,
+                                offset: row.get(1)?,
+                                block: row.get(2)?,
+                                occurrence: row.get(3)?,
+                            },
+                            row.get::<_, Option<String>>(4)?,
+                            row.get(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(index)?;
+            let Some((position, kind, occurrence, correlation, legacy_id)) = matched else {
+                continue;
+            };
+            if winner
+                .as_ref()
+                .is_some_and(|current| current.position >= position)
+            {
+                continue;
+            }
+            let start = if let Some(kind) = kind {
+                let offset = u64::try_from(position.offset).map_err(index)?;
+                let launch = kind == "launch"
+                    || (kind == "user" && launch_at == Some(Some(position.offset)));
+                let relay = kind == "relay";
+                let id = if launch {
+                    crate::model::spawn_turn_id(harness, key)
+                } else if let Some(legacy_id) = legacy_id {
+                    legacy_id
+                } else if relay {
+                    crate::model::incoming_relay_turn_id(correlation.as_deref(), native_id, offset)
+                } else {
+                    prompt_id(key, native_id, offset, &kind)
+                };
+                Some(TurnStart {
+                    id,
+                    handoff: launch || relay,
+                    head: kind == "launch",
+                    address: Address {
+                        path: path.to_owned(),
+                        offset,
+                        block: 0,
+                        occurrence,
+                    },
+                })
+            } else {
+                None
+            };
+            *winner = Some(Boundary { position, start });
+        }
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> BTreeMap<Position, Option<TurnStart>> {
+        self.winners
+            .into_iter()
+            .map(|(target, (_, winner))| (target, winner.and_then(|boundary| boundary.start)))
+            .collect()
+    }
 }
 
 pub(super) fn prompt_id(key: &str, native_id: &str, offset: u64, kind: &str) -> String {
@@ -244,12 +316,23 @@ impl CallSlot {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(in super::super) struct Operation {
+    pub(in super::super) parent: u64,
+    pub(super) ok: Option<bool>,
+}
+
 pub(super) struct Inputs {
     signals: Vec<crate::events::Signal>,
     calls: Vec<CallSlot>,
+    operation: Option<Operation>,
 }
 
 impl Inputs {
+    pub(super) fn operation(&self) -> Option<Operation> {
+        self.operation
+    }
+
     pub(super) fn load(
         db: &Connection,
         reference: &SessionSourceRef,
@@ -269,8 +352,9 @@ impl Inputs {
             return Err(index("Selected signal budget exhausted"));
         }
         let mut calls_query = db.prepare_cached(CALLS_AT).map_err(index)?;
+        let end = i64::try_from(reference.offset).map_err(index)?;
         let mut call_rows = calls_query
-            .query(params![at.source, at.offset])
+            .query(params![at.source, at.offset, end])
             .map_err(index)?;
         let mut result_query = db.prepare_cached(TOOL_RESULTS).map_err(index)?;
         let mut calls = Vec::new();
@@ -287,13 +371,7 @@ impl Inputs {
                 continue;
             };
             let mut result_rows = result_query
-                .query(params![
-                    at.source,
-                    at.offset,
-                    block,
-                    i64::try_from(reference.offset).map_err(index)?,
-                    129,
-                ])
+                .query(params![at.source, at.offset, block, end, 129,])
                 .map_err(index)?;
             let mut replies = Vec::new();
             while let Some(row) = result_rows.next().map_err(index)? {
@@ -310,14 +388,37 @@ impl Inputs {
                     m: row.get(8).map_err(index)?,
                 });
             }
-            calls.push(CallSlot {
+            let call = CallSlot {
                 id,
                 tool,
                 block,
                 replies,
-            });
+            };
+            let has_operations: bool = row.get(3).map_err(index)?;
+            if !has_operations
+                || call
+                    .display_reply()
+                    .is_none_or(|reply| reply.e && reply.f & crate::events::UNKNOWN == 0)
+            {
+                calls.push(call);
+            }
         }
-        Ok(Self { signals, calls })
+        let operation = db
+            .prepare_cached(OPERATION_AT)
+            .map_err(index)?
+            .query_row(params![at.source, at.offset, at.block], |row| {
+                Ok(Operation {
+                    parent: row.get(0)?,
+                    ok: row.get(1)?,
+                })
+            })
+            .optional()
+            .map_err(index)?;
+        Ok(Self {
+            signals,
+            calls,
+            operation,
+        })
     }
 
     pub(super) fn render(
