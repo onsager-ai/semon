@@ -559,6 +559,38 @@ pub(super) fn annotations(
     }
 }
 
+type AddressedQuery = (
+    String,
+    Option<NativeEntryAddress>,
+    Option<crate::session_route::RetainedPeerAddress>,
+);
+
+fn addressed_query(query: &str) -> Result<AddressedQuery, ViewerReply> {
+    let mut fields = Vec::new();
+    let (mut address, mut peer) = (None, None);
+    for field in query.split('&') {
+        match field.split_once('=') {
+            Some(("address", value)) if address.is_none() => {
+                address = Some(
+                    NativeEntryAddress::parse(&crate::viewer::decoded(value).ok_or_else(invalid)?)
+                        .map_err(|_| invalid())?,
+                );
+            }
+            Some(("peer", value)) if peer.is_none() => {
+                peer = Some(
+                    crate::session_route::RetainedPeerAddress::parse(
+                        &crate::viewer::decoded(value).ok_or_else(invalid)?,
+                    )
+                    .map_err(|_| invalid())?,
+                );
+            }
+            Some(("address" | "peer", _)) => return Err(invalid()),
+            _ => fields.push(field),
+        }
+    }
+    Ok((fields.join("&"), address, peer))
+}
+
 pub(super) fn home(
     configured: &OverviewSource,
     query: &str,
@@ -566,33 +598,9 @@ pub(super) fn home(
     retained_provider: Option<&dyn crate::SessionSourceReader>,
 ) -> ViewerReply {
     let read = || -> Result<ViewerReply, ViewerReply> {
-        let mut fields = Vec::new();
-        let (mut address, mut peer) = (None, None);
-        for field in query.split('&') {
-            match field.split_once('=') {
-                Some(("address", value)) if address.is_none() => {
-                    address = Some(
-                        NativeEntryAddress::parse(
-                            &crate::viewer::decoded(value).ok_or_else(invalid)?,
-                        )
-                        .map_err(|_| invalid())?,
-                    );
-                }
-                Some(("peer", value)) if peer.is_none() => {
-                    peer = Some(
-                        crate::session_route::RetainedPeerAddress::parse(
-                            &crate::viewer::decoded(value).ok_or_else(invalid)?,
-                        )
-                        .map_err(|_| invalid())?,
-                    );
-                }
-                Some(("address" | "peer", _)) => return Err(invalid()),
-                _ => fields.push(field),
-            }
-        }
+        let (fields, address, peer) = addressed_query(query)?;
         let (selection, scope, machine) =
-            crate::overview::parse_session_home_scope(&fields.join("&"), true)
-                .map_err(|_| invalid())?;
+            crate::overview::parse_session_home_scope(&fields, true).map_err(|_| invalid())?;
         if peer.is_some() && (address.is_none() || scope != CatalogReadScope::RetainedHistory) {
             return Err(invalid());
         }
@@ -828,7 +836,13 @@ pub(super) fn trace(
     retained_provider: Option<&dyn crate::SessionSourceReader>,
 ) -> ViewerReply {
     let read = || -> Result<ViewerReply, ViewerReply> {
-        let (request, turn) = turn_request(configured, query)?;
+        let (query, address, peer) = addressed_query(query)?;
+        let (request, turn) = turn_request(configured, &query)?;
+        if peer.is_some()
+            && (address.is_none() || request.scope != CatalogReadScope::RetainedHistory)
+        {
+            return Err(invalid());
+        }
         let key = request.sid.as_deref().ok_or_else(invalid)?;
         if let Some(reply) = crate::index_rebuild::history_reply(&configured.options) {
             return Err(reply);
@@ -844,9 +858,20 @@ pub(super) fn trace(
             .map(|reader| reader as &dyn crate::SessionSourceReader);
         let source =
             Source::focused(namespace, &path, &configured.options, current).map_err(read_error)?;
-        let value = super::trace::read(&source, request.scope, key, &turn, retained_provider)
-            .map_err(read_error)?
-            .ok_or_else(not_found)?;
+        let value = super::trace::read(
+            &source,
+            request.scope,
+            key,
+            &turn,
+            retained_provider,
+            address.as_ref(),
+            peer.as_ref().map(|peer| selected::PeerBinding {
+                trace: &peer.trace,
+                witness: &peer.witness,
+            }),
+        )
+        .map_err(read_error)?
+        .ok_or_else(not_found)?;
         Ok(crate::catalog::reply(200, value))
     };
     match read() {
@@ -1086,46 +1111,21 @@ fn read_transcript(
         .map_err(|error| read_error(index(error)))?;
     let source = Source::focused(namespace, &path, &configured.options, current_provider)
         .map_err(read_error)?;
-    let component = match (scope, peer.as_ref()) {
-        (CatalogReadScope::Current, _) => match &address {
-            None => selected::latest_page(source.options, &source, key, limit, cursor.as_ref()),
-            Some(address) => {
-                selected::addressed_window(&source, key, &address.record, &address.binding)
-            }
-        },
-        (CatalogReadScope::RetainedHistory, Some(peer)) => selected::retained_peer_window(
-            &source,
-            key,
-            selected::PeerBinding {
-                trace: &peer.trace,
-                witness: &peer.witness,
-            },
-            limit,
-            cursor.as_ref(),
-            address
-                .as_ref()
-                .map(|address| (&address.record, address.binding.as_str())),
-            retained_provider,
-        )
-        .map(Some),
-        (CatalogReadScope::RetainedHistory, None) => {
-            let archive = super::ArchiveReader::new(&configured.options);
-            let provider = retained_provider.unwrap_or(&archive);
-            match &address {
-                None => {
-                    selected::retained_latest_page(&source, key, limit, cursor.as_ref(), provider)
-                }
-                Some(address) => selected::retained_addressed_window(
-                    &source,
-                    key,
-                    &address.record,
-                    &address.binding,
-                    provider,
-                ),
-            }
-            .map(Some)
-        }
-    }
+    let view = selected::ReadView::open(&source).map_err(read_error)?;
+    let component = selected::transcript_window(
+        &view,
+        &source,
+        scope,
+        key,
+        limit,
+        cursor.as_ref(),
+        address.as_ref(),
+        retained_provider,
+        peer.as_ref().map(|peer| selected::PeerBinding {
+            trace: &peer.trace,
+            witness: &peer.witness,
+        }),
+    )
     .map_err(read_error)?;
     let Some(component) = component else {
         return Err(not_found());
@@ -1133,9 +1133,9 @@ fn read_transcript(
     let entries =
         selected::render::entries(&component, &configured.key, key, crate::model::now_ms());
     if let Some(address) = &address
-        && !entries.iter().any(|entry| {
-            entry["entry_id"] == address.entry_id && entry["address"]["block"] == address.block
-        })
+        && !entries
+            .iter()
+            .any(|entry| entry["address"] == json!(address))
     {
         return Err(error(
             404,
@@ -1174,7 +1174,8 @@ fn read_transcript(
             )),
         };
     }
-    let context = relationship_context(&component, key, &entries, peer.is_none());
+    let context = relationship_context(&view, &source, &component, key, &entries, peer.is_none())
+        .map_err(read_error)?;
     let earlier = component
         .next
         .as_ref()
@@ -1206,11 +1207,13 @@ fn read_transcript(
 }
 
 fn relationship_context(
-    component: &super::selected::Component,
+    view: &selected::ReadView<'_>,
+    source: &Source<'_>,
+    component: &selected::Component,
     key: &str,
     entries: &[Value],
     preview: bool,
-) -> Value {
+) -> Result<Value, ReadError> {
     let turn_ids = entries
         .iter()
         .filter_map(|entry| entry["turn"].as_str())
@@ -1220,6 +1223,30 @@ fn relationship_context(
         .filter(|entry| entry["k"] == "h")
         .filter_map(|entry| entry["id"].as_str())
         .collect::<std::collections::BTreeSet<_>>();
+    let mut turns = std::collections::BTreeMap::new();
+    for record in &component.records {
+        let Some(turn) = record
+            .causal
+            .turn
+            .as_ref()
+            .filter(|turn| turn_ids.contains(turn.id.as_str()))
+        else {
+            continue;
+        };
+        let boundary = turn.address == record.address;
+        let row = turns.entry(turn.id.as_str());
+        if boundary || matches!(&row, std::collections::btree_map::Entry::Vacant(_)) {
+            let (end, last) = if boundary && preview {
+                super::trace::recorded_end(view, source, component, record)?
+            } else {
+                (json!({"st":"off","why":"unavailable"}), false)
+            };
+            *row.or_insert(Value::Null) = json!({
+                "id":turn.id,"sid":key,"start":crate::model::is_ask(&turn.id).then_some(&turn.id).filter(|id| actions.contains(id.as_str())),
+                "u":!turn.handoff,"at":record.at.filter(|_| boundary),"end":end,"sent":[],"last":last,
+            });
+        }
+    }
     let handoffs = component
         .records
         .iter()
@@ -1240,10 +1267,10 @@ fn relationship_context(
     } else {
         json!({})
     };
-    json!({
+    Ok(json!({
         "state":if actions.len() == handoffs.len() { "complete" } else { "incomplete" },
-        "turn_ids":turn_ids,"turns":[],"handoffs":handoffs,"sessions":{},"previews":previews,
-    })
+        "turn_ids":turn_ids,"turns":turns.into_values().collect::<Vec<_>>(),"handoffs":handoffs,"sessions":{},"previews":previews,
+    }))
 }
 
 fn read_annotations(

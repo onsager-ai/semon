@@ -182,7 +182,7 @@ impl SessionRoute {
         }
         if route.controls.contains_key("peer")
             && (route.controls.get("scope").map(String::as_str) != Some("retained_history")
-                || route.turn.is_some()
+                || (route.turn.is_some() && !route.controls.contains_key("address"))
                 || route.controls.contains_key("generation"))
         {
             return Err(malformed());

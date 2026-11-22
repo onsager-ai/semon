@@ -11,6 +11,8 @@ pub(super) fn read(
     key: &str,
     root: &str,
     retained_provider: Option<&dyn SessionSourceReader>,
+    address: Option<&crate::session_route::NativeEntryAddress>,
+    origin: Option<selected::PeerBinding<'_>>,
 ) -> Result<Option<Value>, ReadError> {
     let view = selected::ReadView::open(source)?;
     let provider =
@@ -18,15 +20,29 @@ pub(super) fn read(
     let provider = provider
         .as_ref()
         .map(|reader| reader as &dyn SessionSourceReader);
-    let Some(component) = selected::trace_turn(
-        &view,
-        source,
-        scope,
-        key,
-        root,
-        provider.unwrap_or(&view.archive),
-    )?
-    else {
+    let component = if let Some(address) = address {
+        selected::transcript_window(
+            &view,
+            source,
+            scope,
+            key,
+            1,
+            None,
+            Some(address),
+            provider,
+            origin,
+        )?
+    } else {
+        selected::trace_turn(
+            &view,
+            source,
+            scope,
+            key,
+            root,
+            provider.unwrap_or(&view.archive),
+        )?
+    };
+    let Some(component) = component else {
         return Ok(None);
     };
     let mut starts = component.records.iter().filter(|record| {
@@ -49,8 +65,12 @@ pub(super) fn read(
         .expect("qualified turn boundary");
     let source_key = source.namespace.as_str();
     let root_address = selected::render::turn_address(&component, source_key, key, root);
+    if address.is_some_and(|address| root_address.as_ref() != Some(&json!(address))) {
+        return Err(ReadError::Restart);
+    }
     let mut evidence = vec![match root_address {
-        Some(address) => json!({"catalog_key": key, "turn": root, "address": address}),
+        Some(address) => json!({"catalog_key": key, "turn": root, "address": address,
+            "peer":origin.map(|peer| json!({"trace":peer.trace,"witness":peer.witness}))}),
         None => {
             json!({"catalog_key": key, "turn": root, "reason": "The selected turn has no rendered transcript entry."})
         }
@@ -164,12 +184,13 @@ pub(super) fn read(
         json!({"id":root,"sid":key,"start":start,"at":record.at,"u":!turn.handoff,
         "sent":[],"end":end,"last":last_turn}),
     ];
-    let mut sent = Vec::new();
     let mut previews = json!({(key):component.identity.generation});
     let root_identity = component.identity.clone();
-    let peer = (scope == CatalogReadScope::RetainedHistory).then_some(selected::PeerBinding {
-        trace: key,
-        witness: &root_identity.generation,
+    let peer = origin.or_else(|| {
+        (scope == CatalogReadScope::RetainedHistory).then_some(selected::PeerBinding {
+            trace: key,
+            witness: &root_identity.generation,
+        })
     });
     let mut ids = BTreeSet::from([root.to_owned()]);
     let mut reported = BTreeSet::new();
@@ -304,7 +325,7 @@ pub(super) fn read(
     })))
 }
 
-fn recorded_end(
+pub(super) fn recorded_end(
     view: &selected::ReadView<'_>,
     source: &Source<'_>,
     component: &selected::Component,

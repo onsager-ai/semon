@@ -1079,24 +1079,31 @@ export function createCatalogViewer(
     overview.markResults(accepted.source, results);
     accepted.readResults = new Set(results);
     const route = navigation.route;
-    renderCausalTrace(root, accepted, Date.now(), causalExpanded, {
-      session(key, turn) {
-        const evidence = causalEvidence(accepted, key, turn);
-        if (evidence && 'reason' in evidence) {
-          accepted.observation = evidence.reason;
-          drawCausal();
-          return;
-        }
-        const url =
-          sessionPath(accepted.source, key) +
-          '?' +
-          sessionControls(route.readScope, evidence?.address, evidence?.peer) +
-          (turn && !evidence ? '#' + encodeURIComponent(turn) : '');
-        history.pushState(evidence ? { traceEvidence: true } : null, '', url);
-        fromLocation();
+    renderCausalTrace(
+      root,
+      accepted,
+      Date.now(),
+      causalExpanded,
+      {
+        session(key, turn) {
+          const evidence = causalEvidence(accepted, key, turn);
+          if (evidence && 'reason' in evidence) {
+            accepted.observation = evidence.reason;
+            drawCausal();
+            return;
+          }
+          const url =
+            sessionPath(accepted.source, key) +
+            '?' +
+            sessionControls(route.readScope, evidence?.address, evidence?.peer) +
+            (turn && !evidence ? '#' + encodeURIComponent(turn) : '');
+          history.pushState(evidence ? { traceEvidence: true } : null, '', url);
+          fromLocation();
+        },
+        fold: drawCausal,
       },
-      fold: drawCausal,
-    });
+      route.readScope,
+    );
     chrome();
   }
   async function loadCausal() {
@@ -1110,18 +1117,22 @@ export function createCatalogViewer(
       const p = params(route.readScope);
       p.set('sid', route.sid);
       p.set('turn', route.turn);
+      if (route.address) p.set('address', JSON.stringify(route.address));
+      if (route.peer) p.set('peer', JSON.stringify(route.peer));
       const next = parseCausalTrace(
         await api('/api/session-trace?' + p),
         source,
         route.sid,
         route.turn,
       );
-      const metadataParams = params(route.readScope);
-      metadataParams.set('sid', route.sid);
-      const metadata = parseCatalogPage(await api('/api/sessions?' + metadataParams));
-      if (metadata.machine !== source || metadata.read_scope !== route.readScope)
-        throw Error('Causal metadata selection changed');
-      next.metadata = metadata.items.find((item) => item.key === route.sid);
+      if (!route.peer) {
+        const metadataParams = params(route.readScope);
+        metadataParams.set('sid', route.sid);
+        const metadata = parseCatalogPage(await api('/api/sessions?' + metadataParams));
+        if (metadata.machine !== source || metadata.read_scope !== route.readScope)
+          throw Error('Causal metadata selection changed');
+        next.metadata = metadata.items.find((item) => item.key === route.sid);
+      }
       if (
         disposed ||
         epoch !== causalEpoch ||
@@ -1368,9 +1379,15 @@ export function createCatalogViewer(
       }
     }
   }
-  function goCausal(key: string, turn: string, readScope: CatalogReadScope) {
+  function goCausal(
+    key: string,
+    turn: string,
+    readScope: CatalogReadScope,
+    address?: NativeEntryAddress,
+    peer?: RetainedPeerAddress,
+  ) {
     leaveScreen();
-    navigation.route = { v: 'trace', sid: key, turn, readScope };
+    navigation.route = { v: 'trace', sid: key, turn, readScope, address, peer };
     shell.closeDrawer(true);
     render(
       <p class="catalog-note" role="status">
@@ -1392,7 +1409,8 @@ export function createCatalogViewer(
       evidence && 'address' in evidence ? undefined : route.turn,
       route.readScope,
       false,
-      evidence && 'address' in evidence ? evidence.address : undefined,
+      evidence && 'address' in evidence ? evidence.address : route.address,
+      evidence && 'address' in evidence ? evidence.peer : route.peer,
     );
   }
   function chrome() {
@@ -4662,7 +4680,13 @@ export function createCatalogViewer(
     const address = sessionRoute?.controls.get('address');
     const peer = sessionRoute?.controls.get('peer');
     if (sessionRoute?.turn && !savedPositionUnavailable) {
-      goCausal(sessionRoute.key, sessionRoute.turn, sessionRoute.readScope);
+      goCausal(
+        sessionRoute.key,
+        sessionRoute.turn,
+        sessionRoute.readScope,
+        address ? parseNativeEntryAddress(JSON.parse(address)) : undefined,
+        peer ? parseRetainedPeerAddress(JSON.parse(peer)) : undefined,
+      );
     } else if (sessionRoute) {
       void goSession(
         sessionRoute.key,

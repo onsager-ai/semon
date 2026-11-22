@@ -161,7 +161,9 @@ export function parseSessionRoute(path: string, query = ''): SessionRoute {
   const readScope = controls.get('scope') === 'retained_history' ? 'retained_history' : 'current';
   if (
     controls.has('peer') &&
-    (readScope !== 'retained_history' || turn || controls.has('generation'))
+    (readScope !== 'retained_history' ||
+      (turn && !controls.has('address')) ||
+      controls.has('generation'))
   )
     return fail();
   return { source, key, turn, controls, readScope };

@@ -13,6 +13,7 @@ import {
   parseNativeEntryAddress,
   parseRetainedPeerAddress,
   tracePath,
+  type CatalogReadScope,
   type NativeEntryAddress,
   type RetainedPeerAddress,
 } from '../lib/sessionRoute';
@@ -674,6 +675,7 @@ export function renderCausalTrace(
   now: number,
   expanded: Map<string, Set<string>>,
   host: { session(id: string, turn?: string): void; fold(): void },
+  readScope: CatalogReadScope = 'current',
 ) {
   const costForSessions = (sessions: Session[]): Cost => ({
     usd: sessions.some((session) => session.cost?.usd == null)
@@ -869,10 +871,23 @@ export function renderCausalTrace(
       hops,
       agents: agentSnapshot(data.root),
       observation: data.observation,
-      continuations: data.frontier.map((branch) => ({
-        label: data.sessions[branch.catalog_key]?.name ?? 'Recorded branch',
-        href: tracePath(data.source, branch.catalog_key, branch.turn),
-      })),
+      continuations: data.frontier.flatMap((branch) => {
+        const evidence = causalEvidence(data, branch.catalog_key, branch.turn);
+        if (data.evidence && (!evidence || 'reason' in evidence)) return [];
+        const query = new URLSearchParams();
+        if (readScope === 'retained_history') query.set('scope', readScope);
+        if (evidence && 'address' in evidence) {
+          query.set('address', JSON.stringify(evidence.address));
+          if (evidence.peer) query.set('peer', JSON.stringify(evidence.peer));
+        }
+        const url = tracePath(data.source, branch.catalog_key, branch.turn);
+        return [
+          {
+            label: data.sessions[branch.catalog_key]?.name ?? 'Recorded branch',
+            href: query.size ? url + '?' + query : url,
+          },
+        ];
+      }),
     },
     {
       ...host,

@@ -2906,6 +2906,23 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
     let reply = http::trace(&configured, &query, None, Some(&original));
     let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
     assert_eq!(reply.status, 200, "{trace}");
+    let peer_evidence = trace["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["catalog_key"] == "peer" && row["address"].is_object())
+        .unwrap();
+    let query = crate::native_html::query(&[
+        ("sid", "peer"),
+        ("scope", "retained_history"),
+        ("turn", peer_evidence["turn"].as_str().unwrap()),
+        ("address", &peer_evidence["address"].to_string()),
+        ("peer", &peer_evidence["peer"].to_string()),
+    ]);
+    let reply = http::trace(&configured, &query, None, Some(&original));
+    let continuation: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{continuation}");
+    assert_eq!(&continuation["evidence"][0], peer_evidence);
     let return_edge = trace["handoffs"]
         .as_array()
         .unwrap()

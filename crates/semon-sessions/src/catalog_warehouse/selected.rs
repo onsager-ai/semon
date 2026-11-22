@@ -779,6 +779,38 @@ pub(super) fn page(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(super) fn transcript_window(
+    view: &ReadView<'_>,
+    source: &Source<'_>,
+    scope: CatalogReadScope,
+    key: &str,
+    limit: usize,
+    cursor: Option<&Cursor>,
+    address: Option<&crate::session_route::NativeEntryAddress>,
+    retained_provider: Option<&dyn SessionSourceReader>,
+    peer: Option<PeerBinding<'_>>,
+) -> Result<Option<Component>, ReadError> {
+    let target = address.map_or(Target::Page(limit, Direction::Reverse), |address| {
+        Target::Address(&address.record, Some(&address.binding), None)
+    });
+    match scope {
+        CatalogReadScope::Current => {
+            read_current(view, source.options, source, scope, key, target, cursor)
+        }
+        CatalogReadScope::RetainedHistory => retained::read_frozen(
+            view,
+            source,
+            key,
+            target,
+            cursor,
+            retained_provider.unwrap_or(&view.archive),
+            peer.map(|binding| (binding, retained_provider.is_none())),
+        )
+        .map(Some),
+    }
+}
+
 pub(super) fn latest_page(
     options: &Options,
     source: &Source<'_>,
