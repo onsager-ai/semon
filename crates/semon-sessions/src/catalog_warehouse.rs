@@ -876,31 +876,226 @@ pub(super) fn identity(
         let Some(identity) = current_identity(&tx, source, key, None)? else {
             return Ok(None);
         };
-        let (owner, harness, _) = &identity;
-        let mut members = tx
-            .prepare_cached(
-                "SELECT s.carrier,s.ledger FROM lineage_member root
-             CROSS JOIN lineage_member m ON m.component=root.component
-             CROSS JOIN warehouse_source s ON s.source=m.source WHERE root.source=?1",
-            )
-            .map_err(index)?;
-        let mut rows = members.query([owner]).map_err(index)?;
-        while let Some(row) = rows.next().map_err(index)? {
-            let carrier: String = row.get(0).map_err(index)?;
-            let ledger: Ledger =
-                serde_json::from_str(&row.get::<_, String>(1).map_err(index)?).map_err(index)?;
-            match source.availability(harness, &carrier)? {
-                Availability::Expected(Some(stat))
-                    if selected::stable_or_grown(&ledger.stat, &stat) => {}
-                Availability::Expected(None) if source.current_provider.is_some() => {}
-                _ => return Ok(None),
-            }
-        }
-        source.validate_authority()?;
-        return Ok(Some(identity));
+        return Ok(focused_members(&tx, source, &identity)?.map(|_| identity));
     }
     let snapshot = Snapshot::read(&tx, source)?;
     current_identity(&tx, source, key, Some(&snapshot.paths))
+}
+
+fn focused_members(
+    db: &Connection,
+    source: &Source<'_>,
+    (owner, harness, _): &Identity,
+) -> Result<Option<Vec<crate::CatalogSourceObservation>>, ReadError> {
+    let mut members = db
+        .prepare_cached(
+            "SELECT s.carrier,s.ledger,d.native_id,f.path IS NOT NULL FROM lineage_member root
+         CROSS JOIN lineage_member m ON m.component=root.component
+         LEFT JOIN warehouse_source s ON s.source=m.source AND s.origin=?2 AND s.harness=?3
+         LEFT JOIN dim_session d ON d.source=m.source
+         LEFT JOIN warehouse_current c ON c.source=s.source AND c.path=s.carrier
+         LEFT JOIN files f ON f.path=c.path AND f.resume_at=json_extract(s.ledger,'$.offset')
+         WHERE root.source=?1 ORDER BY m.source",
+        )
+        .map_err(index)?;
+    let mut rows = members
+        .query(params![owner, source.namespace.binding(), harness])
+        .map_err(index)?;
+    let mut references = Vec::new();
+    while let Some(row) = rows.next().map_err(index)? {
+        if !row.get::<_, bool>(3).map_err(index)? {
+            return Ok(None);
+        }
+        let carrier: String = row.get(0).map_err(index)?;
+        let ledger: Ledger =
+            serde_json::from_str(&row.get::<_, String>(1).map_err(index)?).map_err(index)?;
+        let Some(path) = selected::relative(source.options, harness, &carrier) else {
+            return Ok(None);
+        };
+        let state = match source.availability(harness, &carrier)? {
+            Availability::Expected(Some(stat))
+                if selected::stable_or_grown(&ledger.stat, &stat) =>
+            {
+                "cached"
+            }
+            Availability::Expected(None) if source.current_provider.is_some() => "unavailable",
+            _ => return Ok(None),
+        };
+        references.push(crate::CatalogSourceObservation {
+            source: crate::SessionSourceRef {
+                root: harness.clone(),
+                path: path.to_owned(),
+                native_id: row.get(2).map_err(index)?,
+                offset: ledger.offset,
+                prefix_sha256: ledger.prefix,
+                tail_sha256: ledger.tail,
+            },
+            state: state.into(),
+        });
+    }
+    source.validate_authority()?;
+    Ok((!references.is_empty()).then_some(references))
+}
+
+pub(super) fn focused_identity(
+    source: &Source<'_>,
+    scope: CatalogReadScope,
+    key: &str,
+) -> Result<Option<crate::CatalogSessionIdentity>, ReadError> {
+    let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
+    let tx = db.transaction().map_err(index)?;
+    crate::events::store::require_current(&tx).map_err(index)?;
+    crate::storage::sqlite::qualify(&tx, &source.namespace).map_err(index)?;
+    let (harness, references, identity_witness) = match scope {
+        CatalogReadScope::Current => {
+            let Some(identity) = current_identity(&tx, source, key, None)? else {
+                return Ok(None);
+            };
+            let Some(references) = focused_members(&tx, source, &identity)? else {
+                return Ok(None);
+            };
+            let incarnation: String = tx
+                .query_row(
+                    "SELECT value FROM meta WHERE key='incarnation'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(index)?;
+            let digest = Sha256::digest(encode(&(
+                source.namespace.binding(),
+                key,
+                &identity,
+                incarnation,
+                &references,
+            ))?);
+            (identity.1, references, format!("{digest:x}"))
+        }
+        CatalogReadScope::RetainedHistory => {
+            let identity = warehouse::retained_identity(&tx, &source.namespace, key)
+                .map_err(retained_error)?;
+            let mut members = tx.prepare_cached("SELECT receipt FROM warehouse_identity_member WHERE identity=?1 ORDER BY ordinal").map_err(index)?;
+            let mut rows = members.query([identity.binding]).map_err(index)?;
+            let mut references = Vec::new();
+            while let Some(row) = rows.next().map_err(index)? {
+                let receipt: crate::model::summary::CatalogSource =
+                    serde_json::from_str(&row.get::<_, String>(0).map_err(index)?)
+                        .map_err(index)?;
+                let path = receipt
+                    .path
+                    .to_str()
+                    .and_then(|path| selected::relative(source.options, &identity.harness, path))
+                    .ok_or(ReadError::RetainedUnverified)?;
+                references.push(crate::CatalogSourceObservation {
+                    source: crate::SessionSourceRef {
+                        root: identity.harness.clone(),
+                        path: path.to_owned(),
+                        native_id: receipt.native_id,
+                        offset: receipt.offset,
+                        prefix_sha256: receipt.prefix_sha256,
+                        tail_sha256: receipt.tail_sha256,
+                    },
+                    state: "unavailable".into(),
+                });
+            }
+            (identity.harness, references, identity.witness)
+        }
+    };
+    let recorded = source
+        .focused
+        .as_ref()
+        .and_then(|authority| authority.recorded.as_ref());
+    let facts_known =
+        source.options.facts.is_none() || recorded.is_some_and(|facts| facts.facts_known());
+    let selection_known =
+        source.options.facts.is_none() || recorded.is_some_and(|facts| facts.selection_known());
+    let provisional = scope == CatalogReadScope::Current && harness == "codex" && !selection_known;
+    let freshness = |state: &str| crate::catalog::CatalogFreshness {
+        state: state.into(),
+    };
+    let native_selection = (harness == "codex").then(|| {
+        freshness(if scope == CatalogReadScope::RetainedHistory {
+            "retired"
+        } else if selection_known {
+            "cached"
+        } else {
+            "unavailable"
+        })
+    });
+    let native_ids: BTreeSet<_> = references
+        .iter()
+        .map(|reference| reference.source.native_id.clone())
+        .collect();
+    let machine_label = if source.options.facts.is_none() {
+        Some(crate::facts::MachineFacts::Local.hostname(source.options))
+    } else {
+        recorded.and_then(|facts| facts.hostname())
+    };
+    let state = if references
+        .iter()
+        .all(|reference| reference.state == "unavailable")
+    {
+        "unavailable"
+    } else if provisional
+        || references
+            .iter()
+            .any(|reference| reference.state == "unavailable")
+    {
+        "incomplete"
+    } else {
+        "cached"
+    };
+    source.validate_authority()?;
+    Ok(Some(crate::CatalogSessionIdentity {
+        source_key: source.namespace.as_str().to_owned(),
+        read_scope: scope,
+        catalog_key: key.to_owned(),
+        harness,
+        native_id: (native_ids.len() == 1 && !provisional)
+            .then(|| native_ids.first().expect("one native ID").clone()),
+        owner_qualification: if provisional {
+            crate::catalog::CatalogOwnerQualification::Provisional
+        } else {
+            crate::catalog::CatalogOwnerQualification::Qualified
+        },
+        native_ids: native_ids.into_iter().collect(),
+        source_refs: references,
+        machine_label,
+        generation: identity_witness,
+        observed_at: None,
+        freshness: freshness(state),
+        facts_observation: freshness(if facts_known { "cached" } else { "unavailable" }),
+        native_selection,
+    }))
+}
+
+pub(super) fn resolve_current_native(
+    source: &Source<'_>,
+    harness: &str,
+    native_id: &str,
+) -> Result<Vec<String>, ReadError> {
+    let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
+    let tx = db.transaction().map_err(index)?;
+    crate::events::store::require_current(&tx).map_err(index)?;
+    crate::storage::sqlite::qualify(&tx, &source.namespace).map_err(index)?;
+    let mut aliases = tx
+        .prepare_cached(include_str!("events/store/warehouse_native_key.sql"))
+        .map_err(index)?;
+    let mut rows = aliases.query(params![harness, native_id]).map_err(index)?;
+    let mut matches = Vec::new();
+    while let Some(row) = rows.next().map_err(index)? {
+        let identity = (
+            row.get(0).map_err(index)?,
+            row.get(1).map_err(index)?,
+            row.get(2).map_err(index)?,
+        );
+        if focused_members(&tx, source, &identity)?.is_some() {
+            matches.push(row.get(3).map_err(index)?);
+            if matches.len() == 2 {
+                break;
+            }
+        }
+    }
+    Ok(matches)
 }
 
 #[derive(Debug)]

@@ -276,6 +276,32 @@ fn warehouse_list_and_identity_compare_to_current_catalog() {
             .collect();
         assert_eq!(observed, oracle, "{query}");
     }
+    let focused = Source::focused(
+        fixture.namespace.clone(),
+        &fixture.db,
+        &fixture.options,
+        None,
+    )
+    .unwrap();
+    for (harness, native, key) in [
+        ("claude", "same", ":claude:same"),
+        ("claude", "claude:same", "claude:same"),
+        ("codex", "same", "codex:same"),
+        ("copilot", copilot_id, copilot_id),
+    ] {
+        assert_eq!(
+            resolve_current_native(&focused, harness, native).unwrap(),
+            [key]
+        );
+        let resolved = focused_identity(&focused, CatalogReadScope::Current, key)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.native_id.as_deref(), Some(native));
+        assert_eq!(resolved.harness, harness);
+        assert_eq!(resolved.source_refs.len(), 1);
+        assert_eq!(resolved.source_refs[0].source.native_id, native);
+        assert_eq!(resolved.generation.len(), 64);
+    }
     for key in [":claude:same", "claude:same", "codex:same", copilot_id] {
         let expected =
             crate::session_catalog_identity(&fixture.options, fixture.namespace.as_str(), key)
@@ -2108,6 +2134,18 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
     );
     assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     let source = fixture.source(&[&path]);
+    let retained_identity = focused_identity(&source, CatalogReadScope::RetainedHistory, "native")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        retained_identity.source_refs[0].source.offset,
+        provider.data.len() as u64
+    );
+    assert_eq!(
+        retained_identity.source_refs[0].source.prefix_sha256,
+        <[u8; 32]>::from(Sha256::digest(&provider.data))
+    );
+    assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     let latest = selected::retained_latest_page(&source, "native", 1, None, &provider).unwrap();
     assert_eq!(
         latest.records[0].text().as_deref(),
