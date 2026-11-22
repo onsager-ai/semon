@@ -9,8 +9,7 @@ const RECENT: &str = concat!(
     include_str!("../events/store/warehouse_catalog_row.sql"),
     "\n) SELECT id,owner,harness,last,title,model,repo,branch,NULL,
          prompt_pos,owner_path,owner_ledger,native_id,agent_path,is_child,start,lineage,guardian,effort
-       FROM rows WHERE last>=?5 OR id IN (SELECT id FROM rows ORDER BY last DESC,id LIMIT 60)
-       ORDER BY last DESC,id",
+       FROM rows ORDER BY last DESC,id",
 );
 
 pub(crate) fn read(
@@ -37,8 +36,7 @@ fn read_source(
                 snapshot.paths,
                 source.namespace.binding(),
                 super::encode(&snapshot.repos)?,
-                None::<&str>,
-                since
+                None::<&str>
             ])
             .map_err(index)?;
         let mut rows = Vec::new();
@@ -50,7 +48,16 @@ fn read_source(
                 true,
             )?);
         }
-        snapshot.enrich(&mut rows, false)?;
+        let owners = rows.iter().map(|row| row.owner).collect::<Vec<_>>();
+        let runtime = snapshot.runtime_status(&owners, true)?;
+        let mut position = 0;
+        rows.retain(|row| {
+            position += 1;
+            position <= 60
+                || row.position.last >= since
+                || matches!(runtime.get(&row.owner), Some(&("work" | "wait")))
+        });
+        snapshot.enrich_with_status(&mut rows, &runtime)?;
         (
             rows,
             snapshot.coverage.pending == 0 && snapshot.coverage.unavailable == 0,
@@ -74,6 +81,16 @@ fn read_source(
         let generation =
             super::current_identity_witness(&tx, &source, key, &identity, &row.source_refs)?;
         let events = home_events(&tx, row, since, state)?;
+        let waiting_since = events
+            .iter()
+            .filter(|event| event["status"] == "wait")
+            .filter_map(|event| event["at"].as_i64())
+            .min();
+        let state = if waiting_since.is_some() {
+            "wait"
+        } else {
+            state
+        };
         saved.push(Saved {
             id: json!([configured.key, key]).to_string(),
             key: key.to_owned(), source: configured.key.clone(), content_generation: generation,
@@ -81,7 +98,7 @@ fn read_source(
                 "name":row.title,"kind":row.presentation_kind,"harness":row.harness,"model":row.model,
                 "repo":row.repo,"branch":row.branch,"parent":row.parent,"state":state,
                 "last":row.position.last,"start":row.start,"cost":row.cost.as_ref().and_then(|cost| cost.usd),
-                "events":events,
+                "events":events,"waiting_since":waiting_since,
             })),
         });
     }
@@ -95,30 +112,11 @@ fn home_events(
     since: i64,
     state: &str,
 ) -> Result<Vec<Value>, ReadError> {
-    let mut statement = db.prepare_cached(
-        "SELECT d.native_id,c.pos,c.call_id,c.ts,t.ts,t.failed,t.flags
-         FROM lineage_member root JOIN lineage_member m USING(component)
-         JOIN dim_session d ON d.source=m.source
-         JOIN fact_tool_call c ON c.source=m.source AND c.tool IN
-           ('AskUserQuestion','request_user_input','request_user_input_async',
-            'functions.request_user_input','functions.request_user_input_async')
-         LEFT JOIN fact_tool_result t ON (t.source,t.pos,t.block,t.kind,t.occurrence)=(
-           SELECT r.source,r.pos,r.block,r.kind,r.occurrence FROM fact_tool_result r
-           WHERE r.source=c.source AND r.call_id=c.call_id AND r.pos>c.pos
-             AND ((r.call_pos=c.pos AND r.call_block=c.block) OR (r.call_pos IS NULL AND 1=(
-               SELECT count(*) FROM fact_tool_call a WHERE a.source=c.source AND a.call_id=c.call_id)))
-             AND ((r.flags & ?3)=0 OR c.tool IN ('request_user_input_async','functions.request_user_input_async'))
-           ORDER BY r.pos DESC,r.block DESC,r.occurrence DESC LIMIT 1)
-         WHERE root.source=?1 AND (c.ts>=?2 OR t.ts>=?2 OR (?4 AND t.pos IS NULL))
-         ORDER BY c.ts DESC,c.source DESC,c.pos DESC,c.block DESC",
-    ).map_err(index)?;
+    let mut statement = db
+        .prepare_cached(include_str!("home_question_feed.sql"))
+        .map_err(index)?;
     let mut calls = statement
-        .query(params![
-            row.owner,
-            since,
-            crate::events::ACK,
-            state == "wait"
-        ])
+        .query(params![row.owner, since, crate::events::ACK, state])
         .map_err(index)?;
     let mut events = Vec::new();
     while let Some(call) = calls.next().map_err(index)? {
@@ -129,32 +127,26 @@ fn home_events(
         let done: Option<i64> = call.get(4).map_err(index)?;
         let failed: Option<bool> = call.get(5).map_err(index)?;
         let flags: Option<i64> = call.get(6).map_err(index)?;
-        let declined = failed == Some(true)
-            || flags.is_some_and(|flags| flags & i64::from(crate::events::DENIED) != 0);
+        let waiting: bool = call.get(7).map_err(index)?;
+        let declined = row.harness != "codex"
+            && (failed == Some(true)
+                || flags.is_some_and(|flags| flags & i64::from(crate::events::DENIED) != 0));
         events.push(
             json!({"id":crate::model::question_id(&native_id,offset,call_id.as_deref()),
             "at":at.unwrap_or(row.position.last),"done":done,"ask":"question",
-            "status":if failed.is_none() && state == "wait" {"wait"} else {"done"},
+            "status":if waiting {"wait"} else {"done"},
             "brief":"","answer":declined.then(Vec::<String>::new),"declined":declined,"turn":null}),
         );
     }
     if row.parent.is_none()
+        && row.presentation_kind != Some("Approval review")
+        && !events.iter().any(|event| event["status"] == "wait")
         && ((row.harness == "claude" && state == "idle")
             || (row.harness == "codex" && state != "work"))
     {
         let result = db
             .query_row(
-                "SELECT d.native_id,a.pos,a.block,a.ts
-             FROM lineage_member root JOIN lineage_member m USING(component)
-             JOIN dim_session d ON d.source=m.source
-             JOIN fact_subagent_event a ON a.source=m.source AND a.kind='assistant'
-             WHERE root.source=?1 AND a.ts>=?2 AND EXISTS (
-               SELECT 1 FROM fact_prompt p WHERE p.source=a.source AND p.pos=(
-                 SELECT max(z.pos) FROM fact_prompt z WHERE z.source=a.source)
-                 AND p.pos<a.pos AND (p.kind='ask' OR d.harness='codex')
-               AND NOT EXISTS (SELECT 1 FROM fact_subagent_event e WHERE e.source=a.source
-                 AND e.pos>p.pos AND e.pos<=a.pos AND e.kind IN ('agm','xsm')))
-             ORDER BY a.ts DESC,a.source DESC,a.pos DESC,a.block DESC LIMIT 1",
+                include_str!("home_result_feed.sql"),
                 params![row.owner, since],
                 |hit| {
                     Ok((

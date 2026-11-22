@@ -2814,6 +2814,23 @@ fn warehouse_legacy_receipts_resolve_selected_turn_and_completion_only() {
         ),
         Err(ReadError::PeerUnavailable(_))
     ));
+    fs::rename(&root, root.with_extension("fixture-original")).unwrap();
+    fixture.claude("root", "Replacement parent");
+    let identity = http::identity(&configured, "sid=root&scope=retained_history");
+    let metadata: serde_json::Value = serde_json::from_slice(&identity.body).unwrap();
+    assert_eq!(identity.status, 200, "{metadata}");
+    let generation = metadata["identity"]["generation"].as_str().unwrap();
+    let query = crate::native_html::query(&[
+        ("sid", "root"),
+        ("scope", "retained_history"),
+        ("generation", generation),
+        ("session_fields", "[\"detail\"]"),
+    ]);
+    let reply = http::home(&configured, &query, None, Some(&provider));
+    let detail: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{detail}");
+    assert_eq!(detail["session"]["detail"], "Still working");
+    assert_eq!(detail["session"]["detail_from"], "worker");
 }
 
 #[test]
@@ -4152,6 +4169,95 @@ fn warehouse_home_question_origin_uses_the_call_turn() {
     assert_eq!(home.status, 200, "{value}");
     assert_eq!(value["events"][&question]["brief"], "Which file?");
     assert_eq!(value["events"][&question]["origin"], "Review the fixture");
+}
+
+#[test]
+fn warehouse_home_completes_codex_questions_on_the_next_prompt_and_previews_results() {
+    let mut fixture = Fixture::new("home-codex-events");
+    let path = fixture.codex("native");
+    let codex = |second, payload| {
+        json!({"type":"response_item",
+        "timestamp":format!("2026-09-24T00:00:{second:02}Z"),"payload":payload})
+    };
+    let user = |second, text| {
+        codex(
+            second,
+            json!({"type":"message","role":"user",
+        "content":[{"type":"input_text","text":text}]}),
+        )
+    };
+    append_native(&path, user(1, "Review the fixture"));
+    let question_offset = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        codex(
+            2,
+            json!({"type":"function_call","name":"request_user_input",
+        "call_id":"ask","arguments":json!({"questions":[{"question":"Which file?"}]}).to_string()}),
+        ),
+    );
+    append_native(
+        &path,
+        codex(
+            3,
+            json!({"type":"function_call_output","call_id":"ask",
+        "output":"{\"accepted\":true}"}),
+        ),
+    );
+    append_native(&path, user(4, "Use the first file"));
+    let result_offset = fs::metadata(&path).unwrap().len();
+    append_native(
+        &path,
+        codex(
+            5,
+            json!({"type":"message","role":"assistant",
+        "content":[{"type":"output_text","text":"Review complete"}]}),
+        ),
+    );
+    scan_file(&path, "codex", &mut fixture.cache, &mut false).unwrap();
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().to_owned(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let question = crate::model::question_id("native", question_offset, Some("ask"));
+    let result = crate::model::result_id("native", result_offset, 0);
+    let home = |query| {
+        let reply = crate::session_overview_reply(
+            std::slice::from_ref(&configured),
+            "home",
+            query,
+            1_790_208_006_000,
+        )
+        .unwrap();
+        serde_json::from_slice::<serde_json::Value>(&reply.body).unwrap()
+    };
+    let feed = home("");
+    assert_eq!(feed["answered"][0]["event"]["id"], question, "{feed}");
+    assert_eq!(feed["answered"][0]["event"]["done"], 1_790_208_004_000_i64);
+    assert_eq!(feed["inbox"][0]["event"]["id"], result, "{feed}");
+    let generation = feed["inbox"][0]["session"]["content_generation"]
+        .as_str()
+        .unwrap();
+    let events = json!([question, result]).to_string();
+    let query = crate::native_html::query(&[
+        ("sid", "native"),
+        ("scope", "current"),
+        ("generation", generation),
+        ("events", &events),
+    ]);
+    let reply = http::home(&configured, &query, None, None);
+    let detail: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{detail}");
+    assert_eq!(detail["events"][&question]["brief"], "Which file?");
+    assert_eq!(detail["events"][&question]["origin"], "Review the fixture");
+    assert_eq!(detail["events"][&result]["brief"], "Review complete");
+    assert_eq!(detail["events"][&result]["origin"], "Use the first file");
+    let seen = json!([json!([configured.key, result]).to_string()]).to_string();
+    let filtered = home(&crate::native_html::query(&[("seen", &seen)]));
+    assert_eq!(filtered["inbox"], json!([]));
+    assert_eq!(filtered["answered"][0]["event"]["id"], question);
 }
 
 #[test]

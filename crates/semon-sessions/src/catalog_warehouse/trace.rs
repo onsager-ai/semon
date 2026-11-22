@@ -450,7 +450,7 @@ pub(super) fn passive_summary(
     };
     Ok(Some(json!({
         "name": row.title, "harness": row.harness,
-        "kind": row.presentation_kind.as_deref().unwrap_or(&row.kind),
+        "kind": row.presentation_kind.unwrap_or(row.kind),
         "model": row.model, "tokens": row.token_millions(),
         "cost": {"usd":row.cost.as_ref().and_then(|cost| cost.usd),
             "unpriced_models":row.cost.as_ref().map_or(&[][..], |cost| cost.unpriced_models.as_slice())},

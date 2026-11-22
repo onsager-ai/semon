@@ -927,9 +927,20 @@ impl<'a> Snapshot<'a> {
         if rows.is_empty() {
             return Ok(());
         }
-        let owners: Vec<_> = rows.iter().map(|row| row.owner).collect();
+        let owners = rows.iter().map(|row| row.owner).collect::<Vec<_>>();
         let status = self.runtime_status(&owners, selected)?;
-        let owners = encode(&owners)?;
+        self.enrich_with_status(rows, &status)
+    }
+
+    fn enrich_with_status(
+        &self,
+        rows: &mut [Row],
+        status: &BTreeMap<i64, &'static str>,
+    ) -> Result<(), ReadError> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let owners = encode(&rows.iter().map(|row| row.owner).collect::<Vec<_>>())?;
         let table = crate::pricing::snapshot();
         let mut priced = Self::priced_usage(self.transaction, &self.paths, &owners, &table)?;
         let mut members = self

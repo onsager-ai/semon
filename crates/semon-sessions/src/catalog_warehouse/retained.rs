@@ -425,8 +425,12 @@ pub(super) fn read_frozen(
             None => super::super::retained_error(error),
         },
     )?;
-    let mut parent_relay = None;
-    let origin_owner = identity.owner;
+    let mut legacy_plans = Vec::new();
+    let mut carriers = BTreeMap::new();
+    let origin_name = serde_json::from_str::<serde_json::Value>(&identity.metadata)
+        .map_err(index)?["name"]
+        .as_str()
+        .map(str::to_owned);
     let observed_peers = identity.observed_peers().map_err(index)?;
     let mut launch_peers = Vec::new();
     let mut launch_parents = std::collections::BTreeSet::new();
@@ -455,62 +459,145 @@ pub(super) fn read_frozen(
         }
     }
     let launch_peers = encode(&launch_peers)?;
-    let (harness, native_id, witness, selection, metadata, members, live) =
-        if let Some((peer, use_local)) = peer {
-            let (observed, current) =
-                warehouse::retained_peer(&tx, &source.namespace, &identity, peer.witness, key)
-                    .map_err(|error| ReadError::PeerUnavailable(error.to_string()))?;
-            if observed.harness == "claude" && identity.harness == "claude" {
-                let parents = observed
-                    .members
-                    .iter()
-                    .map(|member| {
-                        let path = member
-                            .receipt
-                            .path
-                            .to_str()
-                            .and_then(|p| relative(source.options, "claude", p))
-                            .ok_or(ReadError::RetainedUnverified)?;
-                        Ok((
-                            member.source,
-                            frozen_reference("claude", path, &member.receipt),
-                        ))
-                    })
-                    .collect::<Result<Vec<_>, ReadError>>()?;
-                parent_relay =
-                    certified_parent_relay(&tx, source, &identity, &parents, None, false)?;
-            }
-            let members = observed
+    let (harness, native_id, witness, selection, metadata, members, live) = if let Some((
+        peer,
+        use_local,
+    )) = peer
+    {
+        let (observed, current) =
+            warehouse::retained_peer(&tx, &source.namespace, &identity, peer.witness, key)
+                .map_err(|error| ReadError::PeerUnavailable(error.to_string()))?;
+        if observed.harness == "claude" && identity.harness == "claude" {
+            let parents = observed
                 .members
-                .into_iter()
-                .map(|m| FrozenMember {
-                    id: m.source,
-                    revision: m.revision,
-                    receipt: m.receipt,
+                .iter()
+                .map(|member| {
+                    let path = member
+                        .receipt
+                        .path
+                        .to_str()
+                        .and_then(|p| relative(source.options, "claude", p))
+                        .ok_or(ReadError::RetainedUnverified)?;
+                    Ok((
+                        member.source,
+                        frozen_reference("claude", path, &member.receipt),
+                    ))
+                })
+                .collect::<Result<Vec<_>, ReadError>>()?;
+            if let Some(plan) =
+                certified_parent_relay(&tx, source, &identity, &parents, None, false)?
+            {
+                legacy_plans.push((peer.trace.to_owned(), identity.owner, plan));
+            }
+        }
+        let members = observed
+            .members
+            .into_iter()
+            .map(|m| FrozenMember {
+                id: m.source,
+                revision: m.revision,
+                receipt: m.receipt,
+            })
+            .collect::<Vec<_>>();
+        let selection = encode(&(selection_for(peer.trace)?, key))?;
+        (
+            observed.harness,
+            observed.native_id,
+            peer.witness.to_owned(),
+            selection,
+            None,
+            members,
+            current && use_local,
+        )
+    } else {
+        let frozen = frozen_members(&tx, identity.binding)?;
+        if include_home_detail && identity.harness == "claude" {
+            let parents = frozen
+                .iter()
+                .filter_map(|member| {
+                    let path = relative(source.options, "claude", member.receipt.path.to_str()?)?;
+                    Some((member.id, frozen_reference("claude", path, &member.receipt)))
                 })
                 .collect::<Vec<_>>();
-            let selection = encode(&(selection_for(peer.trace)?, key))?;
-            (
-                observed.harness,
-                observed.native_id,
-                peer.witness.to_owned(),
-                selection,
-                None,
-                members,
-                current && use_local,
-            )
-        } else {
-            let frozen = frozen_members(&tx, identity.binding)?;
-            (
-                identity.harness,
-                identity.native_id,
-                identity.witness,
-                selection_for(key)?,
-                Some(identity.metadata),
-                frozen,
-                false,
-            )
-        };
+            for (sender, candidate) in &observed_peers {
+                if candidate.harness != "claude" {
+                    continue;
+                }
+                let Some(member) = candidate
+                    .members
+                    .iter()
+                    .find(|member| member.source == candidate.owner)
+                else {
+                    continue;
+                };
+                let Some(parent) =
+                    claude_storage_parent(&member.receipt.path, &member.receipt.native_id)
+                else {
+                    continue;
+                };
+                if !frozen
+                    .iter()
+                    .any(|member| member.receipt.path.with_extension("") == parent)
+                {
+                    continue;
+                }
+                let Ok((_, current)) = warehouse::retained_peer(
+                    &tx,
+                    &source.namespace,
+                    &identity,
+                    &identity.witness,
+                    sender,
+                ) else {
+                    continue;
+                };
+                if legacy_plans.len() == 128 {
+                    return Err(ReadError::SourceBudget);
+                }
+                let carrier = member
+                    .receipt
+                    .path
+                    .to_str()
+                    .ok_or(ReadError::RetainedUnverified)?;
+                let path = relative(source.options, "claude", carrier)
+                    .ok_or(ReadError::RetainedUnverified)?;
+                if let Some(plan) = parent_relay::Plan::collect_certified(
+                    &tx,
+                    member.source,
+                    frozen_reference("claude", path, &member.receipt),
+                    member.receipt.claude_agent_call(),
+                    None,
+                    &parents,
+                    false,
+                )? {
+                    if current && !source.provider_only() {
+                        let ledger: String = tx
+                            .query_row(
+                                "SELECT ledger FROM warehouse_source WHERE source=?1",
+                                [member.source],
+                                |row| row.get(0),
+                            )
+                            .map_err(index)?;
+                        let ledger = decode(&ledger)?;
+                        if matches!(source.availability("claude", carrier)?, Availability::Expected(Some(stat))
+                                if stable_or_grown(&ledger.stat, &stat))
+                        {
+                            carriers.insert(path.to_owned(), (carrier.to_owned(), ledger));
+                        }
+                    }
+                    legacy_plans.push((sender.clone(), member.source, plan));
+                }
+            }
+        }
+        (
+            identity.harness,
+            identity.native_id,
+            identity.witness,
+            selection_for(key)?,
+            Some(identity.metadata),
+            frozen,
+            false,
+        )
+    };
     if target
         .expected_generation()
         .is_some_and(|expected| expected != witness)
@@ -547,7 +634,6 @@ pub(super) fn read_frozen(
     let mut annotation_members = BTreeMap::new();
     let mut references = Vec::new();
     let mut prior_references = Vec::new();
-    let mut carriers = BTreeMap::new();
     let mut turn_members = Vec::new();
     {
         let mut copies = tx.prepare_cached(COPIES).map_err(index)?;
@@ -775,21 +861,41 @@ pub(super) fn read_frozen(
             }
         })
     };
-    let legacy = if let Some(plan) = parent_relay.filter(|_| !candidates.is_empty()) {
-        match plan.resolve(origin_owner, |id, reference, offset| {
-            let native = read(id, reference, offset, None, BodyMode::Complete)?;
-            pin_provider_with(&reader, reference, |error| {
-                retained_body_error(error, cursor.is_some())
-            })?;
-            Ok(native)
-        }) {
-            Ok(resolved) => encode(&resolved.incoming)?,
-            Err(ReadError::RetainedUnavailable) => "{}".into(),
-            Err(error) => return Err(error),
+    let mut claims = BTreeMap::new();
+    if !candidates.is_empty() || include_home_detail {
+        for (sender, child, plan) in legacy_plans {
+            match plan.resolve(child, |id, reference, offset| {
+                let native = read(id, reference, offset, None, BodyMode::Complete)?;
+                pin_provider_with(&reader, reference, |error| {
+                    retained_body_error(error, cursor.is_some())
+                })?;
+                Ok(native)
+            }) {
+                Ok(resolved) => {
+                    for (receipt, turn) in resolved.incoming {
+                        claims
+                            .entry(receipt)
+                            .and_modify(|claim| *claim = None)
+                            .or_insert_with(|| Some((turn, sender.clone())));
+                    }
+                }
+                Err(ReadError::RetainedUnavailable | ReadError::RetainedPreparing) => continue,
+                Err(error) => return Err(error),
+            }
         }
-    } else {
-        "{}".into()
-    };
+    }
+    let mut incoming = BTreeMap::new();
+    let mut legacy_senders = BTreeMap::new();
+    for (receipt, claim) in claims {
+        if let Some((turn, sender)) = claim {
+            incoming.insert(receipt, turn.clone());
+            legacy_senders
+                .entry(turn)
+                .and_modify(|sender| *sender = None)
+                .or_insert(Some(sender));
+        }
+    }
+    let legacy = encode(&incoming)?;
     let mut turns = if candidates.is_empty() && !include_home_detail {
         BTreeMap::new()
     } else {
@@ -1003,7 +1109,9 @@ pub(super) fn read_frozen(
             trace: trace_key,
             witness: &selection_identity.generation,
         };
-        let candidate = {
+        let candidate = if let Some(sender) = legacy_senders.remove(&turn.id) {
+            sender
+        } else {
             let tx = view.lock()?;
             let original = warehouse::retained_identity(&tx, &source.namespace, trace_key)
                 .map_err(super::super::retained_error)?;
@@ -1037,7 +1145,7 @@ pub(super) fn read_frozen(
                         )
                         .is_ok() =>
                     {
-                        Some(name)
+                        Some(name.clone())
                     }
                     _ => None,
                 }
@@ -1046,8 +1154,10 @@ pub(super) fn read_frozen(
             }
         };
         if let Some(sender) = candidate {
-            let name =
-                match super::super::trace::passive_summary(view, source, sender, Some(binding)) {
+            let name = if sender == trace_key {
+                origin_name
+            } else {
+                match super::super::trace::passive_summary(view, source, &sender, Some(binding)) {
                     Ok(summary) => {
                         summary.and_then(|summary| summary["name"].as_str().map(str::to_owned))
                     }
@@ -1058,8 +1168,9 @@ pub(super) fn read_frozen(
                         | ReadError::RetainedUnverified,
                     ) => None,
                     Err(error) => return Err(error),
-                };
-            detail.set_sender(sender.clone(), name);
+                }
+            };
+            detail.set_sender(sender, name);
         }
     }
     if let Some(detail) = &mut home_detail
