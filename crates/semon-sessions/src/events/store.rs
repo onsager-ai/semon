@@ -7232,7 +7232,8 @@ mod tests {
             .unwrap();
         }
         if seed_catalog {
-            let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+            let evidence =
+                crate::native_evidence::NativeEvidence::for_source_key("", options.clone());
             let complete = (0..128).any(|_| {
                 evidence
                     .refresh_catalog(
@@ -7285,7 +7286,7 @@ mod tests {
             writeln!(file, "{}", serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Original {index}")}]}})).unwrap();
         }
         drop(file);
-        let initial = crate::native_evidence::NativeEvidence::new(options.clone());
+        let initial = crate::native_evidence::NativeEvidence::for_source_key("", options.clone());
         assert!((0..128).any(|_| {
             initial
                 .refresh_catalog(
@@ -9004,7 +9005,8 @@ mod tests {
                 writeln!(file,"{}",serde_json::json!({"type":"response_item","timestamp":"2026-09-24T00:01:00Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("Original native record {n}")}]}})).unwrap();
             }
             drop(file);
-            let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+            let evidence =
+                crate::native_evidence::NativeEvidence::for_source_key("", options.clone());
             assert!((0..128).any(|_| {
                 evidence
                     .refresh_catalog(
@@ -9203,7 +9205,7 @@ mod tests {
         let path = options.claude_home.join(relative);
         use std::io::Write;
         writeln!(fs::OpenOptions::new().append(true).open(&path).unwrap(), "{}", serde_json::json!({"type":"user","uuid":"native-clear-marker","timestamp":"2026-09-24T00:02:00Z","sessionId":"native-cl-02","session_id":"native-cl-00","origin":{"kind":"human"},"message":{"role":"user","content":"Native clear joins original lineage"}})).unwrap();
-        let evidence = crate::native_evidence::NativeEvidence::new(options.clone());
+        let evidence = crate::native_evidence::NativeEvidence::for_source_key("", options.clone());
         let complete = (0..128).any(|_| {
             evidence
                 .refresh_catalog(

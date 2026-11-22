@@ -29,6 +29,7 @@ fn read_source(
     let view = selected::ReadView::open(&source)?;
     let (mut rows, complete, revision) = {
         let tx = view.lock()?;
+        super::list_functions(&tx).map_err(index)?;
         let snapshot = Snapshot::read(&tx, &source)?;
         let mut statement = tx.prepare_cached(RECENT).map_err(index)?;
         let mut hits = statement

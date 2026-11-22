@@ -11634,7 +11634,7 @@ fn first_acknowledged_owner(
     i64,
     summary::CatalogSource,
 ) {
-    let evidence = crate::native_evidence::NativeEvidence::new(home.options.clone());
+    let evidence = crate::native_evidence::NativeEvidence::for_source_key("", home.options.clone());
     for _ in 0..128 {
         assert!(
             !evidence
@@ -12333,7 +12333,7 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
             );
             let history = crate::catalog::catalog_identity(
                 &options,
-                "fixture",
+                "local",
                 native,
                 crate::CatalogReadScope::RetainedHistory,
                 false,
@@ -12351,7 +12351,7 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
             );
             let current = crate::catalog::catalog_identity(
                 &options,
-                "fixture",
+                "local",
                 native,
                 crate::CatalogReadScope::Current,
                 false,
@@ -12383,7 +12383,7 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
             );
             let transcript = crate::transcript_range::session_transcript_range_with_gate(
                 &options,
-                "fixture",
+                "local",
                 &format!("sid={native}&scope=retained_history&after=0&limit=100"),
                 None,
                 crate::SessionSourceReadMode::LocalThenProvider,
@@ -12398,7 +12398,7 @@ fn staged_current_native_key_ignores_deselected_or_rewritten_cached_codex_header
             assert!(!transcript.contains("Current Claude identity"));
             let list = crate::catalog::read_page(
                 &options,
-                &crate::storage::Namespace::new("fixture").unwrap(),
+                &crate::storage::Namespace::new("local").unwrap(),
                 &crate::catalog::Request::parse("scope=retained_history&harness=claude&limit=100")
                     .unwrap(),
             )
@@ -12544,7 +12544,7 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     drain(&options);
     let current = crate::catalog::catalog_identity(
         &options,
-        "fixture",
+        "local",
         native,
         crate::CatalogReadScope::Current,
         false,
@@ -12561,7 +12561,7 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     assert_eq!(
         crate::catalog::catalog_identity(
             &options,
-            "fixture",
+            "local",
             native,
             crate::CatalogReadScope::RetainedHistory,
             false
@@ -12630,7 +12630,7 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     drain(&options);
     let republished = crate::catalog::catalog_identity(
         &options,
-        "fixture",
+        "local",
         native,
         crate::CatalogReadScope::Current,
         false,
@@ -12647,7 +12647,7 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     );
     let transcript = crate::transcript_range::session_transcript_range_with_gate(
         &options,
-        "fixture",
+        "local",
         &format!("sid={native}&after=0&limit=100"),
         None,
         crate::SessionSourceReadMode::LocalThenProvider,
@@ -12715,7 +12715,7 @@ fn different_harness_current_preserves_unsupported_original_history_custody() {
     assert_eq!(
         crate::catalog::catalog_identity(
             &options,
-            "fixture",
+            "local",
             native,
             crate::CatalogReadScope::RetainedHistory,
             false

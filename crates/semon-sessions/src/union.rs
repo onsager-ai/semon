@@ -1460,7 +1460,6 @@ impl ViewerCore {
                 "Selected session routing is not yet available on PostgreSQL",
             );
         }
-        let _ = view.note_catalog_read();
         let configured = crate::catalog::warehouse::host_source(view.options(), &route.source);
         use crate::catalog::warehouse::http;
         let mut selected = vec![("sid", route.key.as_str())];
@@ -1511,7 +1510,11 @@ impl ViewerCore {
         } else {
             http::identity(&configured, &crate::native_html::query(&selected))
         };
-        if reply.status == 200 || reply.status >= 500 || matches!(reply.status, 409 | 423 | 429) {
+        if reply.status == 200 {
+            return view.respond("GET", "/", "", None);
+        }
+        if reply.status >= 500 || matches!(reply.status, 409 | 423 | 429) {
+            let _ = view.note_catalog_read();
             return view.respond("GET", "/", "", None);
         }
         if reply.status == 404
@@ -1526,6 +1529,7 @@ impl ViewerCore {
             };
             if pending || crate::events::store::catalog_work_pending(view.options()).unwrap_or(true)
             {
+                let _ = view.note_catalog_read();
                 return view.respond("GET", "/", "", None);
             }
         }
@@ -1707,18 +1711,20 @@ impl ViewerCore {
         let configured = crate::catalog::warehouse::host_source(view.options(), key);
         #[cfg(test)]
         let queue = crate::catalog::baseline_start();
-        if path != "/api/session-capabilities" {
+        let refresh_error = if path != "/api/session-capabilities" {
             if view.evidence.validate_configuration().is_err() {
                 return catalog_unavailable();
             }
             if path == "/api/sessions" {
                 http::note_list_search(query, &view.evidence);
             }
-            let _ = view.note_catalog_read();
-        }
+            Some(view.note_catalog_read().is_err())
+        } else {
+            None
+        };
         #[cfg(test)]
         crate::catalog::baseline_record(queue, |sample| &mut sample.wait);
-        match path {
+        let mut reply = match path {
             "/api/session-locate" => http::locate(&configured, query),
             "/api/session-observe" => http::observe(&configured, query),
             "/api/session-home" => http::home(&configured, query, None, None),
@@ -1742,7 +1748,21 @@ impl ViewerCore {
                 7,
             ),
             _ => http::list(&[configured], key, query, false),
+        };
+        if let Some(failed) = refresh_error
+            && let Ok(Value::Object(mut body)) = serde_json::from_slice(&reply.body)
+        {
+            body.insert(
+                "refresh".into(),
+                if failed {
+                    json!({"state":"unavailable","retryable":true})
+                } else {
+                    json!({"state":"updating"})
+                },
+            );
+            reply.body = Value::Object(body).to_string().into_bytes();
         }
+        reply
     }
     /// The first view whose ids an earlier view's win over: the first
     /// received machine's.

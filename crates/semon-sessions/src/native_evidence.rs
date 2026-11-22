@@ -2804,12 +2804,12 @@ mod catalog_owner_tests {
         if shared_roots {
             options.claude_home = options.codex_home.clone();
         }
-        let initial = NativeEvidence::new(options.clone());
+        let initial = NativeEvidence::for_source_key("", options.clone());
         drain_catalog(&initial, &std::cell::Cell::new(0));
         drop(initial);
         let db = rusqlite::Connection::open(EventCache::path(&options.cache)).unwrap();
         db.execute_batch("UPDATE meta SET value='partial' WHERE key='catalog_completeness'; UPDATE meta SET value='draining' WHERE key='catalog_backfill_state';").unwrap();
-        let evidence = NativeEvidence::new(options);
+        let evidence = NativeEvidence::for_source_key("", options);
         let core =
             crate::ViewerCore::from_sources(Arc::new(SessionSources::from_evidence(vec![(
                 String::new(),

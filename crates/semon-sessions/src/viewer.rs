@@ -9395,8 +9395,8 @@ mod tests {
         }
 
         let raw_lock_held_with_waiters = probe_exclusive();
-        let blocked_ready_with_waiters = crate::session_catalog_page_ready(&blocked.options);
-        let available_ready_with_waiters = crate::session_catalog_page_ready(&available.options);
+        let blocked_ready_with_waiters = crate::catalog::sqlite_page_ready(&blocked.options);
+        let available_ready_with_waiters = crate::catalog::sqlite_page_ready(&available.options);
         let (blocked_producer_running, blocked_producer_has_error) =
             match blocked_view.live.state.try_lock() {
                 Ok(state) => (

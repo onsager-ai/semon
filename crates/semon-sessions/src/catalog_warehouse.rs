@@ -137,7 +137,7 @@ const STATUS: &str = "SELECT p.value,d.harness,d.native_id,s.carrier,s.ledger,d.
     CROSS JOIN warehouse_source s ON s.source=m.source
     ORDER BY p.value,m.source";
 const RECEIPTS: &str =
-    "SELECT paths.key,paths.value,s.source,s.ledger,m.sidecar_revision,m.eof_witness,a.evidence
+    "SELECT paths.key,paths.value,s.source,s.ledger,m.sidecar_revision,m.eof_witness,a.evidence,a.source_path IS NOT NULL
     FROM json_each(?1) paths
     LEFT JOIN warehouse_current c ON paths.value AND c.path=paths.key
     LEFT JOIN warehouse_source s ON s.source=c.source AND s.origin=?2 AND s.carrier=c.path
@@ -633,6 +633,7 @@ impl<'a> Snapshot<'a> {
                 let ledger: String = record.get(3).map_err(index)?;
                 let committed: Ledger = serde_json::from_str(&ledger).map_err(index)?;
                 let evidence: Option<String> = record.get(6).map_err(index)?;
+                let receiver_mutation: bool = record.get(7).map_err(index)?;
                 // Discovery can precede this source's SQLite snapshot. If a
                 // commit advanced the same carrier meanwhile, verify its new
                 // stat through the native input opener before admitting it.
@@ -645,7 +646,14 @@ impl<'a> Snapshot<'a> {
                 } else {
                     observed
                 };
+                // Local writers do not use receiver intents. During growth, keep
+                // the last committed metadata for the same carrier. Selected
+                // body reads still verify the committed prefix independently.
+                let local_growth = source.options.facts.is_none()
+                    && !receiver_mutation
+                    && selected::stable_or_grown(&committed.stat, &observed);
                 if committed.stat == observed
+                    || local_growth
                     || evidence
                         .as_deref()
                         .and_then(|value| serde_json::from_str::<AppendEvidence>(value).ok())
