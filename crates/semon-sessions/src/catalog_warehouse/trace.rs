@@ -166,90 +166,140 @@ pub(super) fn read(
     ];
     let mut sent = Vec::new();
     let mut previews = json!({(key):component.identity.generation});
+    let root_identity = component.identity.clone();
     let peer = (scope == CatalogReadScope::RetainedHistory).then_some(selected::PeerBinding {
         trace: key,
-        witness: &component.identity.generation,
+        witness: &root_identity.generation,
     });
-    let mut refusals = Vec::new();
-    let relays = match peer {
-        Some(peer) => retained_relays(
-            &view,
-            source,
-            &component,
-            peer,
-            record,
-            provider,
-            &mut refusals,
-        )?,
-        None => current_relays(&view, source, &component, key, record, &mut refusals)?,
-    };
     let mut ids = BTreeSet::from([root.to_owned()]);
-    for receipt in relays {
-        let Relay {
-            key: target,
-            harness,
-            turn,
-            address,
-            sent_at,
-            received_at,
-            generation,
-        } = receipt;
-        if !ids.insert(turn.clone()) || target == key || target == "you" {
-            continue;
-        }
-        participants.remove(&target);
-        previews[target.as_str()] = json!(generation);
-        sessions[target.as_str()] = json!({
-            "name":target,"harness":harness,"model":"","state":"off","start":received_at,"last":received_at,
-            "tokens":[0,0,0],"cost":{"usd":null,"unpriced_models":[]},
-            "busy":[],"wait_edges":[],"wait_edges_truncated":false,
-        });
-        handoffs.push(json!({
-            "id":turn,"kind":"relay","from":key,"to":target,"at":sent_at,"status":"done",
-            "declined":false,"target_turn":turn,"source_turn":root,"brief_session":target,
-        }));
-        turns.push(json!({
-            "id":turn,"sid":target,"start":turn,"at":received_at,"u":false,"sent":[],
-            "end":{"st":"off","why":"unavailable"},"last":false,
-        }));
-        evidence.push(json!({
-            "catalog_key":target,"turn":turn,"address":address,
-            "peer":peer.map(|peer| json!({"trace":peer.trace,"witness":peer.witness})),
-        }));
-        sent.push(turn);
-    }
     let mut reported = BTreeSet::new();
-    for (id, target, at, reason) in refusals {
-        if target == key || target == "you" || !ids.insert(id.clone()) {
-            continue;
+    let mut queue = std::collections::VecDeque::new();
+    let mut frontier = Vec::new();
+    let mut reads = 0;
+    let root_address = record.address.clone();
+    let mut next = Some((0, component, root_address));
+    while let Some((index, component, address)) = next {
+        let Some(record) = component
+            .records
+            .iter()
+            .find(|record| record.address == address)
+        else {
+            return Err(ReadError::Restart);
+        };
+        let from = &component.identity.catalog_key;
+        let from_turn = record
+            .causal
+            .turn
+            .as_ref()
+            .ok_or(ReadError::Restart)?
+            .id
+            .as_str();
+        let mut refusals = Vec::new();
+        let relays = match peer {
+            Some(peer) => retained_relays(
+                &view,
+                source,
+                &component,
+                peer,
+                record,
+                provider,
+                &mut refusals,
+            )?,
+            None => current_relays(&view, source, &component, from, record, &mut refusals)?,
+        };
+        reads += 1;
+        let mut sent = Vec::new();
+        for receipt in relays {
+            let Relay {
+                key: target,
+                harness,
+                turn,
+                address,
+                sent_at,
+                received_at,
+                generation,
+                window,
+            } = receipt;
+            if target == from.as_str() || target == "you" || !ids.insert(turn.clone()) {
+                continue;
+            }
+            participants.remove(&target);
+            previews[target.as_str()] = json!(generation);
+            if sessions.get(&target).is_none() {
+                sessions[target.as_str()] = json!({
+                    "name":target,"harness":harness,"model":"","state":"off","start":received_at,"last":received_at,
+                    "tokens":[0,0,0],"cost":{"usd":null,"unpriced_models":[]},
+                    "busy":[],"wait_edges":[],"wait_edges_truncated":false,
+                });
+            }
+            handoffs.push(json!({
+                "id":turn,"kind":"relay","from":from,"to":target,"at":sent_at,"status":"done",
+                "declined":false,"target_turn":turn,"source_turn":from_turn,"brief_session":target,
+            }));
+            let (end, last) = if let Some((window, native)) = &window {
+                let receiving = window
+                    .records
+                    .iter()
+                    .find(|record| record.address == *native)
+                    .ok_or(ReadError::Restart)?;
+                recorded_end(&view, source, window, receiving)?
+            } else {
+                (json!({"st":"off","why":"unavailable"}), false)
+            };
+            if let Some((window, native)) = window {
+                queue.push_back((turns.len(), window, native));
+            }
+            turns.push(json!({
+                "id":turn,"sid":target,"start":turn,"at":received_at,"u":false,"sent":[],
+                "end":end,"last":last,
+            }));
+            evidence.push(json!({
+                "catalog_key":target,"turn":turn,"address":address,
+                "peer":peer.filter(|peer| target != peer.trace).map(|peer| json!({"trace":peer.trace,"witness":peer.witness})),
+            }));
+            sent.push(turn);
         }
-        if sessions.get(&target).is_none() {
-            participants
-                .entry(target.clone())
-                .or_insert_with(|| json!(target));
-        }
-        if reported.insert(target.clone())
-            && !evidence
-                .iter()
-                .any(|row| row["catalog_key"] == target && row.get("turn").is_none())
-        {
-            evidence.push(
-                json!({"catalog_key":target,"reason":reason.chars().take(256).collect::<String>()}),
+        for (id, target, at, reason) in refusals {
+            if target == from.as_str() || target == "you" || !ids.insert(id.clone()) {
+                continue;
+            }
+            if sessions.get(&target).is_none() {
+                participants
+                    .entry(target.clone())
+                    .or_insert_with(|| json!(target));
+            }
+            if reported.insert(target.clone())
+                && !evidence
+                    .iter()
+                    .any(|row| row["catalog_key"] == target && row.get("turn").is_none())
+            {
+                evidence.push(json!({"catalog_key":target,"reason":reason.chars().take(256).collect::<String>()}));
+            }
+            handoffs.push(
+                json!({"id":id,"kind":"relay","from":from,"to":target,"at":at,
+                "status":"off","declined":false,"source_turn":from_turn}),
             );
+            sent.push(id);
         }
-        handoffs.push(
-            json!({"id":id,"kind":"relay","from":key,"to":target,"at":at,
-            "status":"off","declined":false,"source_turn":root}),
-        );
-        sent.push(id);
+        turns[index]["sent"] = json!(sent);
+        // Each expanded turn considers at most sixteen relay candidates. Stop
+        // after four turns so the response stays below the Viewer's row bound.
+        if reads == 4 {
+            frontier.extend(queue.drain(..).map(|(index, _, _)| {
+                json!({
+                    "catalog_key":turns[index]["sid"],"turn":turns[index]["id"],
+                })
+            }));
+            break;
+        }
+        next = queue.pop_front();
     }
     let previews_incomplete = !reported.is_empty();
-    turns[0]["sent"] = json!(sent);
     Ok(Some(json!({
         "api":1,"projection":7,"source_key":source_key,"catalog_key":key,"root":root,
-        "generation":component.identity.generation,"identity":component.identity,
+        "generation":root_identity.generation,"identity":root_identity,
         "sessions":sessions,"participants":participants,"handoffs":handoffs,"turns":turns,
-        "frontier":[],"evidence":evidence,"previews":previews,
+        "frontier":frontier,"evidence":evidence,"previews":previews,
         "incomplete":true,"previews_incomplete":previews_incomplete,
     })))
 }
@@ -263,7 +313,11 @@ fn recorded_end(
     let unavailable = || json!({"st":"off","why":"unavailable"});
     // A Codex terminal fact names the same native turn as a reducer-qualified
     // start. Stop at the next human turn so a later task cannot close this one.
-    if component.harness != "codex" || component.member_count != 1 || root.prompt_anchor.is_none() {
+    if component.harness != "codex"
+        || component.member_count != 1
+        || root.causal.turn.as_ref().is_none_or(|turn| turn.handoff)
+        || root.prompt_anchor.is_none()
+    {
         return Ok((unavailable(), false));
     }
     let carrier = source.options.codex_home.join(&root.address.path);
@@ -383,6 +437,7 @@ struct Relay {
     sent_at: i64,
     received_at: i64,
     generation: String,
+    window: Option<(selected::Component, selected::Address)>,
 }
 
 struct Send {
@@ -397,7 +452,7 @@ fn relay_sends(
     source: &Source<'_>,
     component: &selected::Component,
     root: &selected::Record,
-    retained: Option<i64>,
+    retained: Option<&str>,
 ) -> Result<Vec<Send>, ReadError> {
     let Some(harness) = crate::InputRoot::parse(&component.harness) else {
         return Ok(Vec::new());
@@ -406,8 +461,8 @@ fn relay_sends(
     let mut query = tx
         .prepare_cached(
             "WITH member AS (
-           SELECT m.source FROM warehouse_identity_member m
-           WHERE m.identity=?1 AND json_extract(m.receipt,'$.path')=?2
+           SELECT CAST(m.key AS INTEGER) FROM json_each(?1) m
+           WHERE json_extract(m.value,'$[0]')=?2 AND json_extract(m.value,'$[1]')=?5
            UNION ALL
            SELECT w.source FROM warehouse_current w
            CROSS JOIN warehouse_source s ON s.source=w.source AND s.origin=?3
@@ -480,17 +535,17 @@ fn retained_relays(
     provider: Option<&dyn SessionSourceReader>,
     refusals: &mut Vec<(String, String, i64, String)>,
 ) -> Result<Vec<Relay>, ReadError> {
-    let (binding, observed) = {
+    let sender = component.identity.catalog_key.as_str();
+    let (bounds, identity, observed) = {
         let tx = view.lock()?;
         let identity =
             crate::events::store::warehouse::retained_identity(&tx, &source.namespace, peer.trace)
                 .map_err(super::retained_error)?;
-        (
-            identity.binding,
-            identity.observed_peers().map_err(super::index)?,
-        )
+        let bounds = selected::retained_member_bounds(&tx, source, &identity, peer, sender, None)?;
+        let observed = identity.observed_peers().map_err(super::index)?;
+        (bounds, identity, observed)
     };
-    let sends = relay_sends(view, source, component, root, Some(binding))?;
+    let sends = relay_sends(view, source, component, root, Some(&bounds))?;
     let mut relays = Vec::new();
     let mut attempts = 0;
     for Send {
@@ -500,14 +555,27 @@ fn retained_relays(
         at: sent_at,
     } in sends
     {
-        let window = selected::retained_trace_send_window(
-            view,
-            source,
-            peer.trace,
-            &send,
-            &component.binding,
-            provider,
-        )?;
+        let window =
+            match selected::retained_peer_trace_window(view, source, sender, peer, &send, provider)
+            {
+                Ok(window) => window,
+                Err(
+                    error @ (ReadError::RetainedPreparing
+                    | ReadError::RetainedUnavailable
+                    | ReadError::PeerUnavailable(_)),
+                ) => {
+                    if crate::session_route::identifier(&recipient) {
+                        refusals.push((
+                            refused_relay_id(&send, block),
+                            recipient,
+                            sent_at,
+                            error.to_string(),
+                        ));
+                    }
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
         if !window
             .records
             .iter()
@@ -522,17 +590,20 @@ fn retained_relays(
         let mut found = None;
         let mut candidates = observed
             .iter()
-            .filter(|(key, observation)| {
-                if recipient == "main" {
-                    parent == Some(key.as_str())
-                } else {
-                    recipient == observation.native_id || recipient == key.as_str()
-                }
+            .map(|(key, observation)| (key.as_str(), observation.native_id.as_str()))
+            .chain(std::iter::once((peer.trace, identity.native_id.as_str())))
+            .filter(|(key, native_id)| {
+                *key != sender
+                    && if recipient == "main" {
+                        parent == Some(*key)
+                    } else {
+                        recipient == *native_id || recipient == *key
+                    }
             })
             .peekable();
-        let target = candidates.peek().map(|(key, _)| key.as_str());
+        let target = candidates.peek().map(|(key, _)| *key);
         let mut reason = "No certified peer receipt could be matched to this relay.".to_string();
-        for (key, observation) in candidates {
+        for (key, _) in candidates {
             if attempts == 32 {
                 reason =
                     "The certified peer receipt could not be checked within this Trace request."
@@ -541,11 +612,11 @@ fn retained_relays(
                 break;
             }
             attempts += 1;
-            let (address, turn) = match selected::retained_peer_relay_in_view(
+            let (address, turn) = match selected::retained_relay_in_view(
                 view,
                 source,
-                peer.trace,
-                peer.witness,
+                peer,
+                sender,
                 key,
                 (&send, block),
                 provider,
@@ -601,13 +672,14 @@ fn retained_relays(
                 break;
             }
             found = Some(Relay {
-                key: key.clone(),
-                harness: observation.harness.clone(),
+                key: key.into(),
+                harness: window.harness.clone(),
                 turn,
                 address: json!(address),
                 sent_at,
                 received_at,
-                generation: window.identity.generation,
+                generation: window.identity.generation.clone(),
+                window: Some((window, address.record)),
             });
         }
         if let Some(accepted) = found {
@@ -759,7 +831,8 @@ fn current_relays(
                 address,
                 sent_at,
                 received_at,
-                generation: window.identity.generation,
+                generation: window.identity.generation.clone(),
+                window: Some((window, native)),
             }))
         };
         match read()? {

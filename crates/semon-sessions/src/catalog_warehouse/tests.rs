@@ -2048,6 +2048,101 @@ fn warehouse_parent_relay_matches_body_then_time_at_the_selected_prefix() {
 }
 
 #[test]
+fn warehouse_trace_follows_a_send_from_a_continuation_and_a_peer_reply() {
+    let mut fixture = Fixture::new("trace-cross-member-relay");
+    let original = fixture.claude("original", "Begin work");
+    let resumed = original.with_file_name("resumed.jsonl");
+    let mut copied: serde_json::Value = serde_json::from_str(
+        fs::read_to_string(&original)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    copied["sessionId"] = json!("resumed");
+    fs::write(&resumed, format!("{copied}\n")).unwrap();
+    append_native(
+        &original,
+        json!({"type":"continued-in","sessionId":"original",
+        "continuedInSessionId":"resumed","timestamp":"2026-09-24T00:00:01Z"}),
+    );
+    let peer = fixture.claude("peer", "Peer prompt");
+    let last = fixture.claude("last", "Last prompt");
+    let append_relay = |sender: &Path, native, receiver: &Path, target, correlation, at: usize| {
+        append_native(
+            sender,
+            json!({"type":"assistant","uuid":correlation,"sessionId":native,
+            "timestamp":format!("2026-09-24T00:00:{at:02}Z"),"message":{"role":"assistant","content":[
+                {"type":"tool_use","id":correlation,"name":"SendMessage","input":{"to":target,"message":"hello"}}
+            ]}}),
+        );
+        append_native(
+            sender,
+            json!({"type":"user","sessionId":native,
+            "timestamp":format!("2026-09-24T00:00:{:02}Z",at+1),"toolUseResult":{"success":true,"msg_id":correlation},
+            "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":correlation,"content":"sent"}]}}),
+        );
+        append_native(
+            receiver,
+            json!({"type":"user","sessionId":target,
+            "timestamp":format!("2026-09-24T00:00:{:02}Z",at+2),"origin":{"kind":"peer",
+                "from":"uds:/run/user/1000/cc-socks/111.sock","name":native,"fromMode":"prompting",
+                "msg_id":correlation,"body":"hello","verifiedPeerPid":111,"verifiedPeerProcStart":"999"},
+            "message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/111.sock\">hello</cross-session-message>"}}),
+        );
+    };
+    append_relay(&resumed, "resumed", &peer, "peer", "delivery-one", 2);
+    append_relay(&peer, "peer", &last, "last", "delivery-two", 5);
+    let paths = [
+        original.as_path(),
+        resumed.as_path(),
+        peer.as_path(),
+        last.as_path(),
+    ];
+    for path in paths {
+        scan_file(path, "claude", &mut fixture.cache, &mut false).unwrap();
+    }
+    let component = selected_page(&fixture, &paths, "original", 20, None)
+        .unwrap()
+        .unwrap();
+    let record = component
+        .records
+        .iter()
+        .find(|record| record.text().as_deref() == Some("Begin work"))
+        .unwrap();
+    let turn = &record.causal.turn.as_ref().unwrap().id;
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let query = crate::native_html::query(&[("sid", "original"), ("turn", turn)]);
+    let reply = http::trace(&configured, &query, None, None);
+    let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{trace}");
+    assert!(
+        trace["handoffs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["from"] == "original"
+                && edge["to"] == "peer"
+                && edge["status"] == "done"),
+        "{trace}"
+    );
+    assert!(
+        trace["handoffs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|edge| edge["from"] == "peer" && edge["to"] == "last" && edge["status"] == "done"),
+        "{trace}"
+    );
+}
+
+#[test]
 fn warehouse_trace_codex_end_belongs_to_selected_turn() {
     let mut fixture = Fixture::new("trace-codex-end");
     let path = fixture.codex("trace-codex");
@@ -2606,6 +2701,26 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
             "fromMode":"prompting","msg_id":"delivery","body":"hello","verifiedPeerPid":111,"verifiedPeerProcStart":"999"},
         "message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/111.sock\" from-name=\"root\">hello</cross-session-message>"}}),
     );
+    append_native(
+        &peer,
+        json!({"type":"assistant","uuid":"reply-call","sessionId":"peer",
+        "timestamp":"2026-09-24T00:00:04Z","message":{"role":"assistant","content":[
+            {"type":"tool_use","id":"reply","name":"SendMessage","input":{"to":"root","message":"reply"}}
+        ]}}),
+    );
+    append_native(
+        &peer,
+        json!({"type":"user","sessionId":"peer",
+        "timestamp":"2026-09-24T00:00:05Z","toolUseResult":{"success":true,"msg_id":"return-delivery"},
+        "message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"reply","content":"sent"}]}}),
+    );
+    append_native(
+        &root,
+        json!({"type":"user","sessionId":"root","timestamp":"2026-09-24T00:00:06Z",
+        "origin":{"kind":"peer","from":"uds:/run/user/1000/cc-socks/111.sock","name":"peer",
+            "fromMode":"prompting","msg_id":"return-delivery","body":"reply","verifiedPeerPid":111,"verifiedPeerProcStart":"999"},
+        "message":{"role":"user","content":"<cross-session-message from=\"uds:/run/user/1000/cc-socks/111.sock\" from-name=\"peer\">reply</cross-session-message>"}}),
+    );
     let publish = |fixture: &mut Fixture| {
         crate::model::observe_catalog(
             &fixture.options,
@@ -2617,6 +2732,21 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
         .unwrap();
     };
     publish(&mut fixture);
+    let original = RelayFixtureProvider(BTreeMap::from([
+        ("projects/proj/root.jsonl".into(), fs::read(&root).unwrap()),
+        ("projects/proj/peer.jsonl".into(), fs::read(&peer).unwrap()),
+    ]));
+    let component = selected_page(&fixture, &[&root, &peer], "root", 20, None)
+        .unwrap()
+        .unwrap();
+    let turn = component
+        .records
+        .iter()
+        .find(|record| record.text().as_deref() == Some("Original trace"))
+        .and_then(|record| record.causal.turn.as_ref())
+        .unwrap()
+        .id
+        .clone();
     let provider = PeerProvider {
         bytes: fs::read(&peer).unwrap(),
         calls: AtomicUsize::new(0),
@@ -2760,6 +2890,49 @@ fn warehouse_retained_trace_opens_only_the_observed_peer_prefix() {
             .text()
             .as_deref(),
         Some("Original peer")
+    );
+
+    let configured = crate::OverviewSource {
+        key: fixture.namespace.as_str().into(),
+        label: "Fixture".into(),
+        options: fixture.options.clone(),
+        up: true,
+    };
+    let query = crate::native_html::query(&[
+        ("sid", "root"),
+        ("scope", "retained_history"),
+        ("turn", &turn),
+    ]);
+    let reply = http::trace(&configured, &query, None, Some(&original));
+    let trace: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{trace}");
+    let return_edge = trace["handoffs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|edge| edge["from"] == "peer" && edge["to"] == "root" && edge["status"] == "done")
+        .unwrap_or_else(|| panic!("Missing return edge: {trace}"));
+    let evidence = trace["evidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["catalog_key"] == "root" && row["turn"] == return_edge["target_turn"])
+        .unwrap();
+    assert!(evidence["peer"].is_null());
+    let query = crate::native_html::query(&[
+        ("sid", "root"),
+        ("scope", "retained_history"),
+        ("address", &evidence["address"].to_string()),
+    ]);
+    let reply = http::transcript(&configured, &query, None, Some(&original));
+    let transcript: serde_json::Value = serde_json::from_slice(&reply.body).unwrap();
+    assert_eq!(reply.status, 200, "{transcript}");
+    assert!(
+        transcript["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["address"] == evidence["address"])
     );
 
     db.execute(

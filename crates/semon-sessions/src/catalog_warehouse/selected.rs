@@ -27,10 +27,10 @@ pub(super) mod render;
 mod retained;
 pub(super) use retained::{
     PeerBinding, retained_activity_anchor, retained_addressed_preview, retained_addressed_window,
-    retained_annotations, retained_latest_page, retained_page, retained_peer_launch_call,
-    retained_peer_launch_in_view, retained_peer_record_at, retained_peer_relay_address,
-    retained_peer_relay_in_view, retained_peer_trace_window, retained_peer_window,
-    retained_preview_turns, retained_record_at, retained_trace_send_window, retained_turn,
+    retained_annotations, retained_latest_page, retained_member_bounds, retained_page,
+    retained_peer_launch_call, retained_peer_launch_in_view, retained_peer_record_at,
+    retained_peer_relay_address, retained_peer_trace_window, retained_peer_window,
+    retained_preview_turns, retained_record_at, retained_relay_in_view, retained_turn,
 };
 
 const MEMBER_PAGE: i64 = 64;

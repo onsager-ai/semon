@@ -1,14 +1,13 @@
 -- Resolve the successful correlated result of one physical send inside the
 -- certified trace prefix. Ambiguous call IDs and deliveries are unavailable.
 WITH origin AS MATERIALIZED (
-  SELECT m.source,json_extract(m.receipt,'$.offset') AS end
-  FROM warehouse_identity_member m
-  CROSS JOIN fact_record r ON r.source=m.source AND r.pos=?3 AND r.block=?4 AND r.occurrence=?5
-  WHERE m.identity=?1 AND json_extract(m.receipt,'$.path')=?2
-    AND NOT r.gap AND r.pos<json_extract(m.receipt,'$.offset')
+  SELECT CAST(m.key AS INTEGER) AS source,json_extract(m.value,'$[1]') AS end
+  FROM json_each(?1) m
+  CROSS JOIN fact_record r ON r.source=CAST(m.key AS INTEGER) AND r.pos=?2 AND r.block=?3 AND r.occurrence=?4
+  WHERE NOT r.gap AND r.pos<json_extract(m.value,'$[1]')
 ), send AS MATERIALIZED (
   SELECT s.source,s.call_id,s.pos,s.block,o.end FROM origin o
-  CROSS JOIN fact_relay_send s ON s.source=o.source AND s.pos=?3 AND s.block=?6
+  CROSS JOIN fact_relay_send s ON s.source=o.source AND s.pos=?2 AND s.block=?5
   WHERE s.call_id IS NOT NULL
 ), delivery AS MATERIALIZED (
   SELECT DISTINCT r.correlation FROM send s
@@ -21,7 +20,7 @@ WITH origin AS MATERIALIZED (
   LIMIT 2
 )
 SELECT r.source,r.pos,f.occurrence,r.correlation,coalesce(f.ts,-9223372036854775808) FROM delivery d
-CROSS JOIN json_each(?7) m
+CROSS JOIN json_each(?6) m
 CROSS JOIN fact_relay_receipt r INDEXED BY relay_receipt_correlation
   ON r.correlation=d.correlation AND r.source=CAST(m.key AS INTEGER) AND r.pos<m.value
 CROSS JOIN fact_record f ON f.source=r.source AND f.pos=r.pos AND f.block=0 AND NOT f.gap

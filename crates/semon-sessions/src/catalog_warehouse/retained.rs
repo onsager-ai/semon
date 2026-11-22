@@ -158,6 +158,10 @@ pub(in super::super) fn retained_peer_trace_window(
         peer.trace,
         incarnation,
     ))?;
+    if key == peer.trace {
+        let binding = component_binding(&trace, peer.witness)?;
+        return retained_trace_send_window(view, source, key, address, &binding, provider);
+    }
     let binding = component_binding(&encode(&(trace, key))?, peer.witness)?;
     read_frozen(
         view,
@@ -170,7 +174,7 @@ pub(in super::super) fn retained_peer_trace_window(
     )
 }
 
-pub(in super::super) fn retained_trace_send_window(
+fn retained_trace_send_window(
     view: &ReadView<'_>,
     source: &Source<'_>,
     key: &str,
@@ -1056,19 +1060,28 @@ pub(in super::super) fn retained_peer_relay_address(
     provider: Option<&dyn SessionSourceReader>,
 ) -> Result<crate::session_route::NativeEntryAddress, ReadError> {
     let view = ReadView::open(source)?;
-    retained_peer_relay_in_view(&view, source, trace, witness, peer, (send, block), provider)
-        .map(|(address, _)| address)
+    retained_relay_in_view(
+        &view,
+        source,
+        PeerBinding { trace, witness },
+        trace,
+        peer,
+        (send, block),
+        provider,
+    )
+    .map(|(address, _)| address)
 }
 
-pub(in super::super) fn retained_peer_relay_in_view(
+pub(in super::super) fn retained_relay_in_view(
     view: &ReadView<'_>,
     source: &Source<'_>,
-    trace: &str,
-    witness: &str,
+    binding: PeerBinding<'_>,
+    sender: &str,
     peer: &str,
     (send, block): (&Address, u32),
     provider: Option<&dyn SessionSourceReader>,
 ) -> Result<(crate::session_route::NativeEntryAddress, String), ReadError> {
+    let PeerBinding { trace, witness } = binding;
     let unavailable = || {
         ReadError::PeerUnavailable(
         "No exact relay delivery and rendered receipt could be proven in the certified prefixes.".into(),
@@ -1088,11 +1101,7 @@ pub(in super::super) fn retained_peer_relay_in_view(
             trace,
             &incarnation,
         ))?;
-        let root = crate::InputRoot::parse(&identity.harness).ok_or_else(unavailable)?;
-        if !crate::is_input_path(&identity.harness, &send.path) {
-            return Err(unavailable());
-        }
-        let path = root.home(source.options).join(&send.path);
+        let sender_bounds = retained_member_bounds(&tx, source, identity, binding, sender, Some(&send.path))?;
         let bounds = encode(
             &observed
                 .members
@@ -1105,8 +1114,7 @@ pub(in super::super) fn retained_peer_relay_in_view(
             .map_err(index)?;
         let mut rows = query
             .query(params![
-                identity.binding,
-                path.to_str(),
+                sender_bounds,
                 i64::try_from(send.offset).map_err(index)?,
                 send.block,
                 send.occurrence,
@@ -1127,7 +1135,7 @@ pub(in super::super) fn retained_peer_relay_in_view(
         };
         drop(rows);
         drop(query);
-        let plan = if correlated.is_none() {
+        let plan = if correlated.is_none() && sender == trace && peer != trace {
             Some(certified_parent_relay(&tx, source, identity, parents, Some((send, block)))?
                 .ok_or_else(unavailable)?)
         } else {
@@ -1218,7 +1226,8 @@ pub(in super::super) fn retained_peer_relay_in_view(
         {
             return Err(unavailable());
         }
-        matched = Some((component_binding(&encode(&(origin, peer))?, witness)?, turn));
+        let selection = if peer == trace { origin } else { encode(&(origin, peer))? };
+        matched = Some((component_binding(&selection, witness)?, turn));
         Ok(address)
     })?
     .ok_or_else(unavailable)?;
@@ -1269,6 +1278,9 @@ pub(in super::super) fn retained_peer_launch_in_view(
             "No exact launch call could be proven in the certified prefixes.".into(),
         )
     };
+    if trace == peer {
+        return Err(unavailable());
+    }
     let mut matched_call = None;
     let record = read_retained_peer_in_view(
         view,
@@ -1425,6 +1437,9 @@ fn read_retained_peer(
         &mut CertifiedRecordRead<'_>,
     ) -> Result<Address, ReadError>,
 ) -> Result<Option<Record>, ReadError> {
+    if peer == trace {
+        return Ok(None);
+    }
     let view = ReadView::open(source)?;
     read_retained_peer_in_view(
         &view,
@@ -1434,6 +1449,66 @@ fn read_retained_peer(
         provider,
         bytes,
         select,
+    )
+}
+
+fn retained_participant(
+    tx: &rusqlite::Connection,
+    source: &Source<'_>,
+    identity: &warehouse::RetainedIdentity,
+    binding: PeerBinding<'_>,
+    key: &str,
+) -> Result<(warehouse::ObservedPeer, bool), ReadError> {
+    if key != binding.trace {
+        return warehouse::retained_peer(tx, &source.namespace, identity, binding.witness, key)
+            .map_err(|error| ReadError::PeerUnavailable(error.to_string()));
+    }
+    if identity.witness != binding.witness {
+        return Err(ReadError::PeerUnavailable(
+            "The original Trace witness has changed.".into(),
+        ));
+    }
+    let members = frozen_members(tx, identity.binding)?
+        .into_iter()
+        .map(|member| warehouse::ObservedMember {
+            source: member.id,
+            revision: member.revision,
+            receipt: member.receipt,
+        })
+        .collect();
+    Ok((
+        warehouse::ObservedPeer {
+            owner: identity.owner,
+            harness: identity.harness.clone(),
+            native_id: identity.native_id.clone(),
+            members,
+        },
+        false,
+    ))
+}
+
+pub(in super::super) fn retained_member_bounds(
+    tx: &rusqlite::Connection,
+    source: &Source<'_>,
+    identity: &warehouse::RetainedIdentity,
+    binding: PeerBinding<'_>,
+    key: &str,
+    path: Option<&str>,
+) -> Result<String, ReadError> {
+    let (participant, _) = retained_participant(tx, source, identity, binding, key)?;
+    encode(
+        &participant
+            .members
+            .iter()
+            .filter_map(|member| {
+                let carrier = member.receipt.path.to_str()?;
+                if path.is_some() && relative(source.options, &participant.harness, carrier) != path
+                {
+                    return None;
+                }
+                Some((member.source, (carrier, member.receipt.offset)))
+            })
+            .collect::<BTreeMap<_, _>>(),
     )
 }
 
@@ -1455,8 +1530,7 @@ fn read_retained_peer_in_view(
     let identity = warehouse::retained_identity(&tx, &source.namespace, trace)
         .map_err(|error| ReadError::PeerUnavailable(retained_peer_trace_error(error)))?;
     let (observed, current) =
-        warehouse::retained_peer(&tx, &source.namespace, &identity, witness, peer)
-            .map_err(|error| ReadError::PeerUnavailable(error.to_string()))?;
+        retained_participant(&tx, source, &identity, PeerBinding { trace, witness }, peer)?;
     let mut parents = Vec::new();
     let mut carriers = BTreeMap::new();
     for member in &observed.members {
