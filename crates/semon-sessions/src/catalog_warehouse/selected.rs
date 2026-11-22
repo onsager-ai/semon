@@ -22,7 +22,9 @@ mod causal;
 mod parent_relay;
 #[path = "retained.rs"]
 mod retained;
-pub(super) use retained::{retained_page, retained_peer_record_at, retained_record_at};
+pub(super) use retained::{
+    retained_latest_page, retained_page, retained_peer_record_at, retained_record_at,
+};
 
 const MEMBER_PAGE: i64 = 64;
 const PAGE_BYTES: usize = 8 * 1024 * 1024;
@@ -106,6 +108,7 @@ struct ProviderPin {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Cursor {
+    direction: Direction,
     selection: String,
     members: String,
     view: i64,
@@ -400,16 +403,56 @@ fn member_positions(
     Ok(())
 }
 
-fn member_frontier(after: Option<Position>, source: i64) -> (i64, i64, i64, i64) {
-    let Some(after) = after else {
-        return (i64::MIN, i64::MIN, i64::MIN, i64::MIN);
-    };
-    let (offset, block, occurrence) = match source.cmp(&after.source) {
-        std::cmp::Ordering::Less => (i64::MAX, i64::MAX, i64::MAX),
-        std::cmp::Ordering::Equal => (after.offset, after.block, after.occurrence),
-        std::cmp::Ordering::Greater => (i64::MIN, i64::MIN, i64::MIN),
-    };
-    (after.time, offset, block, occurrence)
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum Direction {
+    Forward,
+    Reverse,
+}
+
+impl Direction {
+    fn statement(self) -> &'static str {
+        match self {
+            Self::Forward => warehouse::DETAIL,
+            Self::Reverse => include_str!("../events/store/warehouse_detail_reverse.sql"),
+        }
+    }
+
+    fn frontier(self, after: Option<Position>, source: i64) -> (i64, i64, i64, i64) {
+        let (start, end) = match self {
+            Self::Forward => (i64::MIN, i64::MAX),
+            Self::Reverse => (i64::MAX, i64::MIN),
+        };
+        let Some(after) = after else {
+            return (start, start, start, start);
+        };
+        let (offset, block, occurrence) = match source.cmp(&after.source) {
+            std::cmp::Ordering::Less => match self {
+                Self::Forward => (end, end, end),
+                Self::Reverse => (start, start, start),
+            },
+            std::cmp::Ordering::Equal => (after.offset, after.block, after.occurrence),
+            std::cmp::Ordering::Greater => match self {
+                Self::Forward => (start, start, start),
+                Self::Reverse => (end, end, end),
+            },
+        };
+        (after.time, offset, block, occurrence)
+    }
+
+    fn discard_extra<V>(self, positions: &mut BTreeMap<Position, V>) {
+        match self {
+            Self::Forward => positions.pop_last(),
+            Self::Reverse => positions.pop_first(),
+        };
+    }
+
+    fn continuation<V>(self, positions: &BTreeMap<Position, V>) -> Option<Position> {
+        match self {
+            Self::Forward => positions.last_key_value(),
+            Self::Reverse => positions.first_key_value(),
+        }
+        .map(|(position, _)| *position)
+    }
 }
 
 pub(super) fn prompt_title(
@@ -617,7 +660,31 @@ pub(super) fn page(
     limit: usize,
     cursor: Option<&Cursor>,
 ) -> Result<Option<Component>, ReadError> {
-    read(options, source, scope, key, Target::Page(limit), cursor)
+    read(
+        options,
+        source,
+        scope,
+        key,
+        Target::Page(limit, Direction::Forward),
+        cursor,
+    )
+}
+
+pub(super) fn latest_page(
+    options: &Options,
+    source: &Source<'_>,
+    key: &str,
+    limit: usize,
+    cursor: Option<&Cursor>,
+) -> Result<Option<Component>, ReadError> {
+    read(
+        options,
+        source,
+        CatalogReadScope::Current,
+        key,
+        Target::Page(limit, Direction::Reverse),
+        cursor,
+    )
 }
 
 pub(super) fn record_at(
@@ -763,7 +830,7 @@ fn activity_evidence(
 const EVIDENCE: &str = include_str!("evidence.sql");
 
 enum Target<'a> {
-    Page(usize),
+    Page(usize, Direction),
     Address(&'a Address),
     Evidence(Evidence<'a>),
     Activity(&'a crate::transcript_range::StepAnchor),
@@ -773,8 +840,8 @@ enum Target<'a> {
 impl Target<'_> {
     fn capacity(&self) -> Result<usize, ReadError> {
         match *self {
-            Self::Page(n @ 1..=100) => Ok(n + 1),
-            Self::Page(_) => Err(index("Selected pages require a limit of 1–100")),
+            Self::Page(n @ 1..=100, _) => Ok(n + 1),
+            Self::Page(..) => Err(index("Selected pages require a limit of 1–100")),
             Self::Address(_) | Self::Evidence(_) | Self::Activity(_) => Ok(1),
             Self::ToolResults(_) => Ok(101),
         }
@@ -789,12 +856,21 @@ fn read(
     target: Target<'_>,
     cursor: Option<&Cursor>,
 ) -> Result<Option<Component>, ReadError> {
+    let direction = match target {
+        Target::Page(_, direction) => {
+            if cursor.is_some_and(|cursor| cursor.direction != direction) {
+                return Err(ReadError::Restart);
+            }
+            direction
+        }
+        _ => Direction::Forward,
+    };
     let capacity = target.capacity()?;
     let provider = source
         .current_provider
         .map(|provider| crate::source_reader::BudgetedReader::new(provider, 1024));
     let capacity = if provider.is_some()
-        && matches!(target, Target::Page(_))
+        && matches!(target, Target::Page(..))
         && source
             .inventory
             .values()
@@ -891,7 +967,7 @@ fn read(
     let mut member_after = 0;
     {
         let mut members = db.prepare_cached(MEMBERS).map_err(index)?;
-        let mut detail = db.prepare_cached(warehouse::DETAIL).map_err(index)?;
+        let mut detail = db.prepare_cached(direction.statement()).map_err(index)?;
         let mut evidence = db.prepare_cached(EVIDENCE).map_err(index)?;
         let mut activity_query = db
             .prepare_cached(include_str!("activity_evidence.sql"))
@@ -1002,11 +1078,11 @@ fn read(
                 let mut keep = |(position, kind)| {
                     candidates.insert(position, (kind, member.clone(), witness_prefix.clone()));
                     if candidates.len() > capacity {
-                        candidates.pop_last();
+                        direction.discard_extra(&mut candidates);
                     }
                 };
                 let (start, end, entry_block, entry_occurrence) = match target {
-                    Target::Page(_) => (0, committed.offset, None, None),
+                    Target::Page(..) => (0, committed.offset, None, None),
                     Target::Address(wanted)
                         if member.reference.path == wanted.path
                             && wanted.offset < committed.offset =>
@@ -1105,7 +1181,7 @@ fn read(
                     };
                     (time, i64::MIN, i64::MIN, i64::MIN)
                 } else {
-                    member_frontier(cursor.map(|cursor| cursor.after), id)
+                    direction.frontier(cursor.map(|cursor| cursor.after), id)
                 };
                 let predecessors =
                     continuation_bounds(&mut continuations, &mut prefix, id, component, view)?;
@@ -1149,11 +1225,11 @@ fn read(
     if evidence_matches > 1 {
         candidates.clear();
     }
-    let more = matches!(target, Target::Page(_)) && candidates.len() == capacity;
+    let more = matches!(target, Target::Page(..)) && candidates.len() == capacity;
     if more {
-        candidates.pop_last();
+        direction.discard_extra(&mut candidates);
     }
-    let after = candidates.last_key_value().map(|(position, _)| *position);
+    let after = direction.continuation(&candidates);
     let mut anchors = BTreeMap::new();
     {
         let mut prompts = db.prepare_cached(PROMPT_AT).map_err(index)?;
@@ -1400,6 +1476,7 @@ fn read(
         return Err(ReadError::Restart);
     }
     let next = after.filter(|_| more).map(|after| Cursor {
+        direction,
         selection,
         members,
         view,

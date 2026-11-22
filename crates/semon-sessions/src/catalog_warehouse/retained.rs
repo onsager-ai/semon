@@ -10,7 +10,28 @@ pub(in super::super) fn retained_page(
     cursor: Option<&Cursor>,
     provider: &dyn SessionSourceReader,
 ) -> Result<Component, ReadError> {
-    let limit = Target::Page(limit).capacity()?.min(33);
+    read_retained_page(source, key, limit, cursor, provider, Direction::Forward)
+}
+
+pub(in super::super) fn retained_latest_page(
+    source: &Source<'_>,
+    key: &str,
+    limit: usize,
+    cursor: Option<&Cursor>,
+    provider: &dyn SessionSourceReader,
+) -> Result<Component, ReadError> {
+    read_retained_page(source, key, limit, cursor, provider, Direction::Reverse)
+}
+
+fn read_retained_page(
+    source: &Source<'_>,
+    key: &str,
+    limit: usize,
+    cursor: Option<&Cursor>,
+    provider: &dyn SessionSourceReader,
+    direction: Direction,
+) -> Result<Component, ReadError> {
+    let limit = Target::Page(limit, direction).capacity()?.min(33);
     // Retained requests may touch both the previous page and this one. Stay
     // within the existing 64-source provider budget across the two sets.
     let mut db = crate::events::store::focused_connection(source.path).map_err(index)?;
@@ -30,9 +51,11 @@ pub(in super::super) fn retained_page(
     ))?;
     let now = crate::model::now_ms();
     let opened_at = cursor.map_or(now, |cursor| cursor.opened_at);
-    if cursor
-        .is_some_and(|cursor| cursor.selection != selection || cursor.members != identity.witness)
-        || opened_at > now
+    if cursor.is_some_and(|cursor| {
+        cursor.selection != selection
+            || cursor.members != identity.witness
+            || cursor.direction != direction
+    }) || opened_at > now
         || opened_at < now.saturating_sub(warehouse::PREFIX_WINDOW_MS)
     {
         return Err(ReadError::Restart);
@@ -55,7 +78,7 @@ pub(in super::super) fn retained_page(
              CROSS JOIN warehouse_identity_member m ON m.identity=?1 AND m.source=e.source
              WHERE e.target=?2 AND e.kind='continued-in' AND e.source<>?3 GROUP BY e.source",
         ).map_err(index)?;
-        let mut positions = tx.prepare_cached(warehouse::DETAIL).map_err(index)?;
+        let mut positions = tx.prepare_cached(direction.statement()).map_err(index)?;
         loop {
             let mut batch = members
                 .query(params![identity.binding, ordinal, MEMBER_PAGE])
@@ -126,13 +149,13 @@ pub(in super::super) fn retained_page(
                         end: i64::try_from(receipt.offset).map_err(index)?,
                         predecessors: &encode(&predecessor_bounds)?,
                         entry: None,
-                        frontier: member_frontier(cursor.map(|cursor| cursor.after), id),
+                        frontier: direction.frontier(cursor.map(|cursor| cursor.after), id),
                         capacity: limit,
                     },
                     |(position, kind)| {
                         candidates.insert(position, (kind, reference.clone(), prefix.clone()));
                         if candidates.len() > limit {
-                            candidates.pop_last();
+                            direction.discard_extra(&mut candidates);
                         }
                     },
                 )?;
@@ -147,9 +170,9 @@ pub(in super::super) fn retained_page(
     }
     let more = candidates.len() == limit;
     if more {
-        candidates.pop_last();
+        direction.discard_extra(&mut candidates);
     }
-    let after = candidates.last_key_value().map(|(position, _)| *position);
+    let after = direction.continuation(&candidates);
     let mut bytes_left = PAGE_BYTES;
     let mut touched = BTreeMap::new();
     let mut records = Vec::with_capacity(candidates.len());
@@ -182,6 +205,7 @@ pub(in super::super) fn retained_page(
         });
     }
     let next = after.filter(|_| more).map(|after| Cursor {
+        direction,
         selection,
         members: identity.witness,
         view: 0,

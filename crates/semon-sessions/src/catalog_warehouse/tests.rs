@@ -479,6 +479,50 @@ fn selected_page(
 }
 
 #[test]
+fn warehouse_latest_window_pages_earlier_with_the_same_committed_prefix() {
+    let mut fixture = Fixture::new("latest-window");
+    let path = fixture.claude("native", "Oldest prompt");
+    for second in 1..=4 {
+        append_native(&path, prompt("native", second, &format!("Prompt {second}")));
+    }
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    let text = |page: selected::Component| {
+        page.records
+            .iter()
+            .filter_map(selected::Record::text)
+            .collect::<Vec<_>>()
+    };
+    let latest = |fixture: &Fixture, cursor: Option<&selected::Cursor>| {
+        selected::latest_page(
+            &fixture.options,
+            &fixture.source(&[&path]),
+            "native",
+            2,
+            cursor,
+        )
+        .unwrap()
+        .unwrap()
+    };
+    let mut tail = latest(&fixture, None);
+    let tail_cursor = tail.next.take().unwrap();
+    assert_eq!(text(tail), ["Prompt 3", "Prompt 4"]);
+    append_native(&path, prompt("native", 5, "Newly committed"));
+    scan_file(&path, "claude", &mut fixture.cache, &mut false).unwrap();
+    assert_eq!(
+        text(latest(&fixture, Some(&tail_cursor))),
+        ["Prompt 1", "Prompt 2"]
+    );
+    assert_eq!(
+        text(latest(&fixture, None)),
+        ["Prompt 4", "Newly committed"]
+    );
+    assert!(matches!(
+        selected_page(&fixture, &[&path], "native", 2, Some(&tail_cursor)),
+        Err(ReadError::Restart)
+    ));
+}
+
+#[test]
 fn warehouse_component_cursor_pages_members_and_pins_unvisited_prefixes() {
     let mut fixture = Fixture::new("component-cursor");
     let mut paths = Vec::new();
@@ -2010,6 +2054,11 @@ fn warehouse_retained_address_reads_only_the_certified_original_from_provider() 
     );
     assert_eq!(provider.calls.load(std::sync::atomic::Ordering::Relaxed), 1);
     let source = fixture.source(&[&path]);
+    let latest = selected::retained_latest_page(&source, "native", 1, None, &provider).unwrap();
+    assert_eq!(
+        latest.records[0].text().as_deref(),
+        Some("Original native prompt")
+    );
     let first = selected::retained_page(&source, "native", 1, None, &provider).unwrap();
     assert_eq!(first.member_count, 1);
     let cursor = first.next.unwrap();
